@@ -16,6 +16,7 @@
 #include <liquid/liquid.hpp>
 #include <pqxx/pqxx>
 
+#include "lake/api/audit_routing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/control/agent_runs.hpp"
@@ -654,6 +655,146 @@ TEST(PostgresDriveShareLinks, MigrationRecordsOwnersAndContentFreeRoutes) {
 
 // lake#341: migration 0054 records each forge_records row's owner, its repository's workspace,
 // and the copy's rerun of it picks up late rows and repositories assigned after review.
+// lake#317, migration 0063: each central event about a workspace's data is assigned to that
+// workspace for the copy; the rest stay central.
+TEST(PostgresAudit, MigrationRecordsEachWorkspaceEventsOwnerForTheCopy) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    const std::string kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    auto store = lake::control::make_postgres_store(uri, kek);
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user({"taap:1:ed25519:audit-migration-" + suffix, "", "Audit"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer =
+        store->create_customer({"individual", user->id, "", "audit-migration-" + suffix});
+    const auto other_user =
+        store->create_user({"taap:1:ed25519:audit-other-" + suffix, "", "Other"});
+    const auto other =
+        store->create_customer({"individual", other_user->id, "", "audit-other-" + suffix});
+    ASSERT_TRUE(customer && other);
+    const auto live = store->create_workspace({customer->id, "live", "dev", ""});
+    const auto doomed = store->create_workspace({customer->id, "doomed", "dev", ""});
+    const auto elsewhere = store->create_workspace({other->id, "elsewhere", "dev", ""});
+    ASSERT_TRUE(live && doomed && elsewhere);
+    const auto owned = store->create_repository({customer->id, "owned", "", "private", live->id});
+    const auto gone = store->create_repository({customer->id, "gone", "", "private", doomed->id});
+    ASSERT_TRUE(owned && gone);
+    const lake::audit::IdentityOptions options{.instance_kek = kek};
+    const auto record = [&](lake::audit::EventDraft draft) {
+        draft.kind = draft.kind.empty() ? "capability" : draft.kind;
+        draft.principal = user->taap_id;
+        draft.request_id = lake::control::new_uuid_v4();
+        const auto recorded = lake::audit::record(*store, draft, options);
+        EXPECT_TRUE(recorded) << recorded.error().message;
+        return recorded->id;
+    };
+    const std::string pushed = record(
+        {.object = "repository/" + owned->id, .action = "push", .outcome = "success"});
+    const std::string queried = record({.customer_id = customer->id,
+                                        .object = "capability/workspace_sql",
+                                        .action = "workspace_sql",
+                                        .outcome = "failure",
+                                        .details = {{"workspace_id", live->id}}});
+    const std::string protected_ref = record({.kind = "forge.branch_protection.refused",
+                                              .object = "repository/" + owned->id + "/ref/main",
+                                              .action = "reference_update",
+                                              .outcome = "denied",
+                                              .details = {{"repository", owned->id}}});
+    const std::string deleted = record(
+        {.object = "repository/" + gone->id, .action = "get_repository", .outcome = "success"});
+    const std::string refused = record(
+        {.object = "repository/" + owned->id, .action = "push", .outcome = "denied"});
+    const std::string signed_in = record(
+        {.object = "user/" + user->id, .action = "sign_in_password", .outcome = "success"});
+    const std::string unnamed = record(
+        {.object = "capability/workspace_act", .action = "workspace_act", .outcome = "success"});
+    // A workspace of another space named by an event of this one is not trusted.
+    const std::string crossed = record({.customer_id = customer->id,
+                                        .object = "capability/workspace_query",
+                                        .action = "workspace_query",
+                                        .outcome = "success",
+                                        .details = {{"workspace_id", elsewhere->id}}});
+    ASSERT_TRUE(store->update_workspace(doomed->id, {.desired = "deleted"}));
+    pqxx::connection connection(uri);
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0063_audit_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0063_audit_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = 'audit_events' AND object_id = $1::uuid",
+            id);
+        return found.empty() ? std::pair<std::string, std::string>{}
+                             : std::pair{found[0][0].as<std::string>(),
+                                         found[0][1].as<std::string>()};
+    };
+    using Owner = std::pair<std::string, std::string>;
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome(pushed), (Owner{"event_workspace", live->id}));
+        EXPECT_EQ(outcome(queried), (Owner{"event_workspace", live->id}));
+        EXPECT_EQ(outcome(protected_ref), (Owner{"event_workspace", live->id}))
+            << "a branch protection refusal is the repository's, not an authority refusal";
+        EXPECT_EQ(outcome(deleted), (Owner{"workspace_deleted", ""}));
+        for (const std::string& id : {refused, signed_in, unnamed, crossed}) {
+            EXPECT_TRUE(outcome(id).first.empty()) << id << " stays central";
+        }
+    }
+
+    // An event an earlier replica wrote after the migration is picked up by the assignment each
+    // copy reruns, with the current list of workspace actions.
+    const std::string late = record(
+        {.object = "repository/" + owned->id, .action = "create_issue", .outcome = "success"});
+    EXPECT_TRUE(outcome(late).first.empty());
+    ASSERT_TRUE(store->assign_legacy_audit_events(lake::api::workspace_audit_actions()));
+    EXPECT_EQ(outcome(late), (Owner{"event_workspace", live->id}));
+
+    // The listing pages the assigned events in append order, each with its owner.
+    std::vector<std::string> listed;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_audit_events(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            listed.push_back(row.event.id);
+            if (row.event.id == pushed) {
+                EXPECT_EQ(row.workspace_id, live->id);
+                EXPECT_EQ(row.customer_id, customer->id);
+                EXPECT_TRUE(lake::audit::verify_event(*store, row.event));
+            }
+            if (row.event.id == deleted) {
+                EXPECT_TRUE(row.workspace_id.empty());
+                EXPECT_EQ(row.outcome, "workspace_deleted");
+            }
+        }
+        after = page->back().event.id;
+    }
+    const auto position = [&](const std::string& id) {
+        return std::ranges::find(listed, id) - listed.begin();
+    };
+    for (const std::string& id : {pushed, queried, protected_ref, deleted, late}) {
+        EXPECT_LT(position(id), static_cast<long>(listed.size())) << id;
+    }
+    EXPECT_LT(position(pushed), position(late)) << "append order";
+    EXPECT_EQ(position(refused), static_cast<long>(listed.size()));
+}
+
 TEST(PostgresForgeRecords, MigrationRecordsEachRowsOwnerForTheCopy) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

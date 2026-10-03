@@ -32,3 +32,6 @@ keeps `secret_lease_routes`, the leases' content-free route and due index (lake#
 [schema.md](schema.md#platform-workspaces-migration-0060_platform_workspaces) documents
 `0060_platform_workspaces`, which retires `platform_environments` and `platform_mirror` for the
 workspace Zettas (lake#358, lake#359).
+[schema.md](schema.md#audit-workspaces-migration-0063_audit_workspaces) documents
+`0063_audit_workspaces`, which records the workspace of each central audit event about a
+workspace's data for the copy into that workspace's own audit chain (decision 52, lake#317).

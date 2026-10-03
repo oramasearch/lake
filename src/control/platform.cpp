@@ -1,4 +1,5 @@
 #include "lake/control/platform.hpp"
+#include "lake/control/workspace_audit.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -551,7 +552,11 @@ liquid::runtime::task<PlatformResult<void>> PlatformService::sync(PlatformRecord
             error = finished_text(co_await apply_kind("domain"));
         }
         // Each newly observed phase is audited before its deployment row is written, so a sync
-        // that fails here records it again next time rather than never.
+        // that fails here records it again next time rather than never. A deployment is the
+        // repository's data, so its phases go to the audit of the repository's workspace
+        // (decision 52, docs/api/audit.md#workspace-audit), appended by this loop, off any
+        // request path.
+        std::optional<WorkspaceAuditTail> audit_tail;
         if (error.empty()) {
             for (const json& row : new_deployment_phases(rows.deployments, previous_deployments)) {
                 const audit::EventDraft event{
@@ -569,11 +574,18 @@ liquid::runtime::task<PlatformResult<void>> PlatformService::sync(PlatformRecord
                                 {"updated_at", text_of(row, "updated_at")}},
                 };
                 const audit::IdentityOptions options{config_.identity_seed, config_.instance_kek};
-                const auto recorded = audit::record(*store_, event, options);
-                if (!recorded) {
-                    error = recorded.error().code + ": " + recorded.error().message;
+                const auto signer = audit::identity(*store_, options);
+                if (!signer) {
+                    error = signer.error().code + ": " + signer.error().message;
                     break;
                 }
+                auto appended = settled(co_await append_workspace_audit_event(
+                    *records, *store_, *signer, audit::pending(event), options, audit_tail));
+                if (!appended) {
+                    error = appended.error().code + ": " + appended.error().message;
+                    break;
+                }
+                audit_tail = *appended;
             }
         }
         if (error.empty()) {

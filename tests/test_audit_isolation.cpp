@@ -1,4 +1,5 @@
 #include "audit_test_support.hpp"
+#include "lake/api/audit_routing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/control/memory_store.hpp"
@@ -7,8 +8,14 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <memory>
+#include <regex>
+#include <set>
+#include <string>
 
 namespace {
 
@@ -221,3 +228,62 @@ INSTANTIATE_TEST_SUITE_P(Stores,
                          });
 
 } // namespace
+
+// Decision 52 (lake#317): one function decides which log a capability's events go to, and every
+// registered capability is named by it, so a new capability cannot be added without deciding.
+TEST(AuditRouting, EveryRegisteredCapabilityIsClassified) {
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    std::set<std::string> registered;
+    for (const auto& capability : registry.list()) {
+        registered.insert(capability->name);
+        EXPECT_TRUE(lake::api::audit_log_of(capability->name).has_value())
+            << capability->name << " is in neither audit table (src/api/audit_routing.cpp)";
+    }
+    const auto central = lake::api::central_audit_capabilities();
+    const auto workspace = lake::api::workspace_audit_capabilities();
+    EXPECT_TRUE(std::ranges::is_sorted(central));
+    EXPECT_TRUE(std::ranges::is_sorted(workspace));
+    for (const std::string_view name : central) {
+        EXPECT_FALSE(std::ranges::binary_search(workspace, name)) << name << " is in both";
+        EXPECT_TRUE(registered.contains(std::string(name))) << name << " is not registered";
+    }
+    for (const std::string_view name : workspace) {
+        EXPECT_TRUE(registered.contains(std::string(name))) << name << " is not registered";
+    }
+    // The identity, control-plane and audit capabilities named in decision 52 stay central; the
+    // workspace calls and actions on a workspace's data go to it.
+    for (const char* name : {"sign_in_password", "create_membership", "create_grant",
+                             "create_workspace", "create_token", "create_customer",
+                             "create_organization", "create_object", "audit", "my_audit",
+                             "set_audit_retention"}) {
+        EXPECT_EQ(lake::api::audit_log_of(name), lake::api::AuditLog::Central) << name;
+    }
+    for (const char* name : {"workspace_act", "workspace_query", "workspace_sql",
+                             "create_repository", "register_application", "create_app",
+                             "build_image", "put_secret", "upload_drive_files", "create_issue",
+                             "create_stream", "create_store"}) {
+        EXPECT_EQ(lake::api::audit_log_of(name), lake::api::AuditLog::Workspace) << name;
+    }
+
+    // Migration 0063 assigns the central events of workspace actions only.
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0063_audit_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto list = schema.find("e.action = ANY (ARRAY[", start);
+    ASSERT_NE(list, std::string::npos);
+    const auto end = schema.find("])", list);
+    const std::string names = schema.substr(list, end - list);
+    const auto actions = lake::api::workspace_audit_actions();
+    std::size_t listed = 0;
+    const std::regex quoted("'([a-z_0-9]+)'");
+    for (auto match = std::sregex_iterator(names.begin(), names.end(), quoted);
+         match != std::sregex_iterator(); ++match) {
+        EXPECT_TRUE(std::ranges::binary_search(actions, (*match)[1].str())) << (*match)[1];
+        ++listed;
+    }
+    // The copy reapplies the assignment with the current list, so a later workspace capability
+    // is covered there without changing the migration.
+    EXPECT_GT(listed, 0U);
+}

@@ -8838,6 +8838,23 @@ AuditPageView audit_page_view(const nlohmann::json& items, bool include_reads) {
             capability != item.end() && capability->is_string()) {
             view.capabilities[id] = capability->get<std::string>();
         }
+        if (item.value("log", std::string()) == "workspace") {
+            view.workspaces[id] = item.value("workspace_id", std::string());
+        }
+        if (item.value("pending", false)) {
+            view.pending.insert(id);
+        }
+    }
+    return view;
+}
+
+AuditPageView audit_page_view(const nlohmann::json& answer, const nlohmann::json& items,
+                              bool include_reads) {
+    AuditPageView view = audit_page_view(items, include_reads);
+    for (const nlohmann::json& unread :
+         answer.value("unread_workspaces", nlohmann::json::array())) {
+        view.unread.emplace_back(unread.value("workspace_id", std::string()),
+                                 unread.value("message", std::string()));
     }
     return view;
 }
@@ -8895,12 +8912,27 @@ std::string web_ui_audit(const std::vector<audit::Event>& events,
             log_configuration.contains("aggregator_endpoint") ? "; aggregation endpoint configured"
                                                               : "");
     }
+    // Decision 52: the central log and each workspace's own audit; say which could not be read.
+    for (const auto& [workspace_id, reason] : view.unread) {
+        content += std::format("<div class=\"panel\" role=\"status\">The audit of workspace "
+                               "<code>{}</code> could not be read: {}</div>",
+                               web_ui_escape(workspace_id),
+                               web_ui_escape(reason));
+    }
+    const auto workspace_label = [&viewer](const std::string& workspace_id) {
+        for (const auto& [id, name] : viewer.workspaces) {
+            if (id == workspace_id) {
+                return name;
+            }
+        }
+        return workspace_id.substr(0, 8);
+    };
     if (events.empty()) {
         content += "<div class=\"panel empty\">No audit events match these filters.</div>";
     } else {
         content += "<table><thead><tr><th>When</th><th>Principal</th><th>Object</"
                    "th><th>Action</th>"
-                   "<th>Outcome</th><th>Digest</th></tr></thead><tbody>";
+                   "<th>Outcome</th><th>Log</th><th>Digest</th></tr></thead><tbody>";
         for (const audit::Event& event : events) {
             // The principal's name, with the recorded identity kept as its title; a workspace
             // call shows the capability it called inside the workspace (lake#445).
@@ -8918,15 +8950,26 @@ std::string web_ui_audit(const std::vector<audit::Event>& events,
                                   web_ui_escape(event.draft.action),
                                   web_ui_escape(capability->second))
                     : web_ui_escape(event.draft.action);
+            const auto workspace = view.workspaces.find(event.id);
+            const std::string log =
+                workspace == view.workspaces.end()
+                    ? std::string("Central")
+                    : std::format("<span title=\"{}\">Workspace {}</span>",
+                                  web_ui_escape(workspace->second),
+                                  web_ui_escape(workspace_label(workspace->second)));
+            const std::string digest = view.pending.contains(event.id)
+                                           ? std::string("<em>being written</em>")
+                                           : "<code>" + web_ui_escape(event.digest) + "</code>";
             content += std::format("<tr><td>{}</td><td>{}</td><td><code>{}</code></td>"
-                                   "<td>{}</td><td>{}</td>"
-                                   "<td><code>{}</code></td></tr>",
+                                   "<td>{}</td><td>{}</td><td>{}</td>"
+                                   "<td>{}</td></tr>",
                                    web_ui_escape(event.occurred_at),
                                    principal,
                                    web_ui_escape(event.draft.object),
                                    action,
                                    badge_markup(event.draft.outcome),
-                                   web_ui_escape(event.digest));
+                                   log,
+                                   digest);
         }
         content += "</tbody></table>";
     }

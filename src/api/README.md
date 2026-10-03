@@ -56,6 +56,17 @@ workspace Zettas every `metering_flush_interval`, and `ApiServer::stop` flushes 
 in-flight requests finish. Contracts and regression proof: [page performance](../../docs/ui/performance.md)
 and [metering](../../docs/api/metering.md).
 
+The audit split by subject (decision 52, lake#317) lives in three files. `audit_routing.cpp` is the
+one classification: two sorted tables name every registered capability central or workspace, and
+`audit_route` sends a call's event to the workspace it acted on (the validated `workspace_id`, or
+the workspace of the repository, mount, application, app, build or task its input names) or to the
+central chain; `Registry::call`'s `finish_call` and the push and branch protection events in
+`capabilities.cpp` record through `record_audit`. `audit_recorder.cpp` is the `AuditRecorder`: a
+workspace event is queued without I/O, `ApiServer::drain` flushes it into the workspace's chain
+every `audit_flush_interval`, and `ApiServer::stop` flushes it once more. `audit_logs.cpp` reads
+both logs for `audit`, `my_audit`, `export_audit`, `verify_audit` and the `/activity` and `/audit`
+pages, every workspace concurrently in one round. See [audit](../../docs/api/audit.md#which-log).
+
 `datasets.cpp` holds the workspace dataset rules lake applies on top of Zetta (lake#447): engine
 result databases, SQL-queryable names, CSV row checks with line numbers, and the one
 `<database>/<name>` id. `workspace_query`/`workspace_act` apply them to `list_datasets`,

@@ -4216,7 +4216,11 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         {"/w/:workspace_id/train/streams", {1, 1}},
         // Usage reads each workspace's datasets, runs, and repository transfer and build records
         // (lake#348, lake#349) together, in one round.
-        {"/metering", {4, 1}}};
+        {"/metering", {4, 1}},
+        // Activity and Audit read the central log and each workspace's audit (decision 52,
+        // lake#317): one list_records walk per workspace, all in one round. The fixture has one.
+        {"/activity", {1, 1, Capabilities{"list_records"}}},
+        {"/audit", {1, 1, Capabilities{"list_records"}}}};
     const auto workspace_call_budget = [&workspace_call_budgets](const std::string& pattern) {
         const auto found = workspace_call_budgets.find(pattern);
         return found == workspace_call_budgets.end() ? WorkspaceCallBudget{} : found->second;

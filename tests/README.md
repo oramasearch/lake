@@ -446,6 +446,20 @@ bound, build records once), and `TheOneShotCopyMovesMeteringIntoEachSpacesWorksp
 `PostgresSync.PushAndPullUsePostgresControlPlane` a real push and pull flushed into the
 repository's workspace, nothing in PostgreSQL, and the flush on stop.
 
+The audit split by subject (decision 52, lake#317): `test_workspace_records.cpp`'s
+`AuditEventsAboutAWorkspaceLiveInItsOwnChain` covers the `AuditRecorder` and the readers across two
+spaces with two workspaces each (a call writes nothing until the flush, control-plane calls,
+refusals and missing, malformed and unknown `workspace_id` central, sealed records at the
+workspace's endpoint only, a second replica's appends never forking the chain, verify, export,
+`audit` and `my_audit`, a workspace that is not ready, workspace deletion, the bound, tampering,
+a lake without workspaces), and `TheOneShotCopyMovesWorkspaceAuditEvents` the copy in both stores.
+`AuditRouting.EveryRegisteredCapabilityIsClassified` (`test_audit_isolation.cpp`) holds every
+registered capability to one of the two tables. `PostgresAudit.MigrationRecordsEachWorkspaceEventsOwnerForTheCopy`
+covers `0063_audit_workspaces`. `PostgresSync.*` and `PlatformFixture.*` read pushes, branch
+protection decisions and deployment phases from the repository's workspace audit;
+`TokenAttenuation` finds an application's events there through `audit`; and
+`WebUi.AuditPagesSayWhichLogHoldsEachEvent` the pages.
+
 Forge records in workspace Zettas (lake#341): `test_workspace_records.cpp`'s
 `ForgeRecordsLiveInTheirRepositorysWorkspace` covers two spaces with two workspaces each, records
 only at their own endpoint, other repositories' and workspaces' ids, a record copied elsewhere,

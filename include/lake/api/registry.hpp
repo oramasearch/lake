@@ -113,6 +113,7 @@ struct MeteringConfig {
 
 class Registry;
 class MeteringRecorder;
+class AuditRecorder;
 
 struct WorkspaceCallTiming {
     std::atomic<std::size_t> count{0};
@@ -236,6 +237,12 @@ struct ApiContext {
     std::string audit_kind;
     std::string audit_object;
     nlohmann::json audit_details = nlohmann::json::object();
+    // The workspace a call acted on, for its audit event (decision 52, audit_routing.hpp): the
+    // input's `workspace_id` once Registry::call has validated it, or one a handler resolved.
+    std::string audit_workspace_id;
+    // The workspace audit's writer (docs/api/audit.md#workspace-audit). Null: this lake has no
+    // workspace Zettas, and every event is recorded in the central log.
+    AuditRecorder* audit_recorder = nullptr;
 };
 
 using CapabilityHandler =

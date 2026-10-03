@@ -205,6 +205,7 @@ add_library(lake-core STATIC
   src/control/application_settings_records.cpp
   src/control/agent_task_records.cpp
   src/control/metering.cpp
+  src/control/workspace_audit.cpp
   "${LAKE_LIQUID_SOURCE_DIR}/src/scan/detectors.cpp"
   src/version.cpp
   src/api/web_ui.cpp
@@ -231,6 +232,9 @@ add_library(lake-core STATIC
   src/api/pki_capabilities.cpp
   src/api/metering_capabilities.cpp
   src/api/metering_recorder.cpp
+  src/api/audit_recorder.cpp
+  src/api/audit_routing.cpp
+  src/api/audit_logs.cpp
   src/api/drive.cpp
   src/api/drive_capabilities.cpp
   src/api/model_capabilities.cpp

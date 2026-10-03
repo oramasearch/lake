@@ -262,6 +262,16 @@ public:
         return call("set_repository_ref",
                     [&] { return store_->set_repository_ref(repository_id, name, head); });
     }
+    control::Result<void>
+    assign_legacy_audit_events(const std::vector<std::string>& workspace_actions) override {
+        return call("assign_legacy_audit_events",
+                    [&] { return store_->assign_legacy_audit_events(workspace_actions); });
+    }
+    control::Result<std::vector<control::LegacyAuditEvent>>
+    legacy_audit_events(const std::string& after_id, int limit) override {
+        return call("legacy_audit_events",
+                    [&] { return store_->legacy_audit_events(after_id, limit); });
+    }
     control::Result<void> assign_legacy_forge_records() override {
         return call("assign_legacy_forge_records",
                     [&] { return store_->assign_legacy_forge_records(); });

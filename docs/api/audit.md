@@ -1,7 +1,9 @@
 # Audit API
 
 lake records signed, hash-linked audit events for every capability call, including authorization
-and input failures. The audit stream is the source of evidence for authentication, session and
+and input failures. Since decision 52 (lake#317) the events are kept in two kinds of log: the
+central log in lake's PostgreSQL for control-plane and identity events, and each workspace's own
+audit, in its Zetta, for events about that workspace's data. See [Which log](#which-log). The audit stream is the source of evidence for authentication, session and
 token lifecycle, denied authorization, grant changes, secrets and certificate activity, retention
 refusals, and administrative activity. The canonical event contract is in
 [`../design/phase-6.md`](../design/phase-6.md#audit-decision-13).
@@ -18,10 +20,10 @@ All audit capabilities except `identity` require the normal lake bearer or sessi
 |---|---|---|
 | `identity` | `GET /v1/identity` | Lake's public TAAP/1 Ed25519 identity document. |
 | `rotate_identity` | `POST /v1/rotate_identity` | A new public identity document after a dual-signed rotation. |
-| `audit` | `GET /v1/audit` | `{items: [event]}` filtered by `principal`, `object`, `outcome`, `from`, `to`, and `limit`. |
-| `export_audit` | `GET /v1/export_audit` | `{jsonl}` containing the matching event objects, one JSON line each. |
-| `verify_audit` | `GET /v1/verify_audit` | `{verified: true}` after checking every stored signature, digest, and predecessor link. |
-| `set_audit_retention` | `POST /v1/set_audit_retention` | The customer ID and retained days after setting a value of at least 400 days. |
+| `audit` | `GET /v1/audit` | `{items: [event], unread_workspaces}` filtered by `principal`, `object`, `outcome`, `from`, `to`, and `limit`, from the central log and the workspaces' audits; `workspace_id`, `customer_id` and `log` choose the logs ([Reading both logs](#reading-both-logs)). |
+| `export_audit` | `GET /v1/export_audit` | `{jsonl}` containing the matching event objects, one JSON line each: the central log, or with `workspace_id` that workspace's whole audit. |
+| `verify_audit` | `GET /v1/verify_audit` | `{verified: true, log}` after checking every stored signature, digest, and predecessor link of the central chain, or with `workspace_id` of that workspace's chain. |
+| `set_audit_retention` | `POST /v1/set_audit_retention` | The customer ID and retained days after setting the central log's retention to at least 400 days, and `workspace_audit_retention`. |
 
 `rotate_identity` is an administrative action and produces one audit event through the registry.
 Identity history remains in `lake_identity`, so events signed before a rotation remain verifiable.
@@ -55,6 +57,14 @@ reduced. 400 days is the enforced floor. A request below that floor or below the
 existing setting is refused and produces the one `retention` event for that capability call.
 Pruning is intentionally absent: the database append-only trigger rejects update and delete
 operations on `audit_events`.
+
+The setting stays in `audit_retention` and governs the central log (lake#318): it is the space's
+policy, a control-plane row, and the central log is where its events are. A workspace's audit is
+the collection `lake_audit_events` of its Zetta, whose `retention_ms` is 0: it is kept until the
+workspace is deleted, which is never shorter than any setting, and is deleted with the workspace.
+`set_audit_retention` answers `workspace_audit_retention: "kept until the workspace is deleted"`.
+A finite workspace retention would be a new collection with a `retention_ms` at or above the
+space's setting, copied into (a collection's retention cannot change).
 
 ## Verify
 
@@ -130,3 +140,157 @@ capability, and an order selector; `/activity` also has an **Include reads** che
 (`ActivityIsNewestFirstNamedAndQuiet`, both stores), `tests/test_streams.cpp` (the acting agent of
 a task credential) and `tests/test_web_ui.cpp` (`ActivityPageNamesPrincipalsAndWorkspaceCapabilities`)
 cover it.
+
+## Which log
+
+Decision 52 (liquid-bridge `docs/decisions.md`, lake#317, lake#318) splits lake's audit by subject.
+`audit_route` in `src/api/audit_routing.cpp` is the one function that decides, from the
+capability and its input:
+
+- **Central** (the hash-chained `audit_events` table): sign-in, sessions, tokens, users, customers,
+  organizations, memberships, teams, invitations, grants and policy objects, workspaces themselves,
+  SSO and SCIM, account recovery and MFA, workload identity, certificates and ACME, the keystore,
+  lake's identity, transparency, TUF and timestamping, the audit capabilities, and the reads that
+  span a space or the instance (`list_services`, `metering_usage`, `search`). Dynamic-secret
+  leases stay central too: each event is appended to lake's transparency log, which commits to the
+  central chain when the call is made.
+- **The workspace's audit**: `workspace_act`, `workspace_query`, `workspace_sql` and every
+  capability that acts on an object with a workspace: repositories and their sync, forge, drive,
+  platform environments, applications, apps, builds, secrets, stores, services, streams, agents,
+  experiments, Ask and Design. Pushes, branch protection decisions at a push and the deployment
+  phases the platform sync mirrors are recorded outside the registry and go to the repository's
+  workspace the same way.
+
+Every registered capability is in exactly one of the two tables
+(`AuditRouting.EveryRegisteredCapabilityIsClassified`); a new capability is refused by that test
+until it is classified. A workspace capability's event goes to the workspace the call acted on:
+the `workspace_id` `Registry::call` validated, else the workspace of the repository, secret mount,
+application, app, build or agent task its input names (one indexed PostgreSQL read of a routing
+row; no workspace is called). It stays central when:
+
+- the call was refused before its handler ran (no credential, an invalid input, a missing,
+  unknown or foreign `workspace_id`, no authority), or refused for want of authority (`denied`):
+  authorization decisions are control-plane evidence, and a caller cannot write into a workspace
+  it may not act in;
+- no live workspace of the call's space can be found: an object without a workspace, a deleted
+  workspace;
+- this lake has no workspace audit: no workspace Zettas are configured, so the server has no
+  `AuditRecorder` and every event is central (local development and the single-store tests).
+
+A workspace event is never written centrally instead, whatever happens to its workspace.
+
+## Workspace audit
+
+A workspace's audit is the sealed record collection `lake_audit_events` of its own Zetta
+([workspace records](../architecture/workspace-records.md)), found by one lookup
+(`workspace:<id>`) and ordered by each event's instant. Zetta's own audit trail is not used: its
+vocabulary is closed (`AuditAction`), its events are the engine's, not lake's signed `audit_event/1`
+values, and its segments are checksummed, not hash-linked, so it would neither carry lake's
+signature nor let lake's verifier check a chain. The record store is lake's, sealed with the
+workspace's key, and conditional.
+
+**Off the request path.** A call only queues its event in the server's `AuditRecorder`
+(`include/lake/api/audit_recorder.hpp`), with its id and instant fixed when the call finished; no
+workspace round trip is added to any call. The owner loop flushes the queue every second
+(`ServerOptions::audit_flush_interval`), at once when half of `audit_max_pending` (65,536) is
+held, and once more when the server drains. A flush signs each workspace's events in order and
+appends them to its chain, one conditional `put_record` each.
+
+**Loss window.** On a crash, the events queued since the last successful flush: one second, plus
+any write that kept failing. A workspace that is not ready keeps its events, in order, for the
+next flush; the events of a deleted workspace are dropped and counted. An event beyond the bound is
+dropped and counted. Counters: `lake_audit_workspace_events_written_total`,
+`lake_audit_workspace_flush_errors_total`, `lake_audit_workspace_conflicts_total`,
+`lake_audit_workspace_dropped_total{reason="bound"|"workspace_deleted"}`, and the gauge
+`lake_audit_workspace_pending`.
+
+## Tamper evidence
+
+Each workspace has its own **hash chain**, verified like the central one:
+
+- Every event lake writes there is a signed `audit_event/1`, the central format, whose
+  `previous_digest` is the digest of the workspace's previous chained event.
+- The n-th event's record key is the blind index of `sequence:<n>`, written `if_absent`. Claiming a
+  place in the chain is that one conditional write, so two lake replicas never fork it: the one
+  that loses reads the place, searches on for the end of the chain (doubling probes, then a binary
+  search) and signs its event again after it. A place that already holds the same event (a write
+  whose answer was lost) counts as written.
+- The record is sealed with the workspace's key and bound to its key and place, so a value moved
+  from another place, collection or workspace does not open, and the workspace holds no plaintext.
+- `verify_audit {workspace_id}` reads the whole audit and checks that the chained events form one
+  unbroken chain from place 1, that every signature verifies against lake's identity history, and
+  that every digest matches; a removed or altered event is `invalid_chain`, `invalid_signature` or
+  `invalid_digest`, naming the place.
+
+Events recorded centrally before the split and copied by `copy_workspace_records` keep their id,
+signature and central predecessor; they are stored under their id, have no place, and are checked
+alone (`audit::verify_event`). The central chain holds their place.
+
+What it does not detect: removal of the newest events of a workspace (the end of a chain), or the
+whole workspace rolled back by its administrator. Both need state outside the workspace, as for
+every workspace record ([workspace records](../architecture/workspace-records.md#record-format));
+a later change can anchor each workspace's chain head in lake's transparency log.
+
+## Reading both logs
+
+`audit`, `my_audit` and `export_audit` take two more inputs, and every returned event names its
+log: `log` (`central` or `workspace`), `workspace_id`, `sequence` (its place, for a chained event)
+and `pending: true` for an event this process has queued and not yet written (no signature yet).
+The answer lists `unread_workspaces` (`workspace_id`, `code`, `message`) whose audit could not be
+read; the rest is still answered.
+
+- `workspace_id`: that workspace's audit alone. `after_id` cannot be combined with it; it pages the
+  central log.
+- `customer_id`: the central log and the audits of that space's live workspaces.
+- `log: central`: the central log alone (the Organization page's events).
+- Otherwise, `audit` (operator only) reads the central log and every live workspace's audit;
+  `my_audit` reads the central log and the audits of the workspaces of the caller's own spaces,
+  and only the caller's own events from them. A workspace of another space is `unauthorized`.
+
+The workspaces are read concurrently, one `list_records` walk each, all in one round, and merged
+with the central events by instant, newest first unless `order` is `oldest`, at most `limit`, with
+an event the copy put in a workspace before its central row is dropped counted once. The
+`/activity` and `/audit` pages read through the same capabilities with `call_async`, show each
+event's log (Central, or the workspace by name) and say which workspace could not be read; their
+budget is one round, one `list_records` call per workspace
+([performance](../ui/performance.md)). The repository's branch protection page reads its
+workspace's audit. `audit`, `my_audit`, `export_audit` and `verify_audit` keep a synchronous form
+for a lake without workspaces; with workspaces they are read through `Registry::call_async`.
+
+## Moving the central events of workspaces (migration `0063`)
+
+Migration `0063_audit_workspaces` records, in `workspace_assignments` (`object_table
+'audit_events'`), the workspace of each central event about a workspace's data: an event of a
+workspace action (the workspace capabilities, `push_change`, `reference_update`,
+`deployment_phase`) that was not refused for want of authority, whose workspace is named in its
+details (`workspace_id`, `repository_id`, `repository`) or found through its object (a repository,
+app, build, secret mount or agent task), and belongs to the event's space. `event_workspace`: it
+is copied there. `workspace_deleted`: its workspace is gone, and it stays central. Every other
+event stays central, and the migration reports the count: most capability events recorded before
+the split name only `capability/<name>`. Nothing is dropped, and `audit_events` stays append-only.
+
+`copy_workspace_records {"collection":"audit_events"}` plans, copies (each event as it is, under
+its id, `if_absent`) and verifies (the copy equals the central row and its signature verifies);
+each run first reapplies the assignment with the current list, for events an older replica wrote
+centrally during a rolling update. Nothing needs selecting, so `complete` is false only for a
+missing or changed copy. A later, separately approved migration may replace each copied central
+row by a digest-only row so the central chain still verifies.
+
+### Cutover, dev cluster
+
+These steps are for the coordinator and are not run by this change.
+
+1. Workspace Zettas run Zetta `dev` at or after `82f617e` (the record store), as for every
+   workspace record.
+2. Have the operator vendor `db/schema.sql` through `0063_audit_workspaces` and select
+   `audit_workspaces_guard`. Apply the schema, then read the warnings `audit events
+   (event_workspace|workspace_deleted): N` and `audit events staying central: N`.
+3. Deploy the lake image built from this change. From then on, events about a workspace's data go
+   to its audit, a second after the call. `/activity` and `/audit` show both logs. The central
+   chain keeps verifying; `verify_audit {"workspace_id": ...}` verifies each workspace's.
+4. Run `POST /v1/copy_workspace_records {"collection":"audit_events","mode":"plan"}` with the
+   operator bearer, then `{"mode":"copy"}` following `next_after` until it is null, then
+   `{"mode":"verify"}` over every page. Until then the old events show once, from the central log.
+5. Rerun step 4 after any rollback to an older image: events it wrote centrally are assigned and
+   copied on the next run.
+6. Nothing is dropped. Replacing the copied central rows by digest-only rows is a later decision.

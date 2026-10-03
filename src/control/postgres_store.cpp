@@ -244,6 +244,33 @@ constexpr std::string_view legacy_application_code_resolution_sql =
 // copy: each row belongs to its repository's workspace, is needs_selection while the repository
 // has none, and workspace_deleted when that workspace is gone. The second statement resolves
 // recorded needs_selection rows once their repository has been assigned a live workspace.
+// Audit events about a workspace's data (lake#317, migration 0063): the workspace each names in
+// its details or through its object; $1 is the workspace actions. Events no live or deleted
+// workspace of their space can be found for get no row and stay central.
+constexpr std::string_view legacy_audit_event_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'audit_events', r.id, w.customer_id, CASE WHEN w.desired = 'deleted' THEN "
+    "NULL ELSE w.id END, CASE WHEN w.desired = 'deleted' THEN 'workspace_deleted' ELSE "
+    "'event_workspace' END FROM (SELECT e.id, e.customer_id, COALESCE("
+    "CASE WHEN e.details->>'workspace_id' ~ '^[0-9a-f-]{36}$' THEN "
+    "(e.details->>'workspace_id')::uuid END, "
+    "(SELECT p.workspace_id FROM repositories p WHERE p.id = "
+    "substring(e.object FROM '^repository/([0-9a-f-]{36})')::uuid), "
+    "(SELECT p.workspace_id FROM repositories p WHERE p.id::text = "
+    "COALESCE(e.details->>'repository_id', e.details->>'repository')), "
+    "(SELECT a.workspace_id FROM apps a WHERE a.id = "
+    "substring(e.object FROM '^app/([0-9a-f-]{36})')::uuid), "
+    "(SELECT b.workspace_id FROM builds b WHERE b.id = "
+    "substring(e.object FROM '^build/([0-9a-f-]{36})')::uuid), "
+    "(SELECT m.workspace_id FROM secret_mount_routes m WHERE m.mount_id = "
+    "substring(e.object FROM '^secret_mount/([0-9a-f-]{36})')::uuid), "
+    "(SELECT t.workspace_id FROM agent_tasks t WHERE t.id = "
+    "substring(e.object FROM '^agent_task/([0-9a-f-]{36})')::uuid)) AS workspace_id "
+    "FROM audit_events e WHERE e.action = ANY ($1::text[]) AND (e.outcome <> 'denied' OR "
+    "e.kind LIKE 'forge.branch_protection.%') AND NOT EXISTS (SELECT 1 FROM "
+    "workspace_assignments x WHERE x.object_table = 'audit_events' AND x.object_id = e.id)) r "
+    "JOIN workspaces w ON w.id = r.workspace_id AND (r.customer_id IS NULL OR w.customer_id = "
+    "r.customer_id) ON CONFLICT DO NOTHING";
 constexpr std::string_view legacy_forge_record_assignment_sql =
     "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
     "outcome) SELECT 'forge_records', f.id, r.customer_id, CASE WHEN w.desired = 'deleted' THEN "
@@ -2342,6 +2369,47 @@ public:
             tx.exec(std::string(legacy_forge_record_resolution_sql));
             return {};
         });
+    }
+
+    Result<void>
+    assign_legacy_audit_events(const std::vector<std::string>& workspace_actions) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            std::string array = "{";
+            for (std::size_t index = 0; index < workspace_actions.size(); ++index) {
+                array += (index == 0 ? "\"" : ",\"") + workspace_actions[index] + "\"";
+            }
+            array += "}";
+            tx.exec_params(std::string(legacy_audit_event_assignment_sql), array);
+            return {};
+        });
+    }
+
+    Result<std::vector<LegacyAuditEvent>> legacy_audit_events(const std::string& after_id,
+                                                              int limit) override {
+        return with_tx<std::vector<LegacyAuditEvent>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyAuditEvent>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + audit_event_columns +
+                        ", assigned_customer, assigned_workspace, assigned_outcome FROM "
+                        "(SELECT e.*, a.customer_id::text AS assigned_customer, "
+                        "COALESCE(a.workspace_id::text, '') AS assigned_workspace, "
+                        "a.outcome AS assigned_outcome FROM audit_events e JOIN "
+                        "workspace_assignments a ON a.object_table = 'audit_events' AND "
+                        "a.object_id = e.id WHERE ($1 = '' OR e.sequence > (SELECT sequence FROM "
+                        "audit_events WHERE id::text = $1))) s ORDER BY sequence LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyAuditEvent> events;
+                for (const pqxx::row& row : rows) {
+                    LegacyAuditEvent legacy;
+                    legacy.event = audit_event_of(row);
+                    legacy.customer_id = row[16].as<std::string>();
+                    legacy.workspace_id = row[17].as<std::string>();
+                    legacy.outcome = row[18].as<std::string>();
+                    events.push_back(std::move(legacy));
+                }
+                return events;
+            });
     }
 
     Result<std::vector<LegacyForgeRecord>>

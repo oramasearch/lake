@@ -161,3 +161,8 @@ Environments and deployments live in the repository's workspace Zetta (lake#358,
 Deployments, Environments and Environment pages read them through the same capabilities, and the
 Deployments overview skips a repository whose workspace cannot be read. See
 [platform.md](../api/platform.md#where-environments-live-lake358-lake359).
+
+Activity and Audit read the central log and each workspace's own audit (decision 52, lake#317):
+each event says which log holds it, an event still being written has no digest yet, and a workspace
+whose audit could not be read is named. The budget is one round, one `list_records` call per
+workspace. See [audit.md](../api/audit.md#reading-both-logs).

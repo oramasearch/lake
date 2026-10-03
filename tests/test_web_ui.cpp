@@ -1509,6 +1509,41 @@ TEST(WebUi, ActivityPageNamesPrincipalsAndWorkspaceCapabilities) {
     EXPECT_NE(page.find("Successful reads"), std::string::npos);
 }
 
+// Decision 52 (lake#317): each event says which log holds it, the central one or a workspace's
+// own audit (named by the viewer's workspace list), an event still being written has no digest
+// yet, and a workspace whose audit could not be read is named.
+TEST(WebUi, AuditPagesSayWhichLogHoldsEachEvent) {
+    const auto event = [](std::string id, std::string digest) {
+        return lake::audit::Event{.id = std::move(id),
+                                  .occurred_at = "2026-10-03T00:00:00.000000Z",
+                                  .draft = {.principal = "admin",
+                                            .object = "capability/x",
+                                            .action = "workspace_query",
+                                            .outcome = "success"},
+                                  .digest = std::move(digest)};
+    };
+    const nlohmann::json answer{
+        {"unread_workspaces",
+         nlohmann::json::array({{{"workspace_id", "ws-lab"}, {"message", "not <ready>"}}})}};
+    const nlohmann::json items = nlohmann::json::array(
+        {{{"id", "central"}, {"log", "central"}},
+         {{"id", "home"}, {"log", "workspace"}, {"workspace_id", "ws-home"}, {"sequence", 3}},
+         {{"id", "queued"}, {"log", "workspace"}, {"workspace_id", "ws-home"}, {"pending", true}}});
+    lake::api::WebUiViewer viewer{true, false};
+    viewer.path = "/audit";
+    viewer.workspaces = {{"ws-home", "Home"}};
+    const std::string page = lake::api::web_ui_audit(
+        {event("central", "c0ffee"), event("home", "beef"), event("queued", "")},
+        lake::audit::Filter{.newest_first = true}, nlohmann::json::object(), viewer,
+        lake::api::audit_page_view(answer, items, true));
+    EXPECT_NE(page.find("<th>Log</th>"), std::string::npos);
+    EXPECT_NE(page.find("<td>Central</td>"), std::string::npos);
+    EXPECT_NE(page.find("<span title=\"ws-home\">Workspace Home</span>"), std::string::npos);
+    EXPECT_NE(page.find("<em>being written</em>"), std::string::npos);
+    EXPECT_NE(page.find("<code>ws-lab</code> could not be read: not &lt;ready&gt;"),
+              std::string::npos);
+}
+
 TEST(WebUi, TransparencyPageRendersVerifiedIdentityMatches) {
     const nlohmann::json scan{
         {"duration_ms", 12.5},

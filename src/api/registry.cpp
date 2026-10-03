@@ -8,6 +8,7 @@
 #include <exception>
 #include <print>
 
+#include "lake/api/audit_routing.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/store.hpp"
 #include "lake/transparency/log.hpp"
@@ -518,6 +519,7 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     context.audit_kind.clear();
     context.audit_object.clear();
     context.audit_details = nlohmann::json::object();
+    context.audit_workspace_id.clear();
     CallState state{.capability = std::move(capability)};
     if (context.authorized && context.credential_kind == "agent_task" &&
         context.credential_session_id.starts_with("task:") && context.store) {
@@ -621,6 +623,9 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
                 state.proceed = false;
             }
         }
+        if (state.proceed) {
+            context.audit_workspace_id = workspace->id;
+        }
     }
     if (state.proceed && !context.path_workspace_id.empty() &&
         context.credential_kind == "agent_task" &&
@@ -667,8 +672,10 @@ std::string acting_agent(const ApiContext& context) {
 
 ApiResult finish_call(const Capability* capability,
                       const std::string& name,
+                      const nlohmann::json& input,
                       ApiResult result,
-                      ApiContext& context) {
+                      ApiContext& context,
+                      bool handled) {
     // An anonymous caller refused by a capability that otherwise needs a credential (a private
     // repository read) is refused for want of one.
     if (capability != nullptr && capability->requires_auth && !context.authorized && !result.ok &&
@@ -704,17 +711,20 @@ ApiResult finish_call(const Capability* capability,
         .device = context.device,
         .details = std::move(details),
     };
-    const audit::IdentityOptions options{
-        .configured_seed = context.identity_seed,
-        .instance_kek = context.instance_kek,
-    };
-    auto recorded = audit::record(*context.store, event, options);
+    // Decision 52: events about a workspace's data go to that workspace's audit, queued without
+    // I/O; the rest are signed into the central chain now.
+    const AuditRoute route =
+        audit_route(capability, name, input, context, event.outcome, handled);
+    auto recorded = record_audit(context, event, route);
     if (!recorded) {
         return ApiResult::failure("store_error",
                                   "could not record audit event: " + recorded.error().message);
     }
+    if (!*recorded) {
+        return result;
+    }
     if (kind == "dynamic_secret" && context.transparency_log) {
-        auto appended = context.transparency_log->append_audit_event(*recorded);
+        auto appended = context.transparency_log->append_audit_event(**recorded);
         if (!appended) {
             return ApiResult::failure("store_error",
                                       "could not append audit event to transparency log: " +
@@ -819,10 +829,12 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     if (!canonical) {
         return finish_call(capability.get(),
                            name,
+                           input,
                            ApiResult::failure(canonical.error().code,
                                               canonical.error().message,
                                               canonical.error().path),
-                           context);
+                           context,
+                           false);
     }
     nlohmann::json workspace_resolved_input;
     const nlohmann::json& workspace_input =
@@ -848,7 +860,8 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
                 .count();
     }
-    return finish_call(capability.get(), name, std::move(state.result), context);
+    return finish_call(
+        capability.get(), name, call_input, std::move(state.result), context, state.proceed);
 }
 
 liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
@@ -863,10 +876,12 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
     if (!canonical) {
         co_return finish_call(capability.get(),
                               name,
+                              input,
                               ApiResult::failure(canonical.error().code,
                                                  canonical.error().message,
                                                  canonical.error().path),
-                              context);
+                              context,
+                              false);
     }
     nlohmann::json workspace_resolved_input;
     const nlohmann::json& workspace_input =
@@ -898,7 +913,8 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
                 .count();
     }
-    co_return finish_call(capability.get(), name, std::move(state.result), context);
+    co_return finish_call(
+        capability.get(), name, call_input, std::move(state.result), context, state.proceed);
 }
 
 } // namespace lake::api

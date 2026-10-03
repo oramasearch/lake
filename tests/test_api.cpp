@@ -47,6 +47,7 @@
 #include "lake/api/server.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/workspace_audit.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/handles.hpp"
@@ -5633,14 +5634,36 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     const auto references = control->list_repository_refs(repository->id);
     ASSERT_TRUE(references) << references.error().message;
     EXPECT_FALSE(references->empty());
+    // Decision 52: a push and a pull are the repository's data, so their events are in the
+    // audit of the repository's workspace, written by the server's flush (here, its stop), and
+    // not in the central log.
     const auto events = lake::test::audit_events(*control, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
-    EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
-        return event.draft.action == "push" && event.draft.outcome == "success";
+    EXPECT_FALSE(std::ranges::any_of(*events, [](const auto& event) {
+        return event.draft.action == "push" || event.draft.action == "pull";
     }));
-    EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
-        return event.draft.action == "pull" && event.draft.outcome == "success";
+    auto context = lake::api::ApiContext{};
+    context.store = control.get();
+    context.workspaces = workspaces.service.get();
+    context.instance_kek = options.instance_kek;
+    auto records = lake::api::workspace_records(context, customer->id, workspace_id);
+    ASSERT_TRUE(records);
+    const auto workspace_events =
+        liquid::runtime::block_on(lake::control::list_workspace_audit(*records, {}, 0));
+    ASSERT_TRUE(workspace_events && *workspace_events);
+    const auto& written_events = **workspace_events;
+    EXPECT_TRUE(std::ranges::any_of(written_events, [](const auto& found) {
+        return found.event.draft.action == "push" && found.event.draft.outcome == "success" &&
+               found.sequence > 0;
     }));
+    EXPECT_TRUE(std::ranges::any_of(written_events, [](const auto& found) {
+        return found.event.draft.action == "pull" && found.event.draft.outcome == "success";
+    }));
+    const auto verified =
+        liquid::runtime::block_on(lake::control::verify_workspace_audit(*records, *control));
+    ASSERT_TRUE(verified && *verified);
+    EXPECT_TRUE((*verified)->verified) << (*verified)->error_message;
+    EXPECT_EQ((*verified)->chained, written_events.size());
 }
 
 TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
@@ -5686,8 +5709,34 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     lake::test::RecordWorkspaces workspaces(control, database_uri);
     workspaces.ready(repository->workspace_id);
     options.workspaces = workspaces.service;
+    // Branch protection decisions go to the repository's workspace audit (decision 52); each
+    // drain() below writes what the pushes queued.
+    options.audit_flush_interval = std::chrono::milliseconds(0);
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
+    const auto workspace_audit = [&] {
+        server.drain();
+        auto context = lake::api::ApiContext{};
+        context.store = control.get();
+        context.workspaces = workspaces.service.get();
+        context.instance_kek = options.instance_kek;
+        auto records =
+            lake::api::workspace_records(context, customer->id, repository->workspace_id);
+        EXPECT_TRUE(records);
+        std::vector<lake::audit::Event> events;
+        if (!records) {
+            return events;
+        }
+        auto listed =
+            liquid::runtime::block_on(lake::control::list_workspace_audit(*records, {}, 0));
+        EXPECT_TRUE(listed && *listed);
+        if (listed && *listed) {
+            for (auto& found : **listed) {
+                events.push_back(std::move(found.event));
+            }
+        }
+        return events;
+    };
     const std::string url =
         "http://127.0.0.1:" + std::to_string(server.port()) + "/v1/repositories/" + repository->id;
     liquid::sync_endpoint owner_endpoint(
@@ -5726,19 +5775,23 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     EXPECT_EQ(fast_forward_refusal->reason,
               "branch protection rejects a non-fast-forward update to main");
 
-    const auto events_before_unauthorized = lake::test::audit_events(*control, {.limit = 100});
-    ASSERT_TRUE(events_before_unauthorized) << events_before_unauthorized.error().message;
+    const auto central_events = lake::test::audit_events(*control, {.limit = 100});
+    ASSERT_TRUE(central_events) << central_events.error().message;
+    EXPECT_FALSE(std::ranges::any_of(*central_events, [](const auto& event) {
+        return event.draft.kind.starts_with("forge.branch_protection.");
+    })) << "branch protection decisions are the repository's workspace audit";
+    const auto events_before_unauthorized = workspace_audit();
     const auto branch_events_before =
-        std::ranges::count_if(*events_before_unauthorized, [](const auto& event) {
+        std::ranges::count_if(events_before_unauthorized, [](const auto& event) {
             return event.draft.kind.starts_with("forge.branch_protection.");
         });
-    EXPECT_TRUE(std::ranges::any_of(*events_before_unauthorized, [](const auto& event) {
+    EXPECT_TRUE(std::ranges::any_of(events_before_unauthorized, [](const auto& event) {
         return event.draft.kind == "forge.branch_protection.refused" &&
                event.draft.details.value("reference", "") == "main" &&
                event.draft.details.value("caller", "") == "admin" &&
                event.draft.details.value("rule", "") == "required_review";
     }));
-    EXPECT_TRUE(std::ranges::any_of(*events_before_unauthorized, [](const auto& event) {
+    EXPECT_TRUE(std::ranges::any_of(events_before_unauthorized, [](const auto& event) {
         return event.draft.kind == "forge.branch_protection.allowed" &&
                event.draft.details.value("reference", "") == "main" &&
                event.draft.details.value("caller", "") == "admin";
@@ -5754,10 +5807,9 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     const auto anonymous = liquid::runtime::block_on(anonymous_endpoint.push(*anonymous_source));
     ASSERT_FALSE(anonymous);
     EXPECT_EQ(anonymous.error().code, liquid::errc::unauthorized);
-    const auto events_after_anonymous = lake::test::audit_events(*control, {.limit = 100});
-    ASSERT_TRUE(events_after_anonymous) << events_after_anonymous.error().message;
+    const auto events_after_anonymous = workspace_audit();
     const auto branch_events_after =
-        std::ranges::count_if(*events_after_anonymous, [](const auto& event) {
+        std::ranges::count_if(events_after_anonymous, [](const auto& event) {
             return event.draft.kind.starts_with("forge.branch_protection.");
         });
     EXPECT_EQ(branch_events_after, branch_events_before);

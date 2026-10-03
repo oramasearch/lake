@@ -25,6 +25,7 @@
 #include "lake/api/web_ui.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/platform.hpp"
+#include "lake/control/workspace_audit.hpp"
 #include "lake/control/zetta_control.hpp"
 #include "api/workspace_records_api.hpp"
 #include "repository_test_support.hpp"
@@ -321,6 +322,27 @@ protected:
         return std::move(*opened);
     }
 
+    // The repository's workspace audit, in chain order (decision 52: a deployment's phases are
+    // the repository's data). The chain is verified on every read.
+    std::vector<lake::audit::Event> workspace_audit() {
+        auto opened = records();
+        auto listed = liquid::runtime::block_on(lake::control::list_workspace_audit(opened, {}, 0));
+        EXPECT_TRUE(listed && *listed);
+        if (!listed || !*listed) {
+            return {};
+        }
+        auto found = std::move(**listed);
+        std::ranges::sort(found, {}, &lake::control::WorkspaceAuditEvent::sequence);
+        std::vector<lake::audit::Event> events;
+        for (auto& event : found) {
+            events.push_back(std::move(event.event));
+        }
+        const auto verified =
+            liquid::runtime::block_on(lake::control::verify_workspace_audit(opened, *store));
+        EXPECT_TRUE(verified && *verified && (*verified)->verified);
+        return events;
+    }
+
     template <class Task> PlatformResult<json> finish(Task task) {
         auto completed = liquid::runtime::block_on(std::move(task));
         if (!completed) {
@@ -403,9 +425,14 @@ TEST_F(PlatformFixture, SyncCreatesEnvironmentLatestPhaseAndAuditEvent) {
     const auto object = store->get_policy_object(object_id);
     ASSERT_TRUE(object);
     EXPECT_EQ(object->object_type, "environment");
-    auto events = lake::test::audit_events(*store, {});
-    ASSERT_TRUE(events);
-    EXPECT_TRUE(std::ranges::any_of(*events, [](const lake::audit::Event& event) {
+    // The phase is in the repository's workspace audit, not the central log (decision 52).
+    auto central = lake::test::audit_events(*store, {});
+    ASSERT_TRUE(central);
+    EXPECT_FALSE(std::ranges::any_of(*central, [](const lake::audit::Event& event) {
+        return event.draft.kind == "platform.deployment.phase";
+    }));
+    auto events = workspace_audit();
+    EXPECT_TRUE(std::ranges::any_of(events, [](const lake::audit::Event& event) {
         return event.draft.kind == "platform.deployment.phase";
     }));
 
@@ -416,9 +443,8 @@ TEST_F(PlatformFixture, SyncCreatesEnvironmentLatestPhaseAndAuditEvent) {
     const auto environment = get_environment("production");
     ASSERT_TRUE(environment);
     EXPECT_EQ(environment->at("deployment").at("phase"), "healthy");
-    events = lake::test::audit_events(*store, {});
-    ASSERT_TRUE(events);
-    EXPECT_EQ(std::ranges::count_if(*events,
+    events = workspace_audit();
+    EXPECT_EQ(std::ranges::count_if(events,
                                     [](const lake::audit::Event& event) {
                                         return event.draft.kind == "platform.deployment.phase";
                                     }),
@@ -540,10 +566,9 @@ TEST_F(PlatformFixture, PlatformReducersProduceTheSameResultForEveryInputOrder) 
         EXPECT_EQ(environment->at("env").at(0).at("value"), "blue");
         EXPECT_EQ(environment->at("deployment").at("phase"), "ready");
 
-        const auto events = lake::test::audit_events(*store, {});
-        ASSERT_TRUE(events);
+        const auto events = workspace_audit();
         std::vector<std::string> phases;
-        for (const lake::audit::Event& event : *events) {
+        for (const lake::audit::Event& event : events) {
             if (event.draft.kind == "platform.deployment.phase") {
                 phases.push_back(event.draft.details.at("phase"));
             }

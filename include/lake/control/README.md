@@ -149,3 +149,12 @@ the store answers its dispatch half only (an empty `body`, a null `result`, and 
 lake's notice); `create_agent_task` keeps a caller-made `id`, `record_agent_task_event` takes no
 message or answer, and `assign_legacy_agent_tasks`/`legacy_agent_tasks` (`LegacyAgentTask`) serve
 only the copy.
+`workspace_audit.hpp` holds a workspace's audit chain (decision 52, lake#317): the
+`lake_audit_events` collection, chained and copied events, `append_workspace_audit_event`,
+`find_workspace_audit_tail`, `list_workspace_audit` and `verify_workspace_audit`.
+`workspace_records.hpp`'s `list` takes an optional `keep` predicate. `store.hpp` declares
+`LegacyAuditEvent`, `assign_legacy_audit_events` and `legacy_audit_events`, which serve only the
+copy. `lake/audit/audit.hpp` adds `PendingEvent` (an event whose id and instant are fixed when its
+call finishes and whose predecessor and signature are added when it is written), `sign_pending`
+and `verify_event` (one event checked alone).
+

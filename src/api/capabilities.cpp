@@ -1,4 +1,6 @@
 #include "lake/api/capabilities.hpp"
+#include "audit_logs.hpp"
+#include "lake/api/audit_routing.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/version.hpp"
 
@@ -1196,7 +1198,20 @@ json audit_filter_input() {
               {"to", {{"type", "string"}}},
               {"limit", {{"type", "integer"}}},
               {"order", {{"type", "string"}, {"enum", json::array({"newest", "oldest"})}}},
-              {"include_reads", {{"type", "boolean"}}}}},
+              {"include_reads", {{"type", "boolean"}}},
+              // Decision 52 (docs/api/audit.md#which-log): which logs a read covers.
+              {"workspace_id",
+               {{"type", "string"},
+                {"description", "Read only this workspace's audit (its Zetta's chain)."}}},
+              {"customer_id",
+               {{"type", "string"},
+                {"description", "With the central log, read the audits of this space's live "
+                                "workspaces (by default, every workspace in scope)."}}},
+              {"log",
+               {{"type", "string"},
+                {"enum", json::array({"all", "central"})},
+                {"description", "`central`: the central log alone. `all` (the default): the "
+                                "central log and the workspaces' audits."}}}}},
             {"additionalProperties", false}};
 }
 
@@ -1315,6 +1330,38 @@ ApiResult audit_items(const std::vector<audit::Event>& events, ApiContext& conte
     return ApiResult::success({{"items", std::move(items)}});
 }
 
+// audit_items over events read from both logs (decision 52): each item says which log it came
+// from, the workspace and its place in that workspace's chain, and whether it is still queued in
+// this process; the answer names the workspaces that could not be read.
+ApiResult logged_audit_items(const AuditRead& read, ApiContext& context) {
+    std::vector<audit::Event> events;
+    events.reserve(read.events.size());
+    for (const LoggedEvent& logged : read.events) {
+        events.push_back(logged.event);
+    }
+    ApiResult result = audit_items(events, context);
+    if (!result.ok) {
+        return result;
+    }
+    json& items = result.value["items"];
+    for (std::size_t index = 0; index < read.events.size(); ++index) {
+        const LoggedEvent& logged = read.events[index];
+        json& item = items[index];
+        item["log"] = logged.log;
+        if (!logged.workspace_id.empty()) {
+            item["workspace_id"] = logged.workspace_id;
+        }
+        if (logged.sequence > 0) {
+            item["sequence"] = logged.sequence;
+        }
+        if (logged.pending) {
+            item["pending"] = true;
+        }
+    }
+    result.value["unread_workspaces"] = read.unread;
+    return result;
+}
+
 audit::IdentityOptions identity_options(const ApiContext& context) {
     return audit::IdentityOptions{
         .configured_seed = context.identity_seed,
@@ -1371,7 +1418,9 @@ SyncStoreResult<void> record_branch_protection_event(ApiContext& context,
                     {"rule", rule},
                     {"reason", reason}},
     };
-    const auto recorded = audit::record(*context.store, event, identity_options(context));
+    // A decision about a repository's reference is the repository's data: its workspace's audit.
+    const auto recorded =
+        record_audit(context, event, workspace_audit_route(context, repository.workspace_id));
     if (!recorded) {
         return std::unexpected(
             SyncStoreError{recorded.error().code, recorded.error().message, update.name, rule});
@@ -1533,7 +1582,13 @@ sync_change_authorizer(ApiContext& context, const control::Repository& repositor
                         {"offline_grant_id", context.offline_grant_id},
                         {"reason", reason}},
         };
-        auto recorded = audit::record(*context.store, event, identity_options(context));
+        // Publication into a repository is its data: the repository's workspace audit. A refusal
+        // for want of authority stays central, as a refused capability call does.
+        const auto pushed_into = context.store->get_repository(repository_id);
+        const AuditRoute route = outcome != "denied" && pushed_into
+                                     ? workspace_audit_route(context, pushed_into->workspace_id)
+                                     : AuditRoute{};
+        auto recorded = record_audit(context, event, route);
         if (!recorded) {
             return std::unexpected(SyncStoreError{
                 recorded.error().code, recorded.error().message, "repository sync audit"});
@@ -4981,6 +5036,98 @@ void register_search_capability(Registry& registry) {
 } // namespace
 
 // ---- instance identity and audit ----
+namespace {
+
+// The logs one audit read covers (decision 52, docs/api/audit.md#which-log). `spaces`: the spaces
+// whose workspaces a caller may read when the input names none (empty for the operator's `audit`:
+// every space).
+std::expected<AuditScope, ApiError>
+audit_scope(const json& input, ApiContext& context, const std::vector<std::string>& spaces) {
+    AuditScope scope;
+    if (input.contains("workspace_id")) {
+        // Registry::call has checked that it names a workspace (of `customer_id`, when given).
+        if (input.contains("after_id")) {
+            return std::unexpected(ApiError{"invalid_input",
+                                            "after_id pages the central log; export_audit reads "
+                                            "a workspace's whole audit",
+                                            "/after_id"});
+        }
+        const auto workspace = context.store->get_workspace(input.at("workspace_id"));
+        if (!workspace) {
+            return std::unexpected(
+                ApiError{"invalid_input", "workspace_id must name a workspace", "/workspace_id"});
+        }
+        if (!spaces.empty() && std::ranges::find(spaces, workspace->customer_id) == spaces.end()) {
+            return std::unexpected(ApiError{
+                "unauthorized", "the workspace is not in one of the caller's spaces"});
+        }
+        scope.central = false;
+        scope.workspaces.emplace_back(workspace->customer_id, workspace->id);
+        return scope;
+    }
+    if (input.value("log", "all") == "central" || !context.workspaces) {
+        return scope;
+    }
+    std::vector<std::string> customers;
+    if (input.contains("customer_id")) {
+        const std::string customer_id = input.at("customer_id");
+        if (!spaces.empty() && std::ranges::find(spaces, customer_id) == spaces.end()) {
+            return std::unexpected(
+                ApiError{"unauthorized", "the space is not one of the caller's", "/customer_id"});
+        }
+        customers.push_back(customer_id);
+    } else if (!spaces.empty()) {
+        customers = spaces;
+    } else if (context.operator_credential || context.acting_identity == "admin") {
+        if (const auto all = context.store->list_customers(1000)) {
+            for (const control::Customer& customer : *all) {
+                customers.push_back(customer.id);
+            }
+        }
+    }
+    scope.workspaces = live_workspaces_of(context, customers);
+    return scope;
+}
+
+// The synchronous form of the audit reads: the central log, the only log a lake without
+// workspace Zettas has. A lake with workspaces reads through Registry::call_async.
+ApiResult central_audit_only(const json& input, ApiContext& context, const audit::Filter& filter) {
+    if (!context.store) {
+        return no_store();
+    }
+    if (context.workspaces && (input.contains("workspace_id") ||
+                               input.value("log", "all") != "central")) {
+        return ApiResult::failure("store_error",
+                                  "the workspaces' audits are read through call_async");
+    }
+    auto events = context.store->list_audit_events(filter);
+    if (!events) {
+        return from_store_error(events.error());
+    }
+    AuditRead read;
+    for (audit::Event& event : *events) {
+        read.events.push_back(LoggedEvent{.event = std::move(event)});
+    }
+    return logged_audit_items(read, context);
+}
+
+ApiResult verify_central_audit(ApiContext& context) {
+    if (!context.store) {
+        return no_store();
+    }
+    auto events = context.store->list_audit_events(audit::Filter{.limit = 1000000});
+    if (!events) {
+        return from_store_error(events.error());
+    }
+    auto verified = audit::verify(*context.store, *events);
+    if (!verified) {
+        return ApiResult::failure(verified.error().code, verified.error().message);
+    }
+    return ApiResult::success({{"verified", true}, {"log", "central"}, {"events", events->size()}});
+}
+
+} // namespace
+
 void register_audit_capabilities(Registry& registry) {
     registry.add(
         Capability{.name = "identity",
@@ -5034,7 +5181,10 @@ void register_audit_capabilities(Registry& registry) {
         .description = "Query signed audit events by principal, object, outcome and time, newest "
                        "first unless `order` is `oldest` or `after_id` continues a page. Each "
                        "event names its principal (`principal_name`) and, for a workspace call, "
-                       "the inner `capability`.",
+                       "the inner `capability`. Reads the central log and every workspace's audit "
+                       "(decision 52): `workspace_id` reads one workspace's, `customer_id` limits "
+                       "the workspaces to one space's, and `log: central` reads the central log "
+                       "alone. Each event says its `log`.",
         .input_schema = audit_filter_input(),
         .output_schema = list_schema(audit_event_schema()),
         .kind = CapabilityKind::Read,
@@ -5042,20 +5192,31 @@ void register_audit_capabilities(Registry& registry) {
         .action = "read",
         .resolve_object = global_object,
         .handler = [](const json& input, ApiContext& context) {
+            return central_audit_only(input, context, audit_filter_of(input, context));
+        },
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return no_store();
+                co_return no_store();
             }
-            auto events = context.store->list_audit_events(audit_filter_of(input, context));
-            if (!events) {
-                return from_store_error(events.error());
+            auto scope = audit_scope(input, context, {});
+            if (!scope) {
+                co_return ApiResult::failure(scope.error().code, scope.error().message,
+                                             scope.error().path);
             }
-            return audit_items(*events, context);
+            auto read = settled_read(
+                co_await read_audit_logs(context, audit_filter_of(input, context), *scope));
+            if (!read) {
+                co_return ApiResult::failure(read.error().code, read.error().message);
+            }
+            co_return logged_audit_items(*read, context);
         }});
     registry.add(Capability{
         .name = "my_audit",
         .title = "Query my audit events",
         .description =
-            "The signed-in principal's own signed audit events, filtered like audit, newest first. "
+            "The signed-in principal's own signed audit events, filtered like audit, newest first, "
+            "from the central log and the audits of the workspaces of the principal's spaces. "
             "Successful reads (the polling a browser does) are left out unless `include_reads` "
             "is true; failed and denied reads always appear.",
         .input_schema = audit_filter_input(),
@@ -5065,25 +5226,52 @@ void register_audit_capabilities(Registry& registry) {
         .action = "read",
         .resolve_object = self_object,
         .handler = [](const json& input, ApiContext& context) {
-            if (!context.store) {
-                return no_store();
-            }
             if (context.acting_identity.empty()) {
                 return ApiResult::failure("unauthorized", "no signed-in principal");
             }
             audit::Filter filter =
                 audit_filter_of(input, context, {.newest_first = true, .include_reads = false});
             filter.principal = context.acting_identity;
-            auto events = context.store->list_audit_events(filter);
-            if (!events) {
-                return from_store_error(events.error());
+            return central_audit_only(input, context, filter);
+        },
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store) {
+                co_return no_store();
             }
-            return audit_items(*events, context);
+            if (context.acting_identity.empty()) {
+                co_return ApiResult::failure("unauthorized", "no signed-in principal");
+            }
+            audit::Filter filter =
+                audit_filter_of(input, context, {.newest_first = true, .include_reads = false});
+            filter.principal = context.acting_identity;
+            // The person's own spaces' workspaces; only their own events are read from them.
+            std::vector<std::string> spaces;
+            if (!context.acting_user_id.empty()) {
+                if (const auto customers =
+                        context.store->list_customers(500, context.acting_user_id)) {
+                    for (const control::Customer& customer : *customers) {
+                        spaces.push_back(customer.id);
+                    }
+                }
+            }
+            auto scope = audit_scope(input, context, spaces);
+            if (!scope) {
+                co_return ApiResult::failure(scope.error().code, scope.error().message,
+                                             scope.error().path);
+            }
+            auto read = settled_read(co_await read_audit_logs(context, filter, *scope));
+            if (!read) {
+                co_return ApiResult::failure(read.error().code, read.error().message);
+            }
+            co_return logged_audit_items(*read, context);
         }});
     registry.add(Capability{
         .name = "export_audit",
         .title = "Export audit events",
-        .description = "Export matching signed audit events as JSON lines.",
+        .description = "Export matching signed audit events as JSON lines: the central log in "
+                       "append order, or with `workspace_id` that workspace's whole audit (copied "
+                       "central events, then its chain by place), each line naming its `log`.",
         .input_schema = audit_filter_input(),
         .output_schema = {{"type", "object"}, {"properties", {{"jsonl", {{"type", "string"}}}}}},
         .kind = CapabilityKind::Read,
@@ -5094,45 +5282,118 @@ void register_audit_capabilities(Registry& registry) {
             if (!context.store) {
                 return no_store();
             }
+            if (input.contains("workspace_id")) {
+                return ApiResult::failure("store_error",
+                                          "a workspace's audit is read asynchronously");
+            }
             auto events = context.store->list_audit_events(
                 audit_filter_of(input, context, {.newest_first = false, .include_reads = true}));
             if (!events) {
                 return from_store_error(events.error());
             }
             return ApiResult::success({{"jsonl", audit::json_lines(*events)}});
+        },
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store) {
+                co_return no_store();
+            }
+            if (!input.contains("workspace_id")) {
+                auto events = context.store->list_audit_events(audit_filter_of(
+                    input, context, {.newest_first = false, .include_reads = true}));
+                if (!events) {
+                    co_return from_store_error(events.error());
+                }
+                co_return ApiResult::success({{"jsonl", audit::json_lines(*events)}});
+            }
+            const auto workspace = context.store->get_workspace(input.at("workspace_id"));
+            if (!workspace) {
+                co_return from_store_error(workspace.error());
+            }
+            auto events = settled_read(co_await export_workspace_audit(
+                context, workspace->customer_id, workspace->id));
+            if (!events) {
+                co_return ApiResult::failure(events.error().code, events.error().message);
+            }
+            const audit::Filter filter =
+                audit_filter_of(input, context, {.newest_first = false, .include_reads = true});
+            std::string jsonl;
+            int written = 0;
+            for (const LoggedEvent& logged : *events) {
+                if (filter.limit > 0 && written >= filter.limit) {
+                    break;
+                }
+                if (!audit_filter_matches(filter, logged.event)) {
+                    continue;
+                }
+                json line = audit::to_json(logged.event);
+                line["log"] = "workspace";
+                line["workspace_id"] = logged.workspace_id;
+                if (logged.sequence > 0) {
+                    line["sequence"] = logged.sequence;
+                }
+                jsonl += line.dump();
+                jsonl += '\n';
+                ++written;
+            }
+            co_return ApiResult::success({{"jsonl", std::move(jsonl)}});
         }});
     registry.add(Capability{
         .name = "verify_audit",
         .title = "Verify audit chain",
-        .description = "Check that a space's audit log is complete and untampered: every event's "
-                       "signature and the hash chain linking them.",
+        .description = "Check that an audit log is complete and untampered: every event's "
+                       "signature and the hash chain linking them. The central log, or with "
+                       "`workspace_id` that workspace's own chain (decision 52).",
         .input_schema = {{"type", "object"},
-                         {"properties", json::object()},
+                         {"properties",
+                          {{"workspace_id", {{"type", "string"}}},
+                           {"customer_id", {{"type", "string"}}}}},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
-                          {"properties", {{"verified", {{"type", "boolean"}}}}}},
+                          {"properties",
+                           {{"verified", {{"type", "boolean"}}},
+                            {"log", {{"type", "string"}}},
+                            {"workspace_id", {{"type", "string"}}},
+                            {"events", {{"type", "integer"}}},
+                            {"chained", {{"type", "integer"}}},
+                            {"copied", {{"type", "integer"}}},
+                            {"last_sequence", {{"type", "integer"}}}}}},
         .kind = CapabilityKind::Read,
         .object = "audit log",
         .action = "read",
         .resolve_object = global_object,
-        .handler = [](const json&, ApiContext& context) {
+        .handler = [](const json& input, ApiContext& context) {
+            if (input.contains("workspace_id")) {
+                return ApiResult::failure("store_error",
+                                          "a workspace's audit is verified asynchronously");
+            }
+            return verify_central_audit(context);
+        },
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!input.contains("workspace_id")) {
+                co_return verify_central_audit(context);
+            }
             if (!context.store) {
-                return no_store();
+                co_return no_store();
             }
-            auto events = context.store->list_audit_events(audit::Filter{.limit = 1000000});
-            if (!events) {
-                return from_store_error(events.error());
+            const auto workspace = context.store->get_workspace(input.at("workspace_id"));
+            if (!workspace) {
+                co_return from_store_error(workspace.error());
             }
-            auto verified = audit::verify(*context.store, *events);
+            auto verified = co_await verify_workspace_audit_log(context, workspace->customer_id,
+                                                                workspace->id);
             if (!verified) {
-                return ApiResult::failure(verified.error().code, verified.error().message);
+                co_return ApiResult::failure("store_unavailable", verified.error().message);
             }
-            return ApiResult::success({{"verified", true}});
+            co_return std::move(*verified);
         }});
     registry.add(Capability{
         .name = "set_audit_retention",
         .title = "Set audit retention",
-        .description = "Set customer audit retention at or above the 400-day floor.",
+        .description = "Set a space's retention of the central audit log, at or above the "
+                       "400-day floor; it can never be reduced. The space's workspace audits are "
+                       "kept until their workspace is deleted (decision 52, lake#318).",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"customer_id", {{"type", "string"}}}, {"days", {{"type", "integer"}}}}},
@@ -5141,7 +5402,8 @@ void register_audit_capabilities(Registry& registry) {
         .output_schema = {{"type", "object"},
                           {"properties",
                            {{"customer_id", {{"type", "string"}}},
-                            {"days", {{"type", "integer"}}}}}},
+                            {"days", {{"type", "integer"}}},
+                            {"workspace_audit_retention", {{"type", "string"}}}}}},
         .kind = CapabilityKind::Action,
         .object = "customer",
         .action = "admin",
@@ -5159,7 +5421,12 @@ void register_audit_capabilities(Registry& registry) {
             if (!updated) {
                 return from_store_error(updated.error());
             }
-            return ApiResult::success({{"customer_id", input["customer_id"]}, {"days", days}});
+            // Each workspace's audit is the collection lake_audit_events of its Zetta, whose
+            // retention_ms is 0: kept until the workspace is deleted, never shorter than `days`.
+            return ApiResult::success(
+                {{"customer_id", input["customer_id"]},
+                 {"days", days},
+                 {"workspace_audit_retention", "kept until the workspace is deleted"}});
         }});
 }
 

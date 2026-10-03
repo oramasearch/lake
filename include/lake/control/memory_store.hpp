@@ -45,6 +45,10 @@ public:
     Result<RepositoryRef> set_repository_ref(const std::string& repository_id,
                                              const std::string& name,
                                              const std::string& head) override;
+    Result<void>
+    assign_legacy_audit_events(const std::vector<std::string>& workspace_actions) override;
+    Result<std::vector<LegacyAuditEvent>> legacy_audit_events(const std::string& after_id,
+                                                              int limit) override;
     Result<void> assign_legacy_forge_records() override;
     Result<std::vector<LegacyForgeRecord>> legacy_forge_records(const std::string& after_id,
                                                                 int limit) override;
@@ -523,6 +527,8 @@ private:
     std::vector<ForgeRecord> legacy_forge_records_;
     // Legacy forge record id -> (workspace, outcome), as migration 0054 records them.
     std::map<std::string, std::pair<std::string, std::string>> legacy_forge_assignments_;
+    // Audit event id -> (workspace, outcome), as workspace_assignments holds them (lake#317).
+    std::map<std::string, std::pair<std::string, std::string>> legacy_audit_assignments_;
     std::vector<DriveShareLink> legacy_drive_share_links_;
     std::map<std::string, std::pair<std::string, std::string>> legacy_drive_share_assignments_; // workspace, outcome
     std::map<std::string, DriveShareLinkRoute> drive_share_link_routes_; // by token digest

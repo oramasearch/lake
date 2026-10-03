@@ -4177,6 +4177,106 @@ void InMemoryStore::seed_legacy_forge_record(ForgeRecord record) {
 // Migration 0054's assignment: a row belongs to its repository's workspace. A row whose repository
 // has no workspace is needs_selection until it has one; a row whose workspace was deleted went
 // with it (workspace_deleted).
+// Migration 0063's assignment, over the events this store holds (lake#317).
+Result<void>
+InMemoryStore::assign_legacy_audit_events(const std::vector<std::string>& workspace_actions) {
+    std::lock_guard lock(mutex_);
+    const auto uuid_after = [](const std::string& object, std::string_view prefix) {
+        if (!object.starts_with(prefix) || object.size() < prefix.size() + 36) {
+            return std::string();
+        }
+        return object.substr(prefix.size(), 36);
+    };
+    const auto repository_workspace = [this](const std::string& id) {
+        const auto repository = repository_by_id(repositories_, id);
+        return repository == repositories_.end() ? std::string() : repository->workspace_id;
+    };
+    for (const audit::Event& event : audit_events_) {
+        if (legacy_audit_assignments_.contains(event.id) ||
+            std::ranges::find(workspace_actions, event.draft.action) == workspace_actions.end() ||
+            (event.draft.outcome == "denied" &&
+             !event.draft.kind.starts_with("forge.branch_protection."))) {
+            continue;
+        }
+        const nlohmann::json& details = event.draft.details;
+        const auto detail = [&details](const char* key) {
+            return details.is_object() && details.contains(key) && details.at(key).is_string()
+                       ? details.at(key).get<std::string>()
+                       : std::string();
+        };
+        std::string workspace_id = detail("workspace_id");
+        if (workspace_id.empty()) {
+            workspace_id =
+                repository_workspace(uuid_after(event.draft.object, "repository/"));
+        }
+        if (workspace_id.empty()) {
+            const std::string named = detail("repository_id");
+            workspace_id = repository_workspace(named.empty() ? detail("repository") : named);
+        }
+        if (workspace_id.empty()) {
+            const std::string app = uuid_after(event.draft.object, "app/");
+            const auto found = std::ranges::find(web_apps_, app, &WebApp::id);
+            workspace_id = !app.empty() && found != web_apps_.end() ? found->workspace_id : "";
+        }
+        if (workspace_id.empty()) {
+            const std::string build = uuid_after(event.draft.object, "build/");
+            const auto found = std::ranges::find(builds_, build, &Build::id);
+            workspace_id = !build.empty() && found != builds_.end() ? found->workspace_id : "";
+        }
+        if (workspace_id.empty()) {
+            const std::string mount = uuid_after(event.draft.object, "secret_mount/");
+            const auto found =
+                std::ranges::find(secret_mount_routes_, mount, &SecretMountRoute::mount_id);
+            workspace_id =
+                !mount.empty() && found != secret_mount_routes_.end() ? found->workspace_id : "";
+        }
+        if (workspace_id.empty()) {
+            const std::string task = uuid_after(event.draft.object, "agent_task/");
+            const auto found = std::ranges::find(agent_tasks_, task, &AgentTask::id);
+            workspace_id = !task.empty() && found != agent_tasks_.end() ? found->workspace_id : "";
+        }
+        const auto workspace = std::ranges::find(workspaces_, workspace_id, &Workspace::id);
+        if (workspace_id.empty() || workspace == workspaces_.end() ||
+            (!event.draft.customer_id.empty() &&
+             workspace->customer_id != event.draft.customer_id)) {
+            continue; // stays central
+        }
+        legacy_audit_assignments_[event.id] =
+            workspace->desired == "deleted"
+                ? std::pair<std::string, std::string>{"", "workspace_deleted"}
+                : std::pair<std::string, std::string>{workspace->id, "event_workspace"};
+    }
+    return {};
+}
+
+Result<std::vector<LegacyAuditEvent>>
+InMemoryStore::legacy_audit_events(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<LegacyAuditEvent> rows;
+    bool after = after_id.empty();
+    for (const audit::Event& event : audit_events_) {
+        if (!after) {
+            after = event.id == after_id;
+            continue;
+        }
+        const auto assigned = legacy_audit_assignments_.find(event.id);
+        if (assigned == legacy_audit_assignments_.end()) {
+            continue;
+        }
+        if (static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            break;
+        }
+        std::string customer_id = event.draft.customer_id;
+        if (const auto workspace =
+                std::ranges::find(workspaces_, assigned->second.first, &Workspace::id);
+            workspace != workspaces_.end()) {
+            customer_id = workspace->customer_id;
+        }
+        rows.push_back({event, customer_id, assigned->second.first, assigned->second.second});
+    }
+    return rows;
+}
+
 Result<void> InMemoryStore::assign_legacy_forge_records() {
     std::lock_guard lock(mutex_);
     for (const ForgeRecord& record : legacy_forge_records_) {
