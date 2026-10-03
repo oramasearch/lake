@@ -37,6 +37,13 @@ The configure step is Release by default and exports `compile_commands.json`. Gi
 repeats this build with the Dockerfile's Ubuntu 24.04, clang-19 and CMake 3.31.5 toolchain on
 every push and pull request; see [`ci.md`](ci.md).
 
+Lake's own targets and its test binaries compile with `-Werror=return-type`. A coroutine that
+returns `liquid::runtime::task<T>` carries a `result<T>`, so its promise has `return_value` and no
+`return_void`: one that flows off its end leaves the result unset, and the coroutine awaiting it
+reads and destroys uninitialized memory. That is how `report_on_asking_turn` aborted
+`AgentRuns.AgentTurnReachesLibraryNativeAndPythonAgents` in about half of its runs (lake#476). End
+every such coroutine with an explicit `co_return`.
+
 ## Test
 
 ```sh

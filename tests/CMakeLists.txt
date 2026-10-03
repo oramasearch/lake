@@ -81,3 +81,8 @@ add_test(
 add_test(
   NAME lake-experiment-charts
   COMMAND ${LAKE_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/experiment_charts.cjs)
+
+# The fakes are coroutines too: one that flows off its end is an error, as in lake's own targets.
+foreach(lake_test_target lake-tests lake-postgres-tests)
+  target_compile_options(${lake_test_target} PRIVATE -Werror=return-type)
+endforeach()
