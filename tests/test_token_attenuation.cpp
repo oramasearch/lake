@@ -127,21 +127,8 @@ protected:
             if (!uri || !*uri) {
                 GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
             }
-            schema_ = "attenuation_" + lake::control::new_uuid_v4();
-            std::erase(schema_, '-');
-            pqxx::connection connection(uri);
-            pqxx::work tx(connection);
-            tx.exec("SET client_min_messages TO warning");
-            tx.exec("CREATE SCHEMA " + tx.quote_name(schema_));
-            tx.exec("SET search_path TO " + tx.quote_name(schema_));
-            std::ifstream schema_file(std::filesystem::path(LAKE_TEST_SOURCE_DIR) /
-                                      "db/schema.sql");
-            const std::string schema_sql((std::istreambuf_iterator<char>(schema_file)), {});
-            ASSERT_FALSE(schema_sql.empty());
-            tx.exec(schema_sql);
-            tx.commit();
+            // The runner's database is private to this test (tests/test_main.cpp).
             database_uri_ = uri;
-            database_uri_ += " options='-csearch_path=" + schema_ + "'";
             store_ = lake::control::make_postgres_store(database_uri_, std::string(instance_kek));
         } else {
             store_ = std::make_shared<lake::control::InMemoryStore>();
@@ -187,13 +174,6 @@ protected:
         }
         server_.reset();
         store_.reset();
-        if (postgres_) {
-            pqxx::connection connection(lake::test::postgres_uri());
-            pqxx::work tx(connection);
-            tx.exec("SET client_min_messages TO warning");
-            tx.exec("DROP SCHEMA " + tx.quote_name(schema_) + " CASCADE");
-            tx.commit();
-        }
     }
 
     json call(const std::string& name, const json& input, const std::string& secret) {
@@ -341,7 +321,6 @@ protected:
     std::shared_ptr<lake::test::StreamCaller> zetta_ = std::make_shared<lake::test::StreamCaller>();
     std::shared_ptr<lake::control::WorkspaceService> workspaces_;
     std::filesystem::path workspace_dir_;
-    std::string schema_;
     std::string database_uri_;
     bool postgres_ = false;
     bool mcp_ = false;

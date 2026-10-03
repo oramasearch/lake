@@ -568,22 +568,8 @@ protected:
             if (uri == nullptr || *uri == '\0') {
                 GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
             }
-            postgres_uri_ = uri;
-            schema_ = "http_response_" + lake::control::new_uuid_v4();
-            std::erase(schema_, '-');
-            pqxx::connection connection(postgres_uri_);
-            pqxx::work tx(connection);
-            tx.exec("SET client_min_messages TO warning");
-            tx.exec("CREATE SCHEMA " + tx.quote_name(schema_));
-            tx.exec("SET search_path TO " + tx.quote_name(schema_));
-            std::ifstream schema_file(std::filesystem::path(LAKE_TEST_SOURCE_DIR) /
-                                      "db/schema.sql");
-            const std::string schema_sql((std::istreambuf_iterator<char>(schema_file)), {});
-            ASSERT_FALSE(schema_sql.empty());
-            tx.exec(schema_sql);
-            tx.commit();
-            database_uri_ = postgres_uri_;
-            database_uri_ += " options='-csearch_path=" + schema_ + "'";
+            // The runner's database is private to this test (tests/test_main.cpp).
+            database_uri_ = uri;
             store_ = lake::control::make_postgres_store(database_uri_, instance_kek_);
             create_identity_document();
             ASSERT_FALSE(identity_document_.empty());
@@ -647,14 +633,6 @@ protected:
     void TearDown() override {
         server_.reset();
         store_.reset();
-        if (schema_.empty()) {
-            return;
-        }
-        pqxx::connection connection(postgres_uri_);
-        pqxx::work tx(connection);
-        tx.exec("SET client_min_messages TO warning");
-        tx.exec("DROP SCHEMA " + tx.quote_name(schema_) + " CASCADE");
-        tx.commit();
     }
 
     void verify_agent_workspace(HttpConnection& connection,
@@ -874,9 +852,7 @@ protected:
     std::shared_ptr<lake::control::WorkspaceService> workspaces_;
     std::filesystem::path workspace_dir_;
     std::unique_ptr<lake::api::ApiServer> server_;
-    std::string postgres_uri_;
     std::string database_uri_;
-    std::string schema_;
     std::string email_;
     std::string identity_document_;
     const std::string password_ = "correct horse battery staple";

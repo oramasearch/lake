@@ -89,8 +89,8 @@ skip when `LAKE_TEST_DB_URI` is absent), `lake-postgres-tests` (the focused cont
 `ctest --test-dir build -N` lists the discovered cases.
 
 Postgres-backed tests connect only through `LAKE_TEST_DB_URI` and need a `LAKE_INSTANCE_KEK`.
-The configured role needs `CREATEDB`: the test runner creates a private database per case,
-loads `db/schema.sql`, and drops only that database. Create a base connection database against
+The configured role needs `CREATEDB`: the test runner copies a private database per case from a
+template loaded once with `db/schema.sql`, and drops only that copy. Create a base connection database against
 local Postgres and run the suite with both variables set:
 
 ```sh

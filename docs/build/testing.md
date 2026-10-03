@@ -9,24 +9,72 @@ remain effective. Failure to create the process directory reports the selected r
 filesystem error.
 
 Postgres-backed tests call `lake::test::postgres_uri()` from `tests/postgres_fixture.hpp`.
-The shared GoogleTest runner lazily creates a UUID-named database from `template0`, loads
-`db/schema.sql`, and drops that database after the test fixture is destroyed. Repeated calls in
-one test return the same connection string, including when the test restarts a server or opens a
-second store. A missing `LAKE_TEST_DB_URI` returns null so existing skip behavior is preserved.
+The shared GoogleTest runner (`tests/test_main.cpp`) lazily copies a private database for the
+test from a template with `CREATE DATABASE … TEMPLATE`, and drops it after the test fixture is
+destroyed. Repeated calls in one test return the same connection string, including when the test
+restarts a server or opens a second store. A missing `LAKE_TEST_DB_URI` returns null so existing
+skip behavior is preserved.
 
 `LAKE_TEST_DB_URI` supplies the administrative connection settings. Its database is never
 modified, copied, or dropped. Its role needs `CREATEDB`. The runner generates a fresh random
 `LAKE_INSTANCE_KEK` per test; fixtures with explicit cryptographic test keys may retain those
 keys within their private database. There is no cross-test persisted identity. Database creation,
-schema loading and cleanup errors fail the test; they do not turn into skips. A process killed
-before teardown can leave its UUID-named database behind; remove only databases whose ownership
-you have established.
+schema loading and cleanup errors fail the test; they do not turn into skips.
+
+### Databases the runner owns
+
+Every database the runner creates starts with `lake_fixture_`:
+
+| Name | What it is | Lifetime |
+|---|---|---|
+| `lake_fixture_template_<digest>` | `db/schema.sql` loaded once; `<digest>` is the first 16 hex digits of the file's SHA-256 | Kept and reused by later runs; one per schema version |
+| `lake_fixture_build_<epoch>_<hex>` | A template while it is being loaded | Renamed to the template name when loaded |
+| `lake_fixture_<epoch>_<hex>` | One test's private copy | Dropped at the end of the test |
+
+`<epoch>` is the PostgreSQL server's clock in seconds when the database was created.
+
+- **Template load.** The first test process that finds no template for the current schema takes a
+  PostgreSQL advisory lock on the administrative database, loads `db/schema.sql` into a build
+  database, marks it `IS_TEMPLATE true` and `ALLOW_CONNECTIONS false`, and renames it to the
+  template name. Concurrent processes wait on the lock and then find the template. A runner on
+  another administrative database that publishes the same template first wins the rename; the
+  loser drops its build. Changing `db/schema.sql` changes the digest, so a new template is loaded
+  and the old one is never used again.
+- **Copy.** PostgreSQL refuses to copy a template while any session is connected to it (SQLSTATE
+  `55006`). The template refuses connections, so only a transient session such as autovacuum can
+  cause that; the runner retries the copy on that error only. If the template has disappeared
+  (`3D000`, swept by another runner), it loads it again.
+- **Sweep.** Once per test process, before its first copy, the runner drops its own leftovers: a
+  copy or build database more than an hour old (a process killed before teardown; CTest's default
+  timeout is 1,500 seconds), and a template for another schema digest created more than a day
+  ago (the creation time is in the template's comment). A database with a live session fails
+  `DROP DATABASE` and is left alone. The sweep matches only the `lake_fixture_` names above;
+  it never touches other databases on the server, including `lake_test_<uuid>` databases left by
+  runners before this scheme. Remove those only once you have established who owns them.
 
 We chose per-test databases because isolation covers every append-only table, sequences and
 advisory locks automatically. A test cannot accidentally omit a tenant or request filter on a
 write and contaminate another case. The implementation also works when several tests run in one
 executable, with shuffle or repeat, rather than relying on CTest's usual one-case-per-process
-execution. Existing HTTP/token fixtures retain their nested schemas inside the private database.
+execution.
+
+### Why a template
+
+Loading `db/schema.sql` takes a lock on every table, index, sequence and trigger it creates, in
+one transaction. Every Postgres-backed test used to do that for its own database, and
+`HttpResponseIsolation` and `TokenAttenuation` then loaded it a second time into a nested schema
+and dropped that schema with `CASCADE`, another transaction locking every object. With `ctest -j 6`
+several of those ran at once against one server, whose shared lock table holds
+`max_locks_per_transaction × (max_connections + max_prepared_transactions)` entries (6,400 on a
+default local PostgreSQL), and the suite failed with `ERROR: out of shared memory` once the schema
+reached migration `0063`. Every migration made it worse.
+
+Copying a template takes a handful of locks regardless of schema size, so the suite's lock use no
+longer grows with the schema, and no PostgreSQL configuration change is needed. The alternative,
+applying and dropping the schema in smaller transactions, would bound each transaction but still
+do the schema's full work per test and need the schema split by hand. The nested schemas were
+redundant once each test had a private database (lake#140), so both fixtures now use the
+runner's database directly.
 
 ## Why
 
