@@ -93,3 +93,7 @@ one-shot copy (migration `0045_ask_message_workspaces`). `opportunities.cpp` is 
 collection (lake#376): a scan's Opportunities keyed by scan and rank and written only if absent,
 status changes conditional on the revision read; `assign_legacy_opportunities` and
 `legacy_opportunities` serve only the copy (migration `0046_opportunity_workspaces`).
+one-shot copy (migration `0045_ask_message_workspaces`). `stream_owners.cpp` is the second
+(lake#379): one `if_absent` record per topic, keyed by the topic's blind index; the stores keep only
+`assign_legacy_stream_owners` and `legacy_stream_owners` for the copy (migration
+`0047_stream_owner_workspaces`).

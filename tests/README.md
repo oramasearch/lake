@@ -101,8 +101,10 @@ retention, revisions, REST/MCP parity with one call per operation, UI control ma
 selected navigation. Its 1,000-topic case checks the 50-row default page, cursor and prefix
 filtering, sub-500 ms response, one list call per Zetta and no per-topic detail calls.
 `stream_fixture.hpp` is a stateful fake workspace caller using the exact Zetta CRUD wire shape;
-bus tests use `MemoryAgentBus`. PostgreSQL tests reopen ownership across space/workspace
-boundaries. The schema conformance fixture exercises all nine successful outputs. See
+bus tests use `MemoryAgentBus`. `Streams.CreatorOwnershipLivesInTheTopicsWorkspaceZetta` keeps
+each topic's creator at its own workspace endpoint across two spaces and two workspaces, and covers
+missing and unknown workspace ids, a workspace that is not ready, workspace deletion and the
+immutable `if_absent` claim (lake#379). The schema conformance fixture exercises all nine successful outputs. See
 `docs/api/streams.md` and `docs/ui/streams.md`.
 
 `test_instance_origin.cpp` checks external-origin precedence, startup validation and repository
@@ -375,3 +377,6 @@ foreign and missing/malformed/unknown ids, a workspace that is not ready, worksp
 `WorkspaceRecords.AnOpportunityStatusChangeRereadsAfterAConcurrentWrite` (derived keys and a raced
 conditional write), `Stores/WorkspaceRecordStores.TheOneShotCopyMovesEachOpportunityToItsScansWorkspace`
 and `PostgresOpportunities.MigrationRecordsEachRowsOwnerForTheCopy` (`0046_opportunity_workspaces`).
+`Stores/WorkspaceRecordStores.TheOneShotCopyMovesEachTopicCreatorIntoItsWorkspace` copies the
+retired `stream_owners` rows (lake#379), and `PostgresStreamOwners.MigrationRecordsEachRowsWorkspaceForTheCopy`
+covers `0047_stream_owner_workspaces`.

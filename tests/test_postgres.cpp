@@ -23,6 +23,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/platform_store.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/stream_owners.hpp"
 #include "lake/search/index.hpp"
 #include "temporary_directory.hpp"
 
@@ -1635,6 +1636,110 @@ TEST(PostgresOpportunities, MigrationRecordsEachRowsOwnerForTheCopy) {
     EXPECT_EQ(listed.at(ambiguous).outcome, "needs_selection");
     EXPECT_EQ(listed.at(doomed).outcome, "deleted_workspace");
     EXPECT_TRUE(listed.at(doomed).workspace_id.empty());
+}
+
+// Migration 0047 (lake#379): each stream_owners row is recorded against the workspace it names,
+// keyed by md5(customer_id, workspace_id, topic) as lake computes it.
+TEST(PostgresStreamOwners, MigrationRecordsEachRowsWorkspaceForTheCopy) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "stream-owner-migration-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    std::vector<std::string> customers, workspaces;
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "stream-migration-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+        const auto workspace = store->create_workspace({customer->id, "ws", "dev", ""});
+        ASSERT_TRUE(workspace) << workspace.error().message;
+        workspaces.push_back(workspace->id);
+    }
+    const auto deleted = store->create_workspace({customers[0], "old", "dev", ""});
+    ASSERT_TRUE(deleted);
+    ASSERT_TRUE(store->update_workspace(deleted->id, {.desired = "deleted"}));
+    pqxx::connection connection(uri);
+    const auto insert = [&](const lake::control::StreamOwner& owner) {
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO stream_owners (customer_id, workspace_id, topic, created_by) "
+                       "VALUES ($1::uuid, $2, $3, $4)",
+                       owner.customer_id, owner.workspace_id, owner.topic, owner.created_by);
+        tx.commit();
+        return lake::control::legacy_stream_owner_id(owner);
+    };
+    const std::string owned = insert({customers[0], workspaces[0], "orders", "taap:a"});
+    const std::string other_space = insert({customers[1], workspaces[0], "orders", "taap:b"});
+    const std::string not_uuid = insert({customers[1], "workspace-one", "orders", "taap:b"});
+    const std::string gone = insert({customers[0], deleted->id, "orders", "taap:a"});
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0047_stream_owner_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0047_stream_owner_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = 'stream_owners' AND object_id = $1::uuid",
+            id);
+        return found.empty() ? std::pair<std::string, std::string>{}
+                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome(owned), (std::pair<std::string, std::string>{"recorded_workspace",
+                                                                       workspaces[0]}));
+        EXPECT_EQ(outcome(other_space), (std::pair<std::string, std::string>{"unknown_workspace", ""}))
+            << "a workspace of another space never owns the row";
+        EXPECT_EQ(outcome(not_uuid).first, "unknown_workspace");
+        EXPECT_EQ(outcome(gone), (std::pair<std::string, std::string>{"workspace_deleted", ""}));
+    }
+    const std::string late = insert({customers[1], workspaces[1], "late", "taap:b"});
+    EXPECT_TRUE(outcome(late).first.empty());
+    ASSERT_TRUE(store->assign_legacy_stream_owners());
+    EXPECT_EQ(outcome(late).first, "recorded_workspace") << "a row written after the migration";
+
+    std::map<std::string, lake::control::LegacyStreamOwner> listed;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_stream_owners(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            EXPECT_GT(row.id, after) << "pages are ordered by id";
+            listed.emplace(row.id, row);
+        }
+        after = page->back().id;
+    }
+    ASSERT_TRUE(listed.contains(owned)) << "lake and the migration compute the same id";
+    EXPECT_EQ(listed.at(owned).workspace_id, workspaces[0]);
+    EXPECT_EQ(listed.at(owned).owner.created_by, "taap:a");
+    EXPECT_EQ(listed.at(owned).owner.topic, "orders");
+    EXPECT_EQ(listed.at(late).workspace_id, workspaces[1]);
+    EXPECT_EQ(listed.at(gone).outcome, "workspace_deleted");
+    EXPECT_TRUE(listed.at(not_uuid).workspace_id.empty());
+
+    // A workspace deleted after its rows were assigned no longer receives them.
+    ASSERT_TRUE(store->update_workspace(workspaces[1], {.desired = "deleted"}));
+    const auto relisted = store->legacy_stream_owners("", 5000);
+    ASSERT_TRUE(relisted);
+    const auto row = std::ranges::find(*relisted, late, &lake::control::LegacyStreamOwner::id);
+    ASSERT_NE(row, relisted->end());
+    EXPECT_EQ(row->outcome, "workspace_deleted");
+    EXPECT_TRUE(row->workspace_id.empty());
 }
 
 // Agent launches, their credential and cron schedules against the production

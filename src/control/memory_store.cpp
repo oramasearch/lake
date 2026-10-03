@@ -11,6 +11,7 @@
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/policy.hpp"
+#include "lake/control/stream_owners.hpp"
 #include "secrets_crypto.hpp"
 
 namespace lake::control {
@@ -1172,36 +1173,63 @@ Result<void> InMemoryStore::set_web_app_status(const std::string& id,
     return {};
 }
 
-Result<void> InMemoryStore::create_stream_owner(const StreamOwner& owner) {
+void InMemoryStore::seed_legacy_stream_owner(StreamOwner owner) {
     std::lock_guard lock(mutex_);
-    for (const auto& row : stream_owners_) {
-        if (row.customer_id == owner.customer_id && row.workspace_id == owner.workspace_id &&
-            row.topic == owner.topic) {
-            return std::unexpected(StoreError{"conflict", "stream ownership already exists"});
+    legacy_stream_owners_.push_back(std::move(owner));
+}
+
+Result<void> InMemoryStore::assign_legacy_stream_owners() {
+    std::lock_guard lock(mutex_);
+    for (const StreamOwner& owner : legacy_stream_owners_) {
+        const std::string id = legacy_stream_owner_id(owner);
+        if (legacy_stream_assignments_.contains(id)) {
+            continue;
         }
+        const auto workspace = std::ranges::find_if(workspaces_, [&](const Workspace& row) {
+            return row.id == owner.workspace_id && row.customer_id == owner.customer_id;
+        });
+        legacy_stream_assignments_[id] =
+            workspace == workspaces_.end()
+                ? std::pair<std::string, std::string>{"", "unknown_workspace"}
+            : workspace->desired == "deleted"
+                ? std::pair<std::string, std::string>{"", "workspace_deleted"}
+                : std::pair<std::string, std::string>{workspace->id, "recorded_workspace"};
     }
-    stream_owners_.push_back(owner);
     return {};
 }
 
-Result<std::string> InMemoryStore::stream_owner(const StreamOwner& owner) {
+Result<std::vector<LegacyStreamOwner>>
+InMemoryStore::legacy_stream_owners(const std::string& after_id, int limit) {
     std::lock_guard lock(mutex_);
-    for (const auto& row : stream_owners_) {
-        if (row.customer_id == owner.customer_id && row.workspace_id == owner.workspace_id &&
-            row.topic == owner.topic) {
-            return row.created_by;
+    std::vector<LegacyStreamOwner> ordered;
+    for (const StreamOwner& owner : legacy_stream_owners_) {
+        LegacyStreamOwner row{legacy_stream_owner_id(owner), owner, "", "unknown_workspace"};
+        if (const auto found = legacy_stream_assignments_.find(row.id);
+            found != legacy_stream_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
         }
+        // A workspace deleted since its rows were assigned no longer receives them.
+        const auto workspace = std::ranges::find(workspaces_, row.workspace_id, &Workspace::id);
+        if (!row.workspace_id.empty() && workspace != workspaces_.end() &&
+            workspace->desired == "deleted") {
+            row.workspace_id.clear();
+            row.outcome = "workspace_deleted";
+        }
+        ordered.push_back(std::move(row));
     }
-    return std::string();
-}
-
-Result<void> InMemoryStore::delete_stream_owner(const StreamOwner& owner) {
-    std::lock_guard lock(mutex_);
-    std::erase_if(stream_owners_, [&](const auto& row) {
-        return row.customer_id == owner.customer_id && row.workspace_id == owner.workspace_id &&
-               row.topic == owner.topic && row.created_by == owner.created_by;
-    });
-    return {};
+    std::ranges::sort(ordered, {}, &LegacyStreamOwner::id);
+    std::vector<LegacyStreamOwner> rows;
+    for (LegacyStreamOwner& row : ordered) {
+        if (!after_id.empty() && row.id <= after_id) {
+            continue;
+        }
+        if (static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            break;
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
 }
 
 Result<std::vector<AgentTaskStreamScope>>

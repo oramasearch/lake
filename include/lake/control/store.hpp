@@ -441,8 +441,21 @@ struct StaleAgentTasks {
     std::vector<AgentTask> unclaimed, overdue, reclaimed;
 };
 
+// Who created a workspace topic. It lives in the workspace Zetta of that topic (lake#379,
+// control/stream_owners.hpp); the control store only reads the retired stream_owners table for
+// the one-shot copy.
 struct StreamOwner {
     std::string customer_id, workspace_id, topic, created_by;
+};
+// A row of the retired stream_owners table with its recorded owner (migration 0047). `id` is the
+// row's stable identity, md5(customer_id, workspace_id, topic) as a UUID, which pages the copy.
+// `workspace_id` is the live workspace it is copied into, or empty with the reason it is not:
+// `workspace_deleted` (the topic went with that workspace incarnation) or `unknown_workspace`.
+struct LegacyStreamOwner {
+    std::string id;
+    StreamOwner owner;
+    std::string workspace_id;
+    std::string outcome;
 };
 
 // One Opportunity Auto-Suggest recommended (or declined, status not_yet), kept across scans. It
@@ -1025,9 +1038,12 @@ public:
     // In-cluster image builds (docs/control-plane/builds.md). Lake inserts desired rows; the
     // operator writes status and the hashes of the three credentials it owns.
     virtual Result<std::vector<Build>> list_builds(const std::string& customer_id) = 0;
-    virtual Result<void> create_stream_owner(const StreamOwner&) = 0;
-    virtual Result<std::string> stream_owner(const StreamOwner&) = 0;
-    virtual Result<void> delete_stream_owner(const StreamOwner&) = 0;
+    // The retired stream_owners table (lake#379), for the one-shot copy into workspace Zettas only.
+    // Assigning records each unassigned row's owner in workspace_assignments, as migration 0047
+    // does, for rows written after it; listing pages by the row id, oldest id first.
+    virtual Result<void> assign_legacy_stream_owners() = 0;
+    virtual Result<std::vector<LegacyStreamOwner>> legacy_stream_owners(const std::string& after_id,
+                                                                        int limit) = 0;
     virtual Result<std::vector<AgentTaskStreamScope>>
     list_agent_task_stream_scopes(const std::string& customer_id) = 0;
     virtual Result<Build> get_build(const std::string& id) = 0;

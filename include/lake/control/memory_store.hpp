@@ -224,9 +224,11 @@ public:
                                     std::string message,
                                     std::int64_t observed_generation);
     Result<std::vector<Build>> list_builds(const std::string& customer_id) override;
-    Result<void> create_stream_owner(const StreamOwner&) override;
-    Result<std::string> stream_owner(const StreamOwner&) override;
-    Result<void> delete_stream_owner(const StreamOwner&) override;
+    Result<void> assign_legacy_stream_owners() override;
+    Result<std::vector<LegacyStreamOwner>> legacy_stream_owners(const std::string& after_id,
+                                                                int limit) override;
+    // A row of the retired stream_owners table, as an earlier lake wrote it (tests of the copy).
+    void seed_legacy_stream_owner(StreamOwner owner);
     Result<std::vector<AgentTaskStreamScope>>
     list_agent_task_stream_scopes(const std::string& customer_id) override;
     Result<Build> get_build(const std::string& id) override;
@@ -573,7 +575,8 @@ private:
     };
     std::vector<WebAppAuthorizationCodeRecord> web_app_authorization_codes_;
     std::vector<Build> builds_;
-    std::vector<StreamOwner> stream_owners_;
+    std::vector<StreamOwner> legacy_stream_owners_;
+    std::map<std::string, std::pair<std::string, std::string>> legacy_stream_assignments_; // workspace, outcome
     std::vector<ManagedStore> stores_;
     std::set<std::pair<std::string, std::string>> metered_builds_;
     std::vector<PkiAuthorityRecord> pki_authorities_;

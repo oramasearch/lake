@@ -683,14 +683,14 @@ public:
     list_builds(const std::string& customer_id) override {
         return call("list_builds", [&] { return store_->list_builds(customer_id); });
     }
-    control::Result<void> create_stream_owner(const control::StreamOwner& owner) override {
-        return call("create_stream_owner", [&] { return store_->create_stream_owner(owner); });
+    control::Result<void> assign_legacy_stream_owners() override {
+        return call("assign_legacy_stream_owners",
+                    [&] { return store_->assign_legacy_stream_owners(); });
     }
-    control::Result<std::string> stream_owner(const control::StreamOwner& owner) override {
-        return call("stream_owner", [&] { return store_->stream_owner(owner); });
-    }
-    control::Result<void> delete_stream_owner(const control::StreamOwner& owner) override {
-        return call("delete_stream_owner", [&] { return store_->delete_stream_owner(owner); });
+    control::Result<std::vector<control::LegacyStreamOwner>>
+    legacy_stream_owners(const std::string& after_id, int limit) override {
+        return call("legacy_stream_owners",
+                    [&] { return store_->legacy_stream_owners(after_id, limit); });
     }
     control::Result<std::vector<control::AgentTaskStreamScope>>
     list_agent_task_stream_scopes(const std::string& customer_id) override {

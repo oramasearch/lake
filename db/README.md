@@ -73,3 +73,14 @@ owning workspace Zetta (lake#376), so lake no longer writes or reads the table e
 operator's `copy_workspace_records`. It adds no column and drops nothing. The latest guard is
 `opportunity_workspaces_guard`; the operator must vendor this schema and update its guard before
 rollout.
+The latest guard is `ask_message_workspaces_guard`; the operator must vendor this schema and update
+its guard before rollout. See [workspace-records.md](../docs/architecture/workspace-records.md).
+
+Migration `0047_stream_owner_workspaces` records the workspace of each retired `stream_owners` row
+in `workspace_assignments`, keyed by `md5(customer_id, workspace_id, topic)` as a UUID because the
+table has no id. A row whose workspace is live in the same space is `recorded_workspace`; a deleted
+workspace is `workspace_deleted` (its topic went with it); anything else is `unknown_workspace` and
+reported. Topic creators now live in the topic's workspace Zetta (lake#379), so lake no longer
+writes or reads the table except through `copy_workspace_records`. It adds no column and drops
+nothing. The latest guard is `stream_owner_workspaces_guard`; the operator must vendor this schema
+and update its guard before rollout. See [streams.md](../docs/control-plane/streams.md).

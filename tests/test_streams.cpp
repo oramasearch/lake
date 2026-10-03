@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include "api/workspace_records_api.hpp"
 #include "audit_test_support.hpp"
 #include "http1/client.hpp"
 #include "lake/api/agent_docs.hpp"
@@ -15,6 +16,7 @@
 #include "lake/audit/audit.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/stream_owners.hpp"
 #include "postgres_fixture.hpp"
 #include "stream_fixture.hpp"
 
@@ -78,6 +80,7 @@ struct Streams : testing::Test {
         context.authorized = true;
         context.operator_credential = true;
         context.acting_identity = "admin";
+        context.instance_kek = "73747265616d2d6f776e6572732d776f726b73706163652d7265636f72647331";
     }
     json input(std::string topic = "orders", std::string zetta = "workspace") {
         return {{"customer_id", customer}, {"workspace_id", workspace->id}, {"zetta", zetta}, {"topic", topic}};
@@ -444,7 +447,9 @@ TEST_F(Streams, ExistingOwnershipCannotBeReassignedAfterAnExternalDrop) {
     context.operator_credential = false;
     const auto calls_before = workspace->caller->calls.size();
     EXPECT_EQ(call("create_stream", input()).error.code, "conflict");
-    EXPECT_EQ(workspace->caller->calls.size(), calls_before);
+    // Only the ownership record was read (lake#379); the topic was never recreated upstream.
+    ASSERT_EQ(workspace->caller->calls.size(), calls_before + 1);
+    EXPECT_EQ(workspace->caller->calls.back().first, "get_record");
     EXPECT_FALSE(workspace->caller->topics.contains("orders"));
 }
 
@@ -480,7 +485,8 @@ TEST_F(Streams, DispatchPagingCanContinueAcrossEmptyFilteredPages) {
 
 TEST_F(Streams, RestMcpParityAndEveryControlUsesACapability) {
     lake::api::ApiServer server({.port = 0, .store = store,
-        .workspaces = workspace->service, .agent_bus = bus, .admin_token = "stream-operator"});
+        .workspaces = workspace->service, .agent_bus = bus, .admin_token = "stream-operator",
+        .instance_kek = context.instance_kek});
     ASSERT_TRUE(server.start()) << server.reason();
     const auto request = [&](const std::string& method, const std::string& path, const json& body = nullptr) {
         const auto data = body.is_null() ? std::string() : body.dump();
@@ -574,31 +580,93 @@ TEST_F(Streams, RestMcpParityAndEveryControlUsesACapability) {
     }
 }
 
-TEST(StreamsPostgres, OwnershipSurvivesReopenAndIsBoundToSpaceAndWorkspace) {
-    const char* uri = lake::test::postgres_uri();
-    if (!uri) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is absent";
+// lake#379: a topic's creator is a sealed record in the workspace Zetta that holds the topic, never
+// a control-store row, so it follows that workspace incarnation.
+TEST_F(Streams, CreatorOwnershipLivesInTheTopicsWorkspaceZetta) {
+    const std::string home_url = "http://workspace.test";
+    const auto lab = workspace->add(store, customer, "lab");
+    const auto theirs = workspace->add(store, other, "theirs");
+    const auto at = [&](const std::string& customer_id, const std::string& workspace_id,
+                        std::string topic = "orders") {
+        return json{{"customer_id", customer_id}, {"workspace_id", workspace_id},
+                    {"zetta", "workspace"}, {"topic", std::move(topic)}};
+    };
+    ASSERT_TRUE(call("create_stream", input()).ok);
+    auto& home_rows = workspace->caller->records[home_url].rows("stream_owners");
+    ASSERT_EQ(home_rows.size(), 1U);
+    EXPECT_EQ(home_rows.begin()->first.find("orders"), std::string::npos)
+        << "the key is the blind index of the topic, not its name";
+    EXPECT_EQ(home_rows.begin()->second.dump().find("admin"), std::string::npos);
+
+    // The same name in another workspace of the space, or in another space, is another topic with
+    // its own creator, recorded only at that workspace's endpoint.
+    ASSERT_TRUE(call("create_stream", at(customer, lab)).ok);
+    ASSERT_TRUE(call("create_stream", at(other, theirs)).ok);
+    EXPECT_EQ(workspace->caller->records["http://lab.test"].rows("stream_owners").size(), 1U);
+    EXPECT_EQ(workspace->caller->records["http://theirs.test"].rows("stream_owners").size(), 1U);
+    EXPECT_EQ(home_rows.size(), 1U);
+
+    // Only the creator manages it; another writer of the space reads can_manage false.
+    const auto object = store->find_policy_object("customer", customer);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(store->create_grant({"writer", object->id, "write", "test-attestation", "admin", ""}));
+    context.operator_credential = false;
+    context.acting_identity = "writer";
+    EXPECT_FALSE(call("get_stream", input()).value.at("can_manage"));
+    auto drop = input();
+    drop["confirm_name"] = "orders";
+    EXPECT_EQ(call("delete_stream", drop).error.code, "unauthorized");
+    EXPECT_EQ(home_rows.size(), 1U) << "a refused drop keeps the creator";
+    context.operator_credential = true;
+    context.acting_identity = "admin";
+    EXPECT_TRUE(call("get_stream", input()).value.at("can_manage"));
+
+    // Ownership is immutable: a second claim of a recorded name conflicts in the engine.
+    auto records = lake::api::workspace_records(context, customer, workspace->id);
+    ASSERT_TRUE(records) << records.error().message;
+    const auto second = liquid::runtime::block_on(lake::control::claim_stream_owner(
+        *records, {customer, workspace->id, "orders", "taap:someone-else"}));
+    ASSERT_TRUE(second);
+    ASSERT_FALSE(*second);
+    EXPECT_EQ(second->error().code, "conflict");
+    EXPECT_EQ(*liquid::runtime::block_on(lake::control::stream_creator(*records, customer, "orders"))
+                   .value(), "admin");
+
+    // Missing and unknown workspace ids name the field and reach no Zetta.
+    const auto calls_before = workspace->caller->calls.size();
+    auto missing = input("fresh");
+    missing.erase("workspace_id");
+    const auto refused = liquid::runtime::block_on(registry.call_async("create_stream", missing, context));
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->error.code, "invalid_input");
+    EXPECT_EQ(refused->error.path, "/workspace_id");
+    for (const std::string bad : {std::string("not-a-workspace"), lake::control::new_uuid_v4()}) {
+        const auto unknown = call("create_stream", at(customer, bad, "fresh"));
+        EXPECT_EQ(unknown.error.code, "invalid_input") << bad;
+        EXPECT_EQ(unknown.error.path, "/workspace_id") << bad;
     }
-    auto store = lake::control::make_postgres_store(uri, "stream-test-kek");
-    const auto user = store->create_user({"taap:stream-store", "", "Streams"});
-    ASSERT_TRUE(user) << user.error().message;
-    const auto customer = store->create_customer({"individual", user->id, "", "streams"});
-    ASSERT_TRUE(customer);
-    const lake::control::StreamOwner owner{customer->id, "workspace-one", "orders", "taap:creator"};
-    ASSERT_TRUE(store->create_stream_owner(owner));
-    EXPECT_FALSE(store->create_stream_owner(owner));
-    store.reset();
-    store = lake::control::make_postgres_store(uri, "stream-test-kek");
-    ASSERT_TRUE(store->stream_owner(owner));
-    EXPECT_EQ(*store->stream_owner(owner), "taap:creator");
-    auto replaced = owner;
-    replaced.workspace_id = "workspace-two";
-    EXPECT_TRUE(store->stream_owner(replaced)->empty());
-    replaced = owner;
-    replaced.created_by = "someone-else";
-    ASSERT_TRUE(store->delete_stream_owner(replaced));
-    EXPECT_EQ(*store->stream_owner(owner), "taap:creator");
-    ASSERT_TRUE(store->delete_stream_owner(owner));
-    EXPECT_TRUE(store->stream_owner(owner)->empty());
+    const auto foreign = call("create_stream", at(customer, theirs, "fresh"));
+    EXPECT_EQ(foreign.error.code, "invalid_input") << "another space's workspace";
+    EXPECT_EQ(workspace->caller->calls.size(), calls_before);
+
+    // A workspace that is not ready refuses; nothing falls back to another store.
+    const auto lab_row = store->get_workspace(lab);
+    ASSERT_TRUE(store->set_service_status(lab_row->zetta_service_id, "Provisioning", "", "http://lab.test"));
+    EXPECT_FALSE(call("create_stream", at(customer, lab, "fresh")).ok);
+    EXPECT_EQ(workspace->caller->records["http://lab.test"].rows("stream_owners").size(), 1U);
+
+    // Deleting a workspace takes its topics and their creators with it: the id is refused, and the
+    // other workspaces keep theirs.
+    ASSERT_TRUE(store->update_workspace(lab, {.desired = "deleted"}));
+    const auto deleted = call("get_stream", at(customer, lab));
+    EXPECT_EQ(deleted.error.code, "invalid_input");
+    EXPECT_EQ(deleted.error.path, "/workspace_id");
+    EXPECT_TRUE(call("get_stream", input()).value.at("can_manage"));
+
+    // Dropping the topic releases the name in its workspace only.
+    ASSERT_TRUE(call("delete_stream", drop).ok);
+    EXPECT_TRUE(home_rows.empty());
+    EXPECT_EQ(workspace->caller->records["http://theirs.test"].rows("stream_owners").size(), 1U);
+    ASSERT_TRUE(call("create_stream", input()).ok) << "a released name can be created again";
 }
 } // namespace

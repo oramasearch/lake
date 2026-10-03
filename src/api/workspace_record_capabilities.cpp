@@ -1,6 +1,7 @@
 // The one-shot copy of a retired control-store table into the owning workspace Zettas
 // (docs/architecture/workspace-records.md, lake#370). One operator capability serves every
-// collection that moves: each follow-up adds its collection to `copy_collections` and a copier.
+// collection that moves: each follow-up adds its collection to `copy_collections` and a copier
+// (ask_messages, lake#370; opportunities, lake#376; stream_owners, lake#379).
 
 #include <algorithm>
 #include <array>
@@ -13,6 +14,7 @@
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/store.hpp"
+#include "lake/control/stream_owners.hpp"
 #include "workspace_records_api.hpp"
 
 namespace lake::api {
@@ -20,7 +22,8 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 2> copy_collections = {"ask_messages", "opportunities"};
+constexpr std::array<std::string_view, 3> copy_collections = {"ask_messages", "opportunities",
+                                                             "stream_owners"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -282,6 +285,134 @@ liquid::runtime::task<ApiResult> copy_opportunities(ApiContext& context, const s
                           std::move(unresolved), tallies);
 }
 
+// One page of stream_owners (lake#379): assignments first, then per workspace one get_record per
+// topic and, when copying, one `if_absent` put of the missing creators. Rows whose workspace was
+// deleted are listed under `unresolved` but do not keep the page from being complete: their topic
+// went with that workspace incarnation, so nothing is lost when the table is dropped.
+liquid::runtime::task<ApiResult> copy_stream_owners(ApiContext& context, const std::string& mode,
+                                                    const std::string& after, int limit) {
+    if (auto assigned = context.store->assign_legacy_stream_owners(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_stream_owners(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    json unresolved = json::array();
+    bool blocking = false;
+    std::map<std::string, std::vector<const control::LegacyStreamOwner*>> by_workspace;
+    for (const control::LegacyStreamOwner& row : *rows) {
+        if (row.workspace_id.empty()) {
+            unresolved.push_back({{"id", row.id},
+                                  {"customer_id", row.owner.customer_id},
+                                  {"workspace_id", row.owner.workspace_id},
+                                  {"outcome", row.outcome}});
+            blocking = blocking || row.outcome != "workspace_deleted";
+        } else {
+            by_workspace[row.workspace_id].push_back(&row);
+        }
+    }
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, owned] : by_workspace) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = owned.front()->owner.customer_id;
+        tally.rows = owned.size();
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        for (const control::LegacyStreamOwner* row : owned) {
+            auto creator = control::settled(
+                co_await control::stream_creator(*records, row->owner.customer_id, row->owner.topic));
+            if (!creator) {
+                tally.error = creator.error().code + ": " + creator.error().message;
+                break;
+            }
+            if (mode == "verify") {
+                if (creator->empty()) {
+                    tally.missing.push_back(row->id);
+                } else if (*creator != row->owner.created_by) {
+                    tally.mismatched.push_back(row->id);
+                } else {
+                    ++tally.verified;
+                }
+                continue;
+            }
+            if (!creator->empty()) {
+                ++tally.already_present;
+                continue;
+            }
+            auto claimed =
+                control::settled(co_await control::claim_stream_owner(*records, row->owner));
+            if (!claimed && claimed.error().code == "conflict") {
+                // Claimed meanwhile (a concurrent copy, or a record that does not open); verify
+                // compares it.
+                ++tally.already_present;
+                continue;
+            }
+            if (!claimed) {
+                tally.error = claimed.error().code + ": " + claimed.error().message;
+                break;
+            }
+            ++tally.copied;
+        }
+    }
+    json workspaces = json::array();
+    std::size_t copied = 0, already_present = 0, verified = 0, failed = 0;
+    json missing = json::array(), mismatched = json::array();
+    for (const auto& [workspace_id, tally] : tallies) {
+        copied += tally.copied;
+        already_present += tally.already_present;
+        verified += tally.verified;
+        failed += tally.error.empty() ? 0 : 1;
+        for (const auto& id : tally.missing) {
+            missing.push_back(id);
+        }
+        for (const auto& id : tally.mismatched) {
+            mismatched.push_back(id);
+        }
+        json entry{{"workspace_id", workspace_id}, {"customer_id", tally.customer_id},
+                   {"rows", tally.rows}};
+        if (mode == "copy") {
+            entry["copied"] = tally.copied;
+            entry["already_present"] = tally.already_present;
+        } else if (mode == "verify") {
+            entry["verified"] = tally.verified;
+            entry["missing"] = tally.missing;
+            entry["mismatched"] = tally.mismatched;
+        }
+        if (!tally.error.empty()) {
+            entry["error"] = tally.error;
+        }
+        workspaces.push_back(std::move(entry));
+    }
+    json value{{"collection", "stream_owners"},
+               {"mode", mode},
+               {"rows", rows->size()},
+               {"next_after", rows->empty() || static_cast<int>(rows->size()) < limit
+                                  ? json(nullptr)
+                                  : json(rows->back().id)},
+               {"assigned", rows->size() - unresolved.size()},
+               {"unresolved", std::move(unresolved)},
+               {"workspaces", std::move(workspaces)},
+               {"failed_workspaces", failed}};
+    if (mode == "copy") {
+        value["copied"] = copied;
+        value["already_present"] = already_present;
+    } else if (mode == "verify") {
+        value["verified"] = verified;
+        value["missing"] = std::move(missing);
+        value["mismatched"] = std::move(mismatched);
+        value["complete"] = !blocking && failed == 0 && value["missing"].empty() &&
+                            value["mismatched"].empty();
+    }
+    co_return ApiResult::success(std::move(value));
+}
+
 // Only the operator copies, and the operator bypasses policy; anyone else is refused here, before
 // a policy lookup on an object no grant can name.
 std::expected<std::string, ApiError> records_object(const json&, ApiContext&) {
@@ -339,6 +470,9 @@ void register_workspace_record_capabilities(Registry& registry) {
             const int limit = input.value("limit", 1000);
             if (input.at("collection") == "opportunities") {
                 co_return co_await copy_opportunities(context, mode, after, limit);
+            }
+            if (input.at("collection") == "stream_owners") {
+                co_return co_await copy_stream_owners(context, mode, after, limit);
             }
             co_return co_await copy_ask_messages(context, mode, after, limit);
         }});
