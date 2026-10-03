@@ -21,12 +21,13 @@
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/metering.hpp"
 #include "lake/control/platform_store.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/stream_owners.hpp"
 #include "lake/search/index.hpp"
-#include "temporary_directory.hpp"
 #include "repository_test_support.hpp"
+#include "temporary_directory.hpp"
 
 namespace {
 
@@ -737,46 +738,144 @@ TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
     EXPECT_EQ(scan_event->draft.details.value("mode", ""), "scan");
 }
 
-TEST(PostgresMetering, AggregatesHourlyUsageAndRecordsBuildOnce) {
+// Migration 0053 (lake#348, lake#349): metering rows of a space with one live workspace are owned
+// by it, every other row is needs_selection; usage rows without transfer are not copied. A rerun
+// changes nothing, the store's rerun picks up late rows, lake and SQL compute the same row ids,
+// and a workspace deleted after assignment no longer receives its rows.
+TEST(PostgresMetering, MigrationRecordsEachRowsOwnerForTheCopy) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
-    auto store = lake::control::make_postgres_store(
-        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
-    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    auto store = lake::control::make_postgres_store(uri, "metering-migration-test");
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    const auto user = store->create_user(
-        {"taap:1:ed25519:meter-" + suffix, "meter-" + suffix + "@example.com", "Meter"});
-    ASSERT_TRUE(user) << user.error().message;
-    const auto customer = store->create_customer({"individual", user->id, "", "meter-" + suffix});
-    ASSERT_TRUE(customer) << customer.error().message;
-    const std::string hour = "2026-09-04T10:00:00Z";
-    const auto transfer = store->upsert_metering_usage({.customer_id = customer->id,
-                                                        .hour = hour,
-                                                        .stored_bytes = 4096,
-                                                        .transfer_in_bytes = 10,
-                                                        .transfer_out_bytes = 20});
-    ASSERT_TRUE(transfer) << transfer.error().message;
-    EXPECT_EQ(transfer->stored_bytes, 4096);
-    const auto first = store->record_metered_build({.customer_id = customer->id,
-                                                    .result_id = "result-" + suffix,
-                                                    .hour = hour,
-                                                    .compute_seconds = 3});
-    ASSERT_TRUE(first) << first.error().message;
-    EXPECT_TRUE(*first);
-    const auto duplicate = store->record_metered_build({.customer_id = customer->id,
-                                                        .result_id = "result-" + suffix,
-                                                        .hour = hour,
-                                                        .compute_seconds = 3});
-    ASSERT_TRUE(duplicate) << duplicate.error().message;
-    EXPECT_FALSE(*duplicate);
-    const auto usage = store->list_metering_usage(customer->id, hour, hour, 10);
-    ASSERT_TRUE(usage) << usage.error().message;
-    ASSERT_EQ(usage->size(), 1U);
-    EXPECT_EQ(usage->front().transfer_in_bytes, 10);
-    EXPECT_EQ(usage->front().transfer_out_bytes, 20);
-    EXPECT_EQ(usage->front().compute_seconds, 3);
+    std::vector<std::string> customers;
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "meter-migration-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+    }
+    // The first space has one live workspace (and a deleted one); the second has two.
+    const auto sole = store->create_workspace({customers[0], "home", "dev", ""});
+    ASSERT_TRUE(sole) << sole.error().message;
+    const auto old = store->create_workspace({customers[0], "old", "dev", ""});
+    ASSERT_TRUE(old);
+    ASSERT_TRUE(store->update_workspace(old->id, {.desired = "deleted"}));
+    ASSERT_TRUE(store->create_workspace({customers[1], "a", "dev", ""}));
+    ASSERT_TRUE(store->create_workspace({customers[1], "b", "dev", ""}));
+    pqxx::connection connection(uri);
+    const auto usage = [&](const std::string& customer,
+                           const std::string& hour,
+                           std::uint64_t in,
+                           std::uint64_t out) {
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO metering_usage (customer_id, hour, stored_bytes, "
+                       "transfer_in_bytes, transfer_out_bytes, compute_seconds) VALUES "
+                       "($1::uuid, $2::timestamptz, 4096, $3, $4, 7)",
+                       customer,
+                       hour,
+                       in,
+                       out);
+        tx.commit();
+        return lake::control::legacy_metering_usage_id(customer, hour);
+    };
+    const auto build = [&](const std::string& customer, const std::string& result) {
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO metering_build_records (customer_id, result_id, hour, "
+                       "compute_seconds) VALUES ($1::uuid, $2, '2026-09-04T10:00:00Z', 3)",
+                       customer,
+                       result);
+        tx.commit();
+        return lake::control::legacy_metered_build_id(customer, result);
+    };
+    const std::string owned = usage(customers[0], "2026-09-04T10:00:00Z", 10, 20);
+    const std::string gauge_only = usage(customers[0], "2026-09-04T11:00:00Z", 0, 0);
+    const std::string ambiguous = usage(customers[1], "2026-09-04T10:00:00Z", 5, 0);
+    const std::string owned_build = build(customers[0], "result-a-" + suffix);
+    const std::string ambiguous_build = build(customers[1], "result-b-" + suffix);
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0053_metering_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0053_metering_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& table, const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = $1 AND object_id = $2::uuid",
+            table,
+            id);
+        return found.empty()
+                   ? std::pair<std::string, std::string>{}
+                   : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    using Outcome = std::pair<std::string, std::string>;
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome("metering_usage", owned), (Outcome{"sole_workspace", sole->id}));
+        EXPECT_TRUE(outcome("metering_usage", gauge_only).first.empty())
+            << "a row without transfer has nothing to copy";
+        EXPECT_EQ(outcome("metering_usage", ambiguous), (Outcome{"needs_selection", ""}));
+        EXPECT_EQ(outcome("metering_build_records", owned_build),
+                  (Outcome{"sole_workspace", sole->id}));
+        EXPECT_EQ(outcome("metering_build_records", ambiguous_build),
+                  (Outcome{"needs_selection", ""}));
+    }
+    const std::string late = usage(customers[0], "2026-09-04T12:00:00Z", 1, 1);
+    const std::string late_build = build(customers[0], "result-late-" + suffix);
+    EXPECT_TRUE(outcome("metering_usage", late).first.empty());
+    ASSERT_TRUE(store->assign_legacy_metering());
+    EXPECT_EQ(outcome("metering_usage", late).first, "sole_workspace") << "a row written later";
+    EXPECT_EQ(outcome("metering_build_records", late_build).first, "sole_workspace");
+
+    std::map<std::string, lake::control::LegacyMeteringUsage> listed;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_metering_usage(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            EXPECT_GT(row.id, after) << "pages are ordered by id";
+            listed.emplace(row.id, row);
+        }
+        after = page->back().id;
+    }
+    ASSERT_TRUE(listed.contains(owned)) << "lake and the migration compute the same id";
+    EXPECT_FALSE(listed.contains(gauge_only));
+    EXPECT_EQ(listed.at(owned).workspace_id, sole->id);
+    EXPECT_EQ(listed.at(owned).usage.hour, "2026-09-04T10:00:00Z");
+    EXPECT_EQ(listed.at(owned).usage.transfer_in_bytes, 10U);
+    EXPECT_EQ(listed.at(owned).usage.transfer_out_bytes, 20U);
+    EXPECT_EQ(listed.at(ambiguous).outcome, "needs_selection");
+    const auto builds = store->legacy_metering_build_records("", 5000);
+    ASSERT_TRUE(builds) << builds.error().message;
+    const auto found_build =
+        std::ranges::find(*builds, owned_build, &lake::control::LegacyMeteredBuild::id);
+    ASSERT_NE(found_build, builds->end());
+    EXPECT_EQ(found_build->build.result_id, "result-a-" + suffix);
+    EXPECT_EQ(found_build->build.hour, "2026-09-04T10:00:00Z");
+    EXPECT_EQ(found_build->build.compute_seconds, 3U);
+
+    // A workspace deleted after its rows were assigned no longer receives them.
+    ASSERT_TRUE(store->update_workspace(sole->id, {.desired = "deleted"}));
+    const auto relisted = store->legacy_metering_usage("", 5000);
+    ASSERT_TRUE(relisted);
+    const auto row = std::ranges::find(*relisted, owned, &lake::control::LegacyMeteringUsage::id);
+    ASSERT_NE(row, relisted->end());
+    EXPECT_EQ(row->outcome, "workspace_deleted");
+    EXPECT_TRUE(row->workspace_id.empty());
 }
 
 TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {

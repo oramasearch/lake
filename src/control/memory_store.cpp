@@ -10,6 +10,7 @@
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/metering.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/stream_owners.hpp"
 #include "secrets_crypto.hpp"
@@ -547,79 +548,121 @@ Result<void> InMemoryStore::set_audit_retention_days(const std::string& customer
     return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
 }
 
-Result<MeteringUsage> InMemoryStore::upsert_metering_usage(const MeteringUpdate& update) {
-    if (update.customer_id.empty() || update.hour.empty()) {
-        return std::unexpected(StoreError{"invalid_input", "customer_id and hour are required"});
-    }
+void InMemoryStore::seed_legacy_metering_usage(MeteringUsage usage) {
     std::lock_guard lock(mutex_);
-    auto found = std::ranges::find_if(metering_usage_, [&](const MeteringUsage& usage) {
-        return usage.customer_id == update.customer_id && usage.hour == update.hour;
-    });
-    if (found == metering_usage_.end()) {
-        metering_usage_.push_back(MeteringUsage{.customer_id = update.customer_id,
-                                                .hour = update.hour,
-                                                .stored_bytes = update.stored_bytes.value_or(0),
-                                                .transfer_in_bytes = update.transfer_in_bytes,
-                                                .transfer_out_bytes = update.transfer_out_bytes});
-        return metering_usage_.back();
-    }
-    if (update.stored_bytes) {
-        found->stored_bytes = *update.stored_bytes;
-    }
-    found->transfer_in_bytes += update.transfer_in_bytes;
-    found->transfer_out_bytes += update.transfer_out_bytes;
-    return *found;
+    legacy_metering_usage_.push_back(std::move(usage));
 }
 
-Result<bool> InMemoryStore::record_metered_build(const MeteredBuild& build) {
-    if (build.customer_id.empty() || build.result_id.empty() || build.hour.empty()) {
-        return std::unexpected(
-            StoreError{"invalid_input", "customer_id, result_id, and hour are required"});
-    }
+void InMemoryStore::seed_legacy_metered_build(MeteredBuild build) {
     std::lock_guard lock(mutex_);
-    if (!metered_builds_.emplace(build.customer_id, build.result_id).second) {
-        return false;
-    }
-    auto found = std::ranges::find_if(metering_usage_, [&](const MeteringUsage& usage) {
-        return usage.customer_id == build.customer_id && usage.hour == build.hour;
-    });
-    if (found == metering_usage_.end()) {
-        metering_usage_.push_back(MeteringUsage{.customer_id = build.customer_id,
-                                                .hour = build.hour,
-                                                .compute_seconds = build.compute_seconds});
-    } else {
-        found->compute_seconds += build.compute_seconds;
-    }
-    return true;
+    legacy_metered_builds_.push_back(std::move(build));
 }
 
-Result<std::vector<MeteringUsage>>
-InMemoryStore::list_metering_usage(const std::string& customer_id,
-                                   const std::string& from_hour,
-                                   const std::string& to_hour,
-                                   int limit) {
-    if (customer_id.empty() || limit < 1) {
-        return std::unexpected(StoreError{"invalid_input", "customer_id and limit are required"});
-    }
+// Migration 0053's rule: a space with exactly one live workspace owns its metering rows; every
+// other row needs a reviewed selection. Recorded once per row, like workspace_assignments.
+Result<void> InMemoryStore::assign_legacy_metering() {
     std::lock_guard lock(mutex_);
-    std::vector<MeteringUsage> result;
-    for (const MeteringUsage& usage : metering_usage_) {
-        if (usage.customer_id != customer_id) {
-            continue;
+    const auto assign = [&](const std::string& id, const std::string& customer_id) {
+        if (legacy_metering_assignments_.contains(id)) {
+            return;
         }
-        if (!from_hour.empty() && usage.hour < from_hour) {
-            continue;
+        std::vector<const Workspace*> live;
+        for (const Workspace& workspace : workspaces_) {
+            if (workspace.customer_id == customer_id && workspace.desired != "deleted") {
+                live.push_back(&workspace);
+            }
         }
-        if (!to_hour.empty() && usage.hour > to_hour) {
-            continue;
+        legacy_metering_assignments_[id] =
+            live.size() == 1
+                ? std::pair<std::string, std::string>{live.front()->id, "sole_workspace"}
+                : std::pair<std::string, std::string>{"", "needs_selection"};
+    };
+    for (const MeteringUsage& usage : legacy_metering_usage_) {
+        if (usage.transfer_in_bytes > 0 || usage.transfer_out_bytes > 0) {
+            assign(legacy_metering_usage_id(usage.customer_id, usage.hour), usage.customer_id);
         }
-        result.push_back(usage);
     }
-    std::ranges::sort(result, {}, &MeteringUsage::hour);
-    if (result.size() > static_cast<std::size_t>(limit)) {
-        result.resize(static_cast<std::size_t>(limit));
+    for (const MeteredBuild& build : legacy_metered_builds_) {
+        assign(legacy_metered_build_id(build.customer_id, build.result_id), build.customer_id);
     }
-    return result;
+    return {};
+}
+
+namespace {
+
+// One page by id of the legacy rows, each with its recorded owner; a workspace deleted since its
+// rows were assigned no longer receives them.
+template <class Legacy, class Row, class Id>
+std::vector<Legacy>
+legacy_metering_page(const std::vector<Row>& source,
+                     Id id,
+                     const std::map<std::string, std::pair<std::string, std::string>>& assignments,
+                     const std::vector<Workspace>& workspaces,
+                     const std::string& after_id,
+                     int limit) {
+    std::vector<Legacy> ordered;
+    for (const Row& row : source) {
+        Legacy legacy{id(row), row, "", "needs_selection"};
+        if (const auto found = assignments.find(legacy.id); found != assignments.end()) {
+            legacy.workspace_id = found->second.first;
+            legacy.outcome = found->second.second;
+        }
+        const auto workspace = std::ranges::find(workspaces, legacy.workspace_id, &Workspace::id);
+        if (!legacy.workspace_id.empty() && workspace != workspaces.end() &&
+            workspace->desired == "deleted") {
+            legacy.workspace_id.clear();
+            legacy.outcome = "workspace_deleted";
+        }
+        ordered.push_back(std::move(legacy));
+    }
+    std::ranges::sort(ordered, {}, &Legacy::id);
+    std::vector<Legacy> rows;
+    for (Legacy& row : ordered) {
+        if (!after_id.empty() && row.id <= after_id) {
+            continue;
+        }
+        if (static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            break;
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+} // namespace
+
+Result<std::vector<LegacyMeteringUsage>>
+InMemoryStore::legacy_metering_usage(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    // Only rows that carry transfer are copied (migration 0053).
+    std::vector<MeteringUsage> transfer;
+    std::ranges::copy_if(
+        legacy_metering_usage_, std::back_inserter(transfer), [](const MeteringUsage& usage) {
+            return usage.transfer_in_bytes > 0 || usage.transfer_out_bytes > 0;
+        });
+    return legacy_metering_page<LegacyMeteringUsage>(
+        transfer,
+        [](const MeteringUsage& usage) {
+            return legacy_metering_usage_id(usage.customer_id, usage.hour);
+        },
+        legacy_metering_assignments_,
+        workspaces_,
+        after_id,
+        limit);
+}
+
+Result<std::vector<LegacyMeteredBuild>>
+InMemoryStore::legacy_metering_build_records(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    return legacy_metering_page<LegacyMeteredBuild>(
+        legacy_metered_builds_,
+        [](const MeteredBuild& build) {
+            return legacy_metered_build_id(build.customer_id, build.result_id);
+        },
+        legacy_metering_assignments_,
+        workspaces_,
+        after_id,
+        limit);
 }
 
 Result<std::optional<std::uint64_t>> InMemoryStore::storage_quota(const std::string& customer_id) {

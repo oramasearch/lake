@@ -68,6 +68,33 @@ constexpr std::string_view legacy_stream_owner_assignment_sql =
     "CASE WHEN w.id IS NULL THEN 'unknown_workspace' WHEN w.desired = 'deleted' THEN "
     "'workspace_deleted' ELSE 'recorded_workspace' END FROM stream_owners s LEFT JOIN workspaces "
     "w ON w.id::text = s.workspace_id AND w.customer_id = s.customer_id ON CONFLICT DO NOTHING";
+// Migration 0053's hour text: an hour exactly as lake prints it ("YYYY-MM-DDTHH:00:00Z"), which
+// the legacy row ids hash.
+constexpr std::string_view metering_hour_text_sql =
+    "to_char(m.hour AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
+constexpr std::string_view metering_build_hour_text_sql =
+    "to_char(b.hour AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
+// Migration 0053's assignment of the retired metering rows (db/schema.sql), rerun before each
+// copy: a space with exactly one live workspace owns its rows, every other row needs selection.
+// Usage rows without transfer carry only the retired storage gauge and build compute, which the
+// build records hold, so they are not part of the copy.
+constexpr std::string_view legacy_metering_usage_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'metering_usage', md5(m.customer_id::text || E'\\n' || to_char(m.hour AT "
+    "TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'))::uuid, m.customer_id, w.id, CASE WHEN "
+    "w.id IS NULL THEN 'needs_selection' ELSE 'sole_workspace' END FROM metering_usage m LEFT "
+    "JOIN workspaces w ON w.customer_id = m.customer_id AND w.desired <> 'deleted' AND (SELECT "
+    "count(*) FROM workspaces w2 WHERE w2.customer_id = m.customer_id AND w2.desired <> "
+    "'deleted') = 1 WHERE m.transfer_in_bytes > 0 OR m.transfer_out_bytes > 0 ON CONFLICT DO "
+    "NOTHING";
+constexpr std::string_view legacy_metered_build_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'metering_build_records', md5(b.customer_id::text || E'\\n' || "
+    "b.result_id)::uuid, b.customer_id, w.id, CASE WHEN w.id IS NULL THEN 'needs_selection' "
+    "ELSE 'sole_workspace' END FROM metering_build_records b LEFT JOIN workspaces w ON "
+    "w.customer_id = b.customer_id AND w.desired <> 'deleted' AND (SELECT count(*) FROM "
+    "workspaces w2 WHERE w2.customer_id = b.customer_id AND w2.desired <> 'deleted') = 1 ON "
+    "CONFLICT DO NOTHING";
 // Migration 0048's assignment and route, rerun before each copy for rows written after it: a
 // link's space is its repository's, and a space with exactly one live workspace owns its links.
 constexpr std::string_view legacy_drive_share_link_assignment_sql =
@@ -4065,85 +4092,85 @@ public:
         });
     }
 
-    Result<MeteringUsage> upsert_metering_usage(const MeteringUpdate& update) override {
-        return with_tx<MeteringUsage>([&](pqxx::work& tx) -> Result<MeteringUsage> {
+    Result<void> assign_legacy_metering() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec(std::string(legacy_metering_usage_assignment_sql));
+            tx.exec(std::string(legacy_metered_build_assignment_sql));
+            return {};
+        });
+    }
+
+    Result<std::vector<LegacyMeteringUsage>> legacy_metering_usage(const std::string& after_id,
+                                                                   int limit) override {
+        return with_tx<
+            std::vector<LegacyMeteringUsage>>([&](pqxx::work& tx)
+                                                  -> Result<std::vector<LegacyMeteringUsage>> {
+            // Only rows that carry transfer are copied (migration 0053). A workspace deleted
+            // since its rows were assigned no longer receives them.
             const pqxx::result rows = tx.exec_params(
-                "INSERT INTO metering_usage "
-                "(customer_id, hour, stored_bytes, transfer_in_bytes, transfer_out_bytes) "
-                "VALUES ($1::uuid, $2::timestamptz, COALESCE($3::bigint, 0), $4, $5) "
-                "ON CONFLICT (customer_id, hour) DO UPDATE SET "
-                "stored_bytes = COALESCE($3::bigint, metering_usage.stored_bytes), "
-                "transfer_in_bytes = metering_usage.transfer_in_bytes + "
-                "EXCLUDED.transfer_in_bytes, "
-                "transfer_out_bytes = metering_usage.transfer_out_bytes + "
-                "EXCLUDED.transfer_out_bytes "
-                "RETURNING customer_id::text, "
-                "to_char(hour AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
-                "stored_bytes, transfer_in_bytes, transfer_out_bytes, compute_seconds",
-                update.customer_id,
-                update.hour,
-                update.stored_bytes,
-                update.transfer_in_bytes,
-                update.transfer_out_bytes);
-            return MeteringUsage{.customer_id = rows[0][0].as<std::string>(),
-                                 .hour = rows[0][1].as<std::string>(),
-                                 .stored_bytes = rows[0][2].as<std::uint64_t>(),
-                                 .transfer_in_bytes = rows[0][3].as<std::uint64_t>(),
-                                 .transfer_out_bytes = rows[0][4].as<std::uint64_t>(),
-                                 .compute_seconds = rows[0][5].as<std::uint64_t>()};
+                "SELECT o.id::text, o.customer_id::text, o.hour_text, o.stored_bytes, "
+                "o.transfer_in_bytes, o.transfer_out_bytes, o.compute_seconds, "
+                "CASE WHEN w.desired = 'deleted' THEN '' ELSE COALESCE(a.workspace_id::text, '') "
+                "END, CASE WHEN w.desired = 'deleted' THEN 'workspace_deleted' "
+                "ELSE COALESCE(a.outcome, 'needs_selection') END "
+                "FROM (SELECT md5(m.customer_id::text || E'\\n' || " +
+                    std::string(metering_hour_text_sql) + ")::uuid AS id, " +
+                    std::string(metering_hour_text_sql) +
+                    " AS hour_text, m.* FROM metering_usage m WHERE m.transfer_in_bytes > 0 "
+                    "OR m.transfer_out_bytes > 0) o "
+                    "LEFT JOIN workspace_assignments a ON a.object_table = 'metering_usage' "
+                    "AND a.object_id = o.id LEFT JOIN workspaces w ON w.id = a.workspace_id "
+                    "WHERE ($1 = '' OR o.id > NULLIF($1, '')::uuid) ORDER BY o.id LIMIT $2",
+                after_id,
+                std::clamp(limit, 1, 5000));
+            std::vector<LegacyMeteringUsage> usage;
+            for (const pqxx::row& row : rows) {
+                usage.push_back({row[0].as<std::string>(),
+                                 {.customer_id = row[1].as<std::string>(),
+                                  .hour = row[2].as<std::string>(),
+                                  .stored_bytes = row[3].as<std::uint64_t>(),
+                                  .transfer_in_bytes = row[4].as<std::uint64_t>(),
+                                  .transfer_out_bytes = row[5].as<std::uint64_t>(),
+                                  .compute_seconds = row[6].as<std::uint64_t>()},
+                                 row[7].as<std::string>(),
+                                 row[8].as<std::string>()});
+            }
+            return usage;
         });
     }
 
-    Result<bool> record_metered_build(const MeteredBuild& build) override {
-        return with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
-            const pqxx::result inserted = tx.exec_params(
-                "WITH inserted AS ("
-                "INSERT INTO metering_build_records "
-                "(customer_id, result_id, hour, compute_seconds) "
-                "VALUES ($1::uuid, $2, $3::timestamptz, $4) "
-                "ON CONFLICT DO NOTHING RETURNING customer_id, hour, compute_seconds), "
-                "usage AS ("
-                "INSERT INTO metering_usage (customer_id, hour, compute_seconds) "
-                "SELECT customer_id, hour, compute_seconds FROM inserted "
-                "ON CONFLICT (customer_id, hour) DO UPDATE SET "
-                "compute_seconds = metering_usage.compute_seconds + EXCLUDED.compute_seconds "
-                "RETURNING 1) SELECT count(*) FROM inserted",
-                build.customer_id,
-                build.result_id,
-                build.hour,
-                build.compute_seconds);
-            return inserted[0][0].as<int>() == 1;
+    Result<std::vector<LegacyMeteredBuild>>
+    legacy_metering_build_records(const std::string& after_id, int limit) override {
+        return with_tx<
+            std::vector<LegacyMeteredBuild>>([&](pqxx::work& tx)
+                                                 -> Result<std::vector<LegacyMeteredBuild>> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT o.id::text, o.customer_id::text, o.result_id, o.hour_text, "
+                "o.compute_seconds, "
+                "CASE WHEN w.desired = 'deleted' THEN '' ELSE COALESCE(a.workspace_id::text, '') "
+                "END, CASE WHEN w.desired = 'deleted' THEN 'workspace_deleted' "
+                "ELSE COALESCE(a.outcome, 'needs_selection') END "
+                "FROM (SELECT md5(b.customer_id::text || E'\\n' || b.result_id)::uuid AS id, " +
+                    std::string(metering_build_hour_text_sql) +
+                    " AS hour_text, b.* FROM metering_build_records b) o "
+                    "LEFT JOIN workspace_assignments a ON a.object_table = "
+                    "'metering_build_records' AND a.object_id = o.id "
+                    "LEFT JOIN workspaces w ON w.id = a.workspace_id "
+                    "WHERE ($1 = '' OR o.id > NULLIF($1, '')::uuid) ORDER BY o.id LIMIT $2",
+                after_id,
+                std::clamp(limit, 1, 5000));
+            std::vector<LegacyMeteredBuild> builds;
+            for (const pqxx::row& row : rows) {
+                builds.push_back({row[0].as<std::string>(),
+                                  {.customer_id = row[1].as<std::string>(),
+                                   .result_id = row[2].as<std::string>(),
+                                   .hour = row[3].as<std::string>(),
+                                   .compute_seconds = row[4].as<std::uint64_t>()},
+                                  row[5].as<std::string>(),
+                                  row[6].as<std::string>()});
+            }
+            return builds;
         });
-    }
-
-    Result<std::vector<MeteringUsage>> list_metering_usage(const std::string& customer_id,
-                                                           const std::string& from_hour,
-                                                           const std::string& to_hour,
-                                                           int limit) override {
-        return with_tx<std::vector<MeteringUsage>>(
-            [&](pqxx::work& tx) -> Result<std::vector<MeteringUsage>> {
-                const pqxx::result rows = tx.exec_params(
-                    "SELECT customer_id::text, "
-                    "to_char(hour AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
-                    "stored_bytes, transfer_in_bytes, transfer_out_bytes, compute_seconds "
-                    "FROM metering_usage WHERE customer_id = $1::uuid "
-                    "AND ($2 = '' OR hour >= $2::timestamptz) "
-                    "AND ($3 = '' OR hour <= $3::timestamptz) ORDER BY hour ASC LIMIT $4",
-                    customer_id,
-                    from_hour,
-                    to_hour,
-                    limit);
-                std::vector<MeteringUsage> usage;
-                for (const pqxx::row& row : rows) {
-                    usage.push_back(MeteringUsage{.customer_id = row[0].as<std::string>(),
-                                                  .hour = row[1].as<std::string>(),
-                                                  .stored_bytes = row[2].as<std::uint64_t>(),
-                                                  .transfer_in_bytes = row[3].as<std::uint64_t>(),
-                                                  .transfer_out_bytes = row[4].as<std::uint64_t>(),
-                                                  .compute_seconds = row[5].as<std::uint64_t>()});
-                }
-                return usage;
-            });
     }
 
     Result<std::optional<std::uint64_t>> storage_quota(const std::string& customer_id) override {

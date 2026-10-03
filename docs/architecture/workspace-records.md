@@ -20,8 +20,8 @@ still open.
 |---|---|
 | `WorkspaceRecords`, `RecordSet<Codec>` | Implemented on Zetta's keyed record store ([zetta#1231](https://github.com/oramasearch/zetta/issues/1231), merged in zetta PR #1233 to `dev`, `82f617e`). Unit tests run against an engine fake; an opt-in test runs against a real Zetta node built from that commit. |
 | Append-only collections | Implemented. `ask_messages` and `auth_app_webhook_events` have moved; the `ask_messages` table is dropped (migration `0050`, lake#483). |
-| Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. `drive_share_links` (lake#350) has moved: revocation is a conditional `put` on the revision read. `auth_app_webhook_deliveries` (lake#357) claims each attempt with `if_absent` and settles it with `if_revision`. |
-| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `opportunities`, `stream_owners`, `drive_share_links`, `auth_app_webhook_events` and `auth_app_webhook_deliveries`. `ask_messages` left the list with its table: a request for it is `invalid_input`. |
+| Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. `drive_share_links` (lake#350) has moved: revocation is a conditional `put` on the revision read. `auth_app_webhook_deliveries` (lake#357) claims each attempt with `if_absent` and settles it with `if_revision`. `metering_usage` (lake#348) adds to an hourly counter with `if_revision`, and `metering_build_records` (lake#349) records each build result once with `if_absent`. |
+| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `opportunities`, `stream_owners`, `drive_share_links`, `auth_app_webhook_events`, `auth_app_webhook_deliveries`, `metering_usage` and `metering_build_records`. `ask_messages` left the list with its table: a request for it is `invalid_input`. |
 | Dropping the moved tables from PostgreSQL | `ask_messages` is dropped by migration `0050_drop_ask_messages` (lake#483), after its copy was verified on dev; its `workspace_assignments` rows stay. Each other table is dropped by a later migration once its copy is verified on the dev cluster. |
 
 **Zetta dependency.** A workspace Zetta must run Zetta `dev` at or after zetta PR #1233
@@ -34,7 +34,7 @@ part of the [cutover](#cutover-runbook-ask_messages-dev-cluster).
 | Primitive | Capabilities | Durability and consistency | Lookup | Conditional write | Fit |
 |---|---|---|---|---|---|
 | **Keyed record store** (#1231) | `create_collection`, `put_record`, `get_record`, `delete_record`, `list_records` | A write is fsynced on the key's owner and installed on every live peer before the acknowledgement. Writes are linearizable per key. A read after a write returns that write on any live node. Retention is per collection. | `get_record` by key; `list_records` over one value of a declared secondary index, ordered by `order` then key, with paging and both directions | `if_absent`, `if_revision`; `409 conflict` carries `details.revision`; `503 busy` while ownership moves | **All lake records** |
-| Labelled time series (#1231) | `create_metric`, `record_metric`, `query_metric` | Replicated | Label filter, group-by, steps | n/a | Metering and request metrics (#348, #349, #384) |
+| Labelled time series (#1231) | `create_metric`, `record_metric`, `query_metric` | Replicated; a point is not fsynced on its own (the log is flushed every tick) | Label filter, group-by, steps | n/a | Request metrics (#384). Not for anything that might be billed, such as metering (#348, #349), which uses records |
 | SQL tables | `sql` (GET, or POST since #1233) | Rows in the replicated catalogue | Full scan, one predicate | None | Workspace data people query; not lake's records |
 | Pub/sub topics | `create_topic`, `publish_event`, `browse_topic`, … | Node-local, best effort | By sequence | `update_event` only | Event streams with retention (`agent-events`, `app-events.*`, `build-events.*`) |
 | Connections | `create_connection` | Credential sealed at rest since zetta#1230 | By name | None | Not used for lake secrets (lake seals its own) |
@@ -53,7 +53,8 @@ A page that reads one collection therefore pays one workspace round trip.
 | One-use codes, sessions, replay evidence, claims | `sessions` (#323), `identity_oauth_flows` (#326), `identity_webauthn_challenges` (#327), `identity_taap_assertions` (#361), `auth_app_authorization_codes` (#363), `offline_recovery_attempts` (#336), `agent_task_status` claims (#375) | Consume with `remove(id, if_revision)`. Only one caller succeeds; the others get `conflict` or `not_found`. Expiry is the collection's `retention_ms`. |
 | Unique names | `stream_owners` (#379, done), repository and app names | A name-keyed record written with `if_absent`, using a blind key (see [Keys](#record-format)). |
 | Secrets and credentials | `secrets_*` (#328–#332), `keystore` (#324), `pki_authorities` (#342), `custodial_identities` (#364), `auth_app_signing_keys` (#352), `oauth_providers` (#325) | Records whose sealed body holds the secrets subsystem's existing envelope ciphertext. Zetta's connection store is not used (lake seals its own secrets). |
-| Metrics and usage series | `metering_usage` (#348), `metering_build_records` (#349), Prometheus series (#384) | Zetta's labelled time series (`create_metric`/`record_metric`/`query_metric`). The first metering follow-up adds a typed wrapper beside `WorkspaceRecords`. |
+| Exact counters that may be billed | `metering_usage` (#348, **moved**), `metering_build_records` (#349, **moved**) | Records, never metrics, since a metric point is not fsynced on its own. A counter is one record per workspace and hour, added to with `if_revision` from an in-process buffer that is flushed off the request path (`MeteringRecorder`); each counted item (a build result) is one record written `if_absent` ([metering.md](../api/metering.md)). |
+| Operational metrics | Prometheus series (#384) | Zetta's labelled time series (`create_metric`/`record_metric`/`query_metric`). |
 | Event streams | `agent-events`, `app-events.*`, `build-events.*` | Workspace topics with retention, as in #311. |
 
 Lake keeps only `LAKE_INSTANCE_KEK`, the root from which the per-workspace keys are derived, which
@@ -240,6 +241,8 @@ copy is verified.
 | `ApplicationAuth.EventsAndDeliveriesLiveInTheApplicationsWorkspace`, `ApplicationAuth.AnAttemptIsClaimedOnceAndSentOnce` | Application events in the application's workspace among two spaces and two workspaces; missing, malformed, unknown and foreign `workspace_id`; least privilege; not ready; deletion; an attempt claimed by another caller is not sent; an abandoned claim does not block retries |
 | `Stores/WorkspaceRecordStores.TheOneShotCopyMovesApplicationEventsAndTheirDeliveries/{Memory,Postgres}` | Both application collections: plan, verify, copy, rerun, read back through the capability, a legacy application resolved after review, tamper detection |
 | `PostgresApplicationWebhooks.MigrationRecordsEachEventsOwnerForTheCopy` | Migration 0049: application and event outcomes on a rerun, late rows, resolution, the immutable workspace |
+| `Stores/WorkspaceRecordStores.RepositoryUsageStaysInEachRepositorysWorkspace/{Memory,Postgres}` | Repository usage (lake#348, lake#349) across two spaces with two workspaces each: nothing written on the request path, one hourly record per workspace, a second replica's conditional increment, a workspace that is not ready (kept), a deleted workspace (dropped), a repository without a workspace, the bound, build records written once |
+| `Stores/WorkspaceRecordStores.TheOneShotCopyMovesMeteringIntoEachSpacesWorkspace/{Memory,Postgres}`, `PostgresMetering.MigrationRecordsEachRowsOwnerForTheCopy`, `PostgresSync.PushAndPullUsePostgresControlPlane` | The metering copy beside lake's own counters and build records, rows without transfer left out, `needs_selection` blocking, tamper detection, operator only; migration 0053; a real push and pull flushed into the repository's workspace and nothing in PostgreSQL |
 | `WorkspaceRecordsZetta.TheEngineStoresAndReturnsSealedRecords` | Runs with `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` against a node built from Zetta dev with #1233: append, list, a 20 KB body, `if_absent` conflict with `details.revision`, `update`, a stale `if_revision`, conditional delete |
 | `HttpResponseIsolation.AskOrama*`, `…TheAgentFactory*`, `AgentRuns.EveryAgentFlowTheSiteOffersIsACapability`, `PagePerformance.*` | The pages and the capability end to end, and the page budgets |
 
@@ -250,7 +253,8 @@ to it, one store per workspace endpoint.
 ## Checklist for each follow-up
 
 1. Pick the shape from the [table above](#the-primitive-per-record-shape). Every shape except
-   metrics uses `WorkspaceRecords`; metrics use Zetta's labelled time series.
+   operational metrics uses `WorkspaceRecords`; operational metrics use Zetta's labelled time
+   series. Anything that might be billed is a record.
 2. Write a codec in `include/lake/control/<collection>.hpp`. Give it a lookup with every field the
    old query filtered on, and set `retention_ms` if rows expired before.
 3. Writes: use `append` for logs, `update` for mutable rows, and `remove(id, if_revision)` for
@@ -402,3 +406,27 @@ coordinator and are not run by this change.
    deleted) or correct it. Then repeat step 4.
 6. Once `verify` answers `complete: true` on every page, file the migration that drops
    `stream_owners`, with the copy output attached.
+
+## Cutover runbook: metering, dev cluster
+
+Migration `0053_metering_workspaces` (lake#348, lake#349). Repositories must already name their
+workspace (migration `0051_repository_workspaces`, lake#315 part 1). These steps are for the
+coordinator and are not run by this change.
+
+1. Workspace Zettas run Zetta `dev` at or after `82f617e`, as for `ask_messages`.
+2. Have the operator vendor `db/schema.sql` through `0053_metering_workspaces` and select
+   `metering_workspaces_guard`. Apply the schema, then read the warnings: each
+   `table=metering_usage` or `table=metering_build_records` row belongs to a space with several
+   live workspaces or none.
+3. Deploy the lake image built from this change. Sync requests now count transfer in memory and
+   the owner loop writes it to each repository's workspace every five seconds; usage reads write
+   build records. Until step 4, the Usage page shows no transfer from before the deploy; build
+   compute is unaffected, because it is read from the repositories again.
+4. Run `copy_workspace_records` for `metering_usage` and then `metering_build_records`, each
+   `plan`, then `copy` until `next_after` is null, then `verify` over every page.
+5. Rows recorded as `needs_selection` belong to a space with several workspaces: choose the
+   workspace in a reviewed change to `workspace_assignments`, or delete the rows (dev data may be
+   deleted). Rows of a deleted workspace are reported and do not block. Repeat step 4.
+6. Once `verify` answers `complete: true` on every page of both collections, file the migration
+   that drops `metering_usage` and `metering_build_records` (and `metering_guard` stays as a guard
+   table), with the copy output attached.

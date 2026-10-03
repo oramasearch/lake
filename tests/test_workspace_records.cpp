@@ -17,6 +17,7 @@
 
 #include "api/workspace_records_api.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/metering_recorder.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/application_webhook_records.hpp"
@@ -24,6 +25,7 @@
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/metering.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/stream_owners.hpp"
@@ -32,9 +34,9 @@
 #include "lake/control/zetta_workspace.hpp"
 #include "postgres_fixture.hpp"
 #include "record_fixture.hpp"
+#include "repository_test_support.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
-#include "repository_test_support.hpp"
 
 namespace {
 
@@ -1336,6 +1338,295 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationEventsAndTheirDelive
     first_row->second["value"] = second_row->second["value"];
     const auto tampered = copy("auth_app_webhook_deliveries", "verify");
     EXPECT_EQ(tampered.value["missing"].size(), 1U) << "a row that no longer opens is missing";
+}
+
+// lake#348, lake#349: repository transfer and build records live in the workspace Zetta of the
+// repository's workspace. A sync request only counts in memory; the recorder's flush writes each
+// workspace's hourly record and each build record there, and nowhere else.
+TEST_P(WorkspaceRecordStores, RepositoryUsageStaysInEachRepositorysWorkspace) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const auto repository = [](const TwoSpaces::Space& space, const std::string& workspace) {
+        lake::control::Repository row;
+        row.id = lake::control::new_uuid_v4();
+        row.customer_id = space.customer_id;
+        row.workspace_id = workspace;
+        return row;
+    };
+    const auto first_home = repository(first, first.workspaces[0]);
+    const auto first_lab = repository(first, first.workspaces[1]);
+    const auto second_home = repository(second, second.workspaces[0]);
+    const std::string hour = "2026-09-04T10:00:00Z";
+    lake::api::MeteringRecorder recorder(t.store.get(), t.service.get(), std::string(kek), 6);
+    recorder.add_transfer(first_home, 100, 10, hour);
+    recorder.add_transfer(first_home, 1, 2, hour); // merges into the same counter
+    recorder.add_transfer(first_lab, 5, 0, hour);
+    recorder.add_transfer(second_home, 7, 7, hour);
+    // A repository migration 0051 left without a workspace is counted, never recorded.
+    recorder.add_transfer(repository(first, ""), 3, 3, hour);
+    EXPECT_EQ(recorder.totals().unattributed_bytes, 6U);
+    EXPECT_EQ(recorder.pending(), 3U);
+    const auto url = [](const std::string& workspace) { return "http://" + workspace + ".test"; };
+    EXPECT_TRUE(t.zetta->records[url(first.workspaces[0])].collections.empty())
+        << "counting writes nothing";
+    const auto pending = recorder.pending_transfers(first.customer_id);
+    EXPECT_EQ(pending.size(), 2U) << "a space sees only its own pending transfer";
+
+    ASSERT_TRUE(liquid::runtime::block_on(recorder.flush()));
+    EXPECT_EQ(recorder.pending(), 0U);
+    EXPECT_EQ(recorder.totals().flushed_transfers, 3U);
+    const auto transfer = [&](const TwoSpaces::Space& space,
+                              const std::string& workspace,
+                              const std::string& customer_id) {
+        auto context = t.context(space);
+        auto records = lake::api::workspace_records(context, space.customer_id, workspace);
+        EXPECT_TRUE(records) << records.error().message;
+        auto listed = run(lake::control::list_metered_transfer(*records, customer_id));
+        EXPECT_TRUE(listed) << listed.error().message;
+        return *listed;
+    };
+    auto home = transfer(first, first.workspaces[0], first.customer_id);
+    ASSERT_EQ(home.size(), 1U);
+    EXPECT_EQ(home[0].hour, hour);
+    EXPECT_EQ(home[0].transfer_in_bytes, 101U);
+    EXPECT_EQ(home[0].transfer_out_bytes, 12U);
+    ASSERT_EQ(transfer(first, first.workspaces[1], first.customer_id).size(), 1U);
+    EXPECT_EQ(transfer(second, second.workspaces[0], second.customer_id)[0].transfer_in_bytes, 7U);
+    EXPECT_TRUE(transfer(second, second.workspaces[1], second.customer_id).empty());
+    EXPECT_TRUE(transfer(second, second.workspaces[0], first.customer_id).empty())
+        << "another space's records are not in this workspace";
+    // The workspace holds sealed values and blind indexes only.
+    for (const auto& [key, row] :
+         t.zetta->records[url(first.workspaces[0])].rows("metering_usage")) {
+        EXPECT_EQ(row.dump().find(first.customer_id), std::string::npos);
+        EXPECT_EQ(row.dump().find(hour), std::string::npos);
+    }
+
+    // A second lake replica adds to the same hour: a conditional write on the revision it read.
+    lake::api::MeteringRecorder replica(t.store.get(), t.service.get(), std::string(kek));
+    replica.add_transfer(first_home, 9, 0, hour);
+    ASSERT_TRUE(liquid::runtime::block_on(replica.flush()));
+    home = transfer(first, first.workspaces[0], first.customer_id);
+    ASSERT_EQ(home.size(), 1U);
+    EXPECT_EQ(home[0].transfer_in_bytes, 110U);
+
+    // A workspace that is not ready keeps its counter for the next flush.
+    const auto lab = t.store->get_workspace(first.workspaces[1]);
+    ASSERT_TRUE(lab);
+    t.status(lab->zetta_service_id, "Pending", url(first.workspaces[1]));
+    recorder.add_transfer(first_lab, 4, 0, hour);
+    ASSERT_TRUE(liquid::runtime::block_on(recorder.flush()));
+    EXPECT_EQ(recorder.pending(), 1U);
+    EXPECT_GT(recorder.totals().flush_errors, 0U);
+    t.ready(first.workspaces[1]);
+    ASSERT_TRUE(liquid::runtime::block_on(recorder.flush()));
+    EXPECT_EQ(recorder.pending(), 0U);
+    EXPECT_EQ(transfer(first, first.workspaces[1], first.customer_id)[0].transfer_in_bytes, 9U);
+
+    // A deleted workspace's counter is dropped and counted: its records went with it.
+    recorder.add_transfer(repository(second, second.workspaces[1]), 50, 0, hour);
+    ASSERT_TRUE(t.store->update_workspace(second.workspaces[1], {.desired = "deleted"}));
+    ASSERT_TRUE(liquid::runtime::block_on(recorder.flush()));
+    EXPECT_EQ(recorder.pending(), 0U);
+    EXPECT_EQ(recorder.totals().dropped_bytes, 50U);
+
+    // Bounded: a new counter beyond the bound is dropped and counted, an existing one merges.
+    lake::api::MeteringRecorder bounded(t.store.get(), t.service.get(), std::string(kek), 2);
+    bounded.add_transfer(first_home, 1, 0, "2026-09-04T11:00:00Z");
+    bounded.add_transfer(first_home, 1, 0, "2026-09-04T12:00:00Z");
+    bounded.add_transfer(first_home, 8, 0, "2026-09-04T13:00:00Z");
+    bounded.add_transfer(first_home, 1, 0, "2026-09-04T11:00:00Z");
+    EXPECT_EQ(bounded.pending(), 2U);
+    EXPECT_EQ(bounded.totals().dropped_bytes, 8U);
+
+    // Build records: once per result, in the repository's workspace, however often queued.
+    lake::control::MeteredBuild build{.customer_id = first.customer_id,
+                                      .result_id = "result-1",
+                                      .hour = hour,
+                                      .compute_seconds = 3,
+                                      .repository_id = first_home.id};
+    recorder.add_build(first.workspaces[0], build);
+    recorder.add_build(first.workspaces[0], build);
+    EXPECT_EQ(recorder.pending(), 1U);
+    ASSERT_TRUE(liquid::runtime::block_on(recorder.flush()));
+    recorder.add_build(first.workspaces[0], build);
+    ASSERT_TRUE(liquid::runtime::block_on(recorder.flush()));
+    EXPECT_EQ(recorder.totals().flushed_builds, 1U) << "the second write found it recorded";
+    auto context = t.context(first);
+    auto records = lake::api::workspace_records(context, first.customer_id, first.workspaces[0]);
+    ASSERT_TRUE(records);
+    const auto builds = run(lake::control::list_metered_builds(*records, first.customer_id));
+    ASSERT_TRUE(builds);
+    ASSERT_EQ(builds->size(), 1U);
+    EXPECT_EQ(builds->front().compute_seconds, 3U);
+    EXPECT_EQ(builds->front().repository_id, first_home.id);
+    auto other = lake::api::workspace_records(context, first.customer_id, first.workspaces[1]);
+    ASSERT_TRUE(other);
+    EXPECT_TRUE(run(lake::control::list_metered_builds(*other, first.customer_id))->empty());
+}
+
+// lake#348, lake#349: the retired metering rows move into the workspace that owns each one. Only
+// transfer moves from metering_usage; build records are keyed by their result, so one a usage read
+// recorded since the cutover is not copied twice.
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesMeteringIntoEachSpacesWorkspace) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    auto& first = t.spaces[0];
+    auto& second = t.spaces[1];
+    // The second space keeps one live workspace, so it owns its rows; the first has two, so its
+    // rows need a reviewed selection.
+    ASSERT_TRUE(t.store->update_workspace(second.workspaces[1], {.desired = "deleted"}));
+    using lake::control::MeteredBuild;
+    using lake::control::MeteringUsage;
+    const std::vector<MeteringUsage> usage = {
+        {second.customer_id, "2026-09-04T10:00:00Z", 4096, 10, 20, 3},
+        {second.customer_id, "2026-09-04T11:00:00Z", 4096, 0, 5, 0},
+        {second.customer_id, "2026-09-04T12:00:00Z", 4096, 0, 0, 4}, // gauge and compute only
+        {first.customer_id, "2026-09-04T10:00:00Z", 4096, 1, 1, 0}};
+    const std::vector<MeteredBuild> builds = {
+        {second.customer_id, "result-a", "2026-09-04T10:00:00Z", 3, ""},
+        {second.customer_id, "result-b", "2026-09-04T12:00:00Z", 4, ""},
+        {first.customer_id, "result-c", "2026-09-04T10:00:00Z", 1, ""}};
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        for (const MeteringUsage& row : usage) {
+            tx.exec_params("INSERT INTO metering_usage (customer_id, hour, stored_bytes, "
+                           "transfer_in_bytes, transfer_out_bytes, compute_seconds) VALUES "
+                           "($1::uuid, $2::timestamptz, $3, $4, $5, $6)",
+                           row.customer_id,
+                           row.hour,
+                           row.stored_bytes,
+                           row.transfer_in_bytes,
+                           row.transfer_out_bytes,
+                           row.compute_seconds);
+        }
+        for (const MeteredBuild& row : builds) {
+            tx.exec_params("INSERT INTO metering_build_records (customer_id, result_id, hour, "
+                           "compute_seconds) VALUES ($1::uuid, $2, $3::timestamptz, $4)",
+                           row.customer_id,
+                           row.result_id,
+                           row.hour,
+                           row.compute_seconds);
+        }
+        tx.commit();
+    } else {
+        auto& memory = static_cast<lake::control::InMemoryStore&>(*t.store);
+        for (const MeteringUsage& row : usage) {
+            memory.seed_legacy_metering_usage(row);
+        }
+        for (const MeteredBuild& row : builds) {
+            memory.seed_legacy_metered_build(row);
+        }
+    }
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    operator_context.request_id = lake::control::new_uuid_v4();
+    const auto copy =
+        [&](std::string collection, std::string mode, std::string after = {}, int limit = 1000) {
+            json input{{"collection", collection}, {"mode", mode}, {"limit", limit}};
+            if (!after.empty()) {
+                input["after"] = after;
+            }
+            const auto completed = liquid::runtime::block_on(
+                t.registry.call_async("copy_workspace_records", input, operator_context));
+            EXPECT_TRUE(completed);
+            return *completed;
+        };
+    const std::string url = "http://" + second.workspaces[0] + ".test";
+
+    const auto plan = copy("metering_usage", "plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["rows"], 3) << "a row without transfer has nothing to copy";
+    EXPECT_EQ(plan.value["assigned"], 2);
+    ASSERT_EQ(plan.value["unresolved"].size(), 1U);
+    EXPECT_EQ(plan.value["unresolved"][0]["outcome"], "needs_selection");
+    EXPECT_TRUE(t.zetta->records[url].collections.empty()) << "a plan writes nothing";
+    EXPECT_EQ(copy("metering_usage", "verify").value["missing"].size(), 2U);
+
+    // Lake counted transfer in the same hour after the cutover: the copy adds a record beside it
+    // and never overwrites it.
+    auto context = t.context(second);
+    auto records = lake::api::workspace_records(context, second.customer_id, second.workspaces[0]);
+    ASSERT_TRUE(records);
+    ASSERT_TRUE(run(lake::control::add_metered_transfer(
+        *records, second.customer_id, "2026-09-04T10:00:00Z", 100, 0)));
+    // A usage read recorded result-a from its repository since the cutover.
+    ASSERT_TRUE(run(lake::control::record_metered_build(
+        *records, {second.customer_id, "result-a", "2026-09-04T10:00:00Z", 3, "repository-1"})));
+
+    std::size_t copied = 0;
+    std::string after;
+    for (int page = 0; page < 10; ++page) {
+        const auto result = copy("metering_usage", "copy", after, 1);
+        ASSERT_TRUE(result.ok) << result.error.message;
+        copied += result.value["copied"].get<std::size_t>();
+        if (result.value["next_after"].is_null()) {
+            break;
+        }
+        after = result.value["next_after"];
+    }
+    EXPECT_EQ(copied, 2U);
+    EXPECT_EQ(copy("metering_usage", "copy").value["copied"], 0) << "a rerun copies nothing twice";
+    const auto verified = copy("metering_usage", "verify");
+    EXPECT_EQ(verified.value["verified"], 2);
+    EXPECT_FALSE(verified.value["complete"]) << "the first space's row needs a selection";
+    const auto transfer = run(lake::control::list_metered_transfer(*records, second.customer_id));
+    ASSERT_TRUE(transfer);
+    std::uint64_t in = 0, out = 0;
+    for (const auto& row : *transfer) {
+        in += row.transfer_in_bytes;
+        out += row.transfer_out_bytes;
+    }
+    EXPECT_EQ(in, 110U) << "the copied row and lake's own counter both count";
+    EXPECT_EQ(out, 25U);
+
+    const auto built = copy("metering_build_records", "copy");
+    ASSERT_TRUE(built.ok) << built.error.message;
+    EXPECT_EQ(built.value["copied"], 1);
+    EXPECT_EQ(built.value["already_present"], 1) << "result-a was recorded by a read";
+    const auto builds_verified = copy("metering_build_records", "verify");
+    EXPECT_EQ(builds_verified.value["verified"], 2);
+    EXPECT_TRUE(builds_verified.value["missing"].empty());
+    EXPECT_EQ(run(lake::control::list_metered_builds(*records, second.customer_id))->size(), 2U);
+
+    // A record moved under another key does not open there, so verify reports it.
+    auto& rows = t.zetta->records[url].rows("metering_build_records");
+    ASSERT_EQ(rows.size(), 2U);
+    rows.begin()->second["value"] = std::next(rows.begin())->second["value"];
+    EXPECT_EQ(copy("metering_build_records", "verify").value["missing"].size(), 1U);
+
+    if (GetParam()) {
+        // Reviewed: the first space's rows are deleted (dev data may be). Then the usage pages
+        // verify complete.
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params("DELETE FROM metering_usage WHERE customer_id = $1::uuid",
+                       first.customer_id);
+        tx.commit();
+        EXPECT_TRUE(copy("metering_usage", "verify").value["complete"]);
+    }
+    const auto refused = [&] {
+        auto person = t.context(first);
+        return *liquid::runtime::block_on(
+            t.registry.call_async("copy_workspace_records",
+                                  {{"collection", "metering_usage"}, {"mode", "plan"}},
+                                  person));
+    }();
+    EXPECT_FALSE(refused.ok) << "only the operator copies";
 }
 
 TEST(WorkspaceRecords, NoWorkspaceSurfaceReachesTheRecordStore) {

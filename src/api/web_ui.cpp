@@ -8771,9 +8771,9 @@ std::string web_ui_metering(const nlohmann::json& usage, WebUiViewer viewer) {
     const std::string currency = usage.value("currency", "USD");
     content +=
         priced ? std::format("<section class=\"panel\"><h2>Estimated Charge</h2><p><strong>{}"
-                             "</strong></p><p class=\"sub\">Repository storage, transfer and "
-                             "repository build time at this lake's prices. Images, image "
-                             "builds and workspaces are not priced.</p></section>",
+                             "</strong></p><p class=\"sub\">Repository transfer and repository "
+                             "build time at this lake's prices. Storage, images, image builds "
+                             "and workspaces are not priced.</p></section>",
                              web_ui_escape(usage_money(usage.value("cost_micros", std::uint64_t{0}),
                                                        currency)))
                : "<section class=\"panel\"><h2>Estimated Charge</h2><p>This lake has no "
@@ -8793,17 +8793,15 @@ std::string web_ui_metering(const nlohmann::json& usage, WebUiViewer viewer) {
     if (items.empty()) {
         content += "<div class=\"panel empty\">No hourly usage.</div>";
     } else {
-        content += std::string("<table><thead><tr><th>Hour</th><th>Stored</th><th>Uploaded</th>"
+        content += std::string("<table><thead><tr><th>Hour</th><th>Uploaded</th>"
                                "<th>Downloaded</th><th>Build Time</th>") +
                    (priced ? "<th>Charge</th>" : "") + "</tr></thead><tbody>";
         for (const nlohmann::json& row : items) {
             const std::string hour = row.value("hour", "");
             content += std::format(
-                "<tr><td><time datetime=\"{}\">{}</time></td><td>{}</td><td>{}</td><td>{}</td>"
-                "<td>{}</td>",
+                "<tr><td><time datetime=\"{}\">{}</time></td><td>{}</td><td>{}</td><td>{}</td>",
                 web_ui_escape(hour),
                 web_ui_escape(usage_hour(hour)),
-                display_size(row.value("stored_bytes", std::uint64_t{0})),
                 display_size(row.value("transfer_in_bytes", std::uint64_t{0})),
                 display_size(row.value("transfer_out_bytes", std::uint64_t{0})),
                 usage_duration(row.value("compute_seconds", std::uint64_t{0})));

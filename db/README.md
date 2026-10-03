@@ -116,3 +116,10 @@ none is recorded as `needs_selection` and reported. New repositories go through
 fixed, so repositories are no longer transferred. The latest guard is `repository_workspaces_guard`;
 the operator must vendor this schema and update its guard before rollout. See
 [repositories.md](../docs/api/repositories.md#the-owning-workspace).
+Migration `0053_metering_workspaces` retires `metering_usage` and `metering_build_records`
+(lake#348, lake#349): repository transfer and build records live in the repository's workspace
+Zetta, and repository storage is measured live and not recorded. It records each row's owner in
+`workspace_assignments` for `copy_workspace_records` (the space's only live workspace, otherwise
+`needs_selection`); usage rows without transfer are left out. Nothing is dropped. The latest guard
+is `metering_workspaces_guard`; the operator must vendor this schema and update its guard before
+rollout. See [metering.md](../docs/api/metering.md#cutover-lake348-lake349).

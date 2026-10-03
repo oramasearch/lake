@@ -51,7 +51,7 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | `LAKE_LOG_WITNESSES`, `LAKE_LOG_WITNESS_THRESHOLD`, `LAKE_LOG_AGGREGATOR` | JSON witness endpoint/public-key records, their quorum, and the aggregation endpoint anchored mode requires | [`../control-plane/log.md`](../control-plane/log.md), [`../api/transparency.md`](../api/transparency.md) |
 | `LAKE_TSA_URL`, `LAKE_TSA_TRUST_CERT` | RFC 3161 endpoint and optional PEM trust roots for timestamp tokens | [`../api/transparency.md`](../api/transparency.md) |
 | `LAKE_TSA_RENEWAL_SECONDS`, `LAKE_TSA_RENEW_BEFORE_SECONDS` | renewal policy for RFC 4998 evidence records; defaults 31536000 and 2592000 | [`../api/transparency.md`](../api/transparency.md) |
-| `LAKE_PRICE_CURRENCY` (default `USD`), `LAKE_PRICE_STORAGE_GIB_HOUR_MICROS`, `LAKE_PRICE_TRANSFER_IN_GIB_MICROS`, `LAKE_PRICE_TRANSFER_OUT_GIB_MICROS`, `LAKE_PRICE_COMPUTE_SECOND_MICROS` | integer pricing applied by `metering_usage` and `/metering` | [`../api/metering.md`](../api/metering.md) |
+| `LAKE_PRICE_CURRENCY` (default `USD`), `LAKE_PRICE_STORAGE_GIB_HOUR_MICROS`, `LAKE_PRICE_TRANSFER_IN_GIB_MICROS`, `LAKE_PRICE_TRANSFER_OUT_GIB_MICROS`, `LAKE_PRICE_COMPUTE_SECOND_MICROS` | integer pricing applied by `metering_usage` and `/metering`; the storage price is reported but applies to nothing since repository storage has no hourly history (lake#348) | [`../api/metering.md`](../api/metering.md) |
 | `LAKE_STORAGE_QUOTA_BYTES` | default per-customer storage quota; per-customer overrides are capability-backed | [`../api/metering.md`](../api/metering.md) |
 
 Startup refuses to run when `LAKE_OPERATOR_ZETTA_URL` and `LAKE_OPERATOR_ZETTA_TOKEN` are not set

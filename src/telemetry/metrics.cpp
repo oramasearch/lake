@@ -551,21 +551,18 @@ public:
         return call("set_audit_retention_days",
                     [&] { return store_->set_audit_retention_days(customer_id, days); });
     }
-    control::Result<control::MeteringUsage>
-    upsert_metering_usage(const control::MeteringUpdate& update) override {
-        return call("upsert_metering_usage", [&] { return store_->upsert_metering_usage(update); });
+    control::Result<void> assign_legacy_metering() override {
+        return call("assign_legacy_metering", [&] { return store_->assign_legacy_metering(); });
     }
-    control::Result<bool> record_metered_build(const control::MeteredBuild& build) override {
-        return call("record_metered_build", [&] { return store_->record_metered_build(build); });
+    control::Result<std::vector<control::LegacyMeteringUsage>>
+    legacy_metering_usage(const std::string& after_id, int limit) override {
+        return call("legacy_metering_usage",
+                    [&] { return store_->legacy_metering_usage(after_id, limit); });
     }
-    control::Result<std::vector<control::MeteringUsage>>
-    list_metering_usage(const std::string& customer_id,
-                        const std::string& from_hour,
-                        const std::string& to_hour,
-                        int limit) override {
-        return call("list_metering_usage", [&] {
-            return store_->list_metering_usage(customer_id, from_hour, to_hour, limit);
-        });
+    control::Result<std::vector<control::LegacyMeteredBuild>>
+    legacy_metering_build_records(const std::string& after_id, int limit) override {
+        return call("legacy_metering_build_records",
+                    [&] { return store_->legacy_metering_build_records(after_id, limit); });
     }
     control::Result<std::optional<std::uint64_t>>
     storage_quota(const std::string& customer_id) override {

@@ -128,6 +128,11 @@ struct ServerOptions {
     // The standalone server uses its outbound HTTP client when this is empty.
     transparency::TsaSender tsa_sender;
     MeteringConfig metering;
+    // Repository transfer is counted in memory and written to each workspace Zetta by the owner
+    // loop at this interval, and once more on stop (docs/api/metering.md, lake#348). Zero writes
+    // on every drain() tick. At most `metering_max_pending` counters are held.
+    std::chrono::milliseconds metering_flush_interval{std::chrono::seconds(5)};
+    std::size_t metering_max_pending = 4096;
 };
 
 // Prefer the full configured origin. public_host is already the browser-facing

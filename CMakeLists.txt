@@ -196,6 +196,7 @@ add_library(lake-core STATIC
   src/control/stream_owners.cpp
   src/control/drive_share_links.cpp
   src/control/application_webhook_records.cpp
+  src/control/metering.cpp
   "${LAKE_LIQUID_SOURCE_DIR}/src/scan/detectors.cpp"
   src/version.cpp
   src/api/web_ui.cpp
@@ -221,6 +222,7 @@ add_library(lake-core STATIC
   src/api/github_import_capabilities.cpp
   src/api/pki_capabilities.cpp
   src/api/metering_capabilities.cpp
+  src/api/metering_recorder.cpp
   src/api/drive.cpp
   src/api/drive_capabilities.cpp
   src/api/model_capabilities.cpp

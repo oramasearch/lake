@@ -797,28 +797,44 @@ struct PkiRecoveryShareEvidence {
     std::string digest;
 };
 
+// Repository transfer in one UTC hour ("YYYY-MM-DDTHH:00:00Z"). It lives in the workspace Zetta
+// of the repository's workspace (lake#348, control/metering.hpp); the control store only reads the
+// retired metering_usage table for the one-shot copy.
 struct MeteringUsage {
     std::string customer_id;
     std::string hour;
-    std::uint64_t stored_bytes = 0;
+    std::uint64_t stored_bytes = 0; // retired: only the legacy rows carry a sampled gauge
     std::uint64_t transfer_in_bytes = 0;
     std::uint64_t transfer_out_bytes = 0;
     std::uint64_t compute_seconds = 0;
 };
 
-struct MeteringUpdate {
-    std::string customer_id;
-    std::string hour;
-    std::optional<std::uint64_t> stored_bytes;
-    std::uint64_t transfer_in_bytes = 0;
-    std::uint64_t transfer_out_bytes = 0;
-};
-
+// One repository build result's compute, counted once per result (lake#349). It lives in the
+// workspace Zetta of the repository's workspace; `repository_id` is empty for a copied legacy row,
+// which the retired metering_build_records table did not record.
 struct MeteredBuild {
     std::string customer_id;
     std::string result_id;
     std::string hour;
     std::uint64_t compute_seconds = 0;
+    std::string repository_id;
+};
+
+// A row of the retired metering_usage or metering_build_records table with its recorded owner
+// (migration 0053). `id` is the row's stable identity, md5 of the customer and the hour (usage) or
+// the result id (builds) as a UUID, which pages the copy. `workspace_id` is the live workspace it
+// is copied into, or empty with the reason it is not (`needs_selection`, `workspace_deleted`).
+struct LegacyMeteringUsage {
+    std::string id;
+    MeteringUsage usage;
+    std::string workspace_id;
+    std::string outcome;
+};
+struct LegacyMeteredBuild {
+    std::string id;
+    MeteredBuild build;
+    std::string workspace_id;
+    std::string outcome;
 };
 
 nlohmann::json to_json(const User&);
@@ -1011,12 +1027,13 @@ public:
     virtual Result<std::vector<audit::Event>> list_audit_events(const audit::Filter& filter) = 0;
     virtual Result<void> set_audit_retention_days(const std::string& customer_id, int days) = 0;
 
-    virtual Result<MeteringUsage> upsert_metering_usage(const MeteringUpdate& update) = 0;
-    virtual Result<bool> record_metered_build(const MeteredBuild& build) = 0;
-    virtual Result<std::vector<MeteringUsage>> list_metering_usage(const std::string& customer_id,
-                                                                   const std::string& from_hour,
-                                                                   const std::string& to_hour,
-                                                                   int limit) = 0;
+    // The retired metering tables (lake#348, lake#349): migration 0053's owner assignment, rerun
+    // before each copy for rows an older replica wrote, and the rows a page at a time by id.
+    virtual Result<void> assign_legacy_metering() = 0;
+    virtual Result<std::vector<LegacyMeteringUsage>>
+    legacy_metering_usage(const std::string& after_id, int limit) = 0;
+    virtual Result<std::vector<LegacyMeteredBuild>>
+    legacy_metering_build_records(const std::string& after_id, int limit) = 0;
     virtual Result<std::optional<std::uint64_t>> storage_quota(const std::string& customer_id) = 0;
     virtual Result<std::vector<Workspace>> list_workspaces(const std::string& customer_id) = 0;
     virtual Result<Workspace> get_workspace(const std::string& id) = 0;

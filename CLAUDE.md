@@ -55,6 +55,10 @@ token names its workspace, and only a content-free route for pre-move tokens sta
 migration `0045`); application lifecycle events and webhook delivery attempts follow (lake#356,
 lake#357, migration `0049`, in the application's workspace). Each PostgreSQL table stays until a
 later migration drops it after the copy is verified on dev.
+Repository usage follows (lake#348, lake#349, migration `0053`): exact hourly transfer counters and
+one build record per result in the repository's workspace Zetta, written from a bounded in-process
+buffer the owner loop flushes every five seconds and on drain, never on the sync path; repository
+storage is measured live and no longer recorded. See `docs/api/metering.md`.
 
 Every repository belongs to one workspace (lake#315 part 1, migration `0051`): an immutable
 `repositories.workspace_id` required on every create and import, returned on reads and carried
@@ -158,8 +162,9 @@ Published artifact outputs are decomposed through libliquid's format registry af
 publication or through the audited `reindex_artifacts` action. Scoped artifact search reports
 indexed text and source members with artifact identity, member path, digest, and line; binary
 members and containers nested beyond one inner level remain listed by digest only.
-Metering migration `0014_metering` stores hourly unique-byte gauges, sync transfer counters, and
-idempotent build-compute counters. `metering_usage` and `/metering` expose configured integer
+Metering migration `0014_metering` stored hourly unique-byte gauges, sync transfer counters, and
+idempotent build-compute counters; since `0053` (lake#348, lake#349) transfer and build records live
+in each repository's workspace Zetta and storage is measured live. `metering_usage` and `/metering` expose configured integer
 pricing, with audited per-customer quota overrides. Its current summary also measures registry
 image bytes, workspace Zetta dataset bytes, image build time and workspace run time on each read,
 without storing them, and lists what is not measured yet (lake#444). `LAKE_STORAGE_QUOTA_BYTES` remains the
