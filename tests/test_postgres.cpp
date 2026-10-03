@@ -4,10 +4,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <liquid/liquid.hpp>
@@ -1591,4 +1593,33 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
     EXPECT_EQ(messages->at(1).payload["reads"], json::array());
     EXPECT_TRUE(store->ask_conversation(conversation, lake::control::new_uuid_v4(), 50)->empty())
         << "only the person who had the conversation reads it back";
+}
+
+TEST(PostgresSessions, AnExpiredCredentialIsToldApartFromAnUnknownOne) {
+    // lake#450: a caller holding the real secret of an expired token learns it expired; any other
+    // secret is simply not active.
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:exp-" + suffix, "exp-" + suffix + "@example.com", "Expiring"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto token =
+        store->create_token({user->id, "lake", "short", "test", {"list_customers"}, 1, false});
+    ASSERT_TRUE(token) << token.error().message;
+    ASSERT_TRUE(store->context_for(token->secret)) << "live before it expires";
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    const auto expired = store->context_for(token->secret);
+    ASSERT_FALSE(expired);
+    EXPECT_EQ(expired.error().code, "expired");
+    std::string wrong = token->secret;
+    wrong.back() = wrong.back() == 'a' ? 'b' : 'a';
+    const auto unknown = store->context_for(wrong);
+    ASSERT_FALSE(unknown);
+    EXPECT_NE(unknown.error().code, "expired") << "a wrong secret never learns of the session";
 }

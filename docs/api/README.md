@@ -47,9 +47,13 @@ continues to declare its value schema once; the registry nests that schema under
 `structuredContent` and as its text content, without changing the value's shape.
 
 Failures use `{ "ok": false, "error": { "code", "message", "path" }, "duration_ms" }`,
-also serialized and described by the registry. REST status by error code: `invalid_input` 400,
-`unauthorized` / `mfa_required` 403, `not_found` / `unknown_capability` 404,
-`conflict` / `unrecoverable` 409, `store_unavailable` 503, anything else 500. MCP capability
+also serialized and described by the registry. [`errors.md`](errors.md) lists every code a caller
+can receive with its REST status (`error_codes()` is the one table; `invalid_input` 400,
+`unauthenticated` 401 with `reason` and `help`, `unauthorized` 403, `not_found` 404, `conflict`
+409, `store_unavailable` 503, …); any other code is answered as `store_error`. `path` is set
+whenever the input is at fault. [`naming.md`](naming.md) gives the one name each concept has across
+capabilities (`customer_id`, `run_id`, `model_id`, `index_id`) and the deprecated aliases still
+accepted. An empty query key (`/v1/server_info?`) is ignored. MCP capability
 failures are successful JSON-RPC exchanges over HTTP 200 with `isError: true` and the same
 error envelope; the advertised success `outputSchema` applies when `isError: false`.
 Database `ERROR:` and `DETAIL:` diagnostics are logged server-side and replaced before an
@@ -121,7 +125,7 @@ credentials.
 | `get_organization` | read | `id` | organization | [customers.md](customers.md) |
 | `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization | [organizations.md](organizations.md) |
 | `list_customers` | read | `limit` | `{items: [customer]}` | [customers.md](customers.md) |
-| `get_customer` | read | `id` (or `customer_id`) | customer | [customers.md](customers.md) |
+| `get_customer` | read | `customer_id` (`id` deprecated) | customer | [customers.md](customers.md) |
 | `create_customer` | action | `customer_type`, `user_id?`, `organization_id?`, `name?` | customer | [customers.md](customers.md) |
 | `list_repositories` | read | `customer_id?`, `limit` | `{items: [repository]}` | [repositories.md](repositories.md) |
 | `get_repository` | read | `id` | repository | [repositories.md](repositories.md) |
@@ -138,7 +142,7 @@ credentials.
 | `share_drive_folder`, `drive_effective_access`, `drive_shared_with_me` | action/read | folder, recipient, role and evidence; folder; or no input | live grant, direct/inherited access panel, or direct live folders for the signed-in identity | [sharing.md](sharing.md) |
 | `create_drive_share_link`, `resolve_drive_share_link`, `revoke_drive_share_link` | action/read | folder, role, expiry; token, ref, optional descendant path; or link id | scoped link, authorized folder contents, or revoked link | [sharing.md](sharing.md) |
 | `preview_drive_share_link`, `download_drive_share_link` | read, bearer link | token, ref, file path | scoped format-registry preview or exact base64 bytes; expiry and revocation checked on every call | [sharing.md](sharing.md) |
-| `get_model`, `get_dataset`, `resolve_model_file`, `resolve_dataset_file` | read | repository id and revision, or ApplicationAgent workspace dataset id; file path where required | compatible model/dataset metadata, workspace schema, storage/provenance, or exact file | [models.md](models.md) |
+| `get_model`, `get_dataset`, `resolve_model_file`, `resolve_dataset_file` | read | repository id and revision, or, without `revision`, a workspace model or dataset id with `customer_id` and `workspace_id`; file path where required | compatible model/dataset metadata, the workspace's trained model or dataset schema, storage/provenance, or exact file | [models.md](models.md) |
 | `prepare_repository_upload`, `stage_repository_file`, `commit_repository_files` | action | repository id plus upload plan, verified staged bytes, or file operations | upload modes, unique stored bytes, or immutable committed revision | [models.md](models.md) |
 | `attach_model_provenance`, `verify_model_provenance` | action | model and dataset revisions plus canonical liquid attestations, or model revision | attached or re-verified dataset-to-model training chain | [models.md](models.md) |
 | `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | repository | [repositories.md](repositories.md) |

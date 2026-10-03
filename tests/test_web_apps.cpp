@@ -336,7 +336,7 @@ TEST(WebApps, CapabilitiesAreCustomerScopedAndValidateSecretsHostsAndDeletes) {
     EXPECT_EQ(apps.registry
                   .call("get_app", {{"app_id", id}, {"customer_id", apps.customer_id}}, anonymous)
                   .error.code,
-              "unauthorized");
+              "unauthenticated");
     const auto secret = apps.call("set_app_env",
                                   {{"app_id", id},
                                    {"key", "AWS_SECRET_ACCESS_KEY"},

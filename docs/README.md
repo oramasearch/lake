@@ -3,6 +3,11 @@
 One folder per topic, one file per subject. The root README is the front door; this index points
 to the detailed contracts and records.
 
+[api/errors.md](api/errors.md) lists every error code a capability answers with its REST status,
+the 401 `missing`/`invalid`/`expired` contract and where `path` comes from;
+[api/naming.md](api/naming.md) gives the one name each concept has across capabilities and the
+deprecated aliases still accepted (lake#450).
+
 [control-plane/workspaces.md](control-plane/workspaces.md) defines migration 0039, workspace
 desired state, operator notifications, the schema guard and the approved dev-cluster cutover.
 Its native verification is recorded in [build/workspace-contract-proof.md](build/workspace-contract-proof.md).

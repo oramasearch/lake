@@ -244,7 +244,16 @@ constexpr std::string_view rules =
     "- `search_index` works only on a **published** index.\n"
     "- `workspace_sql` runs one read-only `SELECT` or `WITH`.\n"
     "- Deleting a workspace, a service, a store or a repository destroys its data: ask the "
-    "person first.\n";
+    "person first.\n"
+    "- Names: a space is always `customer_id`, a workspace `workspace_id`, a run `run_id`, a "
+    "model `model_id` and an index `index_id`, including inside `workspace_query` and "
+    "`workspace_act` input. The older `run`, `model`, `index` and get_customer's `id` still work "
+    "and are deprecated. A dataset id is `<database>/<name>` everywhere.\n"
+    "- A failure is `{ok: false, error: {code, message, path}}`. `path` points at the input field "
+    "at fault; `code` is one of those `/v1/openapi.json` lists in `error_envelope`. "
+    "`unauthenticated` (HTTP 401) "
+    "carries `reason` (`missing`, `invalid` or `expired`) and `help`, the page that makes a new "
+    "key.\n";
 
 } // namespace
 
@@ -296,7 +305,8 @@ const std::vector<Flow>& flows() {
            "approved again"},
           {"run_pipeline", "runs the checks, then the pipeline; answers {gate, run}"}}},
         {"Load a dataset",
-         "A dataset is a table in your workspace. Upload a CSV or JSONL file's text (up to 16 MiB).",
+         "A dataset is a table in your workspace. Upload a CSV or JSONL file's text (up to 16 "
+         "MiB).",
          {{"create_workspace",
            "once (a `name` and an `environment`); its `id` is the `workspace_id` every later call "
            "names. Poll `workspace_status` until it is ready"},
@@ -305,7 +315,8 @@ const std::vector<Flow>& flows() {
            "content}`; answers the rows loaded and the dataset's `id`. A name is letters, digits "
            "and underscores; a taken name answers `conflict` unless `if_exists: \"rename\"`; a "
            "CSV row whose field count differs from the header is refused with its line"},
-          {"workspace_query", "`capability: \"get_dataset\"`, `input: {dataset}` (the `id` "
+          {"workspace_query",
+           "`capability: \"get_dataset\"`, `input: {dataset}` (the `id` "
            "`<database>/<name>` from `list_datasets`): its columns"},
           {"workspace_sql", "`statement: \"SELECT … LIMIT 20\"` to look at it"}}},
         {"Train a model and call it",
@@ -320,9 +331,14 @@ const std::vector<Flow>& flows() {
           {"run_pipeline",
            "`dataset_path: \"datasets.<name>\"`, `holdout_fraction: 0.2`, `model_name`; answers "
            "{gate, run}"},
-          {"workspace_query", "`capability: \"get_run_report\"`, `input: {run_id}` once it finished"},
-          {"workspace_act", "`capability: \"expose_model\"`, `input: {model: <id>}` to publish it"},
-          {"predict", "`model`, `rows`: scores rows through the published model"}}},
+          {"workspace_query",
+           "`capability: \"get_run_report\"`, `input: {run_id}` once it finished"},
+          {"workspace_act",
+           "`capability: \"expose_model\"`, `input: {model_id: <id>}` to publish it; answers "
+           "the `predict` call to make"},
+          {"predict",
+           "`model_id`, `rows` (each with its key in `entity`): the rows ranked by risk, each "
+           "answered with its `entity` key and `row`"}}},
         {"Stand up a Postgres service and connect it",
          "A service is a database, stream or engine lake runs for your space.",
          {{"list_service_kinds", "the kinds, their expected start times, which are preview"},
@@ -344,7 +360,7 @@ const std::vector<Flow>& flows() {
          {{"workspace_query", "`capability: \"list_indexes\"` to find the index id"},
           {"workspace_act",
            "`capability: \"expose_index\"` to publish it (`unexpose_index` to stop)"},
-          {"search_index", "`index`, `query`; optional `field`, `top_k`"}}},
+          {"search_index", "`index_id`, `query`; optional `field`, `top_k`"}}},
     };
     return all;
 }

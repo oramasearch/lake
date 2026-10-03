@@ -331,7 +331,7 @@ TEST(Examples, TheModelsPageCurlNamesTheSignedInWorkspaceAndRunsAgainstPredict) 
     EXPECT_EQ(examples[0].input.value("workspace_id", std::string()), "9d8c7b6a-workspace")
         << "the page's own workspace, so the call works as pasted";
     EXPECT_EQ(examples[0].input.value("customer_id", std::string()), page.customer_id);
-    EXPECT_EQ(examples[0].input.value("model", std::string()), "0aebdb83-model");
+    EXPECT_EQ(examples[0].input.value("model_id", std::string()), "0aebdb83-model");
     EXPECT_TRUE(examples[0].input["rows"][0].contains("tenure_months"));
     expect_valid(examples);
 

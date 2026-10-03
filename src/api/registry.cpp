@@ -1,6 +1,7 @@
 #include "lake/api/registry.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
@@ -41,7 +42,89 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
+constexpr std::array<ErrorCode, 29> documented_error_codes{{
+    {"invalid_input", 400, "The input is at fault; `path` points at the field."},
+    {"secret_required",
+     400,
+     "A value that looks like a secret was sent in plain text; store it as a Secret and pass its "
+     "reference."},
+    {"invalid_digest",
+     400,
+     "An archive or record does not match the digest it carries, so it was changed or damaged."},
+    {"invalid_signature", 400, "A signature does not verify against its key."},
+    {"unauthenticated",
+     401,
+     "No credential was accepted: `reason` says whether it was missing, invalid or expired, and "
+     "`help` links to the page that makes a new key."},
+    {"unauthorized", 403, "The credential is valid but does not grant this call on this object."},
+    {"mfa_required", 403, "The account must finish multi-factor verification first."},
+    {"consent_required",
+     403,
+     "The workspace requires an approval before it reaches an outside source, which lake cannot "
+     "give."},
+    {"not_found", 404, "The addressed object does not exist, or the caller cannot see it."},
+    {"unknown_capability", 404, "No capability has this name."},
+    {"method_not_allowed",
+     405,
+     "The capability exists but takes the other HTTP method: reads GET, actions POST."},
+    {"conflict", 409, "The change conflicts with existing state, such as a name already taken."},
+    {"already_exists", 409, "A repository object or reference with this identity already exists."},
+    {"locked", 409, "Another writer holds the repository reference; retry."},
+    {"unrecoverable",
+     409,
+     "The request cannot succeed as asked, such as recovering a key only a lost device held."},
+    {"not_approved",
+     409,
+     "The workspace action needs an approval it does not have yet: approve the plan or the "
+     "decision first."},
+    {"gate_blocked", 409, "A pipeline gate refused the run; the message names the failing check."},
+    {"invalid_chain",
+     409,
+     "The audit log's hash chain is broken: an event is missing or was changed."},
+    {"size_invalid", 413, "The request body is larger than the limit."},
+    {"engine_error", 502, "The workspace engine could not complete the call; the message is its."},
+    {"not_supported", 501, "This lake or its workspace engine cannot do what was asked yet."},
+    {"quota_exceeded",
+     507,
+     "The customer's storage quota is full; existing content stays readable."},
+    {"store_error", 500, "The server failed; the message says what failed."},
+    {"corrupt", 500, "Stored repository data failed an integrity check."},
+    {"io", 500, "Repository storage could not be read or written."},
+    {"crypto_error", 500, "A signing, hashing or certificate operation failed on the server."},
+    {"store_unavailable",
+     503,
+     "The control-plane store, the workspace or another dependency is not reachable now."},
+    {"workspace_not_ready", 503, "The workspace or service exists but is not ready yet."},
+    {"busy", 503, "The resource is busy; retry."},
+}};
+
+// Other spellings of a documented code: the workspace engine's and liquid's.
+std::string_view documented_spelling(std::string_view code) {
+    if (code == "invalid_argument") {
+        return "invalid_input";
+    }
+    if (code == "unsupported") {
+        return "not_supported";
+    }
+    if (code == "unavailable" || code == "not_remote" || code == "not_configured") {
+        return "store_unavailable";
+    }
+    if (code == "internal") {
+        return "store_error";
+    }
+    return code;
+}
+
 } // namespace
+
+std::span<const ErrorCode> error_codes() {
+    return documented_error_codes;
+}
+
+const ErrorCode* find_error_code(std::string_view code) {
+    const auto found = std::ranges::find(documented_error_codes, code, &ErrorCode::code);
+    return found == documented_error_codes.end() ? nullptr : &*found;
+}
 
 ApiResult ApiResult::success(nlohmann::json output) {
     ApiResult result;
@@ -51,6 +134,12 @@ ApiResult ApiResult::success(nlohmann::json output) {
 }
 
 ApiResult ApiResult::failure(std::string code, std::string message, std::string path) {
+    code = std::string(documented_spelling(code));
+    if (find_error_code(code) == nullptr) {
+        // An undocumented code never reaches a caller (lake#450): it is named in the message.
+        message = code.empty() ? message : code + ": " + message;
+        code = "store_error";
+    }
     if (contains_database_diagnostic(message)) {
         log_database_diagnostic(code, message);
         message = product_store_message(code);
@@ -69,21 +158,44 @@ nlohmann::json ApiResult::envelope() const {
     } else {
         envelope["error"] = {
             {"code", error.code}, {"message", error.message}, {"path", error.path}};
+        if (!error.reason.empty()) {
+            envelope["error"]["reason"] = error.reason;
+        }
+        if (!error.help.empty()) {
+            envelope["error"]["help"] = error.help;
+        }
     }
     envelope["duration_ms"] = duration_ms;
     return envelope;
 }
 
 nlohmann::json error_envelope_schema() {
+    nlohmann::json codes = nlohmann::json::array();
+    for (const ErrorCode& code : documented_error_codes) {
+        codes.push_back(std::string(code.code));
+    }
     return {{"type", "object"},
             {"properties",
              {{"ok", {{"const", false}}},
               {"error",
                {{"type", "object"},
                 {"properties",
-                 {{"code", {{"type", "string"}}},
+                 {{"code",
+                   {{"type", "string"},
+                    {"enum", std::move(codes)},
+                    {"description", "what went wrong, one of the codes in docs/api/errors.md"}}},
                   {"message", {{"type", "string"}}},
-                  {"path", {{"type", "string"}}}}},
+                  {"path",
+                   {{"type", "string"},
+                    {"description",
+                     "JSON pointer to the input field at fault; empty when the input is not"}}},
+                  {"reason",
+                   {{"type", "string"},
+                    {"enum", {"missing", "invalid", "expired"}},
+                    {"description", "unauthenticated only: why no credential was accepted"}}},
+                  {"help",
+                   {{"type", "string"},
+                    {"description", "unauthenticated only: where to make a new key"}}}}},
                 {"required", nlohmann::json::array({"code", "message"})}}},
               {"duration_ms", {{"type", "number"}}}}},
             {"required", nlohmann::json::array({"ok", "error", "duration_ms"})}};
@@ -363,6 +475,39 @@ const nlohmann::json& workspace_path_input(const Capability& capability,
     return resolved;
 }
 
+// An input refusal that leads with the field it is about ("confirm must be the service name",
+// "storage_gi: too large") points at that field when the handler gave no path (lake#450).
+void point_at_named_field(ApiResult& result, const nlohmann::json& input) {
+    if (result.ok || result.error.code != "invalid_input" || !result.error.path.empty() ||
+        !input.is_object()) {
+        return;
+    }
+    const std::string& message = result.error.message;
+    for (const auto& [key, value] : input.items()) {
+        if (message.size() > key.size() && message.starts_with(key) &&
+            std::string_view(" :.,").contains(message[key.size()])) {
+            result.error.path = pointer_child("", key);
+            return;
+        }
+    }
+}
+
+// No credential was accepted (lake#450): 401, saying whether one was missing, invalid or expired,
+// and where a person makes a new key.
+ApiResult unauthenticated(const ApiContext& context) {
+    const std::string reason =
+        context.credential_rejection.empty() ? "missing" : context.credential_rejection;
+    const std::string message =
+        reason == "expired"   ? "the credential has expired; sign in again or make a new key"
+        : reason == "invalid" ? "the credential is not valid (unknown, revoked or mistyped); sign "
+                                "in again or make a new key"
+                              : "a credential is required: send an API key as a bearer token";
+    ApiResult result = ApiResult::failure("unauthenticated", message);
+    result.error.reason = reason;
+    result.error.help = context.request_origin + "/developer/mcp";
+    return result;
+}
+
 CallState prepare_call(std::shared_ptr<const Capability> capability,
                        const nlohmann::json& input,
                        ApiContext& context) {
@@ -390,8 +535,7 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
             ? input.at("workspace_id").get<std::string>() : std::string();
     }
     if (entry.requires_auth && !context.authorized && !entry.allows_anonymous_public_read) {
-        state.result = ApiResult::failure("unauthorized",
-                                          "a valid session or operator credential is required");
+        state.result = unauthenticated(context);
         state.proceed = false;
     } else if (ApiResult validation = validate_input(entry, input); !validation.ok) {
         state.result = validation;
@@ -455,11 +599,18 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
             ? context.store->get_workspace(context.workspace_id)
             : control::Result<control::Workspace>(std::unexpect,
                   control::StoreError{"invalid_input", "workspace_id is unknown"});
-        if (!workspace ||
-            (input.contains("customer_id") && input.at("customer_id") != workspace->customer_id) ||
-            (!context.path_workspace_id.empty() && context.workspace_id != context.path_workspace_id)) {
+        if (!workspace || (!context.path_workspace_id.empty() &&
+                           context.workspace_id != context.path_workspace_id)) {
             state.result = ApiResult::failure("invalid_input",
                 "workspace_id must name a workspace Zetta in this space", "/workspace_id");
+            state.proceed = false;
+        } else if (input.contains("customer_id") &&
+                   input.at("customer_id") != workspace->customer_id) {
+            // The workspace exists, so the space named beside it is the one at fault (lake#450).
+            state.result = ApiResult::failure("invalid_input",
+                                              "customer_id is not the space that owns workspace " +
+                                                  context.workspace_id,
+                                              "/customer_id");
             state.proceed = false;
         }
         if (state.proceed && context.credential_kind == "agent_task" &&
@@ -514,7 +665,18 @@ std::string acting_agent(const ApiContext& context) {
     return {};
 }
 
-ApiResult finish_call(const std::string& name, ApiResult result, ApiContext& context) {
+ApiResult finish_call(const Capability* capability,
+                      const std::string& name,
+                      ApiResult result,
+                      ApiContext& context) {
+    // An anonymous caller refused by a capability that otherwise needs a credential (a private
+    // repository read) is refused for want of one.
+    if (capability != nullptr && capability->requires_auth && !context.authorized && !result.ok &&
+        result.error.code == "unauthorized") {
+        const double duration = result.duration_ms;
+        result = unauthenticated(context);
+        result.duration_ms = duration;
+    }
     if (!context.store) {
         return result;
     }
@@ -532,8 +694,11 @@ ApiResult finish_call(const std::string& name, ApiResult result, ApiContext& con
         .principal = context.acting_identity.empty() ? "anonymous" : context.acting_identity,
         .object = context.audit_object.empty() ? "capability/" + name : context.audit_object,
         .action = name,
-        .outcome =
-            result.ok ? "success" : (result.error.code == "unauthorized" ? "denied" : "failure"),
+        .outcome = result.ok ? "success"
+                             : (result.error.code == "unauthorized" ||
+                                        result.error.code == "unauthenticated"
+                                    ? "denied"
+                                    : "failure"),
         .request_id = context.request_id,
         .method = context.authentication_method,
         .device = context.device,
@@ -588,9 +753,46 @@ ApiResult validate_input(const Capability& capability, const nlohmann::json& inp
     return validate_value(capability.input_schema, input, "");
 }
 
+std::expected<nlohmann::json, ApiError> canonical_input(const Capability& capability,
+                                                        const nlohmann::json& input) {
+    if (capability.input_aliases.empty() || !input.is_object()) {
+        return input;
+    }
+    nlohmann::json canonical = input;
+    for (const auto& [alias, name] : capability.input_aliases) {
+        const auto found = canonical.find(alias);
+        if (found == canonical.end()) {
+            continue;
+        }
+        if (const auto current = canonical.find(name);
+            current != canonical.end() && !current->is_null() && *current != *found) {
+            return std::unexpected(
+                ApiError{"invalid_input",
+                         alias + " is the deprecated name of " + name + "; send only " + name,
+                         pointer_child("", alias)});
+        }
+        nlohmann::json value = std::move(*found);
+        canonical.erase(alias);
+        canonical[name] = std::move(value);
+    }
+    return canonical;
+}
+
 bool Registry::add(Capability capability) {
     if (capability.name.empty() || find(capability.name))
         return false;
+    // A deprecated alias is listed in the schema, so OpenAPI and MCP show it (docs/api/naming.md).
+    for (const auto& [alias, name] : capability.input_aliases) {
+        auto& properties = capability.input_schema["properties"];
+        if (!properties.contains(name) || properties.contains(alias)) {
+            return false;
+        }
+        nlohmann::json property = properties.at(name);
+        property["deprecated"] = true;
+        property["description"] = "Deprecated: the old name of `" + name + "`; send `" + name +
+                                  "`. Accepted while callers move.";
+        properties[alias] = std::move(property);
+    }
     entries_.push_back(std::make_shared<const Capability>(std::move(capability)));
     return true;
 }
@@ -613,9 +815,18 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
     const auto capability = find(name);
     if (!capability)
         return ApiResult::failure("unknown_capability", "no capability named " + name);
+    const auto canonical = canonical_input(*capability, input);
+    if (!canonical) {
+        return finish_call(capability.get(),
+                           name,
+                           ApiResult::failure(canonical.error().code,
+                                              canonical.error().message,
+                                              canonical.error().path),
+                           context);
+    }
     nlohmann::json workspace_resolved_input;
     const nlohmann::json& workspace_input =
-        workspace_path_input(*capability, input, context, workspace_resolved_input);
+        workspace_path_input(*capability, *canonical, context, workspace_resolved_input);
     nlohmann::json task_resolved_input;
     const nlohmann::json& call_input =
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
@@ -632,11 +843,12 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
         } catch (const std::exception& error) {
             state.result = ApiResult::failure("store_error", error.what());
         }
+        point_at_named_field(state.result, call_input);
         state.result.duration_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
                 .count();
     }
-    return finish_call(name, std::move(state.result), context);
+    return finish_call(capability.get(), name, std::move(state.result), context);
 }
 
 liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
@@ -647,9 +859,18 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
     if (!capability) {
         co_return ApiResult::failure("unknown_capability", "no capability named " + name);
     }
+    const auto canonical = canonical_input(*capability, input);
+    if (!canonical) {
+        co_return finish_call(capability.get(),
+                              name,
+                              ApiResult::failure(canonical.error().code,
+                                                 canonical.error().message,
+                                                 canonical.error().path),
+                              context);
+    }
     nlohmann::json workspace_resolved_input;
     const nlohmann::json& workspace_input =
-        workspace_path_input(*capability, input, context, workspace_resolved_input);
+        workspace_path_input(*capability, *canonical, context, workspace_resolved_input);
     nlohmann::json task_resolved_input;
     const nlohmann::json& call_input =
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
@@ -672,11 +893,12 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
         } catch (const std::exception& error) {
             state.result = ApiResult::failure("store_error", error.what());
         }
+        point_at_named_field(state.result, call_input);
         state.result.duration_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
                 .count();
     }
-    co_return finish_call(name, std::move(state.result), context);
+    co_return finish_call(capability.get(), name, std::move(state.result), context);
 }
 
 } // namespace lake::api

@@ -112,24 +112,30 @@ json browse_schema() {
 }
 
 // Registry boundary validation handles shapes; enforce the numeric and enum bounds as well.
-bool constraints(const json& schema, const json& value) {
+// On a violation `at` is the JSON pointer of the value outside its bounds (lake#450).
+bool constraints(const json& schema,
+                 const json& value,
+                 std::string& at,
+                 const std::string& here = {}) {
     if (value.is_null()) {
         const auto type = schema.value("type", json());
         return type == "null" || (type.is_array() &&
             std::ranges::find(type, json("null")) != type.end());
     }
     if (schema.contains("enum") && std::ranges::find(schema["enum"], value) == schema["enum"].end()) {
+        at = at.empty() ? here : at;
         return false;
     }
     if (value.is_number()) {
         if ((schema.contains("minimum") && value < schema["minimum"]) ||
             (schema.contains("maximum") && value > schema["maximum"])) {
+            at = at.empty() ? here : at;
             return false;
         }
     }
     if (value.is_object()) {
         for (const auto& [key, child] : value.items()) {
-            if (!constraints(schema.at("properties").at(key), child)) {
+            if (!constraints(schema.at("properties").at(key), child, at, here + "/" + key)) {
                 return false;
             }
         }
@@ -139,10 +145,12 @@ bool constraints(const json& schema, const json& value) {
             (schema.contains("maxItems") && value.size() > schema["maxItems"].get<std::size_t>()) ||
             (schema.value("uniqueItems", false) &&
              std::set<json>(value.begin(), value.end()).size() != value.size())) {
+            at = at.empty() ? here : at;
             return false;
         }
-        for (const auto& child : value) {
-            if (!constraints(schema.at("items"), child)) {
+        for (std::size_t index = 0; index < value.size(); ++index) {
+            if (!constraints(
+                    schema.at("items"), value[index], at, here + "/" + std::to_string(index))) {
                 return false;
             }
         }
@@ -592,7 +600,8 @@ Task mutate(ApiContext& context, const json& input, const std::string& name) {
     if (create) {
         args["settings"] = input.value("settings", json::object());
         if (args["settings"].contains("exposed") && args["settings"]["exposed"] != true) {
-            co_return ApiResult::failure("invalid_input", "Streams topics must be exposed");
+            co_return ApiResult::failure(
+                "invalid_input", "Streams topics must be exposed", "/settings/exposed");
         }
         args["settings"]["exposed"] = true;
         if (!args["settings"].contains("max_events")) {
@@ -618,7 +627,8 @@ Task mutate(ApiContext& context, const json& input, const std::string& name) {
         upstream = "update_topic";
     } else if (name == "delete_stream") {
         if (topic_name(input.value("confirm_name", "")) != topic) {
-            co_return ApiResult::failure("invalid_input", "type the topic name to confirm deletion");
+            co_return ApiResult::failure(
+                "invalid_input", "type the topic name to confirm deletion", "/confirm_name");
         }
         upstream = "drop_topic";
     } else if (name == "publish_stream_message" || name == "update_stream_message") {
@@ -635,7 +645,8 @@ Task mutate(ApiContext& context, const json& input, const std::string& name) {
              input["sequences"].size() > 1000 ||
              std::set<json>(input["sequences"].begin(), input["sequences"].end()).size() !=
              input["sequences"].size()))) {
-            co_return ApiResult::failure("invalid_input", "choose unique sequences or before_sequence");
+            co_return ApiResult::failure(
+                "invalid_input", "choose unique sequences or before_sequence", "/sequences");
         }
         const auto counted = completed(co_await count_changes(context, input, json::object(), false));
         if (!counted.ok) {
@@ -668,6 +679,38 @@ Task mutate(ApiContext& context, const json& input, const std::string& name) {
     co_return result;
 }
 
+// What each stream capability does for the person calling it (lake#450).
+std::string stream_description(const std::string& name) {
+    static const std::map<std::string, std::string> descriptions = {
+        {"list_streams",
+         "List the streams (topics) of a workspace and the lake bus with their held messages "
+         "and subscribers, to find the one to read."},
+        {"get_stream",
+         "Read one stream's settings, sequence range and subscriptions with their lag, and "
+         "whether it is a system stream."},
+        {"browse_stream",
+         "Read a stream's messages from a sequence number, optionally waiting for new ones, "
+         "without consuming them."},
+        {"create_stream",
+         "Create a stream in a workspace or on the lake bus, owned by you; needs the person's "
+         "confirmation."},
+        {"update_stream",
+         "Change the retention or other settings of a stream you created; `dry_run` shows the "
+         "effect first."},
+        {"delete_stream",
+         "Delete a stream you created and every message in it; `confirm_name` must be its name."},
+        {"publish_stream_message",
+         "Append one message to a stream you created, answered with its sequence number."},
+        {"update_stream_message",
+         "Replace the payload of one message in a stream you created, by its sequence number."},
+        {"delete_stream_messages",
+         "Delete messages from a stream you created: chosen sequence numbers, or everything "
+         "before one."},
+    };
+    const auto found = descriptions.find(name);
+    return found == descriptions.end() ? std::string() : found->second;
+}
+
 void add(Registry& registry, std::string name, json properties, json required, json output,
          std::string permission) {
     properties["customer_id"] = text();
@@ -686,23 +729,31 @@ void add(Registry& registry, std::string name, json properties, json required, j
     }
     const bool read = permission == "read";
     registry.add(Capability{
-        .name = name, .title = name,
-        .description = read ? "Read space streams without consuming messages."
-                            : "Change a person-created stream after the person confirms.",
-        .input_schema = schema, .output_schema = std::move(output),
+        .name = name,
+        .title = name,
+        .description = stream_description(name),
+        .input_schema = schema,
+        .output_schema = std::move(output),
         .kind = read ? CapabilityKind::Read : CapabilityKind::Action,
-        .post_alias = read, .object = "customer", .action = std::move(permission),
-        .resolve_object = customer_object, .authorizes_candidates = name == "list_streams",
+        .post_alias = read,
+        .object = "customer",
+        .action = std::move(permission),
+        .resolve_object = customer_object,
+        .authorizes_candidates = name == "list_streams",
         .resolves_operator_audit_target = true,
         .async_handler = [name, schema](const json& input, ApiContext& context) -> Task {
-            if (!constraints(schema, input)) {
-                co_return ApiResult::failure("invalid_input", "stream argument is outside its bounds");
+            if (std::string at; !constraints(schema, input, at)) {
+                co_return ApiResult::failure("invalid_input",
+                                             (at.empty() ? std::string("input") : at.substr(1)) +
+                                                 " is outside its bounds",
+                                             at);
             }
             if (input.contains("topic")) {
                 const auto topic = topic_name(input.at("topic"));
                 if (topic.empty() || topic.size() > 512 || topic.find_first_of("*? /\\\t\r\n") != std::string::npos ||
                     (topic.contains(':') && !topic.starts_with("inbox:"))) {
-                    co_return ApiResult::failure("invalid_input", "a concrete topic name is required");
+                    co_return ApiResult::failure(
+                        "invalid_input", "a concrete topic name is required", "/topic");
                 }
             }
             context.audit_kind = "stream." + name;

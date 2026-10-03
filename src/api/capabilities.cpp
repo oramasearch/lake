@@ -1565,28 +1565,47 @@ template <class T> ApiResult one_result(control::Result<T> row) {
     return ApiResult::success(control::to_json(*row));
 }
 
+bool known_token_scope(const std::string& scope, const Registry* registry) {
+    if (scope == "*" || scope == "registry_pull") {
+        return true;
+    }
+    return registry != nullptr && registry->find(scope) != nullptr;
+}
+
 std::expected<control::NewToken, ApiError> attenuated_token(const json& input,
                                                             const ApiContext& context) {
     const bool is_static = input.value("static", false);
-    if (!std::ranges::all_of(input.at("scopes"),
-                             [](const json& scope) {
-                                 return scope.is_string() &&
-                                        !scope.get_ref<const std::string&>().empty();
-                             }) ||
-        (input.contains("expires_in_seconds") &&
-         input.at("expires_in_seconds").is_number_unsigned() &&
-         input.at("expires_in_seconds").get<std::uint64_t>() >
-             static_cast<std::uint64_t>(std::numeric_limits<int>::max()))) {
-        return std::unexpected(ApiError{"invalid_input", "invalid token scopes or lifetime"});
+    if (input.contains("expires_in_seconds") &&
+        input.at("expires_in_seconds").is_number_unsigned() &&
+        input.at("expires_in_seconds").get<std::uint64_t>() >
+            static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+        return std::unexpected(
+            ApiError{"invalid_input", "expires_in_seconds is too large", "/expires_in_seconds"});
     }
     const auto scopes = input.at("scopes").get<std::vector<std::string>>();
+    // A scope is a capability name, `*`, or `registry_pull` (docs/api/auth.md#scopes); anything
+    // else would grant nothing, so it is refused rather than stored (lake#450).
+    for (std::size_t index = 0; index < scopes.size(); ++index) {
+        if (!known_token_scope(scopes[index], context.registry)) {
+            return std::unexpected(ApiError{
+                "invalid_input",
+                "unknown scope '" + scopes[index] +
+                    "': a scope is a capability name (GET /v1/openapi.json lists them), * for "
+                    "every capability, or registry_pull to pull images",
+                "/scopes/" + std::to_string(index)});
+        }
+    }
     const auto requested = input.value("expires_in_seconds", std::int64_t{60 * 60 * 24 * 30});
-    if (scopes.empty() || input.at("name").get<std::string>().empty() ||
-        (is_static && input.value("reason", "").empty()) ||
-        (!is_static && (requested <= 0 || requested > std::numeric_limits<int>::max()))) {
+    if (input.at("name").get<std::string>().empty()) {
+        return std::unexpected(ApiError{"invalid_input", "a token needs a name", "/name"});
+    }
+    if (is_static && input.value("reason", "").empty()) {
+        return std::unexpected(
+            ApiError{"invalid_input", "a static token needs a reason", "/reason"});
+    }
+    if (!is_static && (requested <= 0 || requested > std::numeric_limits<int>::max())) {
         return std::unexpected(ApiError{
-            "invalid_input",
-            "a token requires a name, scopes, a positive lifetime, and a reason when static"});
+            "invalid_input", "expires_in_seconds must be positive", "/expires_in_seconds"});
     }
     control::NewToken token{context.acting_user_id,
                             context.pool_id,
@@ -1616,7 +1635,8 @@ std::expected<control::NewToken, ApiError> attenuated_token(const json& input,
         if (input.value("reason", "").empty() || std::ranges::find(scopes, "*") != scopes.end()) {
             return std::unexpected(
                 ApiError{"invalid_input",
-                         "a token that never expires needs a reason and named scopes (not *)"});
+                         "a token that never expires needs a reason and named scopes (not *)",
+                         input.value("reason", "").empty() ? "/reason" : "/scopes"});
         }
         if (!context.non_expiring_credentials_allowed) {
             return std::unexpected(ApiError{"unauthorized",
@@ -1732,36 +1752,38 @@ void register_server_info(Registry& registry, std::string_view version) {
 
 void register_identity_capabilities(Registry& registry) {
     // ---- users ----
-    registry.add(Capability{.name = "list_users",
-                            .title = "List users",
-                            .description = "The most recent users, newest first.",
-                            .input_schema = list_input(),
-                            .output_schema = list_schema(user_schema()),
-                            .kind = CapabilityKind::Read,
-                            .object = "user collection",
-                            .action = "read",
-                            .resolve_object = global_object,
-                            .authorizes_candidates = true,
-                            .handler = [](const json& in, ApiContext& ctx) {
-                                const ApiResult authorization = authorize_user_collection(ctx);
-                                if (!authorization.ok) {
-                                    return authorization;
-                                }
-                                return list_result(ctx.store->list_users(limit_of(in)));
-                            }});
-    registry.add(Capability{.name = "get_user",
-                            .title = "Get user",
-                            .description = "One user by id.",
-                            .input_schema = id_input(),
-                            .output_schema = user_schema(),
-                            .kind = CapabilityKind::Read,
-                            .object = "user",
-                            .action = "read",
-                            .resolve_object = global_object,
-                            .handler = [](const json& in, ApiContext& ctx) {
-                                return ctx.store ? one_result(ctx.store->get_user(in["id"]))
-                                                 : no_store();
-                            }});
+    registry.add(Capability{
+        .name = "list_users",
+        .title = "List users",
+        .description =
+            "List user accounts, newest first, to find someone to invite or grant access.",
+        .input_schema = list_input(),
+        .output_schema = list_schema(user_schema()),
+        .kind = CapabilityKind::Read,
+        .object = "user collection",
+        .action = "read",
+        .resolve_object = global_object,
+        .authorizes_candidates = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const ApiResult authorization = authorize_user_collection(ctx);
+            if (!authorization.ok) {
+                return authorization;
+            }
+            return list_result(ctx.store->list_users(limit_of(in)));
+        }});
+    registry.add(
+        Capability{.name = "get_user",
+                   .title = "Get user",
+                   .description = "Read one user account: identity, email and display name.",
+                   .input_schema = id_input(),
+                   .output_schema = user_schema(),
+                   .kind = CapabilityKind::Read,
+                   .object = "user",
+                   .action = "read",
+                   .resolve_object = global_object,
+                   .handler = [](const json& in, ApiContext& ctx) {
+                       return ctx.store ? one_result(ctx.store->get_user(in["id"])) : no_store();
+                   }});
     registry.add(Capability{
         .name = "create_user",
         .title = "Create user",
@@ -1789,7 +1811,7 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_organizations",
         .title = "List organizations",
-        .description = "The most recent organizations, newest first.",
+        .description = "List the organizations you can see, newest first.",
         .input_schema = list_input(),
         .output_schema = list_schema(organization_schema()),
         .kind = CapabilityKind::Read,
@@ -1802,19 +1824,19 @@ void register_identity_capabilities(Registry& registry) {
                                    ctx.store->list_organizations(limit_of(in)), ctx, "organization")
                              : no_store();
         }});
-    registry.add(Capability{.name = "get_organization",
-                            .title = "Get organization",
-                            .description = "One organization by id.",
-                            .input_schema = id_input(),
-                            .output_schema = organization_schema(),
-                            .kind = CapabilityKind::Read,
-                            .object = "organization",
-                            .action = "read",
-                            .resolve_object = entity_object("organization", "id"),
-                            .handler = [](const json& in, ApiContext& ctx) {
-                                return ctx.store ? one_result(ctx.store->get_organization(in["id"]))
-                                                 : no_store();
-                            }});
+    registry.add(Capability{
+        .name = "get_organization",
+        .title = "Get organization",
+        .description = "Read one organization: its name, the space it owns and when it was made.",
+        .input_schema = id_input(),
+        .output_schema = organization_schema(),
+        .kind = CapabilityKind::Read,
+        .object = "organization",
+        .action = "read",
+        .resolve_object = entity_object("organization", "id"),
+        .handler = [](const json& in, ApiContext& ctx) {
+            return ctx.store ? one_result(ctx.store->get_organization(in["id"])) : no_store();
+        }});
     registry.add(Capability{.name = "create_organization",
                             .title = "Create organization",
                             .description =
@@ -1844,7 +1866,8 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_customers",
         .title = "List customers",
-        .description = "The most recent customers (tenants), newest first.",
+        .description = "List the spaces (customers) you can see, newest first; a space owns "
+                       "repositories, workspaces and services.",
         .input_schema = list_input(),
         .output_schema = list_schema(customer_schema()),
         .kind = CapabilityKind::Read,
@@ -1857,54 +1880,42 @@ void register_identity_capabilities(Registry& registry) {
                                    ctx.store->list_customers(limit_of(in)), ctx, "customer")
                              : no_store();
         }});
-    // customer_id is accepted as well as id, because every other capability names a space
-    // customer_id (lake#443).
-    const auto customer_key = [](const json& in) -> std::expected<std::string, ApiError> {
-        const std::string id = in.value("id", "");
-        const std::string customer_id = in.value("customer_id", "");
-        if (id.empty() && customer_id.empty()) {
-            return std::unexpected(ApiError{"invalid_input", "id is required", "/id"});
-        }
-        if (!id.empty() && !customer_id.empty() && id != customer_id) {
-            return std::unexpected(
-                ApiError{"invalid_input", "id and customer_id name different customers", "/id"});
-        }
-        return id.empty() ? customer_id : id;
-    };
+    // One name for a space across every capability: customer_id. `id` was get_customer's own
+    // spelling and stays as a deprecated alias (lake#443, lake#450).
     registry.add(Capability{
         .name = "get_customer",
         .title = "Get customer",
-        .description = "One customer by id (customer_id is accepted as the same field).",
+        .description = "Read one space (customer): its handle, whether it belongs to a person or "
+                       "an organization, and when it was made. Name it by `customer_id`.",
         .input_schema = {{"type", "object"},
-                         {"properties",
-                          {{"id", {{"type", "string"}}}, {"customer_id", {{"type", "string"}}}}},
+                         {"properties", {{"customer_id", {{"type", "string"}}}}},
+                         {"required", json::array({"customer_id"})},
                          {"additionalProperties", false}},
         .output_schema = customer_schema(),
         .kind = CapabilityKind::Read,
         .object = "customer",
         .action = "read",
-        .resolve_object = [customer_key](const json& in,
-                                         ApiContext& context) -> std::expected<std::string, ApiError> {
-            const auto key = customer_key(in);
-            if (!key) {
-                return std::unexpected(key.error());
-            }
-            auto object = context.store->find_policy_object("customer", *key);
+        .resolve_object = [](const json& in,
+                             ApiContext& context) -> std::expected<std::string, ApiError> {
+            auto object = context.store->find_policy_object("customer", in.at("customer_id"));
             if (!object) {
-                return std::unexpected(ApiError{object.error().code, object.error().message, "/id"});
+                return std::unexpected(
+                    ApiError{object.error().code, object.error().message, "/customer_id"});
             }
             return object->id;
         },
-        .handler = [customer_key](const json& in, ApiContext& ctx) {
-            if (!ctx.store) {
-                return no_store();
-            }
-            const auto key = customer_key(in);
-            if (!key) {
-                return ApiResult::failure(key.error().code, key.error().message, key.error().path);
-            }
-            return one_result(ctx.store->get_customer(*key));
-        }});
+        .handler =
+            [](const json& in, ApiContext& ctx) {
+                if (!ctx.store) {
+                    return no_store();
+                }
+                auto result = one_result(ctx.store->get_customer(in.at("customer_id")));
+                if (!result.ok && result.error.path.empty()) {
+                    result.error.path = "/customer_id";
+                }
+                return result;
+            },
+        .input_aliases = {{"id", "customer_id"}}});
     registry.add(Capability{
         .name = "create_customer",
         .title = "Create customer",
@@ -2496,14 +2507,22 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_token",
         .title = "Create API token",
-        .description = "Issue a named token within the issuer scopes and lifetime. "
-                       "Static derivation requires a static issuer and reason. "
-                       "Revocation of any ancestor invalidates its descendants.",
+        .description = "Make an API key you can give a script, an agent or an MCP client. Name "
+                       "what it may call in `scopes`: capability names, `*` for every "
+                       "capability, or `registry_pull` to pull images; an unknown scope is "
+                       "refused. It can never do more than the credential that makes it, it "
+                       "expires after `expires_in_seconds` (30 days by default), and revoking "
+                       "that credential revokes it too. A static key (`static`) needs a `reason`.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"name", {{"type", "string"}}},
                            {"scopes",
-                            {{"type", "array"}, {"items", {{"type", "string"}}}, {"minItems", 1}}},
+                            {{"type", "array"},
+                             {"items", {{"type", "string"}}},
+                             {"minItems", 1},
+                             {"description",
+                              "what the key may call: capability names, * for every capability, "
+                              "or registry_pull to pull images (docs/api/auth.md#scopes)"}}},
                            {"expires_in_seconds", {{"type", "integer"}}},
                            {"static", {{"type", "boolean"}}},
                            {"never_expires",
@@ -2525,7 +2544,8 @@ void register_identity_capabilities(Registry& registry) {
             }
             const auto token = attenuated_token(input, context);
             if (!token) {
-                return ApiResult::failure(token.error().code, token.error().message);
+                return ApiResult::failure(
+                    token.error().code, token.error().message, token.error().path);
             }
             return issued_result(context.store->create_token(*token), context);
         }});
@@ -3317,7 +3337,8 @@ void register_repository_capabilities(Registry& registry) {
                    }});
     registry.add(Capability{.name = "get_repository",
                             .title = "Get repository",
-                            .description = "One repository by id.",
+                            .description = "Read one repository: its name, space, visibility, "
+                                           "description and whether it is deleted.",
                             .input_schema = id_input(),
                             .output_schema = repository_schema(),
                             .kind = CapabilityKind::Read,
@@ -3466,7 +3487,7 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "repository_refs",
         .title = "List repository refs",
-        .description = "The refs published by libliquid for one repository.",
+        .description = "List a repository's branches and tags and the change each points at.",
         .input_schema = id_input(),
         .output_schema = list_schema(repository_ref_schema()),
         .kind = CapabilityKind::Read,
@@ -3491,7 +3512,8 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "repository_tree",
         .title = "Read a repository tree",
-        .description = "Every tree entry at one libliquid ref.",
+        .description =
+            "List every file and folder of a repository at a branch, tag or change, to browse it.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"id", {{"type", "string"}}},
@@ -3522,55 +3544,56 @@ void register_repository_capabilities(Registry& registry) {
                                                 repository_input_value(in, "ref", "revision")),
                 repository_tree_entry_json);
         }});
-    registry.add(Capability{.name = "repository_file",
-                            .title = "Read a repository file",
-                            .description = "One file and the blob backing it at a libliquid ref.",
-                            .input_schema = {{"type", "object"},
-                                             {"properties",
-                                              {{"id", {{"type", "string"}}},
-                                               {"ref", {{"type", "string"}}},
-                                               {"repository", {{"type", "string"}}},
-                                               {"revision", {{"type", "string"}}},
-                                               {"path", {{"type", "string"}}}}},
-                                             {"required", json::array({"path"})},
-                                             {"additionalProperties", false}},
-                            .output_schema = {{"type", "object"},
-                                              {"properties",
-                                               {{"path", {{"type", "string"}}},
-                                                {"blob", {{"type", "string"}}},
-                                                {"contents", {{"type", "string"}}},
-                                                {"content_base64", {{"type", "string"}}},
-                                                {"size", {{"type", "integer"}}}}}},
-                            .kind = CapabilityKind::Read,
-                            .object = "repository",
-                            .action = "read",
-                            .resolve_object = repository_content_object,
-                            .authorizes_candidates = true,
-                            .allows_anonymous_public_read = true,
-                            .handler = [](const json& in, ApiContext& ctx) {
-                                const auto repository = readable_repository(in, ctx, true);
-                                if (!repository) {
-                                    return ApiResult::failure(repository.error().code,
-                                                              repository.error().message,
-                                                              repository.error().path);
-                                }
-                                if (!ctx.sync_store) {
-                                    return no_repository_store();
-                                }
-                                const auto file = ctx.sync_store->repository_file(
-                                    repository->customer_id,
-                                    repository->id,
-                                    repository_input_value(in, "ref", "revision"),
-                                    in.at("path").get<std::string>());
-                                if (!file) {
-                                    return from_sync_store_error(file.error());
-                                }
-                                return ApiResult::success(repository_file_json(*file));
-                            }});
+    registry.add(Capability{
+        .name = "repository_file",
+        .title = "Read a repository file",
+        .description =
+            "Read one file of a repository at a branch, tag or change, with its contents and size.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}},
+                           {"ref", {{"type", "string"}}},
+                           {"repository", {{"type", "string"}}},
+                           {"revision", {{"type", "string"}}},
+                           {"path", {{"type", "string"}}}}},
+                         {"required", json::array({"path"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"path", {{"type", "string"}}},
+                            {"blob", {{"type", "string"}}},
+                            {"contents", {{"type", "string"}}},
+                            {"content_base64", {{"type", "string"}}},
+                            {"size", {{"type", "integer"}}}}}},
+        .kind = CapabilityKind::Read,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = repository_content_object,
+        .authorizes_candidates = true,
+        .allows_anonymous_public_read = true,
+        .handler = [](const json& in, ApiContext& ctx) {
+            const auto repository = readable_repository(in, ctx, true);
+            if (!repository) {
+                return ApiResult::failure(
+                    repository.error().code, repository.error().message, repository.error().path);
+            }
+            if (!ctx.sync_store) {
+                return no_repository_store();
+            }
+            const auto file =
+                ctx.sync_store->repository_file(repository->customer_id,
+                                                repository->id,
+                                                repository_input_value(in, "ref", "revision"),
+                                                in.at("path").get<std::string>());
+            if (!file) {
+                return from_sync_store_error(file.error());
+            }
+            return ApiResult::success(repository_file_json(*file));
+        }});
     registry.add(Capability{
         .name = "list_changes",
         .title = "List repository changes",
-        .description = "The libliquid change history for one repository.",
+        .description = "List a repository's change history, newest first, with author and message.",
         .input_schema = id_input(),
         .output_schema = list_schema(repository_change_schema()),
         .kind = CapabilityKind::Read,
@@ -3595,7 +3618,8 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "get_change",
         .title = "Get repository change",
-        .description = "One change identity and metadata.",
+        .description = "Read one change in a repository's history: its author, message, parents "
+                       "and when it landed.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"id", {{"type", "string"}}}, {"change_id", {{"type", "string"}}}}},
@@ -3686,7 +3710,8 @@ void register_repository_capabilities(Registry& registry) {
         }});
     registry.add(Capability{.name = "list_artifacts",
                             .title = "List repository artifacts",
-                            .description = "A filtered cursor page of libliquid build results.",
+                            .description = "List a repository's build results, filtered by action, "
+                                           "output or content, a page at a time.",
                             .input_schema = {{"type", "object"},
                                              {"properties",
                                               {{"id", {{"type", "string"}}},
@@ -4088,7 +4113,7 @@ void register_organization_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_teams",
         .title = "List teams",
-        .description = "The teams in an organization, newest first.",
+        .description = "List an organization's teams, newest first, to grant one access.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"organization_id", {{"type", "string"}}},
@@ -4109,18 +4134,20 @@ void register_organization_capabilities(Registry& registry) {
             }
             return list_result(ctx.store->list_teams(in.at("organization_id"), limit_of(in)));
         }});
-    registry.add(Capability{.name = "get_team",
-                            .title = "Get team",
-                            .description = "One team by id.",
-                            .input_schema = id_input(),
-                            .output_schema = team_schema(),
-                            .kind = CapabilityKind::Read,
-                            .object = "team",
-                            .action = "read",
-                            .resolve_object = entity_object("team", "id"),
-                            .handler = [](const json& in, ApiContext& ctx) {
-                                return one_result(ctx.store->get_team(in.at("id")));
-                            }});
+    registry.add(Capability{
+        .name = "get_team",
+        .title = "Get team",
+        .description =
+            "Read one team of an organization: its name and description, to grant it access.",
+        .input_schema = id_input(),
+        .output_schema = team_schema(),
+        .kind = CapabilityKind::Read,
+        .object = "team",
+        .action = "read",
+        .resolve_object = entity_object("team", "id"),
+        .handler = [](const json& in, ApiContext& ctx) {
+            return one_result(ctx.store->get_team(in.at("id")));
+        }});
     registry.add(Capability{
         .name = "create_team",
         .title = "Create team",
@@ -4577,7 +4604,9 @@ void register_policy_capabilities(Registry& registry) {
             }});
     registry.add(Capability{.name = "get_object",
                             .title = "Get object",
-                            .description = "One policy object by id.",
+                            .description =
+                                "Read one object of the access-control tree (a space, repository, "
+                                "team…) and its parent, to see where its grants come from.",
                             .input_schema = id_input(),
                             .output_schema = object_schema(),
                             .kind = CapabilityKind::Read,
@@ -4617,7 +4646,8 @@ void register_policy_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_grants",
         .title = "List grants",
-        .description = "Direct grants on one policy object.",
+        .description = "List who has been granted access directly on one object, and with which "
+                       "role, to audit or revoke it.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"object_id", {{"type", "string"}}}, {"limit", {{"type", "integer"}}}}},
@@ -4954,7 +4984,8 @@ void register_audit_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "verify_audit",
         .title = "Verify audit chain",
-        .description = "Verify the signed audit event digest chain.",
+        .description = "Check that a space's audit log is complete and untampered: every event's "
+                       "signature and the hash chain linking them.",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
                          {"additionalProperties", false}},

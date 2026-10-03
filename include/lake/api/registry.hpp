@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <liquid/runtime.hpp>
@@ -52,11 +53,25 @@ class TiledLog;
 namespace lake::api {
 
 struct ApiError {
-    std::string code;    // invalid_input | unauthorized | not_found | conflict | unrecoverable |
-                         // unknown_capability | store_unavailable | store_error
+    std::string code;    // one of error_codes() (docs/api/errors.md)
     std::string message; // a product-facing reason; database diagnostics remain server-side
     std::string path;    // JSON pointer when the input is at fault
+    // `unauthenticated` only: why no credential was accepted (missing | invalid | expired) and
+    // where to get a new one.
+    std::string reason;
+    std::string help;
 };
+
+// Every error code a capability answers, with its REST status and what it tells the caller
+// (docs/api/errors.md). ApiResult::failure maps the engine's and liquid's spellings onto these and
+// answers any other code as store_error, so a caller only ever sees a documented code.
+struct ErrorCode {
+    std::string_view code;
+    int status;
+    std::string_view meaning;
+};
+std::span<const ErrorCode> error_codes();
+const ErrorCode* find_error_code(std::string_view code);
 
 struct ApiResult {
     bool ok = false;
@@ -114,6 +129,9 @@ struct ApiContext {
     std::string request_id;
     std::string request_path;  // the page route, for web UI navigation; never used to authorize
     std::string request_query; // its query string, for the same; never used to authorize
+    // Why a presented credential was not accepted: "invalid" or "expired" (lake#450); empty when
+    // none was presented or it was accepted.
+    std::string credential_rejection;
     std::string workspace_id; // explicitly supplied by the capability or workspace URL
     std::string path_workspace_id; // immutable selection from /w/<workspace>/...
     std::string remembered_workspace_id; // UI navigation only; never a capability default
@@ -230,7 +248,16 @@ struct Capability {
     bool resolves_operator_audit_target = false;
     CapabilityHandler handler;
     AsyncCapabilityHandler async_handler;
+    // Deprecated input names still accepted, as {alias, canonical} (docs/api/naming.md). The
+    // registry moves an alias onto its canonical field before validation, refuses the two when
+    // they disagree, and Registry::add lists each alias in the input schema as deprecated.
+    std::vector<std::pair<std::string, std::string>> input_aliases;
 };
+
+// The input with every deprecated alias moved onto its canonical field, or invalid_input when a
+// caller sent both with different values.
+std::expected<nlohmann::json, ApiError> canonical_input(const Capability& capability,
+                                                        const nlohmann::json& input);
 
 // Recursive boundary validation: required and declared keys, JSON types, enum values, numeric
 // bounds (minimum, maximum and their exclusive forms) and array items, so a schema REST, OpenAPI

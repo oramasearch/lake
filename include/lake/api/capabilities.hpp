@@ -3,6 +3,8 @@
 #include "lake/api/registry.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_control.hpp"
+#include <map>
+#include <string>
 #include <string_view>
 
 #include <liquid/runtime.hpp>
@@ -58,6 +60,20 @@ call_workspace(ApiContext& context,
                std::string capability,
                bool read,
                nlohmann::json input);
+// One name per concept on the workspace engine's capabilities (docs/api/naming.md): the engine
+// takes `run_id` on some calls and `run` on others, `model_id` and `model`, `index_id` and
+// `index`, `job_id` and `job`. Lake accepts either spelling and sends the one this capability
+// takes. Answers the renames made, as {engine field: caller field}.
+std::map<std::string, std::string> canonical_workspace_input(std::string_view capability,
+                                                             nlohmann::json& input);
+// A workspace engine refusal as a lake error (docs/api/errors.md): the code in lake's vocabulary
+// and `path` set whenever the engine's message names an input field or a value the caller sent,
+// below `prefix` (`/input` for workspace_query and workspace_act). `renamed` maps the engine's
+// field names back to the caller's.
+ApiResult workspace_failure(const control::ZettaControlError& error,
+                            const nlohmann::json& input,
+                            std::string_view prefix = {},
+                            const std::map<std::string, std::string>& renamed = {});
 // Zetta's OpenAPI document reduced to the allow-listed paths, rebased under `base` (the agent
 // path of one workspace), so a client deriving its tools from it sees exactly what it may call.
 nlohmann::json workspace_openapi(const nlohmann::json& document, std::string_view base);

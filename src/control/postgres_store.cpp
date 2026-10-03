@@ -6862,11 +6862,14 @@ public:
             const pqxx::result rows = tx.exec_params(
                 std::string("SELECT ") + qualified_session_columns +
                     ", COALESCE(users.taap_id, ''), secret_hash, "
-                    "floor(extract(epoch FROM sessions.expires_at))::bigint FROM sessions "
+                    "floor(extract(epoch FROM sessions.expires_at))::bigint, "
+                    // Expiry is read rather than filtered, so a caller holding the real secret
+                    // of an expired credential is told it expired (lake#450).
+                    "(sessions.expires_at IS NOT NULL AND sessions.expires_at <= now()) "
+                    "FROM sessions "
                     "LEFT JOIN devices ON devices.id = sessions.device_id "
                     "LEFT JOIN users ON users.id = sessions.user_id "
                     "WHERE sessions.lookup_id = $1::uuid AND sessions.revoked_at IS NULL "
-                    "AND (sessions.expires_at IS NULL OR sessions.expires_at > now()) "
                     "AND (devices.id IS NULL OR devices.revoked_at IS NULL) "
                     "AND (sessions.pool_id = 'lake' OR EXISTS "
                     "(SELECT 1 FROM auth_applications JOIN auth_app_users ON "
@@ -6883,6 +6886,9 @@ public:
             if (expected.size() != digest.size() ||
                 CRYPTO_memcmp(expected.data(), digest.data(), digest.size()) != 0) {
                 return std::unexpected(StoreError{"not_found", "session is not active"});
+            }
+            if (row[16].as<bool>()) {
+                return std::unexpected(StoreError{"expired", "session has expired"});
             }
             const Session session = session_of(row);
             if (!session.parent_session_id.empty() &&

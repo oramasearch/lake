@@ -59,7 +59,7 @@ your space, workspace and model:
 ```
 curl -s https://lake.oramadev.net/v1/predict \
   -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
-  -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model": "<model id>", "rows": [{"support_tickets": 11}]}'
+  -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model_id": "<model id>", "rows": [{"support_tickets": 11}]}'
 ```
 
 Create the key on **Developer → MCP**. Details: [Ship](/docs/ship).

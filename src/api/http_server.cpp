@@ -500,7 +500,7 @@ liquid::errc liquid_error_code(std::string_view code) {
     if (code == "corrupt") {
         return liquid::errc::corrupt;
     }
-    if (code == "unauthorized") {
+    if (code == "unauthorized" || code == "unauthenticated") {
         return liquid::errc::unauthorized;
     }
     if (code == "not_found") {
@@ -1998,6 +1998,21 @@ nlohmann::json to_nlohmann(const boost::json::value& value) {
     return nlohmann::json::parse(boost::json::serialize(value), nullptr, false);
 };
 
+// RFC 6750's challenge for a refused bearer, naming why and where a new key is made (lake#450).
+std::string bearer_challenge(const ApiResult& result) {
+    std::string challenge = "Bearer realm=\"lake\"";
+    if (result.error.reason == "invalid" || result.error.reason == "expired") {
+        challenge += ", error=\"invalid_token\", error_description=\"" +
+                     std::string(result.error.reason == "expired" ? "the credential has expired"
+                                                                  : "the credential is not valid") +
+                     "\"";
+    }
+    if (!result.error.help.empty()) {
+        challenge += ", error_uri=\"" + result.error.help + "\"";
+    }
+    return challenge;
+}
+
 std::string error_body(std::string_view code, std::string_view message) {
     return nlohmann::json{{"ok", false},
                           {"error", {{"code", code}, {"message", message}, {"path", ""}}}}
@@ -2008,7 +2023,7 @@ boost::http::status scim_status(const ApiResult& result) {
     if (result.ok) {
         return boost::http::status::ok;
     }
-    if (result.error.code == "unauthorized") {
+    if (result.error.code == "unauthorized" || result.error.code == "unauthenticated") {
         return boost::http::status::unauthorized;
     }
     return boost::http::int_to_status(static_cast<unsigned>(rest_status(result)));
@@ -5624,7 +5639,13 @@ struct ApiServer::Impl {
                 ctx.credential_expires_at_unix = principal->expires_at_unix;
                 ctx.pool_id = principal->pool_id;
                 ctx.scopes = principal->scopes;
+            } else {
+                // Said apart so a caller knows to renew rather than fix its key (lake#450).
+                ctx.credential_rejection =
+                    principal.error().code == "expired" ? "expired" : "invalid";
             }
+        } else if (!bearer.empty()) {
+            ctx.credential_rejection = "invalid";
         }
         if (route.req.count("x-request-id") != 0) {
             ctx.request_id = std::string(route.req.at("x-request-id"));
@@ -6361,7 +6382,8 @@ struct ApiServer::Impl {
     boost::http::route_task serve_repository_page_error(boost::http::route_params& route,
                                                         const ApiContext& context,
                                                         const ApiResult& result) {
-        if (!context.authorized && result.error.code == "unauthorized") {
+        if (!context.authorized &&
+            (result.error.code == "unauthorized" || result.error.code == "unauthenticated")) {
             return redirect(route, "/sign-in");
         }
         return send_text(route,
@@ -6482,7 +6504,8 @@ struct ApiServer::Impl {
             co_return co_await redirect(route, "/sign-in");
         }
         const std::string customer_id = form_field(body, "customer_id");
-        const ApiResult customer = registry.call("get_customer", {{"id", customer_id}}, context);
+        const ApiResult customer =
+            registry.call("get_customer", {{"customer_id", customer_id}}, context);
         if (!customer.ok) {
             co_return co_await form_failure(route, customer, context);
         }
@@ -10879,7 +10902,7 @@ struct ApiServer::Impl {
             back = "/ship/models?" + query;
             result = unwrap(
                 co_await act(form_field(body, "publish") == "1" ? "expose_model" : "unexpose_model",
-                             {{"model", form_field(body, "model")}}));
+                             {{"model_id", form_field(body, "model")}}));
         }
         if (!result.ok) {
             back += "&error=" + oauth_url_encode(result.error.message);
@@ -11885,7 +11908,7 @@ struct ApiServer::Impl {
         std::optional<control::Customer> owner;
         if (ctx.authorized) {
             const ApiResult owner_result =
-                registry.call("get_customer", {{"id", repository.customer_id}}, ctx);
+                registry.call("get_customer", {{"customer_id", repository.customer_id}}, ctx);
             if (owner_result.ok) {
                 owner = customer_from_json(owner_result.value);
             }
@@ -14862,6 +14885,7 @@ struct ApiServer::Impl {
         nlohmann::json input = nlohmann::json::object();
         std::string body;
         std::string set_cookie;
+        std::string www_authenticate;
         http::status status = http::status::ok;
 
         if (route.req.method() == http::method::get) {
@@ -14897,6 +14921,9 @@ struct ApiServer::Impl {
                           : ApiResult::failure("store_error", completed.error().message);
             status = http::int_to_status(static_cast<unsigned>(rest_status(result)));
             body = rest_envelope(result).dump();
+            if (!result.ok && result.error.code == "unauthenticated") {
+                www_authenticate = bearer_challenge(result);
+            }
             const bool browser_sign_in =
                 capability->name == "sign_up_password" || capability->name == "sign_in_password" ||
                 capability->name == "verify_mfa" || capability->name == "sign_in_passkey" ||
@@ -14912,6 +14939,9 @@ struct ApiServer::Impl {
         route.res.set(http::field::cache_control, "no-store");
         if (!set_cookie.empty()) {
             route.res.set(http::field::set_cookie, set_cookie);
+        }
+        if (!www_authenticate.empty()) {
+            route.res.set(http::field::www_authenticate, www_authenticate);
         }
         stamp_response_headers(route, body);
         auto [send_error] = co_await route.send(body);

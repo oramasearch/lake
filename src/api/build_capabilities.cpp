@@ -374,7 +374,8 @@ void register_build_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_builds",
         .title = "List builds",
-        .description = "List a space's image builds, newest first.",
+        .description =
+            "List a space's image builds, newest first, with their state, to follow or find one.",
         .input_schema = input_schema(json::object()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,

@@ -522,7 +522,9 @@ void register_web_app_capabilities(Registry& registry) {
         }});
     registry.add(Capability{.name = "get_app",
                             .title = "Get app",
-                            .description = "Get one Ship app in a space.",
+                            .description =
+                                "Read one Ship app: its hosts, revision or image, replicas, bound "
+                                "services, and what the operator reports about its rollout.",
                             .input_schema = app_input_schema(),
                             .output_schema = {{"type", "object"}},
                             .kind = CapabilityKind::Read,
@@ -819,7 +821,14 @@ void register_web_app_capabilities(Registry& registry) {
         registry.add(Capability{
             .name = std::move(name),
             .title = event + " app",
-            .description = "Change the app's desired lifecycle state.",
+            .description = event == "start"
+                               ? std::string("Start a stopped app again at its current revision, "
+                                             "so it serves its hosts.")
+                           : event == "stop"
+                               ? std::string("Stop an app: its pods are removed and its hosts stop "
+                                             "answering, while its configuration is kept.")
+                               : std::string("Restart an app's pods at the same revision, for "
+                                             "example after changing a bound secret."),
             .input_schema = app_input_schema(),
             .output_schema = {{"type", "object"}},
             .kind = CapabilityKind::Action,

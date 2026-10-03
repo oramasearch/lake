@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include <optional>
+#include <regex>
 
 #include "lake/api/oauth.hpp"
 #include "lake/api/pipeline.hpp"
@@ -302,8 +303,19 @@ liquid::runtime::task<ApiResult> project_agent_compile_check(ApiContext& context
 // workspace capability reads it (lake#447): get_dataset takes `dataset` plus `database`, the
 // analysis reads take `database.table`.
 void normalize_dataset_reference(const std::string& capability, json& arguments) {
-    if (!arguments.is_object() || !arguments.contains("dataset") ||
-        !arguments["dataset"].is_string()) {
+    if (!arguments.is_object()) {
+        return;
+    }
+    // score and explain read `dataset_path` as `<database>.<table>`; the id list_datasets
+    // answers (`<database>/<table>`) names the same table (lake#450).
+    if (const auto path = arguments.find("dataset_path");
+        path != arguments.end() && path->is_string() &&
+        path->get_ref<const std::string&>().find('/') != std::string::npos) {
+        if (const auto ref = datasets::parse_id(path->get<std::string>())) {
+            *path = ref->database + "." + ref->name;
+        }
+    }
+    if (!arguments.contains("dataset") || !arguments["dataset"].is_string()) {
         return;
     }
     const std::string id = arguments["dataset"];
@@ -466,16 +478,57 @@ std::optional<ApiResult> agent_definition_refusal(const json& arguments) {
     return std::nullopt;
 }
 
+// expose_model and expose_index answer the engine's own route (`/v1/models/<id>/predict`), which
+// does not exist on lake. Lake answers the call that does instead (lake#450): `predict` for a
+// model, `search_index` for an index, with the input filled in.
+void published_call(json& value, const std::string& capability, const json& input) {
+    const bool model = capability.ends_with("_model");
+    const std::string id = value.value(model ? "model_id" : "index_id", std::string());
+    value.erase("endpoint");
+    if (!value.value("exposed", false) || id.empty()) {
+        return;
+    }
+    json call_input{{"customer_id", input.at("customer_id")},
+                    {"workspace_id", input.at("workspace_id")}};
+    if (model) {
+        call_input["model_id"] = id;
+        call_input["rows"] = json::array({json::object()});
+        value["call"] = {{"capability", "predict"},
+                         {"method", "POST"},
+                         {"path", "/v1/predict"},
+                         {"input", std::move(call_input)},
+                         {"note",
+                          "each row is keyed by the model's feature columns and carries "
+                          "its own key in `entity`"}};
+    } else {
+        call_input["index_id"] = id;
+        call_input["query"] = "";
+        value["call"] = {{"capability", "search_index"},
+                         {"method", "GET"},
+                         {"path", "/v1/search_index"},
+                         {"input", std::move(call_input)}};
+    }
+}
+
 void register_workspace_call(Registry& registry, bool read) {
     registry.add(Capability{
         .name = read ? "workspace_query" : "workspace_act",
         .title = read ? "Query a workspace" : "Act in a workspace",
         .description =
-            read ? "Call one of the allowed read capabilities on the workspace Zetta named by `workspace_id`."
-                 : "Call one of the allowed actions on the workspace Zetta named by `workspace_id`. "
-                   "A Python agent's create_agent or update_agent definition is {source: zetta, "
-                   "instructions, entrypoint, files: [{path, contents}]} or {source: lake, "
-                   "repository_id, revision, entrypoint}; lake refuses any other field.",
+            read ? "Read from a workspace's engine (the Zetta named by `workspace_id`): its "
+                   "projects, datasets, runs, models, indexes and more, by naming one allowed "
+                   "read `capability` and its `input`. An entity is `run_id`, `model_id`, "
+                   "`index_id` or `job_id` in `input` (the engine's `run`, `model`, `index` and "
+                   "`job` are accepted too), and `compare_runs` compares every shared metric when "
+                   "`names` is left out."
+                 : "Change something in a workspace's engine (the Zetta named by `workspace_id`): "
+                   "create projects and datasets, approve and run pipelines, publish models and "
+                   "indexes, by naming one allowed action `capability` and its `input`. "
+                   "expose_model and expose_index answer `call`, the lake capability that serves "
+                   "what was published. A Python agent's create_agent or update_agent definition "
+                   "is {source: zetta, instructions, entrypoint, files: [{path, contents}]} or "
+                   "{source: lake, repository_id, revision, entrypoint}; lake refuses any other "
+                   "field.",
         .input_schema = customer_input_schema(
             {{"capability", {{"type", "string"}}}, {"input", {{"type", "object"}}}},
             json::array({"capability"})),
@@ -537,6 +590,21 @@ void register_workspace_call(Registry& registry, bool read) {
                 co_return result ? *result : ApiResult::failure("store_error", result.error().message);
             }
             json arguments = input.value("input", json::object());
+            const json sent = arguments;
+            // One name per concept (lake#450): `run` or `run_id`, `model` or `model_id`, as the
+            // engine capability takes it.
+            const auto renamed = canonical_workspace_input(capability, arguments);
+            // compare_runs reads every metric the runs share when `names` is left out, as the
+            // top-level compare_runs does (lake#450).
+            if (read && capability == "compare_runs" && !arguments.contains("names")) {
+                json compare = arguments;
+                compare["customer_id"] = input.at("customer_id");
+                compare["workspace_id"] = input.at("workspace_id");
+                const auto result =
+                    co_await context.registry->call_async("compare_runs", compare, context);
+                co_return result ? *result
+                                 : ApiResult::failure("store_error", result.error().message);
+            }
             // Dataset rules lake applies before and after the workspace answers (lake#447).
             std::string requested_table;
             if (!read && (capability == "upload_dataset" ||
@@ -550,7 +618,7 @@ void register_workspace_call(Registry& registry, bool read) {
                     co_return *checked->failure;
                 }
                 requested_table = std::move(checked->requested_table);
-            } else if (read) {
+            } else {
                 normalize_dataset_reference(capability, arguments);
             }
             auto called = co_await call_workspace(context,
@@ -562,24 +630,15 @@ void register_workspace_call(Registry& registry, bool read) {
                 co_return ApiResult::failure("store_unavailable", called.error().message);
             }
             if (!*called) {
-                // Point at the field the workspace names (lake#256): "required property 'x' not
-                // found in object" is about /input/x.
-                const std::string message = called->error().message;
-                std::string path;
-                if (const auto at = message.find("property '"); at != std::string::npos) {
-                    const auto end = message.find('\'', at + 10);
-                    if (end != std::string::npos) {
-                        path = "/input/" + message.substr(at + 10, end - at - 10);
-                    }
-                }
-                // Zetta says invalid_argument; lake's documented code for the same is
-                // invalid_input (lake#442).
-                const std::string code = called->error().code == "invalid_argument"
-                                             ? std::string("invalid_input")
-                                             : called->error().code;
-                co_return ApiResult::failure(code, message, path);
+                // Point at the field the workspace names (lake#256, lake#450), in lake's codes.
+                co_return workspace_failure(called->error(), sent, "/input", renamed);
             }
             json value = std::move(**called);
+            if (value.is_object() &&
+                (capability == "expose_model" || capability == "unexpose_model" ||
+                 capability == "expose_index" || capability == "unexpose_index")) {
+                published_call(value, capability, input);
+            }
             if (capability == "list_datasets") {
                 datasets::annotate_list(value);
             } else if (capability == "get_dataset" && value.is_object() &&
@@ -621,6 +680,30 @@ bool valid_service_name(const std::string& name) {
         return (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') ||
                character == '-';
     });
+}
+
+// What each workspace capability does for the person calling it (lake#450). Lake writes the
+// desired state; the operator's observations (phase, endpoint) are read-only.
+std::string workspace_description(const std::string& operation) {
+    static const std::map<std::string, std::string> descriptions = {
+        {"list_workspaces",
+         "List a space's workspaces (each its own Zetta) with their environment, desired state "
+         "and the operator's observed phase; the `id` is the workspace_id other calls name."},
+        {"get_workspace",
+         "Read one workspace: its name, environment, desired state and whether the operator "
+         "reports it ready."},
+        {"create_workspace",
+         "Create a workspace, a Zetta of its own for one environment of a space; poll "
+         "workspace_status until it is ready."},
+        {"update_workspace",
+         "Rename a workspace or stop and start it (`desired: stopped | running`); its data is "
+         "kept."},
+        {"delete_workspace",
+         "Delete a workspace and everything in its Zetta, which cannot be recovered; `confirm` "
+         "must be its name."},
+    };
+    const auto found = descriptions.find(operation);
+    return found == descriptions.end() ? std::string() : found->second;
 }
 
 void register_service_capabilities(Registry& registry) {
@@ -1285,11 +1368,11 @@ void register_search_capabilities(Registry& registry) {
                        "the hits (default 10). Answers hits as {id, score}. An index that is not "
                        "published is refused; publish it with workspace_act expose_index.",
         .input_schema = customer_input_schema(
-            {{"index", {{"type", "string"}}},
+            {{"index_id", {{"type", "string"}}},
              {"query", {{"type", "string"}}},
              {"field", {{"type", "string"}}},
              {"top_k", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}}}},
-            json::array({"index", "query"})),
+            json::array({"index_id", "query"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
         .object = "customer",
@@ -1301,7 +1384,7 @@ void register_search_capabilities(Registry& registry) {
                 co_return unavailable();
             }
             const std::string customer = input.at("customer_id");
-            const std::string index = input.at("index");
+            const std::string index = input.at("index_id");
             set_audit(context, "index.search", input, "search");
             auto described = co_await call_workspace(
                 context, customer, "get_index", true, {{"index_id", index}});
@@ -1309,12 +1392,11 @@ void register_search_capabilities(Registry& registry) {
                 co_return ApiResult::failure("store_unavailable", described.error().message);
             }
             if (!*described) {
-                co_return ApiResult::failure((*described).error().code,
-                                             (*described).error().message);
+                co_return workspace_failure(described->error(), {{"index_id", index}});
             }
             if (!(**described).value("exposed", false)) {
                 co_return ApiResult::failure(
-                    "invalid_input", "index " + index + " is not published", "/index");
+                    "invalid_input", "index " + index + " is not published", "/index_id");
             }
             json search{{"target", index},
                         {"query", input.at("query")},
@@ -1328,30 +1410,39 @@ void register_search_capabilities(Registry& registry) {
                 co_return ApiResult::failure("store_unavailable", found.error().message);
             }
             if (!*found) {
-                co_return ApiResult::failure((*found).error().code, (*found).error().message);
+                co_return workspace_failure(found->error(), input);
             }
             co_return ApiResult::success(**found);
-        }});
+        },
+        .input_aliases = {{"index", "index_id"}}});
 }
 
 // Predict with one published model (lake#250): the public route a customer calls from outside lake,
 // with a lake key. The model must be published (expose_model); rows are keyed by the model's own
-// feature columns and answered ranked by risk with what drives it (Zetta's `score`).
+// feature columns and answered ranked by risk with what drives it (Zetta's `score`). Each ranked
+// entry names its row and that row's entity key (lake#450): the engine numbers the rows it was
+// given, and lake maps each number back to the row.
 void register_predict_capability(Registry& registry) {
     registry.add(Capability{
         .name = "predict",
         .title = "Predict with a published model",
         .description =
-            "Score rows through one published model of the customer's workspace: `model` is the "
-            "model's id (Ship → Models), `rows` the records to score, each keyed by the model's "
-            "feature columns. Answers every row ranked by risk with its score and the features "
-            "that drive it. A model that is not published is refused; publish it with "
-            "workspace_act expose_model.",
+            "Score your own records with one published model of a workspace and get them back "
+            "ranked by risk, with the features that drive it. `model_id` is the model's id "
+            "(Ship → Models); `rows` are the records, each keyed by the model's feature columns "
+            "and carrying its own key in `entity_column` (default `entity`). Every ranked entry "
+            "answers that key as `entity` and the record's position as `row`. A model that is "
+            "not published is refused; publish it with workspace_act expose_model.",
         .input_schema = customer_input_schema(
-            {{"model", {{"type", "string"}}},
+            {{"model_id", {{"type", "string"}}},
              {"rows", {{"type", "array"}, {"items", {{"type", "object"}}}, {"minItems", 1}}},
+             {"entity_column",
+              {{"type", "string"},
+               {"description",
+                "the field of each row that holds its key, answered as `entity` (default "
+                "`entity`; a row without it is answered by `row` alone)"}}},
              {"top_k", {{"type", "integer"}, {"minimum", 0}}}},
-            json::array({"model", "rows"})),
+            json::array({"model_id", "rows"})),
         .output_schema = {{"type", "object"}},
         // Rows go in a JSON body, so it is POST; it changes nothing and is authorized as a read.
         .kind = CapabilityKind::Action,
@@ -1364,7 +1455,8 @@ void register_predict_capability(Registry& registry) {
                 co_return unavailable();
             }
             const std::string customer = input.at("customer_id");
-            const std::string model = input.at("model");
+            const std::string model = input.at("model_id");
+            const std::string key = input.value("entity_column", std::string("entity"));
             set_audit(context, "model.predict", input, "score");
             auto described = co_await call_workspace(
                 context, customer, "get_model", true, {{"model_id", model}});
@@ -1372,14 +1464,17 @@ void register_predict_capability(Registry& registry) {
                 co_return ApiResult::failure("store_unavailable", described.error().message);
             }
             if (!*described) {
-                co_return ApiResult::failure(
-                    "not_found", "no model " + model + " (use its id from Ship → Models)", "/model");
+                co_return ApiResult::failure("not_found",
+                                             "no model " + model +
+                                                 " (use its id from Ship → Models)",
+                                             "/model_id");
             }
             if (!(**described).value("exposed", false)) {
                 co_return ApiResult::failure(
-                    "invalid_input", "model " + model + " is not published", "/model");
+                    "invalid_input", "model " + model + " is not published", "/model_id");
             }
-            json score{{"model", model}, {"rows", input.at("rows")}};
+            const json& rows = input.at("rows");
+            json score{{"model", model}, {"rows", rows}};
             if (input.contains("top_k")) {
                 score["top_k"] = input["top_k"];
             }
@@ -1389,10 +1484,37 @@ void register_predict_capability(Registry& registry) {
                 co_return ApiResult::failure("store_unavailable", scored.error().message);
             }
             if (!*scored) {
-                co_return ApiResult::failure((*scored).error().code, (*scored).error().message);
+                // "score: row 2 has no 'tenure'" is about /rows/2/tenure.
+                const std::string message = scored->error().message;
+                static const std::regex row_field(
+                    R"(row (\d+) has (?:no|a non-numeric) '([^']+)')");
+                std::smatch match;
+                if (std::regex_search(message, match, row_field)) {
+                    co_return ApiResult::failure(
+                        "invalid_input", message, "/rows/" + match[1].str() + "/" + match[2].str());
+                }
+                co_return workspace_failure(scored->error(), input);
             }
-            co_return ApiResult::success(**scored);
-        }});
+            json value = std::move(**scored);
+            if (value.is_object() && value.contains("ranked") && value["ranked"].is_array()) {
+                for (json& entry : value["ranked"]) {
+                    if (!entry.is_object() || !entry.contains("entity") ||
+                        !entry["entity"].is_number_integer()) {
+                        continue;
+                    }
+                    const auto index = entry["entity"].get<std::int64_t>();
+                    entry.erase("entity");
+                    entry["row"] = index;
+                    if (index >= 0 && static_cast<std::size_t>(index) < rows.size() &&
+                        rows[static_cast<std::size_t>(index)].contains(key)) {
+                        entry["entity"] = rows[static_cast<std::size_t>(index)].at(key);
+                    }
+                }
+            }
+            value["entity_column"] = key;
+            co_return ApiResult::success(std::move(value));
+        },
+        .input_aliases = {{"model", "model_id"}}});
 }
 
 // The Zetta connector for a service kind, from the service's delivered connection, or nothing when
@@ -1811,7 +1933,20 @@ std::string read_only_statement_problem(std::string_view statement) {
         head += static_cast<char>(std::tolower(static_cast<unsigned char>(text[index])));
     }
     if (head != "select" && head != "with") {
-        return "only a SELECT or WITH query can run here";
+        // Name the word it starts with, so a typo (`SELEC 1`) reads as one (lake#450); the
+        // workspace's own parse error, with its position, applies once the statement is a read.
+        std::string first;
+        for (std::size_t index = start; index < text.size() && first.size() < 32 &&
+                                        std::isspace(static_cast<unsigned char>(text[index])) == 0;
+             ++index) {
+            first += text[index];
+        }
+        if (first.empty()) {
+            return "the statement is empty: write one SELECT or WITH query";
+        }
+        return "the statement must start with SELECT or WITH (only reads run here); it starts "
+               "with '" +
+               first + "'";
     }
     bool quoted = false;
     for (const char character : text) {
@@ -1830,13 +1965,18 @@ void register_sql_capability(Registry& registry) {
         .name = "workspace_sql",
         .title = "Query the workspace",
         .description = "Run one read-only SQL query over the customer's workspace data and answer "
-                       "{columns, rows}. The workspace speaks a SQL subset: SELECT <columns or *> "
-                       "FROM <database>.<table> [WHERE <column> <op> <value>] [GROUP BY <column>] "
+                       "{columns, rows}; `columns` is always filled, even for no rows. The "
+                       "workspace speaks a SQL subset: SELECT <columns or *> FROM "
+                       "<database>.<table> [WHERE <column> <op> <value>] [GROUP BY <column>] "
                        "[ORDER BY <column> [DESC], ...] [LIMIT n] [OFFSET n]; one WHERE "
-                       "comparison, aggregates (COUNT, SUM, AVG, MIN, MAX) only with GROUP BY, no "
-                       "joins, expressions or subqueries. list_datasets (through workspace_query) "
-                       "names the tables. Anything but a read is refused; the workspace's "
-                       "administrative SQL is not reachable.",
+                       "comparison; aggregates COUNT(*), COUNT(col), SUM, AVG, MIN and MAX with "
+                       "or without GROUP BY (without it the whole table is one group and the "
+                       "answer is one row); GROUP BY on any column, text included; no joins, "
+                       "expressions or subqueries. A column no row carries is an error naming "
+                       "the table's columns, and a parse error gives the position where it "
+                       "stopped. list_datasets (through workspace_query) names the tables. "
+                       "Anything but a read is refused; the workspace's administrative SQL is not "
+                       "reachable.",
         .input_schema = customer_input_schema(
             {{"statement", {{"type", "string"}}}, {"database", {{"type", "string"}}}},
             json::array({"statement"})),
@@ -4048,6 +4188,92 @@ nlohmann::json without_project_agent_checks(const nlohmann::json& graphs) {
     return kept;
 }
 
+std::map<std::string, std::string> canonical_workspace_input(std::string_view capability,
+                                                             json& input) {
+    // The field each engine capability takes for the entity it addresses. Every other capability
+    // is passed through as sent.
+    static const std::map<std::string_view, std::string_view> takes = {
+        {"get_run", "run_id"},
+        {"get_run_report", "run_id"},
+        {"get_run_metrics", "run"},
+        {"get_model", "model_id"},
+        {"model_health", "model_id"},
+        {"expose_model", "model"},
+        {"unexpose_model", "model"},
+        {"score", "model"},
+        {"explain", "model"},
+        {"get_index", "index_id"},
+        {"expose_index", "index"},
+        {"unexpose_index", "index"},
+        {"get_job", "job_id"},
+    };
+    std::map<std::string, std::string> renamed;
+    const auto found = takes.find(capability);
+    if (found == takes.end() || !input.is_object()) {
+        return renamed;
+    }
+    const std::string field(found->second);
+    const std::string other =
+        field.ends_with("_id") ? field.substr(0, field.size() - 3) : field + "_id";
+    if (!input.contains(field) && input.contains(other)) {
+        input[field] = std::move(input[other]);
+        input.erase(other);
+        renamed[field] = other;
+    }
+    return renamed;
+}
+
+ApiResult workspace_failure(const control::ZettaControlError& error,
+                            const json& input,
+                            std::string_view prefix,
+                            const std::map<std::string, std::string>& renamed) {
+    std::string message = error.message;
+    std::string field;
+    // The engine's schema check leads with a pointer: "/format: instance not found in required
+    // enum". The pointer belongs in `path`, the field's name in the message.
+    if (message.starts_with("/")) {
+        if (const auto colon = message.find(": "); colon != std::string::npos) {
+            field = message.substr(1, colon - 1);
+            message = field + message.substr(colon);
+        }
+    }
+    if (error.path.starts_with("/") && error.path.size() > 1) {
+        // The engine's own pointer, when it names the field (zetta#1217), wins.
+        field = error.path.substr(1);
+    } else if (const auto at = message.find("property '");
+               field.empty() && at != std::string::npos) {
+        // "required property 'x' not found in object" is about x (lake#256).
+        const auto end = message.find('\'', at + 10);
+        if (end != std::string::npos) {
+            field = message.substr(at + 10, end - at - 10);
+        }
+    }
+    // A refusal that quotes a value the caller sent ("no model named 'm-1'") is about that field.
+    if (field.empty() && input.is_object() && error.code != "store_unavailable") {
+        for (const auto& [key, value] : input.items()) {
+            if (!value.is_string() || value.get_ref<const std::string&>().empty()) {
+                continue;
+            }
+            const std::string& text = value.get_ref<const std::string&>();
+            if (message.contains("'" + text + "'") || message.contains("\"" + text + "\"")) {
+                field = key;
+                break;
+            }
+        }
+    }
+    if (const auto back = renamed.find(field.substr(0, field.find('/'))); back != renamed.end()) {
+        field = back->second + field.substr(back->first.size());
+    }
+    std::string code = error.code;
+    // The engine names the input field, so the input is at fault, whatever it called it.
+    if (!field.empty() && (code == "engine_error" || code == "invalid_argument")) {
+        code = "invalid_input";
+    }
+    return ApiResult::failure(std::move(code),
+                              std::move(message),
+                              field.empty() ? std::string() : std::string(prefix) + "/" + field);
+}
+
 bool workspace_read_allowed(std::string_view capability) {
     return listed(workspace_reads, capability);
 }
@@ -4529,16 +4755,19 @@ void register_workspace_capabilities(Registry& registry) {
         registry.add(Capability{
             .name = operation,
             .title = operation,
-            .description = "Manage workspace desired state. Operator observations are read-only.",
+            .description = workspace_description(operation),
             .input_schema = listing || creating ? control_input_schema(properties, required)
                                                 : customer_input_schema(properties, required),
             .output_schema = {{"type", "object"}},
             .kind = read ? CapabilityKind::Read : CapabilityKind::Action,
             .object = "customer",
-            .action = deleting ? "admin" : read ? "read" : "write",
+            .action = deleting ? "admin"
+                      : read   ? "read"
+                               : "write",
             .resolve_object = customer_object,
             .authorizes_candidates = listing,
-            .handler = [operation, listing, creating, deleting](const json& input, ApiContext& context) {
+            .handler = [operation, listing, creating, deleting](const json& input,
+                                                                ApiContext& context) {
                 if (listing) {
                     const auto object = customer_object(input, context);
                     if (!object) {

@@ -459,7 +459,8 @@ TEST_F(SharedLinkScenario, SignedOutRecipientTraversesPreviewsAndDownloadsExactB
                                          {"name", "unauthorized"}}
                                         .dump(),
                                     "Bearer " + token);
-    EXPECT_NE(write.find(" 403 "), std::string::npos) << write;
+    // A share-link token is not a lake credential: 401 (lake#450).
+    EXPECT_NE(write.find(" 401 "), std::string::npos) << write;
     const json writable = create_link("write");
     const auto write_role_read =
         shared_request("/download", "shared/hello.txt", writable.at("token").get<std::string>());

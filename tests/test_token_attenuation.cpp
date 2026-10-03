@@ -214,9 +214,12 @@ protected:
                       !result.at("result").at("structuredContent").at("ok").get<bool>());
             result = result.at("result").at("structuredContent");
         }
-        EXPECT_NE(wire.find(mcp_ || result.at("ok").get<bool>()               ? " 200 "
-                            : result.at("error").at("code") == "unauthorized" ? " 403 "
-                                                                              : " 400 "),
+        // A credential lake no longer accepts is 401 unauthenticated; one that does not grant
+        // the call is 403 unauthorized (lake#450).
+        EXPECT_NE(wire.find(mcp_ || result.at("ok").get<bool>()                  ? " 200 "
+                            : result.at("error").at("code") == "unauthenticated" ? " 401 "
+                            : result.at("error").at("code") == "unauthorized"    ? " 403 "
+                                                                                 : " 400 "),
                   std::string::npos);
         if (!secret.empty()) {
             secrets_.push_back(secret);
@@ -241,9 +244,11 @@ protected:
         ASSERT_EQ(matches.size(), 1u) << name;
         EXPECT_EQ(matches[0].draft.action, name);
         EXPECT_EQ(matches[0].draft.outcome,
-                  result.at("ok").get<bool>()                       ? "success"
-                  : result.at("error").at("code") == "unauthorized" ? "denied"
-                                                                    : "failure");
+                  result.at("ok").get<bool>() ? "success"
+                  : result.at("error").at("code") == "unauthorized" ||
+                          result.at("error").at("code") == "unauthenticated"
+                      ? "denied"
+                      : "failure");
         EXPECT_FALSE(matches[0].signature.empty());
     }
 

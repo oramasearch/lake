@@ -31,11 +31,12 @@ curl -H "$H" -H 'content-type: application/json' \
 curl -H "$H" -H 'content-type: application/json' \
   -d '{"customer_type":"individual","user_id":"<user id>"}' https://lake.oramadev.net/v1/create_customer
 curl -H "$H" 'https://lake.oramadev.net/v1/list_customers?limit=5'
-curl -H "$H" 'https://lake.oramadev.net/v1/get_customer?id=<customer id>'
+curl -H "$H" 'https://lake.oramadev.net/v1/get_customer?customer_id=<customer id>'
 ```
 
-`get_customer` also accepts `customer_id`, the name every other capability uses for a space;
-passing both with different values answers `400`.
+`get_customer` names the space `customer_id`, as every other capability does (lake#450). The old
+`id` is still accepted as a deprecated alias ([naming.md](naming.md)); passing both with different
+values answers `400` at `/id`.
 
 Response (success): `{"ok":true,"value":{...},"duration_ms":0.4}`. Failure:
 `{"ok":false,"error":{"code":"conflict","message":"...","path":""},"duration_ms":0.2}`.

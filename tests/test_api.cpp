@@ -16,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -2305,8 +2306,10 @@ TEST(Registry, EverythingElseNeedsAuth) {
     s.ctx.authorized = false;
     const ApiResult r = s.call("list_users");
     EXPECT_FALSE(r.ok);
-    EXPECT_EQ(r.error.code, "unauthorized");
-    EXPECT_EQ(rest_status(r), 403);
+    // No credential at all is 401 unauthenticated, saying so (lake#450).
+    EXPECT_EQ(r.error.code, "unauthenticated");
+    EXPECT_EQ(r.error.reason, "missing");
+    EXPECT_EQ(rest_status(r), 401);
 }
 
 TEST(Registry, ValidatesInput) {
@@ -2376,7 +2379,7 @@ TEST(Audit, DeniedAuthorizationAndJsonLinesExportAreRecorded) {
     s.ctx.authorized = false;
     const ApiResult denied = s.call("list_users");
     EXPECT_FALSE(denied.ok);
-    EXPECT_EQ(denied.error.code, "unauthorized");
+    EXPECT_EQ(denied.error.code, "unauthenticated");
 
     s.ctx.authorized = true;
     const ApiResult exported = s.call("export_audit");
@@ -2491,7 +2494,7 @@ TEST(PostgresAudit, RegistryEventsPersistAndVerify) {
     context.authorized = false;
     context.request_id.clear();
     const ApiResult result = registry.call("list_users", json::object(), context);
-    EXPECT_EQ(result.error.code, "unauthorized");
+    EXPECT_EQ(result.error.code, "unauthenticated");
 
     auto events = lake::test::audit_events(*store, lake::audit::Filter{.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
@@ -2659,7 +2662,7 @@ TEST(SyncRegistry, DeclaresTransportPolicyAndRecordsDenial) {
     surface.ctx.authorized = false;
     const ApiResult denied = surface.call("push", {{"repository_id", "missing"}});
     EXPECT_FALSE(denied.ok);
-    EXPECT_EQ(denied.error.code, "unauthorized");
+    EXPECT_EQ(denied.error.code, "unauthenticated");
     const auto events = lake::test::audit_events(surface.store, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     ASSERT_FALSE(events->empty());
@@ -2784,7 +2787,7 @@ TEST(Mcp, InitializeListAndCall) {
     s.ctx.authorized = false;
     const auto denied = json::parse(*mcp_dispatch(s.registry, call, s.ctx, "0.0.1"));
     EXPECT_TRUE(denied["result"]["isError"]);
-    EXPECT_EQ(denied["result"]["structuredContent"]["error"]["code"], "unauthorized");
+    EXPECT_EQ(denied["result"]["structuredContent"]["error"]["code"], "unauthenticated");
     const auto unknown = json::parse(*mcp_dispatch(
         s.registry, {{"jsonrpc", "2.0"}, {"id", 4}, {"method", "nope"}}, s.ctx, "0.0.1"));
     EXPECT_EQ(unknown["error"]["code"], -32601);
@@ -3318,7 +3321,7 @@ TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {
     EXPECT_EQ(listed.value["items"][0]["id"], public_repository.value["id"]);
     EXPECT_TRUE(s.call("get_repository", {{"id", public_repository.value["id"]}}).ok);
     const ApiResult hidden = s.call("get_repository", {{"id", private_repository.value["id"]}});
-    EXPECT_EQ(hidden.error.code, "unauthorized");
+    EXPECT_EQ(hidden.error.code, "unauthenticated");
 
     for (const auto& capability : s.registry.list()) {
         if (capability->name.starts_with("list_")) {
@@ -4462,7 +4465,7 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     EXPECT_NE(private_page.find("Location: /sign-in"), std::string::npos);
     const std::string private_api =
         http_get(server.port(), "/v1/get_repository?id=" + private_repository->id);
-    EXPECT_NE(private_api.find(" 403 "), std::string::npos);
+    EXPECT_NE(private_api.find(" 401 "), std::string::npos);
     server.stop();
 }
 
@@ -5404,4 +5407,238 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     EXPECT_TRUE(std::ranges::any_of(*audit_events, [](const lake::audit::Event& event) {
         return event.draft.action == "create_token" && event.draft.outcome == "success";
     }));
+}
+
+// --- API consistency (lake#450, docs/api/errors.md, docs/api/naming.md) -------------------------
+
+TEST(ApiErrors, EveryReturnedCodeIsDocumented) {
+    // Every error code literal in the source is in error_codes(), or is a spelling
+    // ApiResult::failure maps onto one, or never leaves the store (`expired` becomes
+    // ApiContext::credential_rejection). The table is also the doc's.
+    const std::set<std::string> mapped = {
+        "invalid_argument", "unsupported", "unavailable", "internal", "expired"};
+    const std::regex literal(R"re((?:failure|ApiError\s*\{|StoreError\s*\{|SyncStoreError\s*\{|)re"
+                             R"re(\bError\s*\{|ZettaControlError\s*\{|error_body)\s*\(?\s*\{?\s*)re"
+                             R"re("([a-z][a-z_]*)"\s*,)re");
+    std::set<std::string> found;
+    const std::filesystem::path root(LAKE_TEST_SOURCE_DIR);
+    for (const auto* directory : {"src", "include"}) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(root / directory)) {
+            const auto extension = entry.path().extension();
+            if (extension != ".cpp" && extension != ".hpp") {
+                continue;
+            }
+            std::ifstream file(entry.path());
+            const std::string text((std::istreambuf_iterator<char>(file)), {});
+            for (auto match = std::sregex_iterator(text.begin(), text.end(), literal);
+                 match != std::sregex_iterator();
+                 ++match) {
+                found.insert((*match)[1].str());
+            }
+        }
+    }
+    EXPECT_TRUE(found.contains("invalid_input")) << "the scan finds the codes it is meant to";
+    for (const std::string& code : found) {
+        EXPECT_TRUE(lake::api::find_error_code(code) != nullptr || mapped.contains(code))
+            << code << " is returned but is not in error_codes() (docs/api/errors.md)";
+    }
+    std::ifstream doc(root / "docs/api/errors.md");
+    const std::string errors((std::istreambuf_iterator<char>(doc)), {});
+    for (const lake::api::ErrorCode& code : lake::api::error_codes()) {
+        EXPECT_NE(errors.find("| `" + std::string(code.code) + "` | " +
+                              std::to_string(code.status) + " |"),
+                  std::string::npos)
+            << code.code << " is missing from docs/api/errors.md";
+    }
+}
+
+TEST(ApiErrors, OtherSpellingsAndUnknownCodesBecomeDocumentedOnes) {
+    EXPECT_EQ(ApiResult::failure("invalid_argument", "x").error.code, "invalid_input");
+    EXPECT_EQ(ApiResult::failure("unsupported", "x").error.code, "not_supported");
+    EXPECT_EQ(ApiResult::failure("unavailable", "x").error.code, "store_unavailable");
+    const ApiResult odd = ApiResult::failure("made_up", "something broke", "/a");
+    EXPECT_EQ(odd.error.code, "store_error");
+    EXPECT_EQ(odd.error.message, "made_up: something broke");
+    EXPECT_EQ(rest_status(ApiResult::failure("unauthenticated", "x")), 401);
+    EXPECT_EQ(rest_status(ApiResult::failure("unauthorized", "x")), 403);
+    EXPECT_EQ(rest_status(ApiResult::failure("method_not_allowed", "x")), 405);
+    EXPECT_EQ(rest_status(ApiResult::failure("not_approved", "x")), 409);
+    EXPECT_EQ(rest_status(ApiResult::failure("engine_error", "x")), 502);
+    EXPECT_EQ(rest_status(ApiResult::failure("workspace_not_ready", "x")), 503);
+    // The OpenAPI error envelope enumerates exactly the documented codes.
+    const json schema = lake::api::error_envelope_schema();
+    EXPECT_EQ(schema["properties"]["error"]["properties"]["code"]["enum"].size(),
+              lake::api::error_codes().size());
+}
+
+TEST(ApiErrors, RestSaysWhetherACredentialIsMissingInvalidOrExpired) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto user =
+        store->create_user({"taap:1:ed25519:expiring", "expiring@example.test", "Expiring"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto token =
+        store->create_token({user->id, "lake", "short", "test", {"list_customers"}, 1, false});
+    ASSERT_TRUE(token) << token.error().message;
+    const auto live =
+        store->create_token({user->id, "lake", "live", "test", {"list_customers"}, 600, false});
+    ASSERT_TRUE(live) << live.error().message;
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "credential-test";
+    options.admin_token = "credential-admin";
+    options.store = store;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const auto body = [](const std::string& response) {
+        return json::parse(response.substr(response.find("\r\n\r\n") + 4));
+    };
+
+    const std::string missing = http_get(server.port(), "/v1/list_customers");
+    EXPECT_NE(missing.find(" 401 "), std::string::npos) << missing;
+    EXPECT_EQ(body(missing)["error"]["code"], "unauthenticated");
+    EXPECT_EQ(body(missing)["error"]["reason"], "missing");
+    EXPECT_EQ(body(missing)["error"]["help"], "http://localhost/developer/mcp");
+    EXPECT_EQ(response_header(missing, "WWW-Authenticate"),
+              "Bearer realm=\"lake\", error_uri=\"http://localhost/developer/mcp\"");
+
+    const std::string invalid =
+        http_get(server.port(), "/v1/list_customers", "Bearer not-a-lake-credential");
+    EXPECT_NE(invalid.find(" 401 "), std::string::npos) << invalid;
+    EXPECT_EQ(body(invalid)["error"]["reason"], "invalid");
+    EXPECT_NE(response_header(invalid, "WWW-Authenticate").find("error=\"invalid_token\""),
+              std::string::npos);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    const std::string expired =
+        http_get(server.port(), "/v1/list_customers", "Bearer " + token->secret);
+    EXPECT_NE(expired.find(" 401 "), std::string::npos) << expired;
+    EXPECT_EQ(body(expired)["error"]["reason"], "expired");
+    EXPECT_NE(body(expired)["error"]["message"].get<std::string>().find("expired"),
+              std::string::npos);
+
+    // A valid credential that does not grant the call is still 403.
+    const std::string refused = http_get(server.port(), "/v1/list_users", "Bearer " + live->secret);
+    EXPECT_NE(refused.find(" 403 "), std::string::npos) << refused;
+    EXPECT_EQ(body(refused)["error"]["code"], "unauthorized");
+
+    // A public capability is unaffected, and an empty query key names no field.
+    for (const char* path : {"/v1/server_info?", "/v1/server_info?&", "/v1/server_info?="}) {
+        const std::string info = http_get(server.port(), path);
+        EXPECT_NE(info.find(" 200 "), std::string::npos) << path << "\n" << info;
+    }
+    server.stop();
+}
+
+TEST(ApiErrors, InputRefusalsPointAtTheField) {
+    Surface s;
+    const ApiResult token =
+        s.call("create_token", {{"name", "k"}, {"scopes", json::array({"*"})}, {"static", true}});
+    ASSERT_FALSE(token.ok);
+    EXPECT_EQ(token.error.path, "/reason");
+    // A handler that names the field first but gives no path gets it from the registry.
+    Capability capability;
+    capability.name = "check_confirm";
+    capability.description = "A test capability that refuses its confirmation.";
+    capability.input_schema = {{"type", "object"},
+                               {"properties", {{"confirm", {{"type", "string"}}}}},
+                               {"additionalProperties", false}};
+    capability.requires_auth = false;
+    capability.handler = [](const json&, ApiContext&) {
+        return ApiResult::failure("invalid_input", "confirm must be the service name");
+    };
+    Registry registry;
+    ASSERT_TRUE(registry.add(capability));
+    ApiContext context;
+    const ApiResult refused = registry.call("check_confirm", {{"confirm", "x"}}, context);
+    EXPECT_EQ(refused.error.path, "/confirm");
+}
+
+TEST(ApiNaming, TokenScopesAreCapabilityNamesStarOrRegistryPull) {
+    Surface s;
+    const ApiResult nonsense =
+        s.call("create_token",
+               {{"name", "k"}, {"scopes", json::array({"list_customers", "nonsense:scope"})}});
+    ASSERT_FALSE(nonsense.ok);
+    EXPECT_EQ(nonsense.error.code, "invalid_input");
+    EXPECT_EQ(nonsense.error.path, "/scopes/1");
+    EXPECT_NE(nonsense.error.message.find("nonsense:scope"), std::string::npos);
+    const ApiResult named =
+        s.call("create_token",
+               {{"name", "k"}, {"scopes", json::array({"list_customers", "registry_pull"})}});
+    // The operator issues no token of its own, but the scopes pass validation first.
+    if (!named.ok) {
+        EXPECT_NE(named.error.path, "/scopes/0");
+        EXPECT_NE(named.error.path, "/scopes/1");
+    }
+}
+
+TEST(ApiNaming, GetCustomerNamesTheSpaceCustomerIdAndKeepsIdAsADeprecatedAlias) {
+    Surface s;
+    const ApiResult user =
+        s.call("create_user", {{"email", "naming@example.test"}, {"display_name", "Naming"}});
+    ASSERT_TRUE(user.ok) << user.error.message;
+    const ApiResult customer =
+        s.call("create_customer", {{"customer_type", "individual"}, {"user_id", user.value["id"]}});
+    ASSERT_TRUE(customer.ok) << customer.error.message;
+    const std::string id = customer.value["id"];
+    EXPECT_TRUE(s.call("get_customer", {{"customer_id", id}}).ok);
+    EXPECT_TRUE(s.call("get_customer", {{"id", id}}).ok) << "the deprecated alias still works";
+    const ApiResult both = s.call("get_customer", {{"id", id}, {"customer_id", "other"}});
+    EXPECT_EQ(both.error.code, "invalid_input");
+    EXPECT_EQ(both.error.path, "/id");
+    const ApiResult missing = s.call("get_customer", {{"customer_id", "missing"}});
+    EXPECT_EQ(missing.error.code, "not_found");
+    EXPECT_EQ(missing.error.path, "/customer_id");
+    // The schema shows the alias as deprecated, so OpenAPI and MCP document it.
+    const json properties = s.registry.find("get_customer")->input_schema["properties"];
+    EXPECT_TRUE(properties["id"].value("deprecated", false));
+    EXPECT_EQ(s.registry.find("get_customer")->input_schema["required"],
+              json::array({"customer_id"}));
+}
+
+TEST(ApiNaming, OneNamePerConceptAcrossCapabilities) {
+    Surface s;
+    const auto has = [&](const std::string& capability, const std::string& field) {
+        const auto found = s.registry.find(capability);
+        return found && found->input_schema["properties"].contains(field) &&
+               !found->input_schema["properties"][field].value("deprecated", false);
+    };
+    for (const auto& [capability, field] :
+         std::vector<std::pair<std::string, std::string>>{{"predict", "model_id"},
+                                                          {"search_index", "index_id"},
+                                                          {"get_run_metrics", "run_id"},
+                                                          {"stop_experiment_trial", "run_id"},
+                                                          {"promote_trial", "run_id"},
+                                                          {"get_customer", "customer_id"}}) {
+        EXPECT_TRUE(has(capability, field)) << capability << " names it " << field;
+    }
+    // No capability takes a concept under a non-canonical name except as a deprecated alias.
+    for (const auto& capability : s.registry.list()) {
+        for (const auto& [field, schema] :
+             capability->input_schema.value("properties", json::object()).items()) {
+            if ((field == "run" || field == "model" || field == "index") &&
+                schema.value("type", json()) == "string") {
+                EXPECT_TRUE(schema.value("deprecated", false))
+                    << capability->name << " takes `" << field << "`; use `" << field << "_id`";
+            }
+        }
+    }
+}
+
+TEST(ApiDescriptions, EveryCapabilitySaysWhatItDoesForAPerson) {
+    Surface s;
+    std::map<std::string, std::string> seen;
+    for (const auto& capability : s.registry.list()) {
+        const std::string& text = capability->description;
+        EXPECT_GE(text.size(), 40u) << capability->name << ": \"" << text << "\" is too thin";
+        EXPECT_FALSE(text.starts_with("Manage")) << capability->name << ": say what it does";
+        for (const char* vague : {"durable forge record",
+                                  "desired lifecycle state",
+                                  "after explicit confirmation in this space"}) {
+            EXPECT_EQ(text.find(vague), std::string::npos) << capability->name << ": " << text;
+        }
+        const auto [previous, inserted] = seen.emplace(text, capability->name);
+        EXPECT_TRUE(inserted) << capability->name << " shares its description with "
+                              << previous->second << ": \"" << text << "\"";
+    }
 }

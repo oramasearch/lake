@@ -437,7 +437,12 @@ void register_pki_capabilities(Registry& registry) {
         registry.add(Capability{
             .name = name,
             .title = title,
-            .description = "Issue a short-lived " + profile + " certificate.",
+            .description =
+                profile == "client"
+                    ? "Issue a short-lived TLS client certificate from the space's authority, so a "
+                      "program can prove who it is to a server that trusts it."
+                    : "Issue a short-lived device certificate from the space's authority, so a "
+                      "machine can prove which device it is.",
             .input_schema = {{"type", "object"},
                              {"properties",
                               {{"customer_id", {{"type", "string"}}},
@@ -478,7 +483,13 @@ void register_pki_capabilities(Registry& registry) {
         registry.add(Capability{
             .name = name,
             .title = title,
-            .description = "Issue a short-lived OpenSSH certificate for an Ed25519 public key.",
+            .description =
+                host ? std::string("Sign a server's Ed25519 SSH host key with the space's SSH "
+                                   "authority, so clients that trust the authority can connect "
+                                   "without a host-key prompt; short-lived.")
+                     : std::string("Sign a person's or workload's Ed25519 SSH key with the space's "
+                                   "SSH authority, so it can log in as the listed principals; "
+                                   "short-lived."),
             .input_schema =
                 {{"type", "object"},
                  {"properties",
@@ -613,7 +624,12 @@ void register_pki_capabilities(Registry& registry) {
         registry.add(Capability{
             .name = std::move(name),
             .title = authorization_lookup ? "Read ACME authorization" : "Read ACME order",
-            .description = "Return current RFC 8555 state.",
+            .description =
+                authorization_lookup
+                    ? std::string("Read an ACME authorization: whether the HTTP-01 challenge for "
+                                  "the domain has been validated yet (RFC 8555).")
+                    : std::string("Read an ACME certificate order: its status and, once it is "
+                                  "valid, the certificate to download (RFC 8555)."),
             .input_schema =
                 {{"type", "object"},
                  {"properties",
