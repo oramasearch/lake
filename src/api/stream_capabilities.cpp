@@ -8,7 +8,9 @@
 #include <set>
 
 #include "lake/control/agent_bus.hpp"
+#include "lake/control/stream_owners.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "workspace_records_api.hpp"
 
 namespace lake::api {
 namespace {
@@ -371,6 +373,26 @@ owner_key(ApiContext& context, const json& input) {
                                   topic_name(input.at("topic")), context.acting_identity};
 }
 
+// The recorded creator of a workspace topic, read from the workspace's own Zetta (lake#379):
+// success with `creator` (empty when nobody claimed it), or with null when the workspace cannot be
+// resolved, in which case nobody may manage the topic.
+Task creator_of(ApiContext& context, const json& input) {
+    auto key = co_await owner_key(context, input);
+    if (!key || !*key) {
+        co_return ApiResult::success({{"creator", nullptr}});
+    }
+    auto records = workspace_records(context, (*key)->customer_id, (*key)->workspace_id);
+    if (!records) {
+        co_return ApiResult::failure(records.error().code, records.error().message);
+    }
+    auto creator = control::settled(
+        co_await control::stream_creator(*records, (*key)->customer_id, (*key)->topic));
+    if (!creator) {
+        co_return ApiResult::failure(creator.error().code, creator.error().message);
+    }
+    co_return ApiResult::success({{"creator", *creator}});
+}
+
 Task get(ApiContext& context, const json& input) {
     const std::string requested = topic_name(input.at("topic"));
     std::string name = requested;
@@ -382,25 +404,37 @@ Task get(ApiContext& context, const json& input) {
         }
         name = *resolved;
     }
-    auto result = completed(co_await proxy(context, input, "get_topic", {{"topic", name}}));
+    const bool owned = !bus && !reserved(name);
+    ApiResult result;
+    ApiResult creator = ApiResult::success({{"creator", nullptr}});
+    if (owned) {
+        // The topic and its creator record are independent reads of the same workspace; they run
+        // together, so a stream page stays at one round.
+        ApiContext topic_context = context;
+        ApiContext owner_context = context;
+        auto [wait_error, topic_done, owner_done] = co_await liquid::runtime::when_all(
+            liquid::runtime::as_io(proxy(topic_context, input, "get_topic", {{"topic", name}})),
+            liquid::runtime::as_io(creator_of(owner_context, input)));
+        if (wait_error) {
+            co_return ApiResult::failure("store_error", wait_error.message());
+        }
+        result = completed(std::move(topic_done));
+        creator = completed(std::move(owner_done));
+    } else {
+        result = completed(co_await proxy(context, input, "get_topic", {{"topic", name}}));
+    }
     if (!result.ok) {
         co_return result;
+    }
+    if (!creator.ok) {
+        co_return creator;
     }
     result.value["topic"] = requested;
     result.value["zetta"] = input.at("zetta");
     result.value["system"] = bus || reserved(name);
-    result.value["can_manage"] = false;
+    result.value["can_manage"] = creator.value.at("creator").is_string() &&
+                                 creator.value.at("creator") == context.acting_identity;
     result.value["counts_available"] = true;
-    if (!bus && !reserved(name)) {
-        auto key = co_await owner_key(context, input);
-        if (key && *key) {
-            auto creator = context.store->stream_owner(**key);
-            if (!creator) {
-                co_return ApiResult::failure(creator.error().code, creator.error().message);
-            }
-            result.value["can_manage"] = *creator == context.acting_identity;
-        }
-    }
     if (bus && shared_agent_topic(name)) {
         // Shared subscription identities and aggregate counts never leave the service.
         result.value["subscriptions"] = json::array();
@@ -579,7 +613,13 @@ Task mutate(ApiContext& context, const json& input, const std::string& name) {
         co_return pending->error();
     }
     auto key = **pending;
-    const auto creator = context.store->stream_owner(key);
+    // Topic ownership lives in the workspace Zetta of the topic (lake#379), never centrally.
+    auto records = workspace_records(context, key.customer_id, key.workspace_id);
+    if (!records) {
+        co_return ApiResult::failure(records.error().code, records.error().message);
+    }
+    const auto creator =
+        control::settled(co_await control::stream_creator(*records, key.customer_id, key.topic));
     if (!creator) {
         co_return ApiResult::failure(creator.error().code, creator.error().message);
     }
@@ -665,13 +705,17 @@ Task mutate(ApiContext& context, const json& input, const std::string& name) {
     if (create && result.ok) {
         // Only a confirmed upstream creation establishes ownership. A lost response or an
         // existing topic must never grant control of a topic this person did not create.
-        const auto claimed = context.store->create_stream_owner(key);
+        const auto claimed = control::settled(co_await control::claim_stream_owner(*records, key));
         if (!claimed) {
-            co_return ApiResult::failure(claimed.error().code, claimed.error().message);
+            co_return ApiResult::failure(claimed.error().code,
+                                         claimed.error().code == "conflict"
+                                             ? "a recorded topic creation already exists"
+                                             : claimed.error().message);
         }
     }
     if (name == "delete_stream" && result.ok) {
-        const auto released = context.store->delete_stream_owner(key);
+        const auto released =
+            control::settled(co_await control::release_stream_owner(*records, key));
         if (!released) {
             co_return ApiResult::failure(released.error().code, released.error().message);
         }

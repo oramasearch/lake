@@ -1,7 +1,8 @@
 # Control-plane contracts
 
-[streams.md](streams.md) describes creator ownership bound to a workspace incarnation,
-server-side shared-bus isolation and migration `0037_streams` with `streams_guard`.
+[streams.md](streams.md) describes creator ownership bound to a workspace incarnation (kept in
+the topic's workspace Zetta since lake#379), server-side shared-bus isolation, migration
+`0037_streams` with `streams_guard`, and `0047_stream_owner_workspaces`.
 
 [schema.md](schema.md) describes persisted tables, migrations and the operator handoff, including
 active-only repository-name uniqueness, token ancestry and the one-use invalidation of legacy

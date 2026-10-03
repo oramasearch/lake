@@ -493,7 +493,10 @@ source, push and event credentials. Desired changes notify `lake_builds`. Idempo
 ## Streams migration
 
 `0037_streams` records topic creators in `stream_owners`, keyed by customer, workspace service
-incarnation and concrete topic name. Idempotent; its guard is `streams_guard`. Apply it
+incarnation and concrete topic name. Idempotent; its guard is `streams_guard`. Since lake#379 the
+creators live in each topic's workspace Zetta, and `0047_stream_owner_workspaces` records each
+row's workspace in `workspace_assignments` for the operator's one-shot copy; it adds no column and
+drops nothing (guard `stream_owner_workspaces_guard`). Apply it
 before the Streams binary and vendor it in the operator rollout. Ownership failure behavior and
 space-scoped bus views are specified in [`streams.md`](streams.md).
 

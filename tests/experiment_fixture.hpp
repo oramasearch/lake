@@ -9,6 +9,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "record_fixture.hpp"
 #include "temporary_directory.hpp"
 
 namespace lake::test {
@@ -198,8 +199,11 @@ public:
 
     liquid::runtime::task<control::ZettaControlResult<json>> call(std::string url,
         std::string token, std::string capability, bool read, json input) override {
+        // Streams, and the workspace records that hold their creators (lake#379), go to the
+        // fallback caller.
         if (fallback && (capability.find("topic") != std::string::npos ||
-            capability == "publish_event" || capability == "update_event" || capability == "delete_events")) {
+            capability == "publish_event" || capability == "update_event" || capability == "delete_events" ||
+            RecordTables::handles(capability, input))) {
             co_return control::settled(co_await fallback->call(url, token, capability, read, input));
         }
         std::lock_guard lock(mutex);

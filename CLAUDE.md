@@ -47,6 +47,8 @@ Lake's records move into workspace Zettas through one mechanism,
 #1233 or later), an operator one-shot copy and verification, and a per-table checklist. Ask Orama conversations are the first collection (lake#370,
 migration `0045`); Design → Opportunities are the first mutable one (lake#376, migration `0046`).
 Each PostgreSQL table stays until a later migration drops it after the copy is verified on dev.
+migration `0045`) and topic creators the second (lake#379, migration `0047`); each PostgreSQL
+table stays until a later migration drops it after the copy is verified on dev.
 
 ## Historical status — superseded 2026-09-08
 
@@ -248,8 +250,10 @@ prefix. The contracts are `docs/api/builds.md` and `docs/control-plane/builds.md
 
 Train → Streams adds nine space-scoped REST/MCP capabilities for topic/message CRUD and
 non-consuming live browse across workspace and bus Zettas. System topics are browse-only;
-topic settings/drop require recorded creator ownership. Migration `0037_streams` stores ownership
-per workspace service incarnation. Lists are cursor-paged from one `list_topics` call per Zetta;
+topic settings/drop require recorded creator ownership. Since lake#379 each creator is a sealed
+record in the topic's workspace Zetta (`lake_stream_owners`), so ownership follows the workspace
+incarnation; migration `0047_stream_owner_workspaces` records the retired `stream_owners` rows'
+workspaces for the operator's copy. Lists are cursor-paged from one `list_topics` call per Zetta;
 workspace-native event topics and the space's Agent tasks rows replace per-turn virtual rows. See
 `docs/api/streams.md`, `docs/ui/streams.md` and `docs/control-plane/streams.md`; the operator
 schema/guard handoff remains a rollout prerequisite.

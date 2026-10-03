@@ -4,8 +4,9 @@
 its reason; `service_json` now includes `updated_at`. `InMemoryStore::set_workspace_status` writes
 the operator's workspace observation in tests (lake#452).
 
-`StreamOwner` and its Store methods bind topic management to the creator, customer and actual
-workspace service ID. `list_agent_task_stream_scopes` supplies one customer's compact durable task
+`StreamOwner` is a topic's creator; `stream_owners.hpp` keeps it as a sealed record in the
+topic's workspace Zetta (lake#379), and `Store` keeps only the legacy reads of the retired
+`stream_owners` table, for the copy (`LegacyStreamOwner`). `list_agent_task_stream_scopes` supplies one customer's compact durable task
 and agent scope for the shared Agent events and Agent tasks views.
 `latest_agent_conversation_task` resolves the preceding task for a same-agent, same-kind follow-up.
 `AgentBus::call` carries named

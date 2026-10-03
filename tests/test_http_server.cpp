@@ -4175,7 +4175,8 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         {"/w/:workspace_id/train/experiments/compare", {2, 1}},
         {"/w/:workspace_id/train/run", {3, 1}},
         {"/w/:workspace_id/train/runs", {2, 1}},
-        {"/w/:workspace_id/train/stream", {2, 1}},
+        // The topic, its creator record (lake#379) and its messages, read together.
+        {"/w/:workspace_id/train/stream", {3, 1}},
         {"/w/:workspace_id/train/streams", {1, 1}},
         // Usage reads each workspace's datasets and runs together.
         {"/metering", {2, 1}}};

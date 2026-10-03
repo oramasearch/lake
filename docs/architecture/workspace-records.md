@@ -5,7 +5,8 @@ Refs [lake#370](https://github.com/oramasearch/lake/issues/370) and
 keep its records in the workspace Zetta that owns them. Every follow-up that moves a table or store
 out of lake's PostgreSQL uses it and applies the [checklist](#checklist-for-each-follow-up) below.
 That covers lake#315, #316–#384 and the other "Move … into workspace Zettas" issues.
-`ask_messages` is the first collection to move, and `opportunities` (lake#376) the first mutable one.
+`ask_messages` is the first collection to move, `opportunities` (lake#376) the first mutable one, and
+`stream_owners` (lake#379) the first keyed by a unique name.
 
 The rule it implements is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in
 a workspace Zetta, including credentials, secrets and metrics. Lake's PostgreSQL and the lake Zetta
@@ -18,9 +19,9 @@ still open.
 |---|---|
 | `WorkspaceRecords`, `RecordSet<Codec>` | Implemented on Zetta's keyed record store ([zetta#1231](https://github.com/oramasearch/zetta/issues/1231), merged in zetta PR #1233 to `dev`, `82f617e`). Unit tests run against an engine fake; an opt-in test runs against a real Zetta node built from that commit. |
 | Append-only collections | Implemented. `ask_messages` has moved. |
-| Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. |
-| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `ask_messages` and `opportunities`. |
-| Dropping `ask_messages` and `opportunities` from PostgreSQL | Not part of these changes. A later migration drops each once its copy is verified on the dev cluster. |
+| Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. |
+| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `ask_messages`, `opportunities` and `stream_owners`. |
+| Dropping `ask_messages`, `opportunities` and `stream_owners` from PostgreSQL | Not part of these changes. A later migration drops each once its copy is verified on the dev cluster. |
 
 **Zetta dependency.** A workspace Zetta must run Zetta `dev` at or after zetta PR #1233
 (`82f617e`). An older engine has no record store and answers `put_record` as an unknown
@@ -48,7 +49,7 @@ A page that reads one collection therefore pays one workspace round trip.
 | Append-only log, read back by key | `ask_messages` (#370), `sso_provisioning_logs` (#333), `auth_app_webhook_events` (#356), `auth_app_webhook_deliveries` (#357), `agent_cron_runs` (#372), `offline_recovery_notifications` (#339), `audit_events` (#317) | `append`: one `put_record` with `if_absent`. `list` is newest first by the lookup index, then put in order. Set `retention_ms` where a purge applies. |
 | Mutable rows found by id | `opportunities` (#376, **moved**), `repositories` (#315), `apps` (#377), `stores` (#365), `forge_records` (#341), `platform_environments` (#358) | `get`, then `put` with `if_revision`, or `update`, which retries on `409` by rereading. `remove` with `if_revision`. |
 | One-use codes, sessions, replay evidence, claims | `sessions` (#323), `identity_oauth_flows` (#326), `identity_webauthn_challenges` (#327), `identity_taap_assertions` (#361), `auth_app_authorization_codes` (#363), `offline_recovery_attempts` (#336), `agent_task_status` claims (#375) | Consume with `remove(id, if_revision)`. Only one caller succeeds; the others get `conflict` or `not_found`. Expiry is the collection's `retention_ms`. |
-| Unique names | repository and app names | A name-keyed record written with `if_absent`, using a blind key (see [Keys](#record-format)). |
+| Unique names | `stream_owners` (#379, done), repository and app names | A name-keyed record written with `if_absent`, using a blind key (see [Keys](#record-format)). |
 | Secrets and credentials | `secrets_*` (#328–#332), `keystore` (#324), `pki_authorities` (#342), `custodial_identities` (#364), `auth_app_signing_keys` (#352), `oauth_providers` (#325) | Records whose sealed body holds the secrets subsystem's existing envelope ciphertext. Zetta's connection store is not used (lake seals its own secrets). |
 | Metrics and usage series | `metering_usage` (#348), `metering_build_records` (#349), Prometheus series (#384) | Zetta's labelled time series (`create_metric`/`record_metric`/`query_metric`). The first metering follow-up adds a typed wrapper beside `WorkspaceRecords`. |
 | Event streams | `agent-events`, `app-events.*`, `build-events.*` | Workspace topics with retention, as in #311. |
@@ -229,6 +230,9 @@ copy is verified.
 | `WorkspaceRecords.AnOpportunityStatusChangeRereadsAfterAConcurrentWrite` | Derived keys, a second settle writing nothing, a raced conditional status write reread and retried, another space's id never opening |
 | `Stores/WorkspaceRecordStores.TheOneShotCopyMovesEachOpportunityToItsScansWorkspace/{Memory,Postgres}` | The scan's workspace owning rows in a space with two workspaces, a deleted workspace's rows reported, idempotent copy, verify accepting a later status change and reporting tampering, operator only |
 | `PostgresOpportunities.MigrationRecordsEachRowsOwnerForTheCopy` | Migration 0046 outcomes (`task_workspace`, `sole_workspace`, `needs_selection`, `deleted_workspace`) on a rerun, late rows, paged legacy listing |
+| `Streams.CreatorOwnershipLivesInTheTopicsWorkspaceZetta`, `Streams.ExistingOwnershipCannotBeReassignedAfterAnExternalDrop` | Topic creators at their own workspace endpoint across two spaces and two workspaces; blind keys; the `if_absent` claim; missing, malformed, unknown and foreign `workspace_id`; a workspace that is not ready; workspace deletion; release on drop |
+| `Stores/WorkspaceRecordStores.TheOneShotCopyMovesEachTopicCreatorIntoItsWorkspace/{Memory,Postgres}` | The `stream_owners` copy: plan, paged copy, rerun, verify, read back per workspace, tamper detection, `unknown_workspace` blocking and `workspace_deleted` not blocking completion, operator only |
+| `PostgresStreamOwners.MigrationRecordsEachRowsWorkspaceForTheCopy` | Migration 0047 outcomes on a rerun, the md5 row id lake and SQL share, late rows, paging, a workspace deleted after assignment |
 | `WorkspaceRecordsZetta.TheEngineStoresAndReturnsSealedRecords` | Runs with `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` against a node built from Zetta dev with #1233: append, list, a 20 KB body, `if_absent` conflict with `details.revision`, `update`, a stale `if_revision`, conditional delete |
 | `HttpResponseIsolation.AskOrama*`, `…TheAgentFactory*`, `AgentRuns.EveryAgentFlowTheSiteOffersIsACapability`, `PagePerformance.*` | The pages and the capability end to end, and the page budgets |
 
@@ -317,3 +321,29 @@ run by this change.
    `workspace_assignments`, or delete it. Then repeat step 5.
 7. Once `verify` answers `complete: true` on every page, file the migration that drops
    `opportunities`, with the copy output attached.
+
+## Cutover runbook: `stream_owners`, dev cluster
+
+Topic creators (lake#379). Each `stream_owners` row already names its workspace, so there is no
+selection step: migration `0047_stream_owner_workspaces` records `recorded_workspace` for a live
+workspace of the same space, `workspace_deleted` for a deleted one (its topic went with it, and
+the row does not hold the drop back), and `unknown_workspace` for anything else. The copy keys each
+creator by the blind index of its topic in `lake_stream_owners`. These steps are for the
+coordinator and are not run by this change.
+
+1. The workspace Zettas must already run Zetta `dev` at or after `82f617e` (step 1 of the
+   `ask_messages` runbook).
+2. Have the operator vendor `db/schema.sql` through `0047_stream_owner_workspaces` and select
+   `stream_owner_workspaces_guard`. Apply the schema and read the warnings for rows that are not
+   copied.
+3. Deploy the lake image built from this change. Until step 4 finishes, `get_stream` reports
+   `can_manage: false` for existing topics, and `update_stream`/`delete_stream` are refused,
+   because their creators are not yet in the workspace; reads, publishing and creating new topics
+   work.
+4. Run `POST /v1/copy_workspace_records {"collection":"stream_owners","mode":"plan"}` with the
+   operator bearer, then `{"mode":"copy"}` and `{"mode":"verify"}`, following `next_after` until
+   it is null.
+5. For each `unknown_workspace` row, decide in a reviewed change: delete the row (dev data may be
+   deleted) or correct it. Then repeat step 4.
+6. Once `verify` answers `complete: true` on every page, file the migration that drops
+   `stream_owners`, with the copy output attached.

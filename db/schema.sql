@@ -2334,3 +2334,46 @@ CREATE TABLE IF NOT EXISTS opportunity_workspaces_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0046_opportunity_workspaces')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0047_stream_owner_workspaces: topic creators live in the workspace Zetta whose topic they
+-- describe (lake#379, docs/control-plane/streams.md, docs/architecture/workspace-records.md).
+-- Lake no longer writes or reads stream_owners; the operator's one-shot copy
+-- (copy_workspace_records) moves each row into its workspace and verifies it. Each row already
+-- names its workspace, so this migration only records it: a row whose workspace is live in the
+-- same space is owned by it, a row whose workspace was deleted is recorded as workspace_deleted
+-- (its topic went with that incarnation, so there is nothing to copy), and any other row is
+-- recorded as unknown_workspace and reported. A row's object_id is
+-- md5(customer_id, workspace_id, topic) as a UUID, since the table has no id column. No column is
+-- added and nothing is dropped; a later migration drops the table once the copy has been verified
+-- on every environment.
+-- ---------------------------------------------------------------------------------------------
+DO $$
+DECLARE
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0047_stream_owner_workspaces') THEN
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT 'stream_owners',
+                   md5(s.customer_id::text || E'\n' || s.workspace_id || E'\n' || s.topic)::uuid,
+                   s.customer_id,
+                   CASE WHEN w.desired <> 'deleted' THEN w.id END,
+                   CASE WHEN w.id IS NULL THEN 'unknown_workspace'
+                        WHEN w.desired = 'deleted' THEN 'workspace_deleted'
+                        ELSE 'recorded_workspace' END
+            FROM stream_owners s LEFT JOIN workspaces w ON w.id::text = s.workspace_id
+                 AND w.customer_id = s.customer_id
+            ON CONFLICT DO NOTHING;
+        FOR unresolved IN SELECT * FROM workspace_assignments
+                           WHERE workspace_id IS NULL AND object_table = 'stream_owners' LOOP
+            RAISE WARNING 'stream owner is not copied (%): object=%, customer=%',
+                unresolved.outcome, unresolved.object_id, unresolved.customer_id;
+        END LOOP;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS stream_owner_workspaces_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0047_stream_owner_workspaces')
+    ON CONFLICT DO NOTHING;

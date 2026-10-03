@@ -256,7 +256,8 @@ void validate_evidence(const json& document) {
 }
 
 TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
-    constexpr const char* kek = "schema-conformance-instance-kek";
+    // 32 bytes of hex, as LAKE_INSTANCE_KEK is: workspace records (Streams ownership) derive from it.
+    constexpr const char* kek = "736368656d612d636f6e666f726d616e63652d696e7374616e63652d6b656b31";
     const auto root = lake::test::fixture_path("schema-server");
     const auto store = std::make_shared<lake::control::InMemoryStore>();
     const std::string suffix = lake::control::new_uuid_v4();

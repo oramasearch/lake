@@ -34,6 +34,10 @@ in `payload`, not as an unspecified schema object.
 missing, unknown or foreign IDs return `invalid_input`. `zetta` is `workspace` or `bus`, not a URL.
 `list_streams` declares candidate authorization and explicitly checks the space's read permission
 inside its handler before either Zetta is called. The other operations use registry authorization.
+The topic creator that `update_stream` and `delete_stream` require, and that `get_stream` reports
+as `can_manage`, is a record in the same workspace Zetta (lake#379,
+[ownership](../control-plane/streams.md)); a workspace that is not ready refuses these operations
+rather than answering from anywhere else.
 `topic` accepts a concrete name with an optional `topic:` prefix. List and read responses return
 the unqualified name used by `browse_topic`; displayed names therefore never include the resource
 prefix returned by some Zetta mutations. Wildcards are refused. A

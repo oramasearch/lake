@@ -23,6 +23,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/stream_owners.hpp"
 #include "lake/control/workspace_records.hpp"
 #include "lake/control/zetta_control.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -965,6 +966,151 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesEachOpportunityToItsScansWorksp
             "copy_workspace_records", {{"collection", "opportunities"}, {"mode", "plan"}},
             context));
         return *completed;
+    }();
+    EXPECT_FALSE(refused.ok) << "only the operator copies";
+}
+
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesEachTopicCreatorIntoItsWorkspace) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    auto& first = t.spaces[0];
+    auto& second = t.spaces[1];
+    using lake::control::StreamOwner;
+    const std::vector<StreamOwner> legacy = {
+        // Owned: each names a live workspace of its own space (two in the first space).
+        {first.customer_id, first.workspaces[0], "orders", "taap:alice"},
+        {first.customer_id, first.workspaces[0], "invoices", "taap:bob"},
+        {first.customer_id, first.workspaces[1], "orders", "taap:carol"},
+        {second.customer_id, second.workspaces[0], "orders", "taap:dave"},
+        // Not copied: a workspace of another space, and a workspace id that never existed.
+        {second.customer_id, first.workspaces[0], "stray", "taap:eve"},
+        {second.customer_id, "workspace-one", "orders", "taap:eve"},
+        // Its workspace is deleted below: the topic went with that incarnation.
+        {second.customer_id, second.workspaces[1], "gone", "taap:dave"}};
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        for (const StreamOwner& row : legacy) {
+            tx.exec_params("INSERT INTO stream_owners (customer_id, workspace_id, topic, created_by) "
+                           "VALUES ($1::uuid, $2, $3, $4)",
+                           row.customer_id, row.workspace_id, row.topic, row.created_by);
+        }
+        tx.commit();
+    } else {
+        for (const StreamOwner& row : legacy) {
+            static_cast<lake::control::InMemoryStore&>(*t.store).seed_legacy_stream_owner(row);
+        }
+    }
+    // The second space's lab workspace was deleted after the rows were written: its topic went
+    // with it, so its row is reported but does not hold the drop back.
+    ASSERT_TRUE(t.store->update_workspace(second.workspaces[1], {.desired = "deleted"}));
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    operator_context.request_id = lake::control::new_uuid_v4();
+    const auto copy = [&](std::string mode, std::string after = {}, int limit = 1000) {
+        json input{{"collection", "stream_owners"}, {"mode", mode}, {"limit", limit}};
+        if (!after.empty()) {
+            input["after"] = after;
+        }
+        const auto completed = liquid::runtime::block_on(
+            t.registry.call_async("copy_workspace_records", input, operator_context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+
+    const auto plan = copy("plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["rows"], 7);
+    EXPECT_EQ(plan.value["assigned"], 4);
+    std::multiset<std::string> outcomes;
+    for (const auto& row : plan.value["unresolved"]) {
+        outcomes.insert(row["outcome"].get<std::string>());
+    }
+    EXPECT_EQ(outcomes, (std::multiset<std::string>{"unknown_workspace", "unknown_workspace",
+                                                    "workspace_deleted"}));
+    const std::string home_url = "http://" + first.workspaces[0] + ".test";
+    EXPECT_TRUE(t.zetta->records[home_url].collections.empty()) << "a plan writes nothing";
+
+    const auto before = copy("verify");
+    EXPECT_EQ(before.value["missing"].size(), 4U);
+    EXPECT_FALSE(before.value["complete"]);
+
+    // Paged: two rows a page, following next_after.
+    std::size_t copied = 0;
+    std::string after;
+    for (int page = 0; page < 10; ++page) {
+        const auto result = copy("copy", after, 2);
+        ASSERT_TRUE(result.ok) << result.error.message;
+        copied += result.value["copied"].get<std::size_t>();
+        if (result.value["next_after"].is_null()) {
+            break;
+        }
+        after = result.value["next_after"];
+    }
+    EXPECT_EQ(copied, 4U);
+    EXPECT_EQ(t.zetta->records[home_url].rows("stream_owners").size(), 2U);
+    EXPECT_EQ(t.zetta->records["http://" + first.workspaces[1] + ".test"].rows("stream_owners").size(), 1U);
+    EXPECT_EQ(t.zetta->records["http://" + second.workspaces[0] + ".test"].rows("stream_owners").size(), 1U);
+    const auto rerun = copy("copy");
+    EXPECT_EQ(rerun.value["copied"], 0) << "a rerun copies nothing twice";
+    EXPECT_EQ(rerun.value["already_present"], 4);
+
+    const auto verified = copy("verify");
+    EXPECT_EQ(verified.value["verified"], 4);
+    EXPECT_TRUE(verified.value["missing"].empty());
+    EXPECT_FALSE(verified.value["complete"]) << "rows naming an unknown workspace need review";
+
+    // Each creator reads back in its own workspace only.
+    const auto creator = [&](const auto& space, const std::string& workspace,
+                             const std::string& topic) {
+        auto context = t.context(space);
+        auto records = lake::api::workspace_records(context, space.customer_id, workspace);
+        EXPECT_TRUE(records);
+        return *liquid::runtime::block_on(
+                    lake::control::stream_creator(*records, space.customer_id, topic))
+                    .value();
+    };
+    EXPECT_EQ(creator(first, first.workspaces[0], "orders"), "taap:alice");
+    EXPECT_EQ(creator(first, first.workspaces[1], "orders"), "taap:carol");
+    EXPECT_EQ(creator(second, second.workspaces[0], "orders"), "taap:dave");
+    EXPECT_EQ(creator(first, first.workspaces[0], "stray"), "");
+
+    // A record moved under another topic's key does not open there, so verify reports it.
+    auto& rows = t.zetta->records[home_url].rows("stream_owners");
+    ASSERT_EQ(rows.size(), 2U);
+    const auto one = rows.begin();
+    std::next(one)->second["value"] = one->second["value"];
+    EXPECT_EQ(copy("verify").value["missing"].size(), 1U);
+
+    // The rows naming an unknown workspace are the only blockers: once reviewed (removed here, as
+    // dev data may be), the remaining pages verify complete, deleted-workspace rows included.
+    rows.erase(std::next(one));
+    ASSERT_TRUE(copy("copy").ok);
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params("DELETE FROM stream_owners WHERE customer_id = $1::uuid AND topic IN "
+                       "('stray', 'orders') AND workspace_id <> $2",
+                       second.customer_id, second.workspaces[0]);
+        tx.commit();
+        const auto done = copy("verify");
+        EXPECT_EQ(done.value["unresolved"].size(), 1U);
+        EXPECT_EQ(done.value["unresolved"][0]["outcome"], "workspace_deleted");
+        EXPECT_TRUE(done.value["complete"]) << done.value.dump();
+    }
+
+    const auto refused = [&] {
+        auto context = t.context(first);
+        return *liquid::runtime::block_on(t.registry.call_async(
+            "copy_workspace_records", {{"collection", "stream_owners"}, {"mode", "plan"}}, context));
     }();
     EXPECT_FALSE(refused.ok) << "only the operator copies";
 }

@@ -69,6 +69,16 @@ constexpr std::string_view legacy_opportunity_assignment_sql =
     "= o.customer_id AND tw.desired <> 'deleted' LEFT JOIN workspaces w ON w.customer_id = "
     "o.customer_id AND w.desired <> 'deleted' AND (SELECT count(*) FROM workspaces w2 WHERE "
     "w2.customer_id = o.customer_id AND w2.desired <> 'deleted') = 1 ON CONFLICT DO NOTHING";
+// Migration 0047's assignment of the retired stream_owners rows (db/schema.sql), rerun before each
+// copy so a row an old replica wrote after the migration is recorded too. Each row names its
+// workspace; it is owned by it while that workspace is live in the same space.
+constexpr std::string_view legacy_stream_owner_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'stream_owners', md5(s.customer_id::text || E'\\n' || s.workspace_id || "
+    "E'\\n' || s.topic)::uuid, s.customer_id, CASE WHEN w.desired <> 'deleted' THEN w.id END, "
+    "CASE WHEN w.id IS NULL THEN 'unknown_workspace' WHEN w.desired = 'deleted' THEN "
+    "'workspace_deleted' ELSE 'recorded_workspace' END FROM stream_owners s LEFT JOIN workspaces "
+    "w ON w.id::text = s.workspace_id AND w.customer_id = s.customer_id ON CONFLICT DO NOTHING";
 
 } // namespace
 
@@ -4913,34 +4923,6 @@ public:
         return build_from(rows[0]);
     }
 
-    Result<void> create_stream_owner(const StreamOwner& owner) override {
-        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
-            tx.exec_params("INSERT INTO stream_owners (customer_id, workspace_id, topic, created_by) "
-                           "VALUES ($1::uuid, $2, $3, $4)",
-                           owner.customer_id, owner.workspace_id, owner.topic, owner.created_by);
-            return {};
-        });
-    }
-
-    Result<std::string> stream_owner(const StreamOwner& owner) override {
-        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
-            const auto rows = tx.exec_params(
-                "SELECT created_by FROM stream_owners WHERE customer_id=$1::uuid "
-                "AND workspace_id=$2 AND topic=$3",
-                owner.customer_id, owner.workspace_id, owner.topic);
-            return rows.empty() ? std::string() : rows[0][0].as<std::string>();
-        });
-    }
-
-    Result<void> delete_stream_owner(const StreamOwner& owner) override {
-        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
-            tx.exec_params("DELETE FROM stream_owners WHERE customer_id=$1::uuid "
-                           "AND workspace_id=$2 AND topic=$3 AND created_by=$4",
-                           owner.customer_id, owner.workspace_id, owner.topic, owner.created_by);
-            return {};
-        });
-    }
-
     Result<std::vector<Build>> list_builds(const std::string& customer_id) override {
         return with_tx<std::vector<Build>>([&](pqxx::work& tx) -> Result<std::vector<Build>> {
             const pqxx::result rows =
@@ -6000,6 +5982,42 @@ public:
                     messages.push_back(std::move(legacy));
                 }
                 return messages;
+            });
+    }
+
+    Result<void> assign_legacy_stream_owners() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec(std::string(legacy_stream_owner_assignment_sql));
+            return {};
+        });
+    }
+
+    Result<std::vector<LegacyStreamOwner>> legacy_stream_owners(const std::string& after_id,
+                                                                int limit) override {
+        return with_tx<std::vector<LegacyStreamOwner>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyStreamOwner>> {
+                // A workspace deleted since its rows were assigned no longer receives them.
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT o.id::text, o.customer_id::text, o.workspace_id, o.topic, o.created_by, "
+                    "CASE WHEN w.desired = 'deleted' THEN '' ELSE COALESCE(a.workspace_id::text, '') "
+                    "END, CASE WHEN w.desired = 'deleted' THEN 'workspace_deleted' "
+                    "ELSE COALESCE(a.outcome, 'unknown_workspace') END "
+                    "FROM (SELECT md5(s.customer_id::text || E'\\n' || s.workspace_id || E'\\n' || "
+                    "s.topic)::uuid AS id, s.* FROM stream_owners s) o "
+                    "LEFT JOIN workspace_assignments a ON a.object_table = 'stream_owners' "
+                    "AND a.object_id = o.id LEFT JOIN workspaces w ON w.id = a.workspace_id "
+                    "WHERE ($1 = '' OR o.id > NULLIF($1, '')::uuid) ORDER BY o.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyStreamOwner> owners;
+                for (const pqxx::row& row : rows) {
+                    owners.push_back({row[0].as<std::string>(),
+                                      {row[1].as<std::string>(), row[2].as<std::string>(),
+                                       row[3].as<std::string>(), row[4].as<std::string>()},
+                                      row[5].as<std::string>(),
+                                      row[6].as<std::string>()});
+                }
+                return owners;
             });
     }
 

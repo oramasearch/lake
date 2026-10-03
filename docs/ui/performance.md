@@ -51,7 +51,9 @@ Dataset metadata and its sample query also run concurrently through their existi
 capabilities; the sample remains bounded to 20 displayed rows.
 Project-to-graph reads run alongside dataset and methodology catalogues, without waiting for
 unrelated catalogue responses before starting graph reads. Study details overlap analysis reads,
-and stream details overlap message browsing. Authorization and input validation still apply to
+and stream details overlap message browsing. A stream's creator is a record in the same workspace
+(lake#379), read by `get_record` alongside `get_topic`, so the stream page went from two calls to
+three and stays at one round; the PostgreSQL ownership query it replaces is gone. Authorization and input validation still apply to
 each capability independently.
 
 Solution and solution-backed Project pages also start one bounded `list_runs` registry read in
@@ -123,7 +125,7 @@ workspace work without an explicit review of this table and the test map.
 | `/w/:workspace_id/train/experiments/compare` | 2 | 1 |
 | `/w/:workspace_id/train/run` | 3 | 1 |
 | `/w/:workspace_id/train/runs` | 2 | 1 |
-| `/w/:workspace_id/train/stream` | 2 | 1 |
+| `/w/:workspace_id/train/stream` | 3 | 1 |
 | `/w/:workspace_id/train/streams` | 1 | 1 |
 
 Train → Runs, a run page and Ship → Models each add a concurrent `list_studies` read, so a study's
