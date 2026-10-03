@@ -80,8 +80,13 @@ TEST(WebAuthn, PersistedRegistrationAssertionAndSignCount) {
     context.session_credential = true;
     context.scopes = {"*"};
     SoftwareAuthenticator authenticator;
+    // The ceremonies may read an application's settings from its workspace (lake#351), so they
+    // are asynchronous.
+    const auto begin = [&](const std::string& name) {
+        return *liquid::runtime::block_on(registry.call_async(name, json::object(), context));
+    };
 
-    auto begun = registry.call("begin_passkey_registration", json::object(), context);
+    auto begun = begin("begin_passkey_registration");
     ASSERT_TRUE(begun.ok) << begun.error.message;
     EXPECT_EQ(begun.value["public_key"]["attestation"], "none");
     const auto wrong_origin =
@@ -90,7 +95,7 @@ TEST(WebAuthn, PersistedRegistrationAssertionAndSignCount) {
     EXPECT_EQ(wrong_origin.error.code, "unauthorized");
     EXPECT_FALSE(register_response(registry, context, begun.value, authenticator).ok);
 
-    begun = registry.call("begin_passkey_registration", json::object(), context);
+    begun = begin("begin_passkey_registration");
     ASSERT_TRUE(begun.ok) << begun.error.message;
     const auto registered = register_response(registry, context, begun.value, authenticator);
     ASSERT_TRUE(registered.ok) << registered.error.message;
@@ -120,20 +125,20 @@ TEST(WebAuthn, PersistedRegistrationAssertionAndSignCount) {
     const std::string passkey_device_id = (*passkey_device)["id"];
 
     context.authorized = false;
-    auto assertion = registry.call("begin_passkey_sign_in", json::object(), context);
+    auto assertion = begin("begin_passkey_sign_in");
     ASSERT_TRUE(assertion.ok) << assertion.error.message;
     const auto signed_in = sign_in_response(registry, context, assertion.value, authenticator, 1);
     ASSERT_TRUE(signed_in.ok) << signed_in.error.message;
     EXPECT_TRUE(store.context_for(signed_in.value["secret"]));
     EXPECT_FALSE(sign_in_response(registry, context, assertion.value, authenticator, 2).ok);
 
-    assertion = registry.call("begin_passkey_sign_in", json::object(), context);
+    assertion = begin("begin_passkey_sign_in");
     ASSERT_TRUE(assertion.ok) << assertion.error.message;
     const auto stale = sign_in_response(registry, context, assertion.value, authenticator, 1);
     EXPECT_FALSE(stale.ok);
     EXPECT_EQ(stale.error.code, "unauthorized");
 
-    assertion = registry.call("begin_passkey_sign_in", json::object(), context);
+    assertion = begin("begin_passkey_sign_in");
     ASSERT_TRUE(assertion.ok) << assertion.error.message;
     const auto advanced = sign_in_response(registry, context, assertion.value, authenticator, 2);
     ASSERT_TRUE(advanced.ok) << advanced.error.message;
@@ -142,7 +147,7 @@ TEST(WebAuthn, PersistedRegistrationAssertionAndSignCount) {
     const auto revoked = registry.call("revoke_device", {{"id", passkey_device_id}}, context);
     ASSERT_TRUE(revoked.ok) << revoked.error.message;
     context.authorized = false;
-    assertion = registry.call("begin_passkey_sign_in", json::object(), context);
+    assertion = begin("begin_passkey_sign_in");
     ASSERT_TRUE(assertion.ok) << assertion.error.message;
     const auto after_revoke =
         sign_in_response(registry, context, assertion.value, authenticator, 3);

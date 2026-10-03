@@ -11,6 +11,7 @@
 
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/application_credential_records.hpp"
+#include "lake/control/application_settings_records.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/store.hpp"
@@ -289,6 +290,29 @@ inline void seed_application_signing_key(control::Store& store,
     }
     auto written = control::settled(liquid::runtime::block_on(control::create_application_signing_keys(
         *records, {.application_id = application_id, .keys = {*key}})));
+    if (!written) {
+        throw std::runtime_error(written.error().message);
+    }
+}
+
+// Writes the settings of an application created directly in `store`, as register_application does
+// (lake#351): one record in the application's workspace Zetta, reached through `workspaces`.
+inline void seed_application_settings(const std::shared_ptr<control::WorkspaceService>& workspaces,
+                                      const std::string& workspace,
+                                      control::ApplicationSettings settings,
+                                      std::string_view instance_kek) {
+    const std::string customer = settings.customer_id;
+    auto records = control::WorkspaceRecords::open(
+        [workspaces, customer, workspace](std::string capability, bool read, nlohmann::json input) {
+            return workspaces->call(customer, workspace, std::move(capability), read,
+                                    std::move(input));
+        },
+        workspace, instance_kek);
+    if (!records) {
+        throw std::runtime_error(records.error().message);
+    }
+    auto written = control::settled(liquid::runtime::block_on(
+        control::create_application_settings(*records, std::move(settings))));
     if (!written) {
         throw std::runtime_error(written.error().message);
     }

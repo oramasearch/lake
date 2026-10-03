@@ -163,3 +163,15 @@ immutable), whose `due_at` is the expiry loop's due index, and reports leases wh
 route. Nothing is dropped. The latest guard is `secret_lease_workspaces_guard`; the operator must
 vendor this schema and update its guard before rollout. See
 [secrets.md](../docs/api/secrets.md#migration-and-cutover-lake362).
+Migration `0059_application_settings_workspaces` moves an application's settings out of
+`auth_applications` (lake#351): its name, allowed origins, redirect URIs and theme are one sealed
+record in the workspace Zetta of the application's workspace. The row stays as the content-free
+routing that finds the application before its workspace is read (`id`, `customer_id`, `pool_id`,
+`custom_sign_in_domain`, `workspace_id`, `created_at`, `updated_at`); the four settings columns
+lose NOT NULL and their defaults, are NULL on every new row, and a row without a name may hold none
+of them (`auth_applications_settings_check`). Each application that still holds settings has its
+owner recorded in `workspace_assignments` under `object_table = 'auth_application_settings'` for
+`copy_workspace_records`: `application_workspace`, `needs_selection` while the application has no
+workspace (resolved by the copy once it has one), or `workspace_deleted`. Nothing is dropped. The
+latest guard is `application_settings_workspaces_guard`; the operator must vendor this schema and
+update its guard before rollout. See [apps.md](../docs/api/apps.md#where-settings-live-lake351).

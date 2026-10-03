@@ -33,8 +33,7 @@ template <class T> void limit_rows(std::vector<T>& rows, int limit) {
 
 Result<Application> InMemoryStore::create_application(const NewApplication& input) {
     std::lock_guard lock(mutex_);
-    if (input.id.empty() || input.pool_id.empty() || input.customer_id.empty() ||
-        input.name.empty() || input.allowed_origins.empty()) {
+    if (input.id.empty() || input.pool_id.empty() || input.customer_id.empty()) {
         return std::unexpected(StoreError{"invalid_input", "application fields are incomplete"});
     }
     const auto customer = std::ranges::find_if(
@@ -65,17 +64,16 @@ Result<Application> InMemoryStore::create_application(const NewApplication& inpu
         return std::unexpected(StoreError{"invalid_input", "customer policy object is missing"});
     }
     const std::string now = now_iso8601();
-    applications_.push_back(Application{input.id,
-                                        input.customer_id,
-                                        input.pool_id,
-                                        input.name,
-                                        input.allowed_origins,
-                                        input.redirect_uris,
-                                        input.custom_sign_in_domain,
-                                        input.theme,
-                                        now,
-                                        now,
-                                        input.workspace_id});
+    // The routing row only: the settings are the application's record in its workspace.
+    Application application;
+    application.id = input.id;
+    application.customer_id = input.customer_id;
+    application.pool_id = input.pool_id;
+    application.custom_sign_in_domain = input.custom_sign_in_domain;
+    application.created_at = now;
+    application.updated_at = now;
+    application.workspace_id = input.workspace_id;
+    applications_.push_back(std::move(application));
     policy_objects_.push_back(
         PolicyObject{new_uuid_v4(), "application", input.id, parent->id, now, now, true});
     return applications_.back();
@@ -128,20 +126,68 @@ InMemoryStore::get_application_by_domain(const std::string& custom_sign_in_domai
     return *value;
 }
 
-Result<Application> InMemoryStore::update_application_theme(const std::string& id,
-                                                            const nlohmann::json& theme) {
+void InMemoryStore::seed_legacy_application_settings(ApplicationSettings settings) {
     std::lock_guard lock(mutex_);
-    const auto value =
-        std::ranges::find_if(applications_, [&](const Application& item) { return item.id == id; });
-    if (value == applications_.end()) {
-        return std::unexpected(StoreError{"not_found", "no application " + id});
+    legacy_application_settings_.push_back(std::move(settings));
+}
+
+// As migration 0059: each application's settings belong to its workspace, are needs_selection
+// while it has none (and are resolved once it has a live one), and workspace_deleted when that
+// workspace is gone.
+Result<void> InMemoryStore::assign_legacy_application_settings() {
+    std::lock_guard lock(mutex_);
+    for (const ApplicationSettings& settings : legacy_application_settings_) {
+        const auto application = std::ranges::find_if(applications_, [&](const Application& value) {
+            return value.id == settings.application_id;
+        });
+        if (application == applications_.end()) {
+            continue;
+        }
+        auto& assigned = legacy_application_settings_assignments_[settings.application_id];
+        if (!assigned.first.empty() || assigned.second == "workspace_deleted") {
+            continue;
+        }
+        const auto workspace = std::ranges::find_if(workspaces_, [&](const Workspace& value) {
+            return value.id == application->workspace_id;
+        });
+        if (application->workspace_id.empty()) {
+            assigned = {"", "needs_selection"};
+        } else if (workspace != workspaces_.end() && workspace->desired == "deleted") {
+            assigned = {"", assigned.second.empty() ? "workspace_deleted" : assigned.second};
+        } else {
+            assigned = {application->workspace_id, "application_workspace"};
+        }
     }
-    if (!theme.is_object()) {
-        return std::unexpected(StoreError{"invalid_input", "application theme must be an object"});
+    return {};
+}
+
+Result<std::vector<LegacyApplicationSettings>>
+InMemoryStore::legacy_application_settings(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<ApplicationSettings> ordered = legacy_application_settings_;
+    std::ranges::sort(ordered, {}, &ApplicationSettings::application_id);
+    std::vector<LegacyApplicationSettings> rows;
+    for (const ApplicationSettings& settings : ordered) {
+        if ((!after_id.empty() && settings.application_id <= after_id) ||
+            static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            continue;
+        }
+        const auto application = std::ranges::find_if(applications_, [&](const Application& value) {
+            return value.id == settings.application_id;
+        });
+        if (application == applications_.end()) {
+            continue; // deleted with its space: nothing to copy
+        }
+        LegacyApplicationSettings row{settings, application->customer_id, "", "needs_selection"};
+        row.settings.customer_id = application->customer_id;
+        if (const auto found = legacy_application_settings_assignments_.find(settings.application_id);
+            found != legacy_application_settings_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
     }
-    value->theme = theme;
-    value->updated_at = now_iso8601();
-    return *value;
+    return rows;
 }
 
 Result<std::string> InMemoryStore::encrypt_application_credential(const std::string& purpose,

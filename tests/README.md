@@ -469,3 +469,13 @@ the server tick. `test_workspace_records.cpp`'s `DynamicLeasesLiveInTheirMountsW
 `TheOneShotCopyMovesDynamicLeasesIntoTheirMountsWorkspace` cover two spaces with two workspaces
 each and the copy in both stores (`seed_legacy_dynamic_secret_lease`);
 `PostgresSecrets.LeaseRoutesAreAContentFreeDueIndex` migration `0058_secret_lease_workspaces`.
+Application settings (lake#351): `test_apps.cpp`
+(`SettingsLiveInTheApplicationsWorkspace`) covers two spaces with two workspaces each, sealed
+records and empty routing rows, reads and listings from the workspace, the theme with missing,
+malformed, unknown and foreign `workspace_id` and a raced change, origins checked from the record,
+least privilege, a moved record not opening, not ready and deletion;
+`WorkspaceRecordStores.TheOneShotCopyMovesApplicationSettings` the copy in both stores;
+`PostgresApplicationSettings.MigrationRecordsEachRowsOwnerForTheCopy` migration
+`0059_application_settings_workspaces`. `stream_fixture.hpp`'s `seed_application_settings` writes
+the settings of an application a test creates directly in a store, and `test_webauthn.cpp` calls
+the passkey ceremonies asynchronously.

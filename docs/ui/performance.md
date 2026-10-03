@@ -146,7 +146,13 @@ workspace observed for it.
 the implicit `0`. With an application that has events it reads its workspace twice, in two rounds:
 the newest events, then their delivery attempts back to the oldest of them (lake#356). `/application/users` and `/application/organizations` are not workspace routes either; each
 reads its workspace once, one `list_records` of the application's users or organizations
-(lake#353, lake#354). The raw
+(lake#353, lake#354). Each of the three application pages also reads the application's settings
+record (`get_record`, lake#351) concurrently with its listing, so `/application/users` and
+`/application/organizations` stay at one round (two calls) and `/application/events` at two.
+`/application` reads the settings record once; `/applications` reads one `list_records` per
+workspace that holds a listed application. The hosted and custom-domain identity pages read the
+settings record once (one call, one round) before rendering, and a hosted password or OAuth form
+reads it once before its capability. The raw
 JWKS route (`/v1/apps/<id>/.well-known/jwks.json`) reads one record, the application's key ring
 (lake#352), and a hosted sign-in also reads the key ring and lists the application's webhooks once
 each before it records its event.

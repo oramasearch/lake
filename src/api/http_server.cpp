@@ -6783,8 +6783,8 @@ struct ApiServer::Impl {
                 if (customer.organization_id != organization_id) {
                     continue;
                 }
-                const ApiResult applications = registry.call(
-                    "list_applications", {{"customer_id", customer.id}, {"limit", 100}}, context);
+                const ApiResult applications = unwrap(co_await registry.call_async(
+                    "list_applications", {{"customer_id", customer.id}, {"limit", 100}}, context));
                 if (applications.ok) {
                     for (const nlohmann::json& application :
                          applications.value.value("items", nlohmann::json::array())) {
@@ -7099,15 +7099,39 @@ struct ApiServer::Impl {
         return options.store->get_application_by_domain(request_host(route));
     }
 
+    // The application a routing read found, with its settings from the record in its workspace
+    // (lake#351): what a hosted page renders (name, theme) and where it sends a user back to
+    // (redirect URIs). One get_record.
+    liquid::runtime::task<std::expected<control::Application, ApiResult>>
+    configured_for(control::Result<control::Application> routing,
+                   const boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        co_return configured(co_await configured_application(std::move(routing), context));
+    }
+
+    static std::expected<control::Application, ApiResult> configured_result(
+        std::expected<std::expected<control::Application, ApiResult>, liquid::error> completed) {
+        return configured(std::move(completed));
+    }
+
+    boost::http::route_task send_application_error(boost::http::route_params& route,
+                                                   const ApiResult& failure) {
+        return send_text(route,
+                         boost::http::int_to_status(static_cast<unsigned>(rest_status(failure))),
+                         error_body(failure.error.code, failure.error.message),
+                         "application/json; charset=utf-8",
+                         "no-store");
+    }
+
     boost::http::route_task serve_applications_page(boost::http::route_params& route,
                                                     std::string error = {}) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
         const ApiResult customer_rows = registry.call("list_customers", {{"limit", 500}}, context);
         if (!customer_rows.ok) {
-            return serve_page_error(route, customer_rows);
+            co_return co_await serve_page_error(route, customer_rows);
         }
         std::vector<control::Customer> customers;
         std::vector<control::Application> applications;
@@ -7122,21 +7146,25 @@ struct ApiServer::Impl {
                     }
                 }
             }
-            const ApiResult application_rows = registry.call(
-                "list_applications", {{"customer_id", customer.id}, {"limit", 500}}, context);
+            // Each application's settings are read from its workspace (lake#351).
+            const ApiResult application_rows = unwrap(co_await registry.call_async(
+                "list_applications", {{"customer_id", customer.id}, {"limit", 500}}, context));
             if (!application_rows.ok) {
-                return serve_page_error(route, application_rows);
+                co_return co_await serve_page_error(route, application_rows);
             }
             for (const auto& application : application_rows.value.at("items")) {
                 applications.push_back(application_from_json(application));
             }
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_applications(
-                             applications, customers, workspaces, error, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_applications(applications,
+                                                         customers,
+                                                         workspaces,
+                                                         error,
+                                                         viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_application_register(boost::http::route_params& route) {
@@ -7177,19 +7205,43 @@ struct ApiServer::Impl {
     boost::http::route_task serve_application_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
         const std::string id = query_value(route, "id");
-        const ApiResult result = registry.call("get_application", {{"id", id}}, context);
+        // The settings are read from the application's workspace (lake#351).
+        const ApiResult result =
+            unwrap(co_await registry.call_async("get_application", {{"id", id}}, context));
         if (!result.ok) {
-            return serve_page_error(route, result);
+            co_return co_await serve_page_error(route, result);
         }
-        return send_text(
+        co_return co_await send_text(
             route,
             boost::http::status::ok,
             web_ui_application(application_from_json(result.value), viewer_for(context)),
             "text/html; charset=utf-8",
             "no-store");
+    }
+
+    // An application page's two reads at once, in one round: the application with its settings
+    // (one get_record) and one listing of its workspace, which `workspace_id` names from the
+    // application's routing row (lake#351).
+    liquid::runtime::task<std::vector<ApiResult>>
+    application_page_reads(ApiContext& context, const std::string& id, std::string listing) {
+        co_return unwrap_reads(co_await page_reads(
+            context,
+            {{"get_application", {{"id", id}}},
+             {std::move(listing),
+              {{"application_id", id}, {"workspace_id", application_workspace(id)},
+               {"limit", 500}}}}));
+    }
+
+    static std::vector<ApiResult>
+    unwrap_reads(std::expected<std::vector<ApiResult>, liquid::error> completed) {
+        if (!completed) {
+            const ApiResult failed = ApiResult::failure("store_error", completed.error().message);
+            return {failed, failed};
+        }
+        return std::move(*completed);
     }
 
     // An application's users and organizations are read from the workspace Zetta of the
@@ -7200,15 +7252,14 @@ struct ApiServer::Impl {
             co_return co_await redirect(route, "/sign-in");
         }
         const std::string id = query_value(route, "id");
-        const ApiResult application = registry.call("get_application", {{"id", id}}, context);
+        const auto reads = unwrap_reads(
+            co_await application_page_reads(context, id, "list_application_users"));
+        const ApiResult& application = reads.at(0);
         if (!application.ok) {
             co_return co_await serve_page_error(route, application);
         }
         const control::Application parsed = application_from_json(application.value);
-        const ApiResult rows = unwrap(co_await registry.call_async(
-            "list_application_users",
-            {{"application_id", id}, {"workspace_id", parsed.workspace_id}, {"limit", 500}},
-            context));
+        const ApiResult& rows = reads.at(1);
         if (!rows.ok) {
             co_return co_await serve_page_error(route, rows);
         }
@@ -7258,15 +7309,14 @@ struct ApiServer::Impl {
             co_return co_await redirect(route, "/sign-in");
         }
         const std::string id = query_value(route, "id");
-        const ApiResult application = registry.call("get_application", {{"id", id}}, context);
+        const auto reads = unwrap_reads(
+            co_await application_page_reads(context, id, "list_application_organizations"));
+        const ApiResult& application = reads.at(0);
         if (!application.ok) {
             co_return co_await serve_page_error(route, application);
         }
         const control::Application parsed = application_from_json(application.value);
-        const ApiResult rows = unwrap(co_await registry.call_async(
-            "list_application_organizations",
-            {{"application_id", id}, {"workspace_id", parsed.workspace_id}, {"limit", 500}},
-            context));
+        const ApiResult& rows = reads.at(1);
         if (!rows.ok) {
             co_return co_await serve_page_error(route, rows);
         }
@@ -7331,24 +7381,19 @@ struct ApiServer::Impl {
                                                      ApiContext& context,
                                                      std::string id,
                                                      std::string secret = {}) {
-        const ApiResult application = registry.call("get_application", {{"id", id}}, context);
+        const auto reads = unwrap_reads(
+            co_await application_page_reads(context, id, "list_application_webhook_events"));
+        const ApiResult& application = reads.at(0);
         if (!application.ok) {
             co_return co_await serve_page_error(route, application);
         }
         const control::Application parsed = application_from_json(application.value);
-        auto rows = co_await registry.call_async(
-            "list_application_webhook_events",
-            {{"application_id", id}, {"workspace_id", parsed.workspace_id}, {"limit", 500}},
-            context);
-        if (!rows) {
-            co_return co_await serve_page_error(
-                route, ApiResult::failure("store_error", rows.error().message));
-        }
-        if (!rows->ok) {
-            co_return co_await serve_page_error(route, *rows);
+        const ApiResult& rows = reads.at(1);
+        if (!rows.ok) {
+            co_return co_await serve_page_error(route, rows);
         }
         std::vector<control::ApplicationWebhookEvent> events;
-        for (const auto& value : rows->value.at("items")) {
+        for (const auto& value : rows.value.at("items")) {
             events.push_back(application_event_from_json(value));
         }
         co_return co_await send_text(
@@ -7377,15 +7422,10 @@ struct ApiServer::Impl {
         const std::string application_id = form_field(body, "application_id");
         // The webhook is kept in the application's workspace (lake#355), which the form does not
         // choose: it is the one the application was registered in.
-        const ApiResult application =
-            registry.call("get_application", {{"id", application_id}}, context);
-        if (!application.ok) {
-            co_return co_await serve_page_error(route, application);
-        }
         auto created = co_await registry.call_async(
             "create_application_webhook",
             {{"application_id", application_id},
-             {"workspace_id", application_from_json(application.value).workspace_id},
+             {"workspace_id", application_workspace(application_id)},
              {"url", form_field(body, "url")},
              {"events", comma_separated(form_field(body, "events"))}},
             context);
@@ -7400,42 +7440,46 @@ struct ApiServer::Impl {
             route, context, application_id, created->value.value("secret", ""));
     }
 
-    boost::http::route_task serve_application_identity_page(boost::http::route_params& route,
-                                                            std::string_view page,
-                                                            std::string_view error = {}) {
-        auto application = application_for_route(route);
-        if (!application) {
-            return send_text(route,
-                             boost::http::status::not_found,
-                             error_body(application.error().code, application.error().message),
-                             "application/json; charset=utf-8",
-                             "no-store");
-        }
+    boost::http::route_task send_application_identity_page(boost::http::route_params& route,
+                                                           const control::Application& application,
+                                                           std::string_view page,
+                                                           std::string_view error = {}) {
         std::string body;
         if (page == "sign-up") {
-            body = web_ui_application_sign_up(*application, error);
+            body = web_ui_application_sign_up(application, error);
         } else if (page == "sign-in") {
-            body = web_ui_application_sign_in(*application, error);
+            body = web_ui_application_sign_in(application, error);
         } else if (page == "mfa") {
-            body = web_ui_application_mfa(*application, error);
+            body = web_ui_application_mfa(application, error);
         } else {
-            body = web_ui_application_passkey_sign_in(*application, error);
+            body = web_ui_application_passkey_sign_in(application, error);
         }
         return send_text(
             route, boost::http::status::ok, body, "text/html; charset=utf-8", "no-store");
     }
 
+    // A hosted identity page renders the application's name and theme, its settings in its
+    // workspace (lake#351).
+    boost::http::route_task serve_application_identity_page(boost::http::route_params& route,
+                                                            std::string page,
+                                                            std::string error = {}) {
+        auto application = co_await configured_for(application_for_route(route), route);
+        const auto found = configured_result(std::move(application));
+        if (!found) {
+            co_return co_await send_application_error(route, found.error());
+        }
+        co_return co_await send_application_identity_page(route, *found, page, error);
+    }
+
     boost::http::route_task serve_application_password(boost::http::route_params& route,
                                                        std::string_view capability) {
         namespace http = boost::http;
-        auto application = application_for_route(route);
+        // Read with its settings once: the page an error renders and the redirect URI the user
+        // returns to are both the application's settings (lake#351).
+        const auto application =
+            configured_result(co_await configured_for(application_for_route(route), route));
         if (!application) {
-            co_return co_await send_text(
-                route,
-                http::status::not_found,
-                error_body(application.error().code, application.error().message),
-                "application/json; charset=utf-8",
-                "no-store");
+            co_return co_await send_application_error(route, application.error());
         }
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
@@ -7463,7 +7507,8 @@ struct ApiServer::Impl {
             const std::string page = capability == "sign_up_password"
                                          ? "sign-up"
                                          : (capability == "verify_mfa" ? "mfa" : "sign-in");
-            co_return co_await serve_application_identity_page(route, page, result.error.message);
+            co_return co_await send_application_identity_page(
+                route, *application, page, result.error.message);
         }
         const std::string destination = application_redirect_location(*application, result);
         co_return co_await redirect(
@@ -7533,13 +7578,13 @@ struct ApiServer::Impl {
         }
         ApiContext context = context_for(route);
         context.public_host = request_host(route);
-        const ApiResult result =
-            registry.call("start_oauth",
-                          {{"pool_id", application->pool_id},
-                           {"provider", form_field(body, "provider")},
-                           {"device_name", form_field(body, "device_name")},
-                           {"identity_document", form_field(body, "identity_document")}},
-                          context);
+        const ApiResult result = unwrap(co_await registry.call_async(
+            "start_oauth",
+            {{"pool_id", application->pool_id},
+             {"provider", form_field(body, "provider")},
+             {"device_name", form_field(body, "device_name")},
+             {"identity_document", form_field(body, "identity_document")}},
+            context));
         if (!result.ok) {
             co_return co_await serve_application_identity_page(
                 route, "sign-in", result.error.message);
@@ -7567,18 +7612,21 @@ struct ApiServer::Impl {
     boost::http::route_task serve_sign_up(boost::http::route_params& route) {
         const ApiContext context = context_for(route);
         if (context.authorized) {
-            return redirect(route,
+            co_return co_await redirect(route,
                             context.operator_credential || clerk ? "/repositories" : "/sessions");
         }
-        if (auto application = application_for_domain(route)) {
-            return send_text(route,
-                             boost::http::status::ok,
-                             web_ui_application_sign_up(*application, ""),
-                             "text/html; charset=utf-8",
-                             "no-store");
+        // A custom sign-in host names its application by routing; the page renders its settings,
+        // read from its workspace (lake#351).
+        if (auto routing = application_for_domain(route)) {
+            const auto application =
+                configured_result(co_await configured_for(std::move(routing), route));
+            if (!application) {
+                co_return co_await send_application_error(route, application.error());
+            }
+            co_return co_await send_application_identity_page(route, *application, "sign-up");
         }
         if (clerk) {
-            return send_text(route,
+            co_return co_await send_text(route,
                              boost::http::status::ok,
                              web_ui_clerk_sign_in(*clerk,
                                                   "sign-up",
@@ -7588,7 +7636,7 @@ struct ApiServer::Impl {
                              "text/html; charset=utf-8",
                              "no-store");
         }
-        return send_text(route,
+        co_return co_await send_text(route,
                          boost::http::status::ok,
                          web_ui_sign_up("", viewer_for(context)),
                          "text/html; charset=utf-8",
@@ -7599,21 +7647,24 @@ struct ApiServer::Impl {
         const ApiContext context = context_for(route);
         if (context.authorized) {
             const std::string app_return = app_sign_in_return(route);
-            return redirect(
+            co_return co_await redirect(
                 route,
                 app_return.empty()
                     ? (context.operator_credential || clerk ? "/repositories" : "/sessions")
                     : app_return);
         }
-        if (auto application = application_for_domain(route)) {
-            return send_text(route,
-                             boost::http::status::ok,
-                             web_ui_application_sign_in(*application, ""),
-                             "text/html; charset=utf-8",
-                             "no-store");
+        // A custom sign-in host names its application by routing; the page renders its settings,
+        // read from its workspace (lake#351).
+        if (auto routing = application_for_domain(route)) {
+            const auto application =
+                configured_result(co_await configured_for(std::move(routing), route));
+            if (!application) {
+                co_return co_await send_application_error(route, application.error());
+            }
+            co_return co_await send_application_identity_page(route, *application, "sign-in");
         }
         if (clerk) {
-            return send_text(route,
+            co_return co_await send_text(route,
                              boost::http::status::ok,
                              web_ui_clerk_sign_in(*clerk,
                                                   "sign-in",
@@ -7623,7 +7674,7 @@ struct ApiServer::Impl {
                              "text/html; charset=utf-8",
                              "no-store");
         }
-        return send_text(route,
+        co_return co_await send_text(route,
                          boost::http::status::ok,
                          web_ui_sign_in("", viewer_for(context)),
                          "text/html; charset=utf-8",
@@ -7633,16 +7684,19 @@ struct ApiServer::Impl {
     boost::http::route_task serve_mfa(boost::http::route_params& route) {
         const ApiContext context = context_for(route);
         if (context.operator_credential) {
-            return redirect(route, "/repositories");
+            co_return co_await redirect(route, "/repositories");
         }
-        if (auto application = application_for_domain(route)) {
-            return send_text(route,
-                             boost::http::status::ok,
-                             web_ui_application_mfa(*application, ""),
-                             "text/html; charset=utf-8",
-                             "no-store");
+        // A custom sign-in host names its application by routing; the page renders its settings,
+        // read from its workspace (lake#351).
+        if (auto routing = application_for_domain(route)) {
+            const auto application =
+                configured_result(co_await configured_for(std::move(routing), route));
+            if (!application) {
+                co_return co_await send_application_error(route, application.error());
+            }
+            co_return co_await send_application_identity_page(route, *application, "mfa");
         }
-        return send_text(route,
+        co_return co_await send_text(route,
                          boost::http::status::ok,
                          web_ui_mfa("", "", {}, viewer_for(context)),
                          "text/html; charset=utf-8",
@@ -7667,16 +7721,19 @@ struct ApiServer::Impl {
     boost::http::route_task serve_passkey_sign_in(boost::http::route_params& route) {
         const ApiContext context = context_for(route);
         if (context.authorized) {
-            return redirect(route, context.operator_credential ? "/repositories" : "/sessions");
+            co_return co_await redirect(route, context.operator_credential ? "/repositories" : "/sessions");
         }
-        if (auto application = application_for_domain(route)) {
-            return send_text(route,
-                             boost::http::status::ok,
-                             web_ui_application_passkey_sign_in(*application, ""),
-                             "text/html; charset=utf-8",
-                             "no-store");
+        // A custom sign-in host names its application by routing; the page renders its settings,
+        // read from its workspace (lake#351).
+        if (auto routing = application_for_domain(route)) {
+            const auto application =
+                configured_result(co_await configured_for(std::move(routing), route));
+            if (!application) {
+                co_return co_await send_application_error(route, application.error());
+            }
+            co_return co_await send_application_identity_page(route, *application, "passkey");
         }
-        return send_text(route,
+        co_return co_await send_text(route,
                          boost::http::status::ok,
                          web_ui_passkey_sign_in("", viewer_for(context)),
                          "text/html; charset=utf-8",
@@ -8189,12 +8246,12 @@ struct ApiServer::Impl {
             co_return http::route_error(read_error);
         }
         ApiContext context = context_for(route);
-        const ApiResult result =
-            registry.call("start_oauth",
-                          {{"provider", form_field(body, "provider")},
-                           {"device_name", form_field(body, "device_name")},
-                           {"identity_document", form_field(body, "identity_document")}},
-                          context);
+        const ApiResult result = unwrap(co_await registry.call_async(
+            "start_oauth",
+            {{"provider", form_field(body, "provider")},
+             {"device_name", form_field(body, "device_name")},
+             {"identity_document", form_field(body, "identity_document")}},
+            context));
         if (!result.ok) {
             co_return co_await send_text(route,
                                          http::int_to_status(rest_status(result)),
@@ -8596,8 +8653,15 @@ struct ApiServer::Impl {
         }
         std::string destination = "/repositories";
         if (issued_pool != "lake") {
-            if (auto application = options.store->get_application_by_pool(issued_pool)) {
-                destination = application_redirect_location(*application, application_result);
+            // The redirect URI is the application's settings in its workspace (lake#351); when
+            // they cannot be read, the user returns to the application's hosted sign-in.
+            if (auto routing = options.store->get_application_by_pool(issued_pool)) {
+                const std::string fallback = "/apps/" + routing->id + "/sign-in";
+                const auto application =
+                    configured_result(co_await configured_for(std::move(routing), route));
+                destination = application
+                                  ? application_redirect_location(*application, application_result)
+                                  : fallback;
             }
         } else if (const std::string app_return = app_sign_in_return(route); !app_return.empty()) {
             destination = app_return;

@@ -142,3 +142,8 @@ workspace (lake#352, lake#355). The stores no longer write or read `auth_app_sig
 `application.jwt.*` and `application.webhook.*` purposes), and `assign_legacy_application_credentials`
 with the two `legacy_application_*` reads serve only the copy (migration
 `0056_application_credential_workspaces`). `create_application` no longer writes a key.
+`application_settings_records.cpp` keeps an application's settings in its workspace (lake#351).
+The stores write and read only the routing columns of `auth_applications` (`create_application`
+leaves the settings columns NULL, and `update_application_theme` is gone);
+`assign_legacy_application_settings` reruns migration `0059`'s owner assignment and
+`legacy_application_settings` pages the rows that still hold settings, for the copy only.

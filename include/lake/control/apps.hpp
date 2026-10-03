@@ -10,6 +10,13 @@
 
 namespace lake::control {
 
+// An application as callers see it. Its routing is lake's content-free auth_applications row:
+// `id`, `customer_id`, `pool_id`, `custom_sign_in_domain`, `workspace_id`, `created_at` and
+// `updated_at`, which find the application from a request before any workspace is read (a pool's
+// sessions, a hosted page's host, an anonymous JWKS read). Its settings, `name`,
+// `allowed_origins`, `redirect_uris` and `theme`, are the ApplicationSettings record in the
+// workspace Zetta of its workspace (lake#351, control/application_settings_records.hpp); the store
+// returns them empty, and the API layer fills them from the workspace.
 struct Application {
     std::string id;
     std::string customer_id;
@@ -21,11 +28,43 @@ struct Application {
     nlohmann::json theme = nlohmann::json::object();
     std::string created_at;
     std::string updated_at;
-    // The workspace whose Zetta holds the application's lifecycle events and delivery attempts
-    // (lake#356, lake#357). Set at registration and never changed; empty only for an application
-    // registered before migration 0049 whose space had several workspaces, until it is assigned.
+    // The workspace whose Zetta holds the application's settings, keys, webhooks, users,
+    // organizations, lifecycle events and delivery attempts. Set at registration and never
+    // changed; empty only for an application registered before migration 0049 whose space had
+    // several workspaces, until it is assigned.
     std::string workspace_id;
 };
+
+// The settings of an application (lake#351): one record in the workspace Zetta of the
+// application's workspace, keyed by the application id. `customer_id` binds it to the
+// application's space. `revision` is the engine revision it was read at and `lake_revision` lake's
+// own (1 when written, one more for each change).
+struct ApplicationSettings {
+    std::string application_id;
+    std::string customer_id;
+    std::string name;
+    std::vector<std::string> allowed_origins;
+    std::vector<std::string> redirect_uris;
+    nlohmann::json theme = nlohmann::json::object();
+    std::string created_at;
+    std::string updated_at;
+    std::int64_t at_us = 0;
+    std::int64_t revision = 0;
+    std::int64_t lake_revision = 0;
+};
+
+// The settings columns of a retired auth_applications row (migration 0059), with its recorded owner,
+// for the one-shot copy only: the application's workspace, or empty with the reason it is not
+// (`needs_selection`, `workspace_deleted`).
+struct LegacyApplicationSettings {
+    ApplicationSettings settings;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
+};
+
+// The application with `settings` filled in from its workspace record.
+void apply_settings(Application& application, const ApplicationSettings& settings);
 
 // One Ed25519 key of an application. `seed` is the private key in the clear, present only between
 // generating or opening it and signing; what is kept is `encrypted_seed`, the secrets subsystem's
@@ -55,15 +94,13 @@ struct ApplicationSigningKeyRing {
     std::int64_t revision = 0;
 };
 
+// The routing row of a new application. Its settings are written to its workspace first
+// (lake#351), never to the control store.
 struct NewApplication {
     std::string id;
     std::string customer_id;
     std::string pool_id;
-    std::string name;
-    std::vector<std::string> allowed_origins;
-    std::vector<std::string> redirect_uris;
     std::string custom_sign_in_domain;
-    nlohmann::json theme = nlohmann::json::object();
     std::string workspace_id; // a live workspace of the customer (migration 0049)
 };
 

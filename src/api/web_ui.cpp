@@ -8238,7 +8238,9 @@ std::string web_ui_organization(const control::Organization& organization,
         for (const auto& application : data.applications) {
             content +=
                 "<p>" +
-                row_link("/application?id=" + application.id, web_ui_escape(application.name)) +
+                row_link("/application?id=" + application.id,
+                         web_ui_escape(application.name.empty() ? application.id
+                                                                : application.name)) +
                 "</p>";
         }
         if (data.applications.empty()) {
@@ -9318,8 +9320,10 @@ std::string web_ui_applications(const std::vector<control::Application>& applica
                "Pool</th><th>Domain</th>"
                "</tr></thead><tbody>";
     for (const auto& application : applications) {
+        // An application whose settings are not in its workspace yet is listed by its id.
         content += "<tr><td><a href=\"/application?id=" + web_ui_escape(application.id) + "\">" +
-                   web_ui_escape(application.name) + "</a></td><td><code>" +
+                   web_ui_escape(application.name.empty() ? application.id : application.name) +
+                   "</a></td><td><code>" +
                    web_ui_escape(application.pool_id) + "</code></td><td>" +
                    web_ui_escape(application.custom_sign_in_domain.empty()
                                      ? "lake domain"

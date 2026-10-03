@@ -5,8 +5,8 @@
 // auth_app_webhook_events and auth_app_webhook_deliveries, lake#356 and lake#357; metering_usage
 // and metering_build_records, lake#348 and lake#349; forge_records, lake#341; auth_app_users and
 // auth_app_organizations, lake#353 and lake#354; auth_app_signing_keys and auth_app_webhooks,
-// lake#352 and lake#355; the five secrets tables, lake#328-#332; dynamic leases, lake#362). A
-// collection
+// lake#352 and lake#355; the five secrets tables, lake#328-#332; dynamic leases, lake#362;
+// auth_applications, the settings of each application, lake#351). A collection
 // leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
 // and verified on dev, dropped by migration 0050, lake#483).
 
@@ -21,6 +21,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/control/application_user_records.hpp"
 #include "lake/control/application_credential_records.hpp"
+#include "lake/control/application_settings_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/forge_records.hpp"
@@ -37,7 +38,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 18> copy_collections = {"opportunities",
+constexpr std::array<std::string_view, 19> copy_collections = {"opportunities",
                                                                "stream_owners",
                                                                "drive_share_links",
                                                                "auth_app_webhook_events",
@@ -54,7 +55,8 @@ constexpr std::array<std::string_view, 18> copy_collections = {"opportunities",
                                                                "secrets_encryption_keys",
                                                                "secrets_entries",
                                                                "secrets_versions",
-                                                               "secrets_dynamic_leases"};
+                                                               "secrets_dynamic_leases",
+                                                               "auth_applications"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -922,6 +924,65 @@ struct WebhookCopy {
     }
 };
 
+// An application's settings (lake#351): one record per application, keyed by it, with the
+// instant its routing row was created. A theme changed since the copy (a later lake revision) is
+// accepted; the name, origins and redirect URIs are never changed after registration.
+struct SettingsCopy {
+    using Present = std::map<std::string, control::ApplicationSettings>;
+    static std::string id(const control::LegacyApplicationSettings& row) {
+        return row.settings.application_id;
+    }
+    static std::string application_id(const control::LegacyApplicationSettings& row) {
+        return row.settings.application_id;
+    }
+    // Any space's record under the application's key; `same` compares the space.
+    static liquid::runtime::task<control::ZettaControlResult<Present>>
+    present(control::WorkspaceRecords& records, std::string application_id) {
+        auto settings = control::settled(
+            co_await control::get_application_settings(records, application_id, {}));
+        if (!settings) {
+            co_return control::ZettaControlResult<Present>(std::unexpected(settings.error()));
+        }
+        Present present;
+        if (*settings) {
+            present.emplace(application_id, std::move(**settings));
+        }
+        co_return control::ZettaControlResult<Present>(std::move(present));
+    }
+    static bool same(const control::ApplicationSettings& stored,
+                     const control::LegacyApplicationSettings& row) {
+        const auto& source = row.settings;
+        const bool changed = stored.lake_revision > 1;
+        return stored.customer_id == source.customer_id && stored.name == source.name &&
+               stored.allowed_origins == source.allowed_origins &&
+               stored.redirect_uris == source.redirect_uris && stored.at_us == source.at_us &&
+               (changed || stored.theme == source.theme);
+    }
+    static liquid::runtime::task<control::ZettaControlResult<void>>
+    write(control::WorkspaceRecords& records, const control::LegacyApplicationSettings& row) {
+        auto created =
+            control::settled(co_await control::create_application_settings(records, row.settings));
+        if (!created) {
+            co_return control::ZettaControlResult<void>(std::unexpected(created.error()));
+        }
+        co_return control::ZettaControlResult<void>();
+    }
+};
+
+liquid::runtime::task<ApiResult> copy_application_settings(ApiContext& context,
+                                                           const std::string& mode,
+                                                           const std::string& after, int limit) {
+    if (auto assigned = context.store->assign_legacy_application_settings(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_application_settings(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    co_return co_await copy_application_rows(context, "auth_applications", mode, *rows, limit,
+                                             SettingsCopy{});
+}
+
 liquid::runtime::task<ApiResult> copy_application_signing_keys(ApiContext& context,
                                                                const std::string& mode,
                                                                const std::string& after,
@@ -1732,6 +1793,9 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "metering_build_records") {
                 co_return co_await copy_metering_build_records(context, mode, after, limit);
+            }
+            if (input.at("collection") == "auth_applications") {
+                co_return co_await copy_application_settings(context, mode, after, limit);
             }
             if (input.at("collection") == "auth_app_signing_keys") {
                 co_return co_await copy_application_signing_keys(context, mode, after, limit);

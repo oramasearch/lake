@@ -349,9 +349,24 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
     const std::string pool_id = registered.value.at("pool_id");
     EXPECT_TRUE(call("get_application", {{"id", application_id}}).ok);
     EXPECT_TRUE(call("list_applications", {{"customer_id", customer->id}}).ok);
-    EXPECT_TRUE(call("update_application_theme",
-                     {{"application_id", application_id}, {"theme", {{"accent_color", "#778899"}}}})
-                    .ok);
+    // The settings live in the application's workspace (lake#351); the routing row holds none.
+    const auto themed = call("update_application_theme",
+                             {{"application_id", application_id},
+                              {"workspace_id", workspace_id},
+                              {"theme", {{"accent_color", "#778899"}}}});
+    ASSERT_TRUE(themed.ok) << themed.error.message;
+    EXPECT_EQ(themed.value.at("name"), "Postgres application");
+    EXPECT_EQ(call("get_application", {{"id", application_id}}).value.at("theme").at("accent_color"),
+              "#778899");
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        const auto row = tx.exec_params(
+            "SELECT name IS NULL AND allowed_origins IS NULL AND redirect_uris IS NULL AND theme "
+            "IS NULL FROM auth_applications WHERE id = $1::uuid",
+            application_id);
+        EXPECT_TRUE(row[0][0].as<bool>());
+    }
     EXPECT_TRUE(call("rotate_application_signing_key",
                      {{"application_id", application_id}, {"workspace_id", workspace_id}})
                     .ok);

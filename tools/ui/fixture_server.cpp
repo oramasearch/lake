@@ -27,6 +27,7 @@
 #include "lake/audit/audit.hpp"
 #include "lake/control/application_user_records.hpp"
 #include "lake/control/application_credential_records.hpp"
+#include "lake/control/application_settings_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/drive_share_links.hpp"
@@ -238,11 +239,7 @@ int main(int argc, char** argv) {
                     {.id = application_id,
                      .customer_id = organization_customer.id,
                      .pool_id = "app:" + application_id,
-                     .name = "Orama Console",
-                     .allowed_origins = {"https://console.example.test"},
-                     .redirect_uris = {"https://console.example.test/callback"},
                      .custom_sign_in_domain = "login.console.example.test",
-                     .theme = {{"accent_color", "#0f62fe"}, {"background_color", "#f8f8fa"}},
                      .workspace_id = console_workspace.id}),
                 "create application");
     const auto application_account =
@@ -287,6 +284,19 @@ int main(int argc, char** argv) {
             lake::control::put_new_application_organization(*records, std::move(app_organization)));
         if (!user_written || !*user_written || !organization_written || !*organization_written) {
             std::println(stderr, "lake-ui-fixture: create application user or organization failed");
+            return 1;
+        }
+        // Its settings live in the same workspace (lake#351); the store holds only its routing.
+        auto settings = liquid::runtime::block_on(lake::control::create_application_settings(
+            *records,
+            {.application_id = application.id,
+             .customer_id = application.customer_id,
+             .name = "Orama Console",
+             .allowed_origins = {"https://console.example.test"},
+             .redirect_uris = {"https://console.example.test/callback"},
+             .theme = {{"accent_color", "#0f62fe"}, {"background_color", "#f8f8fa"}}}));
+        if (!settings || !*settings) {
+            std::println(stderr, "lake-ui-fixture: create application settings failed");
             return 1;
         }
         // Its signing key lives in the same workspace (lake#352), enveloped by the store.

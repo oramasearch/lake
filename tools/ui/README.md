@@ -17,7 +17,7 @@ one Ready workspace whose record store is the tests' `RecordTables` fake, so the
 reads its event from the workspace as production does (lake#356). Its application user and
 organization are records in that workspace too (lake#353, lake#354).
 reads its event from the workspace as production does (lake#356), and its signing key ring is in
-the same workspace (lake#352).
+the same workspace (lake#352), as are its settings, which the hosted pages render (lake#351).
 reads its event from the workspace as production does (lake#356). Its secret mount is in the same
 workspace, written through the secrets API's workspace records (lake#328), and the secret-mounts
 page is captured with that workspace's `workspace_id`.

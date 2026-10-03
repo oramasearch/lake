@@ -11,7 +11,8 @@ own `lake` pool. A credential from one pool is never considered by another pool.
 The registration records a display name, exact allowed origins, redirect URIs, an optional custom
 sign-in host, a JSON theme, and the **workspace** of the space the application belongs to
 (`workspace_id`, required and never changed). That workspace's Zetta holds the application's
-users and organizations ([Where users and organizations live](#where-users-and-organizations-live-lake353-lake354)),
+settings, the name, origins, redirect URIs and theme ([Where settings live](#where-settings-live-lake351)),
+its users and organizations ([Where users and organizations live](#where-users-and-organizations-live-lake353-lake354)),
 its signing keys and webhooks ([Where keys and webhooks live](#where-keys-and-webhooks-live-lake352-lake355)),
 and its lifecycle events and webhook delivery attempts ([Lifecycle webhooks](#lifecycle-webhooks)). Browser requests carrying an `Origin` header must come from the
 hosted page itself or an allowed origin. Redirects use only a registered URI. The custom host is a
@@ -27,8 +28,8 @@ denial, and failure.
 | Capability | Authorization | Result |
 |---|---|---|
 | `register_application` | customer `admin` | application, including its new `pool_id` and its `workspace_id` |
-| `list_applications`, `get_application` | customer/application `read` | registrations without key material |
-| `update_application_theme` | application `admin` | updated registration |
+| `list_applications`, `get_application` | customer/application `read` | registrations with their settings read from each application's workspace, without key material; a listed application whose settings cannot be read carries `settings_unavailable` with the reason |
+| `update_application_theme` | application `admin`; `workspace_id` must be the application's | updated registration |
 | `rotate_application_signing_key` | application `admin`; `workspace_id` must be the application's | new key ID and version |
 | `application_jwks` | public; by `application_id` alone | all retained public verification keys |
 | `issue_application_jwt` | application `write`; `workspace_id` must be the application's | short-lived user access token |
@@ -50,6 +51,47 @@ session bearer, bounded by issuer scopes, expiry and ancestry; it does not also 
 application JWT. Its `session.started` lifecycle event is retained. The derivation policy and REST/MCP
 PostgreSQL coverage are in [identity.md](identity.md#token-derivation-and-revocation). Suspending a user revokes that user's sessions in this pool immediately;
 deleting one removes this pool's credentials and sessions. Neither action touches another pool.
+
+### Where settings live (lake#351)
+
+An application's settings, its display name, allowed origins, redirect URIs and hosted-page theme,
+are one record in the workspace Zetta of the application's workspace: the sealed collection
+`lake_auth_applications`, keyed by the application id and found by its space (`customer:<id>`)
+([workspace-records.md](../architecture/workspace-records.md)). Nothing falls back to PostgreSQL,
+to another workspace or to the lake Zetta.
+
+- **What stays central.** `auth_applications` keeps only the routing that finds an application
+  before any workspace is read: `id`; `customer_id` (its space, and the parent of its policy
+  object); `pool_id` (`app:<id>`, which the pool's sessions, credentials and tokens name);
+  `custom_sign_in_domain` (the `Host` a custom-domain page is requested on, unique across lake, and
+  the issuer host of its tokens); `workspace_id` (`0049`); `created_at` and `updated_at`. None of
+  these is the application's configuration body. A new application's row leaves `name`,
+  `allowed_origins`, `redirect_uris` and `theme` NULL (migration `0059`); a row registered before
+  holds them only until the operator's copy, and a later migration drops the four columns.
+- **Registration.** `register_application` writes the settings into the chosen workspace with
+  `if_absent`, beside the first key ring, before the routing row; a registration refused afterwards
+  (a custom host already taken) takes both records back out.
+- **Reads.** `get_application` reads the routing row and then one `get_record` of the settings.
+  `list_applications` reads the routing rows, then one `list_records` per workspace that holds any
+  of the readable applications; an application whose settings cannot be read (its workspace not
+  ready, no workspace, not yet copied) is still listed by its routing with `settings_unavailable`.
+- **Sign-in.** The hosted pages read the settings to render the name and theme and to choose the
+  redirect URI; the custom-domain pages find the application by `Host` first. A cross-origin
+  identity call (`Origin` not the request's own) checks the allowed origins in the settings, and a
+  passkey ceremony reads them only when the origin is neither lake's host nor the custom host;
+  `begin_application_authorization` checks the redirect URI against them. Same-origin hosted
+  sign-ins read nothing extra. `begin_passkey_registration`, `begin_passkey_sign_in` and
+  `start_oauth` are asynchronous for this.
+- **Theme.** `update_application_theme` takes the application's `workspace_id` and writes the new
+  theme conditionally on the revision it read (`if_revision`); a concurrent change is reread and
+  applied again, never lost. The name, origins and redirect URIs are set at registration.
+- **Not ready, deletion.** A workspace that is not ready answers `workspace_not_ready`; a legacy
+  application without a workspace the same. Deleting the workspace deletes the settings with its
+  Zetta, and the application then answers an error instead of reading anything elsewhere.
+- **Before the copy.** An application registered before this change has its settings only in its
+  retired columns until the operator's copy runs: its pages and `get_application` answer
+  `not_found`, and its cross-origin sign-ins are refused (cutover:
+  [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-application-settings-dev-cluster)).
 
 ### Where users and organizations live (lake#353, lake#354)
 
@@ -296,7 +338,7 @@ page is [the Ship Apps UI](../ui/apps.md).
 cmake --build build
 LAKE_TEST_DB_URI=postgresql://lake:password@127.0.0.1:5432/lake_test \
   ctest --test-dir build --output-on-failure \
-    -R 'ApplicationAuth|ApplicationHttp|PostgresApplications|PostgresApplicationUsers|TheOneShotCopyMovesApplication'
+    -R 'ApplicationAuth|ApplicationHttp|PostgresApplications|PostgresApplicationUsers|PostgresApplicationSettings|TheOneShotCopyMovesApplication'
 ```
 
 `ApplicationAuth` verifies a real Ed25519 JWT against the returned JWKS and checks its audience,
@@ -325,6 +367,15 @@ control store, the anonymous JWKS by application id, tokens verifying with the a
 only, missing, malformed, unknown and foreign `workspace_id` for every caller, deliveries signed
 with the opened secret, rotation, least privilege, a workspace that is not ready, and deletion.
 `ApplicationAuth.AConcurrentRotationIsRereadNotLost` races two rotations and a stale write.
+`ApplicationAuth.SettingsLiveInTheApplicationsWorkspace` covers settings in two spaces with two
+workspaces each: one sealed record only at the application's endpoint and none in the routing row,
+reads and listings filled from the workspace, the theme changed with missing, malformed, unknown and
+foreign `workspace_id` refused and a raced change reread, a cross-origin sign-in allowed only from
+the recorded origins, least privilege, a record moved under another application's key not
+opening, a refused registration leaving nothing behind, a workspace that is not ready (listed with
+`settings_unavailable`), and deletion.
+`WorkspaceRecordStores.TheOneShotCopyMovesApplicationSettings` covers their copy in both stores and
+`PostgresApplicationSettings.MigrationRecordsEachRowsOwnerForTheCopy` migration `0059`.
 `PostgresApplications` exercises the registry capabilities against migration `0016_auth_apps` and
 the routing trigger of `0049`. `PostgresApplicationWebhooks.MigrationRecordsEachEventsOwnerForTheCopy`
 covers migration `0049`, and `WorkspaceRecordStores.TheOneShotCopyMovesApplicationEventsAndTheirDeliveries`

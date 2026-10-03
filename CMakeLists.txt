@@ -200,6 +200,7 @@ add_library(lake-core STATIC
   src/control/secret_records.cpp
   src/control/application_webhook_records.cpp
   src/control/application_credential_records.cpp
+  src/control/application_settings_records.cpp
   src/control/metering.cpp
   "${LAKE_LIQUID_SOURCE_DIR}/src/scan/detectors.cpp"
   src/version.cpp

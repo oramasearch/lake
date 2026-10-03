@@ -110,8 +110,11 @@ public:
     Result<Application> get_application_by_pool(const std::string& pool_id) override;
     Result<Application>
     get_application_by_domain(const std::string& custom_sign_in_domain) override;
-    Result<Application> update_application_theme(const std::string& id,
-                                                 const nlohmann::json& theme) override;
+    Result<void> assign_legacy_application_settings() override;
+    Result<std::vector<LegacyApplicationSettings>>
+    legacy_application_settings(const std::string& after_id, int limit) override;
+    // Test support: the settings an application's row held before migration 0059.
+    void seed_legacy_application_settings(ApplicationSettings settings);
     Result<std::string> encrypt_application_credential(const std::string& purpose,
                                                        const std::string& plaintext) override;
     Result<std::string> decrypt_application_credential(const std::string& purpose,
@@ -516,7 +519,12 @@ private:
     std::vector<Invitation> invitations_;
     std::vector<PolicyObject> policy_objects_;
     std::vector<Grant> grants_;
-    std::vector<Application> applications_;
+    std::vector<Application> applications_; // routing rows: no settings (lake#351)
+    // Settings the retired auth_applications columns held (seeded by tests), and their owners:
+    // application id -> workspace, outcome (migration 0059).
+    std::vector<ApplicationSettings> legacy_application_settings_;
+    std::map<std::string, std::pair<std::string, std::string>>
+        legacy_application_settings_assignments_;
     std::vector<ApplicationSigningKey> application_signing_keys_; // retired rows (0056)
     // The envelope's data key per credential purpose, as the keystore table holds them.
     std::map<std::string, std::string> application_credential_keys_;

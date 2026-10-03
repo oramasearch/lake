@@ -14,6 +14,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/control/application_credential_records.hpp"
+#include "lake/control/application_settings_records.hpp"
 #include "lake/control/application_user_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
@@ -1092,6 +1093,215 @@ TEST(ApplicationAuth, KeysAndWebhooksLiveInTheApplicationsWorkspace) {
     EXPECT_EQ(list_webhooks(second_id, lab).error.path, "/workspace_id");
     EXPECT_EQ(jwks(first_id).value.at("keys").size(), 2U);
     EXPECT_EQ(list_webhooks(first_id, home).value.at("items").size(), 1U);
+}
+
+// lake#351: an application's settings (name, allowed origins, redirect URIs, theme) live in the
+// workspace Zetta of its workspace, among two spaces with several workspaces each. Lake's
+// PostgreSQL keeps only the content-free routing row that finds that workspace.
+TEST(ApplicationAuth, SettingsLiveInTheApplicationsWorkspace) {
+    ApplicationSurface surface;
+    const std::string home = surface.workspace_id;
+    const std::string lab = surface.workspaces->add(surface.owned, surface.customer_id, "lab");
+    const auto other_owner = surface.store.create_user(
+        {"taap:1:ed25519:settings-other", "settings-other@example.test", "Other"});
+    ASSERT_TRUE(other_owner);
+    const auto other_customer =
+        surface.store.create_customer({"individual", other_owner->id, "", "settings-other"});
+    ASSERT_TRUE(other_customer);
+    const std::string theirs = surface.workspaces->add(surface.owned, other_customer->id, "theirs");
+    const std::string theirs_too =
+        surface.workspaces->add(surface.owned, other_customer->id, "theirs-too");
+
+    const ApiResult first = surface.register_application("Client one", home);
+    const ApiResult second = surface.register_application("Client two", lab);
+    ASSERT_TRUE(first.ok) << first.error.message;
+    ASSERT_TRUE(second.ok) << second.error.message;
+    EXPECT_EQ(first.value.at("name"), "Client one") << "registration answers the settings";
+    const auto their_app = surface.call(
+        "register_application",
+        {{"customer_id", other_customer->id},
+         {"workspace_id", theirs_too},
+         {"name", "Their client"},
+         {"allowed_origins", json::array({"https://their.example.test"})},
+         {"redirect_uris", json::array({"https://their.example.test/callback"})}});
+    ASSERT_TRUE(their_app.ok) << their_app.error.message;
+    const std::string first_id = first.value.at("id");
+    const std::string second_id = second.value.at("id");
+    const std::string their_id = their_app.value.at("id");
+
+    // Each application's settings are one sealed record at its own workspace endpoint only,
+    // keyed by the application; the routing row holds none of them.
+    const std::string home_url = "http://workspace.test";
+    const std::string lab_url = "http://lab.test";
+    ASSERT_EQ(surface.records(home_url, "auth_applications").size(), 1U);
+    EXPECT_EQ(surface.records(home_url, "auth_applications").begin()->first, first_id);
+    EXPECT_EQ(surface.records(lab_url, "auth_applications").size(), 1U);
+    EXPECT_EQ(surface.records("http://theirs-too.test", "auth_applications").size(), 1U);
+    EXPECT_TRUE(surface.records("http://theirs.test", "auth_applications").empty());
+    for (const auto& [key, record] : surface.records(home_url, "auth_applications")) {
+        for (const std::string plain :
+             {"Client one", "client.example.test", "#123456", "accent_color"}) {
+            EXPECT_EQ(record.dump().find(plain), std::string::npos) << "sealed body: " << plain;
+        }
+    }
+    const auto routing = surface.store.get_application(first_id);
+    ASSERT_TRUE(routing);
+    EXPECT_TRUE(routing->name.empty());
+    EXPECT_TRUE(routing->allowed_origins.empty());
+    EXPECT_TRUE(routing->redirect_uris.empty());
+    EXPECT_TRUE(routing->theme.empty());
+    EXPECT_EQ(routing->workspace_id, home);
+    EXPECT_EQ(routing->custom_sign_in_domain, "login.client.example.test");
+    EXPECT_TRUE(surface.store.legacy_application_settings("", 5000)->empty());
+
+    // Reads fill the settings from the workspace; listing reads each workspace once.
+    const auto read = [&](const std::string& id) {
+        return surface.call("get_application", {{"id", id}});
+    };
+    const auto got = read(first_id);
+    ASSERT_TRUE(got.ok) << got.error.message;
+    EXPECT_EQ(got.value.at("name"), "Client one");
+    EXPECT_EQ(got.value.at("allowed_origins"), json::array({"https://client.example.test"}));
+    EXPECT_EQ(got.value.at("redirect_uris"),
+              json::array({"https://client.example.test/callback"}));
+    EXPECT_EQ(got.value.at("theme").at("accent_color"), "#123456");
+    EXPECT_EQ(got.value.at("workspace_id"), home);
+    EXPECT_EQ(read(their_id).value.at("name"), "Their client");
+    const auto listed = surface.call("list_applications", {{"customer_id", surface.customer_id}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value.at("items").size(), 2U);
+    for (const json& item : listed.value.at("items")) {
+        EXPECT_FALSE(item.contains("settings_unavailable")) << item;
+        EXPECT_EQ(item.at("name"), item.at("id") == first_id ? "Client one" : "Client two");
+    }
+
+    // The theme is changed in the workspace, conditionally on the revision read. Missing,
+    // malformed, unknown and foreign workspace ids are refused at /workspace_id.
+    const auto theme = [&](const std::string& id, json workspace, std::string color) {
+        json input{{"application_id", id}, {"theme", {{"accent_color", color}}}};
+        if (!workspace.is_null()) {
+            input["workspace_id"] = workspace;
+        }
+        return surface.call("update_application_theme", input);
+    };
+    for (const json& wrong : {json(lab), json(theirs), json(lake::control::new_uuid_v4()),
+                              json("not-a-workspace"), json(nullptr)}) {
+        const auto refused = theme(first_id, wrong, "#000000");
+        EXPECT_EQ(refused.error.code, "invalid_input") << wrong;
+        EXPECT_EQ(refused.error.path, "/workspace_id") << wrong;
+    }
+    const auto themed = theme(first_id, home, "#654321");
+    ASSERT_TRUE(themed.ok) << themed.error.message;
+    EXPECT_EQ(themed.value.at("theme").at("accent_color"), "#654321");
+    EXPECT_EQ(themed.value.at("name"), "Client one") << "the rest of the settings kept";
+    EXPECT_EQ(read(first_id).value.at("theme").at("accent_color"), "#654321");
+    EXPECT_EQ(read(second_id).value.at("theme").at("accent_color"), "#123456");
+
+    auto records =
+        lake::api::workspace_records(surface.context, surface.customer_id, surface.workspace_id);
+    ASSERT_TRUE(records) << records.error().message;
+    int changes = 0;
+    const auto raced = lake::control::settled(
+        liquid::runtime::block_on(lake::control::update_application_settings(
+            *records, first_id, surface.customer_id,
+            [&](lake::control::ApplicationSettings& settings) {
+                if (++changes == 1) {
+                    // Another lake process changes the theme between this read and this write.
+                    const auto other = lake::control::settled(liquid::runtime::block_on(
+                        lake::control::update_application_settings(
+                            *records, first_id, surface.customer_id,
+                            [](lake::control::ApplicationSettings& value) {
+                                value.theme["background_color"] = "#fafafa";
+                            })));
+                    EXPECT_TRUE(other);
+                }
+                settings.theme["accent_color"] = "#111111";
+            })));
+    ASSERT_TRUE(raced) << raced.error().message;
+    EXPECT_EQ(changes, 2) << "the conflicting write was reread";
+    EXPECT_EQ(raced->theme.at("accent_color"), "#111111");
+    EXPECT_EQ(raced->theme.at("background_color"), "#fafafa") << "neither change lost";
+    EXPECT_EQ(raced->lake_revision, 4);
+
+    // A cross-origin sign-in is allowed only from the origins the workspace record lists.
+    surface.context.caller_origin = "https://client.example.test";
+    const auto allowed = surface.call("sign_up_password",
+                                      {{"pool_id", first.value.at("pool_id")},
+                                       {"email", "settings-user@example.test"},
+                                       {"password", "correct horse battery staple"},
+                                       {"display_name", "Settings user"},
+                                       {"identity_document", "{}"}});
+    EXPECT_TRUE(allowed.ok) << allowed.error.message;
+    surface.context.caller_origin = "https://elsewhere.example.test";
+    const auto foreign_origin = surface.call("sign_in_password",
+                                             {{"pool_id", first.value.at("pool_id")},
+                                              {"email", "settings-user@example.test"},
+                                              {"password", "correct horse battery staple"}});
+    EXPECT_EQ(foreign_origin.error.code, "unauthorized");
+    surface.context.caller_origin.clear();
+
+    // Least privilege: a reader of one application reads its settings but cannot change them,
+    // and cannot read another application's.
+    const auto reader = surface.store.create_user(
+        {"taap:1:ed25519:settings-reader", "settings-reader@example.test", "Reader"});
+    ASSERT_TRUE(reader);
+    const auto object = surface.store.find_policy_object("application", first_id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(surface.store.create_grant({reader->taap_id, object->id, "read",
+                                            "settings-reader-attestation", "admin",
+                                            "settings-reader-request"}));
+    surface.context.operator_credential = false;
+    surface.context.acting_identity = reader->taap_id;
+    EXPECT_TRUE(read(first_id).ok);
+    EXPECT_EQ(read(second_id).error.code, "unauthorized");
+    EXPECT_EQ(theme(first_id, home, "#222222").error.code, "unauthorized");
+    surface.context.operator_credential = true;
+    surface.context.acting_identity = "admin";
+
+    // A record moved under another application's key does not open as that application's.
+    auto& rows = surface.records(home_url, "auth_applications");
+    const json kept = rows[first_id];
+    const auto third = surface.register_application("Client one", home);
+    ASSERT_FALSE(third.ok) << "the custom sign-in host is unique";
+    const auto moved_to = surface.call(
+        "register_application",
+        {{"customer_id", surface.customer_id},
+         {"workspace_id", home},
+         {"name", "Client three"},
+         {"allowed_origins", json::array({"https://three.example.test"})},
+         {"redirect_uris", json::array()}});
+    ASSERT_TRUE(moved_to.ok) << moved_to.error.message;
+    EXPECT_TRUE(surface.records(home_url, "auth_applications").size() == 2U)
+        << "a refused registration leaves nothing in the workspace";
+    const std::string third_id = moved_to.value.at("id");
+    rows[third_id]["value"] = kept["value"];
+    EXPECT_EQ(read(third_id).error.code, "not_found");
+    EXPECT_EQ(read(first_id).value.at("name"), "Client one");
+
+    // A workspace that is not ready refuses the settings instead of falling back; the listing
+    // still names the application, with the reason.
+    const auto lab_row = surface.store.get_workspace(lab);
+    ASSERT_TRUE(surface.store.set_service_status(lab_row->zetta_service_id, "Provisioning", "",
+                                                 lab_url));
+    EXPECT_EQ(read(second_id).error.code, "workspace_not_ready");
+    EXPECT_EQ(theme(second_id, lab, "#333333").error.code, "workspace_not_ready");
+    const auto partial = surface.call("list_applications", {{"customer_id", surface.customer_id}});
+    ASSERT_TRUE(partial.ok) << partial.error.message;
+    for (const json& item : partial.value.at("items")) {
+        // The third application's record was replaced above and no longer opens.
+        EXPECT_EQ(item.contains("settings_unavailable"),
+                  item.at("id") == second_id || item.at("id") == third_id)
+            << item;
+    }
+    ASSERT_TRUE(surface.store.set_service_status(lab_row->zetta_service_id, "Ready", "", lab_url));
+    EXPECT_EQ(read(second_id).value.at("name"), "Client two");
+
+    // Deleting a workspace takes its applications' settings with it; the others keep theirs.
+    ASSERT_TRUE(surface.store.update_workspace(lab, {.desired = "deleted"}));
+    EXPECT_FALSE(read(second_id).ok);
+    EXPECT_EQ(theme(second_id, lab, "#444444").error.path, "/workspace_id");
+    EXPECT_EQ(read(first_id).value.at("name"), "Client one");
+    EXPECT_EQ(read(their_id).value.at("name"), "Their client");
 }
 
 // A rotation is one write conditional on the revision it read: a concurrent rotation is reread and
