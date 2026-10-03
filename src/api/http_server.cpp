@@ -1727,6 +1727,29 @@ std::string workspace_prefixed_local_path(std::string_view path) {
     return end == std::string_view::npos ? std::string() : std::string(path.substr(end));
 }
 
+// The workspace selector's choices: each live workspace by its name, which is unique among the
+// space's live workspaces, without "(environment)" (lake#452). Workspaces lists environments.
+std::vector<std::pair<std::string, std::string>>
+workspace_choices(const std::vector<lake::control::Workspace>& rows) {
+    std::vector<std::pair<std::string, std::string>> choices;
+    for (const auto& row : rows) {
+        if (row.desired != "deleted") {
+            choices.emplace_back(row.id, row.name);
+        }
+    }
+    return choices;
+}
+
+// The space selector's label: the viewer's own personal space is "Personal space", not its
+// generated handle (lake#452); every other space keeps its name.
+std::string space_label(const lake::control::Customer& customer, std::string_view user_id) {
+    if (customer.customer_type == "individual" && !user_id.empty() &&
+        customer.user_id == user_id) {
+        return "Personal space";
+    }
+    return customer.name;
+}
+
 bool workspace_api_path(std::string_view path) {
     return path == "/mcp" || path == "/v1/openapi.json" || path.starts_with("/v1/");
 }
@@ -5705,7 +5728,7 @@ struct ApiServer::Impl {
             if (customers.ok) {
                 for (const auto& row : customers.value.at("items")) {
                     const auto customer = customer_from_json(row);
-                    viewer.spaces.emplace_back(customer.id, customer.name);
+                    viewer.spaces.emplace_back(customer.id, space_label(customer, viewer.user_id));
                 }
             }
             const auto query = boost::urls::parse_query(context.request_query);
@@ -5734,13 +5757,8 @@ struct ApiServer::Impl {
             if (viewer.customer_id.empty() && !viewer.spaces.empty()) {
                 viewer.customer_id = viewer.spaces.front().first;
             }
-            const auto services = options.store->list_workspaces(viewer.customer_id);
-            if (services) {
-                for (const auto& service : *services) {
-                    if (service.desired != "deleted") {
-                        viewer.workspaces.emplace_back(service.id, service.name + " (" + service.environment + ")");
-                    }
-                }
+            if (const auto rows = options.store->list_workspaces(viewer.customer_id)) {
+                viewer.workspaces = workspace_choices(*rows);
             }
             if (viewer.workspace_id.empty() && viewer.workspaces.size() == 1) {
                 viewer.workspace_id = viewer.workspaces.front().first;
@@ -8583,6 +8601,16 @@ struct ApiServer::Impl {
     boost::http::route_task workspace_route(boost::http::route_params& route) {
         namespace http = boost::http;
         const std::string path(route.url.path());
+        // `/w/<workspace>` and `/w/<workspace>/` are the workspace itself: its home is the page
+        // an unqualified workspace link lands on (lake#452). The next request checks the ID.
+        if (const std::string home = workspace_path_id(path.ends_with('/') ? path : path + "/");
+            !home.empty() && (path == "/w/" + home || path == "/w/" + home + "/") &&
+            (route.req.method() == http::method::get || route.req.method() == http::method::head)) {
+            const std::string query = route.url.encoded_query().empty()
+                                          ? std::string()
+                                          : "?" + std::string(route.url.encoded_query());
+            co_return co_await redirect(route, "/w/" + home + "/design/projects" + query);
+        }
         const std::string selected = workspace_path_id(path);
         const std::string prefixed_local = workspace_prefixed_local_path(path);
         if (workspace_api_path(prefixed_local)) {
@@ -8650,13 +8678,8 @@ struct ApiServer::Impl {
         viewer.customer_id = selection.customer_id;
         viewer.workspace_id.clear();
         viewer.workspaces.clear();
-        const auto services = options.store->list_workspaces(selection.customer_id);
-        if (services) {
-            for (const auto& service : *services) {
-                if (service.desired != "deleted") {
-                    viewer.workspaces.emplace_back(service.id, service.name + " (" + service.environment + ")");
-                }
-            }
+        if (const auto rows = options.store->list_workspaces(selection.customer_id)) {
+            viewer.workspaces = workspace_choices(*rows);
         }
         std::string choice = switching ? query_value(route, "workspace_id")
                                        : cookie_value(route, "lake_workspace");
@@ -11790,11 +11813,27 @@ struct ApiServer::Impl {
                     prepared = ApiResult::failure(
                         "conflict", "The ApplicationAgent proposal changed before confirmation.");
                 } else {
-                    capability = "agent_turn";
-                    input["agent"] = "agent-application";
-                    input["kind"] = "app";
-                    input["message"] = "Confirm and deploy the reviewed proposal.";
-                    input["context"] = {{"confirmed_proposal", proposal}};
+                    // A public app needs the person's acknowledgement that it is public; the turn
+                    // carries it so create_app accepts the agent's public app (lake#452).
+                    const nlohmann::json app = proposal.value("app", nlohmann::json::object());
+                    const auto access = app.is_object() ? app.find("auth") : app.end();
+                    const bool public_app = access != app.end() && access->is_string() &&
+                                            (*access == "none" || *access == "public");
+                    if (public_app && form_field(body, "confirm_public") != "1") {
+                        prepared = ApiResult::failure(
+                            "invalid_input",
+                            "This app will be public. Tick the box to confirm that anyone with "
+                            "its address can open it.");
+                    } else {
+                        capability = "agent_turn";
+                        input["agent"] = "agent-application";
+                        input["kind"] = "app";
+                        input["message"] = "Confirm and deploy the reviewed proposal.";
+                        input["context"] = {{"confirmed_proposal", proposal}};
+                        if (public_app) {
+                            input["context"]["confirm_public"] = true;
+                        }
+                    }
                 }
             }
         }

@@ -6,6 +6,14 @@ and after the owner drains on SIGTERM under concurrent pushes, drive writes, reg
 transparency appends, every acknowledged write must read back from a successor, the customer store
 must reopen and pass a libliquid dry-run collection, and the log must rebuild its tree. See
 [store-volume.md](../docs/deployment/store-volume.md#one-process-per-store-root).
+lake#452: `WebUi.PhoneWidthGivesTheWorkspacePickerItsOwnRow` checks the top bar's rendered order
+and the 40rem rules; `WorkspaceNavigationHttp.SelectorRedirectsRememberedWorkspaceAndValidatesForms`
+covers workspace labels and the `/w/<workspace>/` home redirect;
+`Workspaces.CreateProjectSaysWhetherTheNameIsMissingOrTaken`,
+`Workspaces.ServiceStatusIsTheSameInListServicesAndOnThePage`,
+`Workspaces.ADeletedWorkspacesZettaLeavesTheListWithItsWorkspace` and the PostgreSQL services test
+cover the rest; `AgentRuns.ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed` and
+`HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp` cover the public acknowledgement.
 
 `test_agent_leases.cpp` runs the same claim, activity, expiry, re-claim, three-attempt exhaustion,
 workspace notice recovery and racing-terminal-write cases on memory and PostgreSQL stores.

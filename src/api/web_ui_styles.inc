@@ -727,6 +727,9 @@ form.search input {
   display: grid;
   gap: var(--lake-space-1);
 }
+.workspace-picker {
+  margin: 0;
+}
 
 code,
 pre,
@@ -1588,6 +1591,41 @@ legend {
   .filters input,
   .filters select {
     width: 100%;
+  }
+  /* At phone width the Space and Workspace selectors and the trail take a full row below the
+     actions instead of sharing one line with them, so neither shrinks to a few letters
+     (lake#452). The taller bar scrolls away rather than covering sticky table headers. */
+  .topbar {
+    position: static;
+    flex-wrap: wrap;
+    padding-top: var(--lake-space-2);
+    padding-bottom: var(--lake-space-2);
+  }
+  th {
+    top: 0;
+  }
+  .topbar-actions {
+    margin-left: auto;
+  }
+  .topbar-context {
+    order: 2;
+    flex: 1 1 100%;
+    overflow: visible;
+    white-space: normal;
+  }
+  .workspace-picker {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    align-items: end;
+    margin: 0 0 var(--lake-space-2);
+  }
+  .workspace-picker label,
+  .workspace-picker select {
+    width: 100%;
+    min-width: 0;
+  }
+  .topbar-trail {
+    margin-top: var(--lake-space-2);
   }
 }
 

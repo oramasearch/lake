@@ -66,7 +66,34 @@ nlohmann::json service_json(const ManagedService& service) {
             {"message", service.message},
             {"endpoint", service.endpoint},
             {"observed_generation", service.observed_generation},
-            {"created_at", service.created_at}};
+            {"created_at", service.created_at},
+            {"updated_at", service.updated_at}};
+}
+
+ServiceCondition service_condition(const ManagedService& service, bool connected) {
+    if (service.workspace_id.empty()) {
+        // Migration 0039 leaves a service unassigned when its space had several workspaces; the
+        // operator reconciles services through their workspace, so it no longer sees this one.
+        return {"Unassigned",
+                "This service was created before workspaces and belongs to none, so the operator "
+                "no longer manages it: lake cannot connect to it, and deleting it would not "
+                "finish. An administrator of this lake has to assign it to a workspace or remove "
+                "it."};
+    }
+    if (service.desired == "absent") {
+        if (service.phase == "Failed") {
+            return {"Failed", "The operator could not delete it: " + service.message};
+        }
+        if (service.observed_generation < service.generation) {
+            return {"Deleting", "Waiting for the operator to start deleting it."};
+        }
+        return {"Deleting", {}};
+    }
+    if (service.phase == "Ready" && !connected) {
+        return {"Connecting",
+                "The operator reports it ready; lake is waiting for its connection to arrive."};
+    }
+    return {service.phase.empty() ? "Waiting for the operator" : service.phase, {}};
 }
 
 nlohmann::json store_json(const ManagedStore& store) {

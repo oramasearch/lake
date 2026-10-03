@@ -183,6 +183,9 @@ public:
     Result<Workspace> get_workspace(const std::string& id) override;
     Result<Workspace> create_workspace(const NewWorkspace&) override;
     Result<Workspace> update_workspace(const std::string& id, const WorkspacePatch&) override;
+    // The operator's workspace observation (phase, observed generation). Tests call this
+    // directly; the production operator updates the same columns in Postgres.
+    Result<void> set_workspace_status(const std::string& id, std::string phase);
     Result<std::vector<ManagedService>> list_services(const std::string& customer_id) override;
     Result<ManagedService> get_service(const std::string& id) override;
     Result<ManagedService> create_service(const NewManagedService&) override;

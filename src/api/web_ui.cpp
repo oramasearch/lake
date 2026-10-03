@@ -1309,7 +1309,8 @@ std::string web_ui_shell(std::string_view title,
                          WebUiViewer viewer) {
     std::string selection;
     if (viewer.signed_in && !viewer.spaces.empty()) {
-        selection = "<form method=\"get\" action=\"/workspace/select\" class=\"filters\">"
+        selection = "<form method=\"get\" action=\"/workspace/select\" "
+                    "class=\"filters workspace-picker\">"
                     "<input type=\"hidden\" name=\"page\" value=\"" +
                     web_ui_escape(workspace_local_path(viewer.path)) + "\">"
                     "<input type=\"hidden\" name=\"page_query\" value=\"" + web_ui_escape(viewer.query) + "\">"
@@ -1328,8 +1329,8 @@ std::string web_ui_shell(std::string_view title,
                 (id == viewer.workspace_id ? " selected" : "") + ">" + web_ui_escape(name) + "</option>";
         }
         selection += "</select></label><button type=\"submit\">Switch</button></form>"
-                     "<a href=\"/workspaces?customer_id=" + web_ui_escape(viewer.customer_id) +
-                     "\">New workspace</a>";
+                     "<a class=\"workspace-new\" href=\"/workspaces?customer_id=" +
+                     web_ui_escape(viewer.customer_id) + "\">New workspace</a>";
     }
     auto html = std::format(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -2139,6 +2140,10 @@ std::string service_start_hint(const nlohmann::json& service, std::string_view p
 }
 
 std::string service_phase(const nlohmann::json& service) {
+    // list_services states the status; the page shows exactly that one (lake#452).
+    if (const std::string status = json_text(service, "status"); !status.empty()) {
+        return status;
+    }
     const std::string phase = json_text(service, "phase");
     if (json_text(service, "desired") == "absent") {
         return phase.empty() || phase == "Ready" ? "Deleting" : phase;
@@ -2147,6 +2152,25 @@ std::string service_phase(const nlohmann::json& service) {
         return "Connecting";
     }
     return phase.empty() ? "Waiting for the operator" : phase;
+}
+
+// Why a service is not progressing (list_services' status_reason), and, for a delete the operator
+// has not finished after a quarter of an hour, how long it has been waiting (lake#452).
+std::string service_stall_note(const nlohmann::json& service, std::string_view phase) {
+    std::string note = json_text(service, "status_reason");
+    if (phase == "Deleting") {
+        const long waited = seconds_since(json_text(service, "updated_at"));
+        if (waited > 15 * 60) {
+            note += (note.empty() ? "" : " ") +
+                    std::format("Deletion was requested {} ago and the operator has not "
+                                "reported it deleted yet.",
+                                waited >= 2 * 24 * 3600 ? std::format("{} days", waited / 86400)
+                                                        : spoken_duration(waited));
+        }
+    }
+    return note.empty() ? std::string()
+                        : "<br><span class=\"notice status-warning\">" + web_ui_escape(note) +
+                              "</span>";
 }
 
 // Services: every Zetta and Postgres cluster of the customer (docs/api/services.md). Never shows a
@@ -2197,7 +2221,8 @@ std::string services_content(const WorkspacePage& page) {
             const std::string kind = json_text(service, "kind");
             const std::string phase = service_phase(service);
             const bool deleting = json_text(service, "desired") == "absent";
-            settling = settling || (phase != "Ready" && phase != "Failed");
+            // An unassigned service will not change on its own; refreshing would not help.
+            settling = settling || (phase != "Ready" && phase != "Failed" && phase != "Unassigned");
             std::string actions;
             if (!deleting && kind != "zetta" && phase == "Ready") {
                 actions += std::format("<form method=\"post\" action=\"/services/connection\">{}{}"
@@ -2242,10 +2267,14 @@ std::string services_content(const WorkspacePage& page) {
                 web_ui_escape(json_text(service, "instances")),
                 web_ui_escape(json_text(service, "storage_gi")),
                 web_ui_escape(phase),
-                (json_text(service, "message").empty()
+                // "service ready" under Deleting or Connecting is the operator's earlier report,
+                // not what is happening now.
+                (json_text(service, "message").empty() ||
+                         (json_text(service, "phase") == "Ready" && phase != "Ready")
                      ? std::string()
                      : "<br><span class=\"muted\">" + web_ui_escape(json_text(service, "message")) +
                            "</span>") +
+                    service_stall_note(service, phase) +
                     (deleting ? std::string() : service_start_hint(service, phase)),
                 web_ui_escape(json_text(service, "endpoint")),
                 actions);
@@ -6495,6 +6524,16 @@ std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer) {
         } else if (result.value("kind", std::string()) == "proposal" &&
                    result.value("confirm", false)) {
             const nlohmann::json app = result.value("app", nlohmann::json::object());
+            // A public app is acknowledged as public before it is deployed (lake#452).
+            const std::string access = json_text(app, "auth");
+            const bool public_app = access == "none" || access == "public";
+            const std::string public_acknowledgement =
+                public_app
+                    ? "<p class=\"notice status-warning\" role=\"note\">This app will be "
+                      "public: anyone with its address can open it without signing in to lake."
+                      "</p><label><input type=\"checkbox\" name=\"confirm_public\" value=\"1\" "
+                      "required> I understand this app will be public</label>"
+                    : std::string();
             std::string files;
             for (const nlohmann::json& file :
                  result.value("files", nlohmann::json::array())) {
@@ -6507,13 +6546,15 @@ std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer) {
                 "class=\"ask-reply\">{}</div><dl><dt>Mode</dt><dd>{}</dd><dt>Framework</dt>"
                 "<dd>{}</dd><dt>Access</dt><dd>{}</dd><dt>Repository</dt><dd>{}</dd><dt>Path</dt>"
                 "<dd>{}</dd></dl>{}<form class=\"stack\" method=\"post\" "
-                "action=\"/ship/apps/agent/confirm\">{}{}{}<button class=\"button "
+                "action=\"/ship/apps/agent/confirm\">{}{}{}{}<button class=\"button "
                 "button-primary\" type=\"submit\">Confirm and deploy</button></form></section>",
                 web_ui_escape(json_text(app, "name")),
                 web_ui_markdown(reply),
                 web_ui_escape(json_text(app, "mode")),
                 web_ui_escape(json_text(app, "framework")),
-                web_ui_escape(json_text(app, "auth")),
+                public_app ? std::string("Public — no sign-in")
+                           : web_ui_escape(access.empty() || access == "lake" ? "Lake sign-in"
+                                                                               : access),
                 web_ui_escape(app.value("repository", nlohmann::json::object())
                                   .value("id",
                                          app.value("repository", nlohmann::json::object())
@@ -6522,7 +6563,8 @@ std::string web_ui_apps(const AppsPage& page, WebUiViewer viewer) {
                 files,
                 hidden("customer_id", page.customer_id),
                 hidden("task_id", page.agent_task.value("task_id", std::string())),
-                hidden("proposal_sha256", page.proposal_sha256));
+                hidden("proposal_sha256", page.proposal_sha256),
+                public_acknowledgement);
         } else {
             const nlohmann::json app = result.value("app", nlohmann::json::object());
             // The deployed App carries "url": null until its rollout reports one, so read

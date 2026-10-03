@@ -49,6 +49,12 @@ turn receives repository writes plus `create_app`, `deploy_app`, and the build c
 of task, or a proposal that did not request confirmation is refused. A deployed result shows its
 URL.
 
+A proposal whose app has public access (`auth` `none` or `public`) shows **Access: Public — no
+sign-in**, a warning that anyone with the app's address can open it, and a required *I understand
+this app will be public* checkbox (lake#452). Confirming without it is refused and starts no turn;
+with it, the confirmed turn carries `context.confirm_public: true`, which `create_app` requires
+before it creates a public app for the agent.
+
 ## Controls
 
 The app page exposes restart, scale, stop/start, deploy and history-bound rollback, build/cancel,

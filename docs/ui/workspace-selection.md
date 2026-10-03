@@ -1,7 +1,9 @@
 # Workspace Selection and Navigation
 
 The top bar has one space selector and one workspace selector. Workspaces are non-deleted contract rows
-of that space. A sole workspace is selected but remains visible; selection is sent explicitly.
+of that space. The viewer's own personal space is labelled *Personal space*, not its generated
+handle; other spaces keep their names. A workspace is labelled by its name alone (names are unique
+among a space's live workspaces); its environment is listed on `/workspaces` (lake#452). A sole workspace is selected but remains visible; selection is sent explicitly.
 Changing space refreshes its workspace choices. New workspace opens `/workspaces`, which lists
 name, environment, phase, namespace and created time, and accepts name/environment for creation.
 It writes desired state through `create_workspace`; the operator provisions the namespace and
@@ -11,7 +13,10 @@ first workspace can be created before a selection exists.
 Switching from Workspaces stays on that management page. Explicit space selection takes
 precedence over a remembered workspace from another space on control-plane pages.
 
-Design, Train, Ship, Ask and the workspace proxy use `/w/<workspace_id>/...`. Navigation ownership
+Design, Train, Ship, Ask and the workspace proxy use `/w/<workspace_id>/...`. `/w/<workspace_id>`
+and `/w/<workspace_id>/` (GET or HEAD) redirect to the workspace's home,
+`/w/<workspace_id>/design/projects`, keeping the query; the home request validates the ID as every
+workspace page does (lake#452). Navigation ownership
 is evaluated on the local page path, so `aria-current="page"` follows the selected page while
 links retain the workspace prefix. Shared rendering carries the ID into URL attributes, inline
 navigation scripts, and hidden form fields. It does not rewrite ordinary hidden field values.
@@ -28,6 +33,12 @@ When changing URL generation, run `ctest --test-dir build -R '^WebUi.Workspace'`
 `PagePerformance` test with PostgreSQL configured. The rewrite tests cover mixed script and
 attribute URLs, query strings and fragments, explicit other-workspace targets, incomplete forms,
 and 2,000-row documents. The [page budget](performance.md) includes this rendering work.
+
+At phone width (`max-width: 40rem`) the top bar wraps: the actions keep the first row, and the
+selectors (`.workspace-picker`: two equal columns and *Switch*) and the trail take a full-width row
+below, so a 390 px viewport shows the whole space and workspace names instead of `gr…` and `wo…`.
+The taller bar is not sticky there, and table headers stick to the top. `WebUi.PhoneWidthGivesTheWorkspacePickerItsOwnRow`
+checks the rendered order and these rules; run `tools/ui/test-token-gates.sh` after changing them.
 
 The selection form submits to `/workspace/select`. Switching keeps the page and query filters,
 removing old customer/workspace query values. Lake records `lake_workspace`, an HttpOnly,

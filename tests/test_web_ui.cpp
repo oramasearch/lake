@@ -61,6 +61,59 @@ TEST(WebUi, WorkspacePathOwnsNavigationAndEveryFormCarriesTheSelection) {
     EXPECT_TRUE(lake::api::workspace_path_id("/w/not-an-id/train/data").empty());
 }
 
+// At 390 px the Space and Workspace selectors shrank to a few letters because they shared one
+// nowrap row with the actions (lake#452). The picker now has its own full-width row at phone
+// width, two equal columns and the Switch button, and the trail keeps a row of its own.
+TEST(WebUi, PhoneWidthGivesTheWorkspacePickerItsOwnRow) {
+    const std::string id = "01234567-89ab-4cde-8fab-0123456789ab";
+    lake::api::WebUiViewer viewer = true;
+    viewer.path = "/w/" + id + "/train/data";
+    viewer.customer_id = "space-one";
+    viewer.workspace_id = id;
+    viewer.spaces = {{"space-one", "Personal space"}};
+    viewer.workspaces = {{id, "workspace"}};
+    const std::string html = lake::api::web_ui_shell(
+        "Data", std::vector<lake::api::WebUiCrumb>{{"Train", "/train/data", {}}, {"Data", "", {}}},
+        "<p>content</p>", viewer);
+    const std::size_t context = html.find("<div class=\"topbar-context\">");
+    const std::size_t picker = html.find("<form method=\"get\" action=\"/workspace/select\" "
+                                         "class=\"filters workspace-picker\">");
+    const std::size_t trail = html.find("<nav class=\"breadcrumbs topbar-trail\"");
+    const std::size_t actions = html.find("<div class=\"topbar-actions\">");
+    ASSERT_NE(context, std::string::npos);
+    ASSERT_NE(picker, std::string::npos);
+    ASSERT_NE(trail, std::string::npos);
+    EXPECT_LT(context, picker);
+    EXPECT_LT(picker, trail);
+    EXPECT_LT(trail, actions) << "picker and trail live in the context, before the actions";
+    EXPECT_NE(html.find("selected>Personal space</option>"), std::string::npos);
+
+    const std::string_view css = lake::api::web_ui_stylesheet();
+    const std::size_t phone = css.find("@media (max-width: 40rem)");
+    ASSERT_NE(phone, std::string::npos);
+    const std::string_view block = css.substr(phone, css.find("\n}\n", phone) - phone);
+    const auto rule = [&](std::string_view selector) {
+        const std::size_t at = block.find(std::string(selector) + " {");
+        return at == std::string_view::npos
+                   ? std::string_view()
+                   : block.substr(at, block.find('}', at) - at);
+    };
+    EXPECT_NE(rule("  .topbar").find("flex-wrap: wrap"), std::string_view::npos) << block;
+    EXPECT_NE(rule("  .topbar").find("position: static"), std::string_view::npos);
+    EXPECT_NE(rule("  .topbar-context").find("flex: 1 1 100%"), std::string_view::npos);
+    EXPECT_NE(rule("  .topbar-context").find("white-space: normal"), std::string_view::npos);
+    EXPECT_NE(rule("  .workspace-picker").find(
+                  "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto"),
+              std::string_view::npos);
+    // Only design tokens: the phone rules introduce no raw lengths or colours.
+    for (const std::string_view selector : {"  .topbar", "  .topbar-context", "  .workspace-picker",
+                                            "  .topbar-trail"}) {
+        const std::string_view body = rule(selector);
+        EXPECT_EQ(body.find("px"), std::string_view::npos) << selector;
+        EXPECT_EQ(body.find('#'), std::string_view::npos) << selector;
+    }
+}
+
 TEST(WebUi, WorkspaceRewritePreservesScriptsValuesAndExplicitSelections) {
     const std::string id = "01234567-89ab-4cde-8fab-0123456789ab";
     const std::string prefix = "/w/" + id;

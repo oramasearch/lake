@@ -4134,12 +4134,35 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
         lake::control::identity_crypto::sha256_hex(second_credential)));
     const auto second_principal = r.store.context_for(second_credential);
     ASSERT_TRUE(second_principal);
-    const auto created = r.call_as(*second_principal, "create_app", create_input);
+    // The person confirmed the proposal but not that the app is public (lake#452).
+    const auto unacknowledged = r.call_as(*second_principal, "create_app", create_input);
+    EXPECT_EQ(unacknowledged.error.code, "invalid_input");
+    EXPECT_EQ(unacknowledged.error.path, "/confirm_public");
+    EXPECT_EQ(r.call("create_app", create_input).error.path, "/confirm_public")
+        << "a person's own create_app acknowledges a public app as set_app_auth does";
+
+    const auto acknowledged = r.call(
+        "agent_turn",
+        {{"agent", "agent-application"},
+         {"message", "Confirm and deploy the reviewed proposal."},
+         {"context", {{"confirmed_proposal", proposal}, {"confirm_public", true}}}});
+    ASSERT_TRUE(acknowledged.ok) << acknowledged.error.message;
+    const auto third = r.store.get_agent_task(acknowledged.value["task_id"]);
+    ASSERT_TRUE(third);
+    const std::string third_credential =
+        "lat." + third->id + ".0011223344556677889900aabbccddee";
+    ASSERT_TRUE(r.store.claim_agent_task(
+        third->id,
+        "agent-application",
+        lake::control::identity_crypto::sha256_hex(third_credential)));
+    const auto third_principal = r.store.context_for(third_credential);
+    ASSERT_TRUE(third_principal);
+    const auto created = r.call_as(*third_principal, "create_app", create_input);
     ASSERT_TRUE(created.ok) << created.error.message;
     EXPECT_EQ(created.value["auth"], "none");
     EXPECT_EQ(created.value["secret_env_refs"]["API_KEY"], "reports-api-key");
     const auto deployed = r.call_as(
-        *second_principal,
+        *third_principal,
         "deploy_app",
         {{"app", created.value["id"]}, {"image", "registry.example.test/reports:confirmed"}});
     ASSERT_TRUE(deployed.ok) << deployed.error.message;
@@ -4814,6 +4837,126 @@ TEST(Workspaces, NamingEngineRefusalsCarryThePathAndLakeCodes) {
         r.call("workspace_act", {{"capability", "approve_plan"}, {"input", json::object()}});
     EXPECT_EQ(required.error.code, "invalid_input");
     EXPECT_EQ(required.error.path, "/input/project");
+}
+
+// Zetta refuses an empty name and a taken one with the same message; lake says which (lake#452).
+TEST(Workspaces, CreateProjectSaysWhetherTheNameIsMissingOrTaken) {
+    ReadyWorkspace r;
+    for (const json name : {json(""), json("   "), json(nullptr)}) {
+        const auto missing = r.call("workspace_act",
+                                    {{"capability", "create_project"},
+                                     {"input", {{"name", name}, {"description", "x"}}}});
+        EXPECT_EQ(missing.error.code, "invalid_input") << name;
+        EXPECT_EQ(missing.error.path, "/input/name") << name;
+        EXPECT_EQ(missing.error.message, "a project needs a name") << name;
+    }
+    EXPECT_TRUE(r.sent("create_project").is_null()) << "an empty name never reaches the engine";
+
+    r.w.caller->failure = lake::control::ZettaControlError{
+        "engine_error", "create_project rejected 'churn' (empty name or name clash)"};
+    const auto taken = r.call("workspace_act",
+                              {{"capability", "create_project"}, {"input", {{"name", "churn"}}}});
+    EXPECT_EQ(taken.error.code, "conflict");
+    EXPECT_EQ(taken.error.path, "/input/name");
+    EXPECT_EQ(taken.error.message,
+              "a project named 'churn' already exists in this workspace; choose another name");
+
+    r.w.caller->failure = lake::control::ZettaControlError{"store_error", "engine unavailable"};
+    const auto other = r.call("workspace_act",
+                              {{"capability", "create_project"}, {"input", {{"name", "churn"}}}});
+    EXPECT_NE(other.error.code, "conflict") << "only the engine's name refusal is a clash";
+}
+
+// list_services states the status the Services page shows, and says why a service that cannot
+// progress on its own is stuck (lake#452).
+TEST(Workspaces, ServiceStatusIsTheSameInListServicesAndOnThePage) {
+    ReadyWorkspace r;
+    const std::string workspace = r.w.workspace_id();
+    lake::control::NewManagedService unassigned{r.w.customer_id, "sqlite", "test-sqlite", "taap:x"};
+    const auto sqlite = r.w.store->create_service(unassigned);
+    ASSERT_TRUE(sqlite);
+    ASSERT_TRUE(r.w.store->set_service_status(sqlite->id, "Ready", "service ready", "http://s:8080"));
+    lake::control::NewManagedService assigned{r.w.customer_id, "postgres", "crm", "taap:x"};
+    assigned.workspace_id = workspace;
+    const auto crm = r.w.store->create_service(assigned);
+    ASSERT_TRUE(crm);
+    ASSERT_TRUE(r.w.store->set_service_status(crm->id, "Ready", "service ready", "crm:5432"));
+    lake::control::NewManagedService gone{r.w.customer_id, "postgres", "old", "taap:x"};
+    gone.workspace_id = workspace;
+    const auto old = r.w.store->create_service(gone);
+    ASSERT_TRUE(old);
+    ASSERT_TRUE(r.w.store->set_service_status(old->id, "Ready", "service ready", "old:5432"));
+    ASSERT_TRUE(r.w.store->withdraw_service(old->id));
+
+    lake::api::ApiContext context;
+    context.store = r.w.store.get();
+    context.workspaces = r.w.service.get();
+    context.authorized = true;
+    context.acting_identity = "admin";
+    context.operator_credential = true;
+    const auto listed = liquid::runtime::block_on(
+        r.registry.call_async("list_services", {{"customer_id", r.w.customer_id}}, context));
+    ASSERT_TRUE(listed && listed->ok) << (listed ? listed->error.message : "");
+    std::map<std::string, json> by_name;
+    for (const json& service : listed->value["services"]) {
+        by_name[service["name"]] = service;
+    }
+    EXPECT_EQ(by_name["test-sqlite"]["status"], "Unassigned");
+    EXPECT_NE(by_name["test-sqlite"]["status_reason"].get<std::string>().find("belongs to none"),
+              std::string::npos);
+    EXPECT_EQ(by_name["crm"]["status"], "Connecting") << "Ready, but no connection in the mount";
+    EXPECT_NE(by_name["crm"]["status_reason"].get<std::string>().find("waiting for its connection"),
+              std::string::npos);
+    EXPECT_EQ(by_name["old"]["status"], "Deleting");
+    EXPECT_EQ(by_name["old"]["status_reason"], "Waiting for the operator to start deleting it.")
+        << "the operator has not observed the withdrawal's generation";
+
+    lake::api::WorkspacePage page;
+    page.section = "services";
+    page.customer_id = r.w.customer_id;
+    page.data["list_services"] = listed->value;
+    const std::string html = lake::api::web_ui_workspace(page, true);
+    for (const auto& [name, service] : by_name) {
+        EXPECT_NE(html.find("<td>" + service["status"].get<std::string>() + "<"),
+                  std::string::npos)
+            << name << " shows list_services' status";
+    }
+    EXPECT_NE(html.find("belongs to none"), std::string::npos);
+    EXPECT_EQ(html.find(">service ready<"), std::string::npos)
+        << "the operator's earlier \"service ready\" is not shown under another status";
+
+    // A delete that has waited for days says so.
+    json stuck = listed->value;
+    for (json& service : stuck["services"]) {
+        if (service["name"] == "old") {
+            service["updated_at"] = "2026-09-26T20:15:24Z";
+            service.erase("status_reason");
+        }
+    }
+    page.data["list_services"] = stuck;
+    const std::string waited = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(waited.find("Deletion was requested"), std::string::npos);
+    EXPECT_NE(waited.find("days ago and the operator has not reported it deleted yet."),
+              std::string::npos);
+}
+
+// A deleted workspace's primary Zetta is history once the operator reports the workspace Deleted,
+// even when its own status row was never updated (lake#452: test-zetta-2/3).
+TEST(Workspaces, ADeletedWorkspacesZettaLeavesTheListWithItsWorkspace) {
+    ReadyWorkspace r;
+    const auto extra = r.w.store->create_workspace({r.w.customer_id, "test-zetta-2", "prod", ""});
+    ASSERT_TRUE(extra);
+    ASSERT_TRUE(
+        r.w.store->set_service_status(extra->zetta_service_id, "Ready", "service ready", "http://z"));
+    ASSERT_TRUE(r.w.store->update_workspace(extra->id, {.desired = "deleted"}));
+    const auto listed = [&] {
+        const auto services = r.w.store->list_services(r.w.customer_id);
+        return std::ranges::any_of(
+            *services, [&](const auto& service) { return service.id == extra->zetta_service_id; });
+    };
+    EXPECT_TRUE(listed()) << "still listed while the workspace is being deleted";
+    ASSERT_TRUE(r.w.store->set_workspace_status(extra->id, "Deleted"));
+    EXPECT_FALSE(listed());
 }
 
 TEST(Workspaces, NamingAWrongSpaceIsBlamedOnCustomerId) {

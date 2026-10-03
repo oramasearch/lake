@@ -734,14 +734,33 @@ Result<Workspace> InMemoryStore::update_workspace(const std::string& id, const W
     return *row;
 }
 
+Result<void> InMemoryStore::set_workspace_status(const std::string& id, std::string phase) {
+    std::lock_guard lock(mutex_);
+    const auto row = std::ranges::find(workspaces_, id, &Workspace::id);
+    if (row == workspaces_.end()) {
+        return std::unexpected(StoreError{"not_found", "no workspace " + id});
+    }
+    row->phase = std::move(phase);
+    row->observed_generation = row->generation;
+    return {};
+}
+
 Result<std::vector<ManagedService>> InMemoryStore::list_services(const std::string& customer_id) {
     std::lock_guard lock(mutex_);
     std::vector<ManagedService> services;
     for (const ManagedService& service : services_) {
-        if (service.customer_id == customer_id &&
-            !(service.desired == "absent" && service.phase == "Deleted")) {
-            services.push_back(service);
+        if (service.customer_id != customer_id ||
+            (service.desired == "absent" && service.phase == "Deleted")) {
+            continue;
         }
+        // A deleted workspace's primary Zetta is history once the workspace is Deleted.
+        const auto owner = std::ranges::find(workspaces_, service.workspace_id, &Workspace::id);
+        if (service.desired == "absent" && owner != workspaces_.end() &&
+            owner->zetta_service_id == service.id && owner->desired == "deleted" &&
+            owner->phase == "Deleted") {
+            continue;
+        }
+        services.push_back(service);
     }
     return services;
 }

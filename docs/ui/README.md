@@ -1,5 +1,9 @@
 # The web UI
 
+lake#452: the selectors' labels, the `/w/<workspace>/` home redirect and the phone-width top bar
+are in [workspace-selection.md](workspace-selection.md); the public-app acknowledgement on an
+ApplicationAgent proposal is in [apps.md](apps.md).
+
 The live 100 ms p95 page rule, deterministic per-route workspace call budgets, loose 500 ms
 regression guard, `Server-Timing` fields (including one `zetta_<capability>` entry per call),
 route-derived coverage, registry invalidation, populated cold-start fixtures, the deferred panels
