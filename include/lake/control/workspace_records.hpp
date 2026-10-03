@@ -18,36 +18,35 @@
 namespace lake::control {
 
 // Lake's records in the workspace Zetta that owns them (docs/architecture/workspace-records.md,
-// lake#370). Every collection is a table in the workspace's reserved `lake_records` database,
-// reached through the workspace caller with Zetta's `sql` capability. A record is a sealed JSON
-// body: lake encrypts it with a key derived for that workspace alone, and finds it again through
-// one blind-indexed lookup value, so the workspace holds only ciphertext and HMACs, and a row
-// copied into another workspace's table does not open there.
-//
-// The interim limits of the existing Zetta primitive are deliberate and documented: no compare-and-
-// set (append-only collections only), single-predicate lookups, and a GET request line of about
-// 4 KiB, which is why a large body is written as several parts and becomes visible only once all
-// of its parts are present.
+// lake#370). Every collection is a collection of the workspace's keyed record store (zetta#1231:
+// create_collection, put_record, get_record, delete_record, list_records), named `lake_<name>`
+// and reached through the workspace caller. A record's value is a sealed envelope: lake encrypts
+// the body with a key derived for that workspace alone, and the record carries one blind-indexed
+// lookup value (index `lookup`), so the workspace holds only ciphertext and HMACs, and a record
+// copied into another workspace, collection, key or lookup does not open there.
 
-// The reserved database. Lake's workspace surfaces never list it and refuse statements naming it.
-inline constexpr std::string_view workspace_records_database = "lake_records";
+// Zetta collections lake owns all start with this prefix; a non-admin service user needs
+// `GRANT records:read, records:write, records:manage ON COLLECTION lake_`.
+inline constexpr std::string_view workspace_records_prefix = "lake_";
 
-// Whether `text` names the reserved database (case-insensitive), for those surface guards.
-bool names_workspace_records(std::string_view text);
-
-// One collection: its table name (lowercase letters, digits and underscores; the Postgres table it
-// replaces keeps its name) and the version of the body schema it writes now.
+// One collection: its name (lowercase letters, digits and underscores; the Postgres table it
+// replaces keeps its name), the version of the body schema it writes now, and its retention
+// (0: kept until deleted).
 struct RecordCollection {
     std::string_view name;
     int schema_version = 1;
+    std::int64_t retention_ms = 0;
 };
 
-// One record as read back: its id, its creation instant in microseconds since the Unix epoch, the
-// schema version it was written with, and its opened body.
+// One record as read back: its key, its creation instant in microseconds since the Unix epoch,
+// the schema version it was written with, lake's revision of it (1 for the first write, one more
+// for each update), the engine's revision (pass it as `if_revision`), and its opened body.
 struct StoredRecord {
     std::string id;
     std::int64_t at_us = 0;
     int schema_version = 1;
+    std::int64_t lake_revision = 1;
+    std::int64_t revision = 0;
     nlohmann::json body;
 };
 
@@ -56,6 +55,12 @@ struct RecordWrite {
     std::string id;
     // 0: now, strictly increasing within this process. A copy keeps the source row's instant.
     std::int64_t at_us = 0;
+};
+
+// The write precondition of a mutable record, decided atomically by the key's owner in Zetta.
+struct RecordCondition {
+    bool if_absent = false;
+    std::optional<std::int64_t> if_revision; // the engine revision the caller read
 };
 
 // Record I/O for one workspace. `Call` is the existing workspace caller, already bound to the
@@ -75,30 +80,63 @@ public:
         return workspace_id_;
     }
 
-    // Appends one record found by `lookup`. Creates the database and table on first use.
+    // Appends one record found by `lookup`, only if its key is absent: one put_record. Creates the
+    // collection on first use. An existing key is `conflict` (a rerun copy counts it as present).
     liquid::runtime::task<ZettaControlResult<StoredRecord>>
     append(RecordCollection collection, std::string lookup, nlohmann::json body,
            RecordWrite write = {});
 
-    // Every complete record found by `lookup`, oldest first (by instant, then id), at most the
-    // newest `newest` of them (0: all). A missing table is no records. Rows that do not open with
-    // this workspace's key, incomplete multi-part records and duplicate copies are skipped.
+    // Every record found by `lookup`, oldest first (by instant, then id), at most the newest
+    // `newest` of them (0: all, following next_after). A missing collection is no records; records
+    // that do not open with this workspace's key are skipped.
     liquid::runtime::task<ZettaControlResult<std::vector<StoredRecord>>>
     list(RecordCollection collection, std::string lookup, std::size_t newest = 0);
 
-    // The blind index of `lookup` in `collection`: what the table's `k` column holds.
+    // One record by key; nullopt when it does not exist (or does not open here).
+    liquid::runtime::task<ZettaControlResult<std::optional<StoredRecord>>>
+    get(RecordCollection collection, std::string id);
+
+    // Writes a mutable record under `condition`; a failed condition is `conflict` with the live
+    // engine revision in `details.revision`. `lake_revision` is the previous one plus one.
+    liquid::runtime::task<ZettaControlResult<StoredRecord>>
+    put(RecordCollection collection, std::string id, std::string lookup, nlohmann::json body,
+        RecordCondition condition, std::int64_t lake_revision = 1, std::int64_t at_us = 0);
+
+    // Deletes a record, only at `if_revision` when given; `not_found` when it does not exist.
+    liquid::runtime::task<ZettaControlResult<void>>
+    remove(RecordCollection collection, std::string id,
+           std::optional<std::int64_t> if_revision = std::nullopt);
+
+    // Read-modify-write: reads the record, asks `change` for its next body (nullopt: delete it, or
+    // leave it absent), and writes it conditionally on the revision it read, rereading and asking
+    // again on a conflict, up to `attempts` times. Answers the record written, or nullopt when
+    // `change` deleted or left nothing.
+    using Change = std::function<std::optional<nlohmann::json>(const std::optional<StoredRecord>&)>;
+    liquid::runtime::task<ZettaControlResult<std::optional<StoredRecord>>>
+    update(RecordCollection collection, std::string id, std::string lookup, Change change,
+           int attempts = 5);
+
+    // The blind index of `lookup` in `collection`: the record's `lookup` index value.
     std::string index_of(RecordCollection collection, std::string_view lookup) const;
 
-    // The most base64url characters of sealed body one INSERT carries, chosen so the encoded GET
-    // request line stays well under Zetta's 4 KiB start-line limit.
-    static constexpr std::size_t part_characters = 2800;
+    // `lake_<name>`, the Zetta collection of a lake collection.
+    static std::string zetta_collection(RecordCollection collection);
 
 private:
     struct Keys;
     WorkspaceRecords(Call call, std::string workspace_id, std::shared_ptr<const Keys> keys);
 
-    liquid::runtime::task<ZettaControlResult<nlohmann::json>> sql(std::string statement);
-    liquid::runtime::task<ZettaControlResult<void>> create_table(RecordCollection collection);
+    // One record capability call, retried while the key's ownership is moving (503 `busy`).
+    liquid::runtime::task<ZettaControlResult<nlohmann::json>> invoke(std::string capability,
+                                                                     bool read,
+                                                                     nlohmann::json input);
+    liquid::runtime::task<ZettaControlResult<void>> create_collection(RecordCollection collection);
+    liquid::runtime::task<ZettaControlResult<StoredRecord>>
+    write(RecordCollection collection, StoredRecord record, std::string lookup,
+          RecordCondition condition);
+    std::optional<StoredRecord> opened(RecordCollection collection, const nlohmann::json& row) const;
+    std::string associated(RecordCollection collection, std::string_view id, std::string_view key,
+                           std::int64_t at_us, int schema_version, std::int64_t lake_revision) const;
 
     Call call_;
     std::string workspace_id_;

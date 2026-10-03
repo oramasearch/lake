@@ -55,33 +55,7 @@ call_workspace(ApiContext& context,
     if (!completed) {
         co_return std::unexpected(completed.error());
     }
-    if (*completed) {
-        hide_workspace_records(**completed);
-    }
     co_return std::move(*completed);
-}
-
-void hide_workspace_records(nlohmann::json& value) {
-    // list_datasets answers {datasets: [{database, ...}]}; a system.datasets or system.tables
-    // query answers {rows: [{database, ...}]}. Lake's reserved database is in neither as lake shows
-    // them (docs/architecture/workspace-records.md).
-    if (!value.is_object()) {
-        return;
-    }
-    for (const char* key : {"datasets", "rows"}) {
-        const auto found = value.find(key);
-        if (found == value.end() || !found->is_array()) {
-            continue;
-        }
-        auto& items = *found;
-        items.erase(std::remove_if(items.begin(), items.end(),
-                                   [](const nlohmann::json& item) {
-                                       return item.is_object() &&
-                                              item.value("database", std::string()) ==
-                                                  control::workspace_records_database;
-                                   }),
-                    items.end());
-    }
 }
 
 namespace {
@@ -587,14 +561,6 @@ void register_workspace_call(Registry& registry, bool read) {
                                              capability + " is not a workspace " +
                                                  (read ? "read" : "action"),
                                              "/capability");
-            }
-            // Lake's own records (docs/architecture/workspace-records.md) are not workspace data
-            // a caller reads or changes through the engine.
-            if (control::names_workspace_records(input.value("input", json::object()).dump())) {
-                co_return ApiResult::failure("invalid_input",
-                                             std::string(control::workspace_records_database) +
-                                                 " is reserved for lake's records",
-                                             "/input");
             }
             const auto agent_task = calling_agent_task(context);
             // An agent turn acts only through the workspace actions its credential names
@@ -2069,18 +2035,6 @@ void register_sql_capability(Registry& registry) {
             if (const std::string problem = read_only_statement_problem(statement);
                 !problem.empty()) {
                 co_return ApiResult::failure("invalid_input", problem, "/statement");
-            }
-            if (control::names_workspace_records(statement)) {
-                co_return ApiResult::failure("invalid_input",
-                                             std::string(control::workspace_records_database) +
-                                                 " is reserved for lake's records",
-                                             "/statement");
-            }
-            if (control::names_workspace_records(input.value("database", std::string()))) {
-                co_return ApiResult::failure("invalid_input",
-                                             std::string(control::workspace_records_database) +
-                                                 " is reserved for lake's records",
-                                             "/database");
             }
             set_audit(context, "workspace.sql", input, "sql");
             json query{{"statement", statement}};

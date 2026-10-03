@@ -43,8 +43,8 @@ operator schema/configuration handoff remain follow-ups. See `docs/api/agent-bus
 
 Lake's records move into workspace Zettas through one mechanism,
 [`docs/architecture/workspace-records.md`](docs/architecture/workspace-records.md): sealed
-collections in each workspace's reserved `lake_records` database, an operator one-shot copy and
-verification, and a per-table checklist. Ask Orama conversations are the first collection (lake#370,
+`lake_*` collections in each workspace Zetta's keyed record store (zetta#1231, Zetta dev with
+#1233 or later), an operator one-shot copy and verification, and a per-table checklist. Ask Orama conversations are the first collection (lake#370,
 migration `0045`); the PostgreSQL table stays until a later migration drops it after the copy is
 verified on dev.
 

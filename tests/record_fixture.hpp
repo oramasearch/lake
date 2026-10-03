@@ -1,211 +1,178 @@
 #pragma once
 
-#include <cctype>
+#include <algorithm>
+#include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
-#include "lake/control/workspace_records.hpp"
 #include "lake/control/zetta_control.hpp"
 
 namespace lake::test {
 
-// The part of a workspace Zetta's `sql` capability that lake's workspace records use
-// (docs/architecture/workspace-records.md): CREATE DATABASE, CREATE TABLE, INSERT with an explicit
-// column list and SELECT * with one equality predicate, answering Zetta's envelope values and its
-// "does not exist" / "already exists" messages. One instance is one workspace's storage; tests
-// that route several workspaces keep one per workspace endpoint. It also records each request's
-// encoded GET line length, so tests can hold writes under Zetta's start-line limit.
+// The keyed record store of one workspace Zetta (zetta#1231, zetta docs/data/record-store.md) as
+// lake's workspace records use it: create_collection, put_record (if_absent / if_revision, 409
+// `conflict` with details.revision), get_record, delete_record and list_records over one index
+// value ordered by `order` then key, a page at a time. Unknown collections are `not_found` at
+// /collection. `busy_next` answers that many calls with 503 `busy` first. Tests that route several
+// workspaces keep one instance per workspace endpoint.
 class RecordTables {
 public:
     using json = nlohmann::json;
-    std::map<std::string, std::map<std::string, std::vector<json>>> databases;
-    std::size_t longest_statement = 0;
+    struct Collection {
+        json indexes = json::array();
+        std::int64_t retention_ms = 0;
+        std::map<std::string, json> records; // key -> stored record (with value)
+    };
+    std::map<std::string, Collection> collections;
+    std::int64_t clock = 1'000'000;
+    int busy_next = 0;
+    std::vector<std::string> calls;
 
-    static bool handles(std::string_view capability, const json& input) {
-        return capability == "sql" && input.is_object() &&
-               control::names_workspace_records(input.value("statement", std::string()));
+    static bool handles(std::string_view capability, const json&) {
+        return capability == "create_collection" || capability == "put_record" ||
+               capability == "get_record" || capability == "delete_record" ||
+               capability == "list_records";
     }
 
-    control::ZettaControlResult<json> run(const json& input) {
-        const std::string statement = input.value("statement", std::string());
-        longest_statement = std::max(longest_statement, encoded_size(statement));
-        tokens_ = tokenize(statement);
-        position_ = 0;
-        if (accept("CREATE")) {
-            if (accept("DATABASE")) {
-                const std::string name = next();
-                if (databases.contains(name)) {
-                    return fail("database \"" + name + "\" already exists or the name is invalid");
+    control::ZettaControlResult<json> run(std::string_view capability, const json& input) {
+        calls.emplace_back(capability);
+        if (busy_next > 0) {
+            --busy_next;
+            return fail("busy", "ownership of this key is moving; retry", "");
+        }
+        const std::string name = input.value("collection", std::string());
+        if (capability == "create_collection") {
+            json indexes = input.value("indexes", json::array());
+            const auto existing = collections.find(name);
+            if (existing != collections.end()) {
+                if (existing->second.indexes != indexes) {
+                    return fail("conflict", "a different collection exists", "/collection");
                 }
-                databases[name];
-                return ok("CREATE DATABASE");
+                return json{{"collection", {{"name", name}}}, {"created", false}};
             }
-            accept("TABLE");
-            const auto [database, table] = qualified();
-            if (!databases.contains(database)) {
-                return fail("database \"" + database + "\" does not exist");
-            }
-            if (databases[database].contains(table)) {
-                return fail("table \"" + table + "\" already exists or the name is invalid");
-            }
-            databases[database][table];
-            return ok("CREATE TABLE");
+            collections[name] = Collection{indexes, input.value("retention_ms", std::int64_t{0}), {}};
+            return json{{"collection", {{"name", name}, {"indexes", indexes}}}, {"created", true}};
         }
-        if (accept("INSERT")) {
-            accept("INTO");
-            const auto [database, table] = qualified();
-            if (!databases.contains(database)) {
-                return fail("database \"" + database + "\" does not exist");
-            }
-            if (!databases[database].contains(table)) {
-                return fail("table \"" + table + "\" does not exist");
-            }
-            std::vector<std::string> columns;
-            accept("(");
-            while (!accept(")")) {
-                columns.push_back(next());
-                accept(",");
-            }
-            accept("VALUES");
-            accept("(");
-            json row = json::object();
-            for (const std::string& column : columns) {
-                row[column] = value();
-                accept(",");
-            }
-            accept(")");
-            databases[database][table].push_back(std::move(row));
-            return ok("INSERT 0 1");
+        const auto found = collections.find(name);
+        if (found == collections.end()) {
+            return fail("not_found", "no record collection '" + name + "'", "/collection");
         }
-        if (accept("SELECT")) {
-            accept("*");
-            accept("FROM");
-            const auto [database, table] = qualified();
-            if (!databases.contains(database)) {
-                return fail("database \"" + database + "\" does not exist");
+        Collection& collection = found->second;
+        const std::string key = input.value("key", std::string());
+        if (capability == "put_record" || capability == "delete_record") {
+            const auto existing = collection.records.find(key);
+            const bool live = existing != collection.records.end();
+            if (input.value("if_absent", false) && live) {
+                return conflict(existing->second, "/if_absent");
             }
-            if (!databases[database].contains(table)) {
-                return fail("table \"" + table + "\" does not exist");
+            if (input.contains("if_revision") &&
+                (!live || existing->second.at("revision") != input.at("if_revision"))) {
+                return live ? conflict(existing->second, "/if_revision")
+                            : fail("conflict", "record '" + key + "' does not exist", "/if_revision");
             }
-            accept("WHERE");
-            const std::string column = next();
-            accept("=");
-            const json wanted = value();
-            json rows = json::array();
-            for (const json& row : databases[database][table]) {
-                if (row.contains(column) && row.at(column) == wanted) {
-                    rows.push_back(row);
+            const std::int64_t revision = ++clock;
+            if (capability == "delete_record") {
+                if (!live) {
+                    return fail("not_found", "no record '" + key + "'", "/key");
                 }
+                collection.records.erase(existing);
+                return written(name, key, revision);
             }
-            return json{{"columns", json::array()},
-                        {"messages", json::array({"SELECT " + std::to_string(rows.size())})},
-                        {"rows", std::move(rows)}};
+            const std::string value = input.value("value", std::string());
+            if (value.empty() || value.size() % 4 != 0) {
+                return fail("invalid_input", "want base64", "/value");
+            }
+            collection.records[key] = {{"collection", name},
+                                       {"key", key},
+                                       {"value", value},
+                                       {"revision", revision},
+                                       {"index", input.value("index", json::object())},
+                                       {"order", input.value("order", std::string())},
+                                       {"updated_ms", revision / 1000}};
+            return written(name, key, revision);
         }
-        return fail("unsupported statement");
+        if (capability == "get_record") {
+            const auto existing = collection.records.find(key);
+            if (existing == collection.records.end()) {
+                return fail("not_found", "no record '" + key + "'", "/key");
+            }
+            return json{{"record", existing->second}};
+        }
+        // list_records
+        const std::string index = input.value("index", std::string());
+        const std::string wanted = input.value("value", std::string());
+        std::vector<const json*> rows;
+        for (const auto& [record_key, record] : collection.records) {
+            if (index.empty() || record.at("index").value(index, std::string()) == wanted) {
+                rows.push_back(&record);
+            }
+        }
+        const auto position = [&](const json* record) {
+            return record->at("order").get<std::string>() + "\x1f" + record->at("key").get<std::string>();
+        };
+        std::ranges::sort(rows, [&](const json* left, const json* right) {
+            return position(left) < position(right);
+        });
+        const bool descending = input.value("direction", std::string("asc")) == "desc";
+        if (descending) {
+            std::ranges::reverse(rows);
+        }
+        const std::string after = input.value("after", std::string());
+        const auto limit = static_cast<std::size_t>(input.value("limit", 100));
+        json records = json::array();
+        std::string last;
+        bool more = false;
+        for (const json* record : rows) {
+            const std::string here = position(record);
+            if (!after.empty() && (descending ? here >= after : here <= after)) {
+                continue;
+            }
+            if (records.size() == limit) {
+                more = true;
+                break;
+            }
+            records.push_back(*record);
+            last = here;
+        }
+        json page{{"records", std::move(records)}};
+        if (more) {
+            page["next_after"] = last;
+        }
+        return page;
     }
 
-    // Every row of a collection, for tests that inspect or tamper with what the workspace holds.
-    std::vector<json>& rows(std::string_view collection) {
-        return databases[std::string(control::workspace_records_database)][std::string(collection)];
+    // Every stored record of a lake collection (`ask_messages` → `lake_ask_messages`), for tests
+    // that inspect or tamper with what the workspace holds.
+    std::map<std::string, json>& rows(std::string_view collection) {
+        return collections["lake_" + std::string(collection)].records;
     }
 
 private:
-    std::vector<std::string> tokens_;
-    std::size_t position_ = 0;
-
-    static std::size_t encoded_size(std::string_view text) {
-        std::size_t size = std::string_view("GET /v1/sql?statement= HTTP/1.1").size();
-        for (const unsigned char c : text) {
-            size += std::isalnum(c) != 0 || c == '-' || c == '_' || c == '.' || c == '~' ? 1 : 3;
-        }
-        return size;
+    static control::ZettaControlResult<json> fail(std::string code, std::string message,
+                                                  std::string path) {
+        return std::unexpected(
+            control::ZettaControlError{std::move(code), std::move(message), std::move(path)});
     }
 
-    static std::vector<std::string> tokenize(std::string_view text) {
-        std::vector<std::string> tokens;
-        std::size_t index = 0;
-        while (index < text.size()) {
-            const char c = text[index];
-            if (std::isspace(static_cast<unsigned char>(c)) != 0) {
-                ++index;
-            } else if (c == '\'') {
-                std::string literal = "'";
-                ++index;
-                while (index < text.size()) {
-                    if (text[index] == '\'' && index + 1 < text.size() && text[index + 1] == '\'') {
-                        literal += '\'';
-                        index += 2;
-                    } else if (text[index] == '\'') {
-                        ++index;
-                        break;
-                    } else {
-                        literal += text[index++];
-                    }
-                }
-                tokens.push_back(std::move(literal));
-            } else if (c == '(' || c == ')' || c == ',' || c == '=' || c == '*') {
-                tokens.emplace_back(1, c);
-                ++index;
-            } else {
-                std::string word;
-                while (index < text.size() &&
-                       std::isspace(static_cast<unsigned char>(text[index])) == 0 &&
-                       std::string_view("(),=*'").find(text[index]) == std::string_view::npos) {
-                    word += text[index++];
-                }
-                tokens.push_back(std::move(word));
-            }
-        }
-        return tokens;
+    static control::ZettaControlResult<json> conflict(const json& record, std::string path) {
+        control::ZettaControlError error{"conflict",
+                                         "record '" + record.at("key").get<std::string>() +
+                                             "' is at revision " + record.at("revision").dump(),
+                                         std::move(path)};
+        error.details = {{"revision", record.at("revision")}};
+        return std::unexpected(std::move(error));
     }
 
-    bool accept(std::string_view word) {
-        if (position_ >= tokens_.size()) {
-            return false;
-        }
-        const std::string& token = tokens_[position_];
-        if (token.size() != word.size()) {
-            return false;
-        }
-        for (std::size_t index = 0; index < word.size(); ++index) {
-            if (std::toupper(static_cast<unsigned char>(token[index])) != word[index]) {
-                return false;
-            }
-        }
-        ++position_;
-        return true;
-    }
-
-    std::string next() {
-        return position_ < tokens_.size() ? tokens_[position_++] : std::string();
-    }
-
-    std::pair<std::string, std::string> qualified() {
-        const std::string name = next();
-        const auto dot = name.find('.');
-        return {name.substr(0, dot), dot == std::string::npos ? std::string() : name.substr(dot + 1)};
-    }
-
-    json value() {
-        const std::string token = next();
-        if (token.starts_with('\'')) {
-            return token.substr(1);
-        }
-        return json::parse(token, nullptr, false);
-    }
-
-    static control::ZettaControlResult<json> ok(std::string message) {
-        return json{{"columns", json::array()},
-                    {"messages", json::array({std::move(message)})},
-                    {"rows", json::array()}};
-    }
-
-    static control::ZettaControlResult<json> fail(std::string message) {
-        return std::unexpected(control::ZettaControlError{"engine_error", std::move(message)});
+    static json written(const std::string& collection, const std::string& key,
+                        std::int64_t revision) {
+        return {{"collection", collection}, {"key", key},     {"revision", revision},
+                {"updated_ms", revision / 1000}, {"owner", "node-1"}, {"replicas", 0},
+                {"replicas_expected", 0}};
     }
 };
 

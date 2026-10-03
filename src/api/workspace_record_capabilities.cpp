@@ -104,6 +104,11 @@ liquid::runtime::task<ApiResult> copy_ask_messages(ApiContext& context, const st
                 }
                 auto appended = control::settled(co_await messages.append(
                     row->message, control::RecordWrite{row->message.id, row->message.at_us}));
+                if (!appended && appended.error().code == "conflict") {
+                    // The key is already there (a concurrent copy); verify compares it.
+                    ++tally.already_present;
+                    continue;
+                }
                 if (!appended) {
                     tally.error = appended.error().code + ": " + appended.error().message;
                     break;

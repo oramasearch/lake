@@ -48,7 +48,7 @@ public:
             return std::unexpected(control::ZettaControlError{code, code});
         };
         if (RecordTables::handles(capability, input)) {
-            co_return records[last_url].run(input);
+            co_return records[last_url].run(capability, input);
         }
         if (capability == "list_topics") {
             json rows = json::array();

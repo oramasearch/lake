@@ -52,9 +52,10 @@ struct DirectRecords {
         auto opened = WorkspaceRecords::open(
             [tables](std::string capability, bool read, json input)
                 -> liquid::runtime::task<lake::control::ZettaControlResult<json>> {
-                EXPECT_EQ(capability, "sql");
-                EXPECT_TRUE(read) << "Zetta's sql is a read: a GET";
-                co_return tables->run(input);
+                EXPECT_TRUE(lake::test::RecordTables::handles(capability, input)) << capability;
+                EXPECT_EQ(read, capability == "get_record" || capability == "list_records")
+                    << capability;
+                co_return tables->run(capability, input);
             },
             id.empty() ? workspace_id : id, kek);
         EXPECT_TRUE(opened) << opened.error().message;
@@ -82,18 +83,21 @@ TEST(WorkspaceRecords, AWorkspaceHoldsOnlySealedBodiesAndBlindIndexes) {
     ASSERT_TRUE(second) << second.error().message;
     EXPECT_LT(first->at_us, second->at_us) << "appends in one process keep their order";
 
-    const auto rows = direct.tables->rows("ask_messages");
-    ASSERT_EQ(rows.size(), 2U);
-    for (const json& row : rows) {
+    const auto& rows = direct.tables->rows("ask_messages");
+    ASSERT_EQ(rows.size(), 2U) << "one put_record per message, in collection lake_ask_messages";
+    for (const auto& [key, row] : rows) {
         const std::string text = row.dump();
         for (const std::string& plain :
              std::vector<std::string>{"what runs?", "two runs", conversation, "user-1"}) {
             EXPECT_EQ(text.find(plain), std::string::npos) << "the workspace holds " << plain;
         }
-        EXPECT_EQ(row.at("k"), records.index_of(lake::control::AskMessageCodec::collection,
-                                                lake::control::ask_conversation_lookup(
-                                                    conversation, "user-1")));
+        EXPECT_EQ(row.at("index").at("lookup"),
+                  records.index_of(lake::control::AskMessageCodec::collection,
+                                   lake::control::ask_conversation_lookup(conversation, "user-1")));
+        EXPECT_EQ(row.at("order").get<std::string>().size(), 20U) << "a zero-padded instant";
     }
+    EXPECT_EQ(direct.tables->collections.at("lake_ask_messages").indexes,
+              json::array({"lookup"}));
 
     const auto read = run(messages.list(lake::control::ask_conversation_lookup(conversation, "user-1")));
     ASSERT_TRUE(read) << read.error().message;
@@ -109,78 +113,135 @@ TEST(WorkspaceRecords, AWorkspaceHoldsOnlySealedBodiesAndBlindIndexes) {
         lake::control::ask_conversation_lookup(conversation, "user-1"), 1));
     ASSERT_EQ(newest->size(), 1U);
     EXPECT_EQ(newest->front().content, "two runs") << "a limit keeps the newest";
+
+    // Appending the same id again is refused by the engine (if_absent), never a second copy.
+    const auto again = run(messages.append(message(conversation, "user-1", "user", "x"),
+                                           lake::control::RecordWrite{first->id, 0}));
+    ASSERT_FALSE(again);
+    EXPECT_EQ(again.error().code, "conflict");
+    EXPECT_TRUE(again.error().details.contains("revision"));
 }
 
-TEST(WorkspaceRecords, AMissingTableIsAnEmptyCollectionAndTheFirstWriteCreatesIt) {
+TEST(WorkspaceRecords, AMissingCollectionIsEmptyAndTheFirstWriteCreatesIt) {
     DirectRecords direct;
     auto records = direct.open();
     AskMessages messages(records);
     const auto none = run(messages.list(lake::control::ask_conversation_lookup("c", "u")));
     ASSERT_TRUE(none) << none.error().message;
     EXPECT_TRUE(none->empty());
-    EXPECT_TRUE(direct.tables->databases.empty()) << "reading creates nothing";
+    EXPECT_TRUE(direct.tables->collections.empty()) << "reading creates nothing";
     ASSERT_TRUE(run(messages.append(message("c", "u", "user", "hello"))));
-    EXPECT_TRUE(direct.tables->databases.contains("lake_records"));
-    // A second store of the same workspace (another replica) finds the table already there.
+    EXPECT_TRUE(direct.tables->collections.contains("lake_ask_messages"));
+    // Another replica's store of the same workspace finds the collection already there.
     auto again = direct.open();
     AskMessages more(again);
     ASSERT_TRUE(run(more.append(message("c", "u", "user", "again"))));
     EXPECT_EQ(run(more.list(lake::control::ask_conversation_lookup("c", "u")))->size(), 2U);
+    EXPECT_EQ(std::ranges::count(direct.tables->calls, "create_collection"), 1);
 }
 
-TEST(WorkspaceRecords, ALargeBodyIsWrittenInPartsUnderTheRequestLineLimit) {
+TEST(WorkspaceRecords, ALongConversationIsListedAPageAtATimeAndALargeBodyIsOneRecord) {
     DirectRecords direct;
     auto records = direct.open();
     AskMessages messages(records);
-    // Incompressible content, as a long answer with reads would be once sealed.
+    for (int index = 0; index < 1205; ++index) {
+        ASSERT_TRUE(run(messages.append(message("c", "u", "user", std::to_string(index)))));
+    }
+    const auto all = run(messages.list(lake::control::ask_conversation_lookup("c", "u")));
+    ASSERT_EQ(all->size(), 1205U) << "next_after is followed";
+    EXPECT_EQ(all->front().content, "0");
+    EXPECT_EQ(all->back().content, "1204");
+    const auto newest = run(messages.list(lake::control::ask_conversation_lookup("c", "u"), 200));
+    ASSERT_EQ(newest->size(), 200U);
+    EXPECT_EQ(newest->front().content, "1005");
+
     std::string content;
-    for (int index = 0; content.size() < 40'000; ++index) {
+    while (content.size() < 40'000) {
         content += lake::control::new_uuid_v4();
     }
-    const auto stored = run(messages.append(message("c", "u", "assistant", content)));
-    ASSERT_TRUE(stored) << stored.error().message;
-    const auto rows = direct.tables->rows("ask_messages");
-    EXPECT_GT(rows.size(), 10U) << "the body is split into parts";
-    EXPECT_LT(direct.tables->longest_statement, 3800U)
-        << "every GET request line stays under Zetta's 4 KiB start-line limit";
-    const auto read = run(messages.list(lake::control::ask_conversation_lookup("c", "u")));
+    ASSERT_TRUE(run(messages.append(message("big", "u", "assistant", content))));
+    const auto read = run(messages.list(lake::control::ask_conversation_lookup("big", "u")));
     ASSERT_EQ(read->size(), 1U);
     EXPECT_EQ(read->front().content, content);
-
-    // A record missing a part (a write that failed partway) is not shown; a part written twice (a
-    // retried insert) is harmless.
-    auto& table = direct.tables->rows("ask_messages");
-    table.push_back(table.front());
-    EXPECT_EQ(run(messages.list(lake::control::ask_conversation_lookup("c", "u")))->size(), 1U);
-    std::erase_if(table, [](const json& row) { return row.at("part") == 1; });
-    EXPECT_TRUE(run(messages.list(lake::control::ask_conversation_lookup("c", "u")))->empty());
 }
 
 TEST(WorkspaceRecords, ARecordOpensOnlyInTheWorkspaceThatWroteIt) {
-    // Ownership is immutable: a row copied into another workspace's table, or re-keyed to another
-    // lookup, does not open there (the AEAD binds workspace, collection, record and lookup).
+    // Ownership is immutable: a record copied into another workspace's collection, or moved to
+    // another lookup, does not open there (the AEAD binds workspace, collection, key, lookup,
+    // instant, schema version and lake's revision).
     DirectRecords first;
     DirectRecords second;
     auto mine = first.open();
     AskMessages messages(mine);
     ASSERT_TRUE(run(messages.append(message("c", "u", "user", "private"))));
     auto other = second.open();
-    second.tables->databases = first.tables->databases;
+    second.tables->collections = first.tables->collections;
     AskMessages theirs(other);
-    EXPECT_TRUE(run(theirs.list(lake::control::ask_conversation_lookup("c", "u")))->empty());
-    for (json& row : second.tables->rows("ask_messages")) {
-        row["k"] = other.index_of(lake::control::AskMessageCodec::collection,
-                                  lake::control::ask_conversation_lookup("c", "u"));
+    for (auto& [key, row] : second.tables->rows("ask_messages")) {
+        row["index"]["lookup"] = other.index_of(lake::control::AskMessageCodec::collection,
+                                                lake::control::ask_conversation_lookup("c", "u"));
     }
     EXPECT_TRUE(run(theirs.list(lake::control::ask_conversation_lookup("c", "u")))->empty())
-        << "the same lookup in another workspace does not open the moved row";
-    for (json& row : first.tables->rows("ask_messages")) {
-        row["k"] = mine.index_of(lake::control::AskMessageCodec::collection,
-                                 lake::control::ask_conversation_lookup("other", "u"));
+        << "the same lookup in another workspace does not open the moved record";
+    for (auto& [key, row] : first.tables->rows("ask_messages")) {
+        row["index"]["lookup"] = mine.index_of(lake::control::AskMessageCodec::collection,
+                                               lake::control::ask_conversation_lookup("other", "u"));
     }
     AskMessages again(mine);
     EXPECT_TRUE(run(again.list(lake::control::ask_conversation_lookup("other", "u")))->empty())
-        << "a row moved to another conversation does not open there either";
+        << "a record moved to another conversation does not open there either";
+}
+
+TEST(WorkspaceRecords, MutableRecordsWriteConditionallyAndRetry) {
+    DirectRecords direct;
+    auto records = direct.open();
+    const lake::control::RecordCollection counters{"test_counters", 1};
+    const auto increment = [&] {
+        return run(records.update(counters, "counter-1", "all",
+                                  [](const std::optional<lake::control::StoredRecord>& current) {
+                                      const int value =
+                                          current ? current->body.value("n", 0) : 0;
+                                      return std::optional<json>(json{{"n", value + 1}});
+                                  }));
+    };
+    const auto created = increment();
+    ASSERT_TRUE(created && *created) << (created ? "" : created.error().message);
+    EXPECT_EQ((*created)->lake_revision, 1);
+    const auto revision = (*created)->revision;
+
+    // A stale writer loses: 409 with the live revision.
+    ASSERT_TRUE(increment());
+    const auto stale = run(records.put(counters, "counter-1", "all", {{"n", 99}},
+                                       {.if_revision = revision}));
+    ASSERT_FALSE(stale);
+    EXPECT_EQ(stale.error().code, "conflict");
+    EXPECT_NE(stale.error().details.value("revision", std::int64_t{0}), revision);
+
+    // A write that lands between update's read and write is retried, not lost.
+    bool raced = false;
+    const auto updated = run(records.update(
+        counters, "counter-1", "all", [&](const std::optional<lake::control::StoredRecord>& current) {
+            if (!raced) {
+                raced = true;
+                auto& row = direct.tables->collections.at("lake_test_counters").records.at("counter-1");
+                row["revision"] = row["revision"].get<std::int64_t>() + 1000;
+            }
+            return std::optional<json>(json{{"n", current->body.value("n", 0) + 1}});
+        }));
+    ASSERT_TRUE(updated && *updated);
+    EXPECT_EQ((*updated)->body["n"], 3);
+    EXPECT_EQ((*updated)->lake_revision, 3);
+    const auto got = run(records.get(counters, "counter-1"));
+    ASSERT_TRUE(got && *got);
+    EXPECT_EQ((**got).body["n"], 3);
+
+    // Ownership moving (503 busy) is retried; a deletion is conditional too.
+    direct.tables->busy_next = 2;
+    ASSERT_TRUE(run(records.get(counters, "counter-1")));
+    EXPECT_FALSE(run(records.remove(counters, "counter-1", revision)));
+    ASSERT_TRUE(run(records.remove(counters, "counter-1", (**got).revision)));
+    EXPECT_FALSE(*run(records.get(counters, "counter-1")));
+    EXPECT_EQ(run(records.remove(counters, "counter-1")).error().code, "not_found");
 }
 
 TEST(WorkspaceRecords, OpeningRefusesAMissingKeyOrAWorkspaceThatIsNotAUuid) {
@@ -189,8 +250,8 @@ TEST(WorkspaceRecords, OpeningRefusesAMissingKeyOrAWorkspaceThatIsNotAUuid) {
     EXPECT_EQ(WorkspaceRecords::open(call, "not-a-workspace", kek).error().code, "invalid_input");
     EXPECT_EQ(WorkspaceRecords::open(call, lake::control::new_uuid_v4(), "").error().code,
               "store_unavailable");
-    EXPECT_TRUE(lake::control::names_workspace_records("SELECT * FROM LAKE_Records.ask_messages"));
-    EXPECT_FALSE(lake::control::names_workspace_records("SELECT * FROM datasets.lake"));
+    EXPECT_EQ(WorkspaceRecords::zetta_collection(lake::control::AskMessageCodec::collection),
+              "lake_ask_messages");
 }
 
 namespace {
@@ -376,7 +437,8 @@ TEST_P(WorkspaceRecordStores, ConversationsStayInTheirWorkspaceAndSpace) {
     // Each message is stored only at its own workspace's endpoint.
     for (const auto& space : t.spaces) {
         for (const auto& workspace : space.workspaces) {
-            const auto& rows = t.zetta->records["http://" + workspace + ".test"].rows("ask_messages");
+            const auto& rows =
+                t.zetta->records["http://" + workspace + ".test"].rows("ask_messages");
             EXPECT_EQ(rows.size(), workspace == second.workspaces[1] ? 0U : 1U) << workspace;
         }
     }
@@ -488,7 +550,7 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesEachOwnedRowOnceAndVerifiesIt) 
     }
     EXPECT_EQ(outcomes, (std::set<std::string>{"needs_selection", "no_customer"}));
     const std::string home_url = "http://" + first.workspaces[0] + ".test";
-    EXPECT_TRUE(t.zetta->records[home_url].databases.empty()) << "a plan writes nothing";
+    EXPECT_TRUE(t.zetta->records[home_url].collections.empty()) << "a plan writes nothing";
 
     const auto before = copy("verify");
     ASSERT_TRUE(before.ok);
@@ -521,11 +583,9 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesEachOwnedRowOnceAndVerifiesIt) 
     EXPECT_EQ(read.value["messages"][1]["payload"]["proposals"][0]["capability"], "x");
 
     // A changed copy is reported, never silently accepted.
-    for (json& row : t.zetta->records[home_url].rows("ask_messages")) {
-        if (row["rid"] == legacy[1].id) {
-            row["at"] = row["at"].get<std::int64_t>() + 1;
-        }
-    }
+    // Another record's sealed value under this key does not open, so the copy is reported.
+    auto& copied_rows = t.zetta->records[home_url].rows("ask_messages");
+    copied_rows.at(legacy[1].id)["value"] = copied_rows.at(legacy[0].id)["value"];
     const auto tampered = copy("verify");
     EXPECT_EQ(tampered.value["missing"].size(), 1U) << "a row that no longer opens is missing";
 
@@ -538,7 +598,10 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesEachOwnedRowOnceAndVerifiesIt) 
     EXPECT_FALSE(refused.ok) << "only the operator copies";
 }
 
-TEST(WorkspaceRecords, NoWorkspaceSurfaceReadsOrListsTheReservedDatabase) {
+TEST(WorkspaceRecords, NoWorkspaceSurfaceReachesTheRecordStore) {
+    // Record capabilities are not in lake's workspace allow-list: lake's collections are reached
+    // only through WorkspaceRecords, never by a person or an agent through workspace_query or
+    // workspace_act.
     TwoSpaces t(std::make_shared<lake::control::InMemoryStore>(), "");
     const auto& space = t.spaces[0];
     const auto call = [&](const std::string& name, json input) {
@@ -547,37 +610,26 @@ TEST(WorkspaceRecords, NoWorkspaceSurfaceReadsOrListsTheReservedDatabase) {
         auto context = t.context(space);
         return *liquid::runtime::block_on(t.registry.call_async(name, input, context));
     };
-    const auto sql = call("workspace_sql", {{"statement", "SELECT * FROM Lake_Records.ask_messages"}});
-    EXPECT_EQ(sql.error.code, "invalid_input");
-    EXPECT_EQ(sql.error.path, "/statement");
-    const auto database =
-        call("workspace_sql", {{"statement", "SELECT * FROM ask_messages"}, {"database", "lake_records"}});
-    EXPECT_EQ(database.error.path, "/database");
-    const auto query = call("workspace_query", {{"capability", "get_dataset"},
-                                                {"input", {{"database", "lake_records"},
-                                                           {"name", "ask_messages"}}}});
-    EXPECT_EQ(query.error.code, "invalid_input");
-    EXPECT_EQ(query.error.path, "/input");
-    const auto act = call("workspace_act", {{"capability", "create_dataset_from_query"},
-                                            {"input", {{"statement",
-                                                        "SELECT * FROM lake_records.ask_messages"}}}});
-    EXPECT_EQ(act.error.path, "/input");
-
-    json listed = {{"datasets", json::array({{{"database", "lake_records"}, {"name", "ask_messages"}},
-                                             {{"database", "datasets"}, {"name", "orders"}}})}};
-    lake::api::hide_workspace_records(listed);
-    ASSERT_EQ(listed["datasets"].size(), 1U);
-    EXPECT_EQ(listed["datasets"][0]["name"], "orders");
-    json rows = {{"rows", json::array({{{"database", "lake_records"}, {"dataset", "ask_messages"}}})}};
-    lake::api::hide_workspace_records(rows);
-    EXPECT_TRUE(rows["rows"].empty());
+    for (const std::string capability : {"list_records", "get_record"}) {
+        const auto read = call("workspace_query", {{"capability", capability},
+                                                   {"input", {{"collection", "lake_ask_messages"}}}});
+        EXPECT_EQ(read.error.code, "invalid_input") << capability;
+        EXPECT_EQ(read.error.path, "/capability") << capability;
+    }
+    for (const std::string capability :
+         {"put_record", "delete_record", "create_collection"}) {
+        const auto act = call("workspace_act", {{"capability", capability},
+                                                {"input", {{"collection", "lake_ask_messages"}}}});
+        EXPECT_EQ(act.error.code, "invalid_input") << capability;
+        EXPECT_EQ(act.error.path, "/capability") << capability;
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(Stores, WorkspaceRecordStores, testing::Values(false, true),
                          [](const auto& info) { return info.param ? "Postgres" : "Memory"; });
 
 // Against a real Zetta when LAKE_TEST_ZETTA_URL and LAKE_TEST_ZETTA_TOKEN name one (for example a
-// local `zetta --headless`): the statements lake writes are the subset the engine accepts.
+// local `zetta --headless` built from zetta dev with #1233): the record store's real contract.
 TEST(WorkspaceRecordsZetta, TheEngineStoresAndReturnsSealedRecords) {
     const char* url = std::getenv("LAKE_TEST_ZETTA_URL");
     const char* token = std::getenv("LAKE_TEST_ZETTA_TOKEN");
@@ -616,4 +668,27 @@ TEST(WorkspaceRecordsZetta, TheEngineStoresAndReturnsSealedRecords) {
     EXPECT_EQ(read->at(0).content, "hello");
     EXPECT_EQ(read->at(1).content, long_answer);
     EXPECT_EQ(read->at(1).payload["reads"][0], "x");
+    const auto duplicate = run(messages.append(message(conversation, "u", "user", "again"),
+                                               lake::control::RecordWrite{hello->id, 0}));
+    ASSERT_FALSE(duplicate);
+    EXPECT_EQ(duplicate.error().code, "conflict") << "if_absent is decided by the engine";
+    EXPECT_TRUE(duplicate.error().details.contains("revision"));
+
+    // A mutable record: conditional writes against the engine's revisions.
+    const lake::control::RecordCollection counters{"test_counters", 1};
+    for (int index = 0; index < 3; ++index) {
+        const auto updated = run(opened->update(
+            counters, "c-1", "all", [](const std::optional<lake::control::StoredRecord>& current) {
+                return std::optional<json>(json{{"n", current ? current->body.value("n", 0) + 1 : 1}});
+            }));
+        ASSERT_TRUE(updated && *updated) << (updated ? "" : updated.error().message);
+    }
+    const auto counted = run(opened->get(counters, "c-1"));
+    ASSERT_TRUE(counted && *counted);
+    EXPECT_EQ((**counted).body["n"], 3);
+    EXPECT_EQ((**counted).lake_revision, 3);
+    EXPECT_EQ(run(opened->put(counters, "c-1", "all", {{"n", 0}}, {.if_revision = 1})).error().code,
+              "conflict");
+    ASSERT_TRUE(run(opened->remove(counters, "c-1", (**counted).revision)));
+    EXPECT_FALSE(*run(opened->get(counters, "c-1")));
 }

@@ -63,9 +63,6 @@ call_workspace(ApiContext& context,
                std::string capability,
                bool read,
                nlohmann::json input);
-// Removes rows of lake's reserved records database from a dataset listing or a system table
-// answer, so no workspace surface lists it (docs/architecture/workspace-records.md).
-void hide_workspace_records(nlohmann::json& value);
 // One name per concept on the workspace engine's capabilities (docs/api/naming.md): the engine
 // takes `run_id` on some calls and `run` on others, `model_id` and `model`, `index_id` and
 // `index`, `job_id` and `job`. Lake accepts either spelling and sends the one this capability

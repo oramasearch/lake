@@ -65,6 +65,9 @@ struct ZettaControlError {
     std::string message;
     // The JSON pointer of the input field at fault, when the engine names one (zetta#1217).
     std::string path = {};
+    // The engine's `error.details`, when it sends them: a record store conflict carries the live
+    // `revision` (zetta#1231).
+    nlohmann::json details = nullptr;
 };
 
 template <class T> using ZettaControlResult = std::expected<T, ZettaControlError>;

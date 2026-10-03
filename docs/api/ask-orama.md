@@ -52,7 +52,7 @@ shows it and keeps it honest.
   and confirmed before that agent receives App writes. An ExperimentsAgent delegation creates an
   `experiment` task, whose editable study is reviewed before that agent receives `create_study`.
 - **Conversations live in the workspace** (lake#370). Every message is a sealed record in the
-  workspace Zetta of the workspace the conversation was held in (`lake_records.ask_messages`,
+  workspace Zetta of the workspace the conversation was held in (collection `lake_ask_messages`,
   [workspace-records.md](../architecture/workspace-records.md)): the person's text, and for Ask
   Orama's the reply with its proposals, reads, delegations and trace id. The page's `/w/<id>/`
   workspace owns it; another workspace of the same space never shows it. Only the person who had a

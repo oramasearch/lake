@@ -4112,7 +4112,7 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         {"/w/:workspace_id/ship/indexes/datasets", {1, 1, Capabilities{"sql"}}}};
     const std::map<std::string, WorkspaceCallBudget> workspace_call_budgets{
         // Ask Orama, Agents, Search Indexes, Models and Experiments: lake#446.
-        {"/w/:workspace_id/ask", {1, 1, Capabilities{"sql"}}},
+        {"/w/:workspace_id/ask", {1, 1, Capabilities{"list_records"}}},
         {"/w/:workspace_id/design/discover", {1, 1}},
         {"/w/:workspace_id/design/methodologies", {1, 1}},
         {"/w/:workspace_id/design/methodology", {2, 1}},
@@ -4128,7 +4128,7 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         {"/w/:workspace_id/ship/models", {2, 1, Capabilities{"list_models", "list_studies"}}},
         {"/w/:workspace_id/train/agent", {3, 1}},
         {"/w/:workspace_id/train/agents", {0, 0, Capabilities{}}},
-        {"/w/:workspace_id/train/agents/new", {1, 1, Capabilities{"sql"}}},
+        {"/w/:workspace_id/train/agents/new", {1, 1, Capabilities{"list_records"}}},
         {"/w/:workspace_id/train/data", {3, 1}},
         {"/w/:workspace_id/train/dataset", {3, 1}},
         {"/w/:workspace_id/train/experiment", {2, 1}},
