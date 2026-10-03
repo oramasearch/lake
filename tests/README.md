@@ -370,7 +370,10 @@ callers route record capabilities to it, one store per endpoint.
 `WorkspaceRecordsZetta.TheEngineStoresAndReturnsSealedRecords` runs against a real Zetta node when
 `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` are set: build Zetta dev (with zetta#1233) in a
 scratch directory and run `zetta --headless --mcp-listen 127.0.0.1:48712 --admin-token <token>`.
-`PostgresAskMessages.MigrationRecordsEachRowsOwnerForTheCopy` covers `0045_ask_message_workspaces`.
+`PostgresAskMessages.MigrationDropsTheTableAndKeepsItsAssignments` covers `0050_drop_ask_messages`
+(lake#483): a pre-0050 table with a row is dropped, its `workspace_assignments` row stays, and two
+reruns of the whole schema leave it dropped. The `ask_messages` copy test and the 0045 test went
+with the table.
 Design → Opportunities (lake#376): `Stores/WorkspaceRecordStores.OpportunitiesStayInTheWorkspaceTheirScanRanIn`
 (two spaces with two workspaces each, the scan's workspace only, a second settle writing nothing,
 foreign and missing/malformed/unknown ids, a workspace that is not ready, workspace deletion),

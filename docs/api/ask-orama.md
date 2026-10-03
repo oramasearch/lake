@@ -57,8 +57,9 @@ shows it and keeps it honest.
   Orama's the reply with its proposals, reads, delegations and trace id. The page's `/w/<id>/`
   workspace owns it; another workspace of the same space never shows it. Only the person who had a
   conversation reads it back, from any replica. A workspace that is not ready shows the error
-  instead of falling back anywhere. Lake's PostgreSQL `ask_messages` table (migration `0030`) is no
-  longer written or read except by the operator's one-shot copy (`copy_workspace_records`).
+  instead of falling back anywhere. Lake's PostgreSQL `ask_messages` table (migration `0030`) was copied
+  into the workspace Zettas by the operator's one-shot copy and dropped by migration
+  `0050_drop_ask_messages` (lake#483).
 - **`get_ask_conversation`** takes `customer_id`, `workspace_id` and `conversation_id` (`limit`
   optional) and reads the person's conversation in that workspace; a missing, malformed, unknown or
   foreign `workspace_id` is `invalid_input` at `/workspace_id`.

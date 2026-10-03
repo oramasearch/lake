@@ -870,15 +870,6 @@ public:
             return store_->list_agent_cron_runs(customer_id, agent_id, limit, workspace_id);
         });
     }
-    control::Result<void> assign_legacy_ask_messages() override {
-        return call("assign_legacy_ask_messages",
-                    [&] { return store_->assign_legacy_ask_messages(); });
-    }
-    control::Result<std::vector<control::LegacyAskMessage>>
-    legacy_ask_messages(const std::string& after_id, int limit) override {
-        return call("legacy_ask_messages",
-                    [&] { return store_->legacy_ask_messages(after_id, limit); });
-    }
     control::Result<control::AgentSession> revoke_agent_session(const std::string& customer_id,
                                                                 const std::string& id) override {
         return call("revoke_agent_session",

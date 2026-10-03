@@ -528,120 +528,6 @@ TEST_P(WorkspaceRecordStores, ConversationsStayInTheirWorkspaceAndSpace) {
     EXPECT_EQ(read(first, 0).value["messages"].size(), 1U);
 }
 
-TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesEachOwnedRowOnceAndVerifiesIt) {
-    auto store = make_store();
-    if (!store) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
-    }
-    TwoSpaces t(store, database_uri_);
-    auto& first = t.spaces[0];
-    auto& second = t.spaces[1];
-    // The first space keeps one workspace, so it owns its rows; the second has two and needs a
-    // selection.
-    ASSERT_TRUE(t.store->update_workspace(first.workspaces[1], {.desired = "deleted"}));
-    const std::string conversation = lake::control::new_uuid_v4();
-    std::vector<AskMessage> legacy = {
-        {lake::control::new_uuid_v4(), conversation, first.customer_id, first.principal.user_id,
-         "user", "what runs?", nullptr, "", 1'790'000'000'000'001},
-        {lake::control::new_uuid_v4(), conversation, first.customer_id, first.principal.user_id,
-         "assistant", "two runs", json{{"proposals", json::array({{{"capability", "x"}}})}}, "",
-         1'790'000'000'000'002},
-        {lake::control::new_uuid_v4(), conversation, second.customer_id, second.principal.user_id,
-         "user", "unassigned", nullptr, "", 1'790'000'000'000'003},
-        {lake::control::new_uuid_v4(), conversation, "", first.principal.user_id, "user",
-         "no space", nullptr, "", 1'790'000'000'000'004}};
-    if (GetParam()) {
-        pqxx::connection connection(database_uri_);
-        pqxx::work tx(connection);
-        for (const AskMessage& row : legacy) {
-            tx.exec_params("INSERT INTO ask_messages (id, conversation_id, customer_id, user_id, role, "
-                           "content, payload, created_at) VALUES ($1::uuid, $2::uuid, "
-                           "NULLIF($3, '')::uuid, $4::uuid, $5, $6, $7::jsonb, "
-                           "to_timestamp($8::double precision / 1000000))",
-                           row.id, row.conversation_id, row.customer_id, row.user_id, row.role,
-                           row.content, row.payload.dump(), row.at_us);
-        }
-        tx.commit();
-    } else {
-        for (const AskMessage& row : legacy) {
-            static_cast<lake::control::InMemoryStore&>(*t.store).seed_legacy_ask_message(row);
-        }
-    }
-    lake::api::ApiContext operator_context;
-    operator_context.store = t.store.get();
-    operator_context.workspaces = t.service.get();
-    operator_context.instance_kek = std::string(kek);
-    operator_context.authorized = true;
-    operator_context.operator_credential = true;
-    operator_context.acting_identity = "admin";
-    operator_context.request_id = lake::control::new_uuid_v4();
-    const auto copy = [&](std::string mode) {
-        const auto completed = liquid::runtime::block_on(t.registry.call_async(
-            "copy_workspace_records", {{"collection", "ask_messages"}, {"mode", mode}},
-            operator_context));
-        EXPECT_TRUE(completed);
-        return *completed;
-    };
-
-    const auto plan = copy("plan");
-    ASSERT_TRUE(plan.ok) << plan.error.message;
-    EXPECT_EQ(plan.value["rows"], 4);
-    EXPECT_EQ(plan.value["assigned"], 2);
-    ASSERT_EQ(plan.value["unresolved"].size(), 2U);
-    std::set<std::string> outcomes;
-    for (const auto& row : plan.value["unresolved"]) {
-        outcomes.insert(row["outcome"].get<std::string>());
-    }
-    EXPECT_EQ(outcomes, (std::set<std::string>{"needs_selection", "no_customer"}));
-    const std::string home_url = "http://" + first.workspaces[0] + ".test";
-    EXPECT_TRUE(t.zetta->records[home_url].collections.empty()) << "a plan writes nothing";
-
-    const auto before = copy("verify");
-    ASSERT_TRUE(before.ok);
-    EXPECT_EQ(before.value["missing"].size(), 2U);
-    EXPECT_FALSE(before.value["complete"]);
-
-    const auto copied = copy("copy");
-    ASSERT_TRUE(copied.ok) << copied.error.message;
-    EXPECT_EQ(copied.value["copied"], 2);
-    EXPECT_EQ(t.zetta->records[home_url].rows("ask_messages").size(), 2U);
-    const auto rerun = copy("copy");
-    EXPECT_EQ(rerun.value["copied"], 0) << "a rerun copies nothing twice";
-    EXPECT_EQ(rerun.value["already_present"], 2);
-    EXPECT_EQ(t.zetta->records[home_url].rows("ask_messages").size(), 2U);
-
-    const auto verified = copy("verify");
-    ASSERT_TRUE(verified.ok);
-    EXPECT_EQ(verified.value["verified"], 2);
-    EXPECT_TRUE(verified.value["missing"].empty());
-    EXPECT_TRUE(verified.value["mismatched"].empty());
-    EXPECT_FALSE(verified.value["complete"]) << "unresolved rows keep the table from being dropped";
-
-    // The person reads the copied conversation back, in order and with the original ids.
-    const auto read = t.read(first, {{"customer_id", first.customer_id},
-                                     {"workspace_id", first.workspaces[0]},
-                                     {"conversation_id", conversation}});
-    ASSERT_TRUE(read.ok) << read.error.message;
-    ASSERT_EQ(read.value["messages"].size(), 2U);
-    EXPECT_EQ(read.value["messages"][0]["id"], legacy[0].id);
-    EXPECT_EQ(read.value["messages"][1]["payload"]["proposals"][0]["capability"], "x");
-
-    // A changed copy is reported, never silently accepted.
-    // Another record's sealed value under this key does not open, so the copy is reported.
-    auto& copied_rows = t.zetta->records[home_url].rows("ask_messages");
-    copied_rows.at(legacy[1].id)["value"] = copied_rows.at(legacy[0].id)["value"];
-    const auto tampered = copy("verify");
-    EXPECT_EQ(tampered.value["missing"].size(), 1U) << "a row that no longer opens is missing";
-
-    const auto refused = [&] {
-        auto context = t.context(first);
-        const auto completed = liquid::runtime::block_on(t.registry.call_async(
-            "copy_workspace_records", {{"collection", "ask_messages"}, {"mode", "plan"}}, context));
-        return *completed;
-    }();
-    EXPECT_FALSE(refused.ok) << "only the operator copies";
-}
-
 TEST_P(WorkspaceRecordStores, OpportunitiesStayInTheWorkspaceTheirScanRanIn) {
     auto store = make_store();
     if (!store) {
@@ -908,6 +794,13 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesEachOpportunityToItsScansWorksp
     ASSERT_EQ(plan.value["unresolved"].size(), 1U);
     EXPECT_EQ(plan.value["unresolved"][0]["id"], legacy[2].id);
     EXPECT_EQ(plan.value["unresolved"][0]["outcome"], "deleted_workspace");
+    // ask_messages left the list when migration 0050 dropped its table (lake#483).
+    const auto retired = liquid::runtime::block_on(t.registry.call_async(
+        "copy_workspace_records", {{"collection", "ask_messages"}, {"mode", "plan"}},
+        operator_context));
+    ASSERT_TRUE(retired);
+    EXPECT_FALSE(retired->ok);
+    EXPECT_EQ(retired->error.code, "invalid_input");
     const std::string home_url = "http://" + first.workspaces[0] + ".test";
     const std::string theirs_url = "http://" + second.workspaces[1] + ".test";
     EXPECT_TRUE(t.zetta->records[home_url].collections.empty()) << "a plan writes nothing";

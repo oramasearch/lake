@@ -491,19 +491,12 @@ struct Opportunity {
 
 // One message of an Ask Orama conversation (docs/api/ask-orama.md, lake#236). It lives in the
 // workspace Zetta of the workspace it was written in (lake#370, control/ask_messages.hpp); the
-// control store only reads the retired ask_messages table for the one-shot copy.
+// control store holds none (migration 0050 dropped the retired ask_messages table, lake#483).
 struct AskMessage {
     std::string id, conversation_id, customer_id, user_id, role, content;
     nlohmann::json payload = nullptr; // proposals, reads and delegations of an assistant message
     std::string created_at;
     std::int64_t at_us = 0; // created_at in microseconds since the Unix epoch
-};
-// A row of the retired ask_messages table with its recorded owner (migration 0045): the workspace
-// it is copied into, or empty with the reason it is not (`needs_selection`, `no_customer`).
-struct LegacyAskMessage {
-    AskMessage message;
-    std::string workspace_id;
-    std::string outcome;
 };
 // A row of the retired opportunities table with its recorded owner (migration 0046): the
 // workspace it is copied into, or empty with the reason it is not (`needs_selection`,
@@ -1149,12 +1142,6 @@ public:
     virtual Result<void> assign_legacy_opportunities() = 0;
     virtual Result<std::vector<LegacyOpportunity>> legacy_opportunities(const std::string& after_id,
                                                                         int limit) = 0;
-    // The retired ask_messages table (lake#370), for the one-shot copy into workspace Zettas only.
-    // Assigning records each unassigned row's owner in workspace_assignments, as migration 0045
-    // does, for rows written after it; listing pages by id, oldest id first.
-    virtual Result<void> assign_legacy_ask_messages() = 0;
-    virtual Result<std::vector<LegacyAskMessage>> legacy_ask_messages(const std::string& after_id,
-                                                                      int limit) = 0;
     virtual Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                     std::uint64_t quota_bytes) = 0;
 

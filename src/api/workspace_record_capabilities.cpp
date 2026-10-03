@@ -1,9 +1,10 @@
 // The one-shot copy of a retired control-store table into the owning workspace Zettas
 // (docs/architecture/workspace-records.md, lake#370). One operator capability serves every
 // collection that moves: each follow-up adds its collection to `copy_collections` and a copier
-// (ask_messages, lake#370; opportunities, lake#376; stream_owners, lake#379;
-// drive_share_links, lake#350; auth_app_webhook_events and auth_app_webhook_deliveries, lake#356
-// and lake#357).
+// (opportunities, lake#376; stream_owners, lake#379; drive_share_links, lake#350;
+// auth_app_webhook_events and auth_app_webhook_deliveries, lake#356 and lake#357). A collection
+// leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
+// and verified on dev, dropped by migration 0050, lake#483).
 
 #include <algorithm>
 #include <array>
@@ -14,7 +15,6 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/control/application_webhook_records.hpp"
-#include "lake/control/ask_messages.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/store.hpp"
@@ -26,9 +26,9 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 6> copy_collections = {
-    "ask_messages",      "opportunities",           "stream_owners",
-    "drive_share_links", "auth_app_webhook_events", "auth_app_webhook_deliveries"};
+constexpr std::array<std::string_view, 5> copy_collections = {
+    "opportunities", "stream_owners", "drive_share_links", "auth_app_webhook_events",
+    "auth_app_webhook_deliveries"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -36,13 +36,6 @@ struct WorkspaceTally {
     json missing = json::array(), mismatched = json::array();
     std::string error;
 };
-
-bool same_message(const control::AskMessage& stored, const control::AskMessage& source) {
-    return stored.conversation_id == source.conversation_id &&
-           stored.customer_id == source.customer_id && stored.user_id == source.user_id &&
-           stored.role == source.role && stored.content == source.content &&
-           stored.payload == source.payload && stored.at_us == source.at_us;
-}
 
 // The answer of one page of a copy, the same for every collection.
 ApiResult copy_result(std::string_view collection, const std::string& mode, std::size_t rows,
@@ -101,96 +94,6 @@ ApiResult copy_result(std::string_view collection, const std::string& mode, std:
                             value["mismatched"].empty();
     }
     return ApiResult::success(std::move(value));
-}
-
-// One page of ask_messages: assignments first (so rows an old replica wrote after migration 0045
-// are owned too), then per workspace and conversation, one read and the missing appends.
-liquid::runtime::task<ApiResult> copy_ask_messages(ApiContext& context, const std::string& mode,
-                                                   const std::string& after, int limit) {
-    if (auto assigned = context.store->assign_legacy_ask_messages(); !assigned) {
-        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
-    }
-    auto rows = context.store->legacy_ask_messages(after, limit);
-    if (!rows) {
-        co_return ApiResult::failure(rows.error().code, rows.error().message);
-    }
-    json unresolved = json::array();
-    std::map<std::string, std::vector<const control::LegacyAskMessage*>> by_workspace;
-    for (const control::LegacyAskMessage& row : *rows) {
-        if (row.workspace_id.empty()) {
-            unresolved.push_back({{"id", row.message.id},
-                                  {"customer_id", row.message.customer_id},
-                                  {"outcome", row.outcome}});
-        } else {
-            by_workspace[row.workspace_id].push_back(&row);
-        }
-    }
-    std::map<std::string, WorkspaceTally> tallies;
-    for (const auto& [workspace_id, owned] : by_workspace) {
-        WorkspaceTally& tally = tallies[workspace_id];
-        tally.customer_id = owned.front()->message.customer_id;
-        tally.rows = owned.size();
-        if (mode == "plan") {
-            continue;
-        }
-        auto records = workspace_records(context, tally.customer_id, workspace_id);
-        if (!records) {
-            tally.error = records.error().code + ": " + records.error().message;
-            continue;
-        }
-        control::AskMessages messages(*records);
-        // One read per conversation, shared by the rows of that conversation.
-        std::map<std::string, std::vector<const control::LegacyAskMessage*>> by_lookup;
-        for (const control::LegacyAskMessage* row : owned) {
-            by_lookup[control::AskMessageCodec::lookup(row->message)].push_back(row);
-        }
-        for (const auto& [lookup, conversation] : by_lookup) {
-            auto present = control::settled(co_await messages.list(lookup));
-            if (!present) {
-                tally.error = present.error().code + ": " + present.error().message;
-                break;
-            }
-            std::map<std::string, const control::AskMessage*> stored;
-            for (const control::AskMessage& message : *present) {
-                stored.emplace(message.id, &message);
-            }
-            for (const control::LegacyAskMessage* row : conversation) {
-                const auto found = stored.find(row->message.id);
-                if (mode == "verify") {
-                    if (found == stored.end()) {
-                        tally.missing.push_back(row->message.id);
-                    } else if (!same_message(*found->second, row->message)) {
-                        tally.mismatched.push_back(row->message.id);
-                    } else {
-                        ++tally.verified;
-                    }
-                    continue;
-                }
-                if (found != stored.end()) {
-                    ++tally.already_present;
-                    continue;
-                }
-                auto appended = control::settled(co_await messages.append(
-                    row->message, control::RecordWrite{row->message.id, row->message.at_us}));
-                if (!appended && appended.error().code == "conflict") {
-                    // The key is already there (a concurrent copy); verify compares it.
-                    ++tally.already_present;
-                    continue;
-                }
-                if (!appended) {
-                    tally.error = appended.error().code + ": " + appended.error().message;
-                    break;
-                }
-                ++tally.copied;
-            }
-            if (!tally.error.empty()) {
-                break;
-            }
-        }
-    }
-    co_return copy_result("ask_messages", mode, rows->size(), limit,
-                          rows->empty() ? std::string() : rows->back().message.id,
-                          std::move(unresolved), tallies);
 }
 
 bool same_opportunity(const control::Opportunity& stored, const control::Opportunity& source) {
@@ -767,10 +670,7 @@ void register_workspace_record_capabilities(Registry& registry) {
                 co_return co_await copy_application_webhook_deliveries(context, mode, after,
                                                                        limit);
             }
-            if (input.at("collection") == "stream_owners") {
-                co_return co_await copy_stream_owners(context, mode, after, limit);
-            }
-            co_return co_await copy_ask_messages(context, mode, after, limit);
+            co_return co_await copy_stream_owners(context, mode, after, limit);
         }});
 }
 

@@ -57,20 +57,17 @@ result for organizations a person runs, plus `list_user_memberships` and
 
 `workspace_records.hpp` declares `WorkspaceRecords` (append, list, get, conditional put,
 remove and update of sealed records in one workspace Zetta's record store) and `RecordSet<Codec>`, the typed collection every table that moves into a
-workspace uses; `ask_messages.hpp` is the reference codec. `Store` keeps only the legacy reads of
-the retired `ask_messages` table, for the copy (`LegacyAskMessage`). `opportunities.hpp` is the
+workspace uses; `ask_messages.hpp` is the reference codec. `Store` has no reads of the retired
+`ask_messages` table, which migration `0050` dropped (lake#483). `opportunities.hpp` is the
 first mutable collection (Design → Opportunities, lake#376): derived keys, conditional status
 writes; `Store` keeps only the legacy reads of the retired `opportunities` table
 (`LegacyOpportunity`). See
-`docs/architecture/workspace-records.md`.
-the retired `ask_messages` table, for the copy (`LegacyAskMessage`). See
 `docs/architecture/workspace-records.md`. `drive_share_links.hpp` is the drive share link codec
 (lake#350): a mutable record per link keyed by its id and found by repository and folder, and the
 bearer token format `<workspace id>.<link id>.<secret>` that routes a recipient to the workspace.
 `Store` keeps only the content-free route of a pre-move token (`drive_share_link_route`) and the
 legacy reads of `drive_share_links` for the copy (`LegacyDriveShareLink`).
-the retired `ask_messages` table, for the copy (`LegacyAskMessage`). See
-`docs/architecture/workspace-records.md`. `application_webhook_records.hpp` holds the application
+`application_webhook_records.hpp` holds the application
 event and delivery-attempt codecs and the claim/settle pair that sends each attempt once
 (lake#356, lake#357); `apps.hpp` gives `Application` its `workspace_id` and declares the
 `LegacyApplicationWebhook*` rows the copy reads.

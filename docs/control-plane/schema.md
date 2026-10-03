@@ -439,7 +439,8 @@ slug, desired, trigger, who launched it), `agent_launch_status` (written by the 
 message, endpoint, exit code, result and the **SHA-256** of the pod's credential, never the
 credential), `agent_schedules` (one per agent, its next run) and `ask_messages` (Ask Orama
 conversations, read back only by the person who had them; retired by `0045`, below, when
-conversations moved into workspace Zettas). Idempotent; guard `agents_guard`. The
+conversations moved into workspace Zettas, and dropped by `0050`, whose rerun-safe schema no longer
+creates it). Idempotent; guard `agents_guard`. The
 operator vendors it and selects that guard before a binary that launches agents is deployed.
 Contract and capabilities: [`../api/agent-launches.md`](../api/agent-launches.md).
 
@@ -542,7 +543,7 @@ retired `ask_messages` row: the space's only live workspace (`sole_workspace`), 
 `no_customer`. Ask Orama conversations live in the owning workspace Zetta (lake#370), and lake no
 longer writes or reads the table except through the operator-only `copy_workspace_records`, which
 reapplies the same assignment before each run. No column is added and nothing is dropped; the
-table is dropped by a later migration after the copy is verified. Idempotent; guard
+table is dropped by `0050_drop_ask_messages`, below, and this block now runs only while it exists. Idempotent; guard
 `ask_message_workspaces_guard`. The operator vendors it and selects that guard before the binary
 is deployed. Mechanism and cutover: [`../architecture/workspace-records.md`](../architecture/workspace-records.md).
 
@@ -591,3 +592,14 @@ operator-only `copy_workspace_records`, which reapplies the assignment and resol
 application has since been assigned. Nothing is dropped. Idempotent; guard
 `application_webhook_workspaces_guard`. Mechanism and cutover:
 [`../architecture/workspace-records.md`](../architecture/workspace-records.md#cutover-runbook-application-events-and-deliveries-dev-cluster).
+
+## Drop ask messages migration
+
+`0050_drop_ask_messages` (lake#483) drops the retired `ask_messages` table. Ask Orama conversations
+live in each workspace Zetta's `lake_ask_messages` collection (lake#370), and the operator's copy
+was verified on dev before the drop: 15 of 15 rows, `complete: true`. The `workspace_assignments`
+rows `0045` recorded for the table stay as the record of where each row went. Because every schema
+Job reapplies this file from the top, the table's original `CREATE` (from `0030`) is removed and
+`0045`'s block runs only while the table exists, so a rerun never recreates it. Lake has no reader
+of the table left, and `copy_workspace_records` no longer accepts `ask_messages`. Idempotent; guard
+`drop_ask_messages_guard`. The operator vendors it and selects that guard.
