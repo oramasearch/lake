@@ -3360,3 +3360,43 @@ CREATE TABLE IF NOT EXISTS repository_records_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0064_repository_records')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0065_workspace_deletions: deleting a workspace cascades (decision 54 S12, lake#514,
+-- docs/api/workspaces.md#deletion). The transaction that sets a workspace's desired state to
+-- `deleted` also tombstones every repository of the workspace still live or inside its retention
+-- with its retention ended (deleted_at kept where set, retention_until = now(), which releases
+-- its name), deletes the workspace's apps, cancels its unfinished builds, and records here what
+-- it destroyed, with the tenant image repositories that existed then.
+--
+-- The rest lives outside PostgreSQL: the tags and manifests of those image repositories in the
+-- instance registry (until lake#383 moves them), the destroyed repositories' search segments,
+-- and one central audit event per destroyed object (the workspace's own audit chain goes with its
+-- Zetta). Lake does it after the commit and sets completed_at; a deletion without completed_at
+-- is resumed by lake's owner loop and by a repeated delete_workspace, and every step is
+-- idempotent. Repository descriptions (lake_repositories, 0064) and every other lake record in
+-- the workspace Zetta go with the Zetta. The operator still deletes the workspace Zetta, and with it the workspace's record
+-- store, from the workspace's desired state; it does not read this table.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS workspace_deletions (
+    workspace_id   uuid        PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+    customer_id    uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    workspace_name text        NOT NULL,
+    requested_by   text        NOT NULL,
+    requested_at   timestamptz NOT NULL DEFAULT now(),
+    -- Each an array of {"id", "name", "state"}: repositories (state live | tombstoned), apps
+    -- (their desired state before), builds (their phase when cancelled), images (state tagged).
+    repositories   jsonb       NOT NULL DEFAULT '[]'::jsonb,
+    apps           jsonb       NOT NULL DEFAULT '[]'::jsonb,
+    builds         jsonb       NOT NULL DEFAULT '[]'::jsonb,
+    images         jsonb       NOT NULL DEFAULT '[]'::jsonb,
+    completed_at   timestamptz
+);
+CREATE INDEX IF NOT EXISTS workspace_deletions_pending_idx ON workspace_deletions (requested_at)
+    WHERE completed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS workspace_deletions_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0065_workspace_deletions')
+    ON CONFLICT DO NOTHING;

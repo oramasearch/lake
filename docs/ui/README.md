@@ -4,6 +4,9 @@ lake#452: the selectors' labels, the `/w/<workspace>/` home redirect and the pho
 are in [workspace-selection.md](workspace-selection.md); the public-app acknowledgement on an
 ApplicationAgent proposal is in [apps.md](apps.md).
 
+lake#514: the `/workspaces` delete confirmation, which lists what a workspace deletion destroys with
+counts, is in [workspace-selection.md](workspace-selection.md).
+
 The live 100 ms p95 page rule, deterministic per-route workspace call budgets, loose 500 ms
 regression guard, `Server-Timing` fields (including one `zetta_<capability>` entry per call),
 route-derived coverage, registry invalidation, populated cold-start fixtures, the deferred panels

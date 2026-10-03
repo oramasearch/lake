@@ -6,7 +6,8 @@ readers retain the 64 MiB ceiling or a smaller route-specific bound.
 
 [configuration.md](configuration.md) lists every command-line flag and environment variable with
 its default and owning contract. [telemetry.md](telemetry.md) covers probes, metrics, and request
-logs, including the dynamic-lease expiry pass's counters (lake#362).
+logs, including the dynamic-lease expiry pass's counters (lake#362) and the workspace deletion
+resume pass's (lake#514).
 
 Change runtime behavior, its configuration entry, the owning API page, and the focused and full
 native proof together.

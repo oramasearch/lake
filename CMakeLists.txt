@@ -215,6 +215,7 @@ add_library(lake-core STATIC
   src/api/clerk.cpp
   src/api/workspace_capabilities.cpp
   src/api/repository_records_api.cpp
+  src/api/workspace_deletion.cpp
   src/api/workspace_record_capabilities.cpp
   src/api/datasets.cpp
   src/api/stream_capabilities.cpp

@@ -366,6 +366,28 @@ struct NewWorkspace {
 struct WorkspacePatch {
     std::optional<std::string> name, environment, desired;
 };
+// Deleting a workspace cascades (decision 54 S12, lake#514, docs/api/workspaces.md#deletion).
+// One object it destroyed: a repository (`live`, or `tombstoned` inside its retention, when the
+// workspace was deleted), an app, a build it cancelled, or a tenant image repository (`name` is
+// the OCI repository, `<space>/<name>` or `<space>/cache/<name>`, and `id` is empty).
+struct WorkspaceDeletionItem {
+    std::string id, name, state;
+};
+// What one workspace deletion destroyed, recorded in the transaction that deleted the workspace
+// (migration 0065, `workspace_deletions`). `completed_at` is empty until lake has removed what
+// lives outside PostgreSQL (tenant image tags, search segments) and recorded one central audit
+// event per destroyed object; until then the owner loop and a repeated delete_workspace resume it.
+struct WorkspaceDeletion {
+    std::string workspace_id, customer_id, workspace_name, requested_by, requested_at,
+        completed_at;
+    std::vector<WorkspaceDeletionItem> repositories, apps, builds, images;
+};
+struct WorkspaceDeletionRequest {
+    std::string workspace_id, requested_by;
+    // The tenant image repositories that exist when the workspace is deleted, resolved by the
+    // caller: the registry lives outside the store until lake#383.
+    std::vector<std::string> images;
+};
 // Reserve room for `-ws-` and twelve UUID digits in a DNS label.
 inline bool valid_workspace_environment(std::string_view value) {
     if (value.empty() || value.size() > 47 || value.front() == '-' || value.back() == '-') {
@@ -1207,6 +1229,19 @@ public:
     virtual Result<Workspace> get_workspace(const std::string& id) = 0;
     virtual Result<Workspace> create_workspace(const NewWorkspace&) = 0;
     virtual Result<Workspace> update_workspace(const std::string& id, const WorkspacePatch&) = 0;
+    // Deletes a workspace and everything it holds in one transaction (lake#514): every repository
+    // of the workspace still live or inside its retention is tombstoned with its retention ended
+    // (`deleted_at` kept where set, `retention_until` now), which releases its name; its apps are
+    // deleted and its unfinished builds cancelled; the workspace's desired state becomes
+    // `deleted` with its services absent, so the operator deletes its Zetta; and the deletion is
+    // recorded with what it destroyed. Repeating it for a workspace it deleted answers the
+    // recorded deletion unchanged; a workspace deleted before migration 0065 is a conflict.
+    virtual Result<WorkspaceDeletion> delete_workspace_cascade(const WorkspaceDeletionRequest&) = 0;
+    // The recorded deletion of a workspace; not_found when it has none.
+    virtual Result<WorkspaceDeletion> get_workspace_deletion(const std::string& workspace_id) = 0;
+    // The deletions lake has not completed, oldest first.
+    virtual Result<std::vector<WorkspaceDeletion>> pending_workspace_deletions(int limit) = 0;
+    virtual Result<void> complete_workspace_deletion(const std::string& workspace_id) = 0;
     // Managed services (docs/control-plane/services.md). Lists the customer's services, oldest
     // first, leaving out deleted ones the operator has finished with.
     virtual Result<std::vector<ManagedService>> list_services(const std::string& customer_id) = 0;

@@ -19,6 +19,13 @@ commands are omitted. See
 [configuration.md](../../../docs/serving/configuration.md) and
 [forge.md](../../../docs/ui/forge.md).
 
+`workspace_deletion.hpp` declares the workspace deletion cascade (lake#514): `WorkspaceContent`,
+the injected dependency through which the HTTP server lets a deletion reach the instance registry
+and the search segments, and the extension point for closing a workspace's own store (lake#380);
+the dry-run plan; and the idempotent `finish_workspace_deletion`/`resume_workspace_deletions`.
+`ApiContext::workspace_content` carries it. See
+[workspaces.md](../../../docs/api/workspaces.md#deletion).
+
 `ApiContext` carries trusted issuer session ID, kind, scopes and expiry from the common credential
 resolver. Token request JSON cannot supply those fields. Keep HTTP and PostgreSQL types out of
 these public headers.

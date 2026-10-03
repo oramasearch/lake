@@ -1584,6 +1584,101 @@ TEST(RegistryProtocols, UsageCountsEachImageDigestOnceForItsSpace) {
     server.stop();
 }
 
+// Deleting a workspace removes its tenant images from the instance registry (lake#514): the app's
+// image and its build cache stop answering pulls, while another workspace's image of the same
+// space, and the blobs it uses, stay.
+TEST(RegistryProtocols, DeletingAWorkspaceMakesItsImagesUnpullable) {
+    TemporarySyncRoot temporary;
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    const auto user = store->create_user(
+        {"taap:1:ed25519:image-owner", "image-owner@example.test", "Image owner"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "tenant-one"});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto doomed = store->create_workspace({customer->id, "doomed", "dev", ""});
+    const auto kept = store->create_workspace({customer->id, "kept", "dev", ""});
+    ASSERT_TRUE(doomed && kept);
+    for (const auto& [workspace, name] :
+         {std::pair{doomed->id, std::string("reports")}, std::pair{kept->id, std::string("other")}}) {
+        ASSERT_TRUE(store->create_web_app({.customer_id = customer->id,
+                                           .workspace_id = workspace,
+                                           .name = name,
+                                           .mode = "image",
+                                           .image = "lake.example.test/tenant-one/" + name + ":v1",
+                                           .framework = "container",
+                                           .port = 8080,
+                                           .host = name + ".apps.example.test"}));
+    }
+    ServerOptions options;
+    options.port = 0;
+    options.node_name = "workspace-deletion-registry-test";
+    options.admin_token = "registry-admin";
+    options.instance_kek = "6c616b652d666f7267652d7265636f7264732d746573742d696e7374616e6365";
+    options.store_root = temporary.path().string();
+    options.store = store;
+    ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    const std::string admin = "Bearer registry-admin";
+    const std::string config = R"({"architecture":"amd64","os":"linux"})";
+    const std::string digest = "sha256:" + lake::control::identity_crypto::sha256_hex(config);
+    const json manifest{{"schemaVersion", 2},
+                        {"mediaType", "application/vnd.oci.image.manifest.v1+json"},
+                        {"config",
+                         {{"mediaType", "application/vnd.oci.image.config.v1+json"},
+                          {"digest", digest},
+                          {"size", config.size()}}},
+                        {"layers", json::array()}};
+    const auto publish = [&](const std::string& repository, const std::string& tag) {
+        const std::string started = http_request(server.port(), "POST",
+                                                 "/v2/" + repository + "/blobs/uploads/", "",
+                                                 "application/octet-stream", {}, admin);
+        ASSERT_NE(started.find(" 202 "), std::string::npos) << started;
+        const std::string completed = http_request(
+            server.port(), "PUT", response_header(started, "Location") + "?digest=" + digest,
+            config, "application/octet-stream", {}, admin);
+        ASSERT_NE(completed.find(" 201 "), std::string::npos) << completed;
+        const std::string published = http_request(
+            server.port(), "PUT", "/v2/" + repository + "/manifests/" + tag, manifest.dump(),
+            "application/vnd.oci.image.manifest.v1+json", {}, admin);
+        ASSERT_NE(published.find(" 201 "), std::string::npos) << published;
+    };
+    publish("tenant-one/reports", "latest");
+    publish("tenant-one/cache/reports", "buildcache");
+    publish("tenant-one/other", "latest");
+    const auto pull = [&](const std::string& repository, const std::string& tag) {
+        return http_request(server.port(), "GET", "/v2/" + repository + "/manifests/" + tag, "",
+                            "application/json", {}, admin);
+    };
+    ASSERT_NE(pull("tenant-one/reports", "latest").find(" 200 "), std::string::npos);
+
+    const std::string planned = http_request(
+        server.port(), "POST", "/v1/delete_workspace",
+        json{{"customer_id", customer->id}, {"workspace_id", doomed->id}, {"dry_run", true}}.dump(),
+        "application/json", {}, admin);
+    const json plan = json::parse(response_body(planned));
+    ASSERT_TRUE(plan.at("ok")) << plan;
+    EXPECT_EQ(plan["value"]["counts"]["images"], 2) << plan;
+    EXPECT_EQ(plan["value"]["counts"]["apps"], 1) << plan;
+
+    const std::string deleted = http_request(
+        server.port(), "POST", "/v1/delete_workspace",
+        json{{"customer_id", customer->id}, {"workspace_id", doomed->id}, {"confirm", "doomed"}}
+            .dump(),
+        "application/json", {}, admin);
+    const json body = json::parse(response_body(deleted));
+    ASSERT_TRUE(body.at("ok")) << body;
+    EXPECT_TRUE(body["value"]["deletion"]["completed"]) << body;
+
+    EXPECT_EQ(pull("tenant-one/reports", "latest").find(" 200 "), std::string::npos);
+    EXPECT_EQ(pull("tenant-one/cache/reports", "buildcache").find(" 200 "), std::string::npos);
+    EXPECT_NE(pull("tenant-one/other", "latest").find(" 200 "), std::string::npos);
+    const std::string blob = http_request(server.port(), "GET",
+                                          "/v2/tenant-one/other/blobs/" + digest, "",
+                                          "application/octet-stream", {}, admin);
+    EXPECT_EQ(response_body(blob), config);
+    server.stop();
+}
+
 TEST(RegistryProtocols, AppPullCredentialReadsOnlyItsOwnImage) {
     TemporarySyncRoot temporary;
     auto store = std::make_shared<lake::control::InMemoryStore>();
@@ -3207,18 +3302,16 @@ TEST(Repositories, BelongToOneWorkspaceOfTheirSpace) {
     EXPECT_EQ(github.error.code, "invalid_input");
     EXPECT_EQ(github.error.path, "/customer_id");
 
-    // A workspace that still holds a live repository is not deleted; once its repositories are
-    // deleted, it is.
-    const ApiResult kept = s.call(
-        "delete_workspace",
-        {{"customer_id", ada}, {"workspace_id", product->id}, {"confirm", "product"}});
-    EXPECT_EQ(kept.error.code, "conflict");
-    ASSERT_TRUE(s.call("delete_repository", {{"id", in_product.value["id"]}}).ok);
+    // Deleting a workspace deletes its repositories with it (lake#514, decision 54 S12): the
+    // live one is tombstoned with its retention ended, and the workspace takes no new one.
     const ApiResult removed = s.call(
         "delete_workspace",
         {{"customer_id", ada}, {"workspace_id", product->id}, {"confirm", "product"}});
-    EXPECT_TRUE(removed.ok) << removed.error.message;
+    ASSERT_TRUE(removed.ok) << removed.error.message;
+    EXPECT_EQ(removed.value["deletion"]["counts"]["live_repositories"], 1);
+    EXPECT_FALSE(s.store.get_repository(in_product.value["id"])->deleted_at.empty());
     EXPECT_EQ(create(product->id, "after").error.path, "/workspace_id");
+    EXPECT_TRUE(create(research->id, "service").ok) << "the deleted repository's name is free";
 }
 
 TEST(ApiErrors, DatabaseDiagnosticsStayOutOfErrorMessages) {

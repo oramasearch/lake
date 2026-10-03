@@ -44,9 +44,10 @@ customer's workspace is ready, the page offers **Start your workspace** instead,
 prepared and refreshes every 15 seconds.
 
 The Workspaces page (`/workspaces`) shows name, environment, phase, namespace and created time.
-New workspace accepts a name and DNS-label-safe environment. Delete requires typing the exact
-name, then sets desired state to `deleted`; the operator deletes the namespace and its contents.
-Pending and stopped rows are selectable. A sole workspace is still shown in the top bar.
+New workspace accepts a name and DNS-label-safe environment. Delete opens a confirmation
+(`/workspaces?delete=<workspace_id>`) that lists everything the deletion destroys, with counts,
+and requires typing the exact name ([Deletion](#deletion)). Pending and stopped rows are
+selectable. A sole workspace is still shown in the top bar.
 
 ## Capabilities
 
@@ -60,7 +61,7 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `get_workspace` | read | `read` | Requires `customer_id`, `workspace_id`; returns desired state and operator observations |
 | `create_workspace` | action | `write` | Requires `customer_id`, `name`, `environment`; atomically creates workspace and primary service desired state |
 | `update_workspace` | action | `write` | Requires `customer_id`, `workspace_id`; optional name, environment, desired (`running` or `stopped`); changes increment generation, status fields are refused |
-| `delete_workspace` | action | `admin` | Requires `customer_id`, `workspace_id`, `confirm` equal to the workspace name; sets desired `deleted` |
+| `delete_workspace` | action | `admin` | Requires `customer_id`, `workspace_id`, `confirm` equal to the workspace name; deletes the workspace and everything it holds ([Deletion](#deletion)). `dry_run: true` deletes nothing and answers what would be destroyed, with counts (`confirm` optional, checked when given) |
 | `start_workspace` | action | `write` | Idempotent creation of the space's first workspace, named `workspace`, in `prod`; answers its state with its `workspace_id`. It uses the same contract table and never routes data implicitly: later calls name a workspace, and `create_workspace` adds more |
 | `predict` | action (POST, changes nothing) | `read` | Score rows through one **published** model from outside lake (lake#250): `{customer_id, workspace_id, model_id, rows, entity_column?, top_k?}` (`model` is the deprecated name of `model_id`); checks the model is published (`get_model`), then Zetta's `score`. Each `ranked` entry is `{entity, row, risk}`: `row` is the record's position in `rows`, and `entity` the value of its `entity_column` field (default `entity`), omitted when the record has none (lake#450). The engine numbers the rows itself; lake maps each number back. "row 2 has no 'tenure'" is answered `invalid_input` at `/rows/2/tenure`. Ship → Models shows each published model's `curl` |
 | `edit_pipeline` | action | `write` | One validated pipeline edit (`op`: add_step, rename_step, kind_step, remove_step, add_edge, remove_edge, set_attribute (step, name, value; null clears), rename), or `edits`: a list applied in order as one save, all or nothing (how a Project Agent proposal is applied). Every step keeps its `attributes` (source, table, target, algo) through every edit. It reads the graph, applies the edit with `lake::api::pipeline`, refuses one that leaves duplicate ids, unknown kinds, dangling edges or a cycle, and saves the whole graph with `save_graph` by its id. The page's forms, REST and MCP all edit through it |
@@ -156,8 +157,70 @@ solution operating-state batch remains concurrent and reuses that run result.
   it in the key so token rotation cannot reuse an earlier entry; it is never persisted by Lake.
 - **Ready** means the operator reported `Ready` with an address *and* the token is present. Calls
   before that fail with `workspace_not_ready`.
-- **Delete workspace** writes desired `deleted` and withdraws its services. The Workspaces page
-  shows the operator's observations until it reports `Deleted`.
+- **Delete workspace** writes desired `deleted` and withdraws its services, in the transaction
+  that deletes what the workspace holds ([Deletion](#deletion)). The Workspaces page shows the
+  operator's observations until it reports `Deleted`.
+
+## Deletion
+
+Deleting a workspace cascades (decision 54 S12,
+[lake#514](https://github.com/oramasearch/lake/issues/514)). It cannot be undone: the workspace
+Zetta's volume snapshots ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260))
+are the only copy left.
+
+**What is destroyed.** `delete_workspace {dry_run: true}` and the confirmation on `/workspaces`
+list it, with `counts` (`repositories`, `live_repositories`, `tombstoned_repositories`, `apps`,
+`builds`, `images`):
+
+- the workspace Zetta, with every record lake keeps there (the sealed `lake_*` collections of
+  [workspace records](../architecture/workspace-records.md)), its datasets, topics and stores, and
+  the workspace's own audit chain. The operator deletes them from the workspace's desired state;
+- its repositories: live ones, and tombstoned ones still inside their 30-day retention. Each is
+  tombstoned with its retention ended (`retention_until` now, `deleted_at` kept where it was set),
+  which frees its name in the space. A tombstone whose retention has already ended is gone
+  already and is not listed. Each repository's description record (`lake_repositories` in the
+  workspace Zetta, lake#315 part 2) goes with the Zetta, like its forge records, so the cascade
+  takes no step of its own for it;
+- its apps (desired `deleted`) and its unfinished builds (desired `cancelled`);
+- its tenant images: `<space>/<name>` and `<space>/cache/<name>` for each of its apps and each
+  image its builds target, when the instance registry holds tags for them. A name an app or build
+  of another live workspace of the same space also uses is kept, because images are addressed per
+  space until [lake#383](https://github.com/oramasearch/lake/issues/383).
+
+**One PostgreSQL transaction** tombstones the repositories, deletes the apps, cancels the builds,
+sets the workspace's desired state to `deleted` with its services `absent`, and records the
+deletion with everything it destroyed in `workspace_deletions` (migration
+`0065_workspace_deletions`). The operator reads only the desired state, as before (decision 51).
+
+**After the commit**, lake removes what lives outside PostgreSQL and records the central audit:
+
+1. drops each destroyed repository's search segments, and the indexed blobs nothing else uses;
+2. removes each image repository's tags and manifests from the instance registry, so nothing can
+   pull it. Blobs stay: the registry has no collection yet, and other manifests may share them;
+3. records one central audit event per destroyed repository, app, build and image, and one for the
+   cascade (`workspace/<id>`), all with request id `workspace-deletion:<workspace_id>`. The
+   workspace's own audit chain goes with its Zetta, so this is where the history survives;
+4. marks the deletion complete (`completed_at`).
+
+Each step is idempotent, and an audit event is recorded once per object and request id. If lake
+stops part way, or the registry is unavailable, the workspace is still deleted and the deletion
+stays pending: `delete_workspace` answers `deletion.completed: false` with the reason in
+`deletion.pending`, and lake's owner loop finishes it on its next pass (every minute, on the lake
+that owns the store root). Repeating `delete_workspace` for the deleted workspace resumes it too,
+and answers the recorded deletion; the dry run of a deleted workspace answers the same record.
+
+The repositories' content stays in the space's liquid store until the collector reclaims it, as
+for any tombstone whose retention has ended. When repositories move into the workspace's own store
+([lake#380](https://github.com/oramasearch/lake/issues/380)), lake closes that store and releases
+its bucket lease before it reports the deletion complete (`WorkspaceContent::close_workspace_store`
+in `include/lake/api/workspace_deletion.hpp`), and the operator's deletion of the namespace and
+volume destroys the bytes. When tenant images move ([lake#383](https://github.com/oramasearch/lake/issues/383)),
+the workspace's rows in `oci_repository_routes` are deleted in the transaction and its images go
+with its store.
+
+**Result.** `delete_workspace` answers the workspace's row (desired `deleted`) and `deletion`:
+`requested_by`, `requested_at`, `completed`, `completed_at`, the destroyed `repositories`, `apps`,
+`builds` and `images` (each `{id?, name, state}`), `counts`, and `audit_request_id`.
 
 Reads are `GET /v1/<capability>` with the input as query parameters; actions are
 `POST /v1/<capability>` with a JSON body. lake unwraps Zetta's `{ok, value}` envelope and passes
@@ -257,13 +320,19 @@ and the capabilities answer `store_unavailable`. `LAKE_DATA_PLANE_*`, `LAKE_WORK
 ctest --test-dir build -R 'Workspaces|WebUi'
 ```
 
+`WorkspaceDeletion.*` (memory and PostgreSQL) covers the cascade: two spaces with two workspaces
+each, a workspace with live and tombstoned repositories, an app, builds and images, the dry run's
+counts, names freed, the other workspace and space untouched, an interrupted cascade resumed by
+the owner loop without repeating an audit event, and that only an administrator of the space
+deletes. `RegistryProtocols.DeletingAWorkspaceMakesItsImagesUnpullable` checks pulls against a
+running lake, and `Search.DroppingARepositoryRemovesItsSegmentsAndUnsharedBlobs` the index.
 `Workspaces.*` covers the slug, the workspace as the default service created once, withdrawal and
 restart (a new slug, the old status not carried over), the delete confirmation, readiness needing both
 the phase and the token, calls reaching only the customer's own address with its own token, the
 allow-lists, and another customer's user being refused. On a deployment: open `/design/projects`,
 start the workspace, wait for Ready, create a project, and build a pipeline. Deleting is verified
-the same way: tick the confirmation, delete, and watch the page return to **Start your workspace**
-while `kubectl -n lake get oramazettacluster` loses `<lake>-<workspace>`.
+the same way: open Delete on `/workspaces`, check the listed repositories and images, type the
+name, and watch `kubectl -n lake get oramazettacluster` lose `<lake>-<workspace>`.
 
 ## Known limits
 

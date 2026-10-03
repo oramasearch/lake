@@ -1,6 +1,7 @@
 # Design and status
 
 Agent-task lease recovery is tracked separately from deployment in [status.md](status.md).
+The cascading workspace deletion (lake#514) has its own row in [status.md](status.md).
 The [agent bus contract](../api/agent-bus.md) documents retries and shared-credential limits.
 
 Train → Experiments implementation, local proof and deployment acceptance are tracked separately

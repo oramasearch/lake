@@ -38,3 +38,6 @@ workspace's data for the copy into that workspace's own audit chain (decision 52
 [schema.md](schema.md#repository-records-migration-0064_repository_records) documents
 `0064_repository_records`, which drops `repository_refs` (lake#319) and records each repository
 description's workspace for the copy into its `lake_repositories` record (lake#315 part 2).
+[schema.md](schema.md#workspace-deletions-migration-0065_workspace_deletions) documents
+`0065_workspace_deletions`, the record of what each cascading workspace deletion destroyed
+(decision 54 S12, lake#514).

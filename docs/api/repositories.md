@@ -172,8 +172,14 @@ repository's metadata, forge records and content when they move.
   every handler that loads the repository carry it. The push path resolves the repository once and
   hands it, workspace included, to `sync_change_authorizer` and `evaluate_branch_protection`; each
   branch protection audit record and the `push` audit record name the workspace.
-- **Workspace deletion.** `delete_workspace` is refused with `conflict` while the workspace holds a
-  live repository; tombstoned repositories do not hold it.
+- **Workspace deletion.** Deleting a workspace deletes its repositories (lake#514, decision 54
+  S12): in the deletion's transaction every repository of the workspace that is live or still
+  inside its retention is tombstoned with its retention ended (`retention_until` now, an earlier
+  `deleted_at` kept), which frees its name in the space at once. Each gets a central audit event
+  (object `repository/<id>`, request id `workspace-deletion:<workspace_id>`), and its search
+  segments are dropped. Their description records (`lake_repositories`) and forge records live in
+  the workspace Zetta and go with it. The confirmation lists them first
+  ([workspaces.md](workspaces.md#deletion)).
 - **Hub clients.** `POST /api/repos/create` takes `workspace_id` in its body or, because
   `huggingface_hub`'s `create_repo` cannot add body fields, the `X-Lake-Workspace-Id` header
   (`HfApi(headers={"X-Lake-Workspace-Id": ...})`).

@@ -587,6 +587,25 @@ public:
     update_workspace(const std::string& id, const control::WorkspacePatch& patch) override {
         return call("update_workspace", [&] { return store_->update_workspace(id, patch); });
     }
+    control::Result<control::WorkspaceDeletion>
+    delete_workspace_cascade(const control::WorkspaceDeletionRequest& request) override {
+        return call("delete_workspace_cascade",
+                    [&] { return store_->delete_workspace_cascade(request); });
+    }
+    control::Result<control::WorkspaceDeletion>
+    get_workspace_deletion(const std::string& workspace_id) override {
+        return call("get_workspace_deletion",
+                    [&] { return store_->get_workspace_deletion(workspace_id); });
+    }
+    control::Result<std::vector<control::WorkspaceDeletion>>
+    pending_workspace_deletions(int limit) override {
+        return call("pending_workspace_deletions",
+                    [&] { return store_->pending_workspace_deletions(limit); });
+    }
+    control::Result<void> complete_workspace_deletion(const std::string& workspace_id) override {
+        return call("complete_workspace_deletion",
+                    [&] { return store_->complete_workspace_deletion(workspace_id); });
+    }
     control::Result<std::vector<control::ManagedService>>
     list_services(const std::string& customer_id) override {
         return call("list_services", [&] { return store_->list_services(customer_id); });

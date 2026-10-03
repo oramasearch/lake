@@ -7,7 +7,12 @@ among a space's live workspaces); its environment is listed on `/workspaces` (la
 Changing space refreshes its workspace choices. New workspace opens `/workspaces`, which lists
 name, environment, phase, namespace and created time, and accepts name/environment for creation.
 It writes desired state through `create_workspace`; the operator provisions the namespace and
-Zetta. Delete requires typing the workspace name. Pending and stopped workspaces remain selectable.
+Zetta. Delete opens a confirmation on the same page (`/workspaces?delete=<workspace_id>`) that
+lists what goes with the workspace, with counts: its Zetta and every record in it, its repositories
+(live and deleted but still retained), its apps, its unfinished builds and its images. It states
+that the deletion cannot be undone and requires typing the workspace name; a wrong name returns to
+the confirmation with the error ([deletion](../api/workspaces.md#deletion), lake#514). Pending and
+stopped workspaces remain selectable.
 IDs are `workspaces.id`, not service IDs. This management page is outside the `/w/` prefix so the
 first workspace can be created before a selection exists.
 Switching from Workspaces stays on that management page. Explicit space selection takes

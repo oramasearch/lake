@@ -698,6 +698,112 @@ Result<Workspace> InMemoryStore::update_workspace(const std::string& id, const W
     return *row;
 }
 
+Result<WorkspaceDeletion> InMemoryStore::delete_workspace_cascade(
+    const WorkspaceDeletionRequest& request) {
+    std::lock_guard lock(mutex_);
+    const auto row = std::ranges::find(workspaces_, request.workspace_id, &Workspace::id);
+    if (row == workspaces_.end()) {
+        return std::unexpected(StoreError{"invalid_input", "workspace_id is unknown"});
+    }
+    if (row->desired == "deleted") {
+        const auto recorded =
+            std::ranges::find(workspace_deletions_, row->id, &WorkspaceDeletion::workspace_id);
+        if (recorded == workspace_deletions_.end()) {
+            return std::unexpected(StoreError{"conflict", "the workspace is deleted"});
+        }
+        return *recorded;
+    }
+    const std::string now = now_iso8601();
+    WorkspaceDeletion deletion;
+    deletion.workspace_id = row->id;
+    deletion.customer_id = row->customer_id;
+    deletion.workspace_name = row->name;
+    deletion.requested_by = request.requested_by;
+    deletion.requested_at = now;
+    for (Repository& repository : repositories_) {
+        if (repository.workspace_id != row->id) {
+            continue;
+        }
+        const bool live = repository.deleted_at.empty();
+        if (!live && repository.retention_until <= now) {
+            continue;
+        }
+        deletion.repositories.push_back(
+            {repository.id, repository.name, live ? "live" : "tombstoned"});
+        if (live) {
+            repository.deleted_at = now;
+        }
+        repository.retention_until = now;
+        repository.updated_at = now;
+    }
+    for (WebApp& app : web_apps_) {
+        if (app.workspace_id == row->id && app.desired != "deleted") {
+            deletion.apps.push_back({app.id, app.name, app.desired});
+            app.desired = "deleted";
+            ++app.generation;
+            app.updated_at = now;
+        }
+    }
+    for (Build& build : builds_) {
+        if (build.workspace_id == row->id && build.desired == "queued" &&
+            build.phase != "Succeeded" && build.phase != "Failed" && build.phase != "Cancelled") {
+            deletion.builds.push_back({build.id, build.target, build.phase});
+            build.desired = "cancelled";
+            build.updated_at = now;
+        }
+    }
+    for (const std::string& image : request.images) {
+        deletion.images.push_back({"", image, "tagged"});
+    }
+    row->desired = "deleted";
+    ++row->generation;
+    row->updated_at = now;
+    for (ManagedService& service : services_) {
+        if (service.workspace_id == row->id && service.desired != "absent") {
+            service.desired = "absent";
+            ++service.generation;
+            service.updated_at = now;
+        }
+    }
+    workspace_deletions_.push_back(deletion);
+    return deletion;
+}
+
+Result<WorkspaceDeletion> InMemoryStore::get_workspace_deletion(const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    const auto found =
+        std::ranges::find(workspace_deletions_, workspace_id, &WorkspaceDeletion::workspace_id);
+    if (found == workspace_deletions_.end()) {
+        return std::unexpected(StoreError{"not_found", "no deletion of workspace " + workspace_id});
+    }
+    return *found;
+}
+
+Result<std::vector<WorkspaceDeletion>> InMemoryStore::pending_workspace_deletions(int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<WorkspaceDeletion> pending;
+    for (const WorkspaceDeletion& deletion : workspace_deletions_) {
+        if (deletion.completed_at.empty() &&
+            (limit <= 0 || pending.size() < static_cast<std::size_t>(limit))) {
+            pending.push_back(deletion);
+        }
+    }
+    return pending;
+}
+
+Result<void> InMemoryStore::complete_workspace_deletion(const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    const auto found =
+        std::ranges::find(workspace_deletions_, workspace_id, &WorkspaceDeletion::workspace_id);
+    if (found == workspace_deletions_.end()) {
+        return std::unexpected(StoreError{"not_found", "no deletion of workspace " + workspace_id});
+    }
+    if (found->completed_at.empty()) {
+        found->completed_at = now_iso8601();
+    }
+    return {};
+}
+
 Result<void> InMemoryStore::set_workspace_status(const std::string& id, std::string phase) {
     std::lock_guard lock(mutex_);
     const auto row = std::ranges::find(workspaces_, id, &Workspace::id);

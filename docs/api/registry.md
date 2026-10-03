@@ -47,6 +47,13 @@ A customer account token attenuated to `registry_pull` may read private images o
 identity may read; the operator can deliver that credential as an `imagePullSecret`. Anonymous
 requests to tenant paths are refused. The administrator bearer remains valid across repositories.
 
+Deleting a workspace removes its tenant images (lake#514, [workspaces.md](workspaces.md#deletion)):
+the tags and manifest pointers of `<space>/<name>` and `<space>/cache/<name>` for each of its apps
+and each image its builds target, unless an app or build of another live workspace of the space
+uses the same name. Pulls of those repositories then answer 404. Blobs stay on the volume, since
+other manifests may reference them and the registry has no collection yet; after
+[lake#383](https://github.com/oramasearch/lake/issues/383) a workspace's images go with its store.
+
 An app pull token is accepted only as HTTP Basic user `app`, with the token as its password. Lake
 re-hashes it against the current app row and allows manifest and blob `GET`/`HEAD` only for the
 exact `<space>/<app name>` repository. Other apps, cache repositories, upload starts, blob writes,

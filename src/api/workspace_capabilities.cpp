@@ -24,6 +24,7 @@
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/api/datasets.hpp"
+#include "lake/api/workspace_deletion.hpp"
 #include "agent_task_records_api.hpp"
 #include "workspace_bus.hpp"
 #include "workspace_records_api.hpp"
@@ -739,8 +740,10 @@ std::string workspace_description(const std::string& operation) {
          "Rename a workspace or stop and start it (`desired: stopped | running`); its data is "
          "kept."},
         {"delete_workspace",
-         "Delete a workspace and everything in its Zetta, which cannot be recovered; `confirm` "
-         "must be its name. Refused while it still holds a live repository."},
+         "Delete a workspace and everything it holds, which cannot be recovered: its Zetta and "
+         "every record in it, its repositories (live and tombstoned, retention cut short), its "
+         "apps, its unfinished builds and its tenant images. `confirm` must be its name. "
+         "`dry_run: true` deletes nothing and lists what would be destroyed, with counts."},
     };
     const auto found = descriptions.find(operation);
     return found == descriptions.end() ? std::string() : found->second;
@@ -4918,6 +4921,68 @@ void register_agent_bus_capabilities(Registry& registry) {
         }});
 }
 
+// delete_workspace (lake#514, docs/api/workspaces.md#deletion): the dry run lists what would be
+// destroyed; otherwise one store transaction deletes the workspace and what it holds, and
+// finish_workspace_deletion removes what lives outside PostgreSQL. A repeated call for a deleted
+// workspace resumes an unfinished deletion and answers the recorded one.
+static ApiResult delete_workspace_cascading(const json& input, ApiContext& context,
+                                            const control::Workspace& row) {
+    const bool dry_run = input.value("dry_run", false);
+    const bool confirmed = input.contains("confirm") && input.at("confirm") == row.name;
+    if (!confirmed && (!dry_run || input.contains("confirm"))) {
+        return ApiResult::failure("invalid_input", "confirm must match the workspace name",
+                                  "/confirm");
+    }
+    context.audit_kind = dry_run ? "workspace.delete.plan" : "workspace.delete";
+    context.audit_object = "workspace/" + row.id;
+    context.audit_details = {{"workspace_id", row.id}, {"workspace_name", row.name}};
+    if (dry_run) {
+        if (row.desired == "deleted") {
+            const auto recorded = context.store->get_workspace_deletion(row.id);
+            if (!recorded) {
+                return ApiResult::failure("conflict", "the workspace is deleted");
+            }
+            json value = workspace_deletion_json(*recorded);
+            value["dry_run"] = true;
+            return ApiResult::success(std::move(value));
+        }
+        auto plan = workspace_deletion_plan(context, row);
+        if (!plan) {
+            return ApiResult::failure(plan.error().code, plan.error().message);
+        }
+        (*plan)["dry_run"] = true;
+        context.audit_details["counts"] = plan->at("counts");
+        return ApiResult::success(std::move(*plan));
+    }
+    control::WorkspaceDeletionRequest request{.workspace_id = row.id,
+                                              .requested_by = context.acting_identity};
+    if (row.desired != "deleted" && context.workspace_content &&
+        context.workspace_content->image_tags) {
+        for (const std::string& image : workspace_image_candidates(*context.store, row)) {
+            if (!context.workspace_content->image_tags(image).empty()) {
+                request.images.push_back(image);
+            }
+        }
+    }
+    const auto deletion = context.store->delete_workspace_cascade(request);
+    if (!deletion) {
+        return store_failure(deletion.error());
+    }
+    // What lives outside PostgreSQL. A failure leaves the deletion pending for the owner loop; the
+    // workspace is deleted either way, so the call answers success with `completed: false`.
+    const auto finished = finish_workspace_deletion(context, *deletion);
+    const auto current = context.store->get_workspace_deletion(row.id);
+    const auto updated = context.store->get_workspace(row.id);
+    json value = control::workspace_json(updated ? *updated : row);
+    value["deletion"] = workspace_deletion_json(current ? *current : *deletion);
+    if (!finished) {
+        value["deletion"]["pending"] = finished.error();
+    }
+    context.audit_details["counts"] = value["deletion"]["counts"];
+    context.audit_details["completed"] = value["deletion"]["completed"];
+    return ApiResult::success(std::move(value));
+}
+
 void register_workspace_capabilities(Registry& registry) {
     for (const std::string operation : {"list_workspaces", "get_workspace", "create_workspace",
                                         "update_workspace", "delete_workspace"}) {
@@ -4941,7 +5006,7 @@ void register_workspace_capabilities(Registry& registry) {
         }
         if (deleting) {
             properties["confirm"] = {{"type", "string"}};
-            required.push_back("confirm");
+            properties["dry_run"] = {{"type", "boolean"}};
         }
         registry.add(Capability{
             .name = operation,
@@ -4993,38 +5058,18 @@ void register_workspace_capabilities(Registry& registry) {
                 if (operation == "get_workspace") {
                     return ApiResult::success(control::workspace_json(*row));
                 }
-                control::WorkspacePatch patch;
                 if (deleting) {
-                    if (input.at("confirm") != row->name) {
-                        return ApiResult::failure("invalid_input", "confirm must match the workspace name", "/confirm");
-                    }
-                    // A repository belongs to one workspace and never moves (lake#315): a
-                    // workspace that still holds a live repository is not deleted under it.
-                    const auto repositories =
-                        context.store->list_repositories(row->customer_id, 1'000, row->id);
-                    if (!repositories) {
-                        return store_failure(repositories.error());
-                    }
-                    const auto live = std::ranges::count_if(
-                        *repositories, [](const auto& repository) { return repository.deleted_at.empty(); });
-                    if (live > 0) {
-                        return ApiResult::failure(
-                            "conflict",
-                            std::format("workspace {} still holds {} repositor{}; delete {} first",
-                                        row->name, live, live == 1 ? "y" : "ies",
-                                        live == 1 ? "it" : "them"));
-                    }
-                    patch.desired = "deleted";
-                } else {
-                    if (input.contains("name")) {
-                        patch.name = input.at("name").get<std::string>();
-                    }
-                    if (input.contains("environment")) {
-                        patch.environment = input.at("environment").get<std::string>();
-                    }
-                    if (input.contains("desired")) {
-                        patch.desired = input.at("desired").get<std::string>();
-                    }
+                    return delete_workspace_cascading(input, context, *row);
+                }
+                control::WorkspacePatch patch;
+                if (input.contains("name")) {
+                    patch.name = input.at("name").get<std::string>();
+                }
+                if (input.contains("environment")) {
+                    patch.environment = input.at("environment").get<std::string>();
+                }
+                if (input.contains("desired")) {
+                    patch.desired = input.at("desired").get<std::string>();
                 }
                 const auto updated = context.store->update_workspace(row->id, patch);
                 return updated ? ApiResult::success(control::workspace_json(*updated)) : store_failure(updated.error());

@@ -343,6 +343,21 @@ repository moves to its workspace, and the unused copy of liquid's refs goes
 The operator's vendored schema test lists `CREATE TABLE IF NOT EXISTS repository_refs` among the
 statements the schema must contain; that entry goes when the operator vendors this schema.
 
+## Workspace deletions (migration `0065_workspace_deletions`)
+
+Decision 54 S12 (lake#514): deleting a workspace cascades to its repositories, apps, unfinished
+builds and tenant images ([workspaces.md](../api/workspaces.md#deletion)).
+
+| Table or change | Purpose |
+|---|---|
+| `workspace_deletions` | One row per workspace deleted since this migration, written in the transaction that sets the workspace's desired state to `deleted`: `customer_id`, `workspace_name`, `requested_by`, `requested_at`, the destroyed `repositories`, `apps`, `builds` and `images` (JSON arrays of `{id, name, state}`), and `completed_at`, set once lake has removed the tenant image tags and search segments and recorded the central audit events. A row without `completed_at` is resumed by lake's owner loop. |
+| `workspace_deletions_pending_idx` | The deletions lake has not completed, oldest first. |
+| `workspace_deletions_guard` | Guard table for migration `0065_workspace_deletions`. |
+
+The operator does not read the table: it still deletes a workspace's Zetta from `workspaces.desired`.
+A workspace deleted before the migration has no row, and repeating `delete_workspace` for it is a
+`conflict`, as before.
+
 ## Identity exit scenario (migration `0020_identity_exit`)
 
 | Table or change | Purpose |

@@ -123,6 +123,12 @@ repository's description is a sealed record in `lake_repositories` of its worksp
 workspace) and the repository pages; the synchronous `Registry::call` answers the routing row alone.
 `repository_refs` is dropped; `refs` answers from liquid alone. The `description` column stays until
 the copy is verified on dev. See `docs/api/repositories.md#where-the-description-lives-lake315-part-2`.
+Deleting a workspace cascades (decision 54 S12, lake#514, migration `0065`): one transaction
+tombstones its repositories (live and retained) with their retention ended, deletes its apps,
+cancels its unfinished builds and records the deletion in `workspace_deletions`; lake then untags
+its tenant images, drops search segments and records one central audit event per destroyed object,
+and the owner loop resumes a deletion left unfinished. `delete_workspace {dry_run: true}` and the
+`/workspaces` confirmation list what goes, with counts. See `docs/api/workspaces.md#deletion`.
 
 ## Historical status — superseded 2026-09-08
 
