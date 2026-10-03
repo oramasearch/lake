@@ -140,13 +140,17 @@ importance, parallel-coordinate rows and the ranked leaderboard with confidence 
 {"best_trial":null,"optimization_history":[],"parameter_importances":[],"parallel_coordinates":[],"leaderboard":[]}
 ```
 
+`get_run_metrics`, `stop_experiment_trial` and `promote_trial` name the run `run_id`, as every
+capability does; `run` is still accepted as a deprecated alias ([naming.md](naming.md)). Their
+answers keep the engine's `run` field.
+
 `get_run_metrics` (MCP: `get_run_metrics`) accepts optional metric `names`, `from_step` and
 `max_points` (4–10000). Omit those fields for all recorded series. Each point carries its original
 step, value and wall time. Engine read-time compaction preserves extrema. Artifacts are closed
 typed data for confusion matrices, ROC/PR curves, calibration, feature importance and predictions.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","run":"run-id","names":["train.loss"],"max_points":500}
+{"customer_id":"space-id","workspace_id":"workspace-id","run_id":"run-id","names":["train.loss"],"max_points":500}
 ```
 ```json
 {"run":"run-id","params":{"learning_rate":0.1},"summary":{"train.loss":{"final":0.4,"final_step":10,"best":0.4,"best_step":10,"direction":"min"}},"series":[{"name":"train.loss","points":[{"step":10,"value":0.4,"time":"2026-09-28T18:20:11Z"}]}],"artifacts":[]}
@@ -224,7 +228,7 @@ new `id`, `status:"running"`, initially empty `trials`, zero `spent_cost`, times
 `stop_experiment_trial` (MCP: `stop_experiment_trial`) stops one trial without stopping the study.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","study":"study-id","run":"run-id","confirm":true}
+{"customer_id":"space-id","workspace_id":"workspace-id","study":"study-id","run_id":"run-id","confirm":true}
 ```
 ```json
 {"study":"study-id","run":"run-id","state":"failed"}
@@ -235,7 +239,7 @@ trial. It does not copy model weights. The page displays the exact study/run and
 confirmation before making the request.
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","study":"study-id","run":"run-id","confirm":true}
+{"customer_id":"space-id","workspace_id":"workspace-id","study":"study-id","run_id":"run-id","confirm":true}
 ```
 ```json
 {"study":"study-id","run":"run-id","model":"model-id","project":"retention"}

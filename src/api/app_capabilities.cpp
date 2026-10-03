@@ -391,7 +391,8 @@ void register_application_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_applications",
         .title = "List applications",
-        .description = "List applications owned by one customer.",
+        .description =
+            "List the applications a space has registered to sign its own users in through lake.",
         .input_schema = application_list_input,
         .output_schema = items_schema(),
         .kind = CapabilityKind::Read,
@@ -569,7 +570,8 @@ void register_application_capabilities(Registry& registry) {
         }});
     registry.add(Capability{.name = "get_application",
                             .title = "Get application",
-                            .description = "Read one application registration.",
+                            .description = "Read one application registered to sign its own users "
+                                           "in through lake, with its settings.",
                             .input_schema =
                                 input_schema({{"id", {{"type", "string"}}}}, json::array({"id"})),
                             .output_schema = object_schema(),
@@ -878,7 +880,8 @@ void register_application_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "delete_application_organization",
         .title = "Delete application organization",
-        .description = "Delete one application-owned organization.",
+        .description = "Delete an organization your application manages for its own users; its "
+                       "memberships go with it.",
         .input_schema = input_schema(
             {{"application_id", {{"type", "string"}}}, {"organization_id", {{"type", "string"}}}},
             json::array({"application_id", "organization_id"})),

@@ -21,7 +21,13 @@ the session secret to its inline script.
 - `GET /metrics` uses the same resolution code: either the bearer or the UI's `lake_session`
   cookie. `GET /healthz` and `GET /readyz` are unauthenticated so Kubernetes can probe them.
 - Without a token configured, lake logs `"admin_token_set":"no"` in its JSON startup event and every guarded
-  capability answers `403 unauthorized`. There is no anonymous write path.
+  capability answers `401 unauthenticated`. There is no anonymous write path.
+- A guarded capability called without a credential lake accepts answers **401
+  `unauthenticated`** with `reason` `missing`, `invalid` or `expired`, a `help` link to
+  `/developer/mcp`, and a `WWW-Authenticate: Bearer` challenge; a valid credential that does not
+  grant the call answers **403 `unauthorized`** ([errors.md](errors.md)). `context_for` records why
+  a presented bearer or cookie was refused (`ApiContext::credential_rejection`); the stores tell
+  `expired` apart only after the secret's hash matches, so guessing a selector reveals nothing.
 - `GET /`, `/style.css`, `/v1/openapi.json` and MCP `initialize` / `tools/list` need no token.
 
 Retrieve it for a Lake:
@@ -91,3 +97,20 @@ REST and MCP. The reproducible measurements are in
 
 When changing this format, version the prefix and migration together, preserve the unique lookup
 and constant-time digest comparison, and rerun both the scaling and lifecycle regressions.
+
+## Scopes
+
+A token's `scopes` (`create_token`) say what it may call. A scope is one of:
+
+| Scope | Grants |
+|---|---|
+| a capability name, such as `search_index` or `workspace_query` | that capability, on the objects the person's grants reach |
+| `*` | every capability (not allowed on a token that never expires) |
+| `registry_pull` | pulling images from the OCI registry with `docker login` |
+
+`GET /v1/openapi.json` lists the capability names (`operationId`). Any other string is refused
+with `invalid_input` at `/scopes/<index>` (lake#450): an unknown scope would grant nothing, and
+storing it would hide a typo. A token can never hold a scope its issuing credential lacks
+(`unauthorized`). Agent-task credentials carry workspace action names the registry does not list
+(`create_study`, `compile_intent`); lake issues those itself and `create_token` never does.
+

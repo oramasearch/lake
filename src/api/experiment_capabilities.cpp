@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <regex>
 #include <set>
 
@@ -40,15 +41,22 @@ std::expected<std::string, ApiError> customer_object(const json& input, ApiConte
     return found->id;
 }
 
-bool constraints(const json& schema, const json& value) {
+// On a violation `at` is the JSON pointer of the value outside its bounds (lake#450).
+bool constraints(const json& schema,
+                 const json& value,
+                 std::string& at,
+                 const std::string& here = {}) {
     if (value.is_null()) {
+        at = at.empty() ? here : at;
         return false;
     }
     if (schema.contains("const") && value != schema.at("const")) {
+        at = at.empty() ? here : at;
         return false;
     }
     if (schema.contains("enum") &&
         std::ranges::find(schema.at("enum"), value) == schema.at("enum").end()) {
+        at = at.empty() ? here : at;
         return false;
     }
     if (value.is_number()) {
@@ -56,6 +64,7 @@ bool constraints(const json& schema, const json& value) {
         if (!std::isfinite(number) ||
             (schema.contains("minimum") && number < schema.at("minimum").get<double>()) ||
             (schema.contains("maximum") && number > schema.at("maximum").get<double>())) {
+            at = at.empty() ? here : at;
             return false;
         }
     }
@@ -65,6 +74,7 @@ bool constraints(const json& schema, const json& value) {
             string.size() > schema.value("maxLength", std::numeric_limits<std::size_t>::max()) ||
             (schema.contains("pattern") &&
              !std::regex_match(string, std::regex(schema.at("pattern").get<std::string>())))) {
+            at = at.empty() ? here : at;
             return false;
         }
     }
@@ -73,17 +83,19 @@ bool constraints(const json& schema, const json& value) {
             value.size() > schema.value("maxItems", std::numeric_limits<std::size_t>::max()) ||
             (schema.value("uniqueItems", false) &&
              std::set<json>(value.begin(), value.end()).size() != value.size())) {
+            at = at.empty() ? here : at;
             return false;
         }
-        for (const auto& child : value) {
-            if (!constraints(schema.at("items"), child)) {
+        for (std::size_t index = 0; index < value.size(); ++index) {
+            if (!constraints(
+                    schema.at("items"), value[index], at, here + "/" + std::to_string(index))) {
                 return false;
             }
         }
     }
     if (value.is_object()) {
         for (const auto& [key, child] : value.items()) {
-            if (!constraints(schema.at("properties").at(key), child)) {
+            if (!constraints(schema.at("properties").at(key), child, at, here + "/" + key)) {
                 return false;
             }
         }
@@ -113,10 +125,11 @@ Task proxy(ApiContext& context, const json& input, std::string name, json args) 
     if (!context.workspaces) {
         co_return ApiResult::failure("store_unavailable", "workspaces are not configured");
     }
+    const json sent = args;
     const auto result = control::settled(co_await call_workspace(
         context, input.at("customer_id"), name, workspace_uses_get(name), std::move(args)));
     if (!result) {
-        co_return ApiResult::failure(result.error().code, result.error().message);
+        co_return workspace_failure(result.error(), sent, "", {{"run", "run_id"}});
     }
     co_return ApiResult::success(*result);
 }
@@ -266,6 +279,11 @@ Task dispatch(ApiContext& context, const json& input, const std::string& name,
     args.erase("customer_id");
     args.erase("workspace_id");
     args.erase("confirm");
+    // Lake names a run `run_id` (lake#450); the engine's experiment calls take `run`.
+    if (args.contains("run_id")) {
+        args["run"] = std::move(args["run_id"]);
+        args.erase("run_id");
+    }
     if (name == "start_study" && args.at("objective").at("validation_split") == "test") {
         co_return ApiResult::failure("invalid_input", "model selection requires a validation split",
                                     "/objective/validation_split");
@@ -275,6 +293,47 @@ Task dispatch(ApiContext& context, const json& input, const std::string& name,
         result.value["series"] = json::array();
     }
     co_return result;
+}
+
+// What each experiment capability does for the person calling it (lake#450).
+std::string experiment_description(const std::string& name) {
+    static const std::map<std::string, std::string> descriptions = {
+        {"list_experiments",
+         "List the training studies and stand-alone runs in a workspace, optionally only one "
+         "project's or those in one state, to see what has been tried."},
+        {"get_experiment_study",
+         "Read one training study: its search space, budgets, every trial with its score, and "
+         "the model it promoted."},
+        {"list_experiment_trials",
+         "List one study's trials with their parameters, state and objective, to see which "
+         "settings did best."},
+        {"get_experiment_analysis",
+         "Read what a study learned: the best trial, the optimization history, which "
+         "parameters mattered, and a leaderboard with confidence bounds."},
+        {"get_run_metrics",
+         "Read one run's metric curves, parameters, summary and charts (confusion matrix, "
+         "ROC, calibration) to judge how it trained."},
+        {"compare_runs",
+         "Compare two to eight runs metric by metric on aligned steps; leave `names` out to "
+         "compare every metric they share."},
+        {"start_study",
+         "Start a training study that tries settings within your budgets and keeps the best "
+         "model; needs `confirm: true` from the person."},
+        {"stop_study",
+         "Stop a running study, keeping the trials it finished; needs `confirm: true` from the "
+         "person."},
+        {"stop_experiment_trial",
+         "Stop one running trial of a study, marking it failed; needs `confirm: true` from the "
+         "person."},
+        {"promote_trial",
+         "Make one trial's model the study's result, published to the project's models; needs "
+         "space administration and `confirm: true`."},
+        {"tail_experiment_events",
+         "Wait for and read the live progress events of a study or run, from a sequence "
+         "number, without consuming them."},
+    };
+    const auto found = descriptions.find(name);
+    return found == descriptions.end() ? std::string() : found->second;
 }
 
 void add(Registry& registry, std::string name, std::string upstream, json properties,
@@ -288,12 +347,12 @@ void add(Registry& registry, std::string name, std::string upstream, json proper
         properties["confirm"] = {{"type", "boolean"}, {"const", true}};
         required.push_back("confirm");
     }
+    const bool names_run = properties.contains("run_id");
     const auto schema = object(std::move(properties), std::move(required));
     registry.add(Capability{
         .name = name,
         .title = name,
-        .description = read ? "Read training experiments in one space; distinct from solution holdouts."
-                            : "Change a training study after explicit confirmation in this space.",
+        .description = experiment_description(name),
         .input_schema = schema,
         .output_schema = std::move(output),
         .kind = read ? CapabilityKind::Read : CapabilityKind::Action,
@@ -304,8 +363,11 @@ void add(Registry& registry, std::string name, std::string upstream, json proper
         .authorizes_candidates = name.starts_with("list_"),
         .resolves_operator_audit_target = true,
         .async_handler = [name, upstream, schema](const json& input, ApiContext& context) -> Task {
-            if (!constraints(schema, input)) {
-                co_return ApiResult::failure("invalid_input", "experiment arguments are outside their bounds");
+            if (std::string at; !constraints(schema, input, at)) {
+                co_return ApiResult::failure("invalid_input",
+                                             (at.empty() ? std::string("input") : at.substr(1)) +
+                                                 " is outside its bounds",
+                                             at);
             }
             if (name.starts_with("list_")) {
                 const auto authorized = authorize_list(input, context);
@@ -315,13 +377,16 @@ void add(Registry& registry, std::string name, std::string upstream, json proper
             }
             context.audit_kind = "experiment." + name;
             context.audit_details = {{"customer_id", input.at("customer_id")}};
-            for (const auto* key : {"study", "run", "runs", "kind", "id", "confirm", "name"}) {
+            for (const auto* key : {"study", "run_id", "runs", "kind", "id", "confirm", "name"}) {
                 if (input.contains(key)) {
                     context.audit_details[key] = input.at(key);
                 }
             }
             co_return completed(co_await dispatch(context, input, name, upstream));
-        }});
+        },
+        .input_aliases = names_run
+                             ? std::vector<std::pair<std::string, std::string>>{{"run", "run_id"}}
+                             : std::vector<std::pair<std::string, std::string>>{}});
 }
 } // namespace
 
@@ -337,9 +402,15 @@ void register_experiment_capabilities(Registry& registry) {
         {"study"}, analysis());
     auto names = array({{"type", "string"}, {"pattern", "^[A-Za-z0-9_.-]{1,128}$"}});
     names["uniqueItems"] = true;
-    add(registry, "get_run_metrics", "get_run_metrics", {{"run", identifier()}, {"names", names},
-        {"from_step", integer(0, 9007199254740991)}, {"max_points", integer(4, 10000)}},
-        {"run"}, metrics());
+    add(registry,
+        "get_run_metrics",
+        "get_run_metrics",
+        {{"run_id", identifier()},
+         {"names", names},
+         {"from_step", integer(0, 9007199254740991)},
+         {"max_points", integer(4, 10000)}},
+        {"run_id"},
+        metrics());
     auto runs = array(identifier());
     runs.update({{"minItems", 2}, {"maxItems", 8}, {"uniqueItems", true}});
     names["minItems"] = 1;
@@ -352,12 +423,25 @@ void register_experiment_capabilities(Registry& registry) {
     add(registry, "stop_study", "stop_study", {{"study", identifier()}}, {"study"},
         object({{"study", identifier()}, {"status", choice({"stopped"})}, {"reason", text()}},
         {"study", "status", "reason"}), "write");
-    add(registry, "stop_experiment_trial", "stop_trial", {{"study", identifier()},
-        {"run", identifier()}}, {"study", "run"}, object({{"study", identifier()},
-        {"run", identifier()}, {"state", choice({"failed"})}}, {"study", "run", "state"}), "write");
-    add(registry, "promote_trial", "promote_trial", {{"study", identifier()}, {"run", identifier()}},
-        {"study", "run"}, object({{"study", identifier()}, {"run", identifier()},
-        {"model", identifier()}, {"project", text()}}, {"study", "run", "model", "project"}), "admin");
+    add(registry,
+        "stop_experiment_trial",
+        "stop_trial",
+        {{"study", identifier()}, {"run_id", identifier()}},
+        {"study", "run_id"},
+        object({{"study", identifier()}, {"run", identifier()}, {"state", choice({"failed"})}},
+               {"study", "run", "state"}),
+        "write");
+    add(registry,
+        "promote_trial",
+        "promote_trial",
+        {{"study", identifier()}, {"run_id", identifier()}},
+        {"study", "run_id"},
+        object({{"study", identifier()},
+                {"run", identifier()},
+                {"model", identifier()},
+                {"project", text()}},
+               {"study", "run", "model", "project"}),
+        "admin");
     add(registry, "tail_experiment_events", "receive_events", {{"kind", choice({"study", "run"})},
         {"id", identifier()}, {"from_sequence", integer(1, 9007199254740991)},
         {"max_events", integer(1, 1000)}, {"wait_ms", integer(0, 30000)}}, {"kind", "id"}, events());

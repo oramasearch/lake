@@ -1123,7 +1123,7 @@ void register_drive_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "diff_drive_versions",
         .title = "Diff drive versions",
-        .description = "Compare two text versions of one drive path.",
+        .description = "Show what changed in a drive file between two versions, line by line.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"repository_id", {{"type", "string"}}},

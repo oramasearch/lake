@@ -274,21 +274,23 @@ ApiResult import_repository(const json& input, ApiContext& context) {
 } // namespace
 
 void register_export_capabilities(Registry& registry) {
-    registry.add(Capability{.name = "export_repository",
-                            .title = "Export repository",
-                            .description = "Create a signed portable repository archive.",
-                            .input_schema = {{"type", "object"},
-                                             {"properties",
-                                              {{"repository_id", {{"type", "string"}}},
-                                               {"include_git", {{"type", "boolean"}}}}},
-                                             {"required", json::array({"repository_id"})},
-                                             {"additionalProperties", false}},
-                            .output_schema = {{"type", "object"}},
-                            .kind = CapabilityKind::Action,
-                            .object = "repository",
-                            .action = "read",
-                            .resolve_object = repository_object,
-                            .handler = export_repository});
+    registry.add(Capability{
+        .name = "export_repository",
+        .title = "Export repository",
+        .description = "Export a repository, with its history, reviews, issues and artifacts, as a "
+                       "signed archive you can download and import elsewhere.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"repository_id", {{"type", "string"}}},
+                           {"include_git", {{"type", "boolean"}}}}},
+                         {"required", json::array({"repository_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "repository",
+        .action = "read",
+        .resolve_object = repository_object,
+        .handler = export_repository});
     registry.add(
         Capability{.name = "import_repository",
                    .title = "Import repository",

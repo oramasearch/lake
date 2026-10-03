@@ -205,7 +205,8 @@ void register_mount_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_secret_mounts",
         .title = "List secret mounts",
-        .description = "List only mounts readable by the caller.",
+        .description =
+            "List the secret mounts you may read in a space, to find where a secret lives.",
         .input_schema = input_schema({{"customer_id", {{"type", "string"}}},
                                       {"organization_id", {{"type", "string"}}},
                                       {"limit", {{"type", "integer"}}}}),
@@ -261,7 +262,7 @@ void register_mount_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "get_secret_mount",
         .title = "Get secret mount",
-        .description = "Read one secret mount.",
+        .description = "Read one secret mount's settings, never the secrets stored in it.",
         .input_schema =
             input_schema({{"mount_id", {{"type", "string"}}}}, json::array({"mount_id"})),
         .output_schema = object_schema(),
@@ -441,28 +442,30 @@ void register_dynamic_secret_capabilities(Registry& registry) {
             return ApiResult::success(
                 {{"lease", control::to_json(issued->lease)}, {"value", issued->value}});
         }});
-    registry.add(
-        Capability{.name = "renew_dynamic_secret",
-                   .title = "Renew dynamic secret",
-                   .description = "Extend an active dynamic-secret lease.",
-                   .input_schema = input_schema({{"lease_id", {{"type", "string"}}},
-                                                 {"lifetime_seconds", {{"type", "integer"}}}},
-                                                json::array({"lease_id"})),
-                   .output_schema = object_schema(),
-                   .kind = CapabilityKind::Action,
-                   .object = "secret_mount",
-                   .action = "write",
-                   .resolve_object = dynamic_lease_object,
-                   .resolves_operator_audit_target = true,
-                   .handler = [](const json& input, ApiContext& context) {
-                       context.audit_details["operation"] = "renew";
-                       return one_result(context.store->renew_dynamic_secret_lease(
-                           input.at("lease_id"), input.value("lifetime_seconds", 300)));
-                   }});
+    registry.add(Capability{
+        .name = "renew_dynamic_secret",
+        .title = "Renew dynamic secret",
+        .description =
+            "Keep a generated credential working longer by renewing its lease before it expires.",
+        .input_schema = input_schema(
+            {{"lease_id", {{"type", "string"}}}, {"lifetime_seconds", {{"type", "integer"}}}},
+            json::array({"lease_id"})),
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "secret_mount",
+        .action = "write",
+        .resolve_object = dynamic_lease_object,
+        .resolves_operator_audit_target = true,
+        .handler = [](const json& input, ApiContext& context) {
+            context.audit_details["operation"] = "renew";
+            return one_result(context.store->renew_dynamic_secret_lease(
+                input.at("lease_id"), input.value("lifetime_seconds", 300)));
+        }});
     registry.add(Capability{
         .name = "revoke_dynamic_secret",
         .title = "Revoke dynamic secret",
-        .description = "Revoke a dynamic-secret lease immediately.",
+        .description =
+            "Revoke a generated credential now, so it stops working everywhere it was used.",
         .input_schema =
             input_schema({{"lease_id", {{"type", "string"}}}}, json::array({"lease_id"})),
         .output_schema = object_schema(),

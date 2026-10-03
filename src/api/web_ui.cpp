@@ -3242,7 +3242,7 @@ std::string index_content(const WorkspacePage& page) {
     // Call it from outside.
     const std::string origin = page.origin.empty() ? "https://lake.oramadev.net" : page.origin;
     const std::string url =
-        std::format("{}/v1/search_index?customer_id={}&workspace_id={}&index={}&query=",
+        std::format("{}/v1/search_index?customer_id={}&workspace_id={}&index_id={}&query=",
                     origin,
                     url_component(page.customer_id),
                     url_component(example_workspace(page)),
@@ -3265,7 +3265,7 @@ std::string index_content(const WorkspacePage& page) {
         "res.json(); "
         "// value.hits: [{{ id, score }}]</code></pre><pre><code># Python\nimport os, requests\n"
         "r = requests.get(\"{}/v1/search_index\", params={{\"customer_id\": \"{}\", "
-        "\"workspace_id\": \"{}\", \"index\": \"{}\", \"query\": \"renewal risk\"}},\n"
+        "\"workspace_id\": \"{}\", \"index_id\": \"{}\", \"query\": \"renewal risk\"}},\n"
         "    headers={{\"Authorization\": f\"Bearer "
         "{{os.environ['LAKE_SEARCH_KEY']}}\"}})\nhits = "
         "r.json()[\"value\"][\"hits\"]</code></pre></li>"
@@ -5510,7 +5510,7 @@ std::string workspace_content(const WorkspacePage& page) {
                         "<h3>{} <small class=\"muted\"><code>{}</code></small></h3><pre><code>"
                         "curl -s {}/v1/predict \\\n  -H \"Authorization: Bearer $LAKE_KEY\" "
                         "-H 'Content-Type: application/json' \\\n  -d '{{\"customer_id\": \"{}\", "
-                        "\"workspace_id\": \"{}\", \"model\": \"{}\", \"rows\": [{{{}}}]}}'"
+                        "\"workspace_id\": \"{}\", \"model_id\": \"{}\", \"rows\": [{{{}}}]}}'"
                         "</code></pre>",
                         web_ui_escape(json_text(model, "name")),
                         web_ui_escape(id.substr(0, 8)),

@@ -423,31 +423,33 @@ Capability dataset_capability() {
     return Capability{
         .name = "get_dataset",
         .title = "Get dataset",
-        .description = "Read a repository dataset revision, or a workspace dataset by the "
-                       "<database>/<dataset> id list_datasets returns (<database>.<dataset> "
-                       "and a bare name in `datasets` are read too).",
-        .input_schema =
-            {{"type", "object"},
-             {"properties",
-              {{"id", {{"type", "string"}}},
-               {"revision", {{"type", "string"}}},
-               {"customer_id", {{"type", "string"}}},
-               {"workspace_id", {{"type", "string"}}}}},
-             {"required", json::array({"id"})},
-             {"additionalProperties", false}},
+        .description = "Read a dataset: with `revision`, a dataset repository's files, storage "
+                       "savings and provenance; without, a dataset of the workspace named by "
+                       "`customer_id` and `workspace_id` (its columns and rows), by the "
+                       "<database>/<dataset> id list_datasets returns (<database>.<dataset> and a "
+                       "bare name in `datasets` are read too).",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}},
+                           {"revision", {{"type", "string"}}},
+                           {"customer_id", {{"type", "string"}}},
+                           {"workspace_id", {{"type", "string"}}}}},
+                         {"required", json::array({"id"})},
+                         {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
         .object = "dataset",
         .action = "read",
         .resolve_object = dataset_object,
         .allows_anonymous_public_read = true,
-        .handler = [](const json& input, ApiContext& context) {
-            if (!input.contains("revision")) {
-                return ApiResult::failure(
-                    "store_error", "workspace datasets require asynchronous dispatch");
-            }
-            return repository_info(input, context, "dataset");
-        },
+        .handler =
+            [](const json& input, ApiContext& context) {
+                if (!input.contains("revision")) {
+                    return ApiResult::failure("store_error",
+                                              "workspace datasets require asynchronous dispatch");
+                }
+                return repository_info(input, context, "dataset");
+            },
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (input.contains("revision")) {
@@ -481,7 +483,11 @@ Capability dataset_capability() {
                 co_return ApiResult::failure("store_unavailable", called.error().message);
             }
             if (!*called) {
-                co_return ApiResult::failure(called->error().code, called->error().message);
+                auto failed = workspace_failure(called->error(), input);
+                if (failed.error.code == "not_found" && failed.error.path.empty()) {
+                    failed.error.path = "/id";
+                }
+                co_return failed;
             }
             json value = std::move(**called);
             value["id"] = datasets::id_of(database, dataset);
@@ -491,6 +497,78 @@ Capability dataset_capability() {
             context.audit_object = "customer/" + *customer_id + "/workspace";
             context.audit_details = {{"capability", "get_dataset"}};
             co_return ApiResult::success(std::move(value));
+        }};
+}
+
+// get_model and get_dataset each name one concept on every surface (lake#450): with `revision`,
+// a model or dataset repository revision; without, the trained model or dataset of a workspace,
+// read from its engine. A workspace model is the same record workspace_query get_model answers.
+Capability model_capability() {
+    return Capability{
+        .name = "get_model",
+        .title = "Get model",
+        .description = "Read a model: with `revision`, a model repository's files, storage "
+                       "savings and verified provenance; without, a trained model of the "
+                       "workspace named by `customer_id` and `workspace_id` (its measures, "
+                       "feature columns and whether it is published), by the id Ship → Models "
+                       "shows.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"id", {{"type", "string"}}},
+                           {"revision", {{"type", "string"}}},
+                           {"customer_id", {{"type", "string"}}},
+                           {"workspace_id", {{"type", "string"}}}}},
+                         {"required", json::array({"id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "model",
+        .action = "read",
+        .resolve_object = dataset_object,
+        .allows_anonymous_public_read = true,
+        .handler =
+            [](const json& input, ApiContext& context) {
+                if (!input.contains("revision")) {
+                    return ApiResult::failure("store_error",
+                                              "workspace models require asynchronous dispatch");
+                }
+                return repository_info(input, context, "model");
+            },
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (input.contains("revision")) {
+                co_return repository_info(input, context, "model");
+            }
+            if (!context.workspaces) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "workspaces are not configured on this lake");
+            }
+            const auto customer_id = workspace_dataset_customer(input, context);
+            if (!customer_id) {
+                co_return ApiResult::failure(customer_id.error().code,
+                                             customer_id.error().message,
+                                             customer_id.error().path);
+            }
+            const std::string id = input.at("id");
+            auto called = co_await call_workspace(
+                context, *customer_id, "get_model", true, {{"model_id", id}});
+            if (!called) {
+                co_return ApiResult::failure("store_unavailable", called.error().message);
+            }
+            if (!*called) {
+                if (called->error().code == "not_found") {
+                    co_return ApiResult::failure(
+                        "not_found",
+                        "no model " + id + " in this workspace (use its id from Ship → Models)",
+                        "/id");
+                }
+                co_return workspace_failure(called->error(), input);
+            }
+            context.audit_customer_id = *customer_id;
+            context.audit_kind = "workspace.query";
+            context.audit_object = "customer/" + *customer_id + "/workspace";
+            context.audit_details = {{"capability", "get_model"}};
+            co_return ApiResult::success(std::move(**called));
         }};
 }
 
@@ -531,11 +609,7 @@ Capability write_capability(std::string name,
 } // namespace
 
 void register_model_capabilities(Registry& registry) {
-    registry.add(read_capability("get_model",
-                                 "Get model",
-                                 "Read model files, storage savings, and verified provenance.",
-                                 false,
-                                 "model"));
+    registry.add(model_capability());
     registry.add(dataset_capability());
     registry.add(read_capability("resolve_model_file",
                                  "Resolve model file",

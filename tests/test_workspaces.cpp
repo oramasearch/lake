@@ -4497,3 +4497,243 @@ TEST(AgentRuns, EachLibraryAgentHasItsOwnBusCredential) {
     EXPECT_TRUE(lake::control::read_agent_bus_tokens("").empty());
     std::filesystem::remove_all(dir);
 }
+
+// --- One name per concept, engine errors with paths, predict entity keys (lake#450) ------------
+
+namespace {
+
+struct ReadyWorkspace {
+    Workspaces w;
+    lake::api::Registry registry;
+    ReadyWorkspace() {
+        auto requested = w.run(w.service->request(w.customer_id));
+        const auto workspace = w.store->get_service(requested->service_id);
+        EXPECT_TRUE(w.store->set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+        w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+        lake::api::register_core_capabilities(registry, "test");
+    }
+    lake::api::ApiResult call(const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = w.store.get();
+        context.workspaces = w.service.get();
+        context.authorized = true;
+        context.acting_identity = "admin";
+        context.operator_credential = true;
+        context.request_id = lake::control::new_uuid_v4();
+        if (!input.contains("customer_id")) {
+            input["customer_id"] = w.customer_id;
+        }
+        if (!input.contains("workspace_id")) {
+            input["workspace_id"] = w.workspace_id();
+        }
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    }
+    json sent(const std::string& capability) const {
+        for (auto call = w.caller->calls.rbegin(); call != w.caller->calls.rend(); ++call) {
+            if (call->first == capability) {
+                return call->second;
+            }
+        }
+        return nullptr;
+    }
+};
+
+} // namespace
+
+TEST(Workspaces, NamingEitherSpellingReachesTheEngineAsItTakesIt) {
+    ReadyWorkspace r;
+    r.w.caller->value = {{"ok", true}};
+    ASSERT_TRUE(
+        r.call("workspace_query", {{"capability", "get_run"}, {"input", {{"run", "r-1"}}}}).ok);
+    EXPECT_EQ(r.sent("get_run"), json({{"run_id", "r-1"}}));
+    ASSERT_TRUE(r.call("workspace_query",
+                       {{"capability", "get_run_metrics"}, {"input", {{"run_id", "r-1"}}}})
+                    .ok);
+    EXPECT_EQ(r.sent("get_run_metrics"), json({{"run", "r-1"}}));
+    ASSERT_TRUE(
+        r.call("workspace_query", {{"capability", "get_model"}, {"input", {{"model", "m-1"}}}}).ok);
+    EXPECT_EQ(r.sent("get_model"), json({{"model_id", "m-1"}}));
+    ASSERT_TRUE(
+        r.call("workspace_query", {{"capability", "get_index"}, {"input", {{"index", "i-1"}}}}).ok);
+    EXPECT_EQ(r.sent("get_index"), json({{"index_id", "i-1"}}));
+    // A dataset id as list_datasets answers it reads as the engine's database.table path.
+    ASSERT_TRUE(r.call("workspace_act",
+                       {{"capability", "score"},
+                        {"input", {{"model_id", "m-1"}, {"dataset_path", "crm/accounts"}}}})
+                    .ok);
+    EXPECT_EQ(r.sent("score"), json({{"model", "m-1"}, {"dataset_path", "crm.accounts"}}));
+}
+
+TEST(Workspaces, NamingExposeModelAnswersTheLakeCallNotTheEngineRoute) {
+    ReadyWorkspace r;
+    r.w.caller->answers["expose_model"] = {{"model_id", "m-1"},
+                                           {"name", "churn"},
+                                           {"exposed", true},
+                                           {"endpoint", "/v1/models/m-1/predict"}};
+    const auto exposed =
+        r.call("workspace_act", {{"capability", "expose_model"}, {"input", {{"model_id", "m-1"}}}});
+    ASSERT_TRUE(exposed.ok) << exposed.error.message;
+    EXPECT_EQ(r.sent("expose_model"), json({{"model", "m-1"}}));
+    EXPECT_FALSE(exposed.value.contains("endpoint")) << "lake does not serve the engine's route";
+    EXPECT_EQ(exposed.value["call"]["capability"], "predict");
+    EXPECT_EQ(exposed.value["call"]["method"], "POST");
+    EXPECT_EQ(exposed.value["call"]["path"], "/v1/predict");
+    EXPECT_EQ(exposed.value["call"]["input"]["model_id"], "m-1");
+    EXPECT_EQ(exposed.value["call"]["input"]["customer_id"], r.w.customer_id);
+    EXPECT_EQ(exposed.value["call"]["input"]["workspace_id"], r.w.workspace_id());
+
+    r.w.caller->answers["expose_index"] = {{"index_id", "i-1"},
+                                           {"table", "docs"},
+                                           {"exposed", true},
+                                           {"endpoint", "/v1/indexes/i-1/search"}};
+    const auto index =
+        r.call("workspace_act", {{"capability", "expose_index"}, {"input", {{"index", "i-1"}}}});
+    ASSERT_TRUE(index.ok) << index.error.message;
+    EXPECT_EQ(index.value["call"]["capability"], "search_index");
+    EXPECT_EQ(index.value["call"]["method"], "GET");
+    EXPECT_EQ(index.value["call"]["input"]["index_id"], "i-1");
+
+    r.w.caller->answers["unexpose_model"] = {
+        {"model_id", "m-1"}, {"exposed", false}, {"endpoint", "/v1/models/m-1/predict"}};
+    const auto withdrawn = r.call(
+        "workspace_act", {{"capability", "unexpose_model"}, {"input", {{"model_id", "m-1"}}}});
+    ASSERT_TRUE(withdrawn.ok);
+    EXPECT_FALSE(withdrawn.value.contains("call")) << "nothing to call once withdrawn";
+}
+
+TEST(Workspaces, NamingEngineRefusalsCarryThePathAndLakeCodes) {
+    ReadyWorkspace r;
+    r.w.caller->failure = lake::control::ZettaControlError{"not_found", "no model named 'm-9'"};
+    const auto missing =
+        r.call("workspace_act", {{"capability", "expose_model"}, {"input", {{"model_id", "m-9"}}}});
+    EXPECT_EQ(missing.error.code, "not_found");
+    EXPECT_EQ(missing.error.path, "/input/model_id") << "the field the caller sent";
+
+    r.w.caller->failure = lake::control::ZettaControlError{
+        "invalid_argument", "/format: instance not found in required enum"};
+    const auto format = r.call(
+        "workspace_act",
+        {{"capability", "upload_dataset"},
+         {"input",
+          {{"table_name", "t"}, {"format", "xml"}, {"content", "x"}, {"if_exists", "rename"}}}});
+    EXPECT_EQ(format.error.code, "invalid_input");
+    EXPECT_EQ(format.error.path, "/input/format");
+    EXPECT_EQ(format.error.message, "format: instance not found in required enum");
+
+    r.w.caller->failure =
+        lake::control::ZettaControlError{"engine_error", "required property 'project' not found"};
+    const auto required =
+        r.call("workspace_act", {{"capability", "approve_plan"}, {"input", json::object()}});
+    EXPECT_EQ(required.error.code, "invalid_input");
+    EXPECT_EQ(required.error.path, "/input/project");
+}
+
+TEST(Workspaces, NamingAWrongSpaceIsBlamedOnCustomerId) {
+    ReadyWorkspace r;
+    const auto other_user =
+        r.w.store->create_user({"taap:1:ed25519:other-space", "other-space@example.test", "Other"});
+    ASSERT_TRUE(other_user);
+    const auto other =
+        r.w.store->create_customer({"individual", other_user->id, "", "other-space"});
+    ASSERT_TRUE(other) << other.error().message;
+    const auto wrong = r.call(
+        "workspace_query",
+        {{"customer_id", other->id}, {"capability", "list_models"}, {"input", json::object()}});
+    EXPECT_EQ(wrong.error.code, "invalid_input");
+    EXPECT_EQ(wrong.error.path, "/customer_id");
+    const auto unknown = r.call("workspace_query",
+                                {{"workspace_id", "no-such-workspace"},
+                                 {"capability", "list_models"},
+                                 {"input", json::object()}});
+    EXPECT_EQ(unknown.error.path, "/workspace_id");
+}
+
+TEST(Workspaces, NamingPredictAnswersEachRowsOwnKey) {
+    ReadyWorkspace r;
+    r.w.caller->answers["get_model"] = {{"id", "m-1"}, {"exposed", true}};
+    r.w.caller->answers["score"] = {
+        {"ranked", json::array({{{"entity", 1}, {"risk", 0.9}}, {{"entity", 0}, {"risk", 0.2}}})},
+        {"rows_scored", 2}};
+    const json rows = json::array(
+        {{{"entity", "acct-a"}, {"tenure", 4}}, {{"entity", "acct-b"}, {"tenure", 40}}});
+    const auto scored = r.call("predict", {{"model_id", "m-1"}, {"rows", rows}});
+    ASSERT_TRUE(scored.ok) << scored.error.message;
+    EXPECT_EQ(scored.value["ranked"][0]["entity"], "acct-b");
+    EXPECT_EQ(scored.value["ranked"][0]["row"], 1);
+    EXPECT_EQ(scored.value["ranked"][1]["entity"], "acct-a");
+    EXPECT_EQ(scored.value["entity_column"], "entity");
+    EXPECT_EQ(r.sent("score")["model"], "m-1") << "the engine still takes `model`";
+
+    const json keyed = json::array({{{"account_id", 7}, {"tenure", 4}}, {{"tenure", 40}}});
+    const auto named =
+        r.call("predict", {{"model", "m-1"}, {"rows", keyed}, {"entity_column", "account_id"}});
+    ASSERT_TRUE(named.ok) << "the deprecated `model` still works: " << named.error.message;
+    EXPECT_FALSE(named.value["ranked"][0].contains("entity")) << "row 1 has no key";
+    EXPECT_EQ(named.value["ranked"][0]["row"], 1);
+    EXPECT_EQ(named.value["ranked"][1]["entity"], 7);
+
+    r.w.caller->failure = lake::control::ZettaControlError{
+        "engine_error", "score: row 1 has no 'tenure'; the model needs tenure"};
+    // get_model answers first, so only the score fails.
+    r.w.caller->before_reply = [&] {
+        if (r.w.caller->capability != "score") {
+            r.w.caller->failure.reset();
+        } else {
+            r.w.caller->failure = lake::control::ZettaControlError{
+                "engine_error", "score: row 1 has no 'tenure'; the model needs tenure"};
+        }
+    };
+    const auto refused = r.call("predict", {{"model_id", "m-1"}, {"rows", rows}});
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_EQ(refused.error.path, "/rows/1/tenure");
+}
+
+TEST(Workspaces, NamingCompareRunsWithoutNamesComparesEverySharedMetric) {
+    ReadyWorkspace r;
+    r.w.caller->answers["get_run_metrics"] = {
+        {"run", "r-1"},
+        {"params", json::object()},
+        {"summary", json::object()},
+        {"artifacts", json::array()},
+        {"series", json::array({{{"name", "loss"}, {"points", json::array()}}})}};
+    r.w.caller->answers["compare_runs"] = {{"runs", json::array({"r-1", "r-2"})},
+                                           {"metrics", json::array()}};
+    const auto compared = r.call(
+        "workspace_query",
+        {{"capability", "compare_runs"}, {"input", {{"runs", json::array({"r-1", "r-2"})}}}});
+    ASSERT_TRUE(compared.ok) << compared.error.message;
+    EXPECT_EQ(r.sent("compare_runs")["names"], json::array({"loss"}))
+        << "lake fills the metrics the runs recorded, as the top-level compare_runs does";
+}
+
+TEST(Workspaces, SqlNamesTheWordAMisspeltStatementStartsWith) {
+    ReadyWorkspace r;
+    const std::size_t before = r.w.caller->calls.size();
+    const auto typo = r.call("workspace_sql", {{"statement", "SELEC 1"}});
+    ASSERT_FALSE(typo.ok);
+    EXPECT_EQ(typo.error.code, "invalid_input");
+    EXPECT_EQ(typo.error.path, "/statement");
+    EXPECT_EQ(typo.error.message,
+              "the statement must start with SELECT or WITH (only reads run here); it starts "
+              "with 'SELEC'");
+    const auto empty = r.call("workspace_sql", {{"statement", "  ;"}});
+    EXPECT_EQ(empty.error.path, "/statement");
+    EXPECT_NE(empty.error.message.find("empty"), std::string::npos);
+    const auto write = r.call("workspace_sql", {{"statement", "DROP TABLE datasets.accounts"}});
+    EXPECT_NE(write.error.message.find("it starts with 'DROP'"), std::string::npos);
+    EXPECT_EQ(r.w.caller->calls.size(), before) << "the read-only guard still holds";
+}
+
+TEST(Workspaces, SqlDescriptionSaysWhatTheWorkspaceSqlNowAnswers) {
+    // zetta#1218: aggregates without GROUP BY, GROUP BY on text, unknown-column errors and parse
+    // positions. Agents write their queries from this description.
+    ReadyWorkspace r;
+    const std::string description = r.registry.find("workspace_sql")->description;
+    EXPECT_EQ(description.find("only with GROUP BY"), std::string::npos) << description;
+    EXPECT_NE(description.find("with or without GROUP BY"), std::string::npos);
+    EXPECT_NE(description.find("text included"), std::string::npos);
+    EXPECT_NE(description.find("A column no row carries is an error"), std::string::npos);
+    EXPECT_NE(description.find("position"), std::string::npos);
+}

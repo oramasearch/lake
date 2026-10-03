@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <expected>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -448,16 +449,43 @@ json map_anchor(json anchor, const json& hunks, const std::string& target_change
     return anchor;
 }
 
+// What each forge list and create capability does for the person calling it (lake#450).
+std::string forge_description(const std::string& name) {
+    static const std::map<std::string, std::string> descriptions = {
+        {"create_webhook",
+         "Register a webhook so a repository's events are POSTed to your URL, signed with your "
+         "secret, and every delivery is recorded."},
+        {"list_issues", "List a repository's issues, newest first, to see what is open or done."},
+        {"list_issue_comments", "List the discussion on a repository's issues, newest first."},
+        {"list_reviews", "List a repository's change reviews and their state, newest first."},
+        {"list_review_comments",
+         "List the comments left on a repository's change reviews, newest first."},
+        {"list_releases",
+         "List a repository's tagged releases with their verified build artifacts."},
+        {"list_webhooks", "List the webhooks registered on a repository, without their secrets."},
+        {"list_webhook_deliveries",
+         "List a repository's webhook delivery attempts with their status, to find failed ones "
+         "to retry."},
+        {"list_exports", "List a repository's signed portable exports, to download or check one."},
+        {"list_branch_protections",
+         "List the branch protection rules on a repository: who may write to which "
+         "references and what must pass first."},
+    };
+    const auto found = descriptions.find(name);
+    return found == descriptions.end() ? std::string() : found->second;
+}
+
 void add_create(Registry& registry,
                 std::string name,
                 std::string title,
                 std::string kind,
                 json properties,
                 json required) {
+    std::string description = forge_description(name);
     registry.add(
         Capability{.name = std::move(name),
                    .title = std::move(title),
-                   .description = "Create a durable forge record.",
+                   .description = std::move(description),
                    .input_schema = repository_input(std::move(properties), std::move(required)),
                    .output_schema = record_schema(),
                    .kind = CapabilityKind::Action,
@@ -479,10 +507,11 @@ void add_list(Registry& registry,
               std::string title,
               std::string kind,
               bool allows_anonymous_public_read = false) {
+    std::string description = forge_description(name);
     registry.add(Capability{
         .name = std::move(name),
         .title = std::move(title),
-        .description = "List durable forge records for one repository.",
+        .description = std::move(description),
         .input_schema = repository_input({{"limit", {{"type", "integer"}}}}, json::array()),
         .output_schema = records_schema(),
         .kind = CapabilityKind::Read,
@@ -655,26 +684,28 @@ evaluate_branch_protection(control::Store& store,
 }
 
 void register_forge_capabilities(Registry& registry) {
-    registry.add(Capability{.name = "create_issue",
-                            .title = "Create issue",
-                            .description = "Create an open Markdown issue.",
-                            .input_schema = repository_input({{"title", {{"type", "string"}}},
-                                                              {"body", {{"type", "string"}}},
-                                                              {"labels", {{"type", "array"}}},
-                                                              {"assignees", {{"type", "array"}}},
-                                                              {"references", {{"type", "array"}}}},
-                                                             json::array({"title"})),
-                            .output_schema = record_schema(),
-                            .kind = CapabilityKind::Action,
-                            .object = "repository",
-                            .action = "write",
-                            .resolve_object = repository_object,
-                            .handler = create_issue});
+    registry.add(Capability{
+        .name = "create_issue",
+        .title = "Create issue",
+        .description =
+            "Open an issue on a repository to track a bug or a task, written in Markdown.",
+        .input_schema = repository_input({{"title", {{"type", "string"}}},
+                                          {"body", {{"type", "string"}}},
+                                          {"labels", {{"type", "array"}}},
+                                          {"assignees", {{"type", "array"}}},
+                                          {"references", {{"type", "array"}}}},
+                                         json::array({"title"})),
+        .output_schema = record_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "repository",
+        .action = "write",
+        .resolve_object = repository_object,
+        .handler = create_issue});
     add_list(registry, "list_issues", "List issues", "issue", true);
     registry.add(
         Capability{.name = "update_issue",
                    .title = "Update issue",
-                   .description = "Update an issue's fields or lifecycle state.",
+                   .description = "Edit an issue's title, body or labels, or close and reopen it.",
                    .input_schema = repository_input(
                        {{"issue_id", {{"type", "string"}}},
                         {"title", {{"type", "string"}}},
@@ -690,18 +721,20 @@ void register_forge_capabilities(Registry& registry) {
                    .action = "write",
                    .resolve_object = repository_object,
                    .handler = update_issue});
-    registry.add(Capability{.name = "create_issue_comment",
-                            .title = "Comment on issue",
-                            .description = "Add Markdown discussion to an issue.",
-                            .input_schema = repository_input({{"issue_id", {{"type", "string"}}},
-                                                              {"body", {{"type", "string"}}}},
-                                                             json::array({"issue_id", "body"})),
-                            .output_schema = record_schema(),
-                            .kind = CapabilityKind::Action,
-                            .object = "repository",
-                            .action = "write",
-                            .resolve_object = repository_object,
-                            .handler = create_issue_comment});
+    registry.add(Capability{
+        .name = "create_issue_comment",
+        .title = "Comment on issue",
+        .description =
+            "Comment on a repository issue, in Markdown, so its discussion stays with it.",
+        .input_schema =
+            repository_input({{"issue_id", {{"type", "string"}}}, {"body", {{"type", "string"}}}},
+                             json::array({"issue_id", "body"})),
+        .output_schema = record_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "repository",
+        .action = "write",
+        .resolve_object = repository_object,
+        .handler = create_issue_comment});
     add_list(registry, "list_issue_comments", "List issue comments", "issue_comment", true);
 
     registry.add(Capability{.name = "create_review",
@@ -720,7 +753,8 @@ void register_forge_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "update_review",
         .title = "Update change review",
-        .description = "Set a review's lifecycle state.",
+        .description = "Approve a change review, ask for changes, or close it, which decides "
+                       "whether the change may land.",
         .input_schema = repository_input(
             {{"review_id", {{"type", "string"}}},
              {"state",

@@ -3172,6 +3172,14 @@ Result<Principal> InMemoryStore::context_for(const std::string& secret) {
         if (!session.revoked_at.empty() ||
             !identity_crypto::verify_secret(session_hash(session), secret))
             continue;
+        // Told apart from an unknown secret only once the secret matched (lake#450).
+        if (!session.expires_at.empty() &&
+            std::stoll(session.expires_at) <=
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count()) {
+            return std::unexpected(StoreError{"expired", "session has expired"});
+        }
         if (!active_session_lineage(sessions_, devices_, session)) {
             continue;
         }

@@ -172,6 +172,10 @@ rest_input_from_query(const Capability& capability,
     const nlohmann::json properties =
         capability.input_schema.value("properties", nlohmann::json::object());
     for (const auto& [key, value] : query) {
+        // `/v1/server_info?` and `?&limit=5` carry an empty key; it names no field (lake#450).
+        if (key.empty()) {
+            continue;
+        }
         input[key] =
             properties.contains(key) ? coerce(properties[key], value) : nlohmann::json(value);
     }
@@ -182,23 +186,9 @@ int rest_status(const ApiResult& result) {
     if (result.ok) {
         return 200;
     }
-    const std::string& code = result.error.code;
-    if (code == "invalid_input") {
-        return 400;
-    }
-    if (code == "unauthorized" || code == "mfa_required") {
-        return 403;
-    }
-    if (code == "not_found" || code == "unknown_capability") {
-        return 404;
-    }
-    if (code == "conflict" || code == "unrecoverable") {
-        return 409;
-    }
-    if (code == "store_unavailable") {
-        return 503;
-    }
-    return 500;
+    // One table (docs/api/errors.md); ApiResult::failure only ever produces a code in it.
+    const ErrorCode* code = find_error_code(result.error.code);
+    return code == nullptr ? 500 : code->status;
 }
 
 nlohmann::json rest_envelope(const ApiResult& result) {
@@ -283,6 +273,11 @@ openapi_document(const Registry& registry, std::string_view version, SchemaAudie
                             {"content",
                              {{"application/json",
                                {{"schema", success_envelope_schema(capability->output_schema)}}}}}};
+        if (capability->requires_auth) {
+            responses["401"] = error_response(
+                "no credential was accepted: `error.reason` is missing, invalid or expired and "
+                "`error.help` links to the page that makes a new key (docs/api/errors.md)");
+        }
         responses["4XX"] = error_response("the input, authorization, or addressed entity is at "
                                           "fault; the error carries the reason");
         responses["5XX"] = error_response("the control-plane store is unavailable or failed");
