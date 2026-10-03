@@ -101,3 +101,11 @@ one-shot copy (migration `0045_ask_message_workspaces`). `drive_share_links.cpp`
 link collection (lake#350); the stores keep only `drive_share_link_route` (the content-free route
 of a pre-move token) and `assign_legacy_drive_share_links`/`legacy_drive_share_links` for the copy
 (migration `0048_drive_share_link_workspaces`).
+one-shot copy (migration `0045_ask_message_workspaces`).
+`application_webhook_records.cpp` is the next: an application's lifecycle events and its webhook
+delivery attempts in the application's workspace (lake#356, lake#357), each attempt claimed with
+`if_absent` before it is sent and settled with `if_revision`. The stores no longer write or read
+`auth_app_webhook_events` or `auth_app_webhook_deliveries`; `assign_legacy_application_webhook_events`
+and the two `legacy_application_webhook_*` reads serve only the copy (migration
+`0049_application_webhook_workspaces`), and `create_application` stores the application's
+immutable `workspace_id`.

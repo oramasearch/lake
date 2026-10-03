@@ -484,33 +484,19 @@ public:
         return call("list_application_webhooks",
                     [&] { return store_->list_application_webhooks(application_id, limit); });
     }
-    control::Result<control::ApplicationWebhookEvent>
-    create_application_webhook_event(const std::string& application_id,
-                                     const std::string& event,
-                                     const nlohmann::json& payload) override {
-        return call("create_application_webhook_event", [&] {
-            return store_->create_application_webhook_event(application_id, event, payload);
-        });
+    control::Result<void> assign_legacy_application_webhook_events() override {
+        return call("assign_legacy_application_webhook_events",
+                    [&] { return store_->assign_legacy_application_webhook_events(); });
     }
-    control::Result<control::ApplicationWebhookEvent>
-    get_application_webhook_event(const std::string& id) override {
-        return call("get_application_webhook_event",
-                    [&] { return store_->get_application_webhook_event(id); });
+    control::Result<std::vector<control::LegacyApplicationWebhookEvent>>
+    legacy_application_webhook_events(const std::string& after_id, int limit) override {
+        return call("legacy_application_webhook_events",
+                    [&] { return store_->legacy_application_webhook_events(after_id, limit); });
     }
-    control::Result<std::vector<control::ApplicationWebhookEvent>>
-    list_application_webhook_events(const std::string& application_id, int limit) override {
-        return call("list_application_webhook_events",
-                    [&] { return store_->list_application_webhook_events(application_id, limit); });
-    }
-    control::Result<control::ApplicationWebhookDelivery> create_application_webhook_delivery(
-        const control::NewApplicationWebhookDelivery& value) override {
-        return call("create_application_webhook_delivery",
-                    [&] { return store_->create_application_webhook_delivery(value); });
-    }
-    control::Result<std::vector<control::ApplicationWebhookDelivery>>
-    list_application_webhook_deliveries(const std::string& event_id) override {
-        return call("list_application_webhook_deliveries",
-                    [&] { return store_->list_application_webhook_deliveries(event_id); });
+    control::Result<std::vector<control::LegacyApplicationWebhookDelivery>>
+    legacy_application_webhook_deliveries(const std::string& after_id, int limit) override {
+        return call("legacy_application_webhook_deliveries",
+                    [&] { return store_->legacy_application_webhook_deliveries(after_id, limit); });
     }
     control::Result<void> create_application_authorization_code(
         const control::ApplicationAuthorizationCode& value) override {

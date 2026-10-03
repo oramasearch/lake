@@ -32,6 +32,9 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/application_webhook_records.hpp"
+#include "lake/control/zetta_workspace.hpp"
+#include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
 
 namespace {
@@ -150,6 +153,12 @@ protected:
         options.worker_coroutines = 1;
         options.instance_kek = instance_kek;
         options.store = store_;
+        // Application events live in the application's workspace Zetta (lake#356).
+        workspace_dir_ = lake::test::fixture_path("attenuation-workspaces-" +
+                                                  lake::control::new_uuid_v4());
+        workspaces_ = std::make_shared<lake::control::WorkspaceService>(
+            lake::control::WorkspaceConfig{workspace_dir_.string(), 0}, store_, zetta_);
+        options.workspaces = workspaces_;
         server_ = std::make_unique<lake::api::ApiServer>(std::move(options));
         ASSERT_TRUE(server_->start()) << server_->reason();
         const std::string suffix = lake::control::new_uuid_v4();
@@ -329,6 +338,9 @@ protected:
     }
 
     std::string operator_secret_ = lake::control::new_uuid_v4();
+    std::shared_ptr<lake::test::StreamCaller> zetta_ = std::make_shared<lake::test::StreamCaller>();
+    std::shared_ptr<lake::control::WorkspaceService> workspaces_;
+    std::filesystem::path workspace_dir_;
     std::string schema_;
     std::string database_uri_;
     bool postgres_ = false;
@@ -501,8 +513,11 @@ TEST_P(TokenAttenuation, ApplicationPoolsReturnOnlyDerivedSessionBearer) {
     const auto customer =
         lake::test::personal_customer(*store_, browser_.at("session").at("user_id"));
     ASSERT_TRUE(customer);
+    const std::string workspace_id = lake::test::ready_workspace(
+        *store_, workspace_dir_, customer->id, "attenuation", postgres_ ? database_uri_ : "");
     const auto application = call("register_application",
                                   {{"customer_id", customer->id},
+                                   {"workspace_id", workspace_id},
                                    {"name", "Attenuation"},
                                    {"allowed_origins", {"https://client.example.test"}},
                                    {"redirect_uris", {"https://client.example.test/callback"}}},
@@ -528,9 +543,19 @@ TEST_P(TokenAttenuation, ApplicationPoolsReturnOnlyDerivedSessionBearer) {
         "revoke_session", {{"id", parent.at("session").at("id")}}, signup.at("value").at("secret"));
     ASSERT_TRUE(revoked.at("ok"));
     EXPECT_FALSE(store_->context_for(child.at("secret")));
-    const auto events =
-        store_->list_application_webhook_events(application.at("value").at("id"), 100);
-    ASSERT_TRUE(events);
+    // The application's events, read from its workspace Zetta (lake#356).
+    auto records = lake::control::WorkspaceRecords::open(
+        [this, customer = customer->id, workspace_id](std::string capability, bool read,
+                                                      json input) {
+            return workspaces_->call(customer, workspace_id, std::move(capability), read,
+                                     std::move(input));
+        },
+        workspace_id, instance_kek);
+    ASSERT_TRUE(records) << records.error().message;
+    const auto events = lake::control::settled(liquid::runtime::block_on(
+        lake::control::list_application_webhook_events(
+            *records, application.at("value").at("id").get<std::string>(), 100)));
+    ASSERT_TRUE(events) << events.error().message;
     ASSERT_LT(events->size(), 100U)
         << "The application event query must return its complete fixture";
     EXPECT_EQ(std::ranges::count_if(

@@ -2,7 +2,8 @@
 // (docs/architecture/workspace-records.md, lake#370). One operator capability serves every
 // collection that moves: each follow-up adds its collection to `copy_collections` and a copier
 // (ask_messages, lake#370; opportunities, lake#376; stream_owners, lake#379;
-// drive_share_links, lake#350).
+// drive_share_links, lake#350; auth_app_webhook_events and auth_app_webhook_deliveries, lake#356
+// and lake#357).
 
 #include <algorithm>
 #include <array>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "lake/api/capabilities.hpp"
+#include "lake/control/application_webhook_records.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/opportunities.hpp"
@@ -24,8 +26,9 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 4> copy_collections = {"ask_messages", "opportunities",
-                                                             "stream_owners", "drive_share_links"};
+constexpr std::array<std::string_view, 6> copy_collections = {
+    "ask_messages",      "opportunities",           "stream_owners",
+    "drive_share_links", "auth_app_webhook_events", "auth_app_webhook_deliveries"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -502,6 +505,200 @@ liquid::runtime::task<ApiResult> copy_drive_share_links(ApiContext& context,
                           std::move(unresolved), tallies);
 }
 
+// One page of a retired application table (lake#356, lake#357): assignments first, then per
+// workspace and application one read of what is there and the missing writes. `Row` is a
+// LegacyApplicationWebhookEvent or LegacyApplicationWebhookDelivery; `Ops` reads the
+// application's records already in the workspace, compares, and writes one row.
+template <class Row, class Ops>
+liquid::runtime::task<ApiResult> copy_application_rows(ApiContext& context, std::string_view name,
+                                                       const std::string& mode,
+                                                       const std::vector<Row>& rows, int limit,
+                                                       Ops ops) {
+    json unresolved = json::array();
+    std::map<std::string, std::map<std::string, std::vector<const Row*>>> by_workspace;
+    for (const Row& row : rows) {
+        if (row.workspace_id.empty()) {
+            unresolved.push_back({{"id", ops.id(row)},
+                                  {"customer_id", row.customer_id},
+                                  {"outcome", row.outcome}});
+        } else {
+            by_workspace[row.workspace_id][ops.application_id(row)].push_back(&row);
+        }
+    }
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, applications] : by_workspace) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = applications.begin()->second.front()->customer_id;
+        for (const auto& [application_id, owned] : applications) {
+            tally.rows += owned.size();
+        }
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        for (const auto& [application_id, owned] : applications) {
+            // One read per application, shared by its rows.
+            auto present = control::settled(co_await ops.present(*records, application_id));
+            if (!present) {
+                tally.error = present.error().code + ": " + present.error().message;
+                break;
+            }
+            for (const Row* row : owned) {
+                const auto found = present->find(ops.id(*row));
+                if (mode == "verify") {
+                    if (found == present->end()) {
+                        tally.missing.push_back(ops.id(*row));
+                    } else if (!ops.same(found->second, *row)) {
+                        tally.mismatched.push_back(ops.id(*row));
+                    } else {
+                        ++tally.verified;
+                    }
+                    continue;
+                }
+                if (found != present->end()) {
+                    ++tally.already_present;
+                    continue;
+                }
+                auto written = control::settled(co_await ops.write(*records, *row));
+                if (!written && written.error().code == "conflict") {
+                    ++tally.already_present; // a concurrent copy; verify compares it
+                    continue;
+                }
+                if (!written) {
+                    tally.error = written.error().code + ": " + written.error().message;
+                    break;
+                }
+                ++tally.copied;
+            }
+            if (!tally.error.empty()) {
+                break;
+            }
+        }
+    }
+    co_return copy_result(name, mode, rows.size(), limit,
+                          rows.empty() ? std::string() : ops.id(rows.back()),
+                          std::move(unresolved), tallies);
+}
+
+struct EventCopy {
+    using Present = std::map<std::string, control::ApplicationWebhookEvent>;
+    static std::string id(const control::LegacyApplicationWebhookEvent& row) {
+        return row.event.id;
+    }
+    static std::string application_id(const control::LegacyApplicationWebhookEvent& row) {
+        return row.event.application_id;
+    }
+    static liquid::runtime::task<control::ZettaControlResult<Present>>
+    present(control::WorkspaceRecords& records, std::string application_id) {
+        auto events = control::settled(
+            co_await control::list_application_webhook_events(records, application_id, 0));
+        if (!events) {
+            co_return control::ZettaControlResult<Present>(std::unexpected(events.error()));
+        }
+        Present present;
+        for (auto& event : *events) {
+            const std::string key = event.id;
+            present.emplace(key, std::move(event));
+        }
+        co_return control::ZettaControlResult<Present>(std::move(present));
+    }
+    static bool same(const control::ApplicationWebhookEvent& stored,
+                     const control::LegacyApplicationWebhookEvent& row) {
+        return stored.application_id == row.event.application_id &&
+               stored.event == row.event.event && stored.payload == row.event.payload &&
+               stored.at_us == row.event.at_us;
+    }
+    static liquid::runtime::task<control::ZettaControlResult<void>>
+    write(control::WorkspaceRecords& records, const control::LegacyApplicationWebhookEvent& row) {
+        control::ApplicationWebhookEvents events(records);
+        auto appended = control::settled(co_await events.append(
+            row.event, control::RecordWrite{row.event.id, row.event.at_us}));
+        if (!appended) {
+            co_return control::ZettaControlResult<void>(std::unexpected(appended.error()));
+        }
+        co_return control::ZettaControlResult<void>();
+    }
+};
+
+struct DeliveryCopy {
+    using Present = std::map<std::string, control::ApplicationWebhookDelivery>;
+    static std::string id(const control::LegacyApplicationWebhookDelivery& row) {
+        return row.delivery.id;
+    }
+    static std::string application_id(const control::LegacyApplicationWebhookDelivery& row) {
+        return row.delivery.application_id;
+    }
+    static liquid::runtime::task<control::ZettaControlResult<Present>>
+    present(control::WorkspaceRecords& records, std::string application_id) {
+        auto deliveries = control::settled(
+            co_await control::list_application_webhook_deliveries(records, application_id, 0));
+        if (!deliveries) {
+            co_return control::ZettaControlResult<Present>(std::unexpected(deliveries.error()));
+        }
+        Present present;
+        for (auto& delivery : *deliveries) {
+            const std::string key = delivery.id;
+            present.emplace(key, std::move(delivery));
+        }
+        co_return control::ZettaControlResult<Present>(std::move(present));
+    }
+    static bool same(const control::ApplicationWebhookDelivery& stored,
+                     const control::LegacyApplicationWebhookDelivery& row) {
+        const auto& source = row.delivery;
+        return stored.application_id == source.application_id &&
+               stored.event_id == source.event_id && stored.webhook_id == source.webhook_id &&
+               stored.attempt == source.attempt && stored.status == source.status &&
+               stored.signature == source.signature && stored.error == source.error &&
+               !stored.pending && stored.at_us == source.at_us;
+    }
+    static liquid::runtime::task<control::ZettaControlResult<void>>
+    write(control::WorkspaceRecords& records, const control::LegacyApplicationWebhookDelivery& row) {
+        // A finished attempt, written only where no record of that attempt exists.
+        control::ApplicationWebhookDelivery delivery = row.delivery;
+        delivery.pending = false;
+        auto claimed = control::settled(
+            co_await control::claim_application_webhook_delivery(records, std::move(delivery)));
+        if (!claimed) {
+            co_return control::ZettaControlResult<void>(std::unexpected(claimed.error()));
+        }
+        co_return control::ZettaControlResult<void>();
+    }
+};
+
+liquid::runtime::task<ApiResult> copy_application_webhook_events(ApiContext& context,
+                                                                 const std::string& mode,
+                                                                 const std::string& after,
+                                                                 int limit) {
+    if (auto assigned = context.store->assign_legacy_application_webhook_events(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_application_webhook_events(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    co_return co_await copy_application_rows(context, "auth_app_webhook_events", mode, *rows,
+                                             limit, EventCopy{});
+}
+
+liquid::runtime::task<ApiResult> copy_application_webhook_deliveries(ApiContext& context,
+                                                                     const std::string& mode,
+                                                                     const std::string& after,
+                                                                     int limit) {
+    if (auto assigned = context.store->assign_legacy_application_webhook_events(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_application_webhook_deliveries(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    co_return co_await copy_application_rows(context, "auth_app_webhook_deliveries", mode, *rows,
+                                             limit, DeliveryCopy{});
+}
+
 // Only the operator copies, and the operator bypasses policy; anyone else is refused here, before
 // a policy lookup on an object no grant can name.
 std::expected<std::string, ApiError> records_object(const json&, ApiContext&) {
@@ -562,6 +759,13 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "drive_share_links") {
                 co_return co_await copy_drive_share_links(context, mode, after, limit);
+            }
+            if (input.at("collection") == "auth_app_webhook_events") {
+                co_return co_await copy_application_webhook_events(context, mode, after, limit);
+            }
+            if (input.at("collection") == "auth_app_webhook_deliveries") {
+                co_return co_await copy_application_webhook_deliveries(context, mode, after,
+                                                                       limit);
             }
             if (input.at("collection") == "stream_owners") {
                 co_return co_await copy_stream_owners(context, mode, after, limit);

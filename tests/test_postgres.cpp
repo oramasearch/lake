@@ -1835,6 +1835,183 @@ TEST(PostgresStreamOwners, MigrationRecordsEachRowsWorkspaceForTheCopy) {
     EXPECT_TRUE(row->workspace_id.empty());
 }
 
+// Migration 0049 (lake#356, lake#357): an application in a space with one live workspace is
+// assigned it, every other is needs_selection; each event row's owner is its application's
+// workspace. Rerunning the migration changes nothing, the store's rerun of the assignment picks up
+// a late row and resolves rows once their application is assigned, and the assignment happens
+// once.
+TEST(PostgresApplicationWebhooks, MigrationRecordsEachEventsOwnerForTheCopy) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "application-webhook-migration-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    std::vector<std::string> customers;
+    std::vector<std::vector<std::string>> workspaces(2);
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "app-webhook-migration-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+        // The second space has two workspaces, so its application cannot be assigned by itself.
+        for (int count = 0; count <= index; ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            workspaces[index].push_back(workspace->id);
+        }
+    }
+    pqxx::connection connection(uri);
+    std::vector<std::string> applications;
+    {
+        // Applications as registered before 0049: no workspace.
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
+        for (const std::string& customer : customers) {
+            const std::string id = lake::control::new_uuid_v4();
+            tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
+                           "allowed_origins) VALUES ($1::uuid, $2::uuid, $3, 'migration', "
+                           "'[\"https://m.example.test\"]'::jsonb)",
+                           id, customer, "app:" + id);
+            applications.push_back(id);
+        }
+        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
+        tx.commit();
+    }
+    const auto insert = [&](const std::string& application) {
+        pqxx::work tx(connection);
+        const std::string id =
+            tx.exec_params("INSERT INTO auth_app_webhook_events (application_id, event, payload) "
+                           "VALUES ($1::uuid, 'user.created', '{\"n\":1}'::jsonb) RETURNING id::text",
+                           application)[0][0]
+                .as<std::string>();
+        tx.commit();
+        return id;
+    };
+    const std::string owned = insert(applications[0]);
+    const std::string ambiguous = insert(applications[1]);
+    {
+        pqxx::work tx(connection);
+        const std::string hook =
+            tx.exec_params("INSERT INTO auth_app_webhooks (application_id, url, events, "
+                           "encrypted_secret) VALUES ($1::uuid, 'https://h.test', "
+                           "ARRAY['user.created'], 'x') RETURNING id::text",
+                           applications[0])[0][0]
+                .as<std::string>();
+        tx.exec_params("INSERT INTO auth_app_webhook_deliveries (event_id, webhook_id, attempt, "
+                       "status, signature) VALUES ($1::uuid, $2::uuid, 1, 204, 'sig')",
+                       owned, hook);
+        tx.exec("DELETE FROM schema_migrations WHERE version = "
+                "'0049_application_webhook_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0049_application_webhook_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& table, const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = $1 AND object_id = $2::uuid",
+            table, id);
+        return found.empty() ? std::pair<std::string, std::string>{}
+                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    const auto application_workspace = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        return tx.exec_params("SELECT COALESCE(workspace_id::text, '') FROM auth_applications "
+                              "WHERE id = $1::uuid",
+                              id)[0][0]
+            .as<std::string>();
+    };
+    // The schema section from 0049 on (later sections are idempotent).
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome("auth_applications", applications[0]),
+                  (std::pair<std::string, std::string>{"sole_workspace", workspaces[0][0]}));
+        EXPECT_EQ(application_workspace(applications[0]), workspaces[0][0]);
+        EXPECT_EQ(outcome("auth_applications", applications[1]).first, "needs_selection");
+        EXPECT_TRUE(application_workspace(applications[1]).empty());
+        EXPECT_EQ(outcome("auth_app_webhook_events", owned),
+                  (std::pair<std::string, std::string>{"application_workspace", workspaces[0][0]}));
+        EXPECT_EQ(outcome("auth_app_webhook_events", ambiguous).first, "needs_selection");
+    }
+    const std::string late = insert(applications[0]);
+    EXPECT_TRUE(outcome("auth_app_webhook_events", late).first.empty());
+    ASSERT_TRUE(store->assign_legacy_application_webhook_events());
+    EXPECT_EQ(outcome("auth_app_webhook_events", late).first, "application_workspace")
+        << "a row written after the migration";
+
+    // A reviewed assignment of the unassigned application resolves its events; after that its
+    // workspace never changes, and the first application's never did.
+    {
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE "
+                                    "id = $1::uuid",
+                                    applications[1], workspaces[0][0]),
+                     pqxx::check_violation)
+            << "a workspace of another space";
+    }
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       applications[1], workspaces[1][1]);
+        tx.commit();
+    }
+    ASSERT_TRUE(store->assign_legacy_application_webhook_events());
+    EXPECT_EQ(outcome("auth_app_webhook_events", ambiguous),
+              (std::pair<std::string, std::string>{"application_workspace", workspaces[1][1]}));
+    for (const auto& [application, workspace] :
+         {std::pair{applications[0], workspaces[1][0]}, std::pair{applications[1], workspaces[1][0]}}) {
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE "
+                                    "id = $1::uuid",
+                                    application, workspace),
+                     pqxx::check_violation);
+    }
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE auth_applications SET name = 'renamed' WHERE id = $1::uuid",
+                       applications[0]);
+        tx.commit();
+    }
+
+    std::map<std::string, lake::control::LegacyApplicationWebhookEvent> events;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_application_webhook_events(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            events.emplace(row.event.id, row);
+        }
+        after = page->back().event.id;
+    }
+    ASSERT_TRUE(events.contains(owned));
+    EXPECT_EQ(events.at(owned).workspace_id, workspaces[0][0]);
+    EXPECT_EQ(events.at(owned).customer_id, customers[0]);
+    EXPECT_EQ(events.at(owned).event.payload["n"], 1);
+    EXPECT_GT(events.at(owned).event.at_us, 0);
+    EXPECT_EQ(events.at(ambiguous).workspace_id, workspaces[1][1]);
+    const auto deliveries = store->legacy_application_webhook_deliveries("", 5000);
+    ASSERT_TRUE(deliveries) << deliveries.error().message;
+    const auto delivered = std::ranges::find_if(
+        *deliveries, [&](const auto& row) { return row.delivery.event_id == owned; });
+    ASSERT_NE(delivered, deliveries->end());
+    EXPECT_EQ(delivered->workspace_id, workspaces[0][0]) << "a delivery goes where its event goes";
+    EXPECT_EQ(delivered->delivery.application_id, applications[0]);
+    EXPECT_EQ(delivered->delivery.status, 204);
+}
+
 // Agent launches, their credential and cron schedules against the production
 // store (docs/api/agent-launches.md, lake#231).
 TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTheContract) {

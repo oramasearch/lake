@@ -195,6 +195,7 @@ add_library(lake-core STATIC
   src/control/opportunities.cpp
   src/control/stream_owners.cpp
   src/control/drive_share_links.cpp
+  src/control/application_webhook_records.cpp
   "${LAKE_LIQUID_SOURCE_DIR}/src/scan/detectors.cpp"
   src/version.cpp
   src/api/web_ui.cpp

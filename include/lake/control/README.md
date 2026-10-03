@@ -69,3 +69,8 @@ the retired `ask_messages` table, for the copy (`LegacyAskMessage`). See
 bearer token format `<workspace id>.<link id>.<secret>` that routes a recipient to the workspace.
 `Store` keeps only the content-free route of a pre-move token (`drive_share_link_route`) and the
 legacy reads of `drive_share_links` for the copy (`LegacyDriveShareLink`).
+the retired `ask_messages` table, for the copy (`LegacyAskMessage`). See
+`docs/architecture/workspace-records.md`. `application_webhook_records.hpp` holds the application
+event and delivery-attempt codecs and the claim/settle pair that sends each attempt once
+(lake#356, lake#357); `apps.hpp` gives `Application` its `workspace_id` and declares the
+`LegacyApplicationWebhook*` rows the copy reads.

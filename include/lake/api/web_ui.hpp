@@ -164,8 +164,10 @@ std::string web_ui_application_sign_in(const control::Application& application,
 std::string web_ui_application_mfa(const control::Application& application, std::string_view error);
 std::string web_ui_application_passkey_sign_in(const control::Application& application,
                                                std::string_view error);
+// The register form picks one workspace of a listed space: it holds the application's events.
 std::string web_ui_applications(const std::vector<control::Application>& applications,
                                 const std::vector<control::Customer>& customers,
+                                const std::vector<control::Workspace>& workspaces,
                                 std::string_view error,
                                 WebUiViewer viewer = true);
 std::string web_ui_application(const control::Application& application, WebUiViewer viewer = true);

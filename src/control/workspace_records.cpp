@@ -338,7 +338,8 @@ std::optional<StoredRecord> WorkspaceRecords::opened(RecordCollection collection
 }
 
 liquid::runtime::task<ZettaControlResult<std::vector<StoredRecord>>>
-WorkspaceRecords::list(RecordCollection collection, std::string lookup, std::size_t newest) {
+WorkspaceRecords::list(RecordCollection collection, std::string lookup, std::size_t newest,
+                       std::int64_t since_us) {
     using Records = std::vector<StoredRecord>;
     if (!collection_name(collection.name)) {
         co_return records_failure<Records>("store_error", "the collection name is invalid");
@@ -368,13 +369,26 @@ WorkspaceRecords::list(RecordCollection collection, std::string lookup, std::siz
             }
             co_return ZettaControlResult<Records>(std::unexpected(page.error()));
         }
+        bool older = false;
         for (const nlohmann::json& row : page->value("records", nlohmann::json::array())) {
+            // The index is in time order, newest first: the first record older than `since_us`
+            // ends the walk, whether or not it opens here.
+            const std::string order =
+                row.is_object() ? row.value("order", std::string()) : std::string();
+            if (since_us > 0 && !order.empty() && order < order_of(since_us)) {
+                older = true;
+                break;
+            }
             if (auto record = opened(collection, row)) {
+                if (since_us > 0 && record->at_us < since_us) {
+                    older = true;
+                    break;
+                }
                 opened_records.push_back(std::move(*record));
             }
         }
         after = page->value("next_after", std::string());
-        if (after.empty() || (newest > 0 && opened_records.size() >= newest)) {
+        if (older || after.empty() || (newest > 0 && opened_records.size() >= newest)) {
             break;
         }
     }

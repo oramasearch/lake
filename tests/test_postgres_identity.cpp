@@ -26,6 +26,7 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "personal_customer_test_support.hpp"
+#include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
 #include "webauthn_test_support.hpp"
 
@@ -287,7 +288,7 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
     }
 
-    std::unique_ptr<lake::control::Store> store =
+    std::shared_ptr<lake::control::Store> store =
         lake::control::make_postgres_store(uri, std::string(test_instance_kek));
     const std::string suffix = std::to_string(static_cast<long long>(getpid()));
     const auto owner = store->create_user({"taap:1:ed25519:postgres-app-owner-" + suffix,
@@ -311,15 +312,26 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
     context.webhook_sender = [](const std::string&, const nlohmann::json&, const std::string&) {
         return lake::api::WebhookDeliveryResult{.status = 204};
     };
+    // The application's events live in its workspace Zetta (lake#356, lake#357).
+    const auto zetta = std::make_shared<lake::test::StreamCaller>();
+    const auto service_dir = lake::test::fixture_path("postgres-app-workspaces-" + suffix);
+    const auto workspaces = std::make_shared<lake::control::WorkspaceService>(
+        lake::control::WorkspaceConfig{service_dir.string(), 0}, store, zetta);
+    context.workspaces = workspaces.get();
+    const std::string workspace_id = lake::test::ready_workspace(
+        *store, service_dir, customer->id, "postgres-app-" + suffix, uri);
     const auto call = [&](const std::string& name,
                           nlohmann::json input = nlohmann::json::object()) {
         context.request_id = lake::control::new_uuid_v4();
-        return registry.call(name, input, context);
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return completed ? *completed : lake::api::ApiResult::failure("store_error", "incomplete");
     };
 
     const auto registered =
         call("register_application",
              {{"customer_id", customer->id},
+              {"workspace_id", workspace_id},
               {"name", "Postgres application"},
               {"allowed_origins", nlohmann::json::array({"https://postgres-client.example.test"})},
               {"redirect_uris",
@@ -374,8 +386,9 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
                                     {"metadata", {{"plan", "test"}}}});
     ASSERT_TRUE(organization.ok) << organization.error.message;
     const std::string organization_id = organization.value.at("id");
-    const auto events =
-        call("list_application_webhook_events", {{"application_id", application_id}, {"limit", 1}});
+    const auto events = call(
+        "list_application_webhook_events",
+        {{"application_id", application_id}, {"workspace_id", workspace_id}, {"limit", 1}});
     ASSERT_TRUE(events.ok) << events.error.message;
     ASSERT_EQ(events.value.at("items").size(), 1U);
     const auto subscribed = events.value.at("items").front();
@@ -391,10 +404,32 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
 
     EXPECT_TRUE(call("retry_application_webhook",
                      {{"application_id", application_id},
+                      {"workspace_id", workspace_id},
                       {"event_id", subscribed.at("id")},
                       {"webhook_id", webhook.value.at("id")}})
                     .ok);
 
+    // The application's workspace never changes (migration 0049's routing trigger), and nothing of
+    // its events is written to the retired tables.
+    {
+        const std::string other = lake::test::ready_workspace(
+            *store, service_dir, customer->id, "postgres-app-other-" + suffix, uri);
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid "
+                                    "WHERE id = $1::uuid",
+                                    application_id, other),
+                     pqxx::check_violation);
+    }
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        EXPECT_EQ(tx.exec_params("SELECT count(*) FROM auth_app_webhook_events WHERE "
+                                 "application_id = $1::uuid",
+                                 application_id)[0][0]
+                      .as<int>(),
+                  0);
+    }
     EXPECT_TRUE(call("delete_application_organization",
                      {{"application_id", application_id}, {"organization_id", organization_id}})
                     .ok);

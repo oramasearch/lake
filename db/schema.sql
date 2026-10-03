@@ -2430,3 +2430,89 @@ CREATE TABLE IF NOT EXISTS drive_share_link_workspaces_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0048_drive_share_link_workspaces')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0049_application_webhook_workspaces: an application's lifecycle events and their delivery
+-- attempts live in the workspace Zetta of the application's workspace (lake#356, lake#357,
+-- docs/architecture/workspace-records.md). Lake no longer writes or reads
+-- auth_app_webhook_events or auth_app_webhook_deliveries; the operator's one-shot copy
+-- (copy_workspace_records) moves each row into its workspace and verifies it.
+--
+-- auth_applications gains workspace_id, the routing pointer that names which workspace an
+-- application's events belong to: content-free multitenancy, like stores.workspace_id (0044).
+-- register_application requires it; it is set once and never changes. An application whose space
+-- has exactly one live workspace is assigned it here; every other application is recorded as
+-- needs_selection and may be assigned once (NULL to a workspace of its space) after review.
+--
+-- Each event row's owner is recorded in workspace_assignments: its application's workspace, or
+-- needs_selection. A delivery attempt has no row of its own there; it always goes where its event
+-- goes. No table is dropped; a later migration drops both once the copy has been verified on
+-- every environment.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE auth_applications ADD COLUMN IF NOT EXISTS workspace_id uuid REFERENCES workspaces(id);
+CREATE INDEX IF NOT EXISTS auth_applications_workspace_idx ON auth_applications (workspace_id);
+
+-- New applications name a live workspace of their own space; a legacy application without one may
+-- be assigned once. Neither the workspace nor the space changes afterwards.
+CREATE OR REPLACE FUNCTION enforce_application_workspace() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        IF NEW.customer_id IS DISTINCT FROM OLD.customer_id OR
+           (OLD.workspace_id IS NOT NULL AND NEW.workspace_id IS DISTINCT FROM OLD.workspace_id) THEN
+            RAISE EXCEPTION 'workspace_id and customer_id are immutable' USING ERRCODE = '23514';
+        END IF;
+        -- Any other change keeps the assignment as it was, including none yet.
+        IF NEW.workspace_id IS NOT DISTINCT FROM OLD.workspace_id THEN
+            RETURN NEW;
+        END IF;
+    END IF;
+    IF NEW.workspace_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM workspaces WHERE id = NEW.workspace_id AND customer_id = NEW.customer_id
+            AND desired <> 'deleted'
+    ) THEN
+        RAISE EXCEPTION 'workspace_id must name a workspace in this space' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END $$;
+
+DO $$
+DECLARE
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations
+                   WHERE version = '0049_application_webhook_workspaces') THEN
+        DROP TRIGGER IF EXISTS application_workspace_routing ON auth_applications;
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT 'auth_applications', a.id, a.customer_id, w.id,
+                   CASE WHEN w.id IS NULL THEN 'needs_selection' ELSE 'sole_workspace' END
+            FROM auth_applications a LEFT JOIN workspaces w ON w.customer_id = a.customer_id
+                 AND w.desired <> 'deleted'
+                 AND (SELECT count(*) FROM workspaces w2 WHERE w2.customer_id = a.customer_id
+                      AND w2.desired <> 'deleted') = 1
+            WHERE a.workspace_id IS NULL ON CONFLICT DO NOTHING;
+        UPDATE auth_applications a SET workspace_id = s.workspace_id FROM workspace_assignments s
+            WHERE s.object_table = 'auth_applications' AND s.object_id = a.id
+              AND a.workspace_id IS NULL AND s.workspace_id IS NOT NULL;
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT 'auth_app_webhook_events', e.id, a.customer_id, a.workspace_id,
+                   CASE WHEN a.workspace_id IS NULL THEN 'needs_selection'
+                        ELSE 'application_workspace' END
+            FROM auth_app_webhook_events e JOIN auth_applications a ON a.id = e.application_id
+            ON CONFLICT DO NOTHING;
+        FOR unresolved IN SELECT * FROM workspace_assignments WHERE workspace_id IS NULL
+                           AND object_table IN ('auth_applications', 'auth_app_webhook_events') LOOP
+            RAISE WARNING 'workspace_id requires selection: table=%, object=%, customer=%',
+                unresolved.object_table, unresolved.object_id, unresolved.customer_id;
+        END LOOP;
+    END IF;
+END $$;
+
+DROP TRIGGER IF EXISTS application_workspace_routing ON auth_applications;
+CREATE TRIGGER application_workspace_routing BEFORE INSERT OR UPDATE ON auth_applications
+    FOR EACH ROW EXECUTE FUNCTION enforce_application_workspace();
+
+CREATE TABLE IF NOT EXISTS application_webhook_workspaces_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0049_application_webhook_workspaces')
+    ON CONFLICT DO NOTHING;

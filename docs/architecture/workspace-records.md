@@ -6,7 +6,8 @@ keep its records in the workspace Zetta that owns them. Every follow-up that mov
 out of lake's PostgreSQL uses it and applies the [checklist](#checklist-for-each-follow-up) below.
 That covers lake#315, #316–#384 and the other "Move … into workspace Zettas" issues.
 `ask_messages` is the first collection to move, `opportunities` (lake#376) the first mutable one, and
-`stream_owners` (lake#379) the first keyed by a unique name.
+`stream_owners` (lake#379) the first keyed by a unique name. Application lifecycle events and their
+webhook delivery attempts (lake#356, lake#357) follow.
 
 The rule it implements is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in
 a workspace Zetta, including credentials, secrets and metrics. Lake's PostgreSQL and the lake Zetta
@@ -18,10 +19,10 @@ still open.
 | Part | State |
 |---|---|
 | `WorkspaceRecords`, `RecordSet<Codec>` | Implemented on Zetta's keyed record store ([zetta#1231](https://github.com/oramasearch/zetta/issues/1231), merged in zetta PR #1233 to `dev`, `82f617e`). Unit tests run against an engine fake; an opt-in test runs against a real Zetta node built from that commit. |
-| Append-only collections | Implemented. `ask_messages` has moved. |
-| Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. `drive_share_links` (lake#350) has moved: revocation is a conditional `put` on the revision read. |
-| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `ask_messages`, `opportunities`, `stream_owners` and `drive_share_links`. |
-| Dropping `ask_messages`, `opportunities`, `stream_owners` and `drive_share_links` from PostgreSQL | Not part of these changes. A later migration drops each once its copy is verified on the dev cluster. |
+| Append-only collections | Implemented. `ask_messages` and `auth_app_webhook_events` have moved. |
+| Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. `drive_share_links` (lake#350) has moved: revocation is a conditional `put` on the revision read. `auth_app_webhook_deliveries` (lake#357) claims each attempt with `if_absent` and settles it with `if_revision`. |
+| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `ask_messages`, `opportunities`, `stream_owners`, `drive_share_links`, `auth_app_webhook_events` and `auth_app_webhook_deliveries`. |
+| Dropping the moved tables from PostgreSQL | Not part of these changes. A later migration drops each once its copy is verified on the dev cluster. |
 
 **Zetta dependency.** A workspace Zetta must run Zetta `dev` at or after zetta PR #1233
 (`82f617e`). An older engine has no record store and answers `put_record` as an unknown
@@ -46,7 +47,8 @@ A page that reads one collection therefore pays one workspace round trip.
 
 | Shape | Examples (follow-up) | How |
 |---|---|---|
-| Append-only log, read back by key | `ask_messages` (#370), `sso_provisioning_logs` (#333), `auth_app_webhook_events` (#356), `auth_app_webhook_deliveries` (#357), `agent_cron_runs` (#372), `offline_recovery_notifications` (#339), `audit_events` (#317) | `append`: one `put_record` with `if_absent`. `list` is newest first by the lookup index, then put in order. Set `retention_ms` where a purge applies. |
+| Append-only log, read back by key | `ask_messages` (#370), `sso_provisioning_logs` (#333), `auth_app_webhook_events` (#356), `agent_cron_runs` (#372), `offline_recovery_notifications` (#339), `audit_events` (#317) | `append`: one `put_record` with `if_absent`. `list` is newest first by the lookup index, then put in order. Set `retention_ms` where a purge applies. |
+| Work items sent once, with retry history | `auth_app_webhook_deliveries` (#357) | One record per attempt, keyed by `index_of(collection, "<item>\n<attempt>")`. Claim it pending with `put(if_absent)` before the side effect and settle it with `put(if_revision)` after: only the caller whose claim succeeded performs it. |
 | Mutable rows found by id | `opportunities` (#376, **moved**), `drive_share_links` (#350, **moved**), `repositories` (#315), `apps` (#377), `stores` (#365), `forge_records` (#341), `platform_environments` (#358) | `get`, then `put` with `if_revision`, or `update`, which retries on `409` by rereading. `remove` with `if_revision`. |
 | One-use codes, sessions, replay evidence, claims | `sessions` (#323), `identity_oauth_flows` (#326), `identity_webauthn_challenges` (#327), `identity_taap_assertions` (#361), `auth_app_authorization_codes` (#363), `offline_recovery_attempts` (#336), `agent_task_status` claims (#375) | Consume with `remove(id, if_revision)`. Only one caller succeeds; the others get `conflict` or `not_found`. Expiry is the collection's `retention_ms`. |
 | Unique names | `stream_owners` (#379, done), repository and app names | A name-keyed record written with `if_absent`, using a blind key (see [Keys](#record-format)). |
@@ -120,7 +122,8 @@ correct. People and agents never reach `lake_*` collections, and lake reaches th
 class WorkspaceRecords {
     static ZettaControlResult<WorkspaceRecords> open(Call call, std::string workspace_id, std::string_view instance_kek);
     task<ZettaControlResult<StoredRecord>> append(RecordCollection, std::string lookup, json body, RecordWrite = {});
-    task<ZettaControlResult<std::vector<StoredRecord>>> list(RecordCollection, std::string lookup, std::size_t newest = 0);
+    task<ZettaControlResult<std::vector<StoredRecord>>> list(RecordCollection, std::string lookup, std::size_t newest = 0,
+                                                             std::int64_t since_us = 0);
     task<ZettaControlResult<std::optional<StoredRecord>>> get(RecordCollection, std::string id);
     task<ZettaControlResult<StoredRecord>> put(RecordCollection, std::string id, std::string lookup, json body,
                                                 RecordCondition, std::int64_t lake_revision = 1, std::int64_t at_us = 0);
@@ -136,8 +139,9 @@ ZettaControlResult<WorkspaceRecords> workspace_records(const ApiContext&, std::s
 - **Append** is one `put_record` with `if_absent`. If the call returns `not_found` at
   `/collection`, `append` runs `create_collection`, which is idempotent, and puts again.
 - **List** calls `list_records` with `index: "lookup"`, `direction: "desc"` and a limit, following
-  `next_after` until `newest` records have opened, then returns them oldest first. A missing
-  collection lists as empty.
+  `next_after` until `newest` records have opened, then returns them oldest first. With `since_us`
+  the walk also stops at the first record older than that instant, so a reader of recent records
+  does not page through the whole history. A missing collection lists as empty.
 - **Conflicts.** A failed condition is `conflict`, and `ZettaControlError::details.revision` holds
   the live engine revision. `update` rereads the record and asks its `Change` again, up to
   `attempts` times.
@@ -234,6 +238,9 @@ copy is verified.
 | `Stores/WorkspaceRecordStores.TheOneShotCopyMovesEachTopicCreatorIntoItsWorkspace/{Memory,Postgres}` | The `stream_owners` copy: plan, paged copy, rerun, verify, read back per workspace, tamper detection, `unknown_workspace` blocking and `workspace_deleted` not blocking completion, operator only |
 | `PostgresStreamOwners.MigrationRecordsEachRowsWorkspaceForTheCopy` | Migration 0047 outcomes on a rerun, the md5 row id lake and SQL share, late rows, paging, a workspace deleted after assignment |
 | `Drive.ShareLinksLiveOnlyInTheWorkspaceThatHoldsThem`, `Stores/WorkspaceRecordStores.TheOneShotCopyMovesDriveShareLinksAndRoutesTheirTokens/{Memory,Postgres}`, `PostgresDriveShareLinks.MigrationRecordsOwnersAndContentFreeRoutes`, `SharedLinkScenario.*` | Drive share links (lake#350): two spaces with two workspaces each, self-routing tokens, forged and moved records, revocation conflicts, not-ready and deleted workspaces, the copy and its routes, migration 0048, the signed-out recipient and the sharing pages |
+| `ApplicationAuth.EventsAndDeliveriesLiveInTheApplicationsWorkspace`, `ApplicationAuth.AnAttemptIsClaimedOnceAndSentOnce` | Application events in the application's workspace among two spaces and two workspaces; missing, malformed, unknown and foreign `workspace_id`; least privilege; not ready; deletion; an attempt claimed by another caller is not sent; an abandoned claim does not block retries |
+| `Stores/WorkspaceRecordStores.TheOneShotCopyMovesApplicationEventsAndTheirDeliveries/{Memory,Postgres}` | Both application collections: plan, verify, copy, rerun, read back through the capability, a legacy application resolved after review, tamper detection |
+| `PostgresApplicationWebhooks.MigrationRecordsEachEventsOwnerForTheCopy` | Migration 0049: application and event outcomes on a rerun, late rows, resolution, the immutable workspace |
 | `WorkspaceRecordsZetta.TheEngineStoresAndReturnsSealedRecords` | Runs with `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` against a node built from Zetta dev with #1233: append, list, a 20 KB body, `if_absent` conflict with `details.revision`, `update`, a stale `if_revision`, conditional delete |
 | `HttpResponseIsolation.AskOrama*`, `…TheAgentFactory*`, `AgentRuns.EveryAgentFlowTheSiteOffersIsACapability`, `PagePerformance.*` | The pages and the capability end to end, and the page budgets |
 
@@ -296,6 +303,31 @@ gets its route on the next copy run after its assignment is chosen.
 - **Membership-change window.** During a membership change, two owners can briefly both accept a
   conditional write to the same key. Lake's claims are safe only on a fully meshed StatefulSet,
   which is what the operator runs.
+
+## Cutover runbook: application events and deliveries, dev cluster
+
+Migration `0049_application_webhook_workspaces` (lake#356, lake#357). Steps 1 and 7 of the
+`ask_messages` runbook below apply unchanged; the rest:
+
+1. Workspace Zettas run Zetta `dev` at or after `82f617e`, as for `ask_messages`.
+2. Have the operator vendor `db/schema.sql` through `0049_application_webhook_workspaces` and
+   select `application_webhook_workspaces_guard`. Apply the schema, then read the warnings: each
+   `table=auth_applications` row is an application whose space has several workspaces, and each
+   `table=auth_app_webhook_events` row is one of its events.
+3. Deploy the lake image built from this change. Registering an application now requires
+   `workspace_id`. An unassigned application's sign-ins and lifecycle actions answer
+   `workspace_not_ready` until step 5, because its events have nowhere to go.
+4. Run `copy_workspace_records` for `auth_app_webhook_events` and then
+   `auth_app_webhook_deliveries`, each `plan`, then `copy` until `next_after` is null, then
+   `verify` over every page. A delivery is copied into its event's workspace.
+5. For each unassigned application, set its workspace once, in a reviewed change:
+   `UPDATE auth_applications SET workspace_id = '<workspace>' WHERE id = '<application>' AND
+   workspace_id IS NULL`. The routing trigger accepts only a live workspace of the application's
+   space, and refuses any later change. Or delete the application (dev data may be deleted). The
+   next copy resolves its events; repeat step 4.
+6. Once `verify` answers `complete: true` on every page of both collections, file the migration
+   that drops `auth_app_webhook_deliveries` and `auth_app_webhook_events`, with the copy output
+   attached. `auth_applications.workspace_id` stays: it is the routing pointer lake#351 builds on.
 
 ## Cutover runbook: `ask_messages`, dev cluster
 

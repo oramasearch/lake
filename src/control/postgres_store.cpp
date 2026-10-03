@@ -93,6 +93,21 @@ constexpr std::string_view legacy_drive_share_link_route_sql =
     "l.id, a.workspace_id FROM drive_share_links l JOIN workspace_assignments a ON "
     "a.object_table = 'drive_share_links' AND a.object_id = l.id WHERE a.workspace_id IS NOT NULL "
     "ON CONFLICT (token_hash) DO UPDATE SET workspace_id = EXCLUDED.workspace_id";
+// Migration 0049's assignment of the retired auth_app_webhook_events rows (db/schema.sql),
+// rerun before each copy: each event belongs to its application's workspace, or is recorded as
+// needs_selection while the application has none. The second statement resolves recorded
+// needs_selection events once their application has been assigned a workspace.
+constexpr std::string_view legacy_application_event_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'auth_app_webhook_events', e.id, a.customer_id, a.workspace_id, CASE WHEN "
+    "a.workspace_id IS NULL THEN 'needs_selection' ELSE 'application_workspace' END FROM "
+    "auth_app_webhook_events e JOIN auth_applications a ON a.id = e.application_id "
+    "ON CONFLICT DO NOTHING";
+constexpr std::string_view legacy_application_event_resolution_sql =
+    "UPDATE workspace_assignments s SET workspace_id = a.workspace_id, outcome = "
+    "'application_workspace' FROM auth_app_webhook_events e JOIN auth_applications a ON a.id = "
+    "e.application_id WHERE s.object_table = 'auth_app_webhook_events' AND s.object_id = e.id "
+    "AND s.workspace_id IS NULL AND a.workspace_id IS NOT NULL";
 
 } // namespace
 
@@ -1712,7 +1727,8 @@ constexpr const char* forge_record_columns =
     "id::text, repository_id::text, kind, value::text, created_at::text, updated_at::text";
 constexpr const char* application_columns =
     "id::text, customer_id::text, pool_id, name, allowed_origins::text, redirect_uris::text, "
-    "coalesce(custom_sign_in_domain,''), theme::text, created_at::text, updated_at::text";
+    "coalesce(custom_sign_in_domain,''), theme::text, created_at::text, updated_at::text, "
+    "coalesce(workspace_id::text,'')";
 constexpr const char* application_user_columns =
     "auth_app_users.application_id::text, auth_app_users.user_id::text, "
     "coalesce(users.taap_id,''), coalesce(users.email,''), users.display_name, "
@@ -1723,11 +1739,6 @@ constexpr const char* application_organization_columns =
 constexpr const char* application_webhook_columns =
     "id::text, application_id::text, url, array_to_json(events)::text, encrypted_secret, "
     "enabled, created_at::text, updated_at::text";
-constexpr const char* application_webhook_event_columns =
-    "id::text, application_id::text, event, payload::text, created_at::text";
-constexpr const char* application_webhook_delivery_columns =
-    "id::text, event_id::text, webhook_id::text, attempt, status, signature, error, "
-    "created_at::text";
 
 Application application_of(const pqxx::row& row) {
     return Application{
@@ -1740,7 +1751,8 @@ Application application_of(const pqxx::row& row) {
         row[6].as<std::string>(),
         nlohmann::json::parse(row[7].as<std::string>()),
         row[8].as<std::string>(),
-        row[9].as<std::string>()};
+        row[9].as<std::string>(),
+        row[10].as<std::string>()};
 }
 
 ApplicationUser application_user_of(const pqxx::row& row) {
@@ -1774,25 +1786,6 @@ ApplicationWebhook application_webhook_of(const pqxx::row& row, std::string secr
         row[5].as<bool>(),
         row[6].as<std::string>(),
         row[7].as<std::string>()};
-}
-
-ApplicationWebhookEvent application_webhook_event_of(const pqxx::row& row) {
-    return ApplicationWebhookEvent{row[0].as<std::string>(),
-                                   row[1].as<std::string>(),
-                                   row[2].as<std::string>(),
-                                   nlohmann::json::parse(row[3].as<std::string>()),
-                                   row[4].as<std::string>()};
-}
-
-ApplicationWebhookDelivery application_webhook_delivery_of(const pqxx::row& row) {
-    return ApplicationWebhookDelivery{row[0].as<std::string>(),
-                                      row[1].as<std::string>(),
-                                      row[2].as<std::string>(),
-                                      row[3].as<int>(),
-                                      row[4].as<int>(),
-                                      row[5].as<std::string>(),
-                                      row[6].as<std::string>(),
-                                      row[7].as<std::string>()};
 }
 
 ForgeRecord forge_record_of(const pqxx::row& row) {
@@ -3417,9 +3410,10 @@ public:
             }
             const pqxx::result rows = tx.exec_params(
                 std::string("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
-                            "allowed_origins, redirect_uris, custom_sign_in_domain, theme) VALUES "
-                            "($1::uuid, $2::uuid, $3, $4, $5::jsonb, $6::jsonb, NULLIF($7, ''), "
-                            "$8::jsonb) RETURNING ") +
+                            "allowed_origins, redirect_uris, custom_sign_in_domain, theme, "
+                            "workspace_id) VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, "
+                            "$6::jsonb, NULLIF($7, ''), $8::jsonb, NULLIF($9, '')::uuid) "
+                            "RETURNING ") +
                     application_columns,
                 input.id,
                 input.customer_id,
@@ -3428,7 +3422,8 @@ public:
                 nlohmann::json(input.allowed_origins).dump(),
                 nlohmann::json(input.redirect_uris).dump(),
                 input.custom_sign_in_domain,
-                input.theme.dump());
+                input.theme.dump(),
+                input.workspace_id);
             tx.exec_params("INSERT INTO auth_app_signing_keys (application_id, kid, version, "
                            "encrypted_seed, public_key, current) VALUES "
                            "($1::uuid, $2, $3, $4, $5, true)",
@@ -3809,89 +3804,88 @@ public:
             });
     }
 
-    Result<ApplicationWebhookEvent>
-    create_application_webhook_event(const std::string& application_id,
-                                     const std::string& event,
-                                     const nlohmann::json& payload) override {
-        return with_tx<ApplicationWebhookEvent>(
-            [&](pqxx::work& tx) -> Result<ApplicationWebhookEvent> {
-                const pqxx::result rows = tx.exec_params(
-                    std::string("INSERT INTO auth_app_webhook_events (application_id, event, "
-                                "payload) VALUES ($1::uuid, $2, $3::jsonb) RETURNING ") +
-                        application_webhook_event_columns,
-                    application_id,
-                    event,
-                    payload.dump());
-                return application_webhook_event_of(rows[0]);
-            });
+    Result<void> assign_legacy_application_webhook_events() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec(std::string(legacy_application_event_assignment_sql));
+            tx.exec(std::string(legacy_application_event_resolution_sql));
+            return {};
+        });
     }
 
-    Result<ApplicationWebhookEvent> get_application_webhook_event(const std::string& id) override {
-        return with_tx<ApplicationWebhookEvent>(
-            [&](pqxx::work& tx) -> Result<ApplicationWebhookEvent> {
-                const pqxx::result rows =
-                    tx.exec_params(std::string("SELECT ") + application_webhook_event_columns +
-                                       " FROM auth_app_webhook_events WHERE id = $1::uuid",
-                                   id);
-                if (rows.empty()) {
-                    return std::unexpected(
-                        StoreError{"not_found", "application webhook event does not exist"});
+    Result<std::vector<LegacyApplicationWebhookEvent>>
+    legacy_application_webhook_events(const std::string& after_id, int limit) override {
+        return with_tx<std::vector<LegacyApplicationWebhookEvent>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyApplicationWebhookEvent>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT e.id::text, e.application_id::text, e.event, e.payload::text, "
+                    "(extract(epoch FROM e.created_at) * 1000000)::bigint, "
+                    "COALESCE(app.customer_id::text, ''), COALESCE(a.workspace_id::text, ''), "
+                    "COALESCE(a.outcome, 'needs_selection') "
+                    "FROM auth_app_webhook_events e "
+                    "LEFT JOIN auth_applications app ON app.id = e.application_id "
+                    "LEFT JOIN workspace_assignments a "
+                    "ON a.object_table = 'auth_app_webhook_events' AND a.object_id = e.id "
+                    "WHERE ($1 = '' OR e.id > NULLIF($1, '')::uuid) ORDER BY e.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyApplicationWebhookEvent> events;
+                for (const pqxx::row& row : rows) {
+                    LegacyApplicationWebhookEvent legacy;
+                    legacy.event.id = row[0].as<std::string>();
+                    legacy.event.application_id = row[1].as<std::string>();
+                    legacy.event.event = row[2].as<std::string>();
+                    legacy.event.payload =
+                        nlohmann::json::parse(row[3].as<std::string>(), nullptr, false);
+                    if (legacy.event.payload.is_discarded()) {
+                        legacy.event.payload = nlohmann::json::object();
+                    }
+                    legacy.event.at_us = row[4].as<std::int64_t>();
+                    legacy.event.created_at = record_instant(legacy.event.at_us);
+                    legacy.customer_id = row[5].as<std::string>();
+                    legacy.workspace_id = row[6].as<std::string>();
+                    legacy.outcome = row[7].as<std::string>();
+                    events.push_back(std::move(legacy));
                 }
-                return application_webhook_event_of(rows[0]);
+                return events;
             });
     }
 
-    Result<std::vector<ApplicationWebhookEvent>>
-    list_application_webhook_events(const std::string& application_id, int limit) override {
-        return with_tx<std::vector<ApplicationWebhookEvent>>(
-            [&](pqxx::work& tx) -> Result<std::vector<ApplicationWebhookEvent>> {
+    Result<std::vector<LegacyApplicationWebhookDelivery>>
+    legacy_application_webhook_deliveries(const std::string& after_id, int limit) override {
+        return with_tx<std::vector<LegacyApplicationWebhookDelivery>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyApplicationWebhookDelivery>> {
                 const pqxx::result rows = tx.exec_params(
-                    std::string("SELECT ") + application_webhook_event_columns +
-                        " FROM auth_app_webhook_events WHERE application_id = $1::uuid ORDER BY "
-                        "created_at DESC LIMIT $2",
-                    application_id,
-                    limit);
-                std::vector<ApplicationWebhookEvent> output;
-                for (const auto& row : rows) {
-                    output.push_back(application_webhook_event_of(row));
+                    "SELECT d.id::text, d.event_id::text, d.webhook_id::text, d.attempt, d.status, "
+                    "d.signature, d.error, (extract(epoch FROM d.created_at) * 1000000)::bigint, "
+                    "e.application_id::text, COALESCE(app.customer_id::text, ''), "
+                    "COALESCE(a.workspace_id::text, ''), COALESCE(a.outcome, 'needs_selection') "
+                    "FROM auth_app_webhook_deliveries d "
+                    "JOIN auth_app_webhook_events e ON e.id = d.event_id "
+                    "LEFT JOIN auth_applications app ON app.id = e.application_id "
+                    "LEFT JOIN workspace_assignments a "
+                    "ON a.object_table = 'auth_app_webhook_events' AND a.object_id = e.id "
+                    "WHERE ($1 = '' OR d.id > NULLIF($1, '')::uuid) ORDER BY d.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyApplicationWebhookDelivery> deliveries;
+                for (const pqxx::row& row : rows) {
+                    LegacyApplicationWebhookDelivery legacy;
+                    legacy.delivery.id = row[0].as<std::string>();
+                    legacy.delivery.event_id = row[1].as<std::string>();
+                    legacy.delivery.webhook_id = row[2].as<std::string>();
+                    legacy.delivery.attempt = row[3].as<int>();
+                    legacy.delivery.status = row[4].as<int>();
+                    legacy.delivery.signature = row[5].as<std::string>();
+                    legacy.delivery.error = row[6].as<std::string>();
+                    legacy.delivery.at_us = row[7].as<std::int64_t>();
+                    legacy.delivery.created_at = record_instant(legacy.delivery.at_us);
+                    legacy.delivery.application_id = row[8].as<std::string>();
+                    legacy.customer_id = row[9].as<std::string>();
+                    legacy.workspace_id = row[10].as<std::string>();
+                    legacy.outcome = row[11].as<std::string>();
+                    deliveries.push_back(std::move(legacy));
                 }
-                return output;
-            });
-    }
-
-    Result<ApplicationWebhookDelivery>
-    create_application_webhook_delivery(const NewApplicationWebhookDelivery& input) override {
-        return with_tx<ApplicationWebhookDelivery>(
-            [&](pqxx::work& tx) -> Result<ApplicationWebhookDelivery> {
-                const pqxx::result rows = tx.exec_params(
-                    std::string("INSERT INTO auth_app_webhook_deliveries (event_id, webhook_id, "
-                                "attempt, status, signature, error) VALUES ($1::uuid, $2::uuid, "
-                                "$3, $4, $5, $6) RETURNING ") +
-                        application_webhook_delivery_columns,
-                    input.event_id,
-                    input.webhook_id,
-                    input.attempt,
-                    input.status,
-                    input.signature,
-                    input.error);
-                return application_webhook_delivery_of(rows[0]);
-            });
-    }
-
-    Result<std::vector<ApplicationWebhookDelivery>>
-    list_application_webhook_deliveries(const std::string& event_id) override {
-        return with_tx<std::vector<ApplicationWebhookDelivery>>(
-            [&](pqxx::work& tx) -> Result<std::vector<ApplicationWebhookDelivery>> {
-                const pqxx::result rows = tx.exec_params(
-                    std::string("SELECT ") + application_webhook_delivery_columns +
-                        " FROM auth_app_webhook_deliveries WHERE event_id = $1::uuid ORDER BY "
-                        "created_at, attempt",
-                    event_id);
-                std::vector<ApplicationWebhookDelivery> output;
-                for (const auto& row : rows) {
-                    output.push_back(application_webhook_delivery_of(row));
-                }
-                return output;
+                return deliveries;
             });
     }
 

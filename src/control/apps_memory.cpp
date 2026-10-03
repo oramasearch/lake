@@ -33,6 +33,14 @@ Result<Application> InMemoryStore::create_application(const NewApplication& inpu
     if (customer == customers_.end()) {
         return std::unexpected(StoreError{"not_found", "application customer does not exist"});
     }
+    // As the routing trigger of migration 0049: a live workspace of the application's own space.
+    if (std::ranges::none_of(workspaces_, [&](const Workspace& value) {
+            return value.id == input.workspace_id && value.customer_id == input.customer_id &&
+                   value.desired != "deleted";
+        })) {
+        return std::unexpected(
+            StoreError{"invalid_input", "workspace_id must name a workspace in this space"});
+    }
     if (std::ranges::any_of(applications_, [&](const Application& value) {
             return value.id == input.id || value.pool_id == input.pool_id ||
                    (!input.custom_sign_in_domain.empty() &&
@@ -57,7 +65,8 @@ Result<Application> InMemoryStore::create_application(const NewApplication& inpu
                                         input.custom_sign_in_domain,
                                         input.theme,
                                         now,
-                                        now});
+                                        now,
+                                        input.workspace_id});
     ApplicationSigningKey key = input.signing_key;
     key.application_id = input.id;
     key.current = true;
@@ -405,68 +414,101 @@ InMemoryStore::list_application_webhooks(const std::string& application_id, int 
     return output;
 }
 
-Result<ApplicationWebhookEvent> InMemoryStore::create_application_webhook_event(
-    const std::string& application_id, const std::string& event, const nlohmann::json& payload) {
+void InMemoryStore::seed_legacy_application_webhook_event(ApplicationWebhookEvent event) {
     std::lock_guard lock(mutex_);
-    if (std::ranges::none_of(applications_,
-                             [&](const auto& value) { return value.id == application_id; })) {
-        return std::unexpected(StoreError{"not_found", "application does not exist"});
+    if (event.id.empty()) {
+        event.id = new_uuid_v4();
     }
-    application_webhook_events_.push_back(
-        ApplicationWebhookEvent{new_uuid_v4(), application_id, event, payload, now_iso8601()});
-    return application_webhook_events_.back();
+    application_webhook_events_.push_back(std::move(event));
 }
 
-Result<ApplicationWebhookEvent>
-InMemoryStore::get_application_webhook_event(const std::string& id) {
+void InMemoryStore::seed_legacy_application_webhook_delivery(ApplicationWebhookDelivery delivery) {
     std::lock_guard lock(mutex_);
-    const auto value = std::ranges::find_if(application_webhook_events_,
-                                            [&](const auto& item) { return item.id == id; });
-    if (value == application_webhook_events_.end()) {
-        return std::unexpected(StoreError{"not_found", "application webhook event does not exist"});
+    if (delivery.id.empty()) {
+        delivery.id = new_uuid_v4();
     }
-    return *value;
+    application_webhook_deliveries_.push_back(std::move(delivery));
 }
 
-Result<std::vector<ApplicationWebhookEvent>>
-InMemoryStore::list_application_webhook_events(const std::string& application_id, int limit) {
+Result<void> InMemoryStore::assign_legacy_application_webhook_events() {
     std::lock_guard lock(mutex_);
-    std::vector<ApplicationWebhookEvent> output;
-    for (auto value = application_webhook_events_.rbegin();
-         value != application_webhook_events_.rend();
-         ++value) {
-        if (value->application_id == application_id) {
-            output.push_back(*value);
+    for (const ApplicationWebhookEvent& event : application_webhook_events_) {
+        const auto application = std::ranges::find_if(
+            applications_, [&](const Application& value) { return value.id == event.application_id; });
+        if (application == applications_.end()) {
+            continue;
+        }
+        auto& assigned = legacy_application_event_assignments_[event.id];
+        if (assigned.first.empty()) {
+            assigned = application->workspace_id.empty()
+                ? std::pair<std::string, std::string>{"", "needs_selection"}
+                : std::pair<std::string, std::string>{application->workspace_id,
+                                                      "application_workspace"};
         }
     }
-    limit_rows(output, limit);
-    return output;
+    return {};
 }
 
-Result<ApplicationWebhookDelivery>
-InMemoryStore::create_application_webhook_delivery(const NewApplicationWebhookDelivery& input) {
+Result<std::vector<LegacyApplicationWebhookEvent>>
+InMemoryStore::legacy_application_webhook_events(const std::string& after_id, int limit) {
     std::lock_guard lock(mutex_);
-    application_webhook_deliveries_.push_back(ApplicationWebhookDelivery{new_uuid_v4(),
-                                                                         input.event_id,
-                                                                         input.webhook_id,
-                                                                         input.attempt,
-                                                                         input.status,
-                                                                         input.signature,
-                                                                         input.error,
-                                                                         now_iso8601()});
-    return application_webhook_deliveries_.back();
-}
-
-Result<std::vector<ApplicationWebhookDelivery>>
-InMemoryStore::list_application_webhook_deliveries(const std::string& event_id) {
-    std::lock_guard lock(mutex_);
-    std::vector<ApplicationWebhookDelivery> output;
-    for (const auto& value : application_webhook_deliveries_) {
-        if (value.event_id == event_id) {
-            output.push_back(value);
+    std::vector<ApplicationWebhookEvent> ordered = application_webhook_events_;
+    std::ranges::sort(ordered, {}, &ApplicationWebhookEvent::id);
+    std::vector<LegacyApplicationWebhookEvent> rows;
+    for (const ApplicationWebhookEvent& event : ordered) {
+        if ((!after_id.empty() && event.id <= after_id) ||
+            static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            continue;
         }
+        LegacyApplicationWebhookEvent row{event, "", "", "needs_selection"};
+        const auto application = std::ranges::find_if(
+            applications_, [&](const Application& value) { return value.id == event.application_id; });
+        if (application != applications_.end()) {
+            row.customer_id = application->customer_id;
+        }
+        if (const auto found = legacy_application_event_assignments_.find(event.id);
+            found != legacy_application_event_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
     }
-    return output;
+    return rows;
+}
+
+Result<std::vector<LegacyApplicationWebhookDelivery>>
+InMemoryStore::legacy_application_webhook_deliveries(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<ApplicationWebhookDelivery> ordered = application_webhook_deliveries_;
+    std::ranges::sort(ordered, {}, &ApplicationWebhookDelivery::id);
+    std::vector<LegacyApplicationWebhookDelivery> rows;
+    for (ApplicationWebhookDelivery delivery : ordered) {
+        if ((!after_id.empty() && delivery.id <= after_id) ||
+            static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            continue;
+        }
+        LegacyApplicationWebhookDelivery row{{}, "", "", "needs_selection"};
+        const auto event = std::ranges::find_if(application_webhook_events_, [&](const auto& value) {
+            return value.id == delivery.event_id;
+        });
+        if (event != application_webhook_events_.end()) {
+            delivery.application_id = event->application_id;
+            const auto application = std::ranges::find_if(applications_, [&](const auto& value) {
+                return value.id == event->application_id;
+            });
+            if (application != applications_.end()) {
+                row.customer_id = application->customer_id;
+            }
+            if (const auto found = legacy_application_event_assignments_.find(event->id);
+                found != legacy_application_event_assignments_.end()) {
+                row.workspace_id = found->second.first;
+                row.outcome = found->second.second;
+            }
+        }
+        row.delivery = std::move(delivery);
+        rows.push_back(std::move(row));
+    }
+    return rows;
 }
 
 Result<void>

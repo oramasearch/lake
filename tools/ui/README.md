@@ -12,7 +12,9 @@ in-memory control plane and an on-disk libliquid repository populated with retai
 two-value conflict, representative preview formats, and a build result. It covers public pages,
 operator pages, identity pages, repository content, hosted application identity, secrets, sharing
 decisions, an individual link detail, a recipient's shared-with-me page, metering, audit data, and
-the public transparency monitor without adding a fixture route to `lake`.
+the public transparency monitor without adding a fixture route to `lake`. Its application lives in
+one Ready workspace whose record store is the tests' `RecordTables` fake, so the event log page
+reads its event from the workspace as production does (lake#356).
 
 ```sh
 cmake --build build --target lake-ui-fixture

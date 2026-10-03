@@ -24,13 +24,15 @@
 
 #include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/workspace_records.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/search/index.hpp"
-// The keyed record store tests use for workspace Zettas: drive links are workspace records.
+// The keyed record store tests use for workspace Zettas: drive links and application events are
+// workspace records.
 #include "../../tests/record_fixture.hpp"
 
 namespace {
@@ -175,6 +177,27 @@ int main(int argc, char** argv) {
     const auto organization_customer =
         require(store->create_customer({"organization", "", organization.id, "orama-research"}),
                 "create organization customer");
+    // One ready workspace of the organization: it holds the application's lifecycle events.
+    const auto console_workspace =
+        require(store->create_workspace({organization_customer.id, "console", "prod", ""}),
+                "create workspace");
+    const auto console_service =
+        require(store->get_service(console_workspace.zetta_service_id), "read workspace service");
+    if (const auto ready =
+            store->set_service_status(console_service.id, "Ready", "", "http://console.test");
+        !ready) {
+        std::println(stderr, "lake-ui-fixture: mark workspace ready: {}", ready.error().message);
+        return 1;
+    }
+    // Every workspace of the fixture is served by one WorkspaceService over FixtureWorkspaces.
+    const auto service_dir = store_root / "ui-fixture-services";
+    std::filesystem::create_directories(service_dir);
+    std::ofstream(service_dir / (console_service.slug + ".json"))
+        << nlohmann::json{{"kind", "zetta"}, {"token", "ui-fixture-workspace"}}.dump();
+    const auto workspaces = std::make_shared<lake::control::WorkspaceService>(
+        lake::control::WorkspaceConfig{service_dir.string(), 0},
+        store,
+        std::make_shared<FixtureWorkspaces>());
     const std::string application_id = lake::control::new_uuid_v4();
     auto application_key = lake::control::apps::generate_signing_key(application_id, 1);
     if (!application_key) {
@@ -192,7 +215,8 @@ int main(int argc, char** argv) {
                      .redirect_uris = {"https://console.example.test/callback"},
                      .custom_sign_in_domain = "login.console.example.test",
                      .theme = {{"accent_color", "#0f62fe"}, {"background_color", "#f8f8fa"}},
-                     .signing_key = *application_key}),
+                     .signing_key = *application_key,
+                     .workspace_id = console_workspace.id}),
                 "create application");
     require(store->sign_up_password({application.pool_id,
                                      "app-user@example.test",
@@ -206,11 +230,28 @@ int main(int argc, char** argv) {
                                                     "Example Workspace",
                                                     {{"plan", "enterprise"}}}),
             "create application organization");
-    require(store->create_application_webhook_event(
-                application.id,
-                "user.created",
-                {{"email", "app-user@example.test"}, {"source", "ui-fixture"}}),
-            "create application event");
+    {
+        auto records = lake::control::WorkspaceRecords::open(
+            [workspaces, customer = organization_customer.id, id = console_workspace.id](
+                std::string capability, bool read, nlohmann::json input) {
+                return workspaces->call(customer, id, std::move(capability), read, std::move(input));
+            },
+            console_workspace.id, instance_kek);
+        if (!records) {
+            std::println(stderr, "lake-ui-fixture: open workspace records: {}",
+                         records.error().message);
+            return 1;
+        }
+        lake::control::ApplicationWebhookEvents events(*records);
+        auto appended = liquid::runtime::block_on(events.append(
+            {.application_id = application.id,
+             .event = "user.created",
+             .payload = {{"email", "app-user@example.test"}, {"source", "ui-fixture"}}}));
+        if (!appended || !*appended) {
+            std::println(stderr, "lake-ui-fixture: create application event failed");
+            return 1;
+        }
+    }
     const auto repository =
         require(store->create_repository({organization_customer.id,
                                           "lake-design",
@@ -427,12 +468,6 @@ int main(int argc, char** argv) {
                                  "ui-fixture-shared-recipient"}),
             "create shared recipient grant");
     // The folder's link lives in the organization's workspace Zetta; centrally only its grant.
-    const auto service_dir = store_root / "ui-fixture-services";
-    std::filesystem::create_directories(service_dir);
-    auto workspaces = std::make_shared<lake::control::WorkspaceService>(
-        lake::control::WorkspaceConfig{service_dir.string(), 0},
-        store,
-        std::make_shared<FixtureWorkspaces>());
     const auto workspace = require(
         store->create_workspace({organization_customer.id, "research", "dev", ""}),
         "create workspace");

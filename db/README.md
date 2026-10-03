@@ -93,3 +93,11 @@ workspace itself. Lake no longer writes or reads `drive_share_links` except thro
 `copy_workspace_records`, which reapplies the assignment and routes before each run. Nothing is
 dropped. The latest guard is `drive_share_link_workspaces_guard`; the operator must vendor this
 schema and update its guard before rollout. See [sharing.md](../docs/api/sharing.md).
+Migration `0049_application_webhook_workspaces` adds `auth_applications.workspace_id` (required for
+new applications by the `application_workspace_routing` trigger, assignable once for a legacy
+application, then immutable), assigns it where the space has one live workspace, and records the
+owner of each retired `auth_app_webhook_events` row in `workspace_assignments`. Application events
+and delivery attempts now live in the application's workspace Zetta (lake#356, lake#357); lake
+reads the two tables only through `copy_workspace_records`. Nothing is dropped. The latest guard is
+`application_webhook_workspaces_guard`; the operator must vendor this schema and update its guard
+before rollout.

@@ -388,3 +388,10 @@ two spaces with two workspaces each, missing/unknown/foreign `workspace_id`, lea
 callers, forged and moved tokens, a workspace that is not ready, revocation and workspace deletion.
 `workspace_fixture.hpp` (`RecordWorkspaces`) gives a test store Ready workspaces whose records live
 in `RecordTables`, over the memory or PostgreSQL store.
+Application events and delivery attempts (lake#356, lake#357): `test_apps.cpp` covers two spaces,
+two workspaces in one, missing, malformed, unknown and foreign `workspace_id`, least privilege, a
+workspace that is not ready, deletion, and an attempt claimed by another caller not being sent;
+`WorkspaceRecordStores.TheOneShotCopyMovesApplicationEventsAndTheirDeliveries` the copy in both
+stores; `PostgresApplicationWebhooks.MigrationRecordsEachEventsOwnerForTheCopy` migration
+`0049_application_webhook_workspaces`. `stream_fixture.hpp`'s `ready_workspace` makes a Ready
+workspace over either store for tests that sign into an application pool.

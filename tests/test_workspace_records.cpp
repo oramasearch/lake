@@ -19,6 +19,8 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/application_webhook_records.hpp"
+#include "lake/control/apps.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/memory_store.hpp"
@@ -1242,6 +1244,202 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesDriveShareLinksAndRoutesTheirTo
     auto& rows = t.zetta->records["http://" + home + ".test"].rows("drive_share_links");
     rows.at(legacy[0].id)["value"] = "AAAA";
     EXPECT_EQ(copy("verify").value["missing"].size(), 1U);
+}
+
+// lake#356 and lake#357: the retired application event and delivery tables move into the
+// workspace of each event's application, deliveries with their event, and read back through the
+// capability with their original ids, attempts and outcomes.
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationEventsAndTheirDeliveries) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    auto& first = t.spaces[0];
+    auto& second = t.spaces[1];
+    const auto application = [&](const std::string& customer, const std::string& workspace,
+                                 const std::string& name) {
+        const std::string id = lake::control::new_uuid_v4();
+        auto key = lake::control::apps::generate_signing_key(id, 1);
+        EXPECT_TRUE(key);
+        auto created = t.store->create_application({.id = id,
+                                                    .customer_id = customer,
+                                                    .pool_id = "app:" + id,
+                                                    .name = name,
+                                                    .allowed_origins = {"https://a.example.test"},
+                                                    .redirect_uris = {},
+                                                    .signing_key = *key,
+                                                    .workspace_id = workspace});
+        EXPECT_TRUE(created) << created.error().message;
+        return id;
+    };
+    // The first space's application is in its lab workspace; the second space's in its first.
+    const std::string lab_app = application(first.customer_id, first.workspaces[1], "lab app");
+    const std::string their_app = application(second.customer_id, second.workspaces[0], "theirs");
+    const std::string webhook_id = lake::control::new_uuid_v4();
+    struct Legacy {
+        lake::control::ApplicationWebhookEvent event;
+        std::vector<lake::control::ApplicationWebhookDelivery> deliveries;
+    };
+    const auto legacy = [&](const std::string& application_id, std::int64_t at_us,
+                            int attempts) {
+        Legacy row;
+        row.event = {lake::control::new_uuid_v4(), application_id, "user.created",
+                     json{{"email", "person@example.test"}}, "", at_us};
+        for (int attempt = 1; attempt <= attempts; ++attempt) {
+            lake::control::ApplicationWebhookDelivery delivery;
+            delivery.id = lake::control::new_uuid_v4();
+            delivery.event_id = row.event.id;
+            delivery.webhook_id = webhook_id;
+            delivery.attempt = attempt;
+            delivery.status = attempt == attempts ? 204 : 503;
+            delivery.signature = "sig-" + std::to_string(attempt);
+            delivery.error = attempt == attempts ? "" : "unavailable";
+            delivery.application_id = application_id;
+            delivery.at_us = at_us + attempt;
+            row.deliveries.push_back(delivery);
+        }
+        return row;
+    };
+    std::vector<Legacy> rows = {legacy(lab_app, 1'790'000'000'000'000, 2),
+                                legacy(their_app, 1'790'000'000'100'000, 1)};
+    std::string legacy_app; // PostgreSQL only: an application from before migration 0049
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        // An application registered before 0049 in a space with two workspaces has none.
+        legacy_app = lake::control::new_uuid_v4();
+        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
+        tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
+                       "allowed_origins) VALUES ($1::uuid, $2::uuid, $3, 'legacy', "
+                       "'[\"https://legacy.example.test\"]'::jsonb)",
+                       legacy_app, second.customer_id, "app:" + legacy_app);
+        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
+        rows.push_back(legacy(legacy_app, 1'790'000'000'200'000, 1));
+        for (const std::string& application_id : {lab_app, their_app, legacy_app}) {
+            tx.exec_params("INSERT INTO auth_app_webhooks (id, application_id, url, events, "
+                           "encrypted_secret) VALUES ($1::uuid, $2::uuid, 'https://h.test', "
+                           "ARRAY['user.created'], 'x')",
+                           application_id == lab_app ? webhook_id : lake::control::new_uuid_v4(),
+                           application_id);
+        }
+        for (Legacy& row : rows) {
+            if (row.event.application_id != lab_app) {
+                const auto hook = tx.exec_params("SELECT id::text FROM auth_app_webhooks WHERE "
+                                                 "application_id = $1::uuid",
+                                                 row.event.application_id);
+                for (auto& delivery : row.deliveries) {
+                    delivery.webhook_id = hook[0][0].as<std::string>();
+                }
+            }
+            tx.exec_params("INSERT INTO auth_app_webhook_events (id, application_id, event, "
+                           "payload, created_at) VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, "
+                           "to_timestamp($5::double precision / 1000000))",
+                           row.event.id, row.event.application_id, row.event.event,
+                           row.event.payload.dump(), row.event.at_us);
+            for (const auto& delivery : row.deliveries) {
+                tx.exec_params("INSERT INTO auth_app_webhook_deliveries (id, event_id, webhook_id, "
+                               "attempt, status, signature, error, created_at) VALUES ($1::uuid, "
+                               "$2::uuid, $3::uuid, $4, $5, $6, $7, "
+                               "to_timestamp($8::double precision / 1000000))",
+                               delivery.id, delivery.event_id, delivery.webhook_id,
+                               delivery.attempt, delivery.status, delivery.signature,
+                               delivery.error, delivery.at_us);
+            }
+        }
+        tx.commit();
+    } else {
+        auto& memory = static_cast<lake::control::InMemoryStore&>(*t.store);
+        for (const Legacy& row : rows) {
+            memory.seed_legacy_application_webhook_event(row.event);
+            for (const auto& delivery : row.deliveries) {
+                memory.seed_legacy_application_webhook_delivery(delivery);
+            }
+        }
+    }
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    operator_context.request_id = lake::control::new_uuid_v4();
+    const auto copy = [&](std::string collection, std::string mode) {
+        const auto completed = liquid::runtime::block_on(t.registry.call_async(
+            "copy_workspace_records", {{"collection", collection}, {"mode", mode}},
+            operator_context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+    const std::size_t unresolved = GetParam() ? 1U : 0U;
+    for (const std::string collection : {"auth_app_webhook_events", "auth_app_webhook_deliveries"}) {
+        const bool events = collection == "auth_app_webhook_events";
+        const std::size_t total = events ? rows.size() : (GetParam() ? 4U : 3U);
+        const std::size_t owned = events ? 2U : 3U;
+        const auto plan = copy(collection, "plan");
+        ASSERT_TRUE(plan.ok) << plan.error.message;
+        EXPECT_EQ(plan.value["rows"], total) << collection;
+        EXPECT_EQ(plan.value["unresolved"].size(), unresolved) << collection;
+        const auto before = copy(collection, "verify");
+        EXPECT_EQ(before.value["missing"].size(), owned) << collection;
+        EXPECT_FALSE(before.value["complete"]);
+        const auto copied = copy(collection, "copy");
+        ASSERT_TRUE(copied.ok) << copied.error.message;
+        EXPECT_EQ(copied.value["copied"], owned) << collection;
+        const auto rerun = copy(collection, "copy");
+        EXPECT_EQ(rerun.value["copied"], 0) << "a rerun copies nothing twice";
+        EXPECT_EQ(rerun.value["already_present"], owned);
+        const auto verified = copy(collection, "verify");
+        EXPECT_EQ(verified.value["verified"], owned) << collection;
+        EXPECT_TRUE(verified.value["missing"].empty());
+        EXPECT_TRUE(verified.value["mismatched"].empty());
+        EXPECT_EQ(verified.value["complete"], unresolved == 0) << collection;
+    }
+    // Each row is only in its own application's workspace.
+    const std::string lab_url = "http://" + first.workspaces[1] + ".test";
+    const std::string their_url = "http://" + second.workspaces[0] + ".test";
+    EXPECT_EQ(t.zetta->records[lab_url].rows("auth_app_webhook_events").size(), 1U);
+    EXPECT_EQ(t.zetta->records[lab_url].rows("auth_app_webhook_deliveries").size(), 2U);
+    EXPECT_EQ(t.zetta->records[their_url].rows("auth_app_webhook_events").size(), 1U);
+    EXPECT_TRUE(t.zetta->records["http://" + first.workspaces[0] + ".test"].collections.empty());
+
+    // The application's event log reads the copy back with the original ids and outcomes.
+    const auto read = liquid::runtime::block_on(t.registry.call_async(
+        "list_application_webhook_events",
+        {{"application_id", lab_app}, {"workspace_id", first.workspaces[1]}}, operator_context));
+    ASSERT_TRUE(read && read->ok) << (read ? read->error.message : "incomplete");
+    ASSERT_EQ(read->value["items"].size(), 1U);
+    const json& event = read->value["items"][0];
+    EXPECT_EQ(event["id"], rows[0].event.id);
+    EXPECT_EQ(event["payload"]["email"], "person@example.test");
+    ASSERT_EQ(event["deliveries"].size(), 2U);
+    EXPECT_EQ(event["deliveries"][0]["id"], rows[0].deliveries[0].id);
+    EXPECT_EQ(event["deliveries"][0]["status"], 503);
+    EXPECT_EQ(event["deliveries"][1]["status"], 204);
+
+    if (GetParam()) {
+        // Assigning the legacy application its workspace resolves its rows on the next run.
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       legacy_app, second.workspaces[1]);
+        tx.commit();
+        const auto resolved = copy("auth_app_webhook_events", "copy");
+        EXPECT_EQ(resolved.value["copied"], 1);
+        EXPECT_TRUE(resolved.value["unresolved"].empty());
+        EXPECT_EQ(copy("auth_app_webhook_deliveries", "copy").value["copied"], 1);
+        EXPECT_TRUE(copy("auth_app_webhook_events", "verify").value["complete"]);
+        EXPECT_TRUE(copy("auth_app_webhook_deliveries", "verify").value["complete"]);
+    }
+
+    // A changed copy is reported, never silently accepted.
+    auto& copied_rows = t.zetta->records[lab_url].rows("auth_app_webhook_deliveries");
+    auto first_row = copied_rows.begin();
+    auto second_row = std::next(first_row);
+    first_row->second["value"] = second_row->second["value"];
+    const auto tampered = copy("auth_app_webhook_deliveries", "verify");
+    EXPECT_EQ(tampered.value["missing"].size(), 1U) << "a row that no longer opens is missing";
 }
 
 TEST(WorkspaceRecords, NoWorkspaceSurfaceReachesTheRecordStore) {

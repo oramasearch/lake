@@ -234,8 +234,8 @@ stored. The migration follows metering migration `0014`.
 | `auth_app_users` | Pool membership and active or suspended status for application users. |
 | `auth_app_organizations` | Application-facing organization profiles and metadata. |
 | `auth_app_webhooks` | Event filters, destination, enabled state, and encrypted signing secret. |
-| `auth_app_webhook_events` | Immutable lifecycle event payloads. |
-| `auth_app_webhook_deliveries` | Every delivery attempt, outcome, signature, and error. |
+| `auth_app_webhook_events` | Immutable lifecycle event payloads. Retired by `0049`: events live in the application's workspace Zetta. |
+| `auth_app_webhook_deliveries` | Every delivery attempt, outcome, signature, and error. Retired by `0049`, with the events. |
 | `auth_app_guard` | Guard table for this migration. |
 
 `users.pool_id` scopes password, OAuth, passkey, session, and MFA lookup. The migration replaces
@@ -574,3 +574,20 @@ and needs no route. Lake no longer writes or reads `drive_share_links` except th
 operator-only `copy_workspace_records`, which reapplies the assignment and routes before each run.
 Nothing is dropped. Idempotent; guard `drive_share_link_workspaces_guard`. See
 [`../api/sharing.md`](../api/sharing.md#where-links-live).
+
+## Application webhook workspaces migration
+
+`0049_application_webhook_workspaces` (lake#356, lake#357) adds `auth_applications.workspace_id`,
+the workspace whose Zetta holds the application's lifecycle events and delivery attempts. It is
+content-free routing, like `stores.workspace_id`. The trigger `application_workspace_routing`
+(`enforce_application_workspace`) requires a live workspace of the application's own space on
+insert, accepts one assignment of a legacy application that has none, and refuses any other change
+of the workspace or the space. An application whose space has exactly one live workspace is
+assigned it (`sole_workspace`); every other is recorded as `needs_selection` with a warning. Each
+retired `auth_app_webhook_events` row's owner is recorded as its application's workspace
+(`application_workspace`) or `needs_selection`; a delivery attempt always goes where its event
+goes and has no row of its own. Lake no longer writes or reads either table except through the
+operator-only `copy_workspace_records`, which reapplies the assignment and resolves events whose
+application has since been assigned. Nothing is dropped. Idempotent; guard
+`application_webhook_workspaces_guard`. Mechanism and cutover:
+[`../architecture/workspace-records.md`](../architecture/workspace-records.md#cutover-runbook-application-events-and-deliveries-dev-cluster).
