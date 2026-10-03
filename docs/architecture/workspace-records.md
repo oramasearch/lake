@@ -423,7 +423,8 @@ Migration `0064_repository_records` (lake#315 part 2, lake#319). Each repository
 to its own workspace (`repositories.workspace_id`, `0051`), so there is no selection step of its
 own: a repository is `needs_selection` only while it has no workspace. On dev that is the `liquid`
 repository, which stays `needs_selection` until lake#513 creates a workspace for its space and
-assigns it. These steps are for the coordinator and are not run by this change.
+migration `0066_assign_unrouted_repositories` assigns it (its description's row becomes
+`repository_workspace`). These steps are for the coordinator and are not run by this change.
 
 1. Workspace Zettas run Zetta `dev` at or after `82f617e`, as for `ask_messages`.
 2. Have the operator vendor `db/schema.sql` through `0064_repository_records`, select
@@ -439,7 +440,8 @@ assigns it. These steps are for the coordinator and are not run by this change.
    operator bearer, then `{"mode":"copy"}` following `next_after` until it is null, then
    `{"mode":"verify"}` over every page. Each record keeps the row's `created_at` instant.
 5. A repository without a workspace stays `needs_selection` and keeps `complete` false if it holds
-   a description; lake#513 assigns it, and the next run copies it. Repositories recorded
+   a description; migration `0066` (lake#513) assigns it, and the next run, once the workspace is
+   Ready, copies it. Repositories recorded
    `workspace_deleted` went with their workspace and do not block. Repeat step 4.
 6. Once `verify` answers `complete: true` on every page, file the migration that drops
    `repositories.description`, with the copy output attached. The table itself stays: it is the

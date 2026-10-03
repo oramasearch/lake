@@ -129,6 +129,10 @@ cancels its unfinished builds and records the deletion in `workspace_deletions`;
 its tenant images, drops search segments and records one central audit event per destroyed object,
 and the owner loop resumes a deletion left unfinished. `delete_workspace {dry_run: true}` and the
 `/workspaces` confirmation list what goes, with counts. See `docs/api/workspaces.md#deletion`.
+A repository left without a workspace is assigned its space's only live workspace by migration
+`0066_assign_unrouted_repositories` (decision 54 S14, lake#513), through a routing-trigger exception
+only that block opens; on dev this is the `liquid` repository. See
+`docs/api/repositories.md#the-owning-workspace`.
 
 ## Historical status — superseded 2026-09-08
 

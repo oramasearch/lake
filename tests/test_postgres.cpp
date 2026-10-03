@@ -2818,6 +2818,142 @@ TEST(PostgresRepositories, MigrationDropsRefsAndRecordsEachDescriptionsOwner) {
     EXPECT_FALSE(tx.exec("SELECT to_regclass('repository_records_guard')")[0][0].is_null());
 }
 
+// Migration 0066 (decision 54 S14, lake#513): a repository 0051 left without a workspace is
+// assigned its space's only live workspace once the space has exactly one, with its routing and
+// description owners recorded; a space with two workspaces is left alone and reported. The
+// trigger lets only the migration's own block make that change: every other change of
+// workspace_id is still refused, in the migration's transaction and afterwards.
+TEST(PostgresRepositories, MigrationAssignsUnroutedRepositoriesTheirSoleWorkspace) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "unrouted-repository-migration-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    // Space 0 had one workspace, deleted before 0051 (so it had none then); space 1 has two.
+    std::vector<std::string> customers;
+    std::vector<std::vector<std::string>> workspaces(2);
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "unrouted-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+        for (int count = 0; count <= index; ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            workspaces[index].push_back(workspace->id);
+        }
+    }
+    std::vector<std::string> repositories;
+    for (int index = 0; index < 2; ++index) {
+        const auto created = store->create_repository(
+            {customers[index], "liquid", "", "private", workspaces[index].front()});
+        ASSERT_TRUE(created) << created.error().message;
+        repositories.push_back(created->id);
+    }
+    pqxx::connection connection(uri);
+    const std::string mine =
+        "ARRAY['" + repositories[0] + "','" + repositories[1] + "']::uuid[]";
+    {
+        // The state 0051 and 0064 left: no workspace, needs_selection for the routing row and the
+        // description, and space 0 without a live workspace.
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec("UPDATE repositories SET workspace_id = NULL, description = 'Version control' "
+                "WHERE id = ANY(" + mine + ")");
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE workspaces SET desired = 'deleted' WHERE id = $1::uuid",
+                       workspaces[0].front());
+        tx.exec("DELETE FROM workspace_assignments WHERE object_id = ANY(" + mine + ")");
+        tx.exec("INSERT INTO workspace_assignments (object_table, object_id, customer_id, "
+                "workspace_id, outcome) SELECT t, r.id, r.customer_id, NULL, 'needs_selection' "
+                "FROM repositories r, unnest(ARRAY['repositories', 'repository_descriptions']) t "
+                "WHERE r.id = ANY(" + mine + ")");
+        tx.commit();
+    }
+    // The space gets its first live workspace after 0051, as on dev.
+    const auto later = store->create_workspace({customers[0], "workspace", "prod", ""});
+    ASSERT_TRUE(later) << later.error().message;
+
+    using Outcome = std::pair<std::string, std::string>;
+    const auto outcome = [&](const std::string& table, const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = $1 AND object_id = $2::uuid",
+            table, id);
+        return found.empty() ? Outcome{}
+                             : Outcome{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    const auto refused = [&](pqxx::dbtransaction& tx, const std::string& statement) {
+        pqxx::subtransaction attempt(tx, "refused");
+        EXPECT_THROW(attempt.exec(statement), pqxx::check_violation) << statement;
+    };
+    std::vector<std::string> warnings;
+    connection.set_notice_handler([&](pqxx::zview notice) { warnings.emplace_back(notice); });
+
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0066_assign_unrouted_repositories:");
+    ASSERT_NE(start, std::string::npos);
+    for (int pass = 0; pass < 2; ++pass) {
+        warnings.clear();
+        {
+            // The first pass runs the block as a database from before 0066 would; the second is a
+            // rerun, which changes nothing.
+            pqxx::work tx(connection);
+            if (pass == 0) {
+                tx.exec("DELETE FROM schema_migrations "
+                        "WHERE version = '0066_assign_unrouted_repositories'");
+            }
+            tx.exec(schema.substr(start));
+            // In the migration's own transaction, after its block, the exception is closed.
+            refused(tx, "UPDATE repositories SET workspace_id = '" + workspaces[1].front() +
+                            "' WHERE id = '" + repositories[1] + "'");
+            tx.commit();
+        }
+        EXPECT_EQ(store->get_repository(repositories[0])->workspace_id, later->id) << pass;
+        EXPECT_TRUE(store->get_repository(repositories[1])->workspace_id.empty()) << pass;
+        EXPECT_EQ(outcome("repositories", repositories[0]), (Outcome{"sole_workspace", later->id}));
+        EXPECT_EQ(outcome("repository_descriptions", repositories[0]),
+                  (Outcome{"repository_workspace", later->id}));
+        EXPECT_EQ(outcome("repositories", repositories[1]), (Outcome{"needs_selection", ""}));
+        EXPECT_EQ(outcome("repository_descriptions", repositories[1]),
+                  (Outcome{"needs_selection", ""}));
+        const auto reported = std::ranges::count_if(warnings, [&](const std::string& notice) {
+            return notice.find("workspace_id requires selection: table=repositories, object=" +
+                               repositories[1]) != std::string::npos &&
+                   notice.find("live_workspaces=2") != std::string::npos;
+        });
+        EXPECT_EQ(reported, pass == 0 ? 1 : 0) << "reported on the run that assigns, once";
+    }
+    connection.set_notice_handler([](pqxx::zview) {});
+
+    // Afterwards the trigger refuses every change of workspace_id, as before.
+    pqxx::work tx(connection);
+    refused(tx, "UPDATE repositories SET workspace_id = '" + workspaces[1].front() +
+                    "' WHERE id = '" + repositories[1] + "'");
+    refused(tx, "UPDATE repositories SET workspace_id = NULL WHERE id = '" + repositories[0] + "'");
+    refused(tx, "UPDATE repositories SET workspace_id = '" + workspaces[1].front() +
+                    "' WHERE id = '" + repositories[0] + "'");
+    // The setting alone opens only NULL to a live workspace of the repository's own space.
+    tx.exec("SELECT set_config('lake.repository_assignment', "
+            "'0066_assign_unrouted_repositories', true)");
+    refused(tx, "UPDATE repositories SET workspace_id = '" + workspaces[1].back() +
+                    "' WHERE id = '" + repositories[0] + "'");
+    refused(tx, "UPDATE repositories SET workspace_id = '" + later->id + "' WHERE id = '" +
+                    repositories[1] + "'");
+    refused(tx, "UPDATE repositories SET customer_id = '" + customers[0] + "' WHERE id = '" +
+                    repositories[1] + "'");
+    tx.abort();
+    pqxx::work check(connection);
+    EXPECT_FALSE(
+        check.exec("SELECT to_regclass('assign_unrouted_repositories_guard')")[0][0].is_null());
+}
+
 // Migration 0046 (lake#376): each Opportunity's owner is the workspace its scan ran in, else the
 // space's only live workspace; a deleted workspace's rows and ambiguous rows are only reported.
 TEST(PostgresOpportunities, MigrationRecordsEachRowsOwnerForTheCopy) {
