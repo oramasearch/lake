@@ -30,6 +30,7 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_markdown.cpp
   test_webauthn.cpp
   test_search.cpp
   test_shared_store.cpp
+  test_thread.cpp
   test_secrets.cpp
   test_offline_recovery.cpp
   test_pki.cpp

@@ -6,6 +6,7 @@
 // Registry::call so authorization, validation and audit remain centralized.
 
 #include "lake/api/server.hpp"
+#include "lake/thread.hpp"
 
 #include "lake/control/agents.hpp"
 #include "lake/control/agent_library.hpp"
@@ -4957,7 +4958,7 @@ class OutboundHttpClient {
 public:
     OutboundHttpClient() {
         boost::capy::run_async(io_context_.get_executor())(keepalive());
-        worker_ = std::thread([this] { io_context_.run(); });
+        worker_ = lake::Thread([this] { io_context_.run(); });
     }
 
     ~OutboundHttpClient() {
@@ -5091,7 +5092,7 @@ private:
     }
 
     boost::corosio::io_context io_context_;
-    std::thread worker_;
+    lake::Thread worker_;
     std::map<std::string, std::shared_ptr<const boost::corosio::tls_context>> tls_contexts_;
 };
 
@@ -5170,7 +5171,7 @@ struct ApiServer::Impl {
     std::optional<ClerkConfig> clerk;
     boost::corosio::io_context io_context;
     std::unique_ptr<boost::beast2::http_server> server;
-    std::thread io_thread;
+    lake::Thread io_thread;
     std::atomic<bool> is_running{false};
     unsigned short bound_port = 0;
     std::string failure_reason;
@@ -5179,7 +5180,7 @@ struct ApiServer::Impl {
     // thread takes it, waiting for a predecessor to release it, then opens the customer stores;
     // store_root_state tells requests and /readyz where that stands (lake#479).
     StoreOwnerLock store_owner;
-    std::thread owner_thread;
+    lake::Thread owner_thread;
     std::atomic<StoreRootState> store_root_state{StoreRootState::opening};
     // Set once another process was found holding the root: this server reported Ready while it
     // waited, so it stays Ready through the open that follows.
@@ -17028,11 +17029,11 @@ bool ApiServer::start() {
     }
     impl.bound_port = impl.server->local_endpoint().port();
     impl.server->start();
-    impl.io_thread = std::thread([&impl] { impl.io_context.run(); });
+    impl.io_thread = lake::Thread([&impl] { impl.io_context.run(); });
     impl.is_running.store(true);
     impl.metrics.set_gauge("lake_up", {}, 1.0);
     if (!impl.options.store_root.empty()) {
-        impl.owner_thread = std::thread([&impl] { impl.own_store_root(); });
+        impl.owner_thread = lake::Thread([&impl] { impl.own_store_root(); });
     }
     return true;
 }

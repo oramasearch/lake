@@ -10,3 +10,8 @@ the server while the HTTP adapter keeps every non-registry body at 64 MiB.
 
 `api/`, `control/` and `telemetry/` document their registry, storage and instrumentation contracts
 in their own READMEs. Verify changes with the native PostgreSQL-backed static and shared suites.
+
+Threads lake starts (the server's `io_context` thread, the store-root owner thread that opens
+liquid stores, the outbound client's thread and the bus loop) are `lake::Thread`s from `include/lake/thread.hpp`, never `std::thread`: they take an
+explicit 8 MiB stack instead of the platform default (lake#478,
+[thread stacks](../docs/build/local.md#debug-builds-and-thread-stacks)).

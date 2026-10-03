@@ -8,6 +8,12 @@ the successor, no response may be a 503 and no request may fail, every acknowled
 back from the successor, the customer store must reopen and pass a libliquid dry-run collection,
 and the log must rebuild its tree. A successor whose wait expires must exit 1 naming the owner. See
 [store-volume.md](../docs/deployment/store-volume.md#the-hand-off).
+Its writer threads run liquid clients and are `lake::Thread`s, so they keep lake's 8 MiB stack in a
+Debug build on macOS, and the hand-off case waits (up to 60 s) for one acknowledged write of each
+kind before starting the successor, because a Debug push under the parallel suite can outlast the
+fixed warm-up (lake#478).
+`test_thread.cpp` (lake#478) runs a 2 MiB frame on a `lake::Thread`, which a `std::thread` on
+macOS cannot hold, and checks that a moved thread joins once.
 lake#452: `WebUi.PhoneWidthGivesTheWorkspacePickerItsOwnRow` checks the top bar's rendered order
 and the 40rem rules; `WorkspaceNavigationHttp.SelectorRedirectsRememberedWorkspaceAndValidatesForms`
 covers workspace labels and the `/w/<workspace>/` home redirect;
