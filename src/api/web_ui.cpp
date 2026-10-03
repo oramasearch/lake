@@ -18,6 +18,7 @@
 #include <liquid/hash.hpp>
 
 #include "lake/api/pipeline.hpp"
+#include "lake/control/agent_library.hpp"
 #include "lake/control/store.hpp"
 #include "modules/frontends/common/syntax.hpp"
 
@@ -3488,14 +3489,17 @@ std::string agent_library_content(const WorkspacePage& page) {
            "<th></th></tr></thead><tbody>";
     for (const nlohmann::json& agent : agents) {
         const bool available = json_text(agent, "status") == "Available";
+        // Orama's own tooling is listed for the record, not offered to talk to (lake#451).
+        const bool internal = agent.value("internal", false);
         out += std::format(
             "<tr><td><strong>{}</strong></td><td>{}</td><td>{}</td><td><span class=\"badge{}\">{}"
             "</span></td></tr>",
             web_ui_escape(json_text(agent, "name")),
             web_ui_escape(json_text(agent, "purpose")),
             web_ui_escape(json_text(agent, "used_in")),
-            available ? " status-success" : "",
-            available                                     ? std::string("Available")
+            available && !internal ? " status-success" : "",
+            internal                                      ? std::string("Orama internal")
+            : available                                   ? std::string("Available")
             : json_text(agent, "runs_as") == "offline" ? std::string("Not yet available to chat")
                                                          : std::string("Not available here"));
     }
@@ -10162,8 +10166,8 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
             "<article class=\"ask-message {}\"><p class=\"eyebrow\">{}</p>{}",
             person ? "ask-person" : "ask-agent",
             person ? std::string("You")
-                   : (agent.empty() || agent == "agent-ask-orama" ? std::string("Ask Orama")
-                                                                  : web_ui_escape(agent)),
+                   : (agent.empty() ? std::string("Ask Orama")
+                                    : web_ui_escape(control::agent_display_name(agent))),
             person ? "<p>" + web_ui_escape(json_text(message, "content")) + "</p>"
                    : "<div class=\"ask-reply\">" +
                          web_ui_markdown(json_text(message, "content")) + "</div>");
@@ -10171,7 +10175,8 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
             for (const nlohmann::json& delegation :
                  payload.value("delegations", nlohmann::json::array())) {
                 content += std::format("<p class=\"sub\">Asked {}: {}</p>",
-                                       web_ui_escape(json_text(delegation, "agent")),
+                                       web_ui_escape(control::agent_display_name(
+                                           json_text(delegation, "agent"))),
                                        web_ui_escape(json_text(delegation, "request")));
                 // A Project Agent proposal waits on its pipeline page (lake#249).
                 const nlohmann::json answered =
@@ -10211,10 +10216,37 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
         content += "</article>";
     }
     if (page.working) {
-        content += "<article class=\"ask-message ask-agent\" role=\"status\"><p class=\"eyebrow\">"
-                   "Ask Orama</p><p><em>Thinking…</em> It keeps working if you leave; this page "
-                   "checks again every 2 seconds.</p><meta http-equiv=\"refresh\" "
-                   "content=\"2\"></article>";
+        // Which agent is working, for how long, and what it last reported (lake#451). The latest
+        // progress message is the task's own: the agent's, or the subagent it brought in, which
+        // lake reports on the asking turn ("Ask Orama asked ExperimentsAgent: …").
+        std::string agent_key = json_text(page.turn, "agent");
+        if (agent_key.empty()) {
+            agent_key = page.agent.empty() ? std::string("agent-ask-orama") : page.agent;
+        }
+        const std::string name = control::agent_display_name(agent_key);
+        const bool waiting = json_text(page.turn, "status") == "pending";
+        const long elapsed = seconds_since(json_text(page.turn, "created_at"));
+        std::string progress = json_text(page.turn, "message");
+        if (progress == "Working on it") {
+            progress.clear(); // every library agent's first event; it says nothing new
+        }
+        const int attempts = page.turn.value("attempts", 1);
+        content += std::format(
+            "<article class=\"ask-message ask-agent ask-working\" role=\"status\"><p "
+            "class=\"eyebrow\">{0}</p><p><strong>{1}</strong>{2}</p>{3}{4}<p class=\"sub\">{5}It "
+            "keeps working if you leave; this page checks again every 2 seconds.</p><meta "
+            "http-equiv=\"refresh\" content=\"2\"></article>",
+            web_ui_escape(name),
+            waiting ? std::format("Waiting for {} to start…", web_ui_escape(name))
+                    : std::format("{} is working…", web_ui_escape(name)),
+            elapsed >= 0 ? " · for " + spoken_duration(elapsed) : std::string(),
+            progress.empty() ? std::string()
+                             : "<p class=\"ask-progress\">" + web_ui_escape(progress) + "</p>",
+            attempts > 1 ? std::format("<p class=\"sub\">Attempt {} of 3.</p>", attempts)
+                         : std::string(),
+            elapsed >= 60 ? "Long turns are usual when it brings in another agent or reads a lot "
+                            "of data. "
+                          : "");
     }
     content += "</section>";
     content += agent_events_link(page.customer_id, page.task_id);

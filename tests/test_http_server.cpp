@@ -606,7 +606,8 @@ protected:
                                             {"agent-application", "http://application:8080"},
                                             {"agent-experiments", "http://experiments:8080"},
                                             {"agent-autosuggest", "http://suggest:8080"},
-                                            {"agent-creator", "http://creator:8080"}};
+                                            {"agent-creator", "http://creator:8080"},
+                                            {"agent-eval-generator", "http://eval:8080"}};
         workspace_config.internal_url = "http://lake.internal";
         workspace_config.agent_service_token = "the-service-token";
         for (const auto& [agent, endpoint] : workspace_config.agent_endpoints) {
@@ -1540,7 +1541,8 @@ TEST_P(HttpResponseIsolation, AskOramaAnswersProposesAndRunsOnlyWhatThePersonCon
     const std::string thinking = connection->request(
         "GET", "/ask?customer_id=" + customer_id + "&conversation=" + conversation + "&task=" + task,
         "", cookie);
-    EXPECT_NE(thinking.find("Thinking…"), std::string::npos) << "the page follows the task";
+    EXPECT_NE(thinking.find("Waiting for Ask Orama to start"), std::string::npos)
+        << "the page follows the task";
     const std::string credential = run_agent_task(*connection, task);
     ASSERT_EQ(agents_->turns.size(), 1U);
     EXPECT_EQ(agents_->turns.back()["message"], "what do I have?");
@@ -1588,6 +1590,120 @@ TEST_P(HttpResponseIsolation, AskOramaAnswersProposesAndRunsOnlyWhatThePersonCon
         "GET", "/ask?customer_id=" + customer_id + "&conversation=" + conversation, "", cookie);
     EXPECT_NE(after.find("Done: create_repository."), std::string::npos);
     EXPECT_NE(after.find("Confirmed"), std::string::npos);
+}
+
+// lake#451: Talk to offers only agents a person uses, and a long turn says which agent is working
+// and what it last reported, including the agent Ask Orama brought in.
+TEST_P(HttpResponseIsolation, AskOramaOffersPeoplesAgentsAndSaysWhoIsWorkingOnALongTurn) {
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302"));
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const std::string customer_id =
+        nlohmann::json::parse(response_body(connection->request("GET", "/v1/list_customers", "", cookie)))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    select_workspace(*connection, customer_id);
+
+    const std::string fresh =
+        connection->request("GET", "/ask?customer_id=" + customer_id, "", cookie);
+    ASSERT_TRUE(fresh.starts_with("HTTP/1.1 200")) << fresh.substr(0, 300);
+    EXPECT_NE(fresh.find("<option value=\"agent-experiments\""), std::string::npos);
+    EXPECT_NE(fresh.find("<option value=\"agent-autosuggest\""), std::string::npos);
+    EXPECT_EQ(fresh.find("agent-eval-generator"), std::string::npos)
+        << "a running internal tool is not offered to talk to";
+    EXPECT_EQ(fresh.find("Eval Generator"), std::string::npos);
+
+    const auto bus = [&](const std::string& agent, const std::string& path, const nlohmann::json& body) {
+        return nlohmann::json::parse(response_body(connection->request(
+            "POST", path, body.dump(), "", "HTTP/1.1", "bus-token-" + agent, "application/json")));
+    };
+    const auto page = [&](const std::string& conversation, const std::string& task) {
+        return connection->request(
+            "GET",
+            "/ask?customer_id=" + customer_id + "&conversation=" + conversation + "&task=" + task,
+            "", cookie);
+    };
+    const std::string conversation = lake::control::new_uuid_v4();
+    const std::string sent = connection->request(
+        "POST",
+        "/ask/send",
+        "customer_id=" + customer_id + "&conversation=" + conversation +
+            "&agent=agent-ask-orama&message=what+should+I+build%3F",
+        cookie);
+    ASSERT_TRUE(sent.starts_with("HTTP/1.1 302")) << sent.substr(0, 300);
+    const std::string task = task_of(sent);
+    ASSERT_FALSE(task.empty());
+    EXPECT_NE(page(conversation, task).find("Waiting for Ask Orama to start"), std::string::npos);
+
+    const nlohmann::json claimed =
+        bus("agent-ask-orama", "/v1/claim_agent_task", {{"task_id", task}, {"agent", "agent-ask-orama"}});
+    ASSERT_EQ(claimed["ok"], true) << claimed.dump();
+    const std::string credential = claimed["value"]["body"].value("lake_token", std::string());
+    ASSERT_EQ(bus("agent-ask-orama", "/v1/publish_agent_event",
+                  {{"task_id", task}, {"agent", "agent-ask-orama"}, {"type", "progress"},
+                   {"message", "Working on it"}})["ok"],
+              true);
+    const std::string working = page(conversation, task);
+    EXPECT_NE(working.find("Ask Orama is working…"), std::string::npos) << working;
+    EXPECT_NE(working.find(" · for "), std::string::npos) << "how long it has worked";
+
+    // Ask Orama brings in Auto-Suggest with its turn key; the asking turn reports it.
+    const std::string delegated = connection->request(
+        "POST", "/v1/agent_turn",
+        nlohmann::json{{"customer_id", customer_id},
+                       {"workspace_id", connection->workspace_id},
+                       {"agent", "agent-autosuggest"},
+                       {"message", "What is worth building?"}}
+            .dump(),
+        "", "HTTP/1.1", credential, "application/json");
+    ASSERT_TRUE(delegated.starts_with("HTTP/1.1 200")) << delegated;
+    const std::string child =
+        nlohmann::json::parse(response_body(delegated))["value"].value("task_id", std::string());
+    ASSERT_FALSE(child.empty()) << delegated;
+    EXPECT_EQ(store_->get_agent_task(child)->body.value("parent_task_id", std::string()), task);
+    EXPECT_EQ(store_->get_agent_task(task)->message,
+              "Ask Orama asked Auto-Suggest: What is worth building?");
+    EXPECT_NE(page(conversation, task).find("Ask Orama asked Auto-Suggest: What is worth building?"),
+              std::string::npos);
+
+    ASSERT_EQ(bus("agent-autosuggest", "/v1/claim_agent_task",
+                  {{"task_id", child}, {"agent", "agent-autosuggest"}})["ok"],
+              true);
+    ASSERT_EQ(bus("agent-autosuggest", "/v1/publish_agent_event",
+                  {{"task_id", child}, {"agent", "agent-autosuggest"}, {"type", "progress"},
+                   {"message", "Reading 4 datasets"}})["ok"],
+              true);
+    EXPECT_NE(page(conversation, task).find("Auto-Suggest: Reading 4 datasets"), std::string::npos)
+        << "the subagent's progress shows on the person's turn";
+    bool published = false;
+    for (const auto& [name, read, input] : workspace_caller_->calls) {
+        if (name == "publish_event" && input.value("correlation_id", std::string()) == task) {
+            const nlohmann::json event = nlohmann::json::parse(input.value("payload", std::string("{}")));
+            published = published || (event.value("delegated_task_id", std::string()) == child &&
+                                       event.value("message", std::string()) ==
+                                           "Auto-Suggest: Reading 4 datasets");
+        }
+    }
+    EXPECT_TRUE(published) << "the asking turn's progress is on the workspace's agent-events";
+
+    ASSERT_EQ(bus("agent-autosuggest", "/v1/publish_agent_event",
+                  {{"task_id", child}, {"agent", "agent-autosuggest"}, {"type", "result"},
+                   {"result", {{"ok", true}, {"reply", "Churn"}}}})["ok"],
+              true);
+    EXPECT_NE(page(conversation, task).find("Auto-Suggest finished; writing the answer."),
+              std::string::npos);
+    ASSERT_EQ(bus("agent-ask-orama", "/v1/publish_agent_event",
+                  {{"task_id", task}, {"agent", "agent-ask-orama"}, {"type", "result"},
+                   {"result", {{"ok", true}, {"reply", "Build churn."}}}})["ok"],
+              true);
+    const std::string answered = page(conversation, task);
+    EXPECT_NE(answered.find("Build churn."), std::string::npos);
+    EXPECT_EQ(answered.find("is working…"), std::string::npos);
 }
 
 TEST_P(HttpResponseIsolation, GrantingAPipelineWritesTheWholeListBackToZetta) {

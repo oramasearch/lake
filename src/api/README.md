@@ -5,6 +5,12 @@ accepted atomically before workspace publication; only a Running task accepts th
 first terminal write wins. Apps, Experiments and Project panels show the persisted retry notice
 without extra workspace requests. See [agent leases](../../docs/api/agent-bus.md).
 
+A delegated `agent_turn` from a task credential names its asking task (`parent_task_id`), and
+`publish_agent_event` reports the delegated task's progress on that asking task (lake#451). The Ask
+page renders the running turn it already reads (agent, latest message, attempts, elapsed time) and
+builds *Talk to* with `control::talk_to_agents`, which leaves out internal library agents. See
+[ask-orama.md](../../docs/api/ask-orama.md) and [delegated turns](../../docs/api/agent-bus.md#delegated-turns).
+
 Page reads share authentication and customer selection within each GET, and batch independent
 workspace and local reads with `when_all`. Data uses a projected dataset/database list from `system.datasets`; dataset
 details own metadata and the bounded sample. `Server-Timing` reports actual outbound calls and

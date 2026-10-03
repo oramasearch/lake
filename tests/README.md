@@ -6,6 +6,12 @@ It checks Apps/Experiments/Project rendering, legacy migration adoption, schema 
 the partial expiry index, and duration bounds without clock sleeps. The Streams task-credential
 fixture takes a real claim before making calls. See [agent-bus.md](../docs/api/agent-bus.md).
 
+`HttpResponseIsolation.AskOramaOffersPeoplesAgentsAndSaysWhoIsWorkingOnALongTurn` (lake#451) runs a
+real Ask Orama claim, a delegation with its turn key, and the subagent's progress and result, and
+checks *Talk to*, the working notice and the asking turn's `agent-events`. The HTTP fixture runs
+`agent-eval-generator` too, so the test proves a running internal agent is not offered.
+`Workspaces.TalkToOffersOnlyRunningAgentsAPersonUses` checks the list builder.
+
 Lease regressions also cover delayed notice acknowledgements and stale waiting-deadline
 observations: neither may discard the final failure notice or fail a fresh retry.
 

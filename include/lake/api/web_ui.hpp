@@ -286,6 +286,9 @@ struct AskPage {
     // A turn is running in the background (lake#269): the page says so and checks again.
     bool working = false;
     std::string task_id;
+    // The running turn as get_agent_task reads it (lake#451): which agent works, its latest
+    // progress message, its attempts and when it started.
+    nlohmann::json turn = nlohmann::json::object();
     nlohmann::json messages = nlohmann::json::array();
     nlohmann::json agents = nlohmann::json::array();
 };

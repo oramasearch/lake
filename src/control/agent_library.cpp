@@ -79,10 +79,35 @@ nlohmann::json agent_library_json(const std::map<std::string, std::string>& endp
                           {"used_in", std::string(agent.used_in)},
                           {"runs_as", std::string(agent.runs_as)},
                           {"chat", agent.chat},
+                          {"internal", agent.internal},
                           {"deployed", deployed},
                           {"status", status}});
     }
     return {{"agents", std::move(agents)}};
+}
+
+nlohmann::json talk_to_agents(const nlohmann::json& library) {
+    nlohmann::json agents =
+        nlohmann::json::array({{{"id", "agent-ask-orama"}, {"name", "Ask Orama"}}});
+    if (!library.is_object()) {
+        return agents;
+    }
+    for (const nlohmann::json& agent : library.value("agents", nlohmann::json::array())) {
+        const std::string key = agent.value("key", std::string());
+        // The row's own flag, and the library's, so an older answer cannot list internal tooling.
+        const LibraryAgent* known = library_agent(key);
+        if (key != "agent-ask-orama" && agent.value("chat", false) &&
+            agent.value("deployed", false) && !agent.value("internal", false) &&
+            !(known != nullptr && known->internal)) {
+            agents.push_back({{"id", key}, {"name", agent.value("name", key)}});
+        }
+    }
+    return agents;
+}
+
+std::string agent_display_name(std::string_view key) {
+    const LibraryAgent* agent = library_agent(key);
+    return std::string(agent != nullptr ? agent->name : key);
 }
 
 } // namespace lake::control
