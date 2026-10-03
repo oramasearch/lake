@@ -23,7 +23,7 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/metering.hpp"
-#include "lake/control/platform_store.hpp"
+#include "lake/control/platform_records.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/stream_owners.hpp"
 #include "lake/search/index.hpp"
@@ -1518,46 +1518,189 @@ TEST(PostgresSecrets, LeaseRoutesAreAContentFreeDueIndex) {
     EXPECT_GT(row.expires_us, row.at_us);
 }
 
-TEST(PostgresPlatform, EnvironmentBindingAndMirrorRoundTrip) {
+// lake#358, lake#359: migration 0060 gives each environment's policy object the environment's
+// derived id, records each platform_environments and platform_mirror row's owner, its repository's
+// workspace, and the copy's rerun of it picks up late rows and repositories assigned after review.
+TEST(PostgresPlatform, MigrationRecordsEachRowsOwnerForTheCopy) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
     auto store = lake::control::make_postgres_store(
         uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
-    auto* platform_store = dynamic_cast<lake::control::PlatformStore*>(store.get());
-    ASSERT_NE(platform_store, nullptr);
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    const auto user = store->create_user(
-        {"taap:1:ed25519:platform-" + suffix, "platform-" + suffix + "@example.test", "Platform"});
+    const auto user =
+        store->create_user({"taap:1:ed25519:platform-migration-" + suffix, "", "Platform"});
     ASSERT_TRUE(user) << user.error().message;
     const auto customer =
-        store->create_customer({"individual", user->id, "", "platform-" + suffix});
+        store->create_customer({"individual", user->id, "", "platform-migration-" + suffix});
     ASSERT_TRUE(customer) << customer.error().message;
-    const auto repository =
-        store->create_repository({customer->id, "platform-" + suffix, "", "private",
-                                  lake::test::repository_workspace(*store, customer->id)});
-    ASSERT_TRUE(repository) << repository.error().message;
-    const auto environment =
-        platform_store->ensure_platform_environment(repository->id, "production");
-    ASSERT_TRUE(environment) << environment.error().message;
-    const auto same = platform_store->ensure_platform_environment(repository->id, "production");
-    ASSERT_TRUE(same) << same.error().message;
-    EXPECT_EQ(same->id, environment->id);
-    const auto object = store->get_policy_object(environment->object_id);
-    ASSERT_TRUE(object) << object.error().message;
-    EXPECT_EQ(object->object_type, "environment");
-    ASSERT_TRUE(platform_store->upsert_platform_mirror(
-        {"deployment",
-         "deployment-" + suffix,
-         {{"repository", repository->id}, {"environment", "production"}, {"phase", "ready"}},
-         "2026-09-06T00:00:00Z"}));
-    const auto rows = platform_store->list_platform_mirror("deployment");
-    ASSERT_TRUE(rows) << rows.error().message;
-    const auto found =
-        std::ranges::find(*rows, "deployment-" + suffix, &lake::control::PlatformMirrorRow::key);
-    ASSERT_NE(found, rows->end());
-    EXPECT_EQ(found->value.at("phase"), "ready");
+    const auto live = store->create_workspace({customer->id, "live", "dev", ""});
+    const auto doomed = store->create_workspace({customer->id, "doomed", "dev", ""});
+    ASSERT_TRUE(live && doomed);
+    const auto owned = store->create_repository({customer->id, "owned", "", "private", live->id});
+    const auto orphan = store->create_repository({customer->id, "orphan", "", "private", live->id});
+    const auto gone = store->create_repository({customer->id, "gone", "", "private", doomed->id});
+    ASSERT_TRUE(owned && orphan && gone);
+    pqxx::connection connection(uri);
+    {
+        // The orphan stands for a repository migration 0051 could not assign.
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE repositories SET workspace_id = NULL WHERE id = $1::uuid",
+                       orphan->id);
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.commit();
+    }
+    ASSERT_TRUE(
+        store->delete_repository(gone->id, {"2026-10-01T00:00:00Z", "2027-10-01T00:00:00Z"}));
+    ASSERT_TRUE(store->update_workspace(doomed->id, {.desired = "deleted"}));
+    // An environment as an earlier lake made it: a random id, and a policy object named by it.
+    const auto environment = [&](const lake::control::Repository& repository,
+                                 const std::string& name) {
+        const auto parent = store->find_policy_object("repository", repository.id);
+        EXPECT_TRUE(parent) << parent.error().message;
+        const std::string id = lake::control::new_uuid_v4();
+        const auto object = store->create_policy_object(
+            {"environment", id, parent->id, "admin", "platform-migration-" + id, true});
+        EXPECT_TRUE(object) << object.error().message;
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO platform_environments (id, repository_id, name, object_id) "
+                       "VALUES ($1::uuid, $2::uuid, $3, $4::uuid)",
+                       id, repository.id, name, object->id);
+        tx.commit();
+        return std::pair{id, object->id};
+    };
+    const auto mirror = [&](const std::string& kind, const std::string& key,
+                            const std::string& repository_id) {
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO platform_mirror (kind, key, value, seen_at) VALUES ($1, $2, "
+                       "$3::jsonb, now())",
+                       kind, key,
+                       nlohmann::json{{"repository", repository_id},
+                                      {"environment", "production"},
+                                      {"phase", "ready"}}
+                           .dump());
+        tx.commit();
+        return lake::control::platform_mirror_id(kind, key);
+    };
+    const auto [production, production_object] = environment(*owned, "production");
+    const auto [waiting, waiting_object] = environment(*orphan, "staging");
+    const auto [released, released_object] = environment(*gone, "production");
+    const std::string deployment = mirror("deployment", "deployment-" + suffix, owned->id);
+    const std::string waiting_value =
+        mirror("environment_env", orphan->id + "/staging/COLOR", orphan->id);
+    const std::string stranger =
+        mirror("domain", "stranger-" + suffix, lake::control::new_uuid_v4());
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0060_platform_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0060_platform_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& table, const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = $1 AND object_id = $2::uuid",
+            table, id);
+        return found.empty() ? std::pair<std::string, std::string>{}
+                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    using Owner = std::pair<std::string, std::string>;
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome("platform_environments", production),
+                  (Owner{"repository_workspace", live->id}));
+        EXPECT_EQ(outcome("platform_environments", waiting), (Owner{"needs_selection", ""}));
+        EXPECT_EQ(outcome("platform_environments", released), (Owner{"workspace_deleted", ""}));
+        EXPECT_EQ(outcome("platform_mirror", deployment),
+                  (Owner{"repository_workspace", live->id}));
+        EXPECT_EQ(outcome("platform_mirror", waiting_value), (Owner{"needs_selection", ""}));
+        EXPECT_TRUE(outcome("platform_mirror", stranger).first.empty())
+            << "a row naming no repository is reported, not assigned";
+    }
+    // The policy object keeps its id and grants and now answers to the environment's derived id,
+    // which lake computes the same way.
+    const auto renamed = store->find_policy_object(
+        "environment", lake::control::platform_environment_id(owned->id, "production"));
+    ASSERT_TRUE(renamed) << renamed.error().message;
+    EXPECT_EQ(renamed->id, production_object);
+
+    // A row written after the migration, and a repository assigned after review, are picked up by
+    // the assignment each copy reruns.
+    const auto [late, late_object] = environment(*owned, "preview");
+    const std::string late_value =
+        mirror("environment_env", owned->id + "/production/LATE", owned->id);
+    {
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE repositories SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       orphan->id, live->id);
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.commit();
+    }
+    ASSERT_TRUE(store->assign_legacy_platform_environments());
+    ASSERT_TRUE(store->assign_legacy_platform_mirror());
+    EXPECT_EQ(outcome("platform_environments", late), (Owner{"repository_workspace", live->id}));
+    EXPECT_EQ(outcome("platform_environments", waiting),
+              (Owner{"repository_workspace", live->id}));
+    EXPECT_EQ(outcome("platform_environments", released).first, "workspace_deleted");
+    EXPECT_EQ(outcome("platform_mirror", late_value), (Owner{"repository_workspace", live->id}));
+    EXPECT_EQ(outcome("platform_mirror", waiting_value),
+              (Owner{"repository_workspace", live->id}));
+    const auto preview = store->find_policy_object(
+        "environment", lake::control::platform_environment_id(owned->id, "preview"));
+    ASSERT_TRUE(preview) << preview.error().message;
+    EXPECT_EQ(preview->id, late_object);
+
+    std::map<std::string, lake::control::LegacyPlatformEnvironment> environments;
+    for (std::string after;;) {
+        const auto page = store->legacy_platform_environments(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            environments.emplace(row.id, row);
+        }
+        after = page->back().id;
+    }
+    ASSERT_TRUE(environments.contains(production));
+    EXPECT_EQ(environments.at(production).workspace_id, live->id);
+    EXPECT_EQ(environments.at(production).customer_id, customer->id);
+    EXPECT_EQ(environments.at(production).environment.name, "production");
+    EXPECT_EQ(environments.at(production).environment.object_id, production_object);
+    EXPECT_GT(environments.at(production).environment.at_us, 0);
+    EXPECT_EQ(environments.at(released).outcome, "workspace_deleted");
+
+    std::map<std::string, lake::control::LegacyPlatformMirrorRow> rows;
+    for (std::string after;;) {
+        const auto page = store->legacy_platform_mirror(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            rows.emplace(row.id, row);
+        }
+        after = page->back().id;
+    }
+    ASSERT_TRUE(rows.contains(deployment));
+    EXPECT_EQ(rows.at(deployment).workspace_id, live->id);
+    EXPECT_EQ(rows.at(deployment).repository_id, owned->id);
+    EXPECT_EQ(rows.at(deployment).row.value["phase"], "ready");
+    EXPECT_GT(rows.at(deployment).at_us, 0);
+    ASSERT_TRUE(rows.contains(stranger));
+    EXPECT_EQ(rows.at(stranger).outcome, "unknown_repository");
+    EXPECT_TRUE(rows.at(stranger).workspace_id.empty());
 }
 
 } // namespace

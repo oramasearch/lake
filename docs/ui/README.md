@@ -156,3 +156,8 @@ to; the `/repositories` form chooses that workspace (lake#315). See
 Forge records live in the repository's workspace Zetta (lake#341): the repository pages read them
 through the same capabilities, and the home page and change view say when that workspace cannot be
 read instead of failing. See [repositories.md](repositories.md).
+
+Environments and deployments live in the repository's workspace Zetta (lake#358, lake#359): the
+Deployments, Environments and Environment pages read them through the same capabilities, and the
+Deployments overview skips a repository whose workspace cannot be read. See
+[platform.md](../api/platform.md#where-environments-live-lake358-lake359).

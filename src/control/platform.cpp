@@ -13,7 +13,7 @@
 #include <zetta/connect/http_transport.hpp>
 
 #include "lake/audit/audit.hpp"
-#include "lake/control/platform_store.hpp"
+#include "lake/control/platform_records.hpp"
 
 namespace lake::control {
 namespace {
@@ -34,6 +34,20 @@ PlatformError platform_error(const liquid::error& error) {
 
 template <class T> PlatformResult<T> platform_failure(PlatformError error) {
     return std::unexpected(std::move(error));
+}
+
+// The error text of a step that answers one ("" when it succeeded).
+std::string finished_text(std::expected<std::string, liquid::error> completed) {
+    return completed ? std::move(*completed) : "store_unavailable: " + completed.error().message;
+}
+
+// A platform task's result, with the runtime's own failure as store_unavailable.
+template <class T>
+PlatformResult<T> finished(std::expected<PlatformResult<T>, liquid::error> completed) {
+    if (!completed) {
+        return platform_failure<T>(platform_error(completed.error()));
+    }
+    return std::move(*completed);
 }
 
 std::string text_of(const json& row, std::string_view key) {
@@ -102,20 +116,8 @@ std::string domain_key(const json& row) {
            text_of(row, "host");
 }
 
-std::string normalized_updated_at(const json& value) {
-    std::string updated_at = text_of(value, "updated_at");
-    if (updated_at.ends_with('Z') && updated_at.find('.') == std::string::npos) {
-        updated_at.insert(updated_at.size() - 1, ".000000");
-    }
-    return updated_at;
-}
-
-auto row_order(const json& row) {
-    return std::tuple{normalized_updated_at(row), text_of(row, "ordering_token"), row.dump()};
-}
-
 bool is_newer_row(const json& candidate, const json& current) {
-    return row_order(current) < row_order(candidate);
+    return platform_row_is_newer(candidate, current);
 }
 
 using KeyFunction = std::string (*)(const json&);
@@ -156,7 +158,7 @@ std::vector<json> new_deployment_phases(const ZettaRows& rows,
 
     std::vector<json> phases;
     for (auto& [key, deployment_rows] : rows_by_deployment) {
-        std::ranges::sort(deployment_rows, {}, row_order);
+        std::ranges::sort(deployment_rows, {}, platform_row_order);
         const auto previous = previous_deployments.find(key);
         std::string previous_phase = previous == previous_deployments.end()
                                          ? std::string{}
@@ -186,7 +188,7 @@ std::vector<json> deployment_values(const std::vector<PlatformMirrorRow>& rows,
         }
         output.push_back(row.value);
     }
-    std::ranges::sort(output, std::greater{}, row_order);
+    std::ranges::sort(output, std::greater{}, platform_row_order);
     return output;
 }
 
@@ -279,9 +281,9 @@ PlatformService::PlatformService(std::shared_ptr<Store> store,
                                  std::shared_ptr<ZettaControl> control,
                                  std::shared_ptr<LokiSource> logs,
                                  PlatformConfig config)
-    : store_(std::move(store)), platform_store_(dynamic_cast<PlatformStore*>(store_.get())),
-      control_(std::move(control)), logs_(std::move(logs)), config_(std::move(config)) {
-    if (!store_ || !platform_store_ || !control_ || config_.lake.empty()) {
+    : store_(std::move(store)), control_(std::move(control)), logs_(std::move(logs)),
+      config_(std::move(config)) {
+    if (!store_ || !control_ || config_.lake.empty()) {
         degraded_ = true;
         stale_since_ = now_iso8601();
     }
@@ -303,6 +305,16 @@ void PlatformService::mark_succeeded() {
     next_sync_ = std::chrono::steady_clock::now() + config_.sync_interval;
 }
 
+void PlatformService::mark_repository(const std::string& repository_id, bool mirrored) {
+    std::lock_guard lock(state_mutex_);
+    if (mirrored) {
+        stale_repositories_.erase(repository_id);
+        return;
+    }
+    stale_repositories_.try_emplace(repository_id, now_iso8601());
+    mirrored_.erase(repository_id);
+}
+
 bool PlatformService::sync_due() const {
     std::lock_guard lock(state_mutex_);
     return std::chrono::steady_clock::now() >= next_sync_;
@@ -318,8 +330,54 @@ std::optional<std::string> PlatformService::stale_since() const {
     return stale_since_;
 }
 
-liquid::runtime::task<PlatformResult<void>> PlatformService::sync() {
-    if (!store_ || !platform_store_ || !control_ || config_.lake.empty()) {
+std::optional<std::string> PlatformService::stale_since(const std::string& repository_id) const {
+    std::lock_guard lock(state_mutex_);
+    if (stale_since_) {
+        return stale_since_;
+    }
+    const auto found = stale_repositories_.find(repository_id);
+    if (found == stale_repositories_.end()) {
+        return std::nullopt;
+    }
+    return found->second;
+}
+
+liquid::runtime::task<PlatformResult<PlatformEnvironment>>
+PlatformService::ensure_environment(WorkspaceRecords& records, const Repository& repository,
+                                    const std::string& name) {
+    const std::string id = platform_environment_id(repository.id, name);
+    // The policy object stays in the control store with its grants; its external id is the
+    // environment's derived id, so authorization finds it without reading the workspace.
+    auto object = store_->find_policy_object("environment", id);
+    if (!object && object.error().code == "not_found") {
+        const auto parent = store_->find_policy_object("repository", repository.id);
+        if (!parent) {
+            co_return platform_failure<PlatformEnvironment>(platform_error(parent.error()));
+        }
+        object = store_->create_policy_object(
+            {"environment", id, parent->id, "lake", new_uuid_v4(), true});
+        if (!object) {
+            // Another replica created it first.
+            object = store_->find_policy_object("environment", id);
+        }
+    }
+    if (!object) {
+        co_return platform_failure<PlatformEnvironment>(platform_error(object.error()));
+    }
+    PlatformEnvironment environment;
+    environment.repository_id = repository.id;
+    environment.name = name;
+    environment.object_id = object->id;
+    auto written =
+        settled(co_await put_platform_environment_record(records, std::move(environment)));
+    if (!written) {
+        co_return platform_failure<PlatformEnvironment>(platform_error(written.error()));
+    }
+    co_return PlatformResult<PlatformEnvironment>(std::move(*written));
+}
+
+liquid::runtime::task<PlatformResult<void>> PlatformService::sync(PlatformRecordsOpener open) {
+    if (!store_ || !control_ || config_.lake.empty() || !open) {
         mark_failed();
         co_return platform_failure<void>(
             {"store_unavailable", "the platform mirror is not configured"});
@@ -329,44 +387,36 @@ liquid::runtime::task<PlatformResult<void>> PlatformService::sync() {
         mark_failed();
         co_return platform_failure<void>(platform_error(quoted_lake.error()));
     }
-    auto deployments_completed =
-        co_await control_->sql("SELECT " + select_columns(deployment_columns) + " FROM " +
-                                   std::string(deployments_table) + " WHERE lake = " + *quoted_lake,
-                               std::string(operator_control_database));
-    if (!deployments_completed) {
-        mark_failed();
-        co_return platform_failure<void>(platform_error(deployments_completed.error()));
-    }
-    auto deployments = std::move(*deployments_completed);
+    const auto read_table = [&](std::string_view table, std::string columns)
+        -> liquid::runtime::task<PlatformResult<ZettaRows>> {
+        auto completed = co_await control_->sql("SELECT " + columns + " FROM " +
+                                                    std::string(table) + " WHERE lake = " +
+                                                    *quoted_lake,
+                                                std::string(operator_control_database));
+        if (!completed) {
+            co_return platform_failure<ZettaRows>(platform_error(completed.error()));
+        }
+        if (!*completed) {
+            co_return platform_failure<ZettaRows>(platform_error(completed->error()));
+        }
+        co_return PlatformResult<ZettaRows>(std::move(**completed));
+    };
+    auto deployments =
+        finished(co_await read_table(deployments_table, select_columns(deployment_columns)));
     if (!deployments) {
         mark_failed();
-        co_return platform_failure<void>(platform_error(deployments.error()));
+        co_return platform_failure<void>(deployments.error());
     }
-    auto environment_env_completed = co_await control_->sql(
-        "SELECT " + select_columns(environment_env_columns) + " FROM " +
-            std::string(environment_env_table) + " WHERE lake = " + *quoted_lake,
-        std::string(operator_control_database));
-    if (!environment_env_completed) {
-        mark_failed();
-        co_return platform_failure<void>(platform_error(environment_env_completed.error()));
-    }
-    auto environment_env = std::move(*environment_env_completed);
+    auto environment_env = finished(
+        co_await read_table(environment_env_table, select_columns(environment_env_columns)));
     if (!environment_env) {
         mark_failed();
-        co_return platform_failure<void>(platform_error(environment_env.error()));
+        co_return platform_failure<void>(environment_env.error());
     }
-    auto domains_completed =
-        co_await control_->sql("SELECT " + select_columns(domain_columns) + " FROM " +
-                                   std::string(domains_table) + " WHERE lake = " + *quoted_lake,
-                               std::string(operator_control_database));
-    if (!domains_completed) {
-        mark_failed();
-        co_return platform_failure<void>(platform_error(domains_completed.error()));
-    }
-    auto domains = std::move(*domains_completed);
+    auto domains = finished(co_await read_table(domains_table, select_columns(domain_columns)));
     if (!domains) {
         mark_failed();
-        co_return platform_failure<void>(platform_error(domains.error()));
+        co_return platform_failure<void>(domains.error());
     }
     const auto latest_deployments = latest_by_key(*deployments, deployment_key);
     const auto latest_environment_env = latest_by_key(*environment_env, environment_env_key);
@@ -379,165 +429,257 @@ liquid::runtime::task<PlatformResult<void>> PlatformService::sync() {
                                                                    : latest_domains.error());
         co_return platform_failure<void>(error);
     }
-    std::map<std::string, json> previous_deployments;
-    const auto old_rows = platform_store_->list_platform_mirror("deployment");
-    if (!old_rows) {
-        mark_failed();
-        co_return platform_failure<void>(platform_error(old_rows.error()));
-    }
-    for (const PlatformMirrorRow& row : *old_rows) {
-        previous_deployments[row.key] = row.value;
-    }
-    const std::vector<json> deployment_phases =
-        new_deployment_phases(*deployments, previous_deployments);
-    const std::string seen_at = now_iso8601();
-    const auto ensure_rows = [&](const std::map<std::string, json>& rows) -> PlatformResult<void> {
-        for (const auto& [key, row] : rows) {
-            static_cast<void>(key);
-            auto environment = platform_store_->ensure_platform_environment(
-                text_of(row, "repository"), text_of(row, "environment"));
-            if (!environment) {
-                return std::unexpected(platform_error(environment.error()));
-            }
-        }
-        return {};
-    };
-    const auto apply_rows = [&](std::string_view kind,
-                                const std::map<std::string, json>& rows) -> PlatformResult<void> {
-        for (const auto& [key, row] : rows) {
-            auto mirrored =
-                platform_store_->upsert_platform_mirror({std::string(kind), key, row, seen_at});
-            if (!mirrored) {
-                return std::unexpected(platform_error(mirrored.error()));
-            }
-        }
-        return {};
-    };
-    if (auto result = ensure_rows(*latest_deployments); !result) {
-        mark_failed();
-        co_return platform_failure<void>(result.error());
-    }
-    if (auto result = ensure_rows(*latest_environment_env); !result) {
-        mark_failed();
-        co_return platform_failure<void>(result.error());
-    }
-    if (auto result = ensure_rows(*latest_domains); !result) {
-        mark_failed();
-        co_return platform_failure<void>(result.error());
-    }
-    if (auto result = apply_rows("environment_env", *latest_environment_env); !result) {
-        mark_failed();
-        co_return platform_failure<void>(result.error());
-    }
-    if (auto result = apply_rows("domain", *latest_domains); !result) {
-        mark_failed();
-        co_return platform_failure<void>(result.error());
-    }
-    for (const json& row : deployment_phases) {
-        const std::string key = deployment_key(row);
-        const std::string phase = text_of(row, "phase");
-        const auto repository = store_->get_repository(text_of(row, "repository"));
-        if (!repository) {
-            mark_failed();
-            co_return platform_failure<void>(platform_error(repository.error()));
-        }
-        const audit::EventDraft event{
-            .customer_id = repository->customer_id,
-            .kind = "platform.deployment.phase",
-            .principal = text_of(row, "requested_by"),
-            .object = "deployment/" + key,
-            .action = "deployment_phase",
-            .outcome = "success",
-            .request_id = new_uuid_v4(),
-            .method = "zetta_mirror",
-            .details = {{"repository_id", repository->id},
-                        {"environment", text_of(row, "environment")},
-                        {"phase", phase},
-                        {"updated_at", text_of(row, "updated_at")}},
-        };
-        const audit::IdentityOptions options{config_.identity_seed, config_.instance_kek};
-        const auto recorded = audit::record(*store_, event, options);
-        if (!recorded) {
-            mark_failed();
-            co_return platform_failure<void>({recorded.error().code, recorded.error().message});
-        }
-    }
-    if (auto result = apply_rows("deployment", *latest_deployments); !result) {
-        mark_failed();
-        co_return platform_failure<void>(result.error());
-    }
+    // The operator control plane answered: the service is healthy whatever a workspace says.
     mark_succeeded();
+
+    // Every row goes to its repository's workspace, so the work is grouped by repository.
+    struct RepositoryRows {
+        std::map<std::string, std::map<std::string, json>> latest; // kind -> key -> row
+        ZettaRows deployments;                                     // every deployment row
+        std::set<std::string> environments;
+    };
+    std::map<std::string, RepositoryRows> by_repository;
+    const auto group = [&](std::string_view kind, const std::map<std::string, json>& rows) {
+        for (const auto& [key, row] : rows) {
+            RepositoryRows& rows_of = by_repository[text_of(row, "repository")];
+            rows_of.latest[std::string(kind)][key] = row;
+            rows_of.environments.insert(text_of(row, "environment"));
+        }
+    };
+    group("deployment", *latest_deployments);
+    group("environment_env", *latest_environment_env);
+    group("domain", *latest_domains);
+    for (const json& row : *deployments) {
+        by_repository[text_of(row, "repository")].deployments.push_back(row);
+    }
+    {
+        std::lock_guard lock(state_mutex_);
+        if (++syncs_since_full_ >= std::max(config_.full_sync_every, 1)) {
+            syncs_since_full_ = 0;
+            mirrored_.clear();
+        }
+    }
+
+    std::vector<std::string> failures;
+    for (const auto& [repository_id, rows] : by_repository) {
+        const std::string fingerprint = json(rows.latest).dump();
+        {
+            std::lock_guard lock(state_mutex_);
+            const auto known = mirrored_.find(repository_id);
+            if (known != mirrored_.end() && known->second == fingerprint) {
+                continue; // nothing changed since this replica last wrote it
+            }
+        }
+        const auto failed = [&](const std::string& reason) {
+            mark_repository(repository_id, false);
+            failures.push_back(repository_id + ": " + reason);
+        };
+        const auto repository = store_->get_repository(repository_id);
+        if (!repository) {
+            if (repository.error().code != "not_found" &&
+                repository.error().code != "invalid_input") {
+                failed(repository.error().message);
+            }
+            continue; // a row for a repository lake does not have belongs to no workspace
+        }
+        if (repository->workspace_id.empty()) {
+            failed("the repository has no workspace");
+            continue;
+        }
+        auto records = open(repository->customer_id, repository->workspace_id);
+        if (!records) {
+            failed(records.error().code + ": " + records.error().message);
+            continue;
+        }
+        auto environments =
+            settled(co_await list_platform_environment_records(*records, repository_id));
+        if (!environments) {
+            failed(environments.error().code + ": " + environments.error().message);
+            continue;
+        }
+        auto mirrored = settled(co_await list_platform_mirror_records(*records, repository_id));
+        if (!mirrored) {
+            failed(mirrored.error().code + ": " + mirrored.error().message);
+            continue;
+        }
+        std::set<std::string> known_environments;
+        for (const PlatformEnvironment& environment : *environments) {
+            known_environments.insert(environment.name);
+        }
+        std::map<std::string, json> stored;              // mirror id -> row value
+        std::map<std::string, json> previous_deployments; // deployment key -> row value
+        for (const PlatformMirrorRow& row : *mirrored) {
+            stored[platform_mirror_id(row.kind, row.key)] = row.value;
+            if (row.kind == "deployment") {
+                previous_deployments[row.key] = row.value;
+            }
+        }
+        std::string error;
+        for (const std::string& name : rows.environments) {
+            if (known_environments.contains(name)) {
+                continue;
+            }
+            auto ensured = finished(co_await ensure_environment(*records, *repository, name));
+            if (!ensured) {
+                error = ensured.error().code + ": " + ensured.error().message;
+                break;
+            }
+        }
+        const std::string seen_at = now_iso8601();
+        const auto apply_kind = [&](std::string_view kind) -> liquid::runtime::task<std::string> {
+            const auto found = rows.latest.find(std::string(kind));
+            if (found == rows.latest.end()) {
+                co_return std::string{};
+            }
+            for (const auto& [key, row] : found->second) {
+                const auto current = stored.find(platform_mirror_id(std::string(kind), key));
+                if (current != stored.end() && current->second == row) {
+                    continue;
+                }
+                auto written = settled(co_await put_platform_mirror_record(
+                    *records, repository_id, {std::string(kind), key, row, seen_at}));
+                if (!written) {
+                    co_return written.error().code + ": " + written.error().message;
+                }
+            }
+            co_return std::string{};
+        };
+        if (error.empty()) {
+            error = finished_text(co_await apply_kind("environment_env"));
+        }
+        if (error.empty()) {
+            error = finished_text(co_await apply_kind("domain"));
+        }
+        // Each newly observed phase is audited before its deployment row is written, so a sync
+        // that fails here records it again next time rather than never.
+        if (error.empty()) {
+            for (const json& row : new_deployment_phases(rows.deployments, previous_deployments)) {
+                const audit::EventDraft event{
+                    .customer_id = repository->customer_id,
+                    .kind = "platform.deployment.phase",
+                    .principal = text_of(row, "requested_by"),
+                    .object = "deployment/" + deployment_key(row),
+                    .action = "deployment_phase",
+                    .outcome = "success",
+                    .request_id = new_uuid_v4(),
+                    .method = "zetta_mirror",
+                    .details = {{"repository_id", repository->id},
+                                {"environment", text_of(row, "environment")},
+                                {"phase", text_of(row, "phase")},
+                                {"updated_at", text_of(row, "updated_at")}},
+                };
+                const audit::IdentityOptions options{config_.identity_seed, config_.instance_kek};
+                const auto recorded = audit::record(*store_, event, options);
+                if (!recorded) {
+                    error = recorded.error().code + ": " + recorded.error().message;
+                    break;
+                }
+            }
+        }
+        if (error.empty()) {
+            error = finished_text(co_await apply_kind("deployment"));
+        }
+        if (!error.empty()) {
+            failed(error);
+            continue;
+        }
+        mark_repository(repository_id, true);
+        std::lock_guard lock(state_mutex_);
+        mirrored_[repository_id] = fingerprint;
+    }
+    if (!failures.empty()) {
+        std::string message = std::to_string(failures.size()) +
+                              " repositories were not mirrored into their workspace: ";
+        for (std::size_t index = 0; index < failures.size(); ++index) {
+            message += (index == 0 ? "" : "; ") + failures[index];
+        }
+        co_return platform_failure<void>({"workspace_not_ready", message});
+    }
     co_return PlatformResult<void>{};
 }
 
-PlatformResult<json> PlatformService::environment_document(const std::string& repository_id,
-                                                           const std::string& environment) const {
-    if (!platform_store_) {
-        return std::unexpected(
-            PlatformError{"store_unavailable", "the platform mirror is not configured"});
-    }
-    const auto local = platform_store_->get_platform_environment(repository_id, environment);
-    if (!local) {
-        return std::unexpected(platform_error(local.error()));
-    }
-    const auto deployment_rows = platform_store_->list_platform_mirror("deployment");
-    const auto env_rows = platform_store_->list_platform_mirror("environment_env");
-    const auto domain_rows = platform_store_->list_platform_mirror("domain");
-    if (!deployment_rows || !env_rows || !domain_rows) {
-        const StoreError error = !deployment_rows
-                                     ? deployment_rows.error()
-                                     : (!env_rows ? env_rows.error() : domain_rows.error());
-        return std::unexpected(platform_error(error));
-    }
-    std::vector<json> deployments = deployment_values(*deployment_rows, repository_id, environment);
+namespace {
+
+json environment_output(const PlatformEnvironment& environment,
+                        const std::vector<PlatformMirrorRow>& rows) {
+    std::vector<json> deployments;
     json env = json::array();
-    for (const PlatformMirrorRow& row : *env_rows) {
-        if (text_of(row.value, "repository") == repository_id &&
-            text_of(row.value, "environment") == environment && !bool_of(row.value, "deleted")) {
+    json domains = json::array();
+    for (const PlatformMirrorRow& row : rows) {
+        if (text_of(row.value, "environment") != environment.name) {
+            continue;
+        }
+        if (row.kind == "deployment") {
+            deployments.push_back(row.value);
+        } else if (row.kind == "environment_env" && !bool_of(row.value, "deleted")) {
             env.push_back({{"key", text_of(row.value, "key")},
                            {"value", text_of(row.value, "value")},
                            {"updated_at", text_of(row.value, "updated_at")}});
-        }
-    }
-    json domains = json::array();
-    for (const PlatformMirrorRow& row : *domain_rows) {
-        if (text_of(row.value, "repository") == repository_id &&
-            text_of(row.value, "environment") == environment && !bool_of(row.value, "deleted")) {
+        } else if (row.kind == "domain" && !bool_of(row.value, "deleted")) {
             domains.push_back(row.value);
         }
     }
+    std::ranges::sort(deployments, std::greater{}, platform_row_order);
+    std::sort(env.begin(), env.end(), [](const json& left, const json& right) {
+        return text_of(left, "key") < text_of(right, "key");
+    });
+    std::sort(domains.begin(), domains.end(), [](const json& left, const json& right) {
+        return text_of(left, "host") < text_of(right, "host");
+    });
     json current = deployments.empty() ? json::object() : deployments.front();
-    json output{{"id", local->id},
-                {"repository_id", repository_id},
-                {"name", environment},
-                {"object_id", local->object_id},
-                {"deployment", current},
-                {"deployments", deployments},
-                {"env", env},
-                {"domains", domains}};
-    const std::optional<std::string> stale = stale_since();
-    if (stale) {
-        output["stale_since"] = *stale;
-    }
-    return output;
+    return {{"id", environment.id},
+            {"repository_id", environment.repository_id},
+            {"name", environment.name},
+            {"object_id", environment.object_id},
+            {"deployment", current},
+            {"deployments", deployments},
+            {"env", env},
+            {"domains", domains}};
 }
 
-PlatformResult<json> PlatformService::list_environments(const std::string& repository_id) const {
-    if (!platform_store_) {
-        return std::unexpected(
-            PlatformError{"store_unavailable", "the platform mirror is not configured"});
+} // namespace
+
+liquid::runtime::task<PlatformResult<json>>
+PlatformService::environment_document(WorkspaceRecords& records, std::string repository_id,
+                                      std::string environment) const {
+    auto local = settled(
+        co_await get_platform_environment_record(records, repository_id, environment));
+    if (!local) {
+        co_return platform_failure<json>(platform_error(local.error()));
     }
-    const auto environments = platform_store_->list_platform_environments(repository_id);
+    if (!*local) {
+        co_return platform_failure<json>({"not_found", "no environment " + environment});
+    }
+    auto rows = settled(co_await list_platform_mirror_records(records, repository_id));
+    if (!rows) {
+        co_return platform_failure<json>(platform_error(rows.error()));
+    }
+    json output = environment_output(**local, *rows);
+    if (const auto stale = stale_since(repository_id)) {
+        output["stale_since"] = *stale;
+    }
+    co_return PlatformResult<json>(std::move(output));
+}
+
+liquid::runtime::task<PlatformResult<json>>
+PlatformService::list_environments(WorkspaceRecords& records, std::string repository_id) const {
+    auto environments =
+        settled(co_await list_platform_environment_records(records, repository_id));
     if (!environments) {
-        return std::unexpected(platform_error(environments.error()));
+        co_return platform_failure<json>(platform_error(environments.error()));
+    }
+    std::vector<PlatformMirrorRow> rows;
+    if (!environments->empty()) {
+        auto listed = settled(co_await list_platform_mirror_records(records, repository_id));
+        if (!listed) {
+            co_return platform_failure<json>(platform_error(listed.error()));
+        }
+        rows = std::move(*listed);
     }
     json items = json::array();
     for (const PlatformEnvironment& environment : *environments) {
-        auto document = environment_document(repository_id, environment.name);
-        if (!document) {
-            return std::unexpected(document.error());
-        }
-        const json deployment = document->at("deployment");
+        const json document = environment_output(environment, rows);
+        const json& deployment = document.at("deployment");
         items.push_back({{"id", environment.id},
                          {"repository_id", repository_id},
                          {"name", environment.name},
@@ -546,47 +688,51 @@ PlatformResult<json> PlatformService::list_environments(const std::string& repos
                          {"change", text_of(deployment, "change")},
                          {"image", text_of(deployment, "image")},
                          {"url", nullable_text(text_of(deployment, "url"))},
-                         {"domains", document->at("domains")},
+                         {"domains", document.at("domains")},
                          {"updated_at", text_of(deployment, "updated_at")}});
     }
     json output{{"repository_id", repository_id}, {"items", items}};
-    const std::optional<std::string> stale = stale_since();
-    if (stale) {
+    if (const auto stale = stale_since(repository_id)) {
         output["stale_since"] = *stale;
     }
-    return output;
+    co_return PlatformResult<json>(std::move(output));
 }
 
-PlatformResult<json> PlatformService::get_environment(const std::string& repository_id,
-                                                      const std::string& environment) const {
-    return environment_document(repository_id, environment);
+liquid::runtime::task<PlatformResult<json>>
+PlatformService::get_environment(WorkspaceRecords& records, std::string repository_id,
+                                 std::string environment) const {
+    auto completed = co_await environment_document(records, std::move(repository_id),
+                                                   std::move(environment));
+    co_return finished(std::move(completed));
 }
 
-PlatformResult<json> PlatformService::list_deployments(const std::string& repository_id,
-                                                       const std::string& environment,
-                                                       int limit) const {
-    if (!platform_store_) {
-        return std::unexpected(
-            PlatformError{"store_unavailable", "the platform mirror is not configured"});
-    }
-    const auto rows = platform_store_->list_platform_mirror("deployment");
+liquid::runtime::task<PlatformResult<json>>
+PlatformService::list_deployments(WorkspaceRecords& records, std::string repository_id,
+                                  std::string environment, int limit) const {
+    auto rows = settled(co_await list_platform_mirror_records(records, repository_id));
     if (!rows) {
-        return std::unexpected(platform_error(rows.error()));
+        co_return platform_failure<json>(platform_error(rows.error()));
     }
-    std::vector<json> deployments = deployment_values(*rows, repository_id, environment);
+    std::vector<PlatformMirrorRow> deployment_rows;
+    for (PlatformMirrorRow& row : *rows) {
+        if (row.kind == "deployment") {
+            deployment_rows.push_back(std::move(row));
+        }
+    }
+    std::vector<json> deployments = deployment_values(deployment_rows, repository_id, environment);
     if (deployments.size() > static_cast<std::size_t>(limit)) {
         deployments.resize(static_cast<std::size_t>(limit));
     }
     json output{{"repository_id", repository_id}, {"items", deployments}};
-    const std::optional<std::string> stale = stale_since();
-    if (stale) {
+    if (const auto stale = stale_since(repository_id)) {
         output["stale_since"] = *stale;
     }
-    return output;
+    co_return PlatformResult<json>(std::move(output));
 }
 
 liquid::runtime::task<PlatformResult<json>>
-PlatformService::environment_logs(std::string repository_id,
+PlatformService::environment_logs(WorkspaceRecords& records,
+                                  std::string repository_id,
                                   std::string environment,
                                   std::string since,
                                   int limit,
@@ -595,7 +741,8 @@ PlatformService::environment_logs(std::string repository_id,
         co_return platform_failure<json>(
             {"store_unavailable", "the Loki-compatible log source is not configured"});
     }
-    const auto document = environment_document(repository_id, environment);
+    const auto document =
+        finished(co_await environment_document(records, repository_id, environment));
     if (!document) {
         co_return platform_failure<json>(document.error());
     }
@@ -614,8 +761,7 @@ PlatformService::environment_logs(std::string repository_id,
     }
     (*result)["repository_id"] = repository_id;
     (*result)["environment"] = environment;
-    const std::optional<std::string> stale = stale_since();
-    if (stale) {
+    if (const auto stale = stale_since(repository_id)) {
         (*result)["stale_since"] = *stale;
     }
     co_return PlatformResult<json>(std::move(*result));
@@ -644,7 +790,7 @@ PlatformService::app_logs(std::string app_id, std::string since, int limit, std:
 }
 
 PlatformResult<void> PlatformService::require_writable() const {
-    if (!control_ || !platform_store_) {
+    if (!control_ || !store_) {
         return std::unexpected(
             PlatformError{"store_unavailable", "the operator control plane is not configured"});
     }
@@ -656,7 +802,8 @@ PlatformResult<void> PlatformService::require_writable() const {
 }
 
 liquid::runtime::task<PlatformResult<void>>
-PlatformService::set_environment_env(std::string repository_id,
+PlatformService::set_environment_env(WorkspaceRecords& records,
+                                     std::string repository_id,
                                      std::string environment,
                                      std::string key,
                                      std::string value,
@@ -665,9 +812,13 @@ PlatformService::set_environment_env(std::string repository_id,
     if (auto writable = require_writable(); !writable) {
         co_return platform_failure<void>(writable.error());
     }
-    const auto local = platform_store_->get_platform_environment(repository_id, environment);
+    auto local = settled(
+        co_await get_platform_environment_record(records, repository_id, environment));
     if (!local) {
         co_return platform_failure<void>(platform_error(local.error()));
+    }
+    if (!*local) {
+        co_return platform_failure<void>({"not_found", "no environment " + environment});
     }
     const std::string updated_at = now_iso8601();
     json row{{"lake", config_.lake},
@@ -689,8 +840,8 @@ PlatformService::set_environment_env(std::string repository_id,
         mark_failed();
         co_return platform_failure<void>(platform_error(appended.error()));
     }
-    const auto mirrored = platform_store_->upsert_platform_mirror(
-        {"environment_env", environment_env_key(row), row, updated_at});
+    auto mirrored = settled(co_await put_platform_mirror_record(
+        records, repository_id, {"environment_env", environment_env_key(row), row, updated_at}));
     if (!mirrored) {
         co_return platform_failure<void>(platform_error(mirrored.error()));
     }
@@ -698,7 +849,8 @@ PlatformService::set_environment_env(std::string repository_id,
 }
 
 liquid::runtime::task<PlatformResult<void>>
-PlatformService::change_domain(std::string repository_id,
+PlatformService::change_domain(WorkspaceRecords& records,
+                               std::string repository_id,
                                std::string environment,
                                std::string host,
                                std::string tls,
@@ -707,18 +859,16 @@ PlatformService::change_domain(std::string repository_id,
     if (auto writable = require_writable(); !writable) {
         co_return platform_failure<void>(writable.error());
     }
-    const auto local = platform_store_->get_platform_environment(repository_id, environment);
-    if (!local) {
-        co_return platform_failure<void>(platform_error(local.error()));
+    const auto document =
+        finished(co_await environment_document(records, repository_id, environment));
+    if (!document) {
+        co_return platform_failure<void>(document.error());
     }
     if (deleted && tls.empty()) {
-        const auto document = environment_document(repository_id, environment);
-        if (document) {
-            for (const json& domain : document->at("domains")) {
-                if (text_of(domain, "host") == host) {
-                    tls = text_of(domain, "tls");
-                    break;
-                }
+        for (const json& domain : document->at("domains")) {
+            if (text_of(domain, "host") == host) {
+                tls = text_of(domain, "tls");
+                break;
             }
         }
     }
@@ -747,8 +897,8 @@ PlatformService::change_domain(std::string repository_id,
         mark_failed();
         co_return platform_failure<void>(platform_error(appended.error()));
     }
-    const auto mirrored =
-        platform_store_->upsert_platform_mirror({"domain", domain_key(row), row, updated_at});
+    auto mirrored = settled(co_await put_platform_mirror_record(
+        records, repository_id, {"domain", domain_key(row), row, updated_at}));
     if (!mirrored) {
         co_return platform_failure<void>(platform_error(mirrored.error()));
     }

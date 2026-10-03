@@ -113,6 +113,14 @@ only `secret_lease_routes`, the content-free route and due index (migration
 them), and `legacy_dynamic_secret_leases` for the copy. A KEK
 rotation still rewraps the retired `secrets_data_keys` rows and the PKI authorities in its
 transaction.
+`platform_records.cpp` is the platform collections' codecs (lake#358, lake#359), and `platform.cpp`'s
+sync writes each repository's environments and rows into that repository's workspace, creating an
+environment's policy object (external id `platform_environment_id`) on first sight, skipping a
+repository whose rows have not changed since its last write, and marking only that repository
+stale when its workspace cannot be written. The stores keep only
+`assign_legacy_platform_environments`/`legacy_platform_environments` and
+`assign_legacy_platform_mirror`/`legacy_platform_mirror` for the copy (migration
+`0060_platform_workspaces`), and no longer write or read either table.
 `application_webhook_records.cpp` is the next: an application's lifecycle events and its webhook
 delivery attempts in the application's workspace (lake#356, lake#357), each attempt claimed with
 `if_absent` before it is sent and settled with `if_revision`. The stores no longer write or read

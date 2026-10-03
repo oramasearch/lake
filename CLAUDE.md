@@ -87,6 +87,12 @@ as claims written `if_absent`; every session issued in an application's pool is 
 user's record there before it is returned, and the identity capabilities are asynchronous. See
 `docs/api/apps.md`.
 
+Repository environments and the platform mirror follow (lake#358, lake#359, migration `0060`): a
+repository's environments and the operator rows lake mirrors for it live in the workspace Zetta of
+the repository's workspace, written by the sync with conditional writes; each environment's policy
+object stays in PostgreSQL under the environment's derived id, so authorization reads no workspace.
+See `docs/api/platform.md`.
+
 Every repository belongs to one workspace (lake#315 part 1, migration `0051`): an immutable
 `repositories.workspace_id` required on every create and import, returned on reads and carried
 through push authorization. It is routing only; repository metadata and content have not moved.

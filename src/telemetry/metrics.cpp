@@ -271,6 +271,24 @@ public:
         return call("legacy_forge_records",
                     [&] { return store_->legacy_forge_records(after_id, limit); });
     }
+    control::Result<void> assign_legacy_platform_environments() override {
+        return call("assign_legacy_platform_environments",
+                    [&] { return store_->assign_legacy_platform_environments(); });
+    }
+    control::Result<std::vector<control::LegacyPlatformEnvironment>>
+    legacy_platform_environments(const std::string& after_id, int limit) override {
+        return call("legacy_platform_environments",
+                    [&] { return store_->legacy_platform_environments(after_id, limit); });
+    }
+    control::Result<void> assign_legacy_platform_mirror() override {
+        return call("assign_legacy_platform_mirror",
+                    [&] { return store_->assign_legacy_platform_mirror(); });
+    }
+    control::Result<std::vector<control::LegacyPlatformMirrorRow>>
+    legacy_platform_mirror(const std::string& after_id, int limit) override {
+        return call("legacy_platform_mirror",
+                    [&] { return store_->legacy_platform_mirror(after_id, limit); });
+    }
     control::Result<control::Team> create_team(const control::NewTeam& value) override {
         return call("create_team", [&] { return store_->create_team(value); });
     }

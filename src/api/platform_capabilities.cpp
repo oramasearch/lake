@@ -9,9 +9,11 @@
 #include <vector>
 
 #include "lake/control/platform.hpp"
+#include "lake/control/platform_records.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "scan/detectors.hpp"
+#include "workspace_records_api.hpp"
 
 namespace lake::api {
 namespace {
@@ -39,19 +41,91 @@ std::expected<std::string, ApiError> repository_object(const json& input, ApiCon
     return object->id;
 }
 
+// An environment's policy object stays in the control store under the environment's derived id
+// (platform_environment_id), so authorization never reads the workspace: a caller without the
+// role is refused before any workspace call.
 std::expected<std::string, ApiError> environment_object(const json& input, ApiContext& context) {
-    if (!context.platform) {
+    if (!context.platform || !context.store) {
         return std::unexpected(
             ApiError{"store_unavailable", "the platform mirror is not configured", {}});
     }
-    const std::string environment = input.contains("environment")
-                                        ? input.at("environment").get<std::string>()
-                                        : input.at("name").get<std::string>();
-    const auto document = context.platform->get_environment(input.at("repository_id"), environment);
-    if (!document) {
-        return std::unexpected(ApiError{document.error().code, document.error().message, {}});
+    const std::string environment = input.at("environment").get<std::string>();
+    if (const auto repository = context.store->get_repository(input.at("repository_id"));
+        !repository) {
+        return std::unexpected(
+            ApiError{repository.error().code, repository.error().message, "/repository_id"});
     }
-    return document->at("object_id").get<std::string>();
+    const auto object = context.store->find_policy_object(
+        "environment",
+        control::platform_environment_id(input.at("repository_id").get<std::string>(),
+                                         environment));
+    if (!object) {
+        if (object.error().code == "not_found") {
+            return std::unexpected(
+                ApiError{"not_found", "no environment " + environment, "/environment"});
+        }
+        return std::unexpected(ApiError{object.error().code, object.error().message, {}});
+    }
+    return object->id;
+}
+
+// The records of the workspace that keeps a repository's environments: the repository's own
+// (lake#358, lake#359). The caller never chooses it, and nothing falls back: a repository without
+// a workspace is `conflict` at /repository_id, a workspace that is not ready `workspace_not_ready`.
+std::expected<control::WorkspaceRecords, ApiError> repository_records(const ApiContext& context,
+                                                                      const std::string& id) {
+    if (!context.store) {
+        return std::unexpected(
+            ApiError{"store_unavailable", "no control-plane store is configured", {}});
+    }
+    const auto repository = context.store->get_repository(id);
+    if (!repository) {
+        return std::unexpected(
+            ApiError{repository.error().code, repository.error().message, "/repository_id"});
+    }
+    if (repository->workspace_id.empty()) {
+        return std::unexpected(ApiError{"conflict",
+                                        "the repository has no workspace yet, so it has nowhere "
+                                        "to keep environments; an operator must assign one",
+                                        "/repository_id"});
+    }
+    auto records = workspace_records(context, repository->customer_id, repository->workspace_id);
+    if (!records) {
+        return std::unexpected(ApiError{records.error().code, records.error().message, {}});
+    }
+    return std::move(*records);
+}
+
+// Whether the caller may read at least one of the repository's environments, decided on their
+// policy objects in the control store. A caller who may read none is answered without a workspace
+// call (least privilege); the operator may read every one.
+std::expected<bool, ApiError> may_read_an_environment(const json& input, ApiContext& context) {
+    if (context.acting_identity == "admin") {
+        return true;
+    }
+    const auto parent = repository_object(input, context);
+    if (!parent) {
+        return std::unexpected(parent.error());
+    }
+    const auto children = context.store->list_policy_objects(*parent, "environment", 1000);
+    if (!children) {
+        return std::unexpected(ApiError{children.error().code, children.error().message, {}});
+    }
+    std::vector<std::string> ids;
+    for (const control::PolicyObject& child : *children) {
+        ids.push_back(child.id);
+    }
+    const auto decisions = control::authorize_batch(
+        *context.store, context.acting_identity, ids, "read", context.authorization_cache);
+    if (!decisions) {
+        return std::unexpected(ApiError{decisions.error().code, decisions.error().message, {}});
+    }
+    return std::ranges::any_of(*decisions,
+                               [](const auto& decision) { return decision.second.allowed; });
+}
+
+ApiResult refused(const ApiError& error) {
+    return ApiResult::failure(error.code, error.message, error.path);
 }
 
 void set_platform_audit(ApiContext& context,
@@ -130,7 +204,8 @@ void register_platform_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_environments",
         .title = "List repository environments",
-        .description = "List mirrored runtime environments the caller may read.",
+        .description = "List mirrored runtime environments the caller may read, from the "
+                       "repository's workspace.",
         .input_schema = {{"type", "object"},
                          {"properties", {{"repository_id", {{"type", "string"}}}}},
                          {"required", json::array({"repository_id"})},
@@ -141,51 +216,76 @@ void register_platform_capabilities(Registry& registry) {
         .action = "read",
         .resolve_object = repository_object,
         .authorizes_candidates = true,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.platform || !context.store) {
-                return ApiResult::failure("store_unavailable",
-                                          "the platform mirror is not configured");
+                co_return ApiResult::failure("store_unavailable",
+                                             "the platform mirror is not configured");
             }
             const std::string repository_id = input.at("repository_id");
-            const auto result = context.platform->list_environments(repository_id);
-            if (!result) {
-                return platform_error(result.error());
+            const auto readable = may_read_an_environment(input, context);
+            if (!readable) {
+                co_return refused(readable.error());
+            }
+            if (!*readable) {
+                set_platform_audit(context, repository_id, "*", "platform.environments.read");
+                co_return ApiResult::success(
+                    {{"repository_id", repository_id}, {"items", json::array()}});
+            }
+            auto records = repository_records(context, repository_id);
+            if (!records) {
+                co_return refused(records.error());
+            }
+            auto completed = co_await context.platform->list_environments(*records, repository_id);
+            if (!completed) {
+                co_return ApiResult::failure("store_error", completed.error().message);
+            }
+            if (!*completed) {
+                co_return platform_error(completed->error());
             }
             set_platform_audit(context, repository_id, "*", "platform.environments.read");
-            return filter_environment_items(*result, context);
+            co_return filter_environment_items(std::move(**completed), context);
         }});
-    registry.add(
-        Capability{.name = "get_environment",
-                   .title = "Get runtime environment",
-                   .description = "Get the mirrored deployment, domains, and environment values.",
-                   .input_schema = {{"type", "object"},
-                                    {"properties",
-                                     {{"repository_id", {{"type", "string"}}},
-                                      {"environment", {{"type", "string"}}}}},
-                                    {"required", json::array({"repository_id", "environment"})},
-                                    {"additionalProperties", false}},
-                   .output_schema = object_schema(),
-                   .kind = CapabilityKind::Read,
-                   .object = "environment",
-                   .action = "read",
-                   .resolve_object = environment_object,
-                   .resolves_operator_audit_target = true,
-                   .handler = [](const json& input, ApiContext& context) {
-                       if (!context.platform) {
-                           return ApiResult::failure("store_unavailable",
-                                                     "the platform mirror is not configured");
-                       }
-                       const auto result = context.platform->get_environment(
-                           input.at("repository_id"), input.at("environment"));
-                       if (!result) {
-                           return platform_error(result.error());
-                       }
-                       set_platform_audit(context,
-                                          input.at("repository_id"),
-                                          input.at("environment"),
-                                          "platform.environment.read");
-                       return ApiResult::success(*result);
-                   }});
+    registry.add(Capability{
+        .name = "get_environment",
+        .title = "Get runtime environment",
+        .description = "Get the mirrored deployment, domains, and environment values from the "
+                       "repository's workspace.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"repository_id", {{"type", "string"}}},
+                           {"environment", {{"type", "string"}}}}},
+                         {"required", json::array({"repository_id", "environment"})},
+                         {"additionalProperties", false}},
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Read,
+        .object = "environment",
+        .action = "read",
+        .resolve_object = environment_object,
+        .resolves_operator_audit_target = true,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.platform) {
+                co_return ApiResult::failure("store_unavailable",
+                                             "the platform mirror is not configured");
+            }
+            const std::string repository_id = input.at("repository_id");
+            const std::string environment = input.at("environment");
+            auto records = repository_records(context, repository_id);
+            if (!records) {
+                co_return refused(records.error());
+            }
+            auto completed =
+                co_await context.platform->get_environment(*records, repository_id, environment);
+            if (!completed) {
+                co_return ApiResult::failure("store_error", completed.error().message);
+            }
+            if (!*completed) {
+                co_return platform_error(completed->error());
+            }
+            set_platform_audit(context, repository_id, environment, "platform.environment.read");
+            co_return ApiResult::success(std::move(**completed));
+        }});
     registry.add(Capability{
         .name = "list_deployments",
         .title = "List mirrored deployments",
@@ -203,34 +303,55 @@ void register_platform_capabilities(Registry& registry) {
         .action = "read",
         .resolve_object = repository_object,
         .authorizes_candidates = true,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.platform || !context.store) {
-                return ApiResult::failure("store_unavailable",
-                                          "the platform mirror is not configured");
+                co_return ApiResult::failure("store_unavailable",
+                                             "the platform mirror is not configured");
             }
             const std::string repository_id = input.at("repository_id");
             const std::string environment = input.value("environment", "");
             const int limit = std::clamp(input.value("limit", 100), 1, 1000);
-            const auto result =
-                context.platform->list_deployments(repository_id, environment, limit);
-            if (!result) {
-                return platform_error(result.error());
+            const auto readable = may_read_an_environment(input, context);
+            if (!readable) {
+                co_return refused(readable.error());
             }
-            json filtered = json::array();
+            if (!*readable) {
+                set_platform_audit(context,
+                                   repository_id,
+                                   environment.empty() ? "*" : environment,
+                                   "platform.deployments.read");
+                co_return ApiResult::success(
+                    {{"repository_id", repository_id}, {"items", json::array()}});
+            }
+            auto records = repository_records(context, repository_id);
+            if (!records) {
+                co_return refused(records.error());
+            }
+            auto completed = co_await context.platform->list_deployments(
+                *records, repository_id, environment, limit);
+            if (!completed) {
+                co_return ApiResult::failure("store_error", completed.error().message);
+            }
+            if (!*completed) {
+                co_return platform_error(completed->error());
+            }
+            const json& result = **completed;
+            // Each row is shown only to a caller who may read its environment; the environments'
+            // policy objects are found in the control store, without another workspace read.
             std::map<std::string, std::string> object_by_environment;
             std::vector<std::string> objects;
-            for (const json& row : result->at("items")) {
+            for (const json& row : result.at("items")) {
                 const std::string name = row.value("environment", "");
                 if (object_by_environment.contains(name)) {
                     continue;
                 }
-                const auto document = context.platform->get_environment(repository_id, name);
-                if (!document) {
-                    return platform_error(document.error());
+                const auto object = context.store->find_policy_object(
+                    "environment", control::platform_environment_id(repository_id, name));
+                object_by_environment[name] = object ? object->id : std::string();
+                if (object) {
+                    objects.push_back(object->id);
                 }
-                const std::string object_id = document->at("object_id");
-                object_by_environment[name] = object_id;
-                objects.push_back(object_id);
             }
             const auto decisions = control::authorize_batch(*context.store,
                                                             context.acting_identity,
@@ -238,20 +359,23 @@ void register_platform_capabilities(Registry& registry) {
                                                             "read",
                                                             context.authorization_cache);
             if (!decisions) {
-                return store_error(decisions.error());
+                co_return store_error(decisions.error());
             }
-            for (const json& row : result->at("items")) {
-                if (decisions->at(object_by_environment.at(row.value("environment", ""))).allowed) {
+            json filtered = json::array();
+            for (const json& row : result.at("items")) {
+                const std::string& object_id =
+                    object_by_environment.at(row.value("environment", ""));
+                if (!object_id.empty() && decisions->at(object_id).allowed) {
                     filtered.push_back(row);
                 }
             }
-            json output = *result;
+            json output = result;
             output["items"] = std::move(filtered);
             set_platform_audit(context,
                                repository_id,
                                environment.empty() ? "*" : environment,
                                "platform.deployments.read");
-            return ApiResult::success(std::move(output));
+            co_return ApiResult::success(std::move(output));
         }});
     registry.add(Capability{
         .name = "environment_logs",
@@ -285,7 +409,12 @@ void register_platform_capabilities(Registry& registry) {
             }
             const std::string repository_id = input.at("repository_id");
             const std::string environment = input.at("environment");
+            auto records = repository_records(context, repository_id);
+            if (!records) {
+                co_return refused(records.error());
+            }
             auto completed = co_await context.platform->environment_logs(
+                *records,
                 repository_id,
                 environment,
                 input.value("since", ""),
@@ -343,8 +472,13 @@ void register_platform_capabilities(Registry& registry) {
                 }
                 const std::string repository_id = input.at("repository_id");
                 const std::string environment = input.at("environment");
+                auto records = repository_records(context, repository_id);
+                if (!records) {
+                    co_return refused(records.error());
+                }
                 auto completed = co_await context.platform->set_environment_env(
-                    repository_id, environment, key, value, deleted, context.acting_identity);
+                    *records, repository_id, environment, key, value, deleted,
+                    context.acting_identity);
                 if (!completed) {
                     co_return ApiResult::failure("store_error", completed.error().message);
                 }
@@ -408,8 +542,13 @@ void register_platform_capabilities(Registry& registry) {
                 }
                 const std::string repository_id = input.at("repository_id");
                 const std::string environment = input.at("environment");
+                auto records = repository_records(context, repository_id);
+                if (!records) {
+                    co_return refused(records.error());
+                }
                 auto completed = co_await context.platform->change_domain(
-                    repository_id, environment, host, tls, deleted, context.acting_identity);
+                    *records, repository_id, environment, host, tls, deleted,
+                    context.acting_identity);
                 if (!completed) {
                     co_return ApiResult::failure("store_error", completed.error().message);
                 }

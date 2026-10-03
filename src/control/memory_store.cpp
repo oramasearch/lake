@@ -1,4 +1,5 @@
 #include "lake/control/memory_store.hpp"
+#include "lake/control/platform_records.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -315,93 +316,6 @@ nlohmann::json to_json(const CustomerKekRotation& value) {
 
 Result<void> InMemoryStore::ping() {
     return {};
-}
-
-Result<PlatformEnvironment>
-InMemoryStore::ensure_platform_environment(const std::string& repository_id,
-                                           const std::string& name) {
-    if (repository_id.empty() || name.empty()) {
-        return std::unexpected(
-            StoreError{"invalid_input", "repository_id and environment name are required"});
-    }
-    std::lock_guard lock(mutex_);
-    const auto existing =
-        std::ranges::find_if(platform_environments_, [&](const PlatformEnvironment& environment) {
-            return environment.repository_id == repository_id && environment.name == name;
-        });
-    if (existing != platform_environments_.end()) {
-        return *existing;
-    }
-    const auto repository = std::ranges::find(repositories_, repository_id, &Repository::id);
-    if (repository == repositories_.end()) {
-        return std::unexpected(StoreError{"not_found", "no repository " + repository_id});
-    }
-    const auto parent = std::ranges::find_if(policy_objects_, [&](const PolicyObject& object) {
-        return object.object_type == "repository" && object.external_id == repository_id;
-    });
-    if (parent == policy_objects_.end()) {
-        return std::unexpected(StoreError{"store_error", "repository policy object is missing"});
-    }
-    const std::string now = now_iso8601();
-    PlatformEnvironment environment{new_uuid_v4(), repository_id, name, new_uuid_v4(), now};
-    policy_objects_.push_back(PolicyObject{
-        environment.object_id, "environment", environment.id, parent->id, now, now, true});
-    platform_environments_.push_back(environment);
-    return environment;
-}
-
-Result<PlatformEnvironment>
-InMemoryStore::get_platform_environment(const std::string& repository_id, const std::string& name) {
-    std::lock_guard lock(mutex_);
-    const auto environment =
-        std::ranges::find_if(platform_environments_, [&](const PlatformEnvironment& candidate) {
-            return candidate.repository_id == repository_id && candidate.name == name;
-        });
-    if (environment == platform_environments_.end()) {
-        return std::unexpected(StoreError{"not_found", "no environment " + name});
-    }
-    return *environment;
-}
-
-Result<std::vector<PlatformEnvironment>>
-InMemoryStore::list_platform_environments(const std::string& repository_id) {
-    std::lock_guard lock(mutex_);
-    std::vector<PlatformEnvironment> output;
-    for (const PlatformEnvironment& environment : platform_environments_) {
-        if (repository_id.empty() || environment.repository_id == repository_id) {
-            output.push_back(environment);
-        }
-    }
-    return output;
-}
-
-Result<void> InMemoryStore::upsert_platform_mirror(const PlatformMirrorRow& row) {
-    if (row.kind.empty() || row.key.empty() || !row.value.is_object()) {
-        return std::unexpected(StoreError{"invalid_input", "platform mirror row is incomplete"});
-    }
-    std::lock_guard lock(mutex_);
-    const auto existing =
-        std::ranges::find_if(platform_mirror_, [&](const PlatformMirrorRow& candidate) {
-            return candidate.kind == row.kind && candidate.key == row.key;
-        });
-    if (existing == platform_mirror_.end()) {
-        platform_mirror_.push_back(row);
-    } else {
-        *existing = row;
-    }
-    return {};
-}
-
-Result<std::vector<PlatformMirrorRow>>
-InMemoryStore::list_platform_mirror(const std::string& kind) {
-    std::lock_guard lock(mutex_);
-    std::vector<PlatformMirrorRow> output;
-    for (const PlatformMirrorRow& row : platform_mirror_) {
-        if (kind.empty() || row.kind == kind) {
-            output.push_back(row);
-        }
-    }
-    return output;
 }
 
 Result<User> InMemoryStore::create_user(const NewUser& in) {
@@ -4239,6 +4153,167 @@ InMemoryStore::legacy_forge_records(const std::string& after_id, int limit) {
             found != legacy_forge_assignments_.end()) {
             row.workspace_id = found->second.first;
             row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+Result<PlatformEnvironment>
+InMemoryStore::seed_legacy_platform_environment(const std::string& repository_id,
+                                                const std::string& name) {
+    std::lock_guard lock(mutex_);
+    const auto parent = std::ranges::find_if(policy_objects_, [&](const PolicyObject& object) {
+        return object.object_type == "repository" && object.external_id == repository_id;
+    });
+    if (parent == policy_objects_.end()) {
+        return std::unexpected(StoreError{"not_found", "repository policy object is missing"});
+    }
+    const std::string now = now_iso8601();
+    PlatformEnvironment environment{new_uuid_v4(), repository_id, name, new_uuid_v4(), now};
+    policy_objects_.push_back(PolicyObject{
+        environment.object_id, "environment", environment.id, parent->id, now, now, true});
+    legacy_platform_environments_.push_back(environment);
+    return environment;
+}
+
+void InMemoryStore::seed_legacy_platform_mirror_row(PlatformMirrorRow row) {
+    std::lock_guard lock(mutex_);
+    if (row.seen_at.empty()) {
+        row.seen_at = now_iso8601();
+    }
+    legacy_platform_mirror_.push_back(std::move(row));
+}
+
+namespace {
+
+// Migration 0060's owner of a row of a repository: its workspace, needs_selection while it has
+// none, workspace_deleted once that workspace is gone.
+std::pair<std::string, std::string> platform_owner(const Repository& repository,
+                                                   const std::vector<Workspace>& workspaces) {
+    if (repository.workspace_id.empty()) {
+        return {"", "needs_selection"};
+    }
+    const auto workspace = std::ranges::find(workspaces, repository.workspace_id, &Workspace::id);
+    if (workspace != workspaces.end() && workspace->desired == "deleted") {
+        return {"", "workspace_deleted"};
+    }
+    return {repository.workspace_id, "repository_workspace"};
+}
+
+} // namespace
+
+// Migration 0060: each environment's policy object takes the environment's derived id, and each
+// row belongs to its repository's workspace.
+Result<void> InMemoryStore::assign_legacy_platform_environments() {
+    std::lock_guard lock(mutex_);
+    for (const PlatformEnvironment& environment : legacy_platform_environments_) {
+        const std::string derived =
+            platform_environment_id(environment.repository_id, environment.name);
+        const bool taken = std::ranges::any_of(policy_objects_, [&](const PolicyObject& object) {
+            return object.object_type == "environment" && object.external_id == derived;
+        });
+        if (!taken) {
+            if (auto object = std::ranges::find(policy_objects_, environment.object_id,
+                                                &PolicyObject::id);
+                object != policy_objects_.end()) {
+                object->external_id = derived;
+            }
+        }
+        const auto repository = repository_by_id(repositories_, environment.repository_id);
+        if (repository == repositories_.end()) {
+            continue;
+        }
+        const auto existing = legacy_platform_assignments_.find(environment.id);
+        if (existing != legacy_platform_assignments_.end() &&
+            existing->second.second != "needs_selection") {
+            continue;
+        }
+        legacy_platform_assignments_[environment.id] = platform_owner(*repository, workspaces_);
+    }
+    return {};
+}
+
+Result<std::vector<LegacyPlatformEnvironment>>
+InMemoryStore::legacy_platform_environments(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<PlatformEnvironment> ordered = legacy_platform_environments_;
+    std::ranges::sort(ordered, {}, &PlatformEnvironment::id);
+    std::vector<LegacyPlatformEnvironment> rows;
+    for (const PlatformEnvironment& environment : ordered) {
+        if (!after_id.empty() && environment.id <= after_id) {
+            continue;
+        }
+        if (static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            break;
+        }
+        LegacyPlatformEnvironment row{environment.id, environment, "", "", "needs_selection"};
+        if (const auto repository = repository_by_id(repositories_, environment.repository_id);
+            repository != repositories_.end()) {
+            row.customer_id = repository->customer_id;
+        }
+        if (const auto found = legacy_platform_assignments_.find(environment.id);
+            found != legacy_platform_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+Result<void> InMemoryStore::assign_legacy_platform_mirror() {
+    std::lock_guard lock(mutex_);
+    for (const PlatformMirrorRow& row : legacy_platform_mirror_) {
+        const std::string repository_id = row.value.value("repository", std::string());
+        const auto repository = repository_by_id(repositories_, repository_id);
+        if (repository == repositories_.end()) {
+            continue;
+        }
+        const std::string id = platform_mirror_id(row.kind, row.key);
+        const auto existing = legacy_platform_assignments_.find(id);
+        if (existing != legacy_platform_assignments_.end() &&
+            existing->second.second != "needs_selection") {
+            continue;
+        }
+        legacy_platform_assignments_[id] = platform_owner(*repository, workspaces_);
+    }
+    return {};
+}
+
+Result<std::vector<LegacyPlatformMirrorRow>>
+InMemoryStore::legacy_platform_mirror(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<LegacyPlatformMirrorRow> all;
+    for (const PlatformMirrorRow& row : legacy_platform_mirror_) {
+        LegacyPlatformMirrorRow legacy;
+        legacy.id = platform_mirror_id(row.kind, row.key);
+        legacy.row = row;
+        legacy.at_us = 0;
+        legacy.repository_id = row.value.value("repository", std::string());
+        legacy.outcome = "unknown_repository";
+        if (const auto repository = repository_by_id(repositories_, legacy.repository_id);
+            repository != repositories_.end()) {
+            legacy.customer_id = repository->customer_id;
+            legacy.outcome = "needs_selection";
+        } else {
+            legacy.repository_id.clear();
+        }
+        if (const auto found = legacy_platform_assignments_.find(legacy.id);
+            found != legacy_platform_assignments_.end()) {
+            legacy.workspace_id = found->second.first;
+            legacy.outcome = found->second.second;
+        }
+        all.push_back(std::move(legacy));
+    }
+    std::ranges::sort(all, {}, &LegacyPlatformMirrorRow::id);
+    std::vector<LegacyPlatformMirrorRow> rows;
+    for (LegacyPlatformMirrorRow& row : all) {
+        if (!after_id.empty() && row.id <= after_id) {
+            continue;
+        }
+        if (static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            break;
         }
         rows.push_back(std::move(row));
     }

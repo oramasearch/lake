@@ -286,6 +286,9 @@ authentication migration `0016`.
 
 ## Platform mirror (migration `0019_platform`)
 
+Both tables are retired by [`0060_platform_workspaces`](#platform-workspaces-migration-0060_platform_workspaces)
+(lake#358, lake#359): lake no longer writes or reads them.
+
 | Table | Purpose |
 |---|---|
 | `platform_environments` | Repository/name binding to the local environment policy object created when the mirror first sees an environment. |
@@ -296,6 +299,18 @@ The issue brief reserved `0017_platform`, but `0017_agent_sessions` and `0018_se
 were already present on main. The platform tables therefore use the next collision-free migration,
 `0019_platform`. Operator Zetta remains the source of truth; these tables provide stale reads and
 local policy binding only.
+
+## Platform workspaces (migration `0060_platform_workspaces`)
+
+| Table or change | Purpose |
+|---|---|
+| `objects` (`environment`) | Each environment's policy object takes the environment's derived id, `md5(repository id, newline, name)` as a UUID, as its external id, unless another environment object already has it. The object keeps its id, parent and grants; lake finds it from the repository and the name. |
+| `workspace_assignments` (`platform_environments`, `platform_mirror`) | Each row's owner: its repository's workspace (`repository_workspace`), `needs_selection` while the repository has none, `workspace_deleted` once that workspace is gone. A mirror row is named by `md5(kind, newline, key)`; one naming no repository is reported and not assigned. |
+| `platform_workspaces_guard` | Guard table for migration `0060_platform_workspaces`. |
+
+Nothing is dropped. Lake reads and writes environments and mirrored rows only in the repository's
+workspace records ([platform.md](../api/platform.md#where-environments-live-lake358-lake359)); the
+one-shot copy moves the retired rows.
 
 ## Identity exit scenario (migration `0020_identity_exit`)
 

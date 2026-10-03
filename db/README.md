@@ -175,3 +175,13 @@ owner recorded in `workspace_assignments` under `object_table = 'auth_applicatio
 workspace (resolved by the copy once it has one), or `workspace_deleted`. Nothing is dropped. The
 latest guard is `application_settings_workspaces_guard`; the operator must vendor this schema and
 update its guard before rollout. See [apps.md](../docs/api/apps.md#where-settings-live-lake351).
+Migration `0060_platform_workspaces` retires `platform_environments` and `platform_mirror`
+(lake#358, lake#359): a repository's environments and the operator rows lake mirrors for it live in
+the workspace Zetta of the repository's workspace. It gives each environment's policy object the
+environment's derived id, `md5(repository id, newline, name)` as a UUID, as its external id (grants
+keep pointing at the same object), and records each row's owner in `workspace_assignments` for
+`copy_workspace_records`: `repository_workspace`, `needs_selection` while the repository has no
+workspace (resolved by the copy once it has one), or `workspace_deleted`; a mirror row naming no
+repository is reported. Nothing is dropped. The latest guard is `platform_workspaces_guard`; the
+operator must vendor this schema and update its guard before rollout. See
+[platform.md](../docs/api/platform.md#where-environments-live-lake358-lake359).

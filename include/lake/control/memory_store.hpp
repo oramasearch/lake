@@ -5,7 +5,6 @@
 #include <set>
 #include <vector>
 
-#include "lake/control/platform_store.hpp"
 #include "lake/control/store.hpp"
 
 namespace lake::control {
@@ -13,20 +12,12 @@ namespace lake::control {
 // In-memory store enforcing the same constraints as db/schema.sql: one customer
 // per identity, individual xor organization, one global handle namespace, the
 // handle format.
-class InMemoryStore final : public Store, public PlatformStore {
+class InMemoryStore final : public Store {
 public:
     std::string kind() const override {
         return "memory";
     }
     Result<void> ping() override;
-    Result<PlatformEnvironment> ensure_platform_environment(const std::string& repository_id,
-                                                            const std::string& name) override;
-    Result<PlatformEnvironment> get_platform_environment(const std::string& repository_id,
-                                                         const std::string& name) override;
-    Result<std::vector<PlatformEnvironment>>
-    list_platform_environments(const std::string& repository_id) override;
-    Result<void> upsert_platform_mirror(const PlatformMirrorRow& row) override;
-    Result<std::vector<PlatformMirrorRow>> list_platform_mirror(const std::string& kind) override;
     Result<User> create_user(const NewUser&) override;
     Result<std::vector<User>> list_users(int limit) override;
     Result<User> get_user(const std::string& id) override;
@@ -59,6 +50,18 @@ public:
                                                                 int limit) override;
     // A row of the retired forge_records table, as an earlier lake wrote it (tests of the copy).
     void seed_legacy_forge_record(ForgeRecord record);
+    Result<void> assign_legacy_platform_environments() override;
+    Result<std::vector<LegacyPlatformEnvironment>>
+    legacy_platform_environments(const std::string& after_id, int limit) override;
+    Result<void> assign_legacy_platform_mirror() override;
+    Result<std::vector<LegacyPlatformMirrorRow>> legacy_platform_mirror(const std::string& after_id,
+                                                                        int limit) override;
+    // An environment of the retired platform_environments table, as an earlier lake made it: a
+    // random id and a policy object under the repository named by that id (tests of the copy).
+    Result<PlatformEnvironment> seed_legacy_platform_environment(const std::string& repository_id,
+                                                                 const std::string& name);
+    // A row of the retired platform_mirror table (tests of the copy).
+    void seed_legacy_platform_mirror_row(PlatformMirrorRow row);
     Result<DriveShareLinkRoute> drive_share_link_route(const std::string& token_hash) override;
     Result<void> assign_legacy_drive_share_links() override;
     Result<std::vector<LegacyDriveShareLink>>
@@ -651,8 +654,11 @@ private:
     std::vector<RecoveryDelivery> recovery_deliveries_;
     std::vector<RecoveryNotification> recovery_notifications_;
     std::vector<RecoveryContact> recovery_contacts_;
-    std::vector<PlatformEnvironment> platform_environments_;
-    std::vector<PlatformMirrorRow> platform_mirror_;
+    // The retired platform tables and their recorded owners (migration 0060): row id ->
+    // (workspace, outcome).
+    std::vector<PlatformEnvironment> legacy_platform_environments_;
+    std::vector<PlatformMirrorRow> legacy_platform_mirror_;
+    std::map<std::string, std::pair<std::string, std::string>> legacy_platform_assignments_;
     std::vector<SsoProvider> sso_providers_;
     std::vector<std::pair<std::string, std::string>> sso_scim_tokens_;
     std::vector<std::pair<std::string, std::string>> sso_oidc_secrets_;

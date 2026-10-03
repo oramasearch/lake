@@ -5,6 +5,34 @@ plane. `liquid deploy` appends deployment intent, the operator appends deploymen
 reconciles environment/domain requests, and Lake mirrors those rows for authorized pages and
 audit. Lake never appends a deployment row; rollback is another `liquid deploy --to` operation.
 
+## Where environments live (lake#358, lake#359)
+
+A repository's environments and the rows Lake mirrors for it live in the workspace Zetta of the
+repository's workspace (`repositories.workspace_id`, lake#315), as two sealed collections of
+[workspace records](../architecture/workspace-records.md), both found by the repository:
+
+| Collection | One record per | Key | Written |
+|---|---|---|---|
+| `lake_platform_environments` | environment | its id, `md5(repository id, newline, name)` as a UUID | `if_absent` when the sync first sees it; two replicas create it once |
+| `lake_platform_mirror` | deployment, environment value or domain | `md5(kind, newline, key)` as a UUID | `if_absent`, or at the engine revision read when the stored row is older (the row order below); an older row never replaces a newer one |
+
+The caller never chooses the workspace: it is the repository's, so naming the repository names
+it, and nothing falls back to another workspace, the lake Zetta or PostgreSQL. A repository
+without a workspace is `conflict` at `/repository_id`; a workspace that is not ready is
+`workspace_not_ready`. Deleting a workspace deletes its Zetta and these records with it.
+
+Each environment's `environment` policy object stays in the control store with its grants, under
+the environment's id as its external id. Authorization therefore never reads the workspace:
+`get_environment`, the logs and the writes find the object from the repository and the name, and
+`list_environments` and `list_deployments` answer an empty list, without a workspace call, to a
+caller who may read none of the repository's environment objects. PostgreSQL keeps no
+environment name, value, domain or deployment row; the object's external id is an md5 of the
+repository and the name.
+
+Reads cost one `list_records` per collection: the environments page two, an environment page
+three (the environment record, then the rows for the document and for the history). The
+Deployments overview reads only the repositories with an environment the caller may read.
+
 ## Capabilities
 
 All capabilities resolve the repository's local `environment` policy object and go through
@@ -12,7 +40,7 @@ All capabilities resolve the repository's local `environment` policy object and 
 
 | Capability | Action | Input | Value |
 |---|---|---|---|
-| `list_environments` | `read` per candidate | `repository_id` | environment summaries with current phase, change, image, URL, domains, and update time |
+| `list_environments` | `read` per candidate | `repository_id` | environment summaries with id, current phase, change, image, URL, domains, and update time |
 | `get_environment` | `read` | `repository_id`, `environment` | current deployment, deployment history, domains, plain environment values, and optional `stale_since` |
 | `list_deployments` | `read` per candidate | `repository_id`, optional `environment`, optional `limit` | latest deployment record per deployment id, newest first |
 | `environment_logs` | `read` | `repository_id`, `environment`, optional `since`, `limit`, `direction` | `{items: [{ts,pod,container,line}], next_since}` |
@@ -59,15 +87,27 @@ characters are rejected. The operator bearer is a Zetta `secret_header` and is n
 ## Mirror and failure behavior
 
 Every `LAKE_PLATFORM_SYNC_SECONDS` (default 15), the owner loop fetches all three tables, selects
-the latest rows, creates `platform_environments` and its policy object on first sight, and upserts
-`platform_mirror`. Each newly observed deployment phase records one signed `platform.deployment.phase` audit
-event. Migration `0019_platform` holds only these local bindings and last-seen JSON rows; `0017`
-and `0018` were already assigned when the platform work landed.
+the latest rows and groups them by repository. For each repository it opens the repository's
+workspace, reads its environments and mirror rows (one `list_records` each), creates an
+environment and its policy object on first sight, and writes each row the workspace does not
+hold yet. Each newly observed deployment phase records one signed `platform.deployment.phase`
+audit event before its row is written, so a sync that fails there records it next time rather than
+never. A replica remembers what it last wrote per repository and skips a repository whose rows
+have not changed, so a quiet sync makes no workspace call; every 20th sync rereads every
+repository's workspace, which rewrites a workspace that lost its records.
 
-All three reads must succeed before a sync mutates the mirror. If Zetta is unreachable, existing
-reads continue from the mirror and include `stale_since`; health reports `platform: degraded`,
-`/readyz` remains governed by the local control store, and platform writes fail
-`store_unavailable`. A successful sync clears the stale marker.
+All three reads must succeed before a sync writes anything. If the operator control plane is
+unreachable, existing reads continue from the workspace mirror and include `stale_since`; health
+reports `platform: degraded`, `/readyz` remains governed by the local control store, and platform
+writes fail `store_unavailable`. A successful sync clears the stale marker. A repository whose
+workspace cannot be written (not ready, or the repository has no workspace) is marked stale on its
+own: its reads carry `stale_since` until a later sync writes it, and the service stays healthy. A
+row naming a repository Lake does not have belongs to no workspace and is skipped.
+
+The retired PostgreSQL tables `platform_environments` and `platform_mirror` (migration
+`0019_platform`) are read only by the one-shot copy; migration `0060_platform_workspaces` records
+each row's owner and gives each environment's policy object its derived id. The cutover is in
+[workspace-records.md](../architecture/workspace-records.md#cutover-runbook-platform-environments-and-mirror-dev-cluster).
 
 ## Loki-compatible logs
 

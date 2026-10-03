@@ -215,12 +215,21 @@ in-memory source that has no network transport, and rejects conflicting equal-si
 views retained under one log identity.
 
 Platform coverage uses an append-only fake Zetta control source and fake Loki source against
-`InMemoryStore`. It proves latest-wins sync, environment policy-object creation, signed phase audit,
+`InMemoryStore`, with the repository in a Ready workspace of a `RecordWorkspaces` (lake#358,
+lake#359). It proves latest-wins sync, environment policy-object creation, signed phase audit,
 tombstones, mutation rows, secret detection, role checks, stale reads, degraded health state, log
 cursors, renderer strings, OpenAPI, and MCP discovery. A Beast2 Loki double verifies the real
-coroutine HTTP client, selector request, secret bearer, line conversion, and cursor. The focused
-Postgres suite round-trips the same environment binding and JSON mirror through the production
-store.
+coroutine HTTP client, selector request, secret bearer, line conversion, and cursor.
+`test_workspace_records.cpp`'s `PlatformEnvironmentsLiveInTheirRepositorysWorkspace` covers two
+spaces with two workspaces each, sealed records only at the repository's workspace endpoint, a quiet
+sync writing nothing, an older row never replacing a newer one, a stale revision, one environment
+created once by two writers, least privilege without a workspace call, missing, malformed and
+unknown ids, a workspace that is not ready (only that repository stale), a repository without a
+workspace and workspace deletion; `TheOneShotCopyMovesPlatformEnvironmentsAndTheMirror` the copy of
+both collections in both stores (the memory store seeds legacy rows with
+`seed_legacy_platform_environment` and `seed_legacy_platform_mirror_row`), including a grant on an
+old policy object still deciding and no phase audited twice; and
+`PostgresPlatform.MigrationRecordsEachRowsOwnerForTheCopy` migration `0060_platform_workspaces`.
 
 `test_web_apps.cpp` proves Ship App policy isolation, validation, desired-state generations,
 reserved platform and configured names, direct-zone default hosts, app/replica quotas,

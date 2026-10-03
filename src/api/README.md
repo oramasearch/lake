@@ -284,3 +284,12 @@ from there on the asynchronous path (`begin_passkey_registration`, `begin_passke
 identity pages, the password and OAuth forms' redirects, and the application pages, which read the
 settings concurrently with their listing (`application_page_reads`). `copy_workspace_records` also
 copies `auth_applications`.
+Environments and the platform mirror live in the workspace of their repository (lake#358,
+lake#359): every platform capability in `platform_capabilities.cpp` is asynchronous and opens the
+repository's own workspace (a repository without one is `conflict` at `/repository_id`). An
+environment's policy object is found in PostgreSQL from the repository and the name, so a refused
+caller reaches no workspace, and `list_environments`/`list_deployments` answer an empty list
+without a workspace call to a caller who may read no environment of the repository. The
+`/deployments`, `/environments` and `/environment` pages call the registry asynchronously, and the
+owner loop hands `PlatformService::sync` an opener over the workspace caller.
+`copy_workspace_records` copies `platform_mirror` and then `platform_environments`.
