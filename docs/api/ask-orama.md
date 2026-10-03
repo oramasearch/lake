@@ -51,9 +51,17 @@ shows it and keeps it honest.
   `launch_agent`. An ApplicationAgent delegation creates an `app` task, whose proposal is reviewed
   and confirmed before that agent receives App writes. An ExperimentsAgent delegation creates an
   `experiment` task, whose editable study is reviewed before that agent receives `create_study`.
-- **Conversations are lake's.** Every message is an `ask_messages` row (migration `0030`): the
-  person's text, and for Ask Orama's the reply with its proposals, reads, delegations and trace id.
-  Only the person who had a conversation reads it back, from any replica.
+- **Conversations live in the workspace** (lake#370). Every message is a sealed record in the
+  workspace Zetta of the workspace the conversation was held in (collection `lake_ask_messages`,
+  [workspace-records.md](../architecture/workspace-records.md)): the person's text, and for Ask
+  Orama's the reply with its proposals, reads, delegations and trace id. The page's `/w/<id>/`
+  workspace owns it; another workspace of the same space never shows it. Only the person who had a
+  conversation reads it back, from any replica. A workspace that is not ready shows the error
+  instead of falling back anywhere. Lake's PostgreSQL `ask_messages` table (migration `0030`) is no
+  longer written or read except by the operator's one-shot copy (`copy_workspace_records`).
+- **`get_ask_conversation`** takes `customer_id`, `workspace_id` and `conversation_id` (`limit`
+  optional) and reads the person's conversation in that workspace; a missing, malformed, unknown or
+  foreign `workspace_id` is `invalid_input` at `/workspace_id`.
 
 ## Routes
 
@@ -64,6 +72,11 @@ shows it and keeps it honest.
 | `POST /ask/confirm` | runs one stored proposal (`message_id`, `index`) as the person and records the outcome |
 
 ## Verify
+
+`Stores/WorkspaceRecordStores.*` (lake#370): two spaces with two workspaces each keep one
+conversation id apart per workspace; foreign, missing, malformed and unknown workspace ids are
+refused; a deleted workspace's conversations go with it; the operator copy moves and verifies
+earlier rows.
 
 `HttpResponseIsolation.AskOramaOffersPeoplesAgentsAndSaysWhoIsWorkingOnALongTurn` (lake#451): a
 running internal generator is not in *Talk to*; the page waits, then names Ask Orama working; Ask

@@ -356,3 +356,16 @@ agreeing under Clerk.
 `internal/controller/lake_*_pgx.go` against a fresh schema: a column the operator selects that lake
 lacks (lake#442, lake#465) fails here. `PostgresStores.MigrationAssignsTheSoleWorkspaceAndRecordsTheRest`
 covers `0044_store_workspaces`. See [storage.md](../docs/control-plane/storage.md).
+
+`test_workspace_records.cpp` covers workspace records (lake#370,
+[workspace-records.md](../docs/architecture/workspace-records.md)): sealed records and blind
+indexes, paged listing, records that open only in their own workspace and lookup, conditional
+writes with conflict retries and `busy` retries, two spaces with two workspaces each over the
+memory and PostgreSQL stores, workspace deletion, the allow-list keeping the record store away from
+`workspace_query`/`workspace_act`, and the operator's one-shot copy. `record_fixture.hpp`
+(`RecordTables`) is the keyed record store (zetta#1231) as records use it; the test workspace
+callers route record capabilities to it, one store per endpoint.
+`WorkspaceRecordsZetta.TheEngineStoresAndReturnsSealedRecords` runs against a real Zetta node when
+`LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` are set: build Zetta dev (with zetta#1233) in a
+scratch directory and run `zetta --headless --mcp-listen 127.0.0.1:48712 --admin-token <token>`.
+`PostgresAskMessages.MigrationRecordsEachRowsOwnerForTheCopy` covers `0045_ask_message_workspaces`.

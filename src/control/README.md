@@ -83,3 +83,10 @@ Stores carry the workspace they belong to (migration `0044_store_workspaces`, la
 stores record it on `create_store` and filter `list_stores` by it; `WorkspaceService::store` and
 `delete_store` treat another workspace's store as `not_found`. See
 `docs/control-plane/storage.md`.
+`workspace_records.cpp` is lake's one mechanism for records in a workspace Zetta (lake#370,
+[workspace-records.md](../../docs/architecture/workspace-records.md)): sealed, blind-indexed
+records in `lake_*` collections of the workspace's keyed record store (zetta#1231) through the
+workspace caller, with engine-decided conditional writes, `busy` retries and a read-modify-write
+`update`. `ask_messages.cpp` is its first collection. The stores no longer write or read Ask Orama
+conversations; `assign_legacy_ask_messages` and `legacy_ask_messages` serve only the operator's
+one-shot copy (migration `0045_ask_message_workspaces`).

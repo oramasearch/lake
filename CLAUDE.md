@@ -41,6 +41,13 @@ expiries. Retry notices reach workspace event streams and the working panels. Sh
 credentials retain first-terminal-write-wins behavior; task-scoped event authentication and
 operator schema/configuration handoff remain follow-ups. See `docs/api/agent-bus.md`.
 
+Lake's records move into workspace Zettas through one mechanism,
+[`docs/architecture/workspace-records.md`](docs/architecture/workspace-records.md): sealed
+`lake_*` collections in each workspace Zetta's keyed record store (zetta#1231, Zetta dev with
+#1233 or later), an operator one-shot copy and verification, and a per-table checklist. Ask Orama conversations are the first collection (lake#370,
+migration `0045`); the PostgreSQL table stays until a later migration drops it after the copy is
+verified on dev.
+
 ## Historical status — superseded 2026-09-08
 
 The following was the prior source-tree status record. Its production claims are retained only as

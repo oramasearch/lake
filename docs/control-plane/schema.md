@@ -438,7 +438,8 @@ never-expiring credentials is deployed. Capabilities: [`../api/agents.md`](../ap
 slug, desired, trigger, who launched it), `agent_launch_status` (written by the operator: phase,
 message, endpoint, exit code, result and the **SHA-256** of the pod's credential, never the
 credential), `agent_schedules` (one per agent, its next run) and `ask_messages` (Ask Orama
-conversations, read back only by the person who had them). Idempotent; guard `agents_guard`. The
+conversations, read back only by the person who had them; retired by `0045`, below, when
+conversations moved into workspace Zettas). Idempotent; guard `agents_guard`. The
 operator vendors it and selects that guard before a binary that launches agents is deployed.
 Contract and capabilities: [`../api/agent-launches.md`](../api/agent-launches.md).
 
@@ -528,3 +529,15 @@ user ID, exact app host, 60-second expiry, and optional use time. The app and us
 cascade on deletion. Exchange marks one live row used atomically while rechecking the live app,
 host, workspace, and membership. The expiry index supports the minute sweep of expired and spent
 rows. The idempotent deployment marker is `app_forward_auth_guard`.
+
+## Ask message workspaces migration
+
+`0045_ask_message_workspaces` records, in `workspace_assignments`, the workspace that owns each
+retired `ask_messages` row: the space's only live workspace (`sole_workspace`), or
+`needs_selection`; a row without a space is reported by a warning and listed by the copy as
+`no_customer`. Ask Orama conversations live in the owning workspace Zetta (lake#370), and lake no
+longer writes or reads the table except through the operator-only `copy_workspace_records`, which
+reapplies the same assignment before each run. No column is added and nothing is dropped; the
+table is dropped by a later migration after the copy is verified. Idempotent; guard
+`ask_message_workspaces_guard`. The operator vendors it and selects that guard before the binary
+is deployed. Mechanism and cutover: [`../architecture/workspace-records.md`](../architecture/workspace-records.md).

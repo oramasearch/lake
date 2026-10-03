@@ -897,14 +897,14 @@ public:
             return store_->list_agent_cron_runs(customer_id, agent_id, limit, workspace_id);
         });
     }
-    control::Result<control::AskMessage>
-    append_ask_message(const control::AskMessage& value) override {
-        return call("append_ask_message", [&] { return store_->append_ask_message(value); });
+    control::Result<void> assign_legacy_ask_messages() override {
+        return call("assign_legacy_ask_messages",
+                    [&] { return store_->assign_legacy_ask_messages(); });
     }
-    control::Result<std::vector<control::AskMessage>> ask_conversation(
-        const std::string& conversation_id, const std::string& user_id, int limit) override {
-        return call("ask_conversation",
-                    [&] { return store_->ask_conversation(conversation_id, user_id, limit); });
+    control::Result<std::vector<control::LegacyAskMessage>>
+    legacy_ask_messages(const std::string& after_id, int limit) override {
+        return call("legacy_ask_messages",
+                    [&] { return store_->legacy_ask_messages(after_id, limit); });
     }
     control::Result<control::AgentSession> revoke_agent_session(const std::string& customer_id,
                                                                 const std::string& id) override {

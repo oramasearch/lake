@@ -534,7 +534,8 @@ public:
         override {
         calls.emplace_back(capability, read, input);
         if (capability == "create_topic" || capability == "publish_event" ||
-            capability == "receive_events" || capability == "update_topic" || capability == "drop_topic") {
+            capability == "receive_events" || capability == "update_topic" || capability == "drop_topic" ||
+            lake::test::RecordTables::handles(capability, input)) {
             co_return lake::control::settled(co_await topics.call("http://workspace.test", "token", capability, read, input));
         }
         const auto answer = answers.find(capability);
@@ -1574,10 +1575,16 @@ TEST_P(HttpResponseIsolation, AskOramaAnswersProposesAndRunsOnlyWhatThePersonCon
     EXPECT_FALSE(store_->list_repositories(customer_id, 10).value().size() > 0)
         << "nothing is created before the person confirms";
 
-    const auto messages = store_->ask_conversation(
-        conversation, store_->context_for(cookie.substr(cookie.find('=') + 1))->user_id, 10);
-    ASSERT_TRUE(messages && messages->size() == 2U);
-    const std::string message_id = messages->at(1).id;
+    // The conversation is in the workspace's Zetta (lake#370), read as the person.
+    const std::string listed = connection->request(
+        "GET",
+        "/v1/get_ask_conversation?customer_id=" + customer_id + "&workspace_id=" +
+            connection->workspace_id + "&conversation_id=" + conversation,
+        "", cookie);
+    const auto messages =
+        nlohmann::json::parse(listed.substr(listed.find("\r\n\r\n") + 4))["value"]["messages"];
+    ASSERT_EQ(messages.size(), 2U) << listed.substr(0, 400);
+    const std::string message_id = messages.at(1).at("id");
     const std::string forged =
         connection->request("POST",
                             "/ask/confirm",
@@ -2986,7 +2993,13 @@ TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePerso
         page.substr(id_at + id_marker.size(),
                     page.find('"', id_at + id_marker.size()) - id_at - id_marker.size());
 
-    const std::size_t before = workspace_caller_->calls.size();
+    // Engine calls other than reading the conversation's own records (lake#370).
+    const auto engine_calls = [&] {
+        return std::ranges::count_if(workspace_caller_->calls, [](const auto& call) {
+            return !lake::test::RecordTables::handles(std::get<0>(call), std::get<2>(call));
+        });
+    };
+    const auto before = engine_calls();
     const std::string stale = connection->request(
         "POST",
         "/train/agents/new/approve",
@@ -2994,7 +3007,7 @@ TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePerso
             "&message_id=" + message_id + "&proposal_sha256=" + std::string(64, '0'),
         cookie);
     EXPECT_NE(response_header(stale, "location").find("error="), std::string::npos);
-    EXPECT_EQ(workspace_caller_->calls.size(), before) << "nothing is created for another proposal";
+    EXPECT_EQ(engine_calls(), before) << "nothing is created for another proposal";
 
     const std::string approved =
         connection->request("POST",
@@ -4035,7 +4048,10 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         "?customer_id=" + customer_id +
         "&id=fixture&name=project-0&project=project-0&graph=pipeline-0"
         "&study=study-0&run=run-0&runs=run-0,run-1&app_id=" + app_id +
-        "&topic=topic-0&zetta=workspace";
+        "&topic=topic-0&zetta=workspace"
+        // An open conversation: Ask Orama and the Agent Factory read it from the workspace's
+        // records (lake#370).
+        "&conversation=5f0c2a1e-3b4d-4c6e-8f70-9a1b2c3d4e5f";
     const std::string cookie = "lake_session=" + session->secret;
     ASSERT_NO_FATAL_FAILURE(verify_cold_metering(server, customer_id, cookie));
     const auto protected_app = store->get_web_app(app_id);
@@ -4096,7 +4112,7 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         {"/w/:workspace_id/ship/indexes/datasets", {1, 1, Capabilities{"sql"}}}};
     const std::map<std::string, WorkspaceCallBudget> workspace_call_budgets{
         // Ask Orama, Agents, Search Indexes, Models and Experiments: lake#446.
-        {"/w/:workspace_id/ask", {0, 0, Capabilities{}}},
+        {"/w/:workspace_id/ask", {1, 1, Capabilities{"list_records"}}},
         {"/w/:workspace_id/design/discover", {1, 1}},
         {"/w/:workspace_id/design/methodologies", {1, 1}},
         {"/w/:workspace_id/design/methodology", {2, 1}},
@@ -4112,6 +4128,7 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         {"/w/:workspace_id/ship/models", {2, 1, Capabilities{"list_models", "list_studies"}}},
         {"/w/:workspace_id/train/agent", {3, 1}},
         {"/w/:workspace_id/train/agents", {0, 0, Capabilities{}}},
+        {"/w/:workspace_id/train/agents/new", {1, 1, Capabilities{"list_records"}}},
         {"/w/:workspace_id/train/data", {3, 1}},
         {"/w/:workspace_id/train/dataset", {3, 1}},
         {"/w/:workspace_id/train/experiment", {2, 1}},

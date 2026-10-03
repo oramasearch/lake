@@ -1948,34 +1948,57 @@ Result<void> InMemoryStore::set_agent_task_status(const std::string& id,
     return {};
 }
 
-Result<AskMessage> InMemoryStore::append_ask_message(const AskMessage& message) {
+void InMemoryStore::seed_legacy_ask_message(AskMessage message) {
     std::lock_guard lock(mutex_);
-    if (message.conversation_id.empty() || message.user_id.empty() ||
-        (message.role != "user" && message.role != "assistant")) {
-        return std::unexpected(StoreError{"invalid_input", "ask message is invalid"});
+    if (message.id.empty()) {
+        message.id = new_uuid_v4();
     }
-    AskMessage stored = message;
-    stored.id = new_uuid_v4();
-    stored.created_at = std::format(
-        "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
-    ask_messages_.push_back(stored);
-    return stored;
+    legacy_ask_messages_.push_back(std::move(message));
 }
 
-Result<std::vector<AskMessage>> InMemoryStore::ask_conversation(const std::string& conversation_id,
-                                                                const std::string& user_id,
-                                                                int limit) {
+Result<void> InMemoryStore::assign_legacy_ask_messages() {
     std::lock_guard lock(mutex_);
-    std::vector<AskMessage> messages;
-    for (const AskMessage& message : ask_messages_) {
-        if (message.conversation_id == conversation_id && message.user_id == user_id) {
-            messages.push_back(message);
+    for (const AskMessage& message : legacy_ask_messages_) {
+        if (message.customer_id.empty() || legacy_ask_assignments_.contains(message.id)) {
+            continue;
         }
+        std::vector<std::string> live;
+        for (const Workspace& workspace : workspaces_) {
+            if (workspace.customer_id == message.customer_id && workspace.desired != "deleted") {
+                live.push_back(workspace.id);
+            }
+        }
+        legacy_ask_assignments_[message.id] = live.size() == 1
+            ? std::pair<std::string, std::string>{live.front(), "sole_workspace"}
+            : std::pair<std::string, std::string>{"", "needs_selection"};
     }
-    if (limit > 0 && static_cast<int>(messages.size()) > limit) {
-        messages.erase(messages.begin(), messages.end() - limit);
+    return {};
+}
+
+Result<std::vector<LegacyAskMessage>> InMemoryStore::legacy_ask_messages(const std::string& after_id,
+                                                                         int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<AskMessage> ordered = legacy_ask_messages_;
+    std::ranges::sort(ordered, {}, &AskMessage::id);
+    std::vector<LegacyAskMessage> rows;
+    for (const AskMessage& message : ordered) {
+        if (!after_id.empty() && message.id <= after_id) {
+            continue;
+        }
+        if (static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            break;
+        }
+        LegacyAskMessage row{message, "", "needs_selection"};
+        if (message.customer_id.empty()) {
+            row.outcome = "no_customer";
+        } else if (const auto found = legacy_ask_assignments_.find(message.id);
+                   found != legacy_ask_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
     }
-    return messages;
+    return rows;
 }
 
 Result<void> InMemoryStore::set_store_status(const std::string& id,

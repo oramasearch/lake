@@ -83,6 +83,8 @@
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_ui.hpp"
 #include "route_guard.hpp"
+#include "workspace_records_api.hpp"
+#include "lake/control/ask_messages.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/callers.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -9772,6 +9774,58 @@ struct ApiServer::Impl {
         return out;
     }
 
+    // The signed-in person's conversation in the workspace of this page (lake#370): its messages
+    // live in that workspace's Zetta, never in lake's control store.
+    liquid::runtime::task<control::ZettaControlResult<std::vector<control::AskMessage>>>
+    ask_conversation(ApiContext& context, std::string conversation, std::size_t newest = 200) {
+        auto records = page_records(context);
+        if (!records) {
+            co_return control::ZettaControlResult<std::vector<control::AskMessage>>(
+                std::unexpected(records.error()));
+        }
+        control::AskMessages messages(*records);
+        co_return control::settled(co_await messages.list(
+            control::ask_conversation_lookup(conversation, context.acting_user_id), newest));
+    }
+
+    // Appends one message to the conversation in the workspace of this page, as the signed-in
+    // person and for the space that owns the workspace.
+    liquid::runtime::task<control::ZettaControlResult<control::AskMessage>>
+    append_ask(ApiContext& context, control::AskMessage message) {
+        auto records = page_records(context);
+        if (!records) {
+            co_return control::ZettaControlResult<control::AskMessage>(
+                std::unexpected(records.error()));
+        }
+        message.customer_id = page_workspace_customer(context);
+        message.user_id = context.acting_user_id;
+        if (const auto problem = control::ask_message_problem(message)) {
+            co_return control::ZettaControlResult<control::AskMessage>(
+                std::unexpected(control::ZettaControlError{"invalid_input", *problem}));
+        }
+        control::AskMessages messages(*records);
+        co_return control::settled(co_await messages.append(std::move(message)));
+    }
+
+    // The space that owns the workspace in the page's path; the route guard has checked that the
+    // signed-in person can see it.
+    std::string page_workspace_customer(const ApiContext& context) const {
+        if (context.path_workspace_id.empty() || !options.store) {
+            return {};
+        }
+        const auto workspace = options.store->get_workspace(context.path_workspace_id);
+        return workspace ? workspace->customer_id : std::string();
+    }
+
+    control::ZettaControlResult<control::WorkspaceRecords> page_records(const ApiContext& context) {
+        const std::string customer_id = page_workspace_customer(context);
+        if (customer_id.empty()) {
+            return std::unexpected(control::ZettaControlError{
+                "invalid_input", "workspace_id is required in the URL path", "/workspace_id"});
+        }
+        return workspace_records(context, customer_id, context.path_workspace_id);
+    }
+
     // Ask Orama first, then the library's running chat agents a person uses (never its internal
     // tooling, lake#451). lake answers these itself; the space's own chat-capable agents come from
     // Zetta's list_agents, which the page defers to /ask/agents because it takes hundreds of
@@ -9817,20 +9871,21 @@ struct ApiServer::Impl {
                                             bool factory) {
         const ApiResult got = unwrap(co_await workspace_call(
             "get_agent_task", {{"customer_id", customer_id}, {"task_id", task_id}}, context));
-        if (!got.ok || !options.store) {
+        if (!got.ok) {
             co_return nullptr;
         }
         const std::string status = got.value.value("status", std::string());
         if (status == "pending" || status == "running") {
             co_return got.value;
         }
-        auto messages = options.store->ask_conversation(conversation, context.acting_user_id, 200);
-        if (messages) {
-            for (const control::AskMessage& message : *messages) {
-                if (message.payload.is_object() &&
-                    message.payload.value("task_id", std::string()) == task_id) {
-                    co_return nullptr;
-                }
+        auto messages = control::settled(co_await ask_conversation(context, conversation));
+        if (!messages) {
+            co_return nullptr; // the answer is settled once the workspace answers again
+        }
+        for (const control::AskMessage& message : *messages) {
+            if (message.payload.is_object() &&
+                message.payload.value("task_id", std::string()) == task_id) {
+                co_return nullptr;
             }
         }
         const nlohmann::json answer = got.value.value("answer", nlohmann::json::object());
@@ -9857,14 +9912,14 @@ struct ApiServer::Impl {
             payload["delegations"] = answer.value("delegations", nlohmann::json::array());
             payload["trace_id"] = answer.value("trace_id", std::string());
         }
-        options.store->append_ask_message({"",
-                                           conversation,
-                                           customer_id,
-                                           context.acting_user_id,
-                                           "assistant",
-                                           std::move(text),
-                                           std::move(payload),
-                                           ""});
+        co_await append_ask(context, {"",
+                                      conversation,
+                                      customer_id,
+                                      context.acting_user_id,
+                                      "assistant",
+                                      std::move(text),
+                                      std::move(payload),
+                                      ""});
         co_return nullptr;
     }
 
@@ -9988,11 +10043,11 @@ struct ApiServer::Impl {
         }
         if (page.conversation_id.empty()) {
             page.conversation_id = control::new_uuid_v4();
-        } else if (options.store) {
-            if (auto messages = options.store->ask_conversation(
-                    page.conversation_id, context.acting_user_id, 200)) {
-                page.messages = ask_messages_json(*messages);
-            }
+        } else if (auto messages =
+                       control::settled(co_await ask_conversation(context, page.conversation_id))) {
+            page.messages = ask_messages_json(*messages);
+        } else if (page.error.empty()) {
+            page.error = "This conversation could not be read: " + messages.error().message;
         }
         if (!page.customer_id.empty() && options.workspaces) {
             page.agents = ask_library_agents(context);
@@ -10034,6 +10089,13 @@ struct ApiServer::Impl {
         if (conversation.empty()) {
             conversation = control::new_uuid_v4();
         }
+        // A message the workspace did not store is an error the page shows, never a silent loss.
+        std::string error;
+        const auto record = [&](auto completed) {
+            if (!completed && error.empty()) {
+                error = "The conversation could not be saved: " + completed.error().message;
+            }
+        };
         const std::string from = form_field(body, "from");
         std::string agent = form_field(body, "agent");
         if (agent.empty()) {
@@ -10058,17 +10120,16 @@ struct ApiServer::Impl {
                 rest = amp == std::string_view::npos ? std::string_view() : rest.substr(amp + 1);
             }
         }
-        std::string error;
         if (!confirm) {
             const std::string message = form_field(body, "message");
-            options.store->append_ask_message({"",
-                                               conversation,
-                                               customer_id,
-                                               context.acting_user_id,
-                                               "user",
-                                               message,
-                                               nullptr,
-                                               ""});
+            record(control::settled(co_await append_ask(context, {"",
+                                                 conversation,
+                                                 customer_id,
+                                                 context.acting_user_id,
+                                                 "user",
+                                                 message,
+                                                 nullptr,
+                                                 ""})));
             const ApiResult answered =
                 unwrap(co_await workspace_call("agent_turn",
                                                {{"customer_id", customer_id},
@@ -10083,7 +10144,8 @@ struct ApiServer::Impl {
                 back += "&task=" + oauth_url_encode(answered.value.value("task_id", std::string()));
             } else if (answered.ok) {
                 const nlohmann::json& value = answered.value;
-                options.store->append_ask_message(
+                record(control::settled(co_await append_ask(
+                    context,
                     {"",
                      conversation,
                      customer_id,
@@ -10095,7 +10157,7 @@ struct ApiServer::Impl {
                       {"reads", value.value("reads", nlohmann::json::array())},
                       {"delegations", value.value("delegations", nlohmann::json::array())},
                       {"trace_id", value.value("trace_id", std::string())}},
-                     ""});
+                     ""})));
             } else {
                 error = answered.error.message;
             }
@@ -10105,8 +10167,7 @@ struct ApiServer::Impl {
             const std::string message_id = form_field(body, "message_id");
             const std::size_t index =
                 static_cast<std::size_t>(std::atoi(form_field(body, "index").c_str()));
-            auto messages =
-                options.store->ask_conversation(conversation, context.acting_user_id, 200);
+            auto messages = control::settled(co_await ask_conversation(context, conversation));
             nlohmann::json proposal;
             if (messages) {
                 for (const control::AskMessage& message : *messages) {
@@ -10126,7 +10187,8 @@ struct ApiServer::Impl {
                 context.audit_details = {{"ask_confirm", true}, {"conversation_id", conversation}};
                 const ApiResult done = unwrap(co_await workspace_call(
                     capability, proposal.value("input", nlohmann::json::object()), context));
-                options.store->append_ask_message(
+                record(control::settled(co_await append_ask(
+                    context,
                     {"",
                      conversation,
                      customer_id,
@@ -10137,7 +10199,7 @@ struct ApiServer::Impl {
                      {{"agent", "agent-ask-orama"},
                       {"confirmed", {{"message_id", message_id}, {"index", std::to_string(index)}}},
                       {"ok", done.ok}},
-                     ""});
+                     ""})));
             }
         }
         if (!error.empty()) {
@@ -10219,21 +10281,21 @@ struct ApiServer::Impl {
         }
         if (page.conversation_id.empty()) {
             page.conversation_id = control::new_uuid_v4();
-        } else if (options.store) {
-            if (auto messages = options.store->ask_conversation(
-                    page.conversation_id, context.acting_user_id, 200)) {
-                page.messages = ask_messages_json(*messages);
-                for (const control::AskMessage& message : *messages) {
-                    if (message.role == "assistant" && message.payload.is_object() &&
-                        message.payload.contains("answer")) {
-                        page.latest = message.payload["answer"];
-                        page.message_id = message.id;
-                    }
-                }
-                if (page.latest.contains("proposal")) {
-                    page.proposal_sha256 = proposal_digest(page.latest["proposal"]);
+        } else if (auto messages =
+                       control::settled(co_await ask_conversation(context, page.conversation_id))) {
+            page.messages = ask_messages_json(*messages);
+            for (const control::AskMessage& message : *messages) {
+                if (message.role == "assistant" && message.payload.is_object() &&
+                    message.payload.contains("answer")) {
+                    page.latest = message.payload["answer"];
+                    page.message_id = message.id;
                 }
             }
+            if (page.latest.contains("proposal")) {
+                page.proposal_sha256 = proposal_digest(page.latest["proposal"]);
+            }
+        } else if (page.error.empty()) {
+            page.error = "This conversation could not be read: " + messages.error().message;
         }
         co_return co_await send_text(route,
                                      boost::http::status::ok,
@@ -10266,26 +10328,22 @@ struct ApiServer::Impl {
         std::string back =
             "/train/agents/new?" + query + "&conversation=" + oauth_url_encode(conversation);
         std::string error;
-        const auto say = [&](std::string text, nlohmann::json payload) {
-            options.store->append_ask_message({"",
-                                               conversation,
-                                               customer_id,
-                                               context.acting_user_id,
-                                               "assistant",
-                                               std::move(text),
-                                               std::move(payload),
-                                               ""});
+        // Coroutine-safe: appends through the workspace and keeps the first failure for the page.
+        const auto keep = [&](auto completed) {
+            if (!completed && error.empty()) {
+                error = "The conversation could not be saved: " + completed.error().message;
+            }
         };
         if (!approve) {
             const std::string message = form_field(body, "message");
-            options.store->append_ask_message({"",
+            keep(control::settled(co_await append_ask(context, {"",
                                                conversation,
                                                customer_id,
                                                context.acting_user_id,
                                                "user",
                                                message,
                                                nullptr,
-                                               ""});
+                                               ""})));
             const ApiResult turned =
                 unwrap(co_await workspace_call("agent_turn",
                                                {{"customer_id", customer_id},
@@ -10309,8 +10367,7 @@ struct ApiServer::Impl {
         // Approve and create: only the exact proposal the person was shown, without defects.
         const std::string message_id = form_field(body, "message_id");
         nlohmann::json answer;
-        if (auto messages =
-                options.store->ask_conversation(conversation, context.acting_user_id, 200)) {
+        if (auto messages = control::settled(co_await ask_conversation(context, conversation))) {
             for (const control::AskMessage& message : *messages) {
                 if (message.id == message_id && message.payload.is_object()) {
                     answer = message.payload.value("answer", nlohmann::json::object());
@@ -10338,7 +10395,9 @@ struct ApiServer::Impl {
              {"defects", answer.value("defects", nlohmann::json::array())}},
             context));
         if (!created.ok) {
-            say("I could not create it: " + created.error.message, {{"created", false}});
+            co_await append_ask(context, {"", conversation, customer_id, context.acting_user_id,
+                                          "assistant", "I could not create it: " + created.error.message,
+                                          {{"created", false}}, ""});
             co_return co_await redirect(route,
                                         back + "&error=" + oauth_url_encode(created.error.message));
         }
@@ -10353,7 +10412,9 @@ struct ApiServer::Impl {
         if (created.value.contains("check_launch_id")) {
             note += " A first check run has started.";
         }
-        say(note, {{"created", true}, {"agent_id", agent_id}});
+        co_await append_ask(context, {"", conversation, customer_id, context.acting_user_id,
+                                      "assistant", note, {{"created", true}, {"agent_id", agent_id}},
+                                      ""});
         co_return co_await redirect(route,
                                     "/train/agent?" + query + "&id=" + oauth_url_encode(agent_id));
     }
