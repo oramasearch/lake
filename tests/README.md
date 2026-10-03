@@ -1,5 +1,11 @@
 # Tests
 
+`test_main.cpp` is the shared GoogleTest runner. `lake::test::postgres_uri()` gives each
+Postgres-backed test a private database copied from a `lake_fixture_template_<digest>` template
+loaded once per `db/schema.sql` version, and drops it afterwards; a start-up sweep removes only
+stale `lake_fixture_*` databases. Fixtures use that database directly, with no nested schema. See
+[testing.md](../docs/build/testing.md#databases-the-runner-owns).
+
 `lake-ui-fixture-pages` (lake#497) starts `lake-ui-fixture` and requests every page it seeds and
 every registered GET route; a fixture that cannot start, a seeded page that is not 200 HTML, or a
 5xx anywhere fails the suite. See [tools/ui/README.md](../tools/ui/README.md).
