@@ -337,7 +337,7 @@ repository moves to its workspace, and the unused copy of liquid's refs goes
 |---|---|
 | `repository_refs` | **Dropped** (lake#319). A copy of each liquid ref, written after a push, a replication and a `refs` read, that nothing read; the liquid repository is the authority. Its `CREATE` (0006) is gone, so a rerun never recreates it. Nothing is copied. |
 | `repositories.description` | No longer written or read by lake (lake#315 part 2): the description is the repository's sealed record in `lake_repositories` of its workspace Zetta. New rows leave it `''`. Read only by the one-shot copy until a later migration drops the column. |
-| `workspace_assignments` (`repository_descriptions`) | The owner of each repository that holds a description, for the copy: `repository_workspace`, `needs_selection` while it has no workspace (resolved by the copy once it has one, lake#513), or `workspace_deleted`. Unassigned rows are reported with `RAISE WARNING`. |
+| `workspace_assignments` (`repository_descriptions`) | The owner of each repository that holds a description, for the copy: `repository_workspace`, `needs_selection` while it has no workspace (resolved by the copy once it has one; `0066`, lake#513, assigns it), or `workspace_deleted`. Unassigned rows are reported with `RAISE WARNING`. |
 | `repository_records_guard` | Guard table for migration `0064_repository_records`. |
 
 The operator's vendored schema test lists `CREATE TABLE IF NOT EXISTS repository_refs` among the
@@ -710,6 +710,21 @@ neither `workspace_id` nor `customer_id` changes afterwards, so `transfer_reposi
 an unassigned repository is assigned only by a reviewed migration. Nothing is dropped. Idempotent;
 guard `repository_workspaces_guard`. The operator reads no repository table, but vendors the schema
 and selects that guard before the binary is deployed. See
+[`../api/repositories.md`](../api/repositories.md#the-owning-workspace).
+
+## Unrouted repositories migration
+
+`0066_assign_unrouted_repositories` (decision 54 S14, lake#513) is the reviewed assignment `0051`
+left open. Once, each repository whose `workspace_id` is still NULL (tombstoned ones included) is
+assigned its space's only live workspace when the space now has exactly one; a repository of a
+space with several live workspaces or none is left alone and reported by a warning. Each assignment
+is recorded in `workspace_assignments`: `repositories` from `needs_selection` to `sole_workspace`,
+`repository_descriptions` (if `0064` recorded one) to `repository_workspace`. The trigger stays:
+`enforce_workspace_routing` allows a change of `workspace_id` only on `repositories`, from NULL to a
+live workspace of the same space, while the transaction-local setting `lake.repository_assignment`
+is `0066_assign_unrouted_repositories`; the block sets it around its updates and clears it, and every
+other change is refused as before. Nothing is added or dropped but the guard. Idempotent; guard
+`assign_unrouted_repositories_guard`. The operator vendors the schema and selects that guard. See
 [`../api/repositories.md`](../api/repositories.md#the-owning-workspace).
 
 ## Metering workspaces migration

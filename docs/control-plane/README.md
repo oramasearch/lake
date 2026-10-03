@@ -40,4 +40,6 @@ workspace's data for the copy into that workspace's own audit chain (decision 52
 description's workspace for the copy into its `lake_repositories` record (lake#315 part 2).
 [schema.md](schema.md#workspace-deletions-migration-0065_workspace_deletions) documents
 `0065_workspace_deletions`, the record of what each cascading workspace deletion destroyed
-(decision 54 S12, lake#514).
+(decision 54 S12, lake#514). [schema.md](schema.md#unrouted-repositories-migration) documents
+`0066_assign_unrouted_repositories`, the reviewed assignment of repositories left without a
+workspace (decision 54 S14, lake#513).

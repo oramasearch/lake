@@ -236,3 +236,13 @@ central audit events, and sets `completed_at`; its owner loop resumes a row with
 operator reads only `workspaces.desired`, as before. The latest guard is
 `workspace_deletions_guard`; the operator must vendor this schema and update its guard before
 rollout. See [workspaces.md](../docs/api/workspaces.md#deletion).
+Migration `0066_assign_unrouted_repositories` is the reviewed assignment `0051` left open (decision
+54 S14, lake#513). Once, each repository whose `workspace_id` is still NULL is assigned its space's
+only live workspace when the space now has exactly one, and recorded in `workspace_assignments`
+(`repositories`: `sole_workspace`; `repository_descriptions`: `repository_workspace`); any other is
+left alone and reported by a warning. The `repository_workspace_routing` trigger stays:
+`enforce_workspace_routing` allows that one change (NULL to a live workspace of the same space, on
+`repositories`) only while the transaction-local setting `lake.repository_assignment` is
+`0066_assign_unrouted_repositories`, which the block sets and clears around its updates. The latest
+guard is `assign_unrouted_repositories_guard`; the operator must vendor this schema and update its
+guard before rollout. See [repositories.md](../docs/api/repositories.md#the-owning-workspace).

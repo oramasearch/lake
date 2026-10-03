@@ -389,7 +389,11 @@ and two workspaces in one, missing, empty, malformed, unknown, deleted and forei
 reads and the workspace filter, the refused transfer, both imports, and workspace deletion.
 `PostgresRepositories.MigrationAssignsTheSoleWorkspaceAndRoutingStaysFixed` covers
 `0051_repository_workspaces` (sole, several, none, a tombstoned repository, a rerun) and the
-trigger's refusals. `repository_test_support.hpp` (`repository_workspace`) gives other tests the
+trigger's refusals. `PostgresRepositories.MigrationAssignsUnroutedRepositoriesTheirSoleWorkspace`
+covers `0066_assign_unrouted_repositories` (lake#513): a repository without a workspace in a space
+that later gets exactly one is assigned, with its routing and description owners recorded; one in a
+space with two is left alone and reported once; a rerun changes nothing; and every other change of
+`workspace_id` is refused in the migration's transaction, afterwards, and with the setting alone. `repository_test_support.hpp` (`repository_workspace`) gives other tests the
 space's first live workspace for the repositories they create.
 
 `test_workspace_records.cpp` covers workspace records (lake#370,

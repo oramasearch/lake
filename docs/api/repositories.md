@@ -167,7 +167,7 @@ repository's metadata, forge records and content when they move.
 - **Immutable.** The `repository_workspace_routing` trigger (`enforce_workspace_routing`) refuses a
   new repository without a live workspace of its own space, and any later change of
   `workspace_id` or `customer_id`, including assigning one to a repository that has none. That is
-  why `transfer_repository` is refused.
+  why `transfer_repository` is refused. The one exception is migration `0066`'s own block (below).
 - **Resolvable from the repository.** `get_repository`, `list_repositories`, the export archive and
   every handler that loads the repository carry it. The push path resolves the repository once and
   hands it, workspace included, to `sync_change_authorizer` and `evaluate_branch_protection`; each
@@ -190,6 +190,34 @@ recorded as `needs_selection` in `workspace_assignments` and reported with a `RA
 keeps working, with `workspace_id: null`, until an explicitly reviewed migration assigns it. List
 them with `SELECT * FROM workspace_assignments WHERE object_table = 'repositories' AND
 outcome = 'needs_selection'`.
+
+Migration `0066_assign_unrouted_repositories` is that reviewed migration (decision 54 S14,
+lake#513). It runs once and is generic rather than naming an id: each repository that still has no
+workspace, tombstoned ones included, is assigned its space's only live workspace when the space now
+has exactly one; any other (several live workspaces, or none) is left alone and reported with a
+`RAISE WARNING` naming the repository, the space and the count. Each assignment is recorded in
+`workspace_assignments`: the `repositories` row changes from `needs_selection` to `sole_workspace`,
+and the `repository_descriptions` row, if `0064` recorded one, to `repository_workspace` (the outcome
+`copy_workspace_records` gives a resolved description), with the workspace. The trigger is not
+dropped: `enforce_workspace_routing` lets an update change `workspace_id` only on `repositories`,
+only from NULL to a live workspace of the same space, and only while the transaction-local setting
+`lake.repository_assignment` is `0066_assign_unrouted_repositories`. The block sets it before its
+updates and clears it after, so every other change is refused, in the migration's own transaction
+and afterwards. Guard `assign_unrouted_repositories_guard`.
+
+On dev this assigns the `liquid` repository (`f4d3d9bf-84fc-4c0c-a39c-952f46cfee04`) to the first
+workspace of its space, `d2a67e5d-cf36-4cd6-83a1-2e77625284dd`. Steps, for the coordinator:
+
+1. Have the operator vendor `db/schema.sql` through `0066_assign_unrouted_repositories` and select
+   `assign_unrouted_repositories_guard`, then apply it (the workspace may still be Pending). The
+   schema Job's log names each assignment (`NOTICE: repository assigned its sole workspace`) and
+   each repository left alone (`WARNING: workspace_id requires selection`).
+2. Check that `SELECT * FROM workspace_assignments WHERE object_table = 'repositories' AND
+   outcome = 'needs_selection'` is empty, and that `get_repository` and the repository page name
+   the workspace.
+3. Once the workspace is Ready, rerun `copy_workspace_records` for the collection `repositories`
+   (`plan`, `copy`, `verify`) so the description is copied into its Zetta; the other collections
+   that follow a repository's workspace (forge records, platform) resolve it on their next run.
 
 ## Where the description lives (lake#315 part 2)
 
@@ -221,7 +249,8 @@ under another key, in another workspace or of another space does not open.
 - **Copy.** Migration `0064_repository_records` records, in `workspace_assignments` under
   `object_table = 'repository_descriptions'`, the owner of each repository whose row still holds a
   description: `repository_workspace`, `needs_selection` while the repository has no workspace
-  (the dev `liquid` repository, until lake#513 assigns one), or `workspace_deleted`. The operator's
+  (the dev `liquid` repository, until migration `0066` assigns one, lake#513), or
+  `workspace_deleted`. The operator's
   `copy_workspace_records` collection `repositories` copies each description with the row's
   creation instant and verifies it; a description changed since (a later lake revision) is
   accepted. A later migration drops the column once `verify` is complete on dev. Steps:
