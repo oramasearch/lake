@@ -40,4 +40,5 @@ capabilities as REST and MCP. See [sharing](../../docs/ui/sharing.md) for the de
 
 Each fixture repository belongs to a workspace of its space (lake#315): `lake-design` to the
 organization's `research` workspace (the one that holds the shared link) and `private-notes` to the
-individual's `personal` workspace.
+individual's `personal` workspace. `lake-design`'s issues, reviews, release, webhook, export and
+branch protection rule are seeded into the `research` workspace's records (lake#341).

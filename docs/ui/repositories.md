@@ -61,6 +61,15 @@ the stored signing secret and retries create a new durable attempt. The protecti
 rule list with signed refusal events by repository identity; it does not infer denials from the
 current rule set.
 
+Forge records live in the workspace Zetta of the repository's workspace (lake#341,
+[forge.md](../api/forge.md#where-forge-records-live)), so these pages keep their addresses and
+read them through the same capabilities: one `list_records` per kind they show (the home page and
+the releases, issues, protection and exports pages one; the change, issue and webhooks pages two).
+The repository home page and the change view do not wait for that workspace: when it cannot be read
+(for example while it is still starting), the home page says "Releases are unavailable" and the
+change view "Reviews are unavailable", with the reason, and render everything else. The pages that
+exist only to show forge records answer the workspace's error instead.
+
 The file browser resolves each path's newest change from those structural diffs. File pages map
 text-hunk ranges onto numbered source lines for blame. C and C++ source is parsed with liquid's
 tree-sitter grammar target before the renderer adds syntax roles; unknown extensions remain

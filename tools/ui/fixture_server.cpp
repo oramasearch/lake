@@ -27,6 +27,7 @@
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/drive_share_links.hpp"
+#include "lake/control/forge_records.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/workspace_records.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -522,48 +523,55 @@ int main(int argc, char** argv) {
                                  "admin",
                                  "ui-fixture-share"}),
             "create drive share link grant");
-    require(store->create_forge_record(
-                {repository.id,
-                 "export",
-                 {{"include_git", false}, {"manifest", {{"format", "lake_export_manifest/1"}}}}}),
+    // The repository's forge records live in its workspace Zetta (lake#341).
+    auto forge_records = require(
+        lake::control::WorkspaceRecords::open(
+            [workspaces, customer = organization_customer.id, id = workspace.id](
+                std::string capability, bool read, nlohmann::json input) {
+                return workspaces->call(customer, id, std::move(capability), read,
+                                        std::move(input));
+            },
+            workspace.id, instance_kek),
+        "open forge records");
+    lake::control::ForgeRecords forge(forge_records);
+    const auto forge_record = [&forge, &repository](std::string kind, nlohmann::json value) {
+        lake::control::ForgeRecord record;
+        record.repository_id = repository.id;
+        record.kind = std::move(kind);
+        record.value = std::move(value);
+        return lake::control::settled(liquid::runtime::block_on(forge.append(std::move(record))));
+    };
+    require(forge_record("export",
+                 {{"include_git", false}, {"manifest", {{"format", "lake_export_manifest/1"}}}}),
             "create export record");
     const std::string change_id = liquid::to_string(change.value);
     const auto fixture_issue = require(
-        store->create_forge_record(
-            {repository.id,
-             "issue",
+        forge_record("issue",
              {{"title", "Keep source anchors stable"},
               {"body",
                "## Context\n\nSource links should survive a new change and remain safe to share."},
               {"state", "open"},
               {"labels", {"forge", "accessibility"}},
               {"assignees", {principal.taap_id}},
-              {"references", {change_id}}}}),
+              {"references", {change_id}}}),
         "create issue record");
-    require(store->create_forge_record(
-                {repository.id,
-                 "issue_comment",
+    require(forge_record("issue_comment",
                  {{"issue_id", fixture_issue.id},
-                  {"body", "Confirmed with keyboard navigation and a **fresh** source view."}}}),
+                  {"body", "Confirmed with keyboard navigation and a **fresh** source view."}}),
             "create issue comment");
     const auto fixture_review =
-        require(store->create_forge_record({repository.id,
-                                            "review",
+        require(forge_record("review",
                                             {{"change_id", change_id},
                                              {"state", "approved"},
-                                             {"reviewers", {principal.taap_id}}}}),
+                                             {"reviewers", {principal.taap_id}}}),
                 "create review record");
-    require(store->create_forge_record(
-                {repository.id,
-                 "review_comment",
+    require(forge_record("review_comment",
                  {{"review_id", fixture_review.id},
                   {"body", "The updated wording is clear and the line anchor remains stable."},
                   {"anchor",
-                   {{"change", change_id}, {"path", "README.md"}, {"line", 3}, {"column", 1}}}}}),
+                   {{"change", change_id}, {"path", "README.md"}, {"line", 3}, {"column", 1}}}}),
             "create review comment");
-    require(store->create_forge_record(
-                {repository.id,
-                 "release",
+    require(forge_record("release",
                  {{"tag", "v1.0.0"},
                   {"change_id", change_id},
                   {"notes", "## Forge release\n\nIncludes repository and review pages."},
@@ -575,17 +583,15 @@ int main(int argc, char** argv) {
                       {{{"id", "ui-fixture-attestation"},
                         {"profile", "slsa_provenance/1"},
                         {"subject", liquid::to_string(artifact.value)},
-                        {"issuer", "ui-fixture"}}}}}}}}}),
+                        {"issuer", "ui-fixture"}}}}}}}}),
             "create release record");
     const auto fixture_webhook =
-        require(store->create_forge_record({repository.id,
-                                            "webhook",
+        require(forge_record("webhook",
                                             {{"url", "https://hooks.example.test/lake"},
                                              {"events", {"review", "release"}},
-                                             {"secret", "fixture-webhook-secret"}}}),
+                                             {"secret", "fixture-webhook-secret"}}),
                 "create webhook record");
-    require(store->create_forge_record({repository.id,
-                                        "webhook_delivery",
+    require(forge_record("webhook_delivery",
                                         {{"webhook_id", fixture_webhook.id},
                                          {"event", "review"},
                                          {"payload", {{"change_id", change_id}}},
@@ -593,16 +599,15 @@ int main(int argc, char** argv) {
                                          {"attempt", 2},
                                          {"status", 503},
                                          {"error", "fixture receiver unavailable"},
-                                         {"delivered", false}}}),
+                                         {"delivered", false}}),
             "create webhook delivery record");
-    require(store->create_forge_record({repository.id,
-                                        "branch_protection",
+    require(forge_record("branch_protection",
                                         {{"ref", "main"},
                                          {"required_review", true},
                                          {"required_verification", true},
                                          {"fast_forward_only", true},
                                          {"allowed_pushers", {principal.taap_id}},
-                                         {"policy_object_id", repository_object.id}}}),
+                                         {"policy_object_id", repository_object.id}}),
             "create branch protection record");
     require(lake::audit::record(*store,
                                 {.customer_id = organization_customer.id,

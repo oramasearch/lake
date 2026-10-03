@@ -20,8 +20,8 @@ still open.
 |---|---|
 | `WorkspaceRecords`, `RecordSet<Codec>` | Implemented on Zetta's keyed record store ([zetta#1231](https://github.com/oramasearch/zetta/issues/1231), merged in zetta PR #1233 to `dev`, `82f617e`). Unit tests run against an engine fake; an opt-in test runs against a real Zetta node built from that commit. |
 | Append-only collections | Implemented. `ask_messages` and `auth_app_webhook_events` have moved; the `ask_messages` table is dropped (migration `0050`, lake#483). |
-| Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. `drive_share_links` (lake#350) has moved: revocation is a conditional `put` on the revision read. `auth_app_webhook_deliveries` (lake#357) claims each attempt with `if_absent` and settles it with `if_revision`. `metering_usage` (lake#348) adds to an hourly counter with `if_revision`, and `metering_build_records` (lake#349) records each build result once with `if_absent`. |
-| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `opportunities`, `stream_owners`, `drive_share_links`, `auth_app_webhook_events`, `auth_app_webhook_deliveries`, `metering_usage` and `metering_build_records`. `ask_messages` left the list with its table: a request for it is `invalid_input`. |
+| Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. `drive_share_links` (lake#350) has moved: revocation is a conditional `put` on the revision read. `auth_app_webhook_deliveries` (lake#357) claims each attempt with `if_absent` and settles it with `if_revision`. `metering_usage` (lake#348) adds to an hourly counter with `if_revision`, and `metering_build_records` (lake#349) records each build result once with `if_absent`. `forge_records` (lake#341) has moved into the workspace of each record's repository: edits are conditional `put`s on the revision read, and the push path reads branch protection once before the push. |
+| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `opportunities`, `stream_owners`, `drive_share_links`, `auth_app_webhook_events`, `auth_app_webhook_deliveries`, `metering_usage`, `metering_build_records` and `forge_records`. `ask_messages` left the list with its table: a request for it is `invalid_input`. |
 | Dropping the moved tables from PostgreSQL | `ask_messages` is dropped by migration `0050_drop_ask_messages` (lake#483), after its copy was verified on dev; its `workspace_assignments` rows stay. Each other table is dropped by a later migration once its copy is verified on the dev cluster. |
 
 **Zetta dependency.** A workspace Zetta must run Zetta `dev` at or after zetta PR #1233
@@ -49,7 +49,7 @@ A page that reads one collection therefore pays one workspace round trip.
 |---|---|---|
 | Append-only log, read back by key | `ask_messages` (#370), `sso_provisioning_logs` (#333), `auth_app_webhook_events` (#356), `agent_cron_runs` (#372), `offline_recovery_notifications` (#339), `audit_events` (#317) | `append`: one `put_record` with `if_absent`. `list` is newest first by the lookup index, then put in order. Set `retention_ms` where a purge applies. |
 | Work items sent once, with retry history | `auth_app_webhook_deliveries` (#357) | One record per attempt, keyed by `index_of(collection, "<item>\n<attempt>")`. Claim it pending with `put(if_absent)` before the side effect and settle it with `put(if_revision)` after: only the caller whose claim succeeded performs it. |
-| Mutable rows found by id | `opportunities` (#376, **moved**), `drive_share_links` (#350, **moved**), `repositories` (#315), `apps` (#377), `stores` (#365), `forge_records` (#341), `platform_environments` (#358) | `get`, then `put` with `if_revision`, or `update`, which retries on `409` by rereading. `remove` with `if_revision`. |
+| Mutable rows found by id | `opportunities` (#376, **moved**), `drive_share_links` (#350, **moved**), `repositories` (#315), `apps` (#377), `stores` (#365), `forge_records` (#341, **moved**), `platform_environments` (#358) | `get`, then `put` with `if_revision`, or `update`, which retries on `409` by rereading. `remove` with `if_revision`. |
 | One-use codes, sessions, replay evidence, claims | `sessions` (#323), `identity_oauth_flows` (#326), `identity_webauthn_challenges` (#327), `identity_taap_assertions` (#361), `auth_app_authorization_codes` (#363), `offline_recovery_attempts` (#336), `agent_task_status` claims (#375) | Consume with `remove(id, if_revision)`. Only one caller succeeds; the others get `conflict` or `not_found`. Expiry is the collection's `retention_ms`. |
 | Unique names | `stream_owners` (#379, done), repository and app names | A name-keyed record written with `if_absent`, using a blind key (see [Keys](#record-format)). |
 | Secrets and credentials | `secrets_*` (#328–#332), `keystore` (#324), `pki_authorities` (#342), `custodial_identities` (#364), `auth_app_signing_keys` (#352), `oauth_providers` (#325) | Records whose sealed body holds the secrets subsystem's existing envelope ciphertext. Zetta's connection store is not used (lake seals its own secrets). |
@@ -243,6 +243,8 @@ copy is verified.
 | `PostgresApplicationWebhooks.MigrationRecordsEachEventsOwnerForTheCopy` | Migration 0049: application and event outcomes on a rerun, late rows, resolution, the immutable workspace |
 | `Stores/WorkspaceRecordStores.RepositoryUsageStaysInEachRepositorysWorkspace/{Memory,Postgres}` | Repository usage (lake#348, lake#349) across two spaces with two workspaces each: nothing written on the request path, one hourly record per workspace, a second replica's conditional increment, a workspace that is not ready (kept), a deleted workspace (dropped), a repository without a workspace, the bound, build records written once |
 | `Stores/WorkspaceRecordStores.TheOneShotCopyMovesMeteringIntoEachSpacesWorkspace/{Memory,Postgres}`, `PostgresMetering.MigrationRecordsEachRowsOwnerForTheCopy`, `PostgresSync.PushAndPullUsePostgresControlPlane` | The metering copy beside lake's own counters and build records, rows without transfer left out, `needs_selection` blocking, tamper detection, operator only; migration 0053; a real push and pull flushed into the repository's workspace and nothing in PostgreSQL |
+| `Stores/WorkspaceRecordStores.ForgeRecordsLiveInTheirRepositorysWorkspace/{Memory,Postgres}`, `Forge.*`, `Export.*`, `GitHubImport.*`, `PostgresSync.EnforcesBranchProtectionAtReferenceUpdates`, `SyncHttp.*ProtectedRefusal*`, `PostgresForgeScenario.*` | Forge records (lake#341) in their repository's workspace among two spaces with two workspaces each: stored sealed only at their own endpoint, another workspace's or repository's ids `not_found`, a record copied elsewhere not opening, conditional updates keeping both changes and a stale revision refused, least privilege, missing and unknown `repository_id`, a repository without a workspace (`conflict`), a workspace that is not ready and workspace deletion, for the capabilities and for branch protection read before a push; export, import and GitHub import; a real push refused and accepted by rules read from the workspace |
+| `Stores/WorkspaceRecordStores.TheOneShotCopyMovesForgeRecordsIntoTheirRepositorysWorkspace/{Memory,Postgres}`, `PostgresForgeRecords.MigrationRecordsEachRowsOwnerForTheCopy` | The `forge_records` copy: plan, verify, copy, rerun, read back through the capabilities with original ids and instants, `needs_selection` blocking and `workspace_deleted` not, a later edit accepted, tamper detection, operator only; migration 0054 outcomes on a rerun, late rows, a repository assigned after review, paged legacy listing |
 | `WorkspaceRecordsZetta.TheEngineStoresAndReturnsSealedRecords` | Runs with `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` against a node built from Zetta dev with #1233: append, list, a 20 KB body, `if_absent` conflict with `details.revision`, `update`, a stale `if_revision`, conditional delete |
 | `HttpResponseIsolation.AskOrama*`, `…TheAgentFactory*`, `AgentRuns.EveryAgentFlowTheSiteOffersIsACapability`, `PagePerformance.*` | The pages and the capability end to end, and the page budgets |
 
@@ -406,6 +408,33 @@ coordinator and are not run by this change.
    deleted) or correct it. Then repeat step 4.
 6. Once `verify` answers `complete: true` on every page, file the migration that drops
    `stream_owners`, with the copy output attached.
+
+## Cutover runbook: `forge_records`, dev cluster
+
+Migration `0054_forge_record_workspaces` (lake#341). Each row's owner is its repository's workspace
+(`repositories.workspace_id`, migration `0051_repository_workspaces`, lake#315 part 1), so there is
+no selection step of its own: a row is `needs_selection` only while its repository has no workspace.
+These steps are for the coordinator and are not run by this change.
+
+1. Workspace Zettas run Zetta `dev` at or after `82f617e`, as for `ask_messages`.
+2. Have the operator vendor `db/schema.sql` through `0054_forge_record_workspaces` and select
+   `forge_record_workspaces_guard`. Apply the schema, then read the warnings
+   `forge record not copied (needs_selection|workspace_deleted)`.
+3. Deploy the lake image built from this change. Issues, reviews, comments, releases, webhooks,
+   exports and branch protection rules are read and written only in each repository's workspace.
+   Until step 4 finishes, existing records are not shown, and **existing branch protection rules
+   are not enforced** (a push sees only rules set after the deploy); run step 4 right after the
+   deploy. A push that updates references to a repository whose workspace is not ready, or that has
+   no workspace, is refused with that reason.
+4. Run `POST /v1/copy_workspace_records {"collection":"forge_records","mode":"plan"}` with the
+   operator bearer, then `{"mode":"copy"}` following `next_after` until it is null, then
+   `{"mode":"verify"}` over every page.
+5. Rows of a repository without a workspace stay `needs_selection` and keep `complete` false: assign
+   the repository's workspace in a reviewed change (lake#315), or delete the repository's rows (dev
+   data may be deleted); the next run copies them. Rows recorded `workspace_deleted` went with
+   their workspace and do not block. Repeat step 4.
+6. Once `verify` answers `complete: true` on every page, file the migration that drops
+   `forge_records`, with the copy output attached.
 
 ## Cutover runbook: metering, dev cluster
 

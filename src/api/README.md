@@ -230,3 +230,14 @@ path passes the repository itself to `sync_change_authorizer` and `evaluate_bran
 refuses a workspace that holds a live repository. `http_server.cpp`'s `/repository/create` form and
 hub `/api/repos/create` (body `workspace_id` or `X-Lake-Workspace-Id`) pass the workspace, and
 `web_ui.cpp` shows it on the repository list and home. See `docs/api/repositories.md`.
+Forge records live in the workspace of their repository's workspace (lake#341):
+`forge_records_api.hpp` declares `RepositoryForge` (create, list, get and conditional update of one
+repository's records; a repository without a workspace is `conflict` at `/repository_id`), and every
+forge capability, `export_repository`, `import_repository` and `import_github_repository` is
+asynchronous over it. The `push` capability is asynchronous too: it reads the rules, and the
+reviews and releases they ask for, once with `load_branch_protection` (`forge.hpp`) and hands that
+snapshot to `sync_change_authorizer`, because the push runs synchronously inside the repository
+store; a snapshot that could not be read refuses every reference update. `serve_sync_post` and the
+repository pages call the registry asynchronously; the home page and change view render without
+releases or reviews, saying why, when the workspace cannot be read. `copy_workspace_records` also
+copies `forge_records`.

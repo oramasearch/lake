@@ -207,6 +207,9 @@ struct RepositoryHomeData {
     std::optional<RepositoryFile> readme;
     std::vector<control::EffectiveAccessEntry> access;
     std::vector<control::ForgeRecord> releases;
+    // Why the releases could not be read from the repository's workspace Zetta (lake#341), for
+    // example while it is still starting; the rest of the page does not depend on it.
+    std::string releases_unavailable;
     // Validated instance configuration, never inferred from a request header.
     std::string external_origin;
     // The repository's workspace, when the viewer may read its space (lake#315).
@@ -406,6 +409,9 @@ std::string web_ui_repository_log(const control::Repository& repository,
 struct ChangeReviewData {
     std::vector<control::ForgeRecord> reviews;
     std::vector<control::ForgeRecord> comments;
+    // Why reviews and comments could not be read from the repository's workspace Zetta
+    // (lake#341); the diff and checks do not depend on it.
+    std::string unavailable;
     RepositoryArtifactPage checks;
 };
 

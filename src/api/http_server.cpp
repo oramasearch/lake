@@ -12242,23 +12242,24 @@ struct ApiServer::Impl {
         ApiContext ctx = context_for(route);
         const std::string repository_id = query_value(route, "repository_id");
         if (repository_id.empty()) {
-            return redirect(route, "/repositories");
+            co_return co_await redirect(route, "/repositories");
         }
         const ApiResult repository_result =
             registry.call("get_repository", {{"id", repository_id}}, ctx);
         if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
+            co_return co_await serve_repository_page_error(route, ctx, repository_result);
         }
         const ApiResult exports_result =
-            registry.call("list_exports", {{"repository_id", repository_id}}, ctx);
+            unwrap(co_await registry.call_async(
+                "list_exports", {{"repository_id", repository_id}}, ctx));
         if (!exports_result.ok) {
-            return serve_repository_page_error(route, ctx, exports_result);
+            co_return co_await serve_repository_page_error(route, ctx, exports_result);
         }
         std::vector<control::ForgeRecord> exports;
         for (const nlohmann::json& value : exports_result.value.at("items")) {
             exports.push_back(forge_record_from_json(value));
         }
-        return send_text(
+        co_return co_await send_text(
             route,
             boost::http::status::ok,
             web_ui_exports(repository_from_json(repository_result.value), exports, viewer_for(ctx)),
@@ -12270,18 +12271,18 @@ struct ApiServer::Impl {
         ApiContext ctx = context_for(route);
         const std::string repository_id = query_value(route, "repository_id");
         if (repository_id.empty()) {
-            return redirect(route, "/repositories");
+            co_return co_await redirect(route, "/repositories");
         }
         const ApiResult exported =
-            registry.call("export_repository",
+            unwrap(co_await registry.call_async("export_repository",
                           {{"repository_id", repository_id},
                            {"include_git", query_value(route, "include_git") == "true"}},
-                          ctx);
+                          ctx));
         if (!exported.ok) {
-            return serve_repository_page_error(route, ctx, exported);
+            co_return co_await serve_repository_page_error(route, ctx, exported);
         }
         route.res.set("content-disposition", "attachment; filename=lake-export.json");
-        return send_text(route,
+        co_return co_await send_text(route,
                          boost::http::status::ok,
                          exported.value.at("archive").dump(2),
                          "application/vnd.lake.export+json",
@@ -12292,11 +12293,11 @@ struct ApiServer::Impl {
         ApiContext ctx = context_for(route);
         const std::string id = query_value(route, "id");
         if (id.empty()) {
-            return redirect(route, "/repositories");
+            co_return co_await redirect(route, "/repositories");
         }
         const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
         if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
+            co_return co_await serve_repository_page_error(route, ctx, repository_result);
         }
         const control::Repository repository = repository_from_json(repository_result.value);
         std::optional<control::Customer> owner;
@@ -12309,7 +12310,7 @@ struct ApiServer::Impl {
         }
         const ApiResult refs_result = registry.call("repository_refs", {{"id", id}}, ctx);
         if (!refs_result.ok) {
-            return serve_repository_page_error(route, ctx, refs_result);
+            co_return co_await serve_repository_page_error(route, ctx, refs_result);
         }
         RepositoryHomeData data;
         data.external_origin = options.external_origin;
@@ -12319,7 +12320,7 @@ struct ApiServer::Impl {
         const std::string default_ref = data.refs.empty() ? "main" : data.refs.front().name;
         const ApiResult changes_result = registry.call("list_changes", {{"id", id}}, ctx);
         if (!changes_result.ok) {
-            return serve_repository_page_error(route, ctx, changes_result);
+            co_return co_await serve_repository_page_error(route, ctx, changes_result);
         }
         for (const nlohmann::json& value : changes_result.value.at("items")) {
             data.changes.push_back(repository_change_from_json(value));
@@ -12328,7 +12329,7 @@ struct ApiServer::Impl {
             const ApiResult tree_result =
                 registry.call("repository_tree", {{"id", id}, {"ref", default_ref}}, ctx);
             if (!tree_result.ok) {
-                return serve_repository_page_error(route, ctx, tree_result);
+                co_return co_await serve_repository_page_error(route, ctx, tree_result);
             }
             for (const nlohmann::json& value : tree_result.value.at("items")) {
                 data.tree.push_back(repository_tree_entry_from_json(value));
@@ -12338,26 +12339,30 @@ struct ApiServer::Impl {
             if (readme_result.ok) {
                 data.readme = repository_file_from_json(readme_result.value);
             } else if (readme_result.error.code != "not_found") {
-                return serve_repository_page_error(route, ctx, readme_result);
+                co_return co_await serve_repository_page_error(route, ctx, readme_result);
             }
         }
         if (ctx.authorized) {
             const ApiResult access_result = registry.call(
                 "entity_effective_access", {{"object_type", "repository"}, {"id", id}}, ctx);
             if (!access_result.ok) {
-                return serve_repository_page_error(route, ctx, access_result);
+                co_return co_await serve_repository_page_error(route, ctx, access_result);
             }
             for (const nlohmann::json& value : access_result.value.at("items")) {
                 data.access.push_back(access_from_json(value));
             }
         }
         const ApiResult releases_result =
-            registry.call("list_releases", {{"repository_id", id}}, ctx);
+            unwrap(co_await registry.call_async(
+                "list_releases", {{"repository_id", id}}, ctx));
+        // Releases are forge records in the repository's workspace Zetta (lake#341). The home page
+        // does not wait for that workspace: it says why the releases are missing instead.
         if (!releases_result.ok) {
-            return serve_repository_page_error(route, ctx, releases_result);
-        }
-        for (const nlohmann::json& value : releases_result.value.at("items")) {
-            data.releases.push_back(forge_record_from_json(value));
+            data.releases_unavailable = releases_result.error.message;
+        } else {
+            for (const nlohmann::json& value : releases_result.value.at("items")) {
+                data.releases.push_back(forge_record_from_json(value));
+            }
         }
         // The owning workspace (lake#315), for a viewer who may read the repository's space; a
         // public reader from elsewhere is not told the space's workspace names.
@@ -12374,7 +12379,7 @@ struct ApiServer::Impl {
                     .environment = json_string(workspace.value, "environment")};
             }
         }
-        return send_text(
+        co_return co_await send_text(
             route,
             boost::http::status::ok,
             web_ui_repository(repository, owner ? &*owner : nullptr, data, viewer_for(ctx)),
@@ -12570,21 +12575,21 @@ struct ApiServer::Impl {
         const std::string id = query_value(route, "repository_id");
         const std::string change_id = query_value(route, "id");
         if (id.empty() || change_id.empty()) {
-            return redirect(route, "/repositories");
+            co_return co_await redirect(route, "/repositories");
         }
         const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
         if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
+            co_return co_await serve_repository_page_error(route, ctx, repository_result);
         }
         const ApiResult change_result =
             registry.call("get_change", {{"id", id}, {"change_id", change_id}}, ctx);
         if (!change_result.ok) {
-            return serve_repository_page_error(route, ctx, change_result);
+            co_return co_await serve_repository_page_error(route, ctx, change_result);
         }
         const ApiResult diff_result =
             registry.call("change_diff", {{"id", id}, {"change_id", change_id}}, ctx);
         if (!diff_result.ok) {
-            return serve_repository_page_error(route, ctx, diff_result);
+            co_return co_await serve_repository_page_error(route, ctx, diff_result);
         }
         std::vector<RepositoryDiffEntry> differences;
         for (const nlohmann::json& value : diff_result.value.at("items")) {
@@ -12592,12 +12597,17 @@ struct ApiServer::Impl {
         }
         ChangeReviewData review;
         const ApiResult reviews_result =
-            registry.call("list_reviews", {{"repository_id", id}, {"limit", 100}}, ctx);
+            unwrap(co_await registry.call_async(
+                "list_reviews", {{"repository_id", id}, {"limit", 100}}, ctx));
+        // Reviews and their comments are forge records in the repository's workspace Zetta
+        // (lake#341); the diff does not wait for it, and the page says why they are missing.
         if (!reviews_result.ok) {
-            return serve_repository_page_error(route, ctx, reviews_result);
+            review.unavailable = reviews_result.error.message;
         }
         std::set<std::string> review_ids;
-        for (const nlohmann::json& value : reviews_result.value.at("items")) {
+        const nlohmann::json no_items = nlohmann::json::array();
+        for (const nlohmann::json& value :
+             reviews_result.ok ? reviews_result.value.at("items") : no_items) {
             control::ForgeRecord item = forge_record_from_json(value);
             if (item.value.value("change_id", "") != change_id) {
                 continue;
@@ -12606,11 +12616,15 @@ struct ApiServer::Impl {
             review.reviews.push_back(std::move(item));
         }
         const ApiResult comments_result =
-            registry.call("list_review_comments", {{"repository_id", id}, {"limit", 1000}}, ctx);
-        if (!comments_result.ok) {
-            return serve_repository_page_error(route, ctx, comments_result);
+            review.unavailable.empty()
+                ? unwrap(co_await registry.call_async(
+                      "list_review_comments", {{"repository_id", id}, {"limit", 1000}}, ctx))
+                : reviews_result;
+        if (!comments_result.ok && review.unavailable.empty()) {
+            review.unavailable = comments_result.error.message;
         }
-        for (const nlohmann::json& value : comments_result.value.at("items")) {
+        for (const nlohmann::json& value :
+             comments_result.ok ? comments_result.value.at("items") : no_items) {
             control::ForgeRecord item = forge_record_from_json(value);
             const nlohmann::json anchor = item.value.value("anchor", nlohmann::json::object());
             if (!review_ids.contains(item.value.value("review_id", "")) ||
@@ -12622,14 +12636,14 @@ struct ApiServer::Impl {
         const ApiResult checks_result =
             registry.call("list_artifacts", {{"id", id}, {"limit", 100}}, ctx);
         if (!checks_result.ok) {
-            return serve_repository_page_error(route, ctx, checks_result);
+            co_return co_await serve_repository_page_error(route, ctx, checks_result);
         }
         review.checks.next_cursor = json_string(checks_result.value, "next_cursor");
         review.checks.done = checks_result.value.value("done", false);
         for (const nlohmann::json& value : checks_result.value.at("items")) {
             review.checks.items.push_back(repository_artifact_from_json(value));
         }
-        return send_text(route,
+        co_return co_await send_text(route,
                          boost::http::status::ok,
                          web_ui_change(repository_from_json(repository_result.value),
                                        repository_change_from_json(change_result.value),
@@ -12644,22 +12658,23 @@ struct ApiServer::Impl {
         ApiContext ctx = context_for(route);
         const std::string id = query_value(route, "repository_id");
         if (id.empty()) {
-            return redirect(route, "/repositories");
+            co_return co_await redirect(route, "/repositories");
         }
         const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
         if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
+            co_return co_await serve_repository_page_error(route, ctx, repository_result);
         }
         const ApiResult issues_result =
-            registry.call("list_issues", {{"repository_id", id}, {"limit", 1000}}, ctx);
+            unwrap(co_await registry.call_async(
+                "list_issues", {{"repository_id", id}, {"limit", 1000}}, ctx));
         if (!issues_result.ok) {
-            return serve_repository_page_error(route, ctx, issues_result);
+            co_return co_await serve_repository_page_error(route, ctx, issues_result);
         }
         std::vector<control::ForgeRecord> issues;
         for (const nlohmann::json& value : issues_result.value.at("items")) {
             issues.push_back(forge_record_from_json(value));
         }
-        return send_text(route,
+        co_return co_await send_text(route,
                          boost::http::status::ok,
                          web_ui_issues(repository_from_json(repository_result.value),
                                        issues,
@@ -12676,16 +12691,17 @@ struct ApiServer::Impl {
         const std::string id = query_value(route, "repository_id");
         const std::string issue_id = query_value(route, "id");
         if (id.empty() || issue_id.empty()) {
-            return redirect(route, "/repositories");
+            co_return co_await redirect(route, "/repositories");
         }
         const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
         if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
+            co_return co_await serve_repository_page_error(route, ctx, repository_result);
         }
         const ApiResult issues_result =
-            registry.call("list_issues", {{"repository_id", id}, {"limit", 1000}}, ctx);
+            unwrap(co_await registry.call_async(
+                "list_issues", {{"repository_id", id}, {"limit", 1000}}, ctx));
         if (!issues_result.ok) {
-            return serve_repository_page_error(route, ctx, issues_result);
+            co_return co_await serve_repository_page_error(route, ctx, issues_result);
         }
         std::optional<control::ForgeRecord> issue;
         for (const nlohmann::json& value : issues_result.value.at("items")) {
@@ -12696,16 +12712,17 @@ struct ApiServer::Impl {
             }
         }
         if (!issue) {
-            return send_text(route,
+            co_return co_await send_text(route,
                              boost::http::status::not_found,
                              web_ui_error("not_found", "issue not found", viewer_for(ctx)),
                              "text/html; charset=utf-8",
                              "no-store");
         }
         const ApiResult comments_result =
-            registry.call("list_issue_comments", {{"repository_id", id}, {"limit", 1000}}, ctx);
+            unwrap(co_await registry.call_async(
+                "list_issue_comments", {{"repository_id", id}, {"limit", 1000}}, ctx));
         if (!comments_result.ok) {
-            return serve_repository_page_error(route, ctx, comments_result);
+            co_return co_await serve_repository_page_error(route, ctx, comments_result);
         }
         std::vector<control::ForgeRecord> comments;
         for (const nlohmann::json& value : comments_result.value.at("items")) {
@@ -12714,7 +12731,7 @@ struct ApiServer::Impl {
                 comments.push_back(std::move(comment));
             }
         }
-        return send_text(
+        co_return co_await send_text(
             route,
             boost::http::status::ok,
             web_ui_issue(
@@ -12727,22 +12744,23 @@ struct ApiServer::Impl {
         ApiContext ctx = context_for(route);
         const std::string id = query_value(route, "repository_id");
         if (id.empty()) {
-            return redirect(route, "/repositories");
+            co_return co_await redirect(route, "/repositories");
         }
         const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
         if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
+            co_return co_await serve_repository_page_error(route, ctx, repository_result);
         }
         const ApiResult releases_result =
-            registry.call("list_releases", {{"repository_id", id}, {"limit", 1000}}, ctx);
+            unwrap(co_await registry.call_async(
+                "list_releases", {{"repository_id", id}, {"limit", 1000}}, ctx));
         if (!releases_result.ok) {
-            return serve_repository_page_error(route, ctx, releases_result);
+            co_return co_await serve_repository_page_error(route, ctx, releases_result);
         }
         std::vector<control::ForgeRecord> releases;
         for (const nlohmann::json& value : releases_result.value.at("items")) {
             releases.push_back(forge_record_from_json(value));
         }
-        return send_text(route,
+        co_return co_await send_text(route,
                          boost::http::status::ok,
                          web_ui_releases(repository_from_json(repository_result.value),
                                          releases,
@@ -12755,21 +12773,23 @@ struct ApiServer::Impl {
         ApiContext ctx = context_for(route);
         const std::string id = query_value(route, "repository_id");
         if (id.empty()) {
-            return redirect(route, "/repositories");
+            co_return co_await redirect(route, "/repositories");
         }
         const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
         if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
+            co_return co_await serve_repository_page_error(route, ctx, repository_result);
         }
         const ApiResult webhooks_result =
-            registry.call("list_webhooks", {{"repository_id", id}, {"limit", 1000}}, ctx);
+            unwrap(co_await registry.call_async(
+                "list_webhooks", {{"repository_id", id}, {"limit", 1000}}, ctx));
         if (!webhooks_result.ok) {
-            return serve_repository_page_error(route, ctx, webhooks_result);
+            co_return co_await serve_repository_page_error(route, ctx, webhooks_result);
         }
         const ApiResult deliveries_result =
-            registry.call("list_webhook_deliveries", {{"repository_id", id}, {"limit", 1000}}, ctx);
+            unwrap(co_await registry.call_async(
+                "list_webhook_deliveries", {{"repository_id", id}, {"limit", 1000}}, ctx));
         if (!deliveries_result.ok) {
-            return serve_repository_page_error(route, ctx, deliveries_result);
+            co_return co_await serve_repository_page_error(route, ctx, deliveries_result);
         }
         std::vector<control::ForgeRecord> webhooks;
         std::vector<control::ForgeRecord> deliveries;
@@ -12779,7 +12799,7 @@ struct ApiServer::Impl {
         for (const nlohmann::json& value : deliveries_result.value.at("items")) {
             deliveries.push_back(forge_record_from_json(value));
         }
-        return send_text(route,
+        co_return co_await send_text(route,
                          boost::http::status::ok,
                          web_ui_webhooks(repository_from_json(repository_result.value),
                                          webhooks,
@@ -12797,10 +12817,10 @@ struct ApiServer::Impl {
         }
         ApiContext ctx = context_for(route);
         const std::string repository_id = form_field(body, "repository_id");
-        const ApiResult result = registry.call(
+        const ApiResult result = unwrap(co_await registry.call_async(
             "retry_webhook_delivery",
             {{"repository_id", repository_id}, {"delivery_id", form_field(body, "delivery_id")}},
-            ctx);
+            ctx));
         if (!result.ok) {
             co_return co_await serve_repository_page_error(route, ctx, result);
         }
@@ -12812,20 +12832,21 @@ struct ApiServer::Impl {
         ApiContext ctx = context_for(route);
         const std::string id = query_value(route, "repository_id");
         if (id.empty()) {
-            return redirect(route, "/repositories");
+            co_return co_await redirect(route, "/repositories");
         }
         const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
         if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
+            co_return co_await serve_repository_page_error(route, ctx, repository_result);
         }
         const ApiResult rules_result =
-            registry.call("list_branch_protections", {{"repository_id", id}, {"limit", 1000}}, ctx);
+            unwrap(co_await registry.call_async(
+                "list_branch_protections", {{"repository_id", id}, {"limit", 1000}}, ctx));
         if (!rules_result.ok) {
-            return serve_repository_page_error(route, ctx, rules_result);
+            co_return co_await serve_repository_page_error(route, ctx, rules_result);
         }
         const ApiResult audit_result = registry.call("audit", {{"limit", 500}}, ctx);
         if (!audit_result.ok) {
-            return serve_repository_page_error(route, ctx, audit_result);
+            co_return co_await serve_repository_page_error(route, ctx, audit_result);
         }
         std::vector<control::ForgeRecord> rules;
         std::vector<audit::Event> events;
@@ -12836,7 +12857,7 @@ struct ApiServer::Impl {
              audit_result.value.value("items", nlohmann::json::array())) {
             events.push_back(audit::event_from_json(value));
         }
-        return send_text(
+        co_return co_await send_text(
             route,
             boost::http::status::ok,
             web_ui_branch_protection(
@@ -15455,7 +15476,8 @@ struct ApiServer::Impl {
         };
         auto body = co_await read_sync_body(route);
         if (!body) {
-            const ApiResult result = registry.call(capability_name, input, context);
+            const ApiResult result =
+                unwrap(co_await registry.call_async(capability_name, input, context));
             if (!result.ok && result.error.code != "invalid_input") {
                 co_return co_await send_sync_error(route, sync_error_of(result, context));
             }
@@ -15468,7 +15490,9 @@ struct ApiServer::Impl {
         }
         context.sync_wire_request = true;
         context.sync_request = as_bytes(*body);
-        const ApiResult result = registry.call(capability_name, input, context);
+        // push reads branch protection from the repository's workspace first (lake#341).
+        const ApiResult result =
+            unwrap(co_await registry.call_async(capability_name, input, context));
         if (!context.reauthorization_results.empty()) {
             const std::string encoded =
                 control::identity_crypto::base64url_encode(context.reauthorization_results.dump());

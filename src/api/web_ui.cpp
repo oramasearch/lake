@@ -1784,7 +1784,10 @@ std::string web_ui_repository(const control::Repository& repository,
         }
         content += "</ul>";
     }
-    if (!data.releases.empty()) {
+    if (!data.releases_unavailable.empty()) {
+        content += "<h3>Releases</h3><p class=\"muted\">Releases are unavailable: " +
+                   web_ui_escape(data.releases_unavailable) + "</p>";
+    } else if (!data.releases.empty()) {
         content += "<h3>Releases</h3><ul class=\"detail-list\">";
         for (const control::ForgeRecord& release : data.releases) {
             content += std::format("<li><strong>{}</strong>{}</li>",
@@ -7209,7 +7212,10 @@ std::string web_ui_change(const control::Repository& repository,
                         web_ui_markdown(body));
     }
     content += "<section class=\"review-summary\"><h2>Review</h2>";
-    if (review.reviews.empty()) {
+    if (!review.unavailable.empty()) {
+        content += "<div class=\"panel empty\">Reviews are unavailable: " +
+                   web_ui_escape(review.unavailable) + "</div>";
+    } else if (review.reviews.empty()) {
         content += "<div class=\"panel empty\">No review has been requested.</div>";
     } else {
         for (const control::ForgeRecord& item : review.reviews) {

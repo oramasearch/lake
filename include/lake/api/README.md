@@ -46,6 +46,11 @@ transfer and build records on their way to the workspace Zettas (lake#348, lake#
 `ApiContext::metering_recorder` points at the server's; `ServerOptions::metering_flush_interval`
 and `metering_max_pending` configure it. A null recorder (no workspaces) records nothing.
 
+`forge.hpp` declares `BranchProtectionRecords` and `load_branch_protection`: the rules, reviews and
+releases a push needs, read from the repository's workspace before the push (lake#341), and
+`evaluate_branch_protection` over that snapshot. `web_ui.hpp`'s `RepositoryHomeData` and
+`ChangeReviewData` carry why releases or reviews could not be read.
+
 Verify changes with the full PostgreSQL-backed static and shared CTest suites. Keep the identity
 contract in `docs/api/identity.md` updated with changes to token derivation.
 

@@ -19,3 +19,6 @@ operation labels.
 
 `list_repositories` forwards its optional workspace filter (lake#315); `transfer_repository` is no
 longer a store operation.
+
+The forge record store operations are gone (lake#341): the wrapper forwards only
+`assign_legacy_forge_records` and `legacy_forge_records`, for the one-shot copy.

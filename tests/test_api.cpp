@@ -78,7 +78,8 @@ struct Surface {
         register_core_capabilities(registry, "0.0.1");
         ctx.store = &store;
         ctx.node_name = "test";
-        ctx.instance_kek = "test-instance-kek";
+        // Hexadecimal, as LAKE_INSTANCE_KEK is: workspace records derive their keys from it.
+        ctx.instance_kek = "6c616b652d666f7267652d7265636f7264732d746573742d696e7374616e6365";
         ctx.authorized = true;
         ctx.acting_identity = "admin";
         ctx.operator_credential = true;
@@ -92,6 +93,22 @@ struct Surface {
                              : ApiResult::failure("store_error", completed.error().message);
         }
         return registry.call(name, input, ctx);
+    }
+    // Workspace Zettas that hold lake's records (forge records, lake#341), created on first use.
+    std::unique_ptr<lake::test::RecordWorkspaces> workspaces;
+    void ready(const std::string& workspace_id) {
+        if (!workspaces) {
+            workspaces = std::make_unique<lake::test::RecordWorkspaces>(
+                std::shared_ptr<lake::control::Store>(&store, [](lake::control::Store*) {}));
+            ctx.workspaces = workspaces->service.get();
+        }
+        workspaces->ready(workspace_id);
+    }
+    // The workspace a test repository is created in, with its Zetta Ready.
+    std::string workspace(const json& customer_id) {
+        const std::string id = lake::test::repository_workspace(store, customer_id);
+        ready(id);
+        return id;
     }
 };
 
@@ -3084,6 +3101,9 @@ TEST(Repositories, BelongToOneWorkspaceOfTheirSpace) {
     const auto withdrawn = s.store.create_workspace({ada, "withdrawn", "dev", ""});
     ASSERT_TRUE(research && product && foreign && withdrawn);
     ASSERT_TRUE(s.store.update_workspace(withdrawn->id, {.desired = "deleted"}));
+    // Their Zettas hold the repositories' forge records (lake#341).
+    s.ready(research->id);
+    s.ready(foreign->id);
 
     const auto create = [&](const json& workspace, const std::string& name) {
         json input{{"customer_id", ada}, {"name", name}};
@@ -3200,7 +3220,7 @@ TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {
     const ApiResult repository = surface.call(
         "create_repository",
         {{"customer_id", customer.value["id"]},
-         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"workspace_id", surface.workspace(customer.value["id"])},
          {"name", "forge"}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
     const std::string repository_id = repository.value["id"];
@@ -3270,7 +3290,7 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
     const ApiResult repository = source.call(
         "create_repository",
         {{"customer_id", customer.value["id"]},
-         {"workspace_id", lake::test::repository_workspace(source.store, customer.value["id"])},
+         {"workspace_id", source.workspace(customer.value["id"])},
          {"name", "portable"}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
     ASSERT_TRUE(source
@@ -3303,7 +3323,7 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
         "import_repository",
         {{"customer_id", target_customer.value["id"]},
          {"workspace_id",
-          lake::test::repository_workspace(destination.store, target_customer.value["id"])},
+          destination.workspace(target_customer.value["id"])},
          {"name", "portable-copy"},
          {"archive", exported.value["archive"]}});
     ASSERT_TRUE(imported.ok) << imported.error.message;
@@ -3324,7 +3344,7 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
         "import_repository",
         {{"customer_id", target_customer.value["id"]},
          {"workspace_id",
-          lake::test::repository_workspace(destination.store, target_customer.value["id"])},
+          destination.workspace(target_customer.value["id"])},
          {"name", "tampered"},
          {"archive", altered}})
                   .error.code,
@@ -3348,7 +3368,7 @@ TEST(GitHubImport, MapsRecordedIssuesReviewsAndWorkflowReport) {
     const ApiResult imported = surface.call(
         "import_github_repository",
         {{"customer_id", customer.value["id"]},
-         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"workspace_id", surface.workspace(customer.value["id"])},
          {"name", "example"},
          {"git_directory", "/recorded/example.git"},
          {"recording", recording}});
@@ -3379,7 +3399,7 @@ TEST(Forge, ReleaseRetainsVerifiedArtifactAttestations) {
     const ApiResult repository = surface.call(
         "create_repository",
         {{"customer_id", customer.value["id"]},
-         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"workspace_id", surface.workspace(customer.value["id"])},
          {"name", "releases"}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
 
@@ -3404,7 +3424,7 @@ TEST(Forge, WebhookDeliveryRetriesAndRetainsAnEventLog) {
     const ApiResult repository = surface.call(
         "create_repository",
         {{"customer_id", customer.value["id"]},
-         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"workspace_id", surface.workspace(customer.value["id"])},
          {"name", "hooks"}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
     const std::string repository_id = repository.value["id"];
@@ -3455,7 +3475,7 @@ TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
     const ApiResult repository = surface.call(
         "create_repository",
         {{"customer_id", customer.value["id"]},
-         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"workspace_id", surface.workspace(customer.value["id"])},
          {"name", "protected"}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
     const std::string repository_id = repository.value["id"];
@@ -3473,8 +3493,17 @@ TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
     const auto stored = surface.store.get_repository(repository_id);
     ASSERT_TRUE(stored);
     EXPECT_EQ(stored->workspace_id, repository.value["workspace_id"].get<std::string>());
+    // Its rules, reviews and releases are read from that workspace before a push (lake#341).
+    const auto load = [&] {
+        auto loaded =
+            liquid::runtime::block_on(load_branch_protection(surface.ctx, *stored));
+        EXPECT_TRUE(loaded && *loaded);
+        return std::move(**loaded);
+    };
+    const auto rules = load();
+    ASSERT_EQ(rules.rules.size(), 1u);
     const auto rejected = evaluate_branch_protection(
-        surface.store, "admin", surface.ctx.authorization_cache, *stored, update);
+        surface.store, "admin", surface.ctx.authorization_cache, rules, update);
     ASSERT_FALSE(rejected);
     EXPECT_EQ(rejected.error().code, "conflict");
 
@@ -3487,8 +3516,11 @@ TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
                            {"review_id", review.value["id"]},
                            {"state", "approved"}})
                     .ok);
+    const auto approved = load();
+    ASSERT_EQ(approved.reviews.size(), 1u);
     EXPECT_TRUE(evaluate_branch_protection(
-        surface.store, "admin", surface.ctx.authorization_cache, *stored, update));
+        surface.store, "admin", surface.ctx.authorization_cache, approved, update));
+    EXPECT_TRUE(approved.releases.empty()) << "no rule asks for verification";
 }
 
 TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {
@@ -5642,6 +5674,11 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     options.instance_kek = instance_kek;
     options.store_root = (temporary.path() / "lake").string();
     options.store = control;
+    // Branch protection, reviews and releases are forge records in the repository's workspace
+    // Zetta (lake#341).
+    lake::test::RecordWorkspaces workspaces(control, database_uri);
+    workspaces.ready(repository->workspace_id);
+    options.workspaces = workspaces.service;
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
     const std::string url =
@@ -5654,14 +5691,12 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     const auto reviewed = liquid::runtime::block_on(source->cut("reviewed"));
     ASSERT_TRUE(reviewed) << reviewed.error().message;
     const std::string reviewed_id = liquid::to_string(reviewed->value);
-    const auto protection =
-        control->create_forge_record({repository->id,
-                                      "branch_protection",
-                                      {{"ref", "main"},
-                                       {"required_review", true},
-                                       {"fast_forward_only", true},
-                                       {"allowed_pushers", json::array({"admin"})}}});
-    ASSERT_TRUE(protection) << protection.error().message;
+    workspaces.forge(*repository, "branch_protection",
+                     {{"ref", "main"},
+                      {"required_review", true},
+                      {"fast_forward_only", true},
+                      {"allowed_pushers", json::array({"admin"})}},
+                     instance_kek);
 
     const auto review_push = liquid::runtime::block_on(owner_endpoint.push(*source));
     ASSERT_TRUE(review_push) << review_push.error().message;
@@ -5671,9 +5706,8 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     EXPECT_EQ(review_refusal->reason,
               "branch protection rejects main: an approved review is required");
 
-    const auto approved = control->create_forge_record(
-        {repository->id, "review", {{"change_id", reviewed_id}, {"state", "approved"}}});
-    ASSERT_TRUE(approved) << approved.error().message;
+    workspaces.forge(*repository, "review", {{"change_id", reviewed_id}, {"state", "approved"}},
+                     instance_kek);
     ASSERT_TRUE(liquid::runtime::block_on(owner_endpoint.push(*source)));
 
     ASSERT_TRUE(liquid::runtime::block_on(source->set_ref("main", *base)));
@@ -5745,9 +5779,12 @@ TEST(SyncHttp, ProtectedRefusalDoesNotBlockAnUnprotectedReference) {
     ServerOptions options;
     options.port = 0;
     options.admin_token = "mixed-admin";
-    options.instance_kek = "mixed-instance-kek";
+    options.instance_kek = "6d697865642d696e7374616e63652d6b656b2d666f722d666f7267652d746573";
     options.store_root = (temporary.path() / "lake").string();
     options.store = control;
+    lake::test::RecordWorkspaces workspaces(control);
+    workspaces.ready(repository->workspace_id);
+    options.workspaces = workspaces.service;
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
     const std::string url =
@@ -5759,8 +5796,8 @@ TEST(SyncHttp, ProtectedRefusalDoesNotBlockAnUnprotectedReference) {
     const auto candidate = liquid::runtime::block_on(source->cut("candidate"));
     ASSERT_TRUE(candidate) << candidate.error().message;
     ASSERT_TRUE(liquid::runtime::block_on(source->set_ref("release", *candidate)));
-    ASSERT_TRUE(control->create_forge_record(
-        {repository->id, "branch_protection", {{"ref", "main"}, {"required_review", true}}}));
+    workspaces.forge(*repository, "branch_protection", {{"ref", "main"}, {"required_review", true}},
+                     options.instance_kek);
 
     const auto pushed = liquid::runtime::block_on(endpoint.push(*source));
     ASSERT_TRUE(pushed) << pushed.error().message;
@@ -5780,6 +5817,26 @@ TEST(SyncHttp, ProtectedRefusalDoesNotBlockAnUnprotectedReference) {
         return reference.name == "main" && reference.head == liquid::to_string(base->value);
     }));
     EXPECT_TRUE(std::ranges::any_of(*references, [&candidate](const auto& reference) {
+        return reference.name == "release" && reference.head == liquid::to_string(candidate->value);
+    }));
+
+    // When the repository's workspace cannot be read, its rules are unknown: every reference
+    // update is refused with the reason rather than decided without them (lake#341).
+    workspaces.status(repository->workspace_id, "Provisioning");
+    ASSERT_TRUE(liquid::runtime::block_on(source->write("later.txt", sync_bytes("later"))));
+    const auto later = liquid::runtime::block_on(source->cut("later"));
+    ASSERT_TRUE(later) << later.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(source->set_ref("release", *later)));
+    const auto unreadable = liquid::runtime::block_on(endpoint.push(*source));
+    ASSERT_TRUE(unreadable) << unreadable.error().message;
+    const auto* release_refused = reference_outcome(*unreadable, "release");
+    ASSERT_NE(release_refused, nullptr);
+    EXPECT_EQ(release_refused->outcome, liquid::sync_ref_outcome_kind::refused);
+    EXPECT_NE(release_refused->reason.find("branch protection is unavailable"), std::string::npos)
+        << release_refused->reason;
+    const auto unchanged = control->list_repository_refs(repository->id);
+    ASSERT_TRUE(unchanged) << unchanged.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*unchanged, [&candidate](const auto& reference) {
         return reference.name == "release" && reference.head == liquid::to_string(candidate->value);
     }));
     server.stop();
@@ -5807,9 +5864,12 @@ TEST(SyncHttp, AtomicProtectedRefusalReportsEveryReferenceAndLandsNothing) {
     ServerOptions options;
     options.port = 0;
     options.admin_token = "atomic-admin";
-    options.instance_kek = "atomic-instance-kek";
+    options.instance_kek = "61746f6d69632d696e7374616e63652d6b656b2d666f722d666f7267652d7465";
     options.store_root = (temporary.path() / "lake").string();
     options.store = control;
+    lake::test::RecordWorkspaces workspaces(control);
+    workspaces.ready(repository->workspace_id);
+    options.workspaces = workspaces.service;
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
     const std::string url =
@@ -5821,8 +5881,8 @@ TEST(SyncHttp, AtomicProtectedRefusalReportsEveryReferenceAndLandsNothing) {
     const auto candidate = liquid::runtime::block_on(source->cut("candidate"));
     ASSERT_TRUE(candidate) << candidate.error().message;
     ASSERT_TRUE(liquid::runtime::block_on(source->set_ref("release", *candidate)));
-    ASSERT_TRUE(control->create_forge_record(
-        {repository->id, "branch_protection", {{"ref", "main"}, {"required_review", true}}}));
+    workspaces.forge(*repository, "branch_protection", {{"ref", "main"}, {"required_review", true}},
+                     options.instance_kek);
 
     const auto pushed = liquid::runtime::block_on(endpoint.push(*source));
     ASSERT_TRUE(pushed) << pushed.error().message;

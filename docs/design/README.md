@@ -39,3 +39,6 @@ It is not implemented.
 
 [status.md](status.md) records repository workspaces (lake#315 part 1, migration `0051`) as
 implemented and not yet deployed.
+
+[status.md](status.md) records forge records in the repository's workspace Zetta (lake#341, migration
+`0054`) as implemented and not yet deployed.

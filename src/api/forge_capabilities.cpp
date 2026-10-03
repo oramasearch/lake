@@ -2,6 +2,8 @@
 #include "lake/api/forge.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <expected>
 #include <map>
 #include <string>
@@ -10,10 +12,14 @@
 
 #include <openssl/hmac.h>
 
+#include "forge_records_api.hpp"
+#include "lake/control/agent_bus.hpp"
+#include "lake/control/forge_records.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
+#include "workspace_records_api.hpp"
 
 namespace lake::api {
 namespace {
@@ -22,6 +28,34 @@ using nlohmann::json;
 
 ApiResult from_store_error(const control::StoreError& error) {
     return ApiResult::failure(error.code, error.message);
+}
+
+template <class T> using ForgeTask = liquid::runtime::task<T>;
+
+// A finished nested task: a runtime failure is a store error.
+ApiResult settled_result(std::expected<ApiResult, liquid::error> completed) {
+    return completed ? std::move(*completed)
+                     : ApiResult::failure("store_error", completed.error().message);
+}
+
+std::expected<control::ForgeRecord, ApiResult> settled_record(
+    std::expected<std::expected<control::ForgeRecord, ApiResult>, liquid::error> completed) {
+    if (!completed) {
+        return std::unexpected(ApiResult::failure("store_error", completed.error().message));
+    }
+    return std::move(*completed);
+}
+
+std::int64_t now_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+bool uuid_shaped(std::string_view value) {
+    return value.size() == 36 && std::ranges::all_of(value, [](unsigned char c) {
+               return std::isxdigit(c) != 0 || c == '-';
+           });
 }
 
 std::expected<std::string, ApiError> repository_object(const json& input, ApiContext& context) {
@@ -61,64 +95,90 @@ json repository_input(json properties, json required) {
             {"additionalProperties", false}};
 }
 
-void deliver_event(const std::string& event,
-                   const control::ForgeRecord& subject,
-                   ApiContext& context);
+ApiResult failure(const ApiError& error) {
+    return ApiResult::failure(error.code, error.message, error.path);
+}
 
-ApiResult create_record(const std::string& kind, const json& value, ApiContext& context) {
-    if (!context.store) {
-        return ApiResult::failure("store_unavailable", "no control-plane store is configured");
+// The forge records of the repository `input` names, in its workspace.
+std::expected<RepositoryForge, ApiResult> open_forge(const json& input, ApiContext& context) {
+    const auto repository =
+        forge_repository(context, input.at("repository_id").get<std::string>());
+    if (!repository) {
+        return std::unexpected(failure(repository.error()));
     }
-    const auto record = context.store->create_forge_record(control::NewForgeRecord{
-        value.at("repository_id").get<std::string>(), kind, value.at("value")});
+    auto forge = RepositoryForge::open(context, *repository);
+    if (!forge) {
+        return std::unexpected(failure(forge.error()));
+    }
+    return std::move(*forge);
+}
+
+void audit_record(ApiContext& context, const control::ForgeRecord& record,
+                  const RepositoryForge& forge) {
+    context.audit_customer_id = forge.repository().customer_id;
+    context.audit_object = "repository/" + record.repository_id;
+    context.audit_details = {{"forge_kind", record.kind},
+                             {"record_id", record.id},
+                             {"workspace_id", forge.repository().workspace_id}};
+}
+
+ForgeTask<void> deliver_event(const std::string& event, const control::ForgeRecord& subject,
+                              RepositoryForge& forge, ApiContext& context);
+
+ForgeTask<ApiResult> create_record(RepositoryForge& forge, std::string kind, json value,
+                                   ApiContext& context) {
+    const auto record = control::settled(co_await forge.create(kind, std::move(value)));
     if (!record) {
-        return from_store_error(record.error());
+        co_return forge_records_failure(record.error());
     }
-    context.audit_object = "repository/" + record->repository_id;
-    context.audit_details = {{"forge_kind", kind}, {"record_id", record->id}};
+    audit_record(context, *record, forge);
     const std::string event = kind == "issue" || kind == "issue_comment"     ? "issue"
                               : kind == "review" || kind == "review_comment" ? "review"
                               : kind == "release"                            ? "release"
                                                                              : "";
     if (!event.empty()) {
-        deliver_event(event, *record, context);
+        co_await deliver_event(event, *record, forge, context);
     }
-    return ApiResult::success(control::to_json(*record));
+    co_return ApiResult::success(control::to_json(*record));
 }
 
-ApiResult list_records(const std::string& kind, const json& input, ApiContext& context) {
+ForgeTask<ApiResult> list_records(std::string kind, const json& input, ApiContext& context) {
     if (!context.store) {
-        return ApiResult::failure("store_unavailable", "no control-plane store is configured");
+        co_return ApiResult::failure("store_unavailable", "no control-plane store is configured");
     }
     if (!context.authorized) {
         const auto repository =
             context.store->get_repository(input.at("repository_id").get<std::string>());
         if (!repository) {
-            return from_store_error(repository.error());
+            co_return from_store_error(repository.error());
         }
         if (repository->visibility != "public") {
-            return ApiResult::failure("unauthorized", "the repository is not public");
+            co_return ApiResult::failure("unauthorized", "the repository is not public");
         }
     } else if (context.acting_identity != "admin") {
         const auto object = repository_object(input, context);
         if (!object) {
-            return ApiResult::failure(
+            co_return ApiResult::failure(
                 object.error().code, object.error().message, object.error().path);
         }
         const auto decision = control::authorize(
             *context.store, context.acting_identity, *object, "read", context.authorization_cache);
         if (!decision) {
-            return from_store_error(decision.error());
+            co_return from_store_error(decision.error());
         }
         if (!decision->allowed) {
-            return ApiResult::failure("unauthorized",
-                                      "principal is not allowed to read repository");
+            co_return ApiResult::failure("unauthorized",
+                                         "principal is not allowed to read repository");
         }
     }
-    const auto records = context.store->list_forge_records(
-        input.at("repository_id"), kind, input.value("limit", 100));
+    auto forge = open_forge(input, context);
+    if (!forge) {
+        co_return forge.error();
+    }
+    const auto records =
+        control::settled(co_await forge->list(kind, input.value("limit", 100)));
     if (!records) {
-        return from_store_error(records.error());
+        co_return forge_records_failure(records.error());
     }
     json items = json::array();
     for (const control::ForgeRecord& record : *records) {
@@ -128,130 +188,133 @@ ApiResult list_records(const std::string& kind, const json& input, ApiContext& c
         }
         items.push_back(std::move(output));
     }
-    return ApiResult::success({{"items", std::move(items)}});
+    co_return ApiResult::success({{"items", std::move(items)}});
 }
 
-std::expected<control::ForgeRecord, ApiResult>
-get_kind(const json& input, ApiContext& context, std::string_view kind, std::string_view id_name) {
-    if (!context.store) {
-        return std::unexpected(
-            ApiResult::failure("store_unavailable", "no control-plane store is configured"));
-    }
-    const auto record = context.store->get_forge_record(input.at(std::string(id_name)));
+// This repository's record `id` of `kind`; `not_found` at `/<field>` when there is none.
+ForgeTask<std::expected<control::ForgeRecord, ApiResult>>
+get_kind(RepositoryForge& forge, std::string id, std::string kind, std::string field) {
+    using Result = std::expected<control::ForgeRecord, ApiResult>;
+    const auto record = control::settled(co_await forge.get(std::move(id)));
     if (!record) {
-        return std::unexpected(from_store_error(record.error()));
+        co_return Result(std::unexpected(forge_records_failure(record.error())));
     }
-    if (record->repository_id != input.at("repository_id").get<std::string>() ||
-        record->kind != kind) {
-        return std::unexpected(
-            ApiResult::failure("not_found", "forge record does not match repository"));
+    if (!*record || (*record)->kind != kind) {
+        co_return Result(std::unexpected(ApiResult::failure(
+            "not_found", "forge record does not match repository", "/" + field)));
     }
-    return *record;
+    co_return Result(**record);
 }
 
-ApiResult
-update_record(const control::ForgeRecord& record, const json& changes, ApiContext& context) {
-    json value = record.value;
-    for (const auto& [key, item] : changes.items()) {
-        value[key] = item;
-    }
-    const auto updated = context.store->update_forge_record(record.id, value);
+// Merges `changes` into the record's value, conditionally on the revision read.
+ForgeTask<ApiResult> update_record(RepositoryForge& forge, const control::ForgeRecord& record,
+                                   json changes, ApiContext& context) {
+    const auto updated = control::settled(co_await forge.update(
+        record.id, record.kind, [changes = std::move(changes)](json value) {
+            for (const auto& [key, item] : changes.items()) {
+                value[key] = item;
+            }
+            return value;
+        }));
     if (!updated) {
-        return from_store_error(updated.error());
+        co_return forge_records_failure(updated.error());
     }
-    context.audit_object = "repository/" + record.repository_id;
-    context.audit_details = {{"forge_kind", record.kind}, {"record_id", record.id}};
-    return ApiResult::success(control::to_json(*updated));
+    if (!*updated) {
+        co_return ApiResult::failure("not_found", "forge record does not match repository");
+    }
+    audit_record(context, **updated, forge);
+    co_return ApiResult::success(control::to_json(**updated));
 }
 
-ApiResult create_issue(const json& input, ApiContext& context) {
+ForgeTask<ApiResult> create_kind(std::string kind, const json& input, ApiContext& context) {
+    auto forge = open_forge(input, context);
+    if (!forge) {
+        co_return forge.error();
+    }
+    json value = input;
+    value.erase("repository_id");
+    co_return settled_result(
+        co_await create_record(*forge, std::move(kind), std::move(value), context));
+}
+
+ForgeTask<ApiResult> create_opened(std::string kind, const json& input, ApiContext& context) {
+    auto forge = open_forge(input, context);
+    if (!forge) {
+        co_return forge.error();
+    }
     json value = input;
     value.erase("repository_id");
     value["state"] = "open";
-    return create_record(
-        "issue", {{"repository_id", input.at("repository_id")}, {"value", value}}, context);
+    co_return settled_result(
+        co_await create_record(*forge, std::move(kind), std::move(value), context));
 }
 
-ApiResult update_issue(const json& input, ApiContext& context) {
-    const auto issue = get_kind(input, context, "issue", "issue_id");
-    if (!issue) {
-        return issue.error();
+ForgeTask<ApiResult> update_kind(std::string kind, std::string id_name, const json& input,
+                                 ApiContext& context) {
+    auto forge = open_forge(input, context);
+    if (!forge) {
+        co_return forge.error();
+    }
+    const auto record = settled_record(co_await get_kind(*forge, input.at(id_name), kind, id_name));
+    if (!record) {
+        co_return record.error();
     }
     json changes = input;
     changes.erase("repository_id");
-    changes.erase("issue_id");
-    return update_record(*issue, changes, context);
+    changes.erase(id_name);
+    co_return settled_result(
+        co_await update_record(*forge, *record, std::move(changes), context));
 }
 
-ApiResult create_review(const json& input, ApiContext& context) {
-    json value = input;
-    value.erase("repository_id");
-    value["state"] = "open";
-    return create_record(
-        "review", {{"repository_id", input.at("repository_id")}, {"value", value}}, context);
-}
-
-ApiResult update_review(const json& input, ApiContext& context) {
-    const auto review = get_kind(input, context, "review", "review_id");
-    if (!review) {
-        return review.error();
+// A comment on this repository's issue or review: the parent must exist here.
+ForgeTask<ApiResult> create_comment(std::string kind, std::string parent_kind,
+                                    std::string parent_id, const json& input,
+                                    ApiContext& context) {
+    if (kind == "review_comment") {
+        const json& anchor = input.at("anchor");
+        if (!anchor.contains("change") || !anchor.contains("path") || !anchor.contains("line") ||
+            !anchor.contains("column") || !anchor.at("change").is_string() ||
+            !anchor.at("path").is_string() || !anchor.at("line").is_number_integer() ||
+            !anchor.at("column").is_number_integer() ||
+            anchor.at("line").get<std::int64_t>() < 0 ||
+            anchor.at("column").get<std::int64_t>() < 0) {
+            co_return ApiResult::failure(
+                "invalid_input", "anchor requires change, path, line, and column", "/anchor");
+        }
     }
-    json changes = input;
-    changes.erase("repository_id");
-    changes.erase("review_id");
-    return update_record(*review, changes, context);
-}
-
-ApiResult create_issue_comment(const json& input, ApiContext& context) {
-    const auto issue = get_kind(input, context, "issue", "issue_id");
-    if (!issue) {
-        return issue.error();
+    auto forge = open_forge(input, context);
+    if (!forge) {
+        co_return forge.error();
     }
-    json value = input;
-    value.erase("repository_id");
-    return create_record(
-        "issue_comment", {{"repository_id", input.at("repository_id")}, {"value", value}}, context);
-}
-
-ApiResult create_review_comment(const json& input, ApiContext& context) {
-    const auto review = get_kind(input, context, "review", "review_id");
-    if (!review) {
-        return review.error();
-    }
-    const json& anchor = input.at("anchor");
-    if (!anchor.contains("change") || !anchor.contains("path") || !anchor.contains("line") ||
-        !anchor.contains("column") || !anchor.at("change").is_string() ||
-        !anchor.at("path").is_string() || !anchor.at("line").is_number_integer() ||
-        !anchor.at("column").is_number_integer() || anchor.at("line").get<std::int64_t>() < 0 ||
-        anchor.at("column").get<std::int64_t>() < 0) {
-        return ApiResult::failure(
-            "invalid_input", "anchor requires change, path, line, and column", "/anchor");
+    const auto parent = settled_record(
+        co_await get_kind(*forge, input.at(parent_id), parent_kind, parent_id));
+    if (!parent) {
+        co_return parent.error();
     }
     json value = input;
     value.erase("repository_id");
-    return create_record("review_comment",
-                         {{"repository_id", input.at("repository_id")}, {"value", value}},
-                         context);
+    co_return settled_result(
+        co_await create_record(*forge, std::move(kind), std::move(value), context));
 }
 
-ApiResult create_release(const json& input, ApiContext& context) {
+ForgeTask<ApiResult> create_release(const json& input, ApiContext& context) {
     if (!context.store) {
-        return ApiResult::failure("store_unavailable", "no control-plane store is configured");
+        co_return ApiResult::failure("store_unavailable", "no control-plane store is configured");
     }
     if (!context.sync_store) {
-        return ApiResult::failure("store_unavailable", "no repository store is configured");
+        co_return ApiResult::failure("store_unavailable", "no repository store is configured");
     }
-    const std::string repository_id = input.at("repository_id").get<std::string>();
-    const auto repository = context.store->get_repository(repository_id);
-    if (!repository) {
-        return from_store_error(repository.error());
+    auto forge = open_forge(input, context);
+    if (!forge) {
+        co_return forge.error();
     }
+    const control::Repository& repository = forge->repository();
     json artifacts = json::array();
     for (const json& artifact_id : input.at("artifact_ids")) {
         const auto artifact = context.sync_store->repository_artifact(
-            repository->customer_id, repository_id, artifact_id.get<std::string>());
+            repository.customer_id, repository.id, artifact_id.get<std::string>());
         if (!artifact) {
-            return ApiResult::failure(artifact.error().code, artifact.error().message);
+            co_return ApiResult::failure(artifact.error().code, artifact.error().message);
         }
         json attestations = json::array();
         for (const RepositoryArtifactAttestation& attestation : artifact->attestations) {
@@ -264,7 +327,7 @@ ApiResult create_release(const json& input, ApiContext& context) {
                                     {"issuer", attestation.issuer}});
         }
         if (attestations.empty()) {
-            return ApiResult::failure(
+            co_return ApiResult::failure(
                 "conflict", "release artifact has no verified attestation", "/artifact_ids");
         }
         artifacts.push_back({{"id", artifact->id},
@@ -278,17 +341,17 @@ ApiResult create_release(const json& input, ApiContext& context) {
     value["artifacts"] = std::move(artifacts);
     if (context.search) {
         const auto published =
-            context.search->publish(search::Publish{repository->customer_id,
-                                                    repository_id,
+            context.search->publish(search::Publish{repository.customer_id,
+                                                    repository.id,
                                                     input.at("tag").get<std::string>(),
                                                     input.at("change_id").get<std::string>(),
                                                     search::PublicationKind::TagSnapshot});
         if (!published) {
-            return ApiResult::failure(published.error().code, published.error().message);
+            co_return ApiResult::failure(published.error().code, published.error().message);
         }
     }
-    return create_record(
-        "release", {{"repository_id", repository_id}, {"value", std::move(value)}}, context);
+    co_return settled_result(
+        co_await create_record(*forge, "release", std::move(value), context));
 }
 
 std::string webhook_signature(std::string_view secret, std::string_view payload) {
@@ -317,12 +380,11 @@ bool webhook_accepts_event(const control::ForgeRecord& webhook, const std::strin
     });
 }
 
-std::expected<control::ForgeRecord, ApiResult>
-record_webhook_attempt(const control::ForgeRecord& webhook,
-                       const std::string& event,
-                       const json& payload,
-                       int attempt,
-                       ApiContext& context) {
+// Sends one signed event to `webhook` and records the attempt in the repository's workspace.
+ForgeTask<std::expected<control::ForgeRecord, ApiResult>>
+record_webhook_attempt(RepositoryForge& forge, const control::ForgeRecord& webhook,
+                       std::string event, json payload, int attempt, ApiContext& context) {
+    using Result = std::expected<control::ForgeRecord, ApiResult>;
     const std::string encoded_payload = payload.dump();
     const std::string signature =
         webhook_signature(webhook.value.value("secret", ""), encoded_payload);
@@ -336,32 +398,26 @@ record_webhook_attempt(const control::ForgeRecord& webhook,
     }
     const bool delivered =
         delivery.error.empty() && delivery.status >= 200 && delivery.status < 300;
-    const auto record =
-        context.store->create_forge_record(control::NewForgeRecord{webhook.repository_id,
-                                                                   "webhook_delivery",
-                                                                   {{"webhook_id", webhook.id},
-                                                                    {"event", event},
-                                                                    {"payload", payload},
-                                                                    {"signature", signature},
-                                                                    {"attempt", attempt},
-                                                                    {"status", delivery.status},
-                                                                    {"error", delivery.error},
-                                                                    {"delivered", delivered}}});
+    const auto record = control::settled(co_await forge.create("webhook_delivery",
+                                                               {{"webhook_id", webhook.id},
+                                                                {"event", event},
+                                                                {"payload", payload},
+                                                                {"signature", signature},
+                                                                {"attempt", attempt},
+                                                                {"status", delivery.status},
+                                                                {"error", delivery.error},
+                                                                {"delivered", delivered}}));
     if (!record) {
-        return std::unexpected(from_store_error(record.error()));
+        co_return Result(std::unexpected(forge_records_failure(record.error())));
     }
-    return *record;
+    co_return Result(*record);
 }
 
-void deliver_event(const std::string& event,
-                   const control::ForgeRecord& subject,
-                   ApiContext& context) {
-    if (!context.store) {
-        return;
-    }
-    const auto webhooks = context.store->list_forge_records(subject.repository_id, "webhook", 1000);
+ForgeTask<void> deliver_event(const std::string& event, const control::ForgeRecord& subject,
+                              RepositoryForge& forge, ApiContext& context) {
+    const auto webhooks = control::settled(co_await forge.list("webhook", 1000));
     if (!webhooks) {
-        return;
+        co_return {};
     }
     const json payload = {{"event", event},
                           {"repository_id", subject.repository_id},
@@ -370,55 +426,62 @@ void deliver_event(const std::string& event,
         if (!webhook_accepts_event(webhook, event)) {
             continue;
         }
-        static_cast<void>(record_webhook_attempt(webhook, event, payload, 1, context));
+        static_cast<void>(
+            co_await record_webhook_attempt(forge, webhook, event, payload, 1, context));
     }
+    co_return {};
 }
 
-ApiResult deliver_webhook(const json& input, ApiContext& context) {
-    const auto webhook = get_kind(input, context, "webhook", "webhook_id");
+ForgeTask<ApiResult> deliver_webhook(const json& input, ApiContext& context) {
+    auto forge = open_forge(input, context);
+    if (!forge) {
+        co_return forge.error();
+    }
+    const auto webhook = settled_record(
+        co_await get_kind(*forge, input.at("webhook_id"), "webhook", "webhook_id"));
     if (!webhook) {
-        return webhook.error();
+        co_return webhook.error();
     }
     if (!webhook_accepts_event(*webhook, input.at("event").get<std::string>())) {
-        return ApiResult::failure("conflict", "webhook does not subscribe to this event", "/event");
+        co_return ApiResult::failure(
+            "conflict", "webhook does not subscribe to this event", "/event");
     }
-    const auto delivery = record_webhook_attempt(
-        *webhook, input.at("event").get<std::string>(), input.at("payload"), 1, context);
+    const auto delivery = settled_record(co_await record_webhook_attempt(
+        *forge, *webhook, input.at("event").get<std::string>(), input.at("payload"), 1, context));
     if (!delivery) {
-        return delivery.error();
+        co_return delivery.error();
     }
-    context.audit_object = "repository/" + webhook->repository_id;
-    context.audit_details = {{"forge_kind", "webhook_delivery"}, {"record_id", delivery->id}};
-    return ApiResult::success(control::to_json(*delivery));
+    audit_record(context, *delivery, *forge);
+    co_return ApiResult::success(control::to_json(*delivery));
 }
 
-ApiResult retry_webhook_delivery(const json& input, ApiContext& context) {
-    const auto delivery = get_kind(input, context, "webhook_delivery", "delivery_id");
+ForgeTask<ApiResult> retry_webhook_delivery(const json& input, ApiContext& context) {
+    auto forge = open_forge(input, context);
+    if (!forge) {
+        co_return forge.error();
+    }
+    const auto delivery = settled_record(
+        co_await get_kind(*forge, input.at("delivery_id"), "webhook_delivery", "delivery_id"));
     if (!delivery) {
-        return delivery.error();
+        co_return delivery.error();
     }
     if (delivery->value.value("delivered", false)) {
-        return ApiResult::failure("conflict", "delivered webhook events are not retried");
+        co_return ApiResult::failure("conflict", "delivered webhook events are not retried");
     }
-    const auto webhook_id = delivery->value.value("webhook_id", "");
-    const auto webhook = context.store->get_forge_record(webhook_id);
+    const auto webhook = settled_record(co_await get_kind(
+        *forge, delivery->value.value("webhook_id", ""), "webhook", "delivery_id"));
     if (!webhook) {
-        return from_store_error(webhook.error());
+        co_return ApiResult::failure("not_found", "delivery webhook does not match repository");
     }
-    if (webhook->repository_id != delivery->repository_id || webhook->kind != "webhook") {
-        return ApiResult::failure("not_found", "delivery webhook does not match repository");
-    }
-    const auto retried = record_webhook_attempt(*webhook,
-                                                delivery->value.value("event", ""),
-                                                delivery->value.value("payload", json::object()),
-                                                delivery->value.value("attempt", 0) + 1,
-                                                context);
+    const auto retried = settled_record(
+        co_await record_webhook_attempt(*forge, *webhook, delivery->value.value("event", ""),
+                                        delivery->value.value("payload", json::object()),
+                                        delivery->value.value("attempt", 0) + 1, context));
     if (!retried) {
-        return retried.error();
+        co_return retried.error();
     }
-    context.audit_object = "repository/" + webhook->repository_id;
-    context.audit_details = {{"forge_kind", "webhook_delivery"}, {"record_id", retried->id}};
-    return ApiResult::success(control::to_json(*retried));
+    audit_record(context, *retried, *forge);
+    co_return ApiResult::success(control::to_json(*retried));
 }
 
 json map_anchor(json anchor, const json& hunks, const std::string& target_change) {
@@ -447,6 +510,52 @@ json map_anchor(json anchor, const json& hunks, const std::string& target_change
     anchor["change"] = target_change;
     anchor["disposition"] = disposition == "same" && shift != 0 ? "shifted" : disposition;
     return anchor;
+}
+
+ForgeTask<ApiResult> map_review_anchors(const json& input, ApiContext& context) {
+    auto forge = open_forge(input, context);
+    if (!forge) {
+        co_return forge.error();
+    }
+    const auto records = control::settled(co_await forge->list("review_comment", 1000));
+    if (!records) {
+        co_return forge_records_failure(records.error());
+    }
+    const std::string source_change = input.at("source_change");
+    const std::string path = input.at("path");
+    const std::string target_change = input.at("target_change");
+    json items = json::array();
+    for (const control::ForgeRecord& record : *records) {
+        if (!record.value.contains("anchor") || !record.value["anchor"].is_object() ||
+            record.value["anchor"].value("change", "") != source_change ||
+            record.value["anchor"].value("path", "") != path) {
+            continue;
+        }
+        const auto updated = control::settled(co_await forge->update(
+            record.id, record.kind,
+            [&input, &target_change, &source_change, &path](json value) {
+                // Reread under the revision: map only an anchor still at the source location.
+                if (value.contains("anchor") && value["anchor"].is_object() &&
+                    value["anchor"].value("change", "") == source_change &&
+                    value["anchor"].value("path", "") == path) {
+                    value["anchor"] = map_anchor(value["anchor"], input.at("hunks"),
+                                                 target_change);
+                }
+                return value;
+            }));
+        if (!updated) {
+            co_return forge_records_failure(updated.error());
+        }
+        if (*updated) {
+            items.push_back(control::to_json(**updated));
+        }
+    }
+    context.audit_customer_id = forge->repository().customer_id;
+    context.audit_object = "repository/" + forge->repository().id;
+    context.audit_details = {{"forge_kind", "review_comment"},
+                             {"mapped", items.size()},
+                             {"workspace_id", forge->repository().workspace_id}};
+    co_return ApiResult::success({{"items", std::move(items)}});
 }
 
 // What each forge list and create capability does for the person calling it (lake#450).
@@ -492,13 +601,9 @@ void add_create(Registry& registry,
                    .object = "repository",
                    .action = "write",
                    .resolve_object = repository_object,
-                   .handler = [kind = std::move(kind)](const json& input, ApiContext& context) {
-                       json value = input;
-                       value.erase("repository_id");
-                       return create_record(kind,
-                                            {{"repository_id", input.at("repository_id")},
-                                             {"value", std::move(value)}},
-                                            context);
+                   .async_handler = [kind = std::move(kind)](const json& input,
+                                                             ApiContext& context) {
+                       return create_kind(kind, input, context);
                    }});
 }
 
@@ -520,7 +625,7 @@ void add_list(Registry& registry,
         .resolve_object = repository_object,
         .authorizes_candidates = true,
         .allows_anonymous_public_read = allows_anonymous_public_read,
-        .handler = [kind = std::move(kind)](const json& input, ApiContext& context) {
+        .async_handler = [kind = std::move(kind)](const json& input, ApiContext& context) {
             return list_records(kind, input, context);
         }});
 }
@@ -570,12 +675,16 @@ bool verified_release(const std::vector<control::ForgeRecord>& records,
     });
 }
 
-ApiResult set_branch_protection(const json& input, ApiContext& context) {
+ForgeTask<ApiResult> set_branch_protection(const json& input, ApiContext& context) {
     const std::string repository_id = input.at("repository_id").get<std::string>();
     const std::string ref = input.at("ref").get<std::string>();
+    auto forge = open_forge(input, context);
+    if (!forge) {
+        co_return forge.error();
+    }
     const auto repository = context.store->find_policy_object("repository", repository_id);
     if (!repository) {
-        return from_store_error(repository.error());
+        co_return from_store_error(repository.error());
     }
     const std::string key = branch_policy_key(repository_id, ref);
     auto policy = context.store->find_policy_object("path", key);
@@ -584,51 +693,83 @@ ApiResult set_branch_protection(const json& input, ApiContext& context) {
             "path", key, repository->id, context.acting_identity, context.request_id, true});
     }
     if (!policy) {
-        return from_store_error(policy.error());
+        co_return from_store_error(policy.error());
     }
     json value = input;
     value.erase("repository_id");
     value["policy_object_id"] = policy->id;
-    const auto rules = context.store->list_forge_records(repository_id, "branch_protection", 1000);
+    const auto rules = control::settled(co_await forge->list("branch_protection", 1000));
     if (!rules) {
-        return from_store_error(rules.error());
+        co_return forge_records_failure(rules.error());
     }
     for (const control::ForgeRecord& rule : *rules) {
         if (rule.value.value("ref", "") != ref) {
             continue;
         }
-        return update_record(rule, value, context);
+        co_return settled_result(
+            co_await update_record(*forge, rule, std::move(value), context));
     }
-    return create_record(
-        "branch_protection", {{"repository_id", repository_id}, {"value", value}}, context);
+    co_return settled_result(
+        co_await create_record(*forge, "branch_protection", std::move(value), context));
 }
 
 } // namespace
+
+liquid::runtime::task<std::expected<BranchProtectionRecords, SyncStoreError>>
+load_branch_protection(ApiContext& context, control::Repository repository) {
+    using Result = std::expected<BranchProtectionRecords, SyncStoreError>;
+    const auto refused = [](std::string code, std::string message) {
+        return Result(std::unexpected(
+            SyncStoreError{std::move(code), "branch protection is unavailable: " +
+                                                std::move(message), "branch protection"}));
+    };
+    // A lake that serves no workspace Zettas (no workspace service configured) keeps no forge
+    // records anywhere, so there are no rules to apply. Every other case reads the repository's
+    // workspace, and an unreadable workspace refuses the push's reference updates.
+    if (!context.workspaces) {
+        co_return Result(BranchProtectionRecords{});
+    }
+    auto forge = RepositoryForge::open(context, std::move(repository));
+    if (!forge) {
+        co_return refused(forge.error().code, forge.error().message);
+    }
+    BranchProtectionRecords records;
+    auto rules = control::settled(co_await forge->list("branch_protection", 1000));
+    if (!rules) {
+        co_return refused(rules.error().code, rules.error().message);
+    }
+    records.rules = std::move(*rules);
+    const auto any_rule = [&records](std::string_view field) {
+        return std::ranges::any_of(records.rules, [field](const control::ForgeRecord& rule) {
+            return rule.value.value(std::string(field), false);
+        });
+    };
+    // Reviews and releases are read only when a rule asks for them.
+    if (any_rule("required_review")) {
+        auto reviews = control::settled(co_await forge->list("review", 1000));
+        if (!reviews) {
+            co_return refused(reviews.error().code, reviews.error().message);
+        }
+        records.reviews = std::move(*reviews);
+    }
+    if (any_rule("required_verification")) {
+        auto releases = control::settled(co_await forge->list("release", 1000));
+        if (!releases) {
+            co_return refused(releases.error().code, releases.error().message);
+        }
+        records.releases = std::move(*releases);
+    }
+    co_return Result(std::move(records));
+}
 
 SyncStoreResult<BranchProtectionEvaluation>
 evaluate_branch_protection(control::Store& store,
                            const std::string& acting_identity,
                            control::AuthorizationCache& authorization_cache,
-                           const control::Repository& repository,
+                           const BranchProtectionRecords& records,
                            const BranchRefUpdate& update) {
-    const std::string& repository_id = repository.id;
-    const auto rules = store.list_forge_records(repository_id, "branch_protection", 1000);
-    if (!rules) {
-        return std::unexpected(
-            SyncStoreError{rules.error().code, rules.error().message, update.name});
-    }
-    const auto reviews = store.list_forge_records(repository_id, "review", 1000);
-    if (!reviews) {
-        return std::unexpected(
-            SyncStoreError{reviews.error().code, reviews.error().message, update.name});
-    }
-    const auto releases = store.list_forge_records(repository_id, "release", 1000);
-    if (!releases) {
-        return std::unexpected(
-            SyncStoreError{releases.error().code, releases.error().message, update.name});
-    }
     BranchProtectionEvaluation evaluation;
-    for (const control::ForgeRecord& rule : *rules) {
+    for (const control::ForgeRecord& rule : records.rules) {
         const std::string rule_ref = rule.value.value("ref", "");
         if (!branch_matches(rule_ref, update.name)) {
             continue;
@@ -665,7 +806,7 @@ evaluate_branch_protection(control::Store& store,
             }
         }
         if (rule.value.value("required_review", false) &&
-            !approved_review(*reviews, update.new_head)) {
+            !approved_review(records.reviews, update.new_head)) {
             return std::unexpected(SyncStoreError{"conflict",
                                                   "branch protection rejects " + update.name +
                                                       ": an approved review is required",
@@ -673,7 +814,7 @@ evaluate_branch_protection(control::Store& store,
                                                   "required_review"});
         }
         if (rule.value.value("required_verification", false) &&
-            !verified_release(*releases, update.new_head)) {
+            !verified_release(records.releases, update.new_head)) {
             return std::unexpected(SyncStoreError{"conflict",
                                                   "branch protection rejects " + update.name +
                                                       ": verified build evidence is required",
@@ -701,7 +842,9 @@ void register_forge_capabilities(Registry& registry) {
         .object = "repository",
         .action = "write",
         .resolve_object = repository_object,
-        .handler = create_issue});
+        .async_handler = [](const json& input, ApiContext& context) {
+            return create_opened("issue", input, context);
+        }});
     add_list(registry, "list_issues", "List issues", "issue", true);
     registry.add(
         Capability{.name = "update_issue",
@@ -721,7 +864,9 @@ void register_forge_capabilities(Registry& registry) {
                    .object = "repository",
                    .action = "write",
                    .resolve_object = repository_object,
-                   .handler = update_issue});
+                   .async_handler = [](const json& input, ApiContext& context) {
+                       return update_kind("issue", "issue_id", input, context);
+                   }});
     registry.add(Capability{
         .name = "create_issue_comment",
         .title = "Comment on issue",
@@ -735,7 +880,9 @@ void register_forge_capabilities(Registry& registry) {
         .object = "repository",
         .action = "write",
         .resolve_object = repository_object,
-        .handler = create_issue_comment});
+        .async_handler = [](const json& input, ApiContext& context) {
+            return create_comment("issue_comment", "issue", "issue_id", input, context);
+        }});
     add_list(registry, "list_issue_comments", "List issue comments", "issue_comment", true);
 
     registry.add(Capability{.name = "create_review",
@@ -749,7 +896,9 @@ void register_forge_capabilities(Registry& registry) {
                             .object = "repository",
                             .action = "write",
                             .resolve_object = repository_object,
-                            .handler = create_review});
+                            .async_handler = [](const json& input, ApiContext& context) {
+                                return create_opened("review", input, context);
+                            }});
     add_list(registry, "list_reviews", "List change reviews", "review", true);
     registry.add(Capability{
         .name = "update_review",
@@ -766,7 +915,9 @@ void register_forge_capabilities(Registry& registry) {
         .object = "repository",
         .action = "write",
         .resolve_object = repository_object,
-        .handler = update_review});
+        .async_handler = [](const json& input, ApiContext& context) {
+            return update_kind("review", "review_id", input, context);
+        }});
     registry.add(
         Capability{.name = "create_review_comment",
                    .title = "Comment on reviewed change",
@@ -780,7 +931,10 @@ void register_forge_capabilities(Registry& registry) {
                    .object = "repository",
                    .action = "write",
                    .resolve_object = repository_object,
-                   .handler = create_review_comment});
+                   .async_handler = [](const json& input, ApiContext& context) {
+                       return create_comment("review_comment", "review", "review_id", input,
+                                             context);
+                   }});
     add_list(registry, "list_review_comments", "List review comments", "review_comment", true);
 
     registry.add(Capability{
@@ -798,33 +952,7 @@ void register_forge_capabilities(Registry& registry) {
         .object = "repository",
         .action = "write",
         .resolve_object = repository_object,
-        .handler = [](const json& input, ApiContext& context) {
-            const auto records = context.store->list_forge_records(
-                input.at("repository_id"), "review_comment", 1000);
-            if (!records) {
-                return from_store_error(records.error());
-            }
-            json items = json::array();
-            for (const control::ForgeRecord& record : *records) {
-                json value = record.value;
-                if (!value.contains("anchor") || !value["anchor"].is_object()) {
-                    continue;
-                }
-                if (value["anchor"].value("change", "") !=
-                        input.at("source_change").get<std::string>() ||
-                    value["anchor"].value("path", "") != input.at("path").get<std::string>()) {
-                    continue;
-                }
-                value["anchor"] =
-                    map_anchor(value["anchor"], input.at("hunks"), input.at("target_change"));
-                const auto updated = context.store->update_forge_record(record.id, value);
-                if (!updated) {
-                    return from_store_error(updated.error());
-                }
-                items.push_back(control::to_json(*updated));
-            }
-            return ApiResult::success({{"items", std::move(items)}});
-        }});
+        .async_handler = map_review_anchors});
 
     registry.add(Capability{.name = "create_release",
                             .title = "Create release",
@@ -839,7 +967,7 @@ void register_forge_capabilities(Registry& registry) {
                             .object = "repository",
                             .action = "write",
                             .resolve_object = repository_object,
-                            .handler = create_release});
+                            .async_handler = create_release});
     add_list(registry, "list_releases", "List releases", "release", true);
     add_create(registry,
                "create_webhook",
@@ -864,7 +992,7 @@ void register_forge_capabilities(Registry& registry) {
         .object = "repository",
         .action = "write",
         .resolve_object = repository_object,
-        .handler = deliver_webhook});
+        .async_handler = deliver_webhook});
     registry.add(
         Capability{.name = "retry_webhook_delivery",
                    .title = "Retry webhook delivery",
@@ -876,7 +1004,7 @@ void register_forge_capabilities(Registry& registry) {
                    .object = "repository",
                    .action = "write",
                    .resolve_object = repository_object,
-                   .handler = retry_webhook_delivery});
+                   .async_handler = retry_webhook_delivery});
     add_list(registry, "list_webhook_deliveries", "List webhook deliveries", "webhook_delivery");
     add_list(registry, "list_exports", "List exports", "export");
 
@@ -895,9 +1023,161 @@ void register_forge_capabilities(Registry& registry) {
         .object = "repository",
         .action = "admin",
         .resolve_object = repository_object,
-        .handler = set_branch_protection,
+        .async_handler = set_branch_protection,
     });
     add_list(registry, "list_branch_protections", "List branch protections", "branch_protection");
+}
+
+std::expected<control::Repository, ApiError> forge_repository(const ApiContext& context,
+                                                              const std::string& repository_id) {
+    if (!context.store) {
+        return std::unexpected(
+            ApiError{"store_unavailable", "no control-plane store is configured", {}});
+    }
+    auto repository = context.store->get_repository(repository_id);
+    if (!repository) {
+        return std::unexpected(
+            ApiError{repository.error().code, repository.error().message, "/repository_id"});
+    }
+    return std::move(*repository);
+}
+
+ApiResult forge_records_failure(const control::ZettaControlError& error) {
+    return ApiResult::failure(error.code, error.message);
+}
+
+std::expected<RepositoryForge, ApiError> RepositoryForge::open(const ApiContext& context,
+                                                               control::Repository repository) {
+    if (repository.workspace_id.empty()) {
+        return std::unexpected(ApiError{"conflict",
+                                        "the repository has no workspace yet, so it has nowhere "
+                                        "to keep forge records; an operator must assign one",
+                                        "/repository_id"});
+    }
+    auto records = workspace_records(context, repository.customer_id, repository.workspace_id);
+    if (!records) {
+        return std::unexpected(ApiError{records.error().code, records.error().message, {}});
+    }
+    return RepositoryForge(std::move(*records), std::move(repository));
+}
+
+RepositoryForge::Task<control::ForgeRecord>
+RepositoryForge::create(std::string kind, nlohmann::json value, control::RecordWrite write) {
+    using Result = control::ZettaControlResult<control::ForgeRecord>;
+    if (!control::is_forge_record_kind(kind) || !value.is_object()) {
+        co_return Result(std::unexpected(control::ZettaControlError{
+            "invalid_input", "forge record kind and object value are required"}));
+    }
+    control::ForgeRecord record;
+    record.repository_id = repository_.id;
+    record.kind = std::move(kind);
+    record.value = std::move(value);
+    control::ForgeRecords set(records_);
+    co_return control::settled(co_await set.append(std::move(record), std::move(write)));
+}
+
+RepositoryForge::Task<control::ForgeRecord> RepositoryForge::copy(control::ForgeRecord record) {
+    record.repository_id = repository_.id;
+    control::ForgeRecords set(records_);
+    const control::RecordWrite write{record.id, record.at_us};
+    co_return control::settled(co_await set.append(std::move(record), write));
+}
+
+RepositoryForge::Task<std::vector<control::ForgeRecord>> RepositoryForge::list(std::string kind,
+                                                                               int limit) {
+    using Result = control::ZettaControlResult<std::vector<control::ForgeRecord>>;
+    std::vector<std::string_view> kinds;
+    if (kind.empty()) {
+        kinds.assign(control::forge_record_kinds.begin(), control::forge_record_kinds.end());
+    } else if (control::is_forge_record_kind(kind)) {
+        kinds.push_back(kind);
+    }
+    const std::size_t newest = limit > 0 ? static_cast<std::size_t>(limit) : 0;
+    control::ForgeRecords set(records_);
+    std::vector<control::ForgeRecord> output;
+    for (const std::string_view each : kinds) {
+        auto listed = control::settled(
+            co_await set.list(control::forge_record_lookup(repository_.id, each), newest));
+        if (!listed) {
+            co_return Result(std::unexpected(listed.error()));
+        }
+        for (control::ForgeRecord& record : *listed) {
+            if (record.repository_id == repository_.id && record.kind == each) {
+                output.push_back(std::move(record));
+            }
+        }
+    }
+    std::ranges::sort(output, [](const control::ForgeRecord& left,
+                                 const control::ForgeRecord& right) {
+        return left.at_us != right.at_us ? left.at_us > right.at_us : left.id > right.id;
+    });
+    if (newest != 0 && output.size() > newest) {
+        output.resize(newest);
+    }
+    co_return Result(std::move(output));
+}
+
+RepositoryForge::Task<std::optional<control::ForgeRecord>> RepositoryForge::get(std::string id) {
+    using Found = std::optional<control::ForgeRecord>;
+    using Result = control::ZettaControlResult<Found>;
+    if (!uuid_shaped(id)) {
+        co_return Result(Found{});
+    }
+    auto stored =
+        control::settled(co_await records_.get(control::ForgeRecordCodec::collection, id));
+    if (!stored) {
+        co_return Result(std::unexpected(stored.error()));
+    }
+    if (!*stored) {
+        co_return Result(Found{});
+    }
+    auto decoded = control::ForgeRecordCodec::decode(**stored);
+    if (!decoded || decoded->repository_id != repository_.id) {
+        co_return Result(Found{});
+    }
+    co_return Result(std::move(decoded));
+}
+
+RepositoryForge::Task<std::optional<control::ForgeRecord>>
+RepositoryForge::update(std::string id, std::string kind,
+                        std::function<nlohmann::json(nlohmann::json)> change, int attempts) {
+    using Found = std::optional<control::ForgeRecord>;
+    using Result = control::ZettaControlResult<Found>;
+    control::ZettaControlError last{"conflict", "the forge record kept changing"};
+    for (int attempt = 0; attempt < std::max(attempts, 1); ++attempt) {
+        auto current = control::settled(co_await get(id));
+        if (!current) {
+            co_return Result(std::unexpected(current.error()));
+        }
+        if (!*current || (*current)->kind != kind) {
+            co_return Result(Found{});
+        }
+        control::ForgeRecord next = **current;
+        next.value = change(next.value);
+        if (!next.value.is_object()) {
+            co_return Result(std::unexpected(control::ZettaControlError{
+                "invalid_input", "forge record value must be an object"}));
+        }
+        next.updated_at = control::record_instant(now_us());
+        auto written = control::settled(co_await records_.put(
+            control::ForgeRecordCodec::collection, id, control::ForgeRecordCodec::lookup(next),
+            control::ForgeRecordCodec::encode(next),
+            control::RecordCondition{.if_revision = (*current)->revision},
+            (*current)->lake_revision + 1, (*current)->at_us));
+        if (written) {
+            auto decoded = control::ForgeRecordCodec::decode(*written);
+            if (!decoded) {
+                co_return Result(std::unexpected(control::ZettaControlError{
+                    "store_error", "the stored forge record did not decode"}));
+            }
+            co_return Result(std::move(decoded));
+        }
+        if (written.error().code != "conflict") {
+            co_return Result(std::unexpected(written.error()));
+        }
+        last = written.error(); // someone else wrote first: reread and apply the change again
+    }
+    co_return Result(std::unexpected(last));
 }
 
 } // namespace lake::api

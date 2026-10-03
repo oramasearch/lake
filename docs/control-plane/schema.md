@@ -167,7 +167,7 @@ never stores an unwrapped repository key. The API and security consequences are 
 
 | Table | Purpose |
 |---|---|
-| `forge_records` | Versioned, repository-owned issue, review, release, webhook, branch-protection, export, and GitHub-import facts. |
+| `forge_records` | Retired by `0054_forge_record_workspaces` (lake#341): forge records live in the workspace Zetta of their repository's workspace, and this table is read only by the one-shot copy until a later migration drops it. It held the versioned, repository-owned issue, review, release, webhook, branch-protection, export, and GitHub-import facts. |
 | `forge_guard` | Guard table for the migration. |
 
 The `value` column is a JSON object with a versioned application shape. This deliberately keeps a
@@ -635,3 +635,16 @@ UUID, since neither table has an id column; lake computes the same. Usage rows w
 (only the retired gauge and compute) are not assigned. No column is added and nothing is dropped;
 `metering_guard` stays. Idempotent; guard `metering_workspaces_guard`. The operator reads neither
 table, but vendors the schema and selects that guard before the binary is deployed.
+
+## Forge record workspaces migration
+
+`0054_forge_record_workspaces` (lake#341) retires `forge_records`: lake no longer writes or reads
+it. Each forge record lives in the workspace Zetta of its repository's workspace
+([`../api/forge.md`](../api/forge.md#where-forge-records-live)). The migration only records each
+row's owner in `workspace_assignments` for the operator's copy: its repository's workspace
+(`repository_workspace`); `needs_selection` while the repository has no workspace (`0051` could not
+assign it), which the copy's rerun of the assignment resolves once the repository is assigned; or
+`workspace_deleted` when that workspace is gone, which does not hold the copy back. Each unresolved
+row is reported by a warning. No column is added and nothing is dropped. Idempotent; guard
+`forge_record_workspaces_guard`. The operator reads no forge table, but vendors the schema and
+selects that guard before the binary is deployed.

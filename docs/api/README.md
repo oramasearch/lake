@@ -259,7 +259,10 @@ The binary sync operations use `/v1/repositories/<repository-id>/sync/*` rather 
 `/v1/<capability>` mapping. Their OpenAPI operations are generated from registry entries, and the
 complete wire contract, including Liquid #192's server-derived per-reference authorization,
 outcome context, and branch-protection enforcement, is mirrored in [`sync.md`](sync.md) and
-[`forge.md`](forge.md).
+[`forge.md`](forge.md). Forge records (issues, reviews, comments, releases, webhooks, exports and
+branch protection rules) live in the workspace Zetta of the repository's workspace (lake#341): a
+repository without a workspace is `conflict` at `/repository_id`, and a push reads its branch
+protection there before it starts ([forge.md](forge.md#where-forge-records-live)).
 
 OAuth providers return the browser to `GET /v1/oauth/<provider>/callback`. This callback is the
 documented provider-facing route outside the registry; it consumes one-use state and issues the

@@ -67,6 +67,11 @@ writes; `Store` keeps only the legacy reads of the retired `opportunities` table
 bearer token format `<workspace id>.<link id>.<secret>` that routes a recipient to the workspace.
 `Store` keeps only the content-free route of a pre-move token (`drive_share_link_route`) and the
 legacy reads of `drive_share_links` for the copy (`LegacyDriveShareLink`).
+`forge_records.hpp` is the forge record codec (lake#341): a mutable record per issue, comment,
+review, release, webhook, delivery, export or rule, in the workspace of its repository's workspace,
+keyed by its id and found by repository and kind (`forge_record_lookup`). `ForgeRecord` carries the
+engine and lake revisions; `Store` keeps only the legacy reads of `forge_records` for the copy
+(`LegacyForgeRecord`).
 `application_webhook_records.hpp` holds the application
 event and delivery-attempt codecs and the claim/settle pair that sends each attempt once
 (lake#356, lake#357); `apps.hpp` gives `Application` its `workspace_id` and declares the
