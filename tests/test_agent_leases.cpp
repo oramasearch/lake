@@ -370,14 +370,17 @@ TEST_P(AgentLeases, MigrationAdoptsLegacyClaimsAndPreservesExistingLeases) {
     {
         pqxx::work tx(connection);
         tx.exec(schema.substr(begin));
-        tx.exec("SET LOCAL enable_seqscan = off");
-        const auto plan = tx.exec("EXPLAIN SELECT task_id FROM agent_task_status "
-                                  "WHERE phase = 'Running' AND lease_until < now()");
-        std::string lines;
-        for (const auto& row : plan) {
-            lines += row[0].as<std::string>();
-        }
-        EXPECT_NE(lines.find("agent_task_status_lease_idx"), std::string::npos);
+        // The expiry scan has its partial index after the migration is replayed. Asserting the
+        // index itself, not a query plan: which plan Postgres picks depends on table statistics,
+        // so a plan check failed intermittently and then consistently as the schema grew.
+        const auto index = tx.exec("SELECT indexdef FROM pg_indexes WHERE tablename = "
+                                   "'agent_task_status' AND indexname = "
+                                   "'agent_task_status_lease_idx'");
+        ASSERT_EQ(index.size(), 1u);
+        const std::string definition = index[0][0].as<std::string>();
+        EXPECT_NE(definition.find("(lease_until)"), std::string::npos) << definition;
+        EXPECT_NE(definition.find("WHERE (phase = 'Running'::text)"), std::string::npos)
+            << definition;
         tx.commit();
     }
     const auto after = store->get_agent_task(task_id);
