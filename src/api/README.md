@@ -194,7 +194,10 @@ the workspace and see only its stores (lake#465). See `docs/api/storage.md`.
 `workspace_records_api.hpp` opens one workspace's records through `call_workspace`, so record
 calls are owner-checked, refused when the workspace is not ready and named in Server-Timing.
 `workspace_record_capabilities.cpp` registers the operator-only `copy_workspace_records` (plan,
-copy, verify). Ask Orama and the Agent Factory (`http_server.cpp`) and `get_ask_conversation` read
-and write conversations in the page's or input's workspace. The record store capabilities stay out of
+copy, verify) for `ask_messages` and `opportunities`. Ask Orama and the Agent Factory
+(`http_server.cpp`) and `get_ask_conversation` read and write conversations in the page's or
+input's workspace. `settle_discover`, `list_opportunities`, `dismiss_opportunity` and
+`create_projects_from_opportunities` keep Design → Opportunities in the workspace the scan ran in
+(lake#376); the Opportunities page reads them concurrently with the methodology registry. The record store capabilities stay out of
 the `workspace_query`/`workspace_act` allow-lists, so only lake reaches its `lake_*` collections
 (lake#370, `docs/architecture/workspace-records.md`).

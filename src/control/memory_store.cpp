@@ -1887,48 +1887,67 @@ Result<AgentTask> InMemoryStore::get_agent_task(const std::string& id) {
     return *found;
 }
 
-Result<void> InMemoryStore::record_opportunities(const std::vector<Opportunity>& rows) {
+void InMemoryStore::seed_legacy_opportunity(Opportunity opportunity) {
     std::lock_guard lock(mutex_);
-    if (!rows.empty() && std::ranges::any_of(opportunities_, [&](const Opportunity& kept) {
-            return kept.task_id == rows.front().task_id;
-        })) {
-        return {};
+    if (opportunity.id.empty()) {
+        opportunity.id = new_uuid_v4();
     }
-    for (Opportunity row : rows) {
-        row.id = new_uuid_v4();
-        row.created_at =
-            std::format("{:%FT%TZ}",
-                        std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
-        opportunities_.push_back(std::move(row));
+    legacy_opportunities_.push_back(std::move(opportunity));
+}
+
+Result<void> InMemoryStore::assign_legacy_opportunities() {
+    std::lock_guard lock(mutex_);
+    for (const Opportunity& opportunity : legacy_opportunities_) {
+        if (legacy_opportunity_assignments_.contains(opportunity.id)) {
+            continue;
+        }
+        // The workspace the scan ran in owns its Opportunities; a scan that named none is owned
+        // by its space's only live workspace, as migration 0046 assigns them.
+        const auto task = std::ranges::find(agent_tasks_, opportunity.task_id, &AgentTask::id);
+        if (task != agent_tasks_.end() && !task->workspace_id.empty()) {
+            const auto workspace = std::ranges::find(workspaces_, task->workspace_id, &Workspace::id);
+            legacy_opportunity_assignments_[opportunity.id] =
+                workspace != workspaces_.end() && workspace->customer_id == opportunity.customer_id &&
+                        workspace->desired != "deleted"
+                    ? std::pair<std::string, std::string>{workspace->id, "task_workspace"}
+                    : std::pair<std::string, std::string>{"", "deleted_workspace"};
+            continue;
+        }
+        std::vector<std::string> live;
+        for (const Workspace& workspace : workspaces_) {
+            if (workspace.customer_id == opportunity.customer_id && workspace.desired != "deleted") {
+                live.push_back(workspace.id);
+            }
+        }
+        legacy_opportunity_assignments_[opportunity.id] =
+            live.size() == 1 ? std::pair<std::string, std::string>{live.front(), "sole_workspace"}
+                             : std::pair<std::string, std::string>{"", "needs_selection"};
     }
     return {};
 }
 
-Result<std::vector<Opportunity>> InMemoryStore::list_opportunities(const std::string& customer_id) {
+Result<std::vector<LegacyOpportunity>>
+InMemoryStore::legacy_opportunities(const std::string& after_id, int limit) {
     std::lock_guard lock(mutex_);
-    std::vector<Opportunity> out;
-    for (auto it = opportunities_.rbegin(); it != opportunities_.rend(); ++it) {
-        if (it->customer_id == customer_id) {
-            out.push_back(*it);
+    std::vector<Opportunity> ordered = legacy_opportunities_;
+    std::ranges::sort(ordered, {}, &Opportunity::id);
+    std::vector<LegacyOpportunity> rows;
+    for (const Opportunity& opportunity : ordered) {
+        if (!after_id.empty() && opportunity.id <= after_id) {
+            continue;
         }
+        if (static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            break;
+        }
+        LegacyOpportunity row{opportunity, "", "needs_selection"};
+        if (const auto found = legacy_opportunity_assignments_.find(opportunity.id);
+            found != legacy_opportunity_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
     }
-    std::ranges::stable_sort(out, [](const Opportunity& a, const Opportunity& b) {
-        return a.task_id == b.task_id && a.rank < b.rank;
-    });
-    return out;
-}
-
-Result<Opportunity> InMemoryStore::set_opportunity_status(const std::string& id,
-                                                          const std::string& status,
-                                                          const std::string& project) {
-    std::lock_guard lock(mutex_);
-    const auto found = std::ranges::find(opportunities_, id, &Opportunity::id);
-    if (found == opportunities_.end()) {
-        return std::unexpected(StoreError{"not_found", "no opportunity " + id});
-    }
-    found->status = status;
-    found->project = project;
-    return *found;
+    return rows;
 }
 
 Result<void> InMemoryStore::set_agent_task_status(const std::string& id,

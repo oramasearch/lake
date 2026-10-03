@@ -62,5 +62,14 @@ Migration `0045_ask_message_workspaces` records the owner of each retired `ask_m
 space are reported). Ask Orama conversations now live in the owning workspace Zetta (lake#370), so
 lake no longer writes or reads the table except through the operator's `copy_workspace_records`.
 It adds no column and drops nothing; a later migration drops the table once the copy is verified.
-The latest guard is `ask_message_workspaces_guard`; the operator must vendor this schema and update
-its guard before rollout. See [workspace-records.md](../docs/architecture/workspace-records.md).
+The guard is `ask_message_workspaces_guard`. See
+[workspace-records.md](../docs/architecture/workspace-records.md).
+
+Migration `0046_opportunity_workspaces` records the owner of each retired `opportunities` row in
+`workspace_assignments`: the workspace the scan's agent task ran in (`task_workspace`); for a task
+that names none, a space's only live workspace (`sole_workspace`); otherwise `needs_selection`, or
+`deleted_workspace` when the scan's workspace is deleted. Design → Opportunities now live in the
+owning workspace Zetta (lake#376), so lake no longer writes or reads the table except through the
+operator's `copy_workspace_records`. It adds no column and drops nothing. The latest guard is
+`opportunity_workspaces_guard`; the operator must vendor this schema and update its guard before
+rollout.

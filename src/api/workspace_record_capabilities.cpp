@@ -11,6 +11,7 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/control/ask_messages.hpp"
+#include "lake/control/opportunities.hpp"
 #include "lake/control/store.hpp"
 #include "workspace_records_api.hpp"
 
@@ -19,7 +20,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 1> copy_collections = {"ask_messages"};
+constexpr std::array<std::string_view, 2> copy_collections = {"ask_messages", "opportunities"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -33,6 +34,65 @@ bool same_message(const control::AskMessage& stored, const control::AskMessage& 
            stored.customer_id == source.customer_id && stored.user_id == source.user_id &&
            stored.role == source.role && stored.content == source.content &&
            stored.payload == source.payload && stored.at_us == source.at_us;
+}
+
+// The answer of one page of a copy, the same for every collection.
+ApiResult copy_result(std::string_view collection, const std::string& mode, std::size_t rows,
+                      int limit, const std::string& last_id, json unresolved,
+                      const std::map<std::string, WorkspaceTally>& tallies) {
+    json workspaces = json::array();
+    std::size_t copied = 0, already_present = 0, verified = 0, failed = 0;
+    json missing = json::array(), mismatched = json::array();
+    for (const auto& [workspace_id, tally] : tallies) {
+        copied += tally.copied;
+        already_present += tally.already_present;
+        verified += tally.verified;
+        failed += tally.error.empty() ? 0 : 1;
+        for (const auto& id : tally.missing) {
+            missing.push_back(id);
+        }
+        for (const auto& id : tally.mismatched) {
+            mismatched.push_back(id);
+        }
+        json entry{{"workspace_id", workspace_id}, {"customer_id", tally.customer_id},
+                   {"rows", tally.rows}};
+        if (mode == "copy") {
+            entry["copied"] = tally.copied;
+            entry["already_present"] = tally.already_present;
+        } else if (mode == "verify") {
+            entry["verified"] = tally.verified;
+            entry["missing"] = tally.missing;
+            entry["mismatched"] = tally.mismatched;
+        }
+        if (!tally.error.empty()) {
+            entry["error"] = tally.error;
+        }
+        workspaces.push_back(std::move(entry));
+    }
+    const bool all_assigned = unresolved.empty();
+    json value{{"collection", std::string(collection)},
+               {"mode", mode},
+               {"rows", rows},
+               {"next_after", last_id.empty() || static_cast<int>(rows) < limit
+                                  ? json(nullptr)
+                                  : json(last_id)},
+               {"assigned", rows - unresolved.size()},
+               {"unresolved", std::move(unresolved)},
+               {"workspaces", std::move(workspaces)},
+               {"failed_workspaces", failed}};
+    if (mode == "copy") {
+        value["copied"] = copied;
+        value["already_present"] = already_present;
+    } else if (mode == "verify") {
+        value["verified"] = verified;
+        value["missing"] = std::move(missing);
+        value["mismatched"] = std::move(mismatched);
+        // Complete: every row of this page has one owner and is in its workspace, unchanged. Only
+        // then may a later migration drop what this page covered.
+        value["complete"] = all_assigned && failed == 0 && value["missing"].empty() &&
+                            value["mismatched"].empty();
+    }
+    return ApiResult::success(std::move(value));
 }
 
 // One page of ask_messages: assignments first (so rows an old replica wrote after migration 0045
@@ -120,59 +180,106 @@ liquid::runtime::task<ApiResult> copy_ask_messages(ApiContext& context, const st
             }
         }
     }
-    json workspaces = json::array();
-    std::size_t copied = 0, already_present = 0, verified = 0, failed = 0;
-    json missing = json::array(), mismatched = json::array();
-    for (const auto& [workspace_id, tally] : tallies) {
-        copied += tally.copied;
-        already_present += tally.already_present;
-        verified += tally.verified;
-        failed += tally.error.empty() ? 0 : 1;
-        for (const auto& id : tally.missing) {
-            missing.push_back(id);
-        }
-        for (const auto& id : tally.mismatched) {
-            mismatched.push_back(id);
-        }
-        json entry{{"workspace_id", workspace_id}, {"customer_id", tally.customer_id},
-                   {"rows", tally.rows}};
-        if (mode == "copy") {
-            entry["copied"] = tally.copied;
-            entry["already_present"] = tally.already_present;
-        } else if (mode == "verify") {
-            entry["verified"] = tally.verified;
-            entry["missing"] = tally.missing;
-            entry["mismatched"] = tally.mismatched;
-        }
-        if (!tally.error.empty()) {
-            entry["error"] = tally.error;
-        }
-        workspaces.push_back(std::move(entry));
+    co_return copy_result("ask_messages", mode, rows->size(), limit,
+                          rows->empty() ? std::string() : rows->back().message.id,
+                          std::move(unresolved), tallies);
+}
+
+bool same_opportunity(const control::Opportunity& stored, const control::Opportunity& source) {
+    const bool same_scan_row =
+        stored.customer_id == source.customer_id && stored.task_id == source.task_id &&
+        stored.rank == source.rank && stored.intent == source.intent &&
+        stored.solution == source.solution && stored.methodology == source.methodology &&
+        stored.why == source.why && stored.payload == source.payload && stored.at_us == source.at_us;
+    // Lake writes only the workspace record after the cutover, so a status the person changed
+    // since the copy (a later lake revision) is theirs, not a difference.
+    return same_scan_row && (stored.lake_revision > 1 ||
+                             (stored.status == source.status && stored.project == source.project));
+}
+
+// One page of opportunities: assignments first (so rows an old replica wrote after migration 0046
+// are owned too), then per workspace one listing of the space's Opportunities and the missing
+// appends. Each row is keyed by its scan and rank (control::opportunity_id), the key a settle of
+// that scan writes, so an old scan read again after the copy is not saved twice.
+liquid::runtime::task<ApiResult> copy_opportunities(ApiContext& context, const std::string& mode,
+                                                    const std::string& after, int limit) {
+    if (auto assigned = context.store->assign_legacy_opportunities(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
     }
-    const bool all_assigned = unresolved.empty();
-    json value{{"collection", "ask_messages"},
-               {"mode", mode},
-               {"rows", rows->size()},
-               {"next_after", rows->empty() || static_cast<int>(rows->size()) < limit
-                                  ? json(nullptr)
-                                  : json(rows->back().message.id)},
-               {"assigned", rows->size() - unresolved.size()},
-               {"unresolved", std::move(unresolved)},
-               {"workspaces", std::move(workspaces)},
-               {"failed_workspaces", failed}};
-    if (mode == "copy") {
-        value["copied"] = copied;
-        value["already_present"] = already_present;
-    } else if (mode == "verify") {
-        value["verified"] = verified;
-        value["missing"] = std::move(missing);
-        value["mismatched"] = std::move(mismatched);
-        // Complete: every row of this page has one owner and is in its workspace, unchanged. Only
-        // then may a later migration drop what this page covered.
-        value["complete"] = all_assigned && failed == 0 && value["missing"].empty() &&
-                            value["mismatched"].empty();
+    auto rows = context.store->legacy_opportunities(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
     }
-    co_return ApiResult::success(std::move(value));
+    json unresolved = json::array();
+    std::map<std::string, std::vector<const control::LegacyOpportunity*>> by_workspace;
+    for (const control::LegacyOpportunity& row : *rows) {
+        if (row.workspace_id.empty() || control::opportunity_problem(row.opportunity)) {
+            unresolved.push_back({{"id", row.opportunity.id},
+                                  {"customer_id", row.opportunity.customer_id},
+                                  {"outcome", row.workspace_id.empty() ? row.outcome
+                                                                       : std::string("invalid")}});
+        } else {
+            by_workspace[row.workspace_id].push_back(&row);
+        }
+    }
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, owned] : by_workspace) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = owned.front()->opportunity.customer_id;
+        tally.rows = owned.size();
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        auto present = control::settled(
+            co_await control::list_opportunities(*records, tally.customer_id));
+        if (!present) {
+            tally.error = present.error().code + ": " + present.error().message;
+            continue;
+        }
+        std::map<std::string, const control::Opportunity*> stored;
+        for (const control::Opportunity& opportunity : *present) {
+            stored.emplace(opportunity.id, &opportunity);
+        }
+        control::Opportunities opportunities(*records);
+        for (const control::LegacyOpportunity* row : owned) {
+            const std::string key =
+                control::opportunity_id(row->opportunity.task_id, row->opportunity.rank);
+            const auto found = stored.find(key);
+            if (mode == "verify") {
+                if (found == stored.end()) {
+                    tally.missing.push_back(row->opportunity.id);
+                } else if (!same_opportunity(*found->second, row->opportunity)) {
+                    tally.mismatched.push_back(row->opportunity.id);
+                } else {
+                    ++tally.verified;
+                }
+                continue;
+            }
+            if (found != stored.end()) {
+                ++tally.already_present;
+                continue;
+            }
+            auto appended = control::settled(co_await opportunities.append(
+                row->opportunity, control::RecordWrite{key, row->opportunity.at_us}));
+            if (!appended) {
+                if (appended.error().code == "conflict") {
+                    ++tally.already_present; // a settle or another copy wrote it meanwhile
+                    continue;
+                }
+                tally.error = appended.error().code + ": " + appended.error().message;
+                break;
+            }
+            ++tally.copied;
+        }
+    }
+    co_return copy_result("opportunities", mode, rows->size(), limit,
+                          rows->empty() ? std::string() : rows->back().opportunity.id,
+                          std::move(unresolved), tallies);
 }
 
 // Only the operator copies, and the operator bypasses policy; anyone else is refused here, before
@@ -228,8 +335,12 @@ void register_workspace_record_capabilities(Registry& registry) {
             const std::string mode = input.at("mode");
             context.audit_kind = "workspace_records.copy";
             context.audit_details = {{"collection", input.at("collection")}, {"mode", mode}};
-            co_return co_await copy_ask_messages(context, mode, input.value("after", std::string()),
-                                                 input.value("limit", 1000));
+            const std::string after = input.value("after", std::string());
+            const int limit = input.value("limit", 1000);
+            if (input.at("collection") == "opportunities") {
+                co_return co_await copy_opportunities(context, mode, after, limit);
+            }
+            co_return co_await copy_ask_messages(context, mode, after, limit);
         }});
 }
 

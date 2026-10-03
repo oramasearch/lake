@@ -9251,14 +9251,25 @@ struct ApiServer::Impl {
             if (!task.empty()) {
                 list_input["task_id"] = task;
             }
-            const ApiResult listed =
-                unwrap(co_await workspace_call("list_opportunities", std::move(list_input), context));
-            if (listed.ok) {
-                page.data["list_opportunities"] = listed.value;
-            }
-            // What the engine runs, so each Opportunity says whether it does (lake#289).
+            // The saved Opportunities (a list_records in the workspace Zetta, lake#376) and what
+            // the engine runs, so each Opportunity says whether it does (lake#289): one round.
             context.registry = &registry;
-            auto methodologies = co_await lake::api::workspace_methodologies(context, page.customer_id);
+            ApiContext list_context = context;
+            auto [wait_error, listed, methodologies] = co_await liquid::runtime::when_all(
+                liquid::runtime::as_io(
+                    workspace_call("list_opportunities", std::move(list_input), list_context)),
+                liquid::runtime::as_io(
+                    lake::api::workspace_methodologies(context, page.customer_id)));
+            if (wait_error && page.error.empty()) {
+                page.error = wait_error.message();
+            }
+            if (listed) {
+                if (const ApiResult result = unwrap(std::move(listed)); result.ok) {
+                    page.data["list_opportunities"] = result.value;
+                } else if (page.error.empty()) {
+                    page.error = result.error.message;
+                }
+            }
             if (methodologies && methodologies->is_array()) {
                 page.data["list_methodologies"] = *methodologies;
             }

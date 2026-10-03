@@ -856,18 +856,14 @@ public:
         return call("stale_agent_tasks",
                     [&] { return store_->stale_agent_tasks(republish_after); });
     }
-    control::Result<void>
-    record_opportunities(const std::vector<control::Opportunity>& rows) override {
-        return call("record_opportunities", [&] { return store_->record_opportunities(rows); });
+    control::Result<void> assign_legacy_opportunities() override {
+        return call("assign_legacy_opportunities",
+                    [&] { return store_->assign_legacy_opportunities(); });
     }
-    control::Result<std::vector<control::Opportunity>>
-    list_opportunities(const std::string& customer_id) override {
-        return call("list_opportunities", [&] { return store_->list_opportunities(customer_id); });
-    }
-    control::Result<control::Opportunity> set_opportunity_status(
-        const std::string& id, const std::string& status, const std::string& project) override {
-        return call("set_opportunity_status",
-                    [&] { return store_->set_opportunity_status(id, status, project); });
+    control::Result<std::vector<control::LegacyOpportunity>>
+    legacy_opportunities(const std::string& after_id, int limit) override {
+        return call("legacy_opportunities",
+                    [&] { return store_->legacy_opportunities(after_id, limit); });
     }
     control::Result<control::AgentCronSchedule>
     create_agent_cron_schedule(const control::NewAgentCronSchedule& value) override {

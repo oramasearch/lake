@@ -1,5 +1,23 @@
 # Design → Opportunities
 
+**Updated 2026-10-03 (lake#376): Opportunities live in the workspace Zetta of the workspace their
+scan ran in.** A finished scan is saved, once, as records of the `lake_opportunities` collection in
+that workspace's Zetta ([workspace records](../architecture/workspace-records.md)), sealed and found
+by the space. Each record's key is derived from the scan and its rank, so however many readers or
+replicas settle the scan, it is saved once. `list_opportunities`, `dismiss_opportunity` and
+`create_projects_from_opportunities {opportunity_ids}` take `workspace_id` (required, as for every
+workspace capability) and act on that workspace's Opportunities only: another workspace of the same
+space lists none of them and answers `not_found` for their ids, and a missing, malformed or unknown
+`workspace_id` is `invalid_input` at `/workspace_id`. A status change (`dismissed`, `project`) is a
+write conditional on the revision read, reread and retried when another write landed first. A task
+that names no workspace has nowhere to keep its Opportunities and saves none; a workspace that is not
+ready answers `workspace_not_ready`; deleting a workspace deletes its Opportunities with its Zetta.
+The page reads the Opportunities and the methodology registry concurrently (two calls, one round).
+Lake no longer writes or reads the `opportunities` table; the operator's one-shot
+`copy_workspace_records {"collection": "opportunities"}` moves the old rows (migration
+`0046_opportunity_workspaces`). Verify: `Stores/WorkspaceRecordStores.OpportunitiesStayInTheWorkspaceTheirScanRanIn`,
+`WorkspaceRecords.AnOpportunityStatusChangeRereadsAfterAConcurrentWrite`.
+
 **Updated 2026-09-27 (lake#269):** Discover became **Design → Opportunities** (`/design/opportunities`;
 `/design/discover` still answers). *Scan my workspace* is a background Auto-Suggest turn
 (`agent_turn`, kind `discover`); the page follows it and the Opportunities it recommends (and the

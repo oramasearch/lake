@@ -57,5 +57,8 @@ result for organizations a person runs, plus `list_user_memberships` and
 `workspace_records.hpp` declares `WorkspaceRecords` (append, list, get, conditional put,
 remove and update of sealed records in one workspace Zetta's record store) and `RecordSet<Codec>`, the typed collection every table that moves into a
 workspace uses; `ask_messages.hpp` is the reference codec. `Store` keeps only the legacy reads of
-the retired `ask_messages` table, for the copy (`LegacyAskMessage`). See
+the retired `ask_messages` table, for the copy (`LegacyAskMessage`). `opportunities.hpp` is the
+first mutable collection (Design → Opportunities, lake#376): derived keys, conditional status
+writes; `Store` keeps only the legacy reads of the retired `opportunities` table
+(`LegacyOpportunity`). See
 `docs/architecture/workspace-records.md`.

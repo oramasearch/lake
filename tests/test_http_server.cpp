@@ -2299,32 +2299,65 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
         connection->request("GET", "/design/opportunities?customer_id=" + customer_id, "", cookie);
     EXPECT_NE(later.find("Predict which accounts will churn"), std::string::npos)
         << "Opportunities are kept after the scan";
-    const auto rows = store_->list_opportunities(customer_id);
-    ASSERT_TRUE(rows && rows->size() == 2U);
-    const auto chosen = std::ranges::find(*rows, std::string("new"), &lake::control::Opportunity::status);
-    ASSERT_NE(chosen, rows->end());
+    // The Opportunities are in the workspace's Zetta (lake#376), read as the person.
+    const auto opportunities = [&] {
+        const std::string listed = connection->request(
+            "GET",
+            "/v1/list_opportunities?customer_id=" + customer_id + "&workspace_id=" +
+                connection->workspace_id,
+            "", cookie);
+        return nlohmann::json::parse(listed.substr(listed.find("\r\n\r\n") + 4))["value"]
+            .value("opportunities", nlohmann::json::array());
+    };
+    const auto rows = opportunities();
+    ASSERT_EQ(rows.size(), 2U);
+    const auto chosen = std::ranges::find_if(
+        rows, [](const nlohmann::json& row) { return row.at("status") == "new"; });
+    ASSERT_NE(chosen, rows.end());
+    const std::string chosen_id = chosen->at("id");
 
     const std::size_t before = workspace_caller_->calls.size();
     const std::string unconfirmed = connection->request(
         "POST", "/design/opportunities/create",
-        "customer_id=" + customer_id + "&pick=" + chosen->id, cookie);
+        "customer_id=" + customer_id + "&pick=" + chosen_id, cookie);
     EXPECT_NE(response_header(unconfirmed, "location").find("error="), std::string::npos);
     EXPECT_EQ(workspace_caller_->calls.size(), before) << "nothing is created without confirming";
     const std::string created = connection->request(
         "POST", "/design/opportunities/create",
-        "customer_id=" + customer_id + "&pick=" + chosen->id + "&confirm=yes", cookie);
+        "customer_id=" + customer_id + "&pick=" + chosen_id + "&confirm=yes", cookie);
     ASSERT_TRUE(created.starts_with("HTTP/1.1 302")) << created.substr(0, 300);
-    const auto& [name, read, input] = workspace_caller_->calls.back();
+    const auto project_call = std::ranges::find_if(
+        workspace_caller_->calls.rbegin(), workspace_caller_->calls.rend(),
+        [](const auto& call) { return std::get<0>(call) == "create_project"; });
+    ASSERT_NE(project_call, workspace_caller_->calls.rend());
+    const auto& [name, read, input] = *project_call;
     EXPECT_EQ(name, "create_project");
     EXPECT_TRUE(input["name"].get<std::string>().starts_with("predict-which-accounts-will-churn-"));
     EXPECT_NE(input["description"].get<std::string>().find("Source Opportunity"),
               std::string::npos);
     EXPECT_EQ(input["intent"], "Predict which accounts will churn");
-    const auto after = store_->list_opportunities(customer_id);
-    const auto made = std::ranges::find(*after, chosen->id, &lake::control::Opportunity::id);
-    EXPECT_EQ(made->status, "project");
+    const auto after = opportunities();
+    const auto made = std::ranges::find_if(
+        after, [&](const nlohmann::json& row) { return row.at("id") == chosen_id; });
+    ASSERT_NE(made, after.end());
+    EXPECT_EQ(made->at("status"), "project");
     const std::string project = input["name"];
-    EXPECT_EQ(made->project, project);
+    EXPECT_EQ(made->at("project"), project);
+    // Dismissing goes through the same workspace record, conditionally on its revision.
+    const auto declined = std::ranges::find_if(
+        after, [](const nlohmann::json& row) { return row.at("status") == "not_yet"; });
+    ASSERT_NE(declined, after.end());
+    const std::string dismissed = connection->request(
+        "POST", "/design/opportunities/dismiss",
+        "customer_id=" + customer_id + "&opportunity_id=" + declined->at("id").get<std::string>(),
+        cookie);
+    ASSERT_TRUE(dismissed.starts_with("HTTP/1.1 302")) << dismissed.substr(0, 300);
+    EXPECT_EQ(response_header(dismissed, "location").find("error="), std::string::npos);
+    const auto finally = opportunities();
+    EXPECT_EQ(std::ranges::count_if(finally, [](const nlohmann::json& row) {
+                  return row.at("status") == "dismissed";
+              }),
+              1);
 
     // The Project Agent designs the new project's pipeline in the background, and the project's
     // page compiles the design once it is done (Steve, 2026-09-27).
@@ -4113,10 +4146,14 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
     const std::map<std::string, WorkspaceCallBudget> workspace_call_budgets{
         // Ask Orama, Agents, Search Indexes, Models and Experiments: lake#446.
         {"/w/:workspace_id/ask", {1, 1, Capabilities{"list_records"}}},
-        {"/w/:workspace_id/design/discover", {1, 1}},
+        // Design → Opportunities under its earlier path, the same page.
+        {"/w/:workspace_id/design/discover",
+         {2, 1, Capabilities{"list_methodologies", "list_records"}}},
         {"/w/:workspace_id/design/methodologies", {1, 1}},
         {"/w/:workspace_id/design/methodology", {2, 1}},
-        {"/w/:workspace_id/design/opportunities", {1, 1}},
+        // The saved Opportunities (lake#376) beside the methodology registry, concurrently.
+        {"/w/:workspace_id/design/opportunities",
+         {2, 1, Capabilities{"list_methodologies", "list_records"}}},
         {"/w/:workspace_id/design/pipeline", {3, 1}},
         {"/w/:workspace_id/design/project", {9, 2}},
         {"/w/:workspace_id/design/projects", {1, 1}},

@@ -369,3 +369,9 @@ callers route record capabilities to it, one store per endpoint.
 `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` are set: build Zetta dev (with zetta#1233) in a
 scratch directory and run `zetta --headless --mcp-listen 127.0.0.1:48712 --admin-token <token>`.
 `PostgresAskMessages.MigrationRecordsEachRowsOwnerForTheCopy` covers `0045_ask_message_workspaces`.
+Design → Opportunities (lake#376): `Stores/WorkspaceRecordStores.OpportunitiesStayInTheWorkspaceTheirScanRanIn`
+(two spaces with two workspaces each, the scan's workspace only, a second settle writing nothing,
+foreign and missing/malformed/unknown ids, a workspace that is not ready, workspace deletion),
+`WorkspaceRecords.AnOpportunityStatusChangeRereadsAfterAConcurrentWrite` (derived keys and a raced
+conditional write), `Stores/WorkspaceRecordStores.TheOneShotCopyMovesEachOpportunityToItsScansWorkspace`
+and `PostgresOpportunities.MigrationRecordsEachRowsOwnerForTheCopy` (`0046_opportunity_workspaces`).

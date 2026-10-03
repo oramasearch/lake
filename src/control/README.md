@@ -89,4 +89,7 @@ records in `lake_*` collections of the workspace's keyed record store (zetta#123
 workspace caller, with engine-decided conditional writes, `busy` retries and a read-modify-write
 `update`. `ask_messages.cpp` is its first collection. The stores no longer write or read Ask Orama
 conversations; `assign_legacy_ask_messages` and `legacy_ask_messages` serve only the operator's
-one-shot copy (migration `0045_ask_message_workspaces`).
+one-shot copy (migration `0045_ask_message_workspaces`). `opportunities.cpp` is the first mutable
+collection (lake#376): a scan's Opportunities keyed by scan and rank and written only if absent,
+status changes conditional on the revision read; `assign_legacy_opportunities` and
+`legacy_opportunities` serve only the copy (migration `0046_opportunity_workspaces`).
