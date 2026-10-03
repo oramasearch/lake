@@ -1,5 +1,12 @@
 # Tests
 
+`test_shared_store.cpp` (lake#467) checks that one lake process owns a store root. The PostgreSQL
+case starts real `lake` binaries on one root: a second process must refuse with the owner named,
+and after the owner drains on SIGTERM under concurrent pushes, drive writes, registry uploads and
+transparency appends, every acknowledged write must read back from a successor, the customer store
+must reopen and pass a libliquid dry-run collection, and the log must rebuild its tree. See
+[store-volume.md](../docs/deployment/store-volume.md#one-process-per-store-root).
+
 `test_agent_leases.cpp` runs the same claim, activity, expiry, re-claim, three-attempt exhaustion,
 workspace notice recovery and racing-terminal-write cases on memory and PostgreSQL stores.
 It checks Apps/Experiments/Project rendering, legacy migration adoption, schema reapplication,
