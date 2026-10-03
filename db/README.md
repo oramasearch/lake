@@ -130,3 +130,12 @@ their repository's workspace. It records each row's owner in `workspace_assignme
 workspace (resolved by the copy once it has one), or `workspace_deleted`. Nothing is dropped. The
 latest guard is `forge_record_workspaces_guard`; the operator must vendor this schema and update its
 guard before rollout. See [forge.md](../docs/api/forge.md#migration-and-cutover-lake341).
+Migration `0055_application_user_workspaces` retires `auth_app_users` and `auth_app_organizations`
+(lake#353, lake#354): an application's users and organizations live in the workspace Zetta of the
+application's workspace, with a pool user's email and an organization's TAAP identity and name as
+claims there. It records each row's owner in `workspace_assignments` for `copy_workspace_records`:
+`application_workspace`, `needs_selection` while the application has no workspace (resolved by the
+copy once it has one), or `workspace_deleted`. A user row's id is md5(application id, newline, user
+id) as a UUID. Nothing is dropped; `users`, `credentials` and `sessions` stay. The latest guard is
+`application_user_workspaces_guard`; the operator must vendor this schema and update its guard
+before rollout. See [apps.md](../docs/api/apps.md#where-users-and-organizations-live-lake353-lake354).

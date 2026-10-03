@@ -145,17 +145,18 @@ TEST(AccountRecovery, CodesCoolingAndTwoAdministratorApprovalRestoreSignIn) {
     ApiContext anonymous;
     anonymous.store = &store;
     anonymous.instance_kek = "offline-recovery-test-kek";
-    const ApiResult code_recovery = registry.call("recover_with_code",
-                                                  {{"email", "recovery-target@example.test"},
-                                                   {"code", enrollment->recovery_codes.front()},
-                                                   {"device_name", "code recovery"}},
-                                                  anonymous);
+    const ApiResult code_recovery = *liquid::runtime::block_on(
+        registry.call_async("recover_with_code",
+                            {{"email", "recovery-target@example.test"},
+                             {"code", enrollment->recovery_codes.front()},
+                             {"device_name", "code recovery"}},
+                            anonymous));
     ASSERT_TRUE(code_recovery.ok) << code_recovery.error.message;
     EXPECT_TRUE(store.context_for(code_recovery.value["secret"]));
-    const ApiResult reused_code = registry.call(
+    const ApiResult reused_code = *liquid::runtime::block_on(registry.call_async(
         "recover_with_code",
         {{"email", "recovery-target@example.test"}, {"code", enrollment->recovery_codes.front()}},
-        anonymous);
+        anonymous));
     EXPECT_EQ(reused_code.error.code, "unauthorized");
 
     const ApiResult email = registry.call(

@@ -412,53 +412,31 @@ public:
         return call("list_application_signing_keys",
                     [&] { return store_->list_application_signing_keys(application_id); });
     }
-    control::Result<control::ApplicationUser>
-    register_application_user(const std::string& application_id,
-                              const std::string& user_id) override {
-        return call("register_application_user",
-                    [&] { return store_->register_application_user(application_id, user_id); });
-    }
-    control::Result<control::ApplicationUser>
-    get_application_user(const std::string& application_id, const std::string& user_id) override {
-        return call("get_application_user",
-                    [&] { return store_->get_application_user(application_id, user_id); });
-    }
-    control::Result<std::vector<control::ApplicationUser>> list_application_users(
-        const std::string& application_id, const std::string& query, int limit) override {
-        return call("list_application_users",
-                    [&] { return store_->list_application_users(application_id, query, limit); });
-    }
-    control::Result<control::ApplicationUser>
-    set_application_user_status(const std::string& application_id,
-                                const std::string& user_id,
-                                const std::string& status) override {
-        return call("set_application_user_status", [&] {
-            return store_->set_application_user_status(application_id, user_id, status);
+    control::Result<int> revoke_application_user_sessions(const std::string& application_id,
+                                                          const std::string& user_id) override {
+        return call("revoke_application_user_sessions", [&] {
+            return store_->revoke_application_user_sessions(application_id, user_id);
         });
     }
-    control::Result<void> delete_application_user(const std::string& application_id,
-                                                  const std::string& user_id) override {
-        return call("delete_application_user",
-                    [&] { return store_->delete_application_user(application_id, user_id); });
+    control::Result<void> delete_application_user_credentials(const std::string& application_id,
+                                                              const std::string& user_id) override {
+        return call("delete_application_user_credentials", [&] {
+            return store_->delete_application_user_credentials(application_id, user_id);
+        });
     }
-    control::Result<control::ApplicationOrganization>
-    create_application_organization(const control::NewApplicationOrganization& value) override {
-        return call("create_application_organization",
-                    [&] { return store_->create_application_organization(value); });
+    control::Result<void> assign_legacy_application_directory() override {
+        return call("assign_legacy_application_directory",
+                    [&] { return store_->assign_legacy_application_directory(); });
     }
-    control::Result<std::vector<control::ApplicationOrganization>>
-    list_application_organizations(const std::string& application_id, int limit) override {
-        return call("list_application_organizations",
-                    [&] { return store_->list_application_organizations(application_id, limit); });
+    control::Result<std::vector<control::LegacyApplicationUser>>
+    legacy_application_users(const std::string& after_id, int limit) override {
+        return call("legacy_application_users",
+                    [&] { return store_->legacy_application_users(after_id, limit); });
     }
-    control::Result<control::ApplicationOrganization> update_application_organization(
-        const std::string& id, const std::string& name, const nlohmann::json& metadata) override {
-        return call("update_application_organization",
-                    [&] { return store_->update_application_organization(id, name, metadata); });
-    }
-    control::Result<void> delete_application_organization(const std::string& id) override {
-        return call("delete_application_organization",
-                    [&] { return store_->delete_application_organization(id); });
+    control::Result<std::vector<control::LegacyApplicationOrganization>>
+    legacy_application_organizations(const std::string& after_id, int limit) override {
+        return call("legacy_application_organizations",
+                    [&] { return store_->legacy_application_organizations(after_id, limit); });
     }
     control::Result<control::ApplicationWebhook>
     create_application_webhook(const control::NewApplicationWebhook& value) override {

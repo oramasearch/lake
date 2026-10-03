@@ -9,13 +9,14 @@
 
 #include <openssl/evp.h>
 
+#include "api/workspace_records_api.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/web_ui.hpp"
+#include "lake/control/application_user_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/memory_store.hpp"
-#include "api/workspace_records_api.hpp"
 #include "stream_fixture.hpp"
 
 namespace {
@@ -254,12 +255,15 @@ TEST(ApplicationAuth, RegistrationHostedIdentityJwtWebhooksAndIsolation) {
     EXPECT_TRUE(verifies_with_jwk(sign_in.value.at("access_token"), jwks.value.at("keys").at(0)));
 
     const ApiResult users =
-        surface.call("list_application_users", {{"application_id", application_id}});
+        surface.call("list_application_users",
+                     {{"application_id", application_id}, {"workspace_id", surface.workspace_id}});
     ASSERT_TRUE(users.ok) << users.error.message;
     ASSERT_EQ(users.value.at("items").size(), 1);
     const std::string user_id = users.value.at("items").at(0).at("user_id");
-    const ApiResult suspended = surface.call(
-        "suspend_application_user", {{"application_id", application_id}, {"user_id", user_id}});
+    const ApiResult suspended = surface.call("suspend_application_user",
+                                             {{"application_id", application_id},
+                                              {"workspace_id", surface.workspace_id},
+                                              {"user_id", user_id}});
     ASSERT_TRUE(suspended.ok) << suspended.error.message;
     EXPECT_EQ(suspended.value.at("status"), "suspended");
     EXPECT_FALSE(surface.store.context_for(sign_in.value.at("secret")));
@@ -331,10 +335,14 @@ TEST(ApplicationAuth, ApplicationListsFilterThroughPolicy) {
     ASSERT_TRUE(applications.ok) << applications.error.message;
     ASSERT_EQ(applications.value.at("items").size(), 1);
     EXPECT_EQ(applications.value.at("items").at(0).at("id"), first.value.at("id"));
-    EXPECT_TRUE(
-        surface.call("list_application_users", {{"application_id", first.value.at("id")}}).ok);
-    const ApiResult denied =
-        surface.call("list_application_users", {{"application_id", second.value.at("id")}});
+    EXPECT_TRUE(surface
+                    .call("list_application_users",
+                          {{"application_id", first.value.at("id")},
+                           {"workspace_id", surface.workspace_id}})
+                    .ok);
+    const ApiResult denied = surface.call(
+        "list_application_users",
+        {{"application_id", second.value.at("id")}, {"workspace_id", surface.workspace_id}});
     EXPECT_FALSE(denied.ok);
     EXPECT_EQ(denied.error.code, "unauthorized");
 }
@@ -391,6 +399,7 @@ TEST(ApplicationAuth, EventsAndDeliveriesLiveInTheApplicationsWorkspace) {
     const auto organization = [&](const ApiResult& application, std::string name) {
         return surface.call("create_application_organization",
                             {{"application_id", application.value.at("id")},
+                             {"workspace_id", application.value.at("workspace_id")},
                              {"taap_id", "taap:1:ed25519:" + name},
                              {"name", name}});
     };
@@ -488,6 +497,7 @@ TEST(ApplicationAuth, AnAttemptIsClaimedOnceAndSentOnce) {
     ASSERT_TRUE(surface
                     .call("create_application_organization",
                           {{"application_id", application_id},
+                           {"workspace_id", surface.workspace_id},
                            {"taap_id", "taap:1:ed25519:claimed-org"},
                            {"name", "claimed"}})
                     .ok);
@@ -576,6 +586,276 @@ TEST(ApplicationAuth, AnAttemptIsClaimedOnceAndSentOnce) {
                                        {"event_id", lake::control::new_uuid_v4()},
                                        {"webhook_id", webhook.value.at("id")}});
     EXPECT_EQ(unknown.error.code, "not_found");
+}
+
+// lake#353, lake#354: an application's users and organizations live in the workspace Zetta of the
+// application's workspace, among two spaces and a space with two workspaces. What must be unique
+// within an application (a pool user's email; an organization's TAAP identity and name) is a claim
+// written with if_absent there, so a second sign-up or create is a conflict.
+TEST(ApplicationAuth, UsersAndOrganizationsLiveInTheApplicationsWorkspace) {
+    ApplicationSurface surface;
+    const std::string home = surface.workspace_id;
+    const std::string lab = surface.workspaces->add(surface.owned, surface.customer_id, "lab");
+    const auto other_owner = surface.store.create_user(
+        {"taap:1:ed25519:directory-other", "directory-other@example.test", "Other"});
+    ASSERT_TRUE(other_owner);
+    const auto other_customer =
+        surface.store.create_customer({"individual", other_owner->id, "", "directory-other"});
+    ASSERT_TRUE(other_customer);
+    const std::string theirs = surface.workspaces->add(surface.owned, other_customer->id, "theirs");
+
+    const ApiResult first = surface.register_application("Client one", home);
+    const ApiResult second = surface.register_application("Client two", lab);
+    ASSERT_TRUE(first.ok) << first.error.message;
+    ASSERT_TRUE(second.ok) << second.error.message;
+    const std::string first_id = first.value.at("id");
+    const std::string second_id = second.value.at("id");
+    const auto sign_up = [&](const ApiResult& application, const std::string& email) {
+        return surface.call("sign_up_password",
+                            {{"pool_id", application.value.at("pool_id")},
+                             {"email", email},
+                             {"password", "correct horse battery staple"},
+                             {"display_name", "Directory user"},
+                             {"identity_document", "{}"}});
+    };
+    const auto sign_in = [&](const ApiResult& application, const std::string& email) {
+        return surface.call("sign_in_password",
+                            {{"pool_id", application.value.at("pool_id")},
+                             {"email", email},
+                             {"password", "correct horse battery staple"}});
+    };
+    const auto users = [&](const std::string& application_id, json workspace) {
+        json input{{"application_id", application_id}};
+        if (!workspace.is_null()) {
+            input["workspace_id"] = workspace;
+        }
+        return surface.call("list_application_users", input);
+    };
+
+    // One email signs up once per application, case-insensitively; another application of the
+    // space has its own users.
+    const ApiResult signed_up = sign_up(first, "person@example.test");
+    ASSERT_TRUE(signed_up.ok) << signed_up.error.message;
+    const auto again = sign_up(first, "Person@Example.test");
+    EXPECT_EQ(again.error.code, "conflict");
+    ASSERT_TRUE(sign_up(second, "person@example.test").ok);
+    // The user and the email claim are stored sealed only at the application's own workspace.
+    EXPECT_EQ(surface.records("http://workspace.test", "auth_app_users").size(), 2U);
+    EXPECT_EQ(surface.records("http://lab.test", "auth_app_users").size(), 2U);
+    EXPECT_TRUE(surface.records("http://theirs.test", "auth_app_users").empty());
+    for (const auto& [key, record] : surface.records("http://workspace.test", "auth_app_users")) {
+        EXPECT_EQ(record.dump().find("person@example.test"), std::string::npos) << "sealed";
+    }
+    const auto listed = users(first_id, home);
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value.at("items").size(), 1U);
+    const std::string user_id = listed.value.at("items").at(0).at("user_id");
+    EXPECT_EQ(listed.value.at("items").at(0).at("email"), "person@example.test");
+    EXPECT_EQ(users(first_id, home).value.at("items").size(), 1U);
+    EXPECT_EQ(surface
+                  .call("list_application_users",
+                        {{"application_id", first_id}, {"workspace_id", home}, {"query", "nobody"}})
+                  .value.at("items")
+                  .size(),
+              0U);
+
+    // Another workspace of the space, another space's workspace, an unknown or malformed id, or
+    // none: refused at /workspace_id, never read anywhere else.
+    for (const json& wrong : {json(lab),
+                              json(theirs),
+                              json(lake::control::new_uuid_v4()),
+                              json("not-a-workspace"),
+                              json(nullptr)}) {
+        const auto refused = users(first_id, wrong);
+        EXPECT_EQ(refused.error.code, "invalid_input") << wrong;
+        EXPECT_EQ(refused.error.path, "/workspace_id") << wrong;
+    }
+    const auto exported =
+        surface.call("export_application_user",
+                     {{"application_id", first_id}, {"workspace_id", home}, {"user_id", user_id}});
+    ASSERT_TRUE(exported.ok) << exported.error.message;
+    EXPECT_EQ(
+        surface
+            .call("export_application_user",
+                  {{"application_id", second_id}, {"workspace_id", lab}, {"user_id", user_id}})
+            .error.code,
+        "not_found")
+        << "a user of one application is not a user of another";
+
+    // An abandoned claim (older than the grace period, naming an account lake never created) is
+    // taken over; a fresh one is not.
+    auto records = lake::api::workspace_records(surface.context, surface.customer_id, home);
+    ASSERT_TRUE(records);
+    const auto collection = lake::control::ApplicationUserCodec::collection;
+    const auto stale_claim = [&](const std::string& email, std::int64_t age_us) {
+        const auto now = std::chrono::duration_cast<std::chrono::microseconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+        return lake::control::settled(liquid::runtime::block_on(
+            records->put(collection,
+                         lake::control::application_claim_key(
+                             *records, collection, first_id, lake::control::email_claim, email),
+                         lake::control::application_claims_lookup(first_id),
+                         {{"kind", "claim"},
+                          {"application_id", first_id},
+                          {"holder", lake::control::new_uuid_v4()}},
+                         {.if_absent = true},
+                         1,
+                         now - age_us)));
+    };
+    ASSERT_TRUE(stale_claim("fresh@example.test", 1'000'000));
+    EXPECT_EQ(sign_up(first, "fresh@example.test").error.code, "conflict");
+    ASSERT_TRUE(stale_claim("abandoned@example.test", 10LL * 60 * 1'000'000));
+    EXPECT_TRUE(sign_up(first, "abandoned@example.test").ok);
+
+    // A sign-up whose user record was not written completes at the next sign-in, because its
+    // email claim names the account; an account with neither is not a user and its new session
+    // is revoked.
+    const json everyone = users(first_id, home).value.at("items");
+    const auto account = std::ranges::find_if(
+        everyone, [](const json& item) { return item.at("email") == "abandoned@example.test"; });
+    ASSERT_NE(account, everyone.end());
+    const std::string abandoned_id = account->at("user_id");
+    ASSERT_TRUE(lake::control::settled(liquid::runtime::block_on(records->remove(
+        collection, lake::control::application_user_key(*records, first_id, abandoned_id)))));
+    const auto healed = sign_in(first, "abandoned@example.test");
+    ASSERT_TRUE(healed.ok) << healed.error.message;
+    ASSERT_TRUE(lake::control::settled(liquid::runtime::block_on(records->remove(
+        collection, lake::control::application_user_key(*records, first_id, abandoned_id)))));
+    ASSERT_TRUE(
+        lake::control::settled(liquid::runtime::block_on(lake::control::release_application_claim(
+            *records,
+            collection,
+            lake::control::application_claim_key(*records,
+                                                 collection,
+                                                 first_id,
+                                                 lake::control::email_claim,
+                                                 "abandoned@example.test"),
+            abandoned_id))));
+    const auto live_sessions = [&] {
+        const auto sessions = surface.store.list_sessions(abandoned_id, first.value.at("pool_id"));
+        EXPECT_TRUE(sessions);
+        return sessions
+                   ? std::ranges::count_if(
+                         *sessions, [](const auto& session) { return session.revoked_at.empty(); })
+                   : 0;
+    };
+    const auto live_before = live_sessions();
+    const auto stranger = sign_in(first, "abandoned@example.test");
+    EXPECT_EQ(stranger.error.code, "unauthorized");
+    EXPECT_EQ(live_sessions(), live_before) << "a refused sign-in leaves no live session";
+
+    // Suspension is written in the workspace and revokes the pool's sessions; a later sign-in is
+    // refused there and its session revoked too.
+    const auto suspended =
+        surface.call("suspend_application_user",
+                     {{"application_id", first_id}, {"workspace_id", home}, {"user_id", user_id}});
+    ASSERT_TRUE(suspended.ok) << suspended.error.message;
+    EXPECT_FALSE(surface.store.context_for(signed_up.value.at("secret")));
+    EXPECT_EQ(sign_in(first, "person@example.test").error.code, "unauthorized");
+    EXPECT_EQ(
+        surface
+            .call("issue_application_jwt",
+                  {{"application_id", first_id}, {"workspace_id", home}, {"user_id", user_id}})
+            .error.code,
+        "unauthorized");
+    // Deleting frees the email for a new sign-up.
+    ASSERT_TRUE(
+        surface
+            .call("delete_application_user",
+                  {{"application_id", first_id}, {"workspace_id", home}, {"user_id", user_id}})
+            .ok);
+    EXPECT_TRUE(sign_up(first, "person@example.test").ok);
+
+    // Organizations: the TAAP identity and the name are each unique within the application.
+    const auto organization = [&](const std::string& application_id,
+                                  const std::string& workspace,
+                                  const std::string& taap,
+                                  const std::string& name) {
+        return surface.call("create_application_organization",
+                            {{"application_id", application_id},
+                             {"workspace_id", workspace},
+                             {"taap_id", taap},
+                             {"name", name}});
+    };
+    const auto acme = organization(first_id, home, "taap:1:ed25519:acme", "Acme");
+    ASSERT_TRUE(acme.ok) << acme.error.message;
+    EXPECT_EQ(organization(first_id, home, "taap:1:ed25519:acme", "Other").error.code, "conflict");
+    EXPECT_EQ(organization(first_id, home, "taap:1:ed25519:other", "Acme").error.code, "conflict");
+    ASSERT_TRUE(organization(second_id, lab, "taap:1:ed25519:acme", "Acme").ok)
+        << "another application has its own organizations";
+    const auto beta = organization(first_id, home, "taap:1:ed25519:beta", "Beta");
+    ASSERT_TRUE(beta.ok);
+    const auto rename = [&](const ApiResult& row, const std::string& name) {
+        return surface.call("update_application_organization",
+                            {{"application_id", first_id},
+                             {"workspace_id", home},
+                             {"organization_id", row.value.at("id")},
+                             {"name", name}});
+    };
+    EXPECT_EQ(rename(beta, "Acme").error.code, "conflict");
+    const auto renamed = rename(acme, "Acme Corp");
+    ASSERT_TRUE(renamed.ok) << renamed.error.message;
+    EXPECT_EQ(renamed.value.at("name"), "Acme Corp");
+    EXPECT_TRUE(organization(first_id, home, "taap:1:ed25519:gamma", "Acme").ok)
+        << "a rename frees the old name";
+    ASSERT_TRUE(surface
+                    .call("delete_application_organization",
+                          {{"application_id", first_id},
+                           {"workspace_id", home},
+                           {"organization_id", beta.value.at("id")}})
+                    .ok);
+    EXPECT_TRUE(organization(first_id, home, "taap:1:ed25519:beta", "Beta").ok)
+        << "a deletion frees both";
+    const auto organizations = surface.call("list_application_organizations",
+                                            {{"application_id", first_id}, {"workspace_id", home}});
+    ASSERT_TRUE(organizations.ok);
+    EXPECT_EQ(organizations.value.at("items").size(), 3U);
+    EXPECT_EQ(surface
+                  .call("delete_application_organization",
+                        {{"application_id", second_id},
+                         {"workspace_id", lab},
+                         {"organization_id", beta.value.at("id")}})
+                  .error.code,
+              "not_found");
+
+    // Least privilege: a reader of one application lists its users and organizations, cannot
+    // change them, and cannot read another application's.
+    const auto reader = surface.store.create_user(
+        {"taap:1:ed25519:directory-reader", "directory-reader@example.test", "Reader"});
+    ASSERT_TRUE(reader);
+    const auto object = surface.store.find_policy_object("application", first_id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(surface.store.create_grant({reader->taap_id,
+                                            object->id,
+                                            "read",
+                                            "directory-reader-attestation",
+                                            "admin",
+                                            "directory-reader-request"}));
+    surface.context.operator_credential = false;
+    surface.context.acting_identity = reader->taap_id;
+    EXPECT_TRUE(users(first_id, home).ok);
+    EXPECT_EQ(users(second_id, lab).error.code, "unauthorized");
+    EXPECT_EQ(organization(first_id, home, "taap:1:ed25519:reader", "Reader").error.code,
+              "unauthorized");
+    surface.context.operator_credential = true;
+    surface.context.acting_identity = "admin";
+
+    // A workspace that is not ready refuses reads, writes and sign-ins rather than falling back.
+    const auto lab_row = surface.store.get_workspace(lab);
+    ASSERT_TRUE(surface.store.set_service_status(
+        lab_row->zetta_service_id, "Provisioning", "", "http://lab.test"));
+    EXPECT_EQ(users(second_id, lab).error.code, "workspace_not_ready");
+    EXPECT_EQ(sign_in(second, "person@example.test").error.code, "workspace_not_ready");
+    ASSERT_TRUE(surface.store.set_service_status(
+        lab_row->zetta_service_id, "Ready", "", "http://lab.test"));
+    EXPECT_TRUE(sign_in(second, "person@example.test").ok);
+
+    // Deleting the workspace takes the application's users with it; the other is untouched.
+    ASSERT_TRUE(surface.store.update_workspace(lab, {.desired = "deleted"}));
+    EXPECT_EQ(users(second_id, lab).error.path, "/workspace_id");
+    EXPECT_FALSE(sign_in(second, "person@example.test").ok);
+    EXPECT_TRUE(users(first_id, home).ok);
 }
 
 } // namespace

@@ -31,7 +31,8 @@ one invalidates both its sessions and its linked passkey credential.
 An operator registers applications at `/applications`, choosing the workspace of a space that will
 hold the application's lifecycle events (it never changes), and follows the application detail
 page to pool users, application organizations, lifecycle events, and webhook registration. The
-event log reads the events and their delivery attempts from that workspace's Zetta (lake#356). Those pages
+event log reads the events and their delivery attempts from that workspace's Zetta (lake#356), and the
+users and organizations pages read theirs there too (lake#353, lake#354). Those pages
 call the application capabilities through the registry and use the application policy object for
 authorization. Protected application mutations are recorded by the same signed audit path.
 

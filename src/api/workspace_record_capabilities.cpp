@@ -3,7 +3,8 @@
 // collection that moves: each follow-up adds its collection to `copy_collections` and a copier
 // (opportunities, lake#376; stream_owners, lake#379; drive_share_links, lake#350;
 // auth_app_webhook_events and auth_app_webhook_deliveries, lake#356 and lake#357; metering_usage
-// and metering_build_records, lake#348 and lake#349; forge_records, lake#341). A collection
+// and metering_build_records, lake#348 and lake#349; forge_records, lake#341; auth_app_users and
+// auth_app_organizations, lake#353 and lake#354). A collection
 // leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
 // and verified on dev, dropped by migration 0050, lake#483).
 
@@ -16,6 +17,7 @@
 #include <vector>
 
 #include "lake/api/capabilities.hpp"
+#include "lake/control/application_user_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/forge_records.hpp"
@@ -30,14 +32,16 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 8> copy_collections = {"opportunities",
-                                                              "stream_owners",
-                                                              "drive_share_links",
-                                                              "auth_app_webhook_events",
-                                                              "auth_app_webhook_deliveries",
-                                                              "metering_usage",
-                                                              "metering_build_records",
-                                                              "forge_records"};
+constexpr std::array<std::string_view, 10> copy_collections = {"opportunities",
+                                                               "stream_owners",
+                                                               "drive_share_links",
+                                                               "auth_app_webhook_events",
+                                                               "auth_app_webhook_deliveries",
+                                                               "metering_usage",
+                                                               "metering_build_records",
+                                                               "forge_records",
+                                                               "auth_app_users",
+                                                               "auth_app_organizations"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -433,12 +437,15 @@ liquid::runtime::task<ApiResult> copy_application_rows(ApiContext& context, std:
                                                        const std::vector<Row>& rows, int limit,
                                                        Ops ops) {
     json unresolved = json::array();
+    // A row whose application's workspace was deleted went with it and does not block completion.
+    bool blocking = false;
     std::map<std::string, std::map<std::string, std::vector<const Row*>>> by_workspace;
     for (const Row& row : rows) {
         if (row.workspace_id.empty()) {
             unresolved.push_back({{"id", ops.id(row)},
                                   {"customer_id", row.customer_id},
                                   {"outcome", row.outcome}});
+            blocking = blocking || row.outcome != "workspace_deleted";
         } else {
             by_workspace[row.workspace_id][ops.application_id(row)].push_back(&row);
         }
@@ -497,9 +504,14 @@ liquid::runtime::task<ApiResult> copy_application_rows(ApiContext& context, std:
             }
         }
     }
-    co_return copy_result(name, mode, rows.size(), limit,
+    co_return copy_result(name,
+                          mode,
+                          rows.size(),
+                          limit,
                           rows.empty() ? std::string() : ops.id(rows.back()),
-                          std::move(unresolved), tallies);
+                          std::move(unresolved),
+                          tallies,
+                          blocking);
 }
 
 struct EventCopy {
@@ -615,6 +627,188 @@ liquid::runtime::task<ApiResult> copy_application_webhook_deliveries(ApiContext&
     }
     co_return co_await copy_application_rows(context, "auth_app_webhook_deliveries", mode, *rows,
                                              limit, DeliveryCopy{});
+}
+
+// Takes the claim of a unique value for a copied user or organization: written if absent, or
+// already held by it. Held by another is an error the operator resolves, never a takeover.
+liquid::runtime::task<control::ZettaControlResult<void>>
+claim_for_copy(control::WorkspaceRecords& records,
+               control::RecordCollection collection,
+               std::string application_id,
+               std::string_view kind,
+               std::string value,
+               std::string holder) {
+    const std::string key =
+        control::application_claim_key(records, collection, application_id, kind, value);
+    auto written = control::settled(co_await control::write_application_claim(
+        records, collection, application_id, key, holder));
+    if (written) {
+        co_return control::ZettaControlResult<void>();
+    }
+    if (written.error().code != "conflict") {
+        co_return control::ZettaControlResult<void>(std::unexpected(written.error()));
+    }
+    auto claim =
+        control::settled(co_await control::read_application_claim(records, collection, key));
+    if (!claim) {
+        co_return control::ZettaControlResult<void>(std::unexpected(claim.error()));
+    }
+    if (*claim && (*claim)->holder == holder) {
+        co_return control::ZettaControlResult<void>();
+    }
+    // Not `conflict`, which the copy counts as a row already present: the row cannot be copied.
+    co_return control::ZettaControlResult<void>(std::unexpected(control::ZettaControlError{
+        "store_error",
+        std::string(kind) + " " + value + " of application " + application_id + " is held by " +
+            (*claim ? (*claim)->holder : std::string("nobody"))}));
+}
+
+struct UserCopy {
+    using Present = std::map<std::string, control::ApplicationUser>;
+    static std::string id(const control::LegacyApplicationUser& row) {
+        return row.id;
+    }
+    static std::string application_id(const control::LegacyApplicationUser& row) {
+        return row.user.application_id;
+    }
+    static liquid::runtime::task<control::ZettaControlResult<Present>>
+    present(control::WorkspaceRecords& records, std::string application_id) {
+        auto users = control::settled(
+            co_await control::list_application_users(records, application_id, "", 0));
+        if (!users) {
+            co_return control::ZettaControlResult<Present>(std::unexpected(users.error()));
+        }
+        Present present;
+        for (auto& user : *users) {
+            const std::string key =
+                control::application_user_row_id(user.application_id, user.user_id);
+            present.emplace(key, std::move(user));
+        }
+        co_return control::ZettaControlResult<Present>(std::move(present));
+    }
+    // A status someone changed in the workspace since the copy (a later lake revision) is theirs.
+    static bool same(const control::ApplicationUser& stored,
+                     const control::LegacyApplicationUser& row) {
+        const auto& source = row.user;
+        return stored.application_id == source.application_id && stored.user_id == source.user_id &&
+               stored.taap_id == source.taap_id && stored.email == source.email &&
+               stored.display_name == source.display_name && stored.own_pool == source.own_pool &&
+               stored.at_us == source.at_us &&
+               (stored.lake_revision > 1 || stored.status == source.status);
+    }
+    static liquid::runtime::task<control::ZettaControlResult<void>>
+    write(control::WorkspaceRecords& records, const control::LegacyApplicationUser& row) {
+        const control::ApplicationUser& user = row.user;
+        if (user.own_pool && !user.email.empty()) {
+            auto claimed =
+                control::settled(co_await claim_for_copy(records,
+                                                         control::ApplicationUserCodec::collection,
+                                                         user.application_id,
+                                                         control::email_claim,
+                                                         user.email,
+                                                         user.user_id));
+            if (!claimed) {
+                co_return claimed;
+            }
+        }
+        auto written = control::settled(co_await control::create_application_user(records, user));
+        if (!written) {
+            co_return control::ZettaControlResult<void>(std::unexpected(written.error()));
+        }
+        co_return control::ZettaControlResult<void>();
+    }
+};
+
+struct OrganizationCopy {
+    using Present = std::map<std::string, control::ApplicationOrganization>;
+    static std::string id(const control::LegacyApplicationOrganization& row) {
+        return row.organization.id;
+    }
+    static std::string application_id(const control::LegacyApplicationOrganization& row) {
+        return row.organization.application_id;
+    }
+    static liquid::runtime::task<control::ZettaControlResult<Present>>
+    present(control::WorkspaceRecords& records, std::string application_id) {
+        auto organizations = control::settled(
+            co_await control::list_application_organizations(records, application_id, 0));
+        if (!organizations) {
+            co_return control::ZettaControlResult<Present>(std::unexpected(organizations.error()));
+        }
+        Present present;
+        for (auto& organization : *organizations) {
+            const std::string key = organization.id;
+            present.emplace(key, std::move(organization));
+        }
+        co_return control::ZettaControlResult<Present>(std::move(present));
+    }
+    // A name or metadata someone changed in the workspace since the copy is theirs.
+    static bool same(const control::ApplicationOrganization& stored,
+                     const control::LegacyApplicationOrganization& row) {
+        const auto& source = row.organization;
+        return stored.application_id == source.application_id && stored.taap_id == source.taap_id &&
+               stored.at_us == source.at_us &&
+               (stored.lake_revision > 1 ||
+                (stored.name == source.name && stored.metadata == source.metadata));
+    }
+    static liquid::runtime::task<control::ZettaControlResult<void>>
+    write(control::WorkspaceRecords& records, const control::LegacyApplicationOrganization& row) {
+        const control::ApplicationOrganization& organization = row.organization;
+        const auto collection = control::ApplicationOrganizationCodec::collection;
+        auto taap = control::settled(co_await claim_for_copy(records,
+                                                             collection,
+                                                             organization.application_id,
+                                                             control::taap_claim,
+                                                             organization.taap_id,
+                                                             organization.id));
+        if (!taap) {
+            co_return taap;
+        }
+        auto name = control::settled(co_await claim_for_copy(records,
+                                                             collection,
+                                                             organization.application_id,
+                                                             control::name_claim,
+                                                             organization.name,
+                                                             organization.id));
+        if (!name) {
+            co_return name;
+        }
+        auto written = control::settled(
+            co_await control::put_new_application_organization(records, organization));
+        if (!written) {
+            co_return control::ZettaControlResult<void>(std::unexpected(written.error()));
+        }
+        co_return control::ZettaControlResult<void>();
+    }
+};
+
+liquid::runtime::task<ApiResult> copy_application_users(ApiContext& context,
+                                                        const std::string& mode,
+                                                        const std::string& after,
+                                                        int limit) {
+    if (auto assigned = context.store->assign_legacy_application_directory(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_application_users(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    co_return co_await copy_application_rows(
+        context, "auth_app_users", mode, *rows, limit, UserCopy{});
+}
+
+liquid::runtime::task<ApiResult> copy_application_organizations(ApiContext& context,
+                                                                const std::string& mode,
+                                                                const std::string& after,
+                                                                int limit) {
+    if (auto assigned = context.store->assign_legacy_application_directory(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_application_organizations(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    co_return co_await copy_application_rows(
+        context, "auth_app_organizations", mode, *rows, limit, OrganizationCopy{});
 }
 
 // The rows of one retired metering table grouped by the workspace that owns them. Rows whose
@@ -953,6 +1147,12 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "forge_records") {
                 co_return co_await copy_forge_records(context, mode, after, limit);
+            }
+            if (input.at("collection") == "auth_app_users") {
+                co_return co_await copy_application_users(context, mode, after, limit);
+            }
+            if (input.at("collection") == "auth_app_organizations") {
+                co_return co_await copy_application_organizations(context, mode, after, limit);
             }
             if (input.at("collection") == "auth_app_webhook_events") {
                 co_return co_await copy_application_webhook_events(context, mode, after, limit);

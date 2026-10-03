@@ -63,6 +63,11 @@ Forge records follow (lake#341, migration `0054`): issues, reviews, comments, re
 exports and branch protection rules live in the workspace Zetta of their repository's workspace,
 found by repository and kind; the push path reads branch protection there once before the push
 and refuses reference updates when it cannot. See `docs/api/forge.md`.
+Application users and organizations follow (lake#353, lake#354, migration `0055`): they live in the
+application's workspace Zetta, with a pool user's email and an organization's TAAP identity and name
+as claims written `if_absent`; every session issued in an application's pool is checked against the
+user's record there before it is returned, and the identity capabilities are asynchronous. See
+`docs/api/apps.md`.
 
 Every repository belongs to one workspace (lake#315 part 1, migration `0051`): an immutable
 `repositories.workspace_id` required on every create and import, returned on reads and carried

@@ -2682,3 +2682,57 @@ CREATE TABLE IF NOT EXISTS forge_record_workspaces_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0054_forge_record_workspaces')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0055_application_user_workspaces: an application's users (lake#353) and organizations
+-- (lake#354) live in the workspace Zetta of the application's workspace
+-- (auth_applications.workspace_id, 0049; docs/api/apps.md, docs/architecture/
+-- workspace-records.md). Lake no longer writes or reads auth_app_users or auth_app_organizations;
+-- the operator's one-shot copy (copy_workspace_records) moves each row into its workspace, with
+-- the claims that keep a pool user's email, and an organization's TAAP identity and name, unique
+-- within the application, and verifies it.
+--
+-- Each row's owner is recorded in workspace_assignments: its application's workspace
+-- (application_workspace), needs_selection while the application has none, or workspace_deleted
+-- when that workspace was deleted (the rows went with it and do not hold the copy back). A user
+-- row's id is md5(application id, newline, user id) as a UUID, since auth_app_users has no id
+-- column. Nothing is dropped here; a later migration drops both tables once the copy has been
+-- verified on every environment. The users rows and the pool's credentials and sessions stay:
+-- they are lake's own accounts (lake#320, lake#322, lake#323 move those).
+-- ---------------------------------------------------------------------------------------------
+DO $$
+DECLARE
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations
+                   WHERE version = '0055_application_user_workspaces') THEN
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT r.object_table, r.object_id, a.customer_id,
+                   CASE WHEN w.desired = 'deleted' THEN NULL ELSE a.workspace_id END,
+                   CASE WHEN a.workspace_id IS NULL THEN 'needs_selection'
+                        WHEN w.desired = 'deleted' THEN 'workspace_deleted'
+                        ELSE 'application_workspace' END
+            FROM (SELECT 'auth_app_users' AS object_table,
+                         md5(u.application_id::text || E'\n' || u.user_id::text)::uuid AS object_id,
+                         u.application_id
+                  FROM auth_app_users u
+                  UNION ALL
+                  SELECT 'auth_app_organizations', o.id, o.application_id
+                  FROM auth_app_organizations o) r
+                 JOIN auth_applications a ON a.id = r.application_id
+                 LEFT JOIN workspaces w ON w.id = a.workspace_id
+            ON CONFLICT DO NOTHING;
+        FOR unresolved IN SELECT * FROM workspace_assignments WHERE workspace_id IS NULL
+                           AND object_table IN ('auth_app_users', 'auth_app_organizations') LOOP
+            RAISE WARNING 'application % not copied (%): object=%, customer=%',
+                unresolved.object_table, unresolved.outcome, unresolved.object_id,
+                unresolved.customer_id;
+        END LOOP;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS application_user_workspaces_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0055_application_user_workspaces')
+    ON CONFLICT DO NOTHING;

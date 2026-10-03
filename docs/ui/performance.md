@@ -144,7 +144,9 @@ workspace observed for it.
 
 `/application/events` is not a workspace route and the fixture has no application, so it is held at
 the implicit `0`. With an application that has events it reads its workspace twice, in two rounds:
-the newest events, then their delivery attempts back to the oldest of them (lake#356).
+the newest events, then their delivery attempts back to the oldest of them (lake#356). `/application/users` and `/application/organizations` are not workspace routes either; each
+reads its workspace once, one `list_records` of the application's users or organizations
+(lake#353, lake#354).
 
 The deferred panels are JSON routes, not pages, and are held to their own budgets:
 

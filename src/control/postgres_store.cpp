@@ -125,6 +125,31 @@ constexpr std::string_view legacy_application_event_resolution_sql =
     "e.application_id WHERE s.object_table = 'auth_app_webhook_events' AND s.object_id = e.id "
     "AND s.workspace_id IS NULL AND a.workspace_id IS NOT NULL";
 
+// Migration 0055's assignment of the retired auth_app_users and auth_app_organizations rows
+// (db/schema.sql), rerun before each copy: each row belongs to its application's workspace, is
+// needs_selection while the application has none, and workspace_deleted when that workspace is
+// gone. A user row's id is md5(application id, newline, user id) as a UUID. The resolution
+// statements assign recorded needs_selection rows once their application has a live workspace.
+constexpr std::string_view legacy_application_directory_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT r.object_table, r.object_id, a.customer_id, CASE WHEN w.desired = 'deleted' "
+    "THEN NULL ELSE a.workspace_id END, CASE WHEN a.workspace_id IS NULL THEN 'needs_selection' "
+    "WHEN w.desired = 'deleted' THEN 'workspace_deleted' ELSE 'application_workspace' END FROM "
+    "(SELECT 'auth_app_users' AS object_table, md5(u.application_id::text || E'\\n' || "
+    "u.user_id::text)::uuid AS object_id, u.application_id FROM auth_app_users u UNION ALL SELECT "
+    "'auth_app_organizations', o.id, o.application_id FROM auth_app_organizations o) r JOIN "
+    "auth_applications a ON a.id = r.application_id LEFT JOIN workspaces w ON w.id = "
+    "a.workspace_id ON CONFLICT DO NOTHING";
+constexpr std::string_view legacy_application_directory_resolution_sql =
+    "UPDATE workspace_assignments s SET workspace_id = a.workspace_id, outcome = "
+    "'application_workspace' FROM (SELECT 'auth_app_users' AS object_table, "
+    "md5(u.application_id::text || E'\\n' || u.user_id::text)::uuid AS object_id, "
+    "u.application_id FROM auth_app_users u UNION ALL SELECT 'auth_app_organizations', o.id, "
+    "o.application_id FROM auth_app_organizations o) r JOIN auth_applications a ON a.id = "
+    "r.application_id JOIN workspaces w ON w.id = a.workspace_id AND w.desired <> 'deleted' WHERE "
+    "s.object_table = r.object_table AND s.object_id = r.object_id AND s.workspace_id IS NULL AND "
+    "s.outcome = 'needs_selection'";
+
 // Migration 0054's assignment of the retired forge_records rows (db/schema.sql), rerun before each
 // copy: each row belongs to its repository's workspace, is needs_selection while the repository
 // has none, and workspace_deleted when that workspace is gone. The second statement resolves
@@ -1762,13 +1787,6 @@ constexpr const char* application_columns =
     "id::text, customer_id::text, pool_id, name, allowed_origins::text, redirect_uris::text, "
     "coalesce(custom_sign_in_domain,''), theme::text, created_at::text, updated_at::text, "
     "coalesce(workspace_id::text,'')";
-constexpr const char* application_user_columns =
-    "auth_app_users.application_id::text, auth_app_users.user_id::text, "
-    "coalesce(users.taap_id,''), coalesce(users.email,''), users.display_name, "
-    "auth_app_users.status, auth_app_users.created_at::text, auth_app_users.updated_at::text";
-constexpr const char* application_organization_columns =
-    "id::text, application_id::text, taap_id, name, metadata::text, created_at::text, "
-    "updated_at::text";
 constexpr const char* application_webhook_columns =
     "id::text, application_id::text, url, array_to_json(events)::text, encrypted_secret, "
     "enabled, created_at::text, updated_at::text";
@@ -1786,27 +1804,6 @@ Application application_of(const pqxx::row& row) {
         row[8].as<std::string>(),
         row[9].as<std::string>(),
         row[10].as<std::string>()};
-}
-
-ApplicationUser application_user_of(const pqxx::row& row) {
-    return ApplicationUser{row[0].as<std::string>(),
-                           row[1].as<std::string>(),
-                           row[2].as<std::string>(),
-                           row[3].as<std::string>(),
-                           row[4].as<std::string>(),
-                           row[5].as<std::string>(),
-                           row[6].as<std::string>(),
-                           row[7].as<std::string>()};
-}
-
-ApplicationOrganization application_organization_of(const pqxx::row& row) {
-    return ApplicationOrganization{row[0].as<std::string>(),
-                                   row[1].as<std::string>(),
-                                   row[2].as<std::string>(),
-                                   row[3].as<std::string>(),
-                                   nlohmann::json::parse(row[4].as<std::string>()),
-                                   row[5].as<std::string>(),
-                                   row[6].as<std::string>()};
 }
 
 ApplicationWebhook application_webhook_of(const pqxx::row& row, std::string secret) {
@@ -3548,79 +3545,25 @@ public:
             });
     }
 
-    Result<ApplicationUser> register_application_user(const std::string& application_id,
-                                                      const std::string& user_id) override {
-        return with_tx<ApplicationUser>([&](pqxx::work& tx) -> Result<ApplicationUser> {
-            const pqxx::result rows = tx.exec_params(
-                std::string("INSERT INTO auth_app_users (application_id, user_id) VALUES "
-                            "($1::uuid, $2::uuid) ON CONFLICT (application_id, user_id) DO UPDATE "
-                            "SET updated_at = auth_app_users.updated_at RETURNING user_id::text"),
-                application_id,
-                user_id);
-            static_cast<void>(rows);
-            return application_user_tx(tx, application_id, user_id);
-        });
-    }
-
-    Result<ApplicationUser> get_application_user(const std::string& application_id,
+    Result<int> revoke_application_user_sessions(const std::string& application_id,
                                                  const std::string& user_id) override {
-        return with_tx<ApplicationUser>(
-            [&](pqxx::work& tx) { return application_user_tx(tx, application_id, user_id); });
-    }
-
-    Result<std::vector<ApplicationUser>> list_application_users(const std::string& application_id,
-                                                                const std::string& query,
-                                                                int limit) override {
-        return with_tx<std::vector<ApplicationUser>>(
-            [&](pqxx::work& tx) -> Result<std::vector<ApplicationUser>> {
-                const pqxx::result rows = tx.exec_params(
-                    std::string("SELECT ") + application_user_columns +
-                        " FROM auth_app_users JOIN users ON users.id = auth_app_users.user_id "
-                        "WHERE auth_app_users.application_id = $1::uuid AND ($2 = '' OR "
-                        "coalesce(users.email,'') ILIKE '%' || $2 || '%' OR users.display_name "
-                        "ILIKE '%' || $2 || '%') ORDER BY auth_app_users.created_at DESC LIMIT $3",
-                    application_id,
-                    query,
-                    limit);
-                std::vector<ApplicationUser> output;
-                for (const auto& row : rows) {
-                    output.push_back(application_user_of(row));
-                }
-                return output;
-            });
-    }
-
-    Result<ApplicationUser> set_application_user_status(const std::string& application_id,
-                                                        const std::string& user_id,
-                                                        const std::string& status) override {
-        return with_tx<ApplicationUser>([&](pqxx::work& tx) -> Result<ApplicationUser> {
-            if (status != "active" && status != "suspended") {
-                return std::unexpected(
-                    StoreError{"invalid_input", "application user status is invalid"});
+        return with_tx<int>([&](pqxx::work& tx) -> Result<int> {
+            const pqxx::result applications = tx.exec_params(
+                "SELECT pool_id FROM auth_applications WHERE id = $1::uuid", application_id);
+            if (applications.empty()) {
+                return std::unexpected(StoreError{"not_found", "application does not exist"});
             }
-            const pqxx::result updated = tx.exec_params(
-                "UPDATE auth_app_users SET status = $3 WHERE application_id = $1::uuid AND "
-                "user_id = $2::uuid RETURNING user_id::text",
-                application_id,
+            const pqxx::result revoked = tx.exec_params(
+                "UPDATE sessions SET revoked_at = now() WHERE user_id = $1::uuid AND pool_id = $2 "
+                "AND revoked_at IS NULL RETURNING id",
                 user_id,
-                status);
-            if (updated.empty()) {
-                return std::unexpected(StoreError{"not_found", "application user does not exist"});
-            }
-            if (status == "suspended") {
-                tx.exec_params("UPDATE sessions SET revoked_at = now() FROM auth_applications "
-                               "WHERE auth_applications.id = $1::uuid AND sessions.user_id = "
-                               "$2::uuid AND sessions.pool_id = auth_applications.pool_id AND "
-                               "sessions.revoked_at IS NULL",
-                               application_id,
-                               user_id);
-            }
-            return application_user_tx(tx, application_id, user_id);
+                applications[0][0].as<std::string>());
+            return static_cast<int>(revoked.size());
         });
     }
 
-    Result<void> delete_application_user(const std::string& application_id,
-                                         const std::string& user_id) override {
+    Result<void> delete_application_user_credentials(const std::string& application_id,
+                                                     const std::string& user_id) override {
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
             const pqxx::result applications = tx.exec_params(
                 "SELECT pool_id FROM auth_applications WHERE id = $1::uuid", application_id);
@@ -3633,82 +3576,104 @@ public:
             tx.exec_params("DELETE FROM credentials WHERE user_id = $1::uuid AND pool_id = $2",
                            user_id,
                            pool_id);
-            const pqxx::result removed = tx.exec_params(
-                "DELETE FROM auth_app_users WHERE application_id = $1::uuid AND user_id = "
-                "$2::uuid RETURNING user_id::text",
-                application_id,
-                user_id);
-            if (removed.empty()) {
-                return std::unexpected(StoreError{"not_found", "application user does not exist"});
-            }
             return {};
         });
     }
 
-    Result<ApplicationOrganization>
-    create_application_organization(const NewApplicationOrganization& input) override {
-        return with_tx<ApplicationOrganization>(
-            [&](pqxx::work& tx) -> Result<ApplicationOrganization> {
-                const pqxx::result rows = tx.exec_params(
-                    std::string("INSERT INTO auth_app_organizations (application_id, taap_id, "
-                                "name, metadata) VALUES ($1::uuid, $2, $3, $4::jsonb) RETURNING ") +
-                        application_organization_columns,
-                    input.application_id,
-                    input.taap_id,
-                    input.name,
-                    input.metadata.dump());
-                return application_organization_of(rows[0]);
-            });
-    }
-
-    Result<std::vector<ApplicationOrganization>>
-    list_application_organizations(const std::string& application_id, int limit) override {
-        return with_tx<std::vector<ApplicationOrganization>>(
-            [&](pqxx::work& tx) -> Result<std::vector<ApplicationOrganization>> {
-                const pqxx::result rows = tx.exec_params(
-                    std::string("SELECT ") + application_organization_columns +
-                        " FROM auth_app_organizations WHERE application_id = $1::uuid ORDER BY "
-                        "created_at DESC LIMIT $2",
-                    application_id,
-                    limit);
-                std::vector<ApplicationOrganization> output;
-                for (const auto& row : rows) {
-                    output.push_back(application_organization_of(row));
-                }
-                return output;
-            });
-    }
-
-    Result<ApplicationOrganization> update_application_organization(
-        const std::string& id, const std::string& name, const nlohmann::json& metadata) override {
-        return with_tx<ApplicationOrganization>(
-            [&](pqxx::work& tx) -> Result<ApplicationOrganization> {
-                const pqxx::result rows = tx.exec_params(
-                    std::string("UPDATE auth_app_organizations SET name = CASE WHEN $2 = '' THEN "
-                                "name ELSE $2 END, metadata = $3::jsonb WHERE id = $1::uuid "
-                                "RETURNING ") +
-                        application_organization_columns,
-                    id,
-                    name,
-                    metadata.dump());
-                if (rows.empty()) {
-                    return std::unexpected(
-                        StoreError{"not_found", "application organization does not exist"});
-                }
-                return application_organization_of(rows[0]);
-            });
-    }
-
-    Result<void> delete_application_organization(const std::string& id) override {
+    Result<void> assign_legacy_application_directory() override {
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
-            const pqxx::result rows = tx.exec_params(
-                "DELETE FROM auth_app_organizations WHERE id = $1::uuid RETURNING id::text", id);
-            if (rows.empty()) {
-                return std::unexpected(
-                    StoreError{"not_found", "application organization does not exist"});
-            }
+            tx.exec(std::string(legacy_application_directory_assignment_sql));
+            tx.exec(std::string(legacy_application_directory_resolution_sql));
             return {};
         });
+    }
+
+    Result<std::vector<LegacyApplicationUser>> legacy_application_users(const std::string& after_id,
+                                                                        int limit) override {
+        return with_tx<
+            std::vector<LegacyApplicationUser>>([&](pqxx::work& tx)
+                                                    -> Result<std::vector<LegacyApplicationUser>> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT u.id::text, u.application_id::text, u.user_id::text, "
+                "COALESCE(us.taap_id, ''), COALESCE(us.email, ''), "
+                "COALESCE(us.display_name, ''), u.status, "
+                "(extract(epoch FROM u.created_at) * 1000000)::bigint, "
+                "(extract(epoch FROM u.updated_at) * 1000000)::bigint, "
+                "COALESCE(us.pool_id = app.pool_id, false), "
+                "COALESCE(app.customer_id::text, ''), COALESCE(a.workspace_id::text, ''), "
+                "COALESCE(a.outcome, 'needs_selection') "
+                "FROM (SELECT md5(application_id::text || E'\\n' || user_id::text)::uuid AS id, "
+                "application_id, user_id, status, created_at, updated_at "
+                "FROM auth_app_users) u "
+                "LEFT JOIN users us ON us.id = u.user_id "
+                "LEFT JOIN auth_applications app ON app.id = u.application_id "
+                "LEFT JOIN workspace_assignments a "
+                "ON a.object_table = 'auth_app_users' AND a.object_id = u.id "
+                "WHERE ($1 = '' OR u.id > NULLIF($1, '')::uuid) ORDER BY u.id LIMIT $2",
+                after_id,
+                std::clamp(limit, 1, 5000));
+            std::vector<LegacyApplicationUser> users;
+            for (const pqxx::row& row : rows) {
+                LegacyApplicationUser legacy;
+                legacy.id = row[0].as<std::string>();
+                legacy.user.application_id = row[1].as<std::string>();
+                legacy.user.user_id = row[2].as<std::string>();
+                legacy.user.taap_id = row[3].as<std::string>();
+                legacy.user.email = row[4].as<std::string>();
+                legacy.user.display_name = row[5].as<std::string>();
+                legacy.user.status = row[6].as<std::string>();
+                legacy.user.at_us = row[7].as<std::int64_t>();
+                legacy.user.created_at = record_instant(legacy.user.at_us);
+                legacy.user.updated_at = record_instant(row[8].as<std::int64_t>());
+                legacy.user.own_pool = row[9].as<bool>();
+                legacy.customer_id = row[10].as<std::string>();
+                legacy.workspace_id = row[11].as<std::string>();
+                legacy.outcome = row[12].as<std::string>();
+                users.push_back(std::move(legacy));
+            }
+            return users;
+        });
+    }
+
+    Result<std::vector<LegacyApplicationOrganization>>
+    legacy_application_organizations(const std::string& after_id, int limit) override {
+        return with_tx<std::vector<LegacyApplicationOrganization>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyApplicationOrganization>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT o.id::text, o.application_id::text, o.taap_id, o.name, "
+                    "o.metadata::text, (extract(epoch FROM o.created_at) * 1000000)::bigint, "
+                    "(extract(epoch FROM o.updated_at) * 1000000)::bigint, "
+                    "COALESCE(app.customer_id::text, ''), COALESCE(a.workspace_id::text, ''), "
+                    "COALESCE(a.outcome, 'needs_selection') "
+                    "FROM auth_app_organizations o "
+                    "LEFT JOIN auth_applications app ON app.id = o.application_id "
+                    "LEFT JOIN workspace_assignments a "
+                    "ON a.object_table = 'auth_app_organizations' AND a.object_id = o.id "
+                    "WHERE ($1 = '' OR o.id > NULLIF($1, '')::uuid) ORDER BY o.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyApplicationOrganization> organizations;
+                for (const pqxx::row& row : rows) {
+                    LegacyApplicationOrganization legacy;
+                    legacy.organization.id = row[0].as<std::string>();
+                    legacy.organization.application_id = row[1].as<std::string>();
+                    legacy.organization.taap_id = row[2].as<std::string>();
+                    legacy.organization.name = row[3].as<std::string>();
+                    legacy.organization.metadata =
+                        nlohmann::json::parse(row[4].as<std::string>(), nullptr, false);
+                    if (!legacy.organization.metadata.is_object()) {
+                        legacy.organization.metadata = nlohmann::json::object();
+                    }
+                    legacy.organization.at_us = row[5].as<std::int64_t>();
+                    legacy.organization.created_at = record_instant(legacy.organization.at_us);
+                    legacy.organization.updated_at = record_instant(row[6].as<std::int64_t>());
+                    legacy.customer_id = row[7].as<std::string>();
+                    legacy.workspace_id = row[8].as<std::string>();
+                    legacy.outcome = row[9].as<std::string>();
+                    organizations.push_back(std::move(legacy));
+                }
+                return organizations;
+            });
     }
 
     Result<ApplicationWebhook>
@@ -5921,24 +5886,23 @@ public:
                 StoreError{"store_error", "could not derive password credential"});
         }
         return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
-            std::string application_id;
-            if (in.pool_id != "lake") {
-                const pqxx::result applications = tx.exec_params(
-                    "SELECT id::text FROM auth_applications WHERE pool_id = $1", in.pool_id);
-                if (applications.empty()) {
-                    return std::unexpected(
-                        StoreError{"invalid_input", "application pool does not exist"});
-                }
-                application_id = applications[0][0].as<std::string>();
+            if (in.pool_id != "lake" &&
+                tx.exec_params("SELECT 1 FROM auth_applications WHERE pool_id = $1", in.pool_id)
+                    .empty()) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "application pool does not exist"});
             }
-            const pqxx::result user_rows =
-                tx.exec_params("INSERT INTO users (taap_id, email, display_name, pool_id) "
-                               "VALUES ($1, $2, $3, $4) "
-                               "RETURNING id::text",
-                               identity->identifier,
-                               in.email,
-                               in.display_name,
-                               in.pool_id);
+            // The caller may choose the id, so that an application's workspace records the user
+            // before this row exists (lake#353); otherwise PostgreSQL makes one.
+            const pqxx::result user_rows = tx.exec_params(
+                "INSERT INTO users (id, taap_id, email, display_name, pool_id) "
+                "VALUES (COALESCE(NULLIF($5, '')::uuid, gen_random_uuid()), $1, $2, $3, $4) "
+                "RETURNING id::text",
+                identity->identifier,
+                in.email,
+                in.display_name,
+                in.pool_id,
+                in.user_id);
             const std::string user_id = user_rows[0][0].as<std::string>();
             tx.exec_params("INSERT INTO identity_documents (user_id, document, "
                            "document_hash) VALUES ($1::uuid, to_jsonb($2::text), $3)",
@@ -5952,27 +5916,25 @@ public:
                            in.pool_id,
                            in.email,
                            password_hash);
-            if (!application_id.empty()) {
-                tx.exec_params("INSERT INTO auth_app_users (application_id, user_id) VALUES "
-                               "($1::uuid, $2::uuid)",
-                               application_id,
-                               user_id);
-            }
             if (in.pool_id == "lake") {
                 const auto customer = provision_personal_customer(tx, user_id, *identity);
                 if (!customer) {
                     return std::unexpected(customer.error());
                 }
             }
-            return issue_session(tx,
-                                 user_id,
-                                 in.pool_id,
-                                 in.device_name,
-                                 "browser",
-                                 "",
-                                 {"*"},
-                                 "",
-                                 60 * 60 * 24 * 30);
+            auto issued = issue_session(tx,
+                                        user_id,
+                                        in.pool_id,
+                                        in.device_name,
+                                        "browser",
+                                        "",
+                                        {"*"},
+                                        "",
+                                        60 * 60 * 24 * 30);
+            if (issued) {
+                issued->created_user = true;
+            }
+            return issued;
         });
     }
     Result<IssuedSession> sign_in_password(const PasswordSignIn& in) override {
@@ -5988,10 +5950,6 @@ public:
                 return std::unexpected(StoreError{"not_found", "invalid email or password"});
             }
             const std::string user_id = rows[0][0].as<std::string>();
-            if (const auto active = require_application_user_active_tx(tx, in.pool_id, user_id);
-                !active) {
-                return std::unexpected(active.error());
-            }
             const pqxx::result totp_rows = tx.exec_params(
                 "SELECT 1 FROM credentials WHERE user_id = $1::uuid AND pool_id = $2 "
                 "AND kind = 'totp' AND revoked_at IS NULL",
@@ -6145,11 +6103,6 @@ public:
                                              password_rows[0][1].as<std::string>(), in.password)) {
                 return std::unexpected(StoreError{"not_found", "invalid email or password"});
             }
-            if (const auto active = require_application_user_active_tx(
-                    tx, in.pool_id, password_rows[0][0].as<std::string>());
-                !active) {
-                return std::unexpected(active.error());
-            }
             return sign_in_totp_tx(tx, in, password_rows[0][0].as<std::string>());
         });
     }
@@ -6266,11 +6219,6 @@ public:
                 return std::unexpected(StoreError{"not_found", "passkey is not registered"});
             }
             const std::uint32_t previous_count = rows[0][2].as<std::uint32_t>();
-            if (const auto active = require_application_user_active_tx(
-                    tx, in.pool_id, rows[0][0].as<std::string>());
-                !active) {
-                return std::unexpected(active.error());
-            }
             const auto sign_count =
                 identity_crypto::verify_passkey_assertion(in.client_data_json,
                                                           in.authenticator_data,
@@ -6307,15 +6255,11 @@ public:
     Result<IssuedSession> sign_in_oauth(const OAuthIdentity& in) override {
         return with_tx<IssuedSession>([&](pqxx::work& tx) -> Result<IssuedSession> {
             const std::string subject = in.provider + ":" + in.subject;
-            std::string application_id;
-            if (in.pool_id != "lake") {
-                const pqxx::result applications = tx.exec_params(
-                    "SELECT id::text FROM auth_applications WHERE pool_id = $1", in.pool_id);
-                if (applications.empty()) {
-                    return std::unexpected(
-                        StoreError{"invalid_input", "application pool does not exist"});
-                }
-                application_id = applications[0][0].as<std::string>();
+            if (in.pool_id != "lake" &&
+                tx.exec_params("SELECT 1 FROM auth_applications WHERE pool_id = $1", in.pool_id)
+                    .empty()) {
+                return std::unexpected(
+                    StoreError{"invalid_input", "application pool does not exist"});
             }
             pqxx::result rows =
                 tx.exec_params("SELECT user_id::text FROM credentials WHERE pool_id = $1 "
@@ -6323,7 +6267,8 @@ public:
                                in.pool_id,
                                subject);
             std::string user_id;
-            if (rows.empty()) {
+            const bool created = rows.empty();
+            if (created) {
                 const Result<VerifiedIdentityDocument> identity =
                     verify_identity_document(in.identity_document);
                 if (!identity) {
@@ -6346,28 +6291,22 @@ public:
                                user_id,
                                in.pool_id,
                                subject);
-                if (!application_id.empty()) {
-                    tx.exec_params("INSERT INTO auth_app_users (application_id, user_id) VALUES "
-                                   "($1::uuid, $2::uuid)",
-                                   application_id,
-                                   user_id);
-                }
             } else {
                 user_id = rows[0][0].as<std::string>();
             }
-            if (const auto active = require_application_user_active_tx(tx, in.pool_id, user_id);
-                !active) {
-                return std::unexpected(active.error());
+            auto issued = issue_session(tx,
+                                        user_id,
+                                        in.pool_id,
+                                        in.device_name,
+                                        "browser",
+                                        "",
+                                        {"*"},
+                                        "",
+                                        60 * 60 * 24 * 30);
+            if (issued) {
+                issued->created_user = created;
             }
-            return issue_session(tx,
-                                 user_id,
-                                 in.pool_id,
-                                 in.device_name,
-                                 "browser",
-                                 "",
-                                 {"*"},
-                                 "",
-                                 60 * 60 * 24 * 30);
+            return issued;
         });
     }
     Result<IssuedSession> sign_in_clerk(const ClerkIdentity& in) override {
@@ -6745,13 +6684,10 @@ public:
                     "LEFT JOIN devices ON devices.id = sessions.device_id "
                     "LEFT JOIN users ON users.id = sessions.user_id "
                     "WHERE sessions.lookup_id = $1::uuid AND sessions.revoked_at IS NULL "
-                    "AND (devices.id IS NULL OR devices.revoked_at IS NULL) "
-                    "AND (sessions.pool_id = 'lake' OR EXISTS "
-                    "(SELECT 1 FROM auth_applications JOIN auth_app_users ON "
-                    "auth_app_users.application_id = auth_applications.id WHERE "
-                    "auth_applications.pool_id = sessions.pool_id AND "
-                    "auth_app_users.user_id = sessions.user_id AND "
-                    "auth_app_users.status = 'active'))",
+                    // An application user's status lives in the application's workspace
+                    // (lake#353): suspension and deletion revoke the pool's sessions, and every
+                    // session issued in a pool is checked there before it is returned.
+                    "AND (devices.id IS NULL OR devices.revoked_at IS NULL)",
                 *lookup_id);
             if (rows.empty()) {
                 return std::unexpected(StoreError{"not_found", "session is not active"});
@@ -9137,39 +9073,6 @@ private:
             }
             return application_of(rows[0]);
         });
-    }
-
-    Result<ApplicationUser> application_user_tx(pqxx::work& tx,
-                                                const std::string& application_id,
-                                                const std::string& user_id) {
-        const pqxx::result rows = tx.exec_params(
-            std::string("SELECT ") + application_user_columns +
-                " FROM auth_app_users JOIN users ON users.id = auth_app_users.user_id WHERE "
-                "auth_app_users.application_id = $1::uuid AND auth_app_users.user_id = $2::uuid",
-            application_id,
-            user_id);
-        if (rows.empty()) {
-            return std::unexpected(StoreError{"not_found", "application user does not exist"});
-        }
-        return application_user_of(rows[0]);
-    }
-
-    Result<void> require_application_user_active_tx(pqxx::work& tx,
-                                                    const std::string& pool_id,
-                                                    const std::string& user_id) {
-        if (pool_id == "lake") {
-            return {};
-        }
-        const pqxx::result rows = tx.exec_params(
-            "SELECT auth_app_users.status FROM auth_applications JOIN auth_app_users ON "
-            "auth_app_users.application_id = auth_applications.id WHERE "
-            "auth_applications.pool_id = $1 AND auth_app_users.user_id = $2::uuid",
-            pool_id,
-            user_id);
-        if (rows.empty() || rows[0][0].as<std::string>() != "active") {
-            return std::unexpected(StoreError{"unauthorized", "application user is suspended"});
-        }
-        return {};
     }
 
     bool organization_admin(pqxx::work& tx,

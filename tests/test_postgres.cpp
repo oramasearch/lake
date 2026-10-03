@@ -19,6 +19,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/control/agent_runs.hpp"
+#include "lake/control/application_user_records.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/metering.hpp"
@@ -2364,6 +2365,184 @@ TEST(PostgresApplicationWebhooks, MigrationRecordsEachEventsOwnerForTheCopy) {
     EXPECT_EQ(delivered->workspace_id, workspaces[0][0]) << "a delivery goes where its event goes";
     EXPECT_EQ(delivered->delivery.application_id, applications[0]);
     EXPECT_EQ(delivered->delivery.status, 204);
+}
+
+// Migration 0055 (lake#353, lake#354): each application user and organization row's owner is its
+// application's workspace, needs_selection while the application has none, and workspace_deleted
+// when that workspace is gone. A user row's id is md5(application, newline, user), the same id lake
+// computes. Rerunning the migration changes nothing; the store's rerun of the assignment picks up
+// a late row and resolves rows once their application is assigned.
+TEST(PostgresApplicationUsers, MigrationRecordsEachRowsOwnerForTheCopy) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "application-user-migration-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    std::vector<std::string> customers;
+    std::vector<std::vector<std::string>> workspaces(2);
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "app-user-migration-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+        for (int count = 0; count <= index; ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            workspaces[index].push_back(workspace->id);
+        }
+    }
+    pqxx::connection connection(uri);
+    // Three applications: one in the first space's workspace, one of the second space with none
+    // yet (registered before 0049), one in a workspace of the second space that is then deleted.
+    std::vector<std::string> applications;
+    {
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
+        for (const auto& [customer, workspace] : {std::pair{customers[0], workspaces[0][0]},
+                                                  std::pair{customers[1], std::string()},
+                                                  std::pair{customers[1], workspaces[1][1]}}) {
+            const std::string id = lake::control::new_uuid_v4();
+            tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
+                           "allowed_origins, workspace_id) VALUES ($1::uuid, $2::uuid, $3, "
+                           "'migration', '[\"https://m.example.test\"]'::jsonb, "
+                           "NULLIF($4, '')::uuid)",
+                           id,
+                           customer,
+                           "app:" + id,
+                           workspace);
+            applications.push_back(id);
+        }
+        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
+        tx.exec_params("UPDATE workspaces SET desired = 'deleted' WHERE id = $1::uuid",
+                       workspaces[1][1]);
+        tx.commit();
+    }
+    // A pool user of an application and an organization of it, as an earlier lake wrote them.
+    const auto user_of = [&](const std::string& application) {
+        pqxx::work tx(connection);
+        const std::string id =
+            tx.exec_params("INSERT INTO users (taap_id, email, display_name, pool_id) VALUES "
+                           "($1, $2, 'Pool user', $3) RETURNING id::text",
+                           "taap:pool-" + lake::control::new_uuid_v4(),
+                           "pool-" + lake::control::new_uuid_v4() + "@example.test",
+                           "app:" + application)[0][0]
+                .as<std::string>();
+        tx.exec_params("INSERT INTO auth_app_users (application_id, user_id) VALUES ($1::uuid, "
+                       "$2::uuid)",
+                       application,
+                       id);
+        tx.commit();
+        return id;
+    };
+    const auto organization_of = [&](const std::string& application) {
+        pqxx::work tx(connection);
+        const std::string id =
+            tx.exec_params("INSERT INTO auth_app_organizations (application_id, taap_id, name) "
+                           "VALUES ($1::uuid, $2, $3) RETURNING id::text",
+                           application,
+                           "taap:org-" + lake::control::new_uuid_v4(),
+                           "org-" + lake::control::new_uuid_v4())[0][0]
+                .as<std::string>();
+        tx.commit();
+        return id;
+    };
+    std::vector<std::string> users, organizations;
+    for (const std::string& application : applications) {
+        users.push_back(lake::control::application_user_row_id(application, user_of(application)));
+        organizations.push_back(organization_of(application));
+    }
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0055_application_user_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0055_application_user_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& table, const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = $1 AND object_id = $2::uuid",
+            table,
+            id);
+        return found.empty()
+                   ? std::pair<std::string, std::string>{}
+                   : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    using Outcome = std::pair<std::string, std::string>;
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        for (const auto& [table, ids] :
+             {std::pair{std::string("auth_app_users"), users},
+              std::pair{std::string("auth_app_organizations"), organizations}}) {
+            EXPECT_EQ(outcome(table, ids[0]), (Outcome{"application_workspace", workspaces[0][0]}))
+                << table;
+            EXPECT_EQ(outcome(table, ids[1]), (Outcome{"needs_selection", ""})) << table;
+            EXPECT_EQ(outcome(table, ids[2]), (Outcome{"workspace_deleted", ""})) << table;
+        }
+    }
+
+    // A row written after the migration is recorded by the store's rerun.
+    const std::string late =
+        lake::control::application_user_row_id(applications[0], user_of(applications[0]));
+    EXPECT_TRUE(outcome("auth_app_users", late).first.empty());
+    ASSERT_TRUE(store->assign_legacy_application_directory());
+    EXPECT_EQ(outcome("auth_app_users", late),
+              (Outcome{"application_workspace", workspaces[0][0]}));
+
+    // A reviewed assignment of the unassigned application resolves its rows.
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       applications[1],
+                       workspaces[1][0]);
+        tx.commit();
+    }
+    ASSERT_TRUE(store->assign_legacy_application_directory());
+    EXPECT_EQ(outcome("auth_app_users", users[1]),
+              (Outcome{"application_workspace", workspaces[1][0]}));
+    EXPECT_EQ(outcome("auth_app_organizations", organizations[1]),
+              (Outcome{"application_workspace", workspaces[1][0]}));
+    EXPECT_EQ(outcome("auth_app_users", users[2]).first, "workspace_deleted");
+
+    // The legacy listing pages by row id and carries each row's owner and pool membership.
+    std::map<std::string, lake::control::LegacyApplicationUser> listed;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_application_users(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        for (const auto& row : *page) {
+            EXPECT_GT(row.id, after);
+            listed.emplace(row.id, row);
+        }
+        if (page->size() < 2) {
+            break;
+        }
+        after = page->back().id;
+    }
+    ASSERT_TRUE(listed.contains(users[0]));
+    EXPECT_EQ(listed.at(users[0]).workspace_id, workspaces[0][0]);
+    EXPECT_TRUE(listed.at(users[0]).user.own_pool);
+    EXPECT_EQ(listed.at(users[0]).user.status, "active");
+    EXPECT_EQ(listed.at(users[2]).outcome, "workspace_deleted");
+    const auto orgs = store->legacy_application_organizations("", 5000);
+    ASSERT_TRUE(orgs);
+    EXPECT_EQ(std::ranges::count_if(*orgs,
+                                    [&](const auto& row) {
+                                        return std::ranges::find(organizations,
+                                                                 row.organization.id) !=
+                                               organizations.end();
+                                    }),
+              3);
 }
 
 // Agent launches, their credential and cron schedules against the production

@@ -75,7 +75,14 @@ engine and lake revisions; `Store` keeps only the legacy reads of `forge_records
 `application_webhook_records.hpp` holds the application
 event and delivery-attempt codecs and the claim/settle pair that sends each attempt once
 (lake#356, lake#357); `apps.hpp` gives `Application` its `workspace_id` and declares the
-`LegacyApplicationWebhook*` rows the copy reads.
+`LegacyApplicationWebhook*` rows the copy reads. `application_user_records.hpp` holds the codecs of
+an application's users and organizations in the application's workspace (lake#353, lake#354), their
+reads and conditional writes, and the claims (`write_application_claim`,
+`release_application_claim`) that keep a pool user's email and an organization's TAAP identity and
+name unique within the application; `apps.hpp` declares the `LegacyApplicationUser` and
+`LegacyApplicationOrganization` rows the copy reads. `NewPasswordUser::user_id` lets a sign-up
+choose the account id it claimed the email for, and `IssuedSession::created_user` says the store
+created the account.
 
 `Repository::workspace_id` and `NewRepository::workspace_id` carry the workspace a repository belongs
 to (migration `0051_repository_workspaces`, lake#315); `list_repositories` takes an optional
