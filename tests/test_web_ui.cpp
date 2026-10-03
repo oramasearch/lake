@@ -1534,16 +1534,21 @@ TEST(WebUi, SecretPagesEscapeDataAndDoNotRenderSecretValues) {
     const lake::control::SecretMount mount{"mount-1",
                                            "customer-1",
                                            "organization-1",
+                                           "workspace-1",
                                            "production<&",
                                            "credentials<&",
                                            "created",
                                            "updated"};
-    const std::string mounts = lake::api::web_ui_secret_mounts({mount});
+    const std::string mounts = lake::api::web_ui_secret_mounts({mount}, "workspace-1");
     EXPECT_NE(mounts.find("production&lt;&amp;"), std::string::npos);
+    EXPECT_NE(mounts.find("<code>workspace-1</code>"), std::string::npos);
     EXPECT_NE(mounts.find("credentials&lt;&amp;"), std::string::npos);
     EXPECT_NE(mounts.find("/secrets?mount_id=mount-1"), std::string::npos);
     EXPECT_NE(mounts.find("/encryption-keys?mount_id=mount-1"), std::string::npos);
     expect_theme_scripts(mounts);
+    // Mounts live in workspaces (lake#328): without one, the page asks for it.
+    EXPECT_NE(lake::api::web_ui_secret_mounts({}, "").find("Choose a workspace"),
+              std::string::npos);
 
     lake::control::SecretMetadata metadata{
         "mount-1",

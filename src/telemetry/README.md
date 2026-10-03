@@ -22,3 +22,8 @@ longer a store operation.
 
 The forge record store operations are gone (lake#341): the wrapper forwards only
 `assign_legacy_forge_records` and `legacy_forge_records`, for the one-shot copy.
+
+The secret store operations are replaced (lake#328-#332): the wrapper forwards the mount routes,
+the customer KEK operations (`wrap_secret_data_key`, `unwrap_secret_data_key`,
+`customer_kek_state`, `rotate_customer_kek`, `retire_customer_kek`), dynamic leases and the
+`legacy_secret_*` reads, each under its own operation label.

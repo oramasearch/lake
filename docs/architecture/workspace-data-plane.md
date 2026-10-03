@@ -145,11 +145,11 @@ only the three listed below; no names are invented for the four unobserved datas
 | `oauth_providers` | workspace | Provider credentials and application configuration. [Follow-up](https://github.com/oramasearch/lake/issues/325). |
 | `identity_oauth_flows` | workspace | Authentication exchange state. [Follow-up](https://github.com/oramasearch/lake/issues/326). |
 | `identity_webauthn_challenges` | workspace | Authentication challenge state. [Follow-up](https://github.com/oramasearch/lake/issues/327). |
-| `secrets_mounts` | workspace | Secret namespace and service configuration. [Follow-up](https://github.com/oramasearch/lake/issues/328). |
-| `secrets_entries` | workspace | Secret names and lifecycle. [Follow-up](https://github.com/oramasearch/lake/issues/329). |
-| `secrets_versions` | workspace | Encrypted secret bodies. [Follow-up](https://github.com/oramasearch/lake/issues/330). |
-| `secrets_encryption_keys` | workspace | Customer key material and versions. [Follow-up](https://github.com/oramasearch/lake/issues/331). |
-| `secrets_data_keys` | workspace | Wrapped data encryption keys. [Follow-up](https://github.com/oramasearch/lake/issues/332). |
+| `secrets_mounts` | workspace | Secret namespace and service configuration. **Moved** (lake#328, migration `0057`): `lake_secrets_mounts` in the mount's workspace Zetta; the table is read only by the one-shot copy until a later migration drops it. |
+| `secrets_entries` | workspace | Secret names and lifecycle. **Moved** (lake#329, migration `0057`): `lake_secrets_entries` in the mount's workspace Zetta; the table is read only by the one-shot copy until a later migration drops it. |
+| `secrets_versions` | workspace | Encrypted secret bodies. **Moved** (lake#330, migration `0057`): `lake_secrets_versions` in the mount's workspace Zetta; the table is read only by the one-shot copy until a later migration drops it. |
+| `secrets_encryption_keys` | workspace | Customer key material and versions. **Moved** (lake#331, migration `0057`): `lake_secrets_encryption_keys` in the mount's workspace Zetta; the table is read only by the one-shot copy until a later migration drops it. |
+| `secrets_data_keys` | workspace | Wrapped data encryption keys. **Moved** (lake#332, migration `0057`): `lake_secrets_data_keys` in the mount's workspace Zetta; the table is read only by the one-shot copy until a later migration drops it. |
 | `sso_providers` | workspace | Federation provider configuration and secrets. [Follow-up](https://github.com/oramasearch/lake/issues/334). |
 | `federation_issuers` | workspace | Issuer/application configuration; retain only membership grants centrally. [Follow-up](https://github.com/oramasearch/lake/issues/335). |
 | `scim_users` | multitenancy/dispatch | External-to-local membership identity mapping. |
@@ -204,6 +204,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `apps` | workspace | App configuration, environment, Secret refs and token hashes; workspace ID added here. [Follow-up](https://github.com/oramasearch/lake/issues/377). |
 | `builds` | workspace | Build inputs, results and token hashes; workspace ID added here. [Follow-up](https://github.com/oramasearch/lake/issues/378). |
 | `stream_owners` | workspace | Moved: topic creators are sealed records in the topic's workspace Zetta (`lake_stream_owners`), so ownership follows the workspace incarnation; migration `0047_stream_owner_workspaces` records each row's workspace for the copy, and the table is dropped once it is verified ([lake#379](https://github.com/oramasearch/lake/issues/379), [streams.md](../control-plane/streams.md)). |
+| `secret_mount_routes` | multitenancy/dispatch | Which workspace holds which secret mount (lake#328, migration `0057`); no name, value or key. |
 | `identity_core_guard`, `identity_mfa_guard`, `secrets_guard`, `sso_federation_guard`, `offline_recovery_guard`, `forge_guard`, `pki_guard`, `metering_guard`, `drive_guard`, `auth_app_guard`, `agent_guard`, `settings_guard`, `platform_guard`, `identity_exit_guard`, `token_attenuation_guard`, `session_lookup_guard`, `custodial_identity_guard`, `services_guard`, `service_catalog_guard`, `sqlite_services_guard`, `analytics_services_guard`, `stores_guard`, `credentials_guard`, `agents_guard`, `agent_cron_guard`, `agent_tasks_guard`, `agent_task_events_guard`, `web_apps_guard`, `web_apps_operator_contract_guard`, `builds_guard`, `streams_guard` | multitenancy/dispatch | Operator migration guards contain application timestamps only. |
 
 | Zetta or other storage | Classification | Reason |

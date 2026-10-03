@@ -5,7 +5,7 @@
 // auth_app_webhook_events and auth_app_webhook_deliveries, lake#356 and lake#357; metering_usage
 // and metering_build_records, lake#348 and lake#349; forge_records, lake#341; auth_app_users and
 // auth_app_organizations, lake#353 and lake#354; auth_app_signing_keys and auth_app_webhooks,
-// lake#352 and lake#355). A collection
+// lake#352 and lake#355; the five secrets tables, lake#328-#332). A collection
 // leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
 // and verified on dev, dropped by migration 0050, lake#483).
 
@@ -25,8 +25,10 @@
 #include "lake/control/forge_records.hpp"
 #include "lake/control/metering.hpp"
 #include "lake/control/opportunities.hpp"
+#include "lake/control/secret_records.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/stream_owners.hpp"
+#include "secret_records_api.hpp"
 #include "workspace_records_api.hpp"
 
 namespace lake::api {
@@ -34,7 +36,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 12> copy_collections = {"opportunities",
+constexpr std::array<std::string_view, 17> copy_collections = {"opportunities",
                                                                "stream_owners",
                                                                "drive_share_links",
                                                                "auth_app_webhook_events",
@@ -45,7 +47,12 @@ constexpr std::array<std::string_view, 12> copy_collections = {"opportunities",
                                                                "auth_app_users",
                                                                "auth_app_organizations",
                                                                "auth_app_signing_keys",
-                                                               "auth_app_webhooks"};
+                                                               "auth_app_webhooks",
+                                                               "secrets_mounts",
+                                                               "secrets_data_keys",
+                                                               "secrets_encryption_keys",
+                                                               "secrets_entries",
+                                                               "secrets_versions"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -1215,6 +1222,375 @@ liquid::runtime::task<ApiResult> copy_forge_records(ApiContext& context, const s
                           std::move(unresolved), tallies, blocking);
 }
 
+// The retired secrets tables (lake#328-#332): every row goes to the workspace of its mount's route
+// (secret_mount_routes, migration 0057), under the key a live call derives for it, so a copied
+// secret, key or data key is found exactly as one written after the cutover. A row whose mount has
+// no route is unresolved and blocks completion; one whose mount's workspace was deleted went with
+// it and does not. `Ops` reads what is in the workspace, compares and writes one row; a write that
+// finds the key taken counts as already present, and verify compares it.
+template <class Row, class Ops>
+liquid::runtime::task<ApiResult> copy_secret_rows(ApiContext& context, std::string_view name,
+                                                  const std::string& mode,
+                                                  const std::vector<Row>& rows, int limit,
+                                                  Ops ops) {
+    json unresolved = json::array();
+    bool blocking = false;
+    std::map<std::string, std::vector<const Row*>> by_workspace;
+    for (const Row& row : rows) {
+        const control::LegacySecretOwner& owner = ops.owner(row);
+        if (owner.workspace_id.empty()) {
+            unresolved.push_back({{"id", ops.id(row)},
+                                  {"mount_id", owner.mount_id},
+                                  {"customer_id", owner.customer_id},
+                                  {"outcome", owner.outcome}});
+            blocking = blocking || owner.outcome != "workspace_deleted";
+        } else {
+            by_workspace[owner.workspace_id].push_back(&row);
+        }
+    }
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, owned] : by_workspace) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = ops.owner(*owned.front()).customer_id;
+        tally.rows = owned.size();
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        for (const Row* row : owned) {
+            auto present = control::settled(co_await ops.present(*records, *row));
+            if (!present) {
+                tally.error = present.error().code + ": " + present.error().message;
+                break;
+            }
+            if (mode == "verify") {
+                if (!*present) {
+                    tally.missing.push_back(ops.id(*row));
+                } else if (!ops.same(context, **present, *row)) {
+                    tally.mismatched.push_back(ops.id(*row));
+                } else {
+                    ++tally.verified;
+                }
+                continue;
+            }
+            if (*present) {
+                ++tally.already_present;
+                continue;
+            }
+            auto written = control::settled(co_await ops.write(context, *records, *row));
+            if (!written) {
+                tally.error = written.error().code + ": " + written.error().message;
+                break;
+            }
+            ++(*written ? tally.copied : tally.already_present);
+        }
+    }
+    co_return copy_result(name, mode, rows.size(), limit,
+                          rows.empty() ? std::string() : ops.id(rows.back()),
+                          std::move(unresolved), tallies, blocking);
+}
+
+using PresentRecord = control::ZettaControlResult<std::optional<control::StoredRecord>>;
+using Copied = control::ZettaControlResult<bool>;
+
+// A record written `if_absent`: true when this copy wrote it, false when the key was taken.
+liquid::runtime::task<Copied> put_absent(control::WorkspaceRecords& records,
+                                         control::RecordCollection collection, std::string id,
+                                         std::string lookup, json body, std::int64_t at_us) {
+    auto written = control::settled(co_await records.put(
+        collection, std::move(id), std::move(lookup), std::move(body),
+        control::RecordCondition{.if_absent = true}, 1, at_us));
+    if (!written && written.error().code == "conflict") {
+        co_return Copied(false);
+    }
+    if (!written) {
+        co_return Copied(std::unexpected(written.error()));
+    }
+    co_return Copied(true);
+}
+
+liquid::runtime::task<PresentRecord> present_record(control::WorkspaceRecords& records,
+                                                    control::RecordCollection collection,
+                                                    std::string id) {
+    co_return control::settled(co_await records.get(collection, std::move(id)));
+}
+
+struct MountCopy {
+    static std::string id(const control::LegacySecretMount& row) {
+        return row.mount.id;
+    }
+    static const control::LegacySecretOwner& owner(const control::LegacySecretMount& row) {
+        return row.owner;
+    }
+    static liquid::runtime::task<PresentRecord> present(control::WorkspaceRecords& records,
+                                                        const control::LegacySecretMount& row) {
+        return present_record(records, control::SecretMountCodec::collection, row.mount.id);
+    }
+    static bool same(const ApiContext&, const control::StoredRecord& stored,
+                     const control::LegacySecretMount& row) {
+        const auto mount = control::SecretMountCodec::decode(stored);
+        return mount && mount->customer_id == row.mount.customer_id &&
+               mount->organization_id == row.mount.organization_id &&
+               mount->workspace_id == row.owner.workspace_id && mount->name == row.mount.name &&
+               mount->description == row.mount.description && mount->at_us == row.mount.at_us;
+    }
+    // The name claim first, then the mount: a name a mount made after the cutover already holds is
+    // reported rather than given to a second mount.
+    static liquid::runtime::task<Copied> write(ApiContext&, control::WorkspaceRecords& records,
+                                               const control::LegacySecretMount& row) {
+        const auto collection = control::SecretMountCodec::collection;
+        const std::string claim_key = control::secret_mount_name_key(
+            records, row.mount.organization_id, row.mount.name);
+        auto claimed = control::settled(co_await put_absent(
+            records, collection, claim_key,
+            control::secret_mount_name_lookup(row.mount.organization_id),
+            control::secret_mount_name_claim(row.mount.id), row.mount.at_us));
+        if (!claimed) {
+            co_return Copied(std::unexpected(claimed.error()));
+        }
+        if (!*claimed) {
+            auto holder = control::settled(co_await records.get(collection, claim_key));
+            if (!holder) {
+                co_return Copied(std::unexpected(holder.error()));
+            }
+            const auto mount =
+                *holder ? control::secret_mount_name_claimed(**holder) : std::nullopt;
+            if (mount != row.mount.id) {
+                co_return Copied(std::unexpected(control::ZettaControlError{
+                    "conflict", "mount " + row.mount.id + ": its name is used by mount " +
+                                    mount.value_or("?") + " in this workspace"}));
+            }
+        }
+        control::SecretMount mount = row.mount;
+        mount.workspace_id = row.owner.workspace_id;
+        co_return control::settled(co_await put_absent(
+            records, collection, mount.id, control::SecretMountCodec::lookup(mount.customer_id),
+            control::SecretMountCodec::encode(mount), mount.at_us));
+    }
+};
+
+struct EntryCopy {
+    static std::string id(const control::LegacySecretEntry& row) {
+        return row.id;
+    }
+    static const control::LegacySecretOwner& owner(const control::LegacySecretEntry& row) {
+        return row.owner;
+    }
+    static liquid::runtime::task<PresentRecord> present(control::WorkspaceRecords& records,
+                                                        const control::LegacySecretEntry& row) {
+        return present_record(
+            records, control::SecretEntryCodec::collection,
+            control::SecretEntryCodec::key(records, row.owner.mount_id, row.name));
+    }
+    // A put, delete or metadata change since the copy (a later lake revision) is accepted.
+    static bool same(const ApiContext&, const control::StoredRecord& stored,
+                     const control::LegacySecretEntry& row) {
+        const auto entry = control::SecretEntryCodec::decode(stored);
+        return entry && entry->mount_id == row.owner.mount_id && entry->name == row.name &&
+               entry->at_us == row.at_us &&
+               (entry->lake_revision > 1 || (entry->current_version == row.current_version &&
+                                              entry->custom_metadata == row.custom_metadata));
+    }
+    static liquid::runtime::task<Copied> write(ApiContext&, control::WorkspaceRecords& records,
+                                               const control::LegacySecretEntry& row) {
+        control::SecretEntry entry{row.owner.mount_id, row.name, row.current_version,
+                                   row.custom_metadata};
+        entry.updated_at = row.updated_at;
+        return put_absent(records, control::SecretEntryCodec::collection,
+                          control::SecretEntryCodec::key(records, row.owner.mount_id, row.name),
+                          control::SecretEntryCodec::lookup(row.owner.mount_id),
+                          control::SecretEntryCodec::encode(entry), row.at_us);
+    }
+};
+
+struct VersionCopy {
+    static std::string id(const control::LegacySecretVersion& row) {
+        return row.id;
+    }
+    static const control::LegacySecretOwner& owner(const control::LegacySecretVersion& row) {
+        return row.owner;
+    }
+    static std::string key(control::WorkspaceRecords& records,
+                           const control::LegacySecretVersion& row) {
+        return control::SecretVersionCodec::key(records, row.owner.mount_id, row.name,
+                                                row.version);
+    }
+    static liquid::runtime::task<PresentRecord> present(control::WorkspaceRecords& records,
+                                                        const control::LegacySecretVersion& row) {
+        return present_record(records, control::SecretVersionCodec::collection, key(records, row));
+    }
+    // The same ciphertext and lifecycle, or a delete, undelete or destroy made since the copy.
+    static bool same(const ApiContext&, const control::StoredRecord& stored,
+                     const control::LegacySecretVersion& row) {
+        const auto version = control::SecretVersionCodec::decode(stored);
+        return version && version->mount_id == row.owner.mount_id && version->name == row.name &&
+               version->version == row.version && version->at_us == row.at_us &&
+               (version->lake_revision > 1 ||
+                (version->ciphertext.value_or("") == row.ciphertext &&
+                 version->deleted_at == row.deleted_at &&
+                 version->destroyed_at == row.destroyed_at));
+    }
+    static liquid::runtime::task<Copied> write(ApiContext&, control::WorkspaceRecords& records,
+                                               const control::LegacySecretVersion& row) {
+        control::SecretVersionRecord version;
+        version.mount_id = row.owner.mount_id;
+        version.name = row.name;
+        version.version = row.version;
+        if (row.destroyed_at.empty()) {
+            version.ciphertext = row.ciphertext;
+        }
+        version.deleted_at = row.deleted_at;
+        version.destroyed_at = row.destroyed_at;
+        return put_absent(records, control::SecretVersionCodec::collection, key(records, row),
+                          control::SecretVersionCodec::lookup(row.owner.mount_id, row.name),
+                          control::SecretVersionCodec::encode(version), row.at_us);
+    }
+};
+
+struct EncryptionKeyCopy {
+    static std::string id(const control::LegacyEncryptionKey& row) {
+        return row.key.id;
+    }
+    static const control::LegacySecretOwner& owner(const control::LegacyEncryptionKey& row) {
+        return row.owner;
+    }
+    static liquid::runtime::task<PresentRecord> present(control::WorkspaceRecords& records,
+                                                        const control::LegacyEncryptionKey& row) {
+        return present_record(
+            records, control::EncryptionKeyCodec::collection,
+            control::EncryptionKeyCodec::key(records, row.key.mount_id, row.key.name));
+    }
+    // A rotation since the copy (a later lake revision) is accepted.
+    static bool same(const ApiContext&, const control::StoredRecord& stored,
+                     const control::LegacyEncryptionKey& row) {
+        const auto key = control::EncryptionKeyCodec::decode(stored);
+        return key && key->key.id == row.key.id && key->key.mount_id == row.key.mount_id &&
+               key->key.name == row.key.name && key->key.derived_from == row.key.derived_from &&
+               key->at_us == row.at_us &&
+               (key->lake_revision > 1 || key->key.current_version == row.key.current_version);
+    }
+    static liquid::runtime::task<Copied> write(ApiContext&, control::WorkspaceRecords& records,
+                                               const control::LegacyEncryptionKey& row) {
+        return put_absent(
+            records, control::EncryptionKeyCodec::collection,
+            control::EncryptionKeyCodec::key(records, row.key.mount_id, row.key.name),
+            control::EncryptionKeyCodec::lookup(row.key.mount_id),
+            control::EncryptionKeyCodec::encode(row.key), row.at_us);
+    }
+};
+
+struct DataKeyCopy {
+    static std::string id(const control::LegacySecretDataKey& row) {
+        return row.id;
+    }
+    static const control::LegacySecretOwner& owner(const control::LegacySecretDataKey& row) {
+        return row.owner;
+    }
+    static std::string key(control::WorkspaceRecords& records,
+                           const control::LegacySecretDataKey& row) {
+        return control::SecretDataKeyCodec::key(records, row.owner_kind, row.owner_id,
+                                                row.key_version);
+    }
+    static liquid::runtime::task<PresentRecord> present(control::WorkspaceRecords& records,
+                                                        const control::LegacySecretDataKey& row) {
+        return present_record(records, control::SecretDataKeyCodec::collection, key(records, row));
+    }
+    static control::SecretDataKey value(const control::LegacySecretDataKey& row) {
+        return {row.owner.customer_id, row.owner_kind, row.owner_id, row.key_version, row.wrapped};
+    }
+    // The same key: both wraps are opened and the raw keys compared, since a KEK rotation rewraps
+    // the row and the record separately.
+    static bool same(const ApiContext& context, const control::StoredRecord& stored,
+                     const control::LegacySecretDataKey& row) {
+        const auto key = control::SecretDataKeyCodec::decode(stored);
+        if (!key || key->customer_id != row.owner.customer_id ||
+            key->owner_kind != row.owner_kind || key->owner_id != row.owner_id ||
+            key->key_version != row.key_version) {
+            return false;
+        }
+        auto copied = unwrap_secret_data_key(context, *key);
+        auto source = unwrap_secret_data_key(context, value(row));
+        const bool equal = copied && source && *copied == *source;
+        if (copied) {
+            std::ranges::fill(*copied, '\0');
+        }
+        if (source) {
+            std::ranges::fill(*source, '\0');
+        }
+        return equal;
+    }
+    // The row's wrap is copied as it is; if a rotation made another KEK version current since the
+    // row was read, the record is rewrapped by it before the copy answers.
+    static liquid::runtime::task<Copied> write(ApiContext& context,
+                                               control::WorkspaceRecords& records,
+                                               const control::LegacySecretDataKey& row) {
+        const std::string id = key(records, row);
+        auto written = control::settled(co_await put_absent(
+            records, control::SecretDataKeyCodec::collection, id,
+            control::SecretDataKeyCodec::lookup(row.owner.customer_id),
+            control::SecretDataKeyCodec::encode(value(row)), row.at_us));
+        if (!written || !*written) {
+            co_return written;
+        }
+        auto settled = control::settled(co_await rewrap_secret_data_key(context, records, id));
+        if (!settled) {
+            co_return Copied(std::unexpected(settled.error()));
+        }
+        co_return Copied(true);
+    }
+};
+
+// One page of a retired secrets table, after recording each legacy mount's owner and route.
+liquid::runtime::task<ApiResult> copy_secrets(ApiContext& context, const std::string& collection,
+                                              const std::string& mode, const std::string& after,
+                                              int limit) {
+    if (auto assigned = context.store->assign_legacy_secrets(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    const auto failed = [](const control::StoreError& error) {
+        return ApiResult::failure(error.code, error.message);
+    };
+    if (collection == "secrets_mounts") {
+        auto rows = context.store->legacy_secret_mounts(after, limit);
+        if (!rows) {
+            co_return failed(rows.error());
+        }
+        co_return co_await copy_secret_rows(context, collection, mode, *rows, limit, MountCopy{});
+    }
+    if (collection == "secrets_entries") {
+        auto rows = context.store->legacy_secret_entries(after, limit);
+        if (!rows) {
+            co_return failed(rows.error());
+        }
+        co_return co_await copy_secret_rows(context, collection, mode, *rows, limit, EntryCopy{});
+    }
+    if (collection == "secrets_versions") {
+        auto rows = context.store->legacy_secret_versions(after, limit);
+        if (!rows) {
+            co_return failed(rows.error());
+        }
+        co_return co_await copy_secret_rows(context, collection, mode, *rows, limit,
+                                            VersionCopy{});
+    }
+    if (collection == "secrets_encryption_keys") {
+        auto rows = context.store->legacy_encryption_keys(after, limit);
+        if (!rows) {
+            co_return failed(rows.error());
+        }
+        co_return co_await copy_secret_rows(context, collection, mode, *rows, limit,
+                                            EncryptionKeyCopy{});
+    }
+    auto rows = context.store->legacy_secret_data_keys(after, limit);
+    if (!rows) {
+        co_return failed(rows.error());
+    }
+    co_return co_await copy_secret_rows(context, collection, mode, *rows, limit, DataKeyCopy{});
+}
+
 // Only the operator copies, and the operator bypasses policy; anyone else is refused here, before
 // a policy lookup on an object no grant can name.
 std::expected<std::string, ApiError> records_object(const json&, ApiContext&) {
@@ -1284,6 +1660,10 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "auth_app_organizations") {
                 co_return co_await copy_application_organizations(context, mode, after, limit);
+            }
+            if (const std::string collection = input.at("collection");
+                collection.starts_with("secrets_")) {
+                co_return co_await copy_secrets(context, collection, mode, after, limit);
             }
             if (input.at("collection") == "auth_app_webhook_events") {
                 co_return co_await copy_application_webhook_events(context, mode, after, limit);

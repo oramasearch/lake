@@ -16,6 +16,8 @@
 #include <pqxx/pqxx>
 
 #include "api/forge_records_api.hpp"
+#include "api/secret_records_api.hpp"
+#include "control/secrets_crypto.hpp"
 #include "api/workspace_records_api.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
@@ -33,6 +35,7 @@
 #include "lake/control/metering.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/secret_records.hpp"
 #include "lake/control/stream_owners.hpp"
 #include "lake/control/workspace_records.hpp"
 #include "lake/control/zetta_control.hpp"
@@ -2450,6 +2453,483 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesForgeRecordsIntoTheirRepository
         "copy_workspace_records", {{"collection", "forge_records"}, {"mode", "plan"}}, person));
     ASSERT_TRUE(refused);
     EXPECT_EQ(refused->error.code, "unauthorized");
+}
+
+// Secrets (lake#328-#332): an organization space with its own organization and workspaces, and
+// the operator context that administers it.
+struct SecretSpace {
+    std::string organization_id, customer_id;
+    std::vector<std::string> workspaces;
+};
+
+SecretSpace secret_space(TwoSpaces& t, const std::string& name, int workspaces) {
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto organization = t.store->create_organization(
+        {"taap:1:ed25519:secrets-" + name + "-" + suffix, name, ""});
+    EXPECT_TRUE(organization) << organization.error().message;
+    const auto customer = t.store->create_customer(
+        {"organization", "", organization->id, "secrets-" + name + "-" + suffix});
+    EXPECT_TRUE(customer) << customer.error().message;
+    SecretSpace space{organization->id, customer->id, {}};
+    for (int index = 0; index < workspaces; ++index) {
+        const auto workspace =
+            t.store->create_workspace({customer->id, name + std::to_string(index), "dev", ""});
+        EXPECT_TRUE(workspace) << workspace.error().message;
+        t.ready(workspace->id);
+        space.workspaces.push_back(workspace->id);
+    }
+    return space;
+}
+
+lake::api::ApiContext secret_operator(TwoSpaces& t) {
+    lake::api::ApiContext context;
+    context.store = t.store.get();
+    context.workspaces = t.service.get();
+    context.instance_kek = std::string(kek);
+    context.authorized = true;
+    context.operator_credential = true;
+    context.acting_identity = "admin";
+    context.request_id = lake::control::new_uuid_v4();
+    return context;
+}
+
+lake::api::ApiResult secret_call(TwoSpaces& t, lake::api::ApiContext context,
+                                 const std::string& capability, json input) {
+    const auto completed =
+        liquid::runtime::block_on(t.registry.call_async(capability, input, context));
+    EXPECT_TRUE(completed);
+    return completed ? *completed : lake::api::ApiResult::failure("store_error", "incomplete");
+}
+
+TEST_P(WorkspaceRecordStores, SecretsLiveInTheirMountsWorkspace) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto admin = [&](const std::string& capability, json input) {
+        return secret_call(t, secret_operator(t), capability, std::move(input));
+    };
+    std::vector<SecretSpace> spaces{secret_space(t, "first", 2), secret_space(t, "second", 2)};
+    struct Placed {
+        std::size_t space, workspace;
+        std::string mount;
+    };
+    std::vector<Placed> placed;
+    for (std::size_t s = 0; s < spaces.size(); ++s) {
+        for (std::size_t w = 0; w < spaces[s].workspaces.size(); ++w) {
+            // The same mount name in each workspace: names are unique within a workspace.
+            const auto mount = admin("create_secret_mount",
+                                     {{"customer_id", spaces[s].customer_id},
+                                      {"workspace_id", spaces[s].workspaces[w]},
+                                      {"organization_id", spaces[s].organization_id},
+                                      {"name", "payments-vault"}});
+            ASSERT_TRUE(mount.ok) << mount.error.message;
+            EXPECT_EQ(mount.value["workspace_id"], spaces[s].workspaces[w]);
+            placed.push_back({s, w, mount.value["id"]});
+            const auto put =
+                admin("put_secret", {{"mount_id", placed.back().mount},
+                                     {"name", "database"},
+                                     {"value", {{"password", "pw-" + std::to_string(s) + "-" +
+                                                                 std::to_string(w)}}}});
+            ASSERT_TRUE(put.ok) << put.error.message;
+            ASSERT_TRUE(admin("create_encryption_key",
+                              {{"mount_id", placed.back().mount}, {"name", "orders"}})
+                            .ok);
+        }
+    }
+    // Each mount's records are stored, sealed, only at its own workspace's endpoint, and
+    // PostgreSQL holds nothing of them but the route.
+    for (const auto& where : placed) {
+        auto& tables =
+            t.zetta->records["http://" + spaces[where.space].workspaces[where.workspace] + ".test"];
+        EXPECT_EQ(tables.rows("secrets_mounts").size(), 2U) << "the mount and its name claim";
+        EXPECT_EQ(tables.rows("secrets_entries").size(), 1U);
+        EXPECT_EQ(tables.rows("secrets_versions").size(), 1U);
+        EXPECT_EQ(tables.rows("secrets_encryption_keys").size(), 1U);
+        EXPECT_EQ(tables.rows("secrets_data_keys").size(), 2U);
+        for (const std::string collection :
+             {"secrets_mounts", "secrets_entries", "secrets_versions", "secrets_encryption_keys",
+              "secrets_data_keys"}) {
+            for (const auto& [key, row] : tables.rows(collection)) {
+                const std::string dumped = row.dump();
+                EXPECT_EQ(dumped.find("payments-vault"), std::string::npos) << collection;
+                EXPECT_EQ(dumped.find("database"), std::string::npos) << collection;
+                EXPECT_EQ(dumped.find("pw-"), std::string::npos) << collection;
+            }
+        }
+        const auto read = admin("read_secret", {{"mount_id", where.mount}, {"name", "database"}});
+        ASSERT_TRUE(read.ok) << read.error.message;
+        EXPECT_EQ(read.value["value"]["password"],
+                  "pw-" + std::to_string(where.space) + "-" + std::to_string(where.workspace));
+        const auto route = t.store->get_secret_mount_route(where.mount);
+        ASSERT_TRUE(route);
+        EXPECT_EQ(route->workspace_id, spaces[where.space].workspaces[where.workspace]);
+    }
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        for (const std::string table : {"secrets_mounts", "secrets_entries", "secrets_versions",
+                                        "secrets_encryption_keys", "secrets_data_keys"}) {
+            EXPECT_EQ(tx.exec("SELECT count(*) FROM " + table)[0][0].as<int>(), 0) << table;
+        }
+    }
+    const auto& first = spaces[0];
+    const auto listed = admin("list_secret_mounts",
+                              {{"customer_id", first.customer_id},
+                               {"workspace_id", first.workspaces[0]}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["items"].size(), 1U);
+    EXPECT_EQ(listed.value["items"][0]["id"], placed[0].mount);
+
+    // A second mount of the same name in the same workspace is refused.
+    const auto duplicate = admin("create_secret_mount",
+                                 {{"customer_id", first.customer_id},
+                                  {"workspace_id", first.workspaces[0]},
+                                  {"organization_id", first.organization_id},
+                                  {"name", "payments-vault"}});
+    EXPECT_EQ(duplicate.error.code, "conflict");
+    EXPECT_EQ(duplicate.error.path, "/name");
+
+    // workspace_id: required, and only a workspace of the mount's own space.
+    const auto create = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["organization_id"] = first.organization_id;
+        input["name"] = "elsewhere";
+        return admin("create_secret_mount", std::move(input));
+    };
+    const auto omitted = create(json::object());
+    EXPECT_EQ(omitted.error.code, "invalid_input");
+    EXPECT_EQ(omitted.error.path, "/workspace_id");
+    for (const std::string bad : {std::string("not-a-workspace"), lake::control::new_uuid_v4()}) {
+        const auto refused = create({{"workspace_id", bad}});
+        EXPECT_EQ(refused.error.code, "invalid_input") << bad;
+        EXPECT_EQ(refused.error.path, "/workspace_id") << bad;
+    }
+    const auto foreign_workspace = create({{"workspace_id", spaces[1].workspaces[0]}});
+    EXPECT_EQ(foreign_workspace.error.code, "invalid_input");
+    // An organization of one space with another space and its workspace writes nothing there.
+    auto& second_home = t.zetta->records["http://" + spaces[1].workspaces[0] + ".test"];
+    const auto before = second_home.rows("secrets_mounts").size();
+    const auto crossed = admin("create_secret_mount",
+                               {{"customer_id", spaces[1].customer_id},
+                                {"workspace_id", spaces[1].workspaces[0]},
+                                {"organization_id", first.organization_id},
+                                {"name", "trespass"}});
+    EXPECT_EQ(crossed.error.code, "invalid_input");
+    EXPECT_EQ(crossed.error.path, "/organization_id");
+    EXPECT_EQ(second_home.rows("secrets_mounts").size(), before);
+    const auto unlisted = admin("list_secret_mounts", {{"customer_id", first.customer_id}});
+    EXPECT_EQ(unlisted.error.code, "invalid_input");
+    EXPECT_EQ(unlisted.error.path, "/workspace_id");
+    for (const std::string bad : {std::string("not-a-mount"), lake::control::new_uuid_v4()}) {
+        const auto missing = admin("read_secret", {{"mount_id", bad}, {"name", "database"}});
+        EXPECT_EQ(missing.error.code, "not_found") << bad;
+        EXPECT_EQ(missing.error.path, "/mount_id") << bad;
+    }
+
+    // Credential boundaries: a person of another space reads nothing, lists nothing.
+    const auto person = t.context(t.spaces[1]);
+    const auto denied =
+        secret_call(t, person, "read_secret", {{"mount_id", placed[0].mount}, {"name", "database"}});
+    EXPECT_EQ(denied.error.code, "unauthorized");
+    const auto denied_write = secret_call(
+        t, person, "put_secret",
+        {{"mount_id", placed[0].mount}, {"name", "database"}, {"value", {{"password", "x"}}}});
+    EXPECT_EQ(denied_write.error.code, "unauthorized");
+
+    // A record copied into another workspace does not open there: a mount cannot change owner.
+    auto context = secret_operator(t);
+    {
+        auto& home = t.zetta->records["http://" + first.workspaces[0] + ".test"];
+        auto& lab = t.zetta->records["http://" + first.workspaces[1] + ".test"];
+        lab.rows("secrets_mounts")[placed[0].mount] = home.rows("secrets_mounts").at(placed[0].mount);
+        auto records = lake::api::workspace_records(context, first.customer_id, first.workspaces[1]);
+        ASSERT_TRUE(records);
+        const auto moved =
+            run(records->get(lake::control::SecretMountCodec::collection, placed[0].mount));
+        ASSERT_TRUE(moved);
+        EXPECT_FALSE(*moved);
+        lab.rows("secrets_mounts").erase(placed[0].mount);
+    }
+
+    // A workspace that is not ready refuses its mounts; the other workspace serves on.
+    const auto lab_workspace = t.store->get_workspace(first.workspaces[1]);
+    t.status(lab_workspace->zetta_service_id, "Provisioning",
+             "http://" + first.workspaces[1] + ".test");
+    EXPECT_EQ(admin("read_secret", {{"mount_id", placed[1].mount}, {"name", "database"}}).error.code,
+              "workspace_not_ready");
+    EXPECT_TRUE(admin("read_secret", {{"mount_id", placed[0].mount}, {"name", "database"}}).ok);
+    // A customer KEK rotation cannot finish while a workspace holding data keys is not ready; the
+    // replaced KEK is kept, and the next rotation finishes the job.
+    EXPECT_EQ(admin("rotate_customer_kek", {{"customer_id", first.customer_id}}).error.code,
+              "workspace_not_ready");
+    EXPECT_NE(t.store->customer_kek_state(first.customer_id)->previous_version, 0U);
+    t.ready(first.workspaces[1]);
+    const auto rotated = admin("rotate_customer_kek", {{"customer_id", first.customer_id}});
+    ASSERT_TRUE(rotated.ok) << rotated.error.message;
+    EXPECT_EQ(t.store->customer_kek_state(first.customer_id)->previous_version, 0U);
+    for (std::size_t index : {0U, 1U}) {
+        const auto read =
+            admin("read_secret", {{"mount_id", placed[index].mount}, {"name", "database"}});
+        ASSERT_TRUE(read.ok) << read.error.message;
+    }
+    // The other space's KEK and keys are untouched.
+    EXPECT_EQ(t.store->customer_kek_state(spaces[1].customer_id)->version, 1U);
+
+    // Workspace deletion: its mount goes with it, the space's other workspace keeps its own, and
+    // a later rotation skips the deleted workspace.
+    ASSERT_TRUE(t.store->update_workspace(first.workspaces[1], {.desired = "deleted"}));
+    EXPECT_FALSE(admin("read_secret", {{"mount_id", placed[1].mount}, {"name", "database"}}).ok);
+    EXPECT_TRUE(admin("read_secret", {{"mount_id", placed[0].mount}, {"name", "database"}}).ok);
+    EXPECT_TRUE(admin("rotate_customer_kek", {{"customer_id", first.customer_id}}).ok);
+    EXPECT_TRUE(admin("read_secret", {{"mount_id", placed[0].mount}, {"name", "database"}}).ok);
+}
+
+// lake#328-#332: the operator's one-shot copy moves each row of the five retired tables into the
+// workspace of its mount's route, where the capabilities then read it, unchanged.
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesSecretsIntoTheirMountsWorkspace) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto admin = [&](const std::string& capability, json input) {
+        return secret_call(t, secret_operator(t), capability, std::move(input));
+    };
+    namespace crypto = lake::control::secrets_crypto;
+    const SecretSpace sole = secret_space(t, "sole", 1);
+    const SecretSpace several = secret_space(t, "several", 2);
+    const SecretSpace doomed = secret_space(t, "doomed", 1);
+    const std::string mount_id = lake::control::new_uuid_v4();
+    const std::string waiting_id = lake::control::new_uuid_v4();
+    const std::string gone_id = lake::control::new_uuid_v4();
+    const std::string key_id = lake::control::new_uuid_v4();
+    auto mount_key = crypto::random_key();
+    auto transit_key = crypto::random_key();
+    ASSERT_TRUE(mount_key && transit_key);
+    const auto raw = [](const crypto::Key& key) {
+        return std::string(reinterpret_cast<const char*>(key.data()), key.size());
+    };
+    const auto sealed = [&](std::uint64_t version, json value) {
+        auto ciphertext = crypto::seal(*mount_key, value.dump(),
+                                       "lake secret/" + mount_id + "/database/" +
+                                           std::to_string(version));
+        EXPECT_TRUE(ciphertext);
+        return *ciphertext;
+    };
+    const std::string payload = "bGVnYWN5";
+    std::string transit_ciphertext;
+    {
+        auto derived = crypto::derive(*transit_key, "lake transit encryption v1");
+        ASSERT_TRUE(derived);
+        auto decoded = crypto::base64url_decode(payload);
+        auto sealed_payload = crypto::seal(*derived, *decoded, "lake transit/" + key_id + "/1");
+        ASSERT_TRUE(sealed_payload);
+        transit_ciphertext = crypto::format_ciphertext({key_id, 1, *sealed_payload});
+    }
+    std::int64_t at = 1'790'000'000'000'000;
+    const std::int64_t mount_at = at += 1'000'000, entry_at = at += 1'000'000,
+                       first_at = at += 1'000'000, second_at = at += 1'000'000,
+                       key_at = at += 1'000'000;
+    const std::string first_ciphertext = sealed(1, {{"password", "legacy-one"}});
+    const std::string second_ciphertext = sealed(2, {{"password", "legacy-two"}});
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        const auto mount = [&](const std::string& id, const SecretSpace& space,
+                               const std::string& name) {
+            tx.exec_params("INSERT INTO secrets_mounts (id, customer_id, organization_id, name, "
+                           "description, created_at) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, "
+                           "'Legacy', to_timestamp($5::double precision / 1000000))",
+                           id, space.customer_id, space.organization_id, name, mount_at);
+        };
+        mount(mount_id, sole, "legacy-vault");
+        mount(waiting_id, several, "waiting-vault");
+        mount(gone_id, doomed, "gone-vault");
+        const std::string entry =
+            tx.exec_params("INSERT INTO secrets_entries (mount_id, name, current_version, "
+                           "custom_metadata, created_at) VALUES ($1::uuid, 'database', 2, "
+                           "'{\"owner\":\"payments\"}'::jsonb, "
+                           "to_timestamp($2::double precision / 1000000)) RETURNING id::text",
+                           mount_id, entry_at)[0][0]
+                .as<std::string>();
+        tx.exec_params("INSERT INTO secrets_versions (entry_id, version, ciphertext, created_at, "
+                       "deleted_at) VALUES ($1::uuid, 1, $2, to_timestamp($3::double precision "
+                       "/ 1000000), now()), ($1::uuid, 2, $4, to_timestamp($5::double "
+                       "precision / 1000000), NULL)",
+                       entry, first_ciphertext, first_at, second_ciphertext, second_at);
+        tx.exec_params("INSERT INTO secrets_encryption_keys (id, mount_id, name, created_at) "
+                       "VALUES ($1::uuid, $2::uuid, 'orders', to_timestamp($3::double precision "
+                       "/ 1000000))",
+                       key_id, mount_id, key_at);
+        const auto wrap = [&](const std::string& owner, const crypto::Key& key) {
+            auto wrapped = t.store->wrap_secret_data_key(sole.customer_id, owner, 1, raw(key),
+                                                         std::string(kek));
+            EXPECT_TRUE(wrapped) << wrapped.error().message;
+            return wrapped->wrapped_key;
+        };
+        tx.exec_params("INSERT INTO secrets_data_keys (customer_id, owner_kind, owner_id, "
+                       "key_version, wrapped_key) VALUES ($1::uuid, 'mount', $2::uuid, 1, $3), "
+                       "($1::uuid, 'encryption', $4::uuid, 1, $5)",
+                       sole.customer_id, mount_id, wrap(mount_id, *mount_key), key_id,
+                       wrap(key_id, *transit_key));
+        tx.commit();
+    } else {
+        auto& memory = static_cast<lake::control::InMemoryStore&>(*t.store);
+        const auto mount = [&](const std::string& id, const SecretSpace& space,
+                               const std::string& name) {
+            lake::control::SecretMount legacy;
+            legacy.id = id;
+            legacy.customer_id = space.customer_id;
+            legacy.organization_id = space.organization_id;
+            legacy.name = name;
+            legacy.description = "Legacy";
+            legacy.at_us = mount_at;
+            legacy.created_at = lake::control::record_instant(mount_at);
+            legacy.updated_at = legacy.created_at;
+            memory.seed_legacy_secret_mount(legacy);
+        };
+        mount(mount_id, sole, "legacy-vault");
+        mount(waiting_id, several, "waiting-vault");
+        mount(gone_id, doomed, "gone-vault");
+        const lake::control::LegacySecretOwner owner{sole.customer_id, mount_id, "", ""};
+        memory.seed_legacy_secret_entry({lake::control::new_uuid_v4(), "database", 2,
+                                         {{"owner", "payments"}}, entry_at,
+                                         lake::control::record_instant(entry_at), owner});
+        memory.seed_legacy_secret_version({lake::control::new_uuid_v4(), "database", 1,
+                                           first_ciphertext, first_at,
+                                           lake::control::record_instant(second_at), "", owner});
+        memory.seed_legacy_secret_version({lake::control::new_uuid_v4(), "database", 2,
+                                           second_ciphertext, second_at, "", "", owner});
+        lake::control::LegacyEncryptionKey legacy_key;
+        legacy_key.key = {key_id, mount_id, "orders", "", 1,
+                          lake::control::record_instant(key_at),
+                          lake::control::record_instant(key_at)};
+        legacy_key.at_us = key_at;
+        legacy_key.owner = owner;
+        memory.seed_legacy_encryption_key(legacy_key);
+        ASSERT_TRUE(memory.seed_legacy_secret_data_key(
+            {lake::control::new_uuid_v4(), "mount", mount_id, 1, {}, mount_at, owner},
+            raw(*mount_key)));
+        ASSERT_TRUE(memory.seed_legacy_secret_data_key(
+            {lake::control::new_uuid_v4(), "encryption", key_id, 1, {}, key_at, owner},
+            raw(*transit_key)));
+    }
+
+    auto operator_context = secret_operator(t);
+    const auto copy = [&](const std::string& collection, const std::string& mode) {
+        return secret_call(t, operator_context, "copy_workspace_records",
+                           {{"collection", collection}, {"mode", mode}});
+    };
+    // The first plan records each mount's owner: the sole workspace's, and the doomed space's
+    // only workspace, which is then deleted.
+    const auto plan = copy("secrets_mounts", "plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["rows"], 3);
+    EXPECT_EQ(plan.value["assigned"], 2);
+    ASSERT_TRUE(t.store->update_workspace(doomed.workspaces[0], {.desired = "deleted"}));
+    std::map<std::string, std::string> outcomes;
+    for (const auto& unresolved : copy("secrets_mounts", "plan").value["unresolved"]) {
+        outcomes[unresolved["id"]] = unresolved["outcome"];
+    }
+    EXPECT_EQ(outcomes[waiting_id], "needs_selection");
+    EXPECT_EQ(outcomes[gone_id], "workspace_deleted");
+    EXPECT_TRUE(t.zetta->records["http://" + sole.workspaces[0] + ".test"].collections.empty())
+        << "a plan writes nothing";
+
+    // Mounts, data keys, keys, entries, versions: each copied once, then verified.
+    const std::vector<std::pair<std::string, int>> collections{{"secrets_mounts", 1},
+                                                               {"secrets_data_keys", 2},
+                                                               {"secrets_encryption_keys", 1},
+                                                               {"secrets_entries", 1},
+                                                               {"secrets_versions", 2}};
+    for (const auto& [collection, rows] : collections) {
+        EXPECT_EQ(copy(collection, "verify").value["missing"].size(), static_cast<std::size_t>(rows))
+            << collection;
+        const auto copied = copy(collection, "copy");
+        ASSERT_TRUE(copied.ok) << collection << ": " << copied.error.message;
+        EXPECT_EQ(copied.value["copied"], rows) << collection;
+        EXPECT_EQ(copy(collection, "copy").value["already_present"], rows)
+            << collection << ": a rerun copies nothing twice";
+        const auto verified = copy(collection, "verify");
+        EXPECT_EQ(verified.value["verified"], rows) << collection;
+        EXPECT_TRUE(verified.value["mismatched"].empty()) << collection;
+        EXPECT_EQ(verified.value["complete"], collection != "secrets_mounts")
+            << collection << ": only the unassigned mount holds a page back";
+    }
+
+    // Each row is now read through the capabilities, in its own workspace only.
+    const auto read = admin("read_secret", {{"mount_id", mount_id}, {"name", "database"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["version"], 2);
+    EXPECT_EQ(read.value["value"]["password"], "legacy-two");
+    EXPECT_EQ(read.value["custom_metadata"]["owner"], "payments");
+    EXPECT_EQ(admin("read_secret", {{"mount_id", mount_id}, {"name", "database"}, {"version", 1}})
+                  .error.code,
+              "not_found")
+        << "a version deleted before the copy stays deleted";
+    const auto metadata = admin("secret_metadata", {{"mount_id", mount_id}, {"name", "database"}});
+    ASSERT_TRUE(metadata.ok) << metadata.error.message;
+    EXPECT_EQ(metadata.value["versions"].size(), 2U);
+    EXPECT_EQ(metadata.value["created_at"], lake::control::record_instant(entry_at));
+    const auto mount = admin("get_secret_mount", {{"mount_id", mount_id}});
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    EXPECT_EQ(mount.value["name"], "legacy-vault");
+    EXPECT_EQ(mount.value["workspace_id"], sole.workspaces[0]);
+    const auto decrypted = admin("decrypt", {{"mount_id", mount_id},
+                                             {"name", "orders"},
+                                             {"ciphertext", transit_ciphertext}});
+    ASSERT_TRUE(decrypted.ok) << decrypted.error.message;
+    EXPECT_EQ(decrypted.value["value"], payload);
+    const auto next = admin("put_secret", {{"mount_id", mount_id},
+                                           {"name", "database"},
+                                           {"value", {{"password", "after"}}},
+                                           {"check_and_set", 2}});
+    ASSERT_TRUE(next.ok) << next.error.message;
+    EXPECT_EQ(next.value["version"], 3);
+    EXPECT_EQ(admin("undelete_secret_versions",
+                    {{"mount_id", mount_id}, {"name", "database"}, {"versions", {1}}})
+                  .ok,
+              true);
+    // Changes made since the copy, and a customer KEK rotation, are accepted by verify.
+    ASSERT_TRUE(admin("rotate_customer_kek", {{"customer_id", sole.customer_id}}).ok);
+    for (const auto& [collection, rows] : collections) {
+        if (collection != "secrets_mounts") {
+            EXPECT_EQ(copy(collection, "verify").value["complete"], true) << collection;
+        }
+    }
+
+    // A reviewed choice for the waiting mount; the next run routes and copies it.
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE workspace_assignments SET workspace_id = $2::uuid WHERE "
+                       "object_table = 'secrets_mounts' AND object_id = $1::uuid",
+                       waiting_id, several.workspaces[1]);
+        tx.commit();
+    } else {
+        static_cast<lake::control::InMemoryStore&>(*t.store)
+            .select_legacy_secret_mount_workspace(waiting_id, several.workspaces[1]);
+    }
+    EXPECT_EQ(copy("secrets_mounts", "copy").value["copied"], 1);
+    EXPECT_EQ(copy("secrets_mounts", "verify").value["complete"], true)
+        << "the deleted workspace's mount does not hold the copy back";
+    EXPECT_TRUE(admin("get_secret_mount", {{"mount_id", waiting_id}}).ok);
+
+    // A swapped record is reported.
+    auto records = lake::api::workspace_records(operator_context, sole.customer_id,
+                                                sole.workspaces[0]);
+    ASSERT_TRUE(records);
+    auto& rows = t.zetta->records["http://" + sole.workspaces[0] + ".test"].rows("secrets_versions");
+    rows.at(lake::control::SecretVersionCodec::key(*records, mount_id, "database", 2))["value"] =
+        "AAAA";
+    EXPECT_EQ(copy("secrets_versions", "verify").value["missing"].size(), 1U);
+
+    // Only the operator copies.
+    const auto refused = secret_call(t, t.context(t.spaces[0]), "copy_workspace_records",
+                                     {{"collection", "secrets_mounts"}, {"mode", "plan"}});
+    EXPECT_EQ(refused.error.code, "unauthorized");
 }
 
 INSTANTIATE_TEST_SUITE_P(Stores, WorkspaceRecordStores, testing::Values(false, true),

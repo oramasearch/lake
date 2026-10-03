@@ -188,6 +188,11 @@ TEST(IdentityExit, PostgresProvesIdentityPkiAndDynamicSecrets) {
         return completed ? std::move(*completed)
                          : ApiResult::failure("store_error", completed.error().message);
     };
+    const auto call_async = [&](const std::string& name, json input = json::object()) {
+        context.request_id = lake::control::new_uuid_v4();
+        const auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        return completed ? *completed : ApiResult::failure("store_error", "did not complete");
+    };
 
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
     const ApiResult signed_up = call("sign_up_password",
@@ -325,15 +330,17 @@ TEST(IdentityExit, PostgresProvesIdentityPkiAndDynamicSecrets) {
     EXPECT_EQ(count_certificate_events("check_agent_certificate"), 2);
     EXPECT_EQ(count_certificate_events("check_agent_certificate", "denied"), 1);
 
-    const ApiResult mount = call("create_secret_mount",
-                                 {{"customer_id", customer->id},
-                                  {"organization_id", organization->id},
-                                  {"name", "identity-exit"}});
+    // The secret mount lives in the same workspace Zetta (lake#328).
+    const ApiResult mount = call_async("create_secret_mount",
+                                       {{"customer_id", customer->id},
+                                        {"workspace_id", workspace_id},
+                                        {"organization_id", organization->id},
+                                        {"name", "identity-exit"}});
     ASSERT_TRUE(mount.ok) << mount.error.message;
     lake::transparency::TiledLog log(lake::test::fixture_path("identity-exit-log"), "lake");
     context.transparency_log = &log;
     const ApiResult lease =
-        call("lease_dynamic_secret",
+        call_async("lease_dynamic_secret",
              {{"mount_id", mount.value.at("id")}, {"role", "reader"}, {"lifetime_seconds", 300}});
     ASSERT_TRUE(lease.ok) << lease.error.message;
     const std::string lease_id = lease.value.at("lease").at("id");

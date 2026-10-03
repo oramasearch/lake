@@ -446,3 +446,14 @@ spaces with two workspaces each, the anonymous JWKS, missing, malformed, unknown
 `PostgresApplicationCredentials.MigrationRecordsEachRowsOwnerForTheCopy` migration
 `0056_application_credential_workspaces`. `stream_fixture.hpp`'s `seed_application_signing_key`
 writes the first key ring of an application a test creates directly in a store.
+
+Secrets in workspace Zettas (lake#328-#332): `test_secrets.cpp` runs the capability contract on a
+`RecordWorkspaces` (history, number reuse, a stopped put completed by the next, transit, a KEK
+rotation finished after a workspace was not ready, leases, denial). `test_workspace_records.cpp`'s
+`SecretsLiveInTheirMountsWorkspace` covers two spaces with two workspaces each, sealed records only
+at their own endpoint and none in PostgreSQL, missing, malformed, unknown and foreign ids, another
+space's person, a record copied elsewhere, a workspace not ready, KEK rotation across workspaces and
+workspace deletion; `TheOneShotCopyMovesSecretsIntoTheirMountsWorkspace` the copy of the five
+collections in both stores (the memory store seeds legacy rows with `seed_legacy_secret_*`);
+`PostgresSecrets.MigrationRecordsEachMountsOwnerAndRoute` migration `0057_secret_workspaces`. The
+identity exit scenario and the Postgres secrets round trip give their mount a Ready workspace.

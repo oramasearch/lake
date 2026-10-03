@@ -37,6 +37,8 @@
 // The keyed record store tests use for workspace Zettas: drive links and application events are
 // workspace records.
 #include "../../tests/record_fixture.hpp"
+// Secrets live in workspace records (lake#328); the fixture writes them as lake does.
+#include "../../src/api/secret_records_api.hpp"
 
 namespace {
 
@@ -105,7 +107,8 @@ std::string share_token_hash(std::string_view token) {
     return output;
 }
 
-// The fixture's workspace Zettas: only lake's own records (drive share links, lake#350), one
+// The fixture's workspace Zettas: only lake's own records (drive share links, lake#350; secrets,
+// lake#328), one
 // record store per workspace endpoint. Every other workspace capability is unknown here.
 class FixtureWorkspaces final : public lake::control::WorkspaceCaller {
 public:
@@ -345,23 +348,45 @@ int main(int argc, char** argv) {
     require(store->create_federation_issuer(
                 {organization.id, "https://identity.example.test", "email"}),
             "create federation issuer");
-    const auto mount = require(store->create_secret_mount({organization_customer.id,
-                                                           organization.id,
-                                                           "production",
-                                                           "Production service credentials.",
-                                                           "admin",
-                                                           "ui-fixture-mount"},
-                                                          instance_kek),
-                               "create secret mount");
-    require(store->put_secret({mount.id,
-                               "search-api",
-                               {{"token", "fixture-value"}},
-                               {{"owner", "platform"}, {"rotation", "quarterly"}},
-                               0},
-                              instance_kek),
-            "create secret");
-    require(store->create_encryption_key({mount.id, "artifact-signing"}, instance_kek),
-            "create encryption key");
+    // The organization's secret mount, in its console workspace (lake#328).
+    lake::api::ApiContext secrets_context;
+    secrets_context.store = store.get();
+    secrets_context.workspaces = workspaces.get();
+    secrets_context.instance_kek = instance_kek;
+    lake::control::SecretMount mount_draft;
+    mount_draft.customer_id = organization_customer.id;
+    mount_draft.workspace_id = console_workspace.id;
+    mount_draft.organization_id = organization.id;
+    mount_draft.name = "production";
+    mount_draft.description = "Production service credentials.";
+    auto created_mount = lake::control::settled(liquid::runtime::block_on(
+        lake::api::create_secret_mount(secrets_context, mount_draft)));
+    if (!created_mount) {
+        std::println(stderr, "lake-ui-fixture: create secret mount: {}",
+                     created_mount.error().message);
+        return 1;
+    }
+    const auto mount = *created_mount;
+    {
+        auto secrets = lake::api::MountSecrets::open(secrets_context, mount.id);
+        if (!secrets) {
+            std::println(stderr, "lake-ui-fixture: open secret mount: {}", secrets.error().message);
+            return 1;
+        }
+        auto put = lake::control::settled(liquid::runtime::block_on(
+            secrets->put({mount.id,
+                          "search-api",
+                          {{"token", "fixture-value"}},
+                          {{"owner", "platform"}, {"rotation", "quarterly"}},
+                          0})));
+        auto key = lake::control::settled(
+            liquid::runtime::block_on(secrets->create_key("artifact-signing")));
+        if (!put || !key) {
+            std::println(stderr, "lake-ui-fixture: create secret and key: {}",
+                         !put ? put.error().message : key.error().message);
+            return 1;
+        }
+    }
 
     auto customer_store = require(liquid::runtime::block_on(liquid::store::open(
                                       store_root / organization_customer.id / "store")),
@@ -733,7 +758,7 @@ int main(int argc, char** argv) {
         {"search", operator_token, std::format("/search?query=Orama&repository={}", repository.id)},
         {"secret-mounts",
          operator_token,
-         std::format("/secret-mounts?customer_id={}", organization_customer.id)},
+         std::format("/secret-mounts?workspace_id={}", console_workspace.id)},
         {"secrets", operator_token, std::format("/secrets?mount_id={}&name=search-api", mount.id)},
         {"encryption-keys", operator_token, std::format("/encryption-keys?mount_id={}", mount.id)},
         {"metering",

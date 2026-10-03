@@ -62,6 +62,12 @@ Repository usage follows (lake#348, lake#349, migration `0053`): exact hourly tr
 one build record per result in the repository's workspace Zetta, written from a bounded in-process
 buffer the owner loop flushes every five seconds and on drain, never on the sync path; repository
 storage is measured live and no longer recorded. See `docs/api/metering.md`.
+Secrets follow (lake#328-#332, migration `0057`): a secret mount belongs to one workspace, chosen
+at creation, and its secrets, versions, named keys and data keys are sealed records in that
+workspace's Zetta with the existing envelope (instance KEK, customer KEK, data key); PostgreSQL
+keeps only the content-free `secret_mount_routes`, the policy objects and the customer KEK. Version
+numbers are claimed `if_absent`, and a customer KEK rotation rewraps every workspace's data keys
+before it forgets the replaced KEK. See `docs/api/secrets.md`.
 Forge records follow (lake#341, migration `0054`): issues, reviews, comments, releases, webhooks,
 exports and branch protection rules live in the workspace Zetta of their repository's workspace,
 found by repository and kind; the push path reads branch protection there once before the push

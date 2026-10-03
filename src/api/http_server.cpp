@@ -2452,6 +2452,7 @@ control::SecretMount secret_mount_from_json(const nlohmann::json& value) {
     return {json_string(value, "id"),
             json_string(value, "customer_id"),
             json_string(value, "organization_id"),
+            json_string(value, "workspace_id"),
             json_string(value, "name"),
             json_string(value, "description"),
             json_string(value, "created_at"),
@@ -15048,61 +15049,86 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    // Secret pages (docs/api/secrets.md): mounts live in workspaces (lake#328), so the list is of
+    // one workspace, named by `workspace_id` or else the one the viewer last chose. A mount's own
+    // pages need no workspace: the mount names it.
     boost::http::route_task serve_secret_mounts_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
-        nlohmann::json input{{"limit", 500}};
-        const std::string customer_id = query_value(route, "customer_id");
+        std::string workspace_id = query_value(route, "workspace_id");
+        if (workspace_id.empty()) {
+            workspace_id = context.remembered_workspace_id;
+        }
+        const auto workspace = workspace_id.empty() || !options.store
+                                   ? control::Result<control::Workspace>(std::unexpect,
+                                         control::StoreError{"not_found", "no workspace"})
+                                   : options.store->get_workspace(workspace_id);
+        if (!workspace || workspace->desired == "deleted") {
+            if (!query_value(route, "workspace_id").empty()) {
+                co_return co_await serve_page_error(
+                    route, ApiResult::failure("invalid_input",
+                                              "workspace_id must name a workspace Zetta in this "
+                                              "space",
+                                              "/workspace_id"));
+            }
+            co_return co_await send_text(route,
+                                         boost::http::status::ok,
+                                         web_ui_secret_mounts({}, "", viewer_for(context)),
+                                         "text/html; charset=utf-8",
+                                         "no-store");
+        }
+        nlohmann::json input{{"customer_id", workspace->customer_id},
+                             {"workspace_id", workspace->id},
+                             {"limit", 500}};
         const std::string organization_id = query_value(route, "organization_id");
-        if (!customer_id.empty()) {
-            input["customer_id"] = customer_id;
-        }
         if (!organization_id.empty()) {
             input["organization_id"] = organization_id;
         }
-        const ApiResult result = registry.call("list_secret_mounts", input, context);
+        const ApiResult result =
+            unwrap(co_await registry.call_async("list_secret_mounts", input, context));
         if (!result.ok) {
-            return serve_page_error(route, result);
+            co_return co_await serve_page_error(route, result);
         }
         std::vector<control::SecretMount> mounts;
         for (const nlohmann::json& item : result.value.at("items")) {
             mounts.push_back(secret_mount_from_json(item));
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_secret_mounts(mounts, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_secret_mounts(mounts, workspace->id,
+                                                          viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_secrets_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
         const std::string mount_id = query_value(route, "mount_id");
         if (mount_id.empty()) {
-            return redirect(route, "/secret-mounts");
+            co_return co_await redirect(route, "/secret-mounts");
         }
-        const ApiResult mount_result =
-            registry.call("get_secret_mount", {{"mount_id", mount_id}}, context);
+        const ApiResult mount_result = unwrap(
+            co_await registry.call_async("get_secret_mount", {{"mount_id", mount_id}}, context));
         if (!mount_result.ok) {
-            return serve_page_error(route, mount_result);
+            co_return co_await serve_page_error(route, mount_result);
         }
         const control::SecretMount mount = secret_mount_from_json(mount_result.value);
         const std::string name = query_value(route, "name");
         std::optional<control::SecretMetadata> metadata;
         if (!name.empty()) {
-            const ApiResult metadata_result =
-                registry.call("secret_metadata", {{"mount_id", mount_id}, {"name", name}}, context);
+            const ApiResult metadata_result = unwrap(co_await registry.call_async(
+                "secret_metadata", {{"mount_id", mount_id}, {"name", name}}, context));
             if (!metadata_result.ok) {
-                return serve_page_error(route, metadata_result);
+                co_return co_await serve_page_error(route, metadata_result);
             }
             metadata = secret_metadata_from_json(metadata_result.value);
         }
-        return send_text(
+        co_return co_await send_text(
             route,
             boost::http::status::ok,
             web_ui_secrets(mount, name, metadata ? &*metadata : nullptr, viewer_for(context)),
@@ -15113,32 +15139,34 @@ struct ApiServer::Impl {
     boost::http::route_task serve_encryption_keys_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
         const std::string mount_id = query_value(route, "mount_id");
         if (mount_id.empty()) {
-            return redirect(route, "/secret-mounts");
+            co_return co_await redirect(route, "/secret-mounts");
         }
-        const ApiResult mount_result =
-            registry.call("get_secret_mount", {{"mount_id", mount_id}}, context);
+        const ApiResult mount_result = unwrap(
+            co_await registry.call_async("get_secret_mount", {{"mount_id", mount_id}}, context));
         if (!mount_result.ok) {
-            return serve_page_error(route, mount_result);
+            co_return co_await serve_page_error(route, mount_result);
         }
-        const ApiResult keys_result = registry.call(
-            "list_encryption_keys", {{"mount_id", mount_id}, {"limit", 500}}, context);
+        const ApiResult keys_result = unwrap(co_await registry.call_async(
+            "list_encryption_keys", {{"mount_id", mount_id}, {"limit", 500}}, context));
         if (!keys_result.ok) {
-            return serve_page_error(route, keys_result);
+            co_return co_await serve_page_error(route, keys_result);
         }
         std::vector<control::EncryptionKey> keys;
         for (const nlohmann::json& item : keys_result.value.at("items")) {
             keys.push_back(encryption_key_from_json(item));
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_encryption_keys(
-                             secret_mount_from_json(mount_result.value), keys, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_encryption_keys(secret_mount_from_json(
+                                                                mount_result.value),
+                                                            keys,
+                                                            viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_style(boost::http::route_params& route) {

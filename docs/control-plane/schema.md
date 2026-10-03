@@ -111,6 +111,11 @@ disablement revoke all prior recovery rows. `identity_mfa_guard` is the migratio
 
 ## Static secrets and encryption (migration `0009_secrets`)
 
+The five `secrets_*` tables below are retired by `0057_secret_workspaces` (lake#328-#332): mounts,
+secrets, versions, named keys and data keys live in the workspace Zetta of each mount's route, and
+these tables are read only by the one-shot copy until a later migration drops them. See
+[0057](#secret-workspaces-migration-0057_secret_workspaces).
+
 | Table | Purpose |
 |---|---|
 | `secrets_mounts` | Organization mount inside a customer namespace; unique lowercase name per customer and organization. |
@@ -130,6 +135,20 @@ Static values use one mount data key and associated data containing mount, name 
 Named encryption keys have one data-key row per version. Customer-KEK rotation locks the customer
 KEK and all of its data-key rows, rewraps those rows and updates the KEK in one transaction. It
 does not update `secrets_versions`.
+
+## Secret workspaces (migration `0057_secret_workspaces`)
+
+| Table or change | Purpose |
+|---|---|
+| `secret_mount_routes` | One row per mount: its space, organization and workspace (`enforce_workspace_routing`: a live workspace of the same space, never changed). Content-free dispatch; no mount name, secret name, value or key. |
+| `keystore.previous_wrapped_key`, `previous_version` | The customer KEK a rotation replaced, wrapped under its own version, kept until every workspace data key is rewrapped. |
+| `secrets_dynamic_leases` | Loses its foreign key to `secrets_mounts`; a new mount has no row there (lake#362 moves leases). |
+| `workspace_assignments` (`secrets_mounts`) | Each legacy mount's owner: `sole_workspace` or `needs_selection`. Its entries, versions, keys and data keys follow it. |
+| `secret_workspaces_guard` | Guard table for migration `0057_secret_workspaces`. |
+
+Nothing is dropped. Lake reads and writes secrets only in workspace records
+([secrets.md](../api/secrets.md#where-secrets-live-lake328-332)); a customer KEK rotation still
+rewraps the retired `secrets_data_keys` rows in its transaction so the one-shot copy can read them.
 
 ## SSO and federation (migration `0010_sso_federation`)
 
@@ -275,7 +294,7 @@ local policy binding only.
 | `identity_taap_assertions` | One-use digest ledger binding each accepted liquid-key sign-in assertion to its lake user and pool. |
 | `auth_app_authorization_codes` | Five-minute application code hashes with exact redirect, PKCE S256 challenge, nonce, user, and one-use timestamp. |
 | `pki_certificates.revoked_at` and `agent` profile | Immediate agent-certificate status plus rotation linkage through the existing `renewed_from_id`. |
-| `secrets_dynamic_leases` | Encrypted generated credential, role, bounded expiry, revocation, and renewal count for each mount lease. |
+| `secrets_dynamic_leases` | Encrypted generated credential, role, bounded expiry, revocation, and renewal count for each mount lease. Since 0057 the value is sealed with the mount data key read from the mount's workspace. |
 | `identity_exit_guard` | Guard table for migration `0020_identity_exit`. |
 
 Dynamic-secret ciphertext uses the existing mount/customer key hierarchy. Authorization codes and
