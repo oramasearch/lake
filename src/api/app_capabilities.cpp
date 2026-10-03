@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "lake/control/application_credential_records.hpp"
 #include "lake/control/application_user_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -186,8 +187,8 @@ application_records(const control::Application& application, const ApiContext& c
     if (application.workspace_id.empty()) {
         return std::unexpected(ApiResult::failure(
             "workspace_not_ready", "application " + application.id +
-                                       " has no workspace yet; its events cannot be recorded until "
-                                       "an operator assigns one (migration 0049)"));
+                                       " has no workspace yet; its events, keys and webhooks are "
+                                       "unavailable until an operator assigns one (migration 0049)"));
     }
     auto records = workspace_records(context, application.customer_id, application.workspace_id);
     if (!records) {
@@ -203,6 +204,53 @@ constexpr std::int64_t abandoned_claim_us = 5LL * 60 * 1'000'000;
 
 ApiResult from_records_error(const control::ZettaControlError& error) {
     return ApiResult::failure(error.code, error.message, error.path);
+}
+
+// The secrets subsystem's envelope purposes of an application's credentials (lake#352, lake#355).
+std::string signing_key_purpose(const std::string& application_id) {
+    return "application.jwt." + application_id;
+}
+std::string webhook_secret_purpose(const std::string& webhook_id) {
+    return "application.webhook." + webhook_id;
+}
+
+// The current signing key of an application, read from the application's workspace records and
+// opened for signing (lake#352). Every token issuer calls it on its asynchronous path.
+liquid::runtime::task<std::expected<control::ApplicationSigningKey, ApiResult>>
+application_signing_key(control::WorkspaceRecords& records, std::string application_id,
+                        ApiContext& context) {
+    using Key = std::expected<control::ApplicationSigningKey, ApiResult>;
+    auto ring = control::settled(
+        co_await control::get_application_signing_keys(records, application_id));
+    if (!ring) {
+        co_return Key(std::unexpected(from_records_error(ring.error())));
+    }
+    if (!*ring) {
+        co_return Key(std::unexpected(ApiResult::failure(
+            "not_found", "application has no current signing key in its workspace")));
+    }
+    const auto current =
+        std::ranges::find_if((*ring)->keys, &control::ApplicationSigningKey::current);
+    control::ApplicationSigningKey key = *current; // the codec admits only rings with one
+    auto seed = context.store->decrypt_application_credential(signing_key_purpose(application_id),
+                                                               key.encrypted_seed);
+    if (!seed) {
+        co_return Key(std::unexpected(from_store_error(seed.error())));
+    }
+    key.seed = std::move(*seed);
+    co_return Key(std::move(key));
+}
+
+// The webhook with its signing secret opened, for signing one delivery.
+std::expected<control::ApplicationWebhook, ApiResult>
+opened_webhook(control::ApplicationWebhook webhook, ApiContext& context) {
+    auto secret = context.store->decrypt_application_credential(
+        webhook_secret_purpose(webhook.id), webhook.encrypted_secret);
+    if (!secret) {
+        return std::unexpected(from_store_error(secret.error()));
+    }
+    webhook.secret = std::move(*secret);
+    return webhook;
 }
 
 // Sends `event` to `webhook` up to three consecutive attempts from `first_attempt`, stopping at the
@@ -269,18 +317,27 @@ liquid::runtime::task<ApiResult> deliver_to_webhook(control::WorkspaceRecords& r
 // Records one event in the application's workspace and delivers it to each subscribed webhook.
 liquid::runtime::task<ApiResult> record_and_deliver(control::WorkspaceRecords& records,
                                                     control::ApplicationWebhookEvent event,
-                                                    std::vector<control::ApplicationWebhook> webhooks,
                                                     ApiContext& context) {
+    // The application's webhooks live in the same workspace (lake#355).
+    auto webhooks = control::settled(
+        co_await control::list_application_webhooks(records, event.application_id));
+    if (!webhooks) {
+        co_return from_records_error(webhooks.error());
+    }
     control::ApplicationWebhookEvents events(records);
     auto stored = control::settled(co_await events.append(std::move(event)));
     if (!stored) {
         co_return from_records_error(stored.error());
     }
-    for (const control::ApplicationWebhook& webhook : webhooks) {
-        if (!accepts_event(webhook, stored->event)) {
+    for (const control::ApplicationWebhook& listed : *webhooks) {
+        if (!accepts_event(listed, stored->event)) {
             continue;
         }
-        auto delivered = co_await deliver_to_webhook(records, *stored, webhook, 1, context);
+        auto webhook = opened_webhook(listed, context);
+        if (!webhook) {
+            co_return webhook.error();
+        }
+        auto delivered = co_await deliver_to_webhook(records, *stored, *webhook, 1, context);
         if (!delivered) {
             co_return ApiResult::failure("store_error", delivered.error().message);
         }
@@ -550,16 +607,12 @@ liquid::runtime::task<ApiResult> emit_application_event(control::Application app
     if (!records) {
         co_return records.error();
     }
-    auto webhooks = context.store->list_application_webhooks(application.id, 1000);
-    if (!webhooks) {
-        co_return from_store_error(webhooks.error());
-    }
     control::ApplicationWebhookEvent value;
     value.application_id = application.id;
     value.event = std::move(event);
     value.payload = std::move(data);
     co_return completed(
-        co_await record_and_deliver(*records, std::move(value), std::move(*webhooks), context));
+        co_await record_and_deliver(*records, std::move(value), context));
 }
 
 liquid::runtime::task<ApiResult>
@@ -600,15 +653,18 @@ application_session_result(control::Result<control::IssuedSession> issued,
         co_return refuse(ApiResult::failure("unauthorized", "application user is suspended"));
     }
     if (issued->session.kind != "api_token" && issued->session.kind != "static") {
-        auto key = context.store->current_application_signing_key(application->id);
+        auto key = co_await application_signing_key(*records, application->id, context);
         if (!key) {
-            co_return refuse(from_store_error(key.error()));
+            co_return refuse(ApiResult::failure("store_error", key.error().message));
+        }
+        if (!*key) {
+            co_return refuse(std::move(key->error()));
         }
         const std::string host = application->custom_sign_in_domain.empty()
                                      ? context.public_host
                                      : application->custom_sign_in_domain;
         const std::string issuer = "https://" + host + "/v1/apps/" + application->id;
-        auto token = control::apps::issue_jwt(*application, *key, **user, issuer);
+        auto token = control::apps::issue_jwt(*application, **key, **user, issuer);
         if (!token) {
             co_return refuse(ApiResult::failure("store_error", token.error()));
         }
@@ -764,8 +820,9 @@ void register_application_capabilities(Registry& registry) {
         .title = "Register application",
         .description =
             "Create an application user pool and its first Ed25519 JWT key, in one workspace of "
-            "the space: that workspace's Zetta holds the application's lifecycle events and "
-            "webhook delivery attempts. The workspace never changes.",
+            "the space: that workspace's Zetta holds the application's signing keys, webhooks, "
+            "users, organizations, lifecycle events and webhook delivery attempts. The workspace "
+            "never changes.",
         .input_schema =
             input_schema({{"customer_id", {{"type", "string"}}},
                           {"name", {{"type", "string"}}},
@@ -781,16 +838,40 @@ void register_application_capabilities(Registry& registry) {
         .object = "customer applications",
         .action = "admin",
         .resolve_object = customer_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (auto invalid = validate_registration(input)) {
-                return *invalid;
+                co_return *invalid;
             }
             const std::string id = control::new_uuid_v4();
             auto key = control::apps::generate_signing_key(id, 1);
             if (!key) {
-                return ApiResult::failure("store_error", key.error());
+                co_return ApiResult::failure("store_error", key.error());
             }
-            return one_result(context.store->create_application(
+            auto envelope = context.store->encrypt_application_credential(signing_key_purpose(id),
+                                                                          key->seed);
+            if (!envelope) {
+                co_return from_store_error(envelope.error());
+            }
+            key->encrypted_seed = std::move(*envelope);
+            key->seed.clear();
+            // The first key goes into the chosen workspace before the application exists, so an
+            // application is never registered without one (lake#352).
+            control::Application routing;
+            routing.id = id;
+            routing.customer_id = input.at("customer_id");
+            routing.workspace_id = input.at("workspace_id");
+            auto records = application_records(routing, context);
+            if (!records) {
+                co_return records.error();
+            }
+            control::ApplicationSigningKeyRing ring{.application_id = id, .keys = {*key}};
+            auto written = control::settled(
+                co_await control::create_application_signing_keys(*records, std::move(ring)));
+            if (!written) {
+                co_return from_records_error(written.error());
+            }
+            auto created = context.store->create_application(
                 {.id = id,
                  .customer_id = input.at("customer_id"),
                  .pool_id = "app:" + id,
@@ -799,8 +880,13 @@ void register_application_capabilities(Registry& registry) {
                  .redirect_uris = input.at("redirect_uris").get<std::vector<std::string>>(),
                  .custom_sign_in_domain = input.value("custom_sign_in_domain", ""),
                  .theme = input.value("theme", json::object()),
-                 .signing_key = *key,
-                 .workspace_id = input.at("workspace_id")}));
+                 .workspace_id = input.at("workspace_id")});
+            if (!created) {
+                // Nothing names the unused key ring: take it back out of the workspace.
+                static_cast<void>(co_await records->remove(
+                    control::ApplicationSigningKeysCodec::collection, id, written->revision));
+            }
+            co_return one_result(std::move(created));
         }});
     registry.add(Capability{
         .name = "list_applications",
@@ -1005,17 +1091,20 @@ void register_application_capabilities(Registry& registry) {
             if ((*user)->status != "active") {
                 co_return ApiResult::failure("unauthorized", "application user is suspended");
             }
-            auto key = context.store->current_application_signing_key(code->application_id);
+            auto key = co_await application_signing_key(*records, application->id, context);
             if (!key) {
-                co_return from_store_error(key.error());
+                co_return ApiResult::failure("store_error", key.error().message);
+            }
+            if (!*key) {
+                co_return std::move(key->error());
             }
             const std::string host = application->custom_sign_in_domain.empty()
                                          ? context.public_host
                                          : application->custom_sign_in_domain;
             const std::string issuer = "https://" + host + "/v1/apps/" + application->id;
-            auto access_token = control::apps::issue_jwt(*application, *key, **user, issuer);
+            auto access_token = control::apps::issue_jwt(*application, **key, **user, issuer);
             auto id_token =
-                control::apps::issue_jwt(*application, *key, **user, issuer, 900, code->nonce);
+                control::apps::issue_jwt(*application, **key, **user, issuer, 900, code->nonce);
             if (!access_token || !id_token) {
                 co_return ApiResult::failure("store_error", "could not issue application tokens");
             }
@@ -1062,56 +1151,95 @@ void register_application_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "rotate_application_signing_key",
         .title = "Rotate application signing key",
-        .description = "Make a new Ed25519 JWT key current while retaining old public keys.",
-        .input_schema = application_id_input,
+        .description =
+            "Make a new Ed25519 JWT key current while retaining old public keys. The keys live in "
+            "the workspace Zetta of the application's workspace: `workspace_id` must name that "
+            "workspace. The current key is retired and the new one added in one conditional "
+            "write, so a concurrent rotation is reread rather than lost.",
+        .input_schema = input_schema(
+            {{"application_id", {{"type", "string"}}}, {"workspace_id", {{"type", "string"}}}},
+            json::array({"application_id", "workspace_id"})),
         .output_schema = object_schema(),
         .kind = CapabilityKind::Action,
         .object = "application",
         .action = "admin",
         .resolve_object = application_object,
-        .handler = [](const json& input, ApiContext& context) {
-            const std::string id = input.at("application_id");
-            auto keys = context.store->list_application_signing_keys(id);
-            if (!keys) {
-                return from_store_error(keys.error());
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            auto application = application_in_workspace(input, context);
+            if (!application) {
+                co_return application.error();
             }
-            auto key = control::apps::generate_signing_key(id, static_cast<int>(keys->size()) + 1);
-            if (!key) {
-                return ApiResult::failure("store_error", key.error());
+            auto records = application_records(*application, context);
+            if (!records) {
+                co_return records.error();
             }
-            auto rotated = context.store->rotate_application_signing_key(*key);
+            const std::string id = application->id;
+            auto rotated = control::settled(co_await control::rotate_application_signing_keys(
+                *records, id,
+                [&](int version) -> std::expected<control::ApplicationSigningKey,
+                                                  control::ZettaControlError> {
+                    auto key = control::apps::generate_signing_key(id, version);
+                    if (!key) {
+                        return std::unexpected(control::ZettaControlError{"store_error", key.error()});
+                    }
+                    auto envelope =
+                        context.store->encrypt_application_credential(signing_key_purpose(id), key->seed);
+                    if (!envelope) {
+                        return std::unexpected(control::ZettaControlError{
+                            envelope.error().code, envelope.error().message});
+                    }
+                    key->encrypted_seed = std::move(*envelope);
+                    key->seed.clear();
+                    return std::move(*key);
+                }));
             if (!rotated) {
-                return from_store_error(rotated.error());
+                co_return from_records_error(rotated.error());
             }
-            return ApiResult::success({{"kid", rotated->kid}, {"version", rotated->version}});
+            co_return ApiResult::success({{"kid", rotated->kid}, {"version", rotated->version}});
         }});
-    registry.add(Capability{.name = "application_jwks",
-                            .title = "Application JSON Web Key Set",
-                            .description = "Public verification keys for application JWTs.",
-                            .input_schema = application_id_input,
-                            .output_schema = object_schema(),
-                            .kind = CapabilityKind::Read,
-                            .requires_auth = false,
-                            .object = "application keys",
-                            .action = "read",
-                            .resolve_object = application_object,
-                            .handler = [](const json& input, ApiContext& context) {
-                                auto keys = context.store->list_application_signing_keys(
-                                    input.at("application_id"));
-                                if (!keys) {
-                                    return from_store_error(keys.error());
-                                }
-                                json output = json::array();
-                                for (const auto& key : *keys) {
-                                    output.push_back({{"kty", "OKP"},
-                                                      {"crv", "Ed25519"},
-                                                      {"use", "sig"},
-                                                      {"alg", "EdDSA"},
-                                                      {"kid", key.kid},
-                                                      {"x", key.public_key}});
-                                }
-                                return ApiResult::success({{"keys", std::move(output)}});
-                            }});
+    registry.add(Capability{
+        .name = "application_jwks",
+        .title = "Application JSON Web Key Set",
+        .description = "Public verification keys for application JWTs, read from the workspace "
+                       "Zetta of the application's workspace.",
+        .input_schema = application_id_input,
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Read,
+        .requires_auth = false,
+        .object = "application keys",
+        .action = "read",
+        .resolve_object = application_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            // Anonymous relying parties name only the application: its routing pointer names the
+            // workspace, and one get_record reads the public keys.
+            auto application = context.store->get_application(input.at("application_id"));
+            if (!application) {
+                co_return from_store_error(application.error());
+            }
+            auto records = application_records(*application, context);
+            if (!records) {
+                co_return records.error();
+            }
+            auto ring = control::settled(
+                co_await control::get_application_signing_keys(*records, application->id));
+            if (!ring) {
+                co_return from_records_error(ring.error());
+            }
+            json output = json::array();
+            if (*ring) {
+                for (const auto& key : (*ring)->keys) {
+                    output.push_back({{"kty", "OKP"},
+                                      {"crv", "Ed25519"},
+                                      {"use", "sig"},
+                                      {"alg", "EdDSA"},
+                                      {"kid", key.kid},
+                                      {"x", key.public_key}});
+                }
+            }
+            co_return ApiResult::success({{"keys", std::move(output)}});
+        }});
     // The application's users and organizations live in the workspace Zetta of its workspace
     // (lake#353, lake#354): every capability below names that workspace in `workspace_id`.
     const json workspace_property = {
@@ -1151,16 +1279,20 @@ void register_application_capabilities(Registry& registry) {
             if ((*user)->status != "active") {
                 co_return ApiResult::failure("unauthorized", "application user is suspended");
             }
-            auto key = context.store->current_application_signing_key(found->application.id);
+            auto key =
+                co_await application_signing_key(found->records, found->application.id, context);
             if (!key) {
-                co_return from_store_error(key.error());
+                co_return ApiResult::failure("store_error", key.error().message);
+            }
+            if (!*key) {
+                co_return std::move(key->error());
             }
             const control::Application& application = found->application;
             const std::string host = application.custom_sign_in_domain.empty()
                                          ? context.public_host
                                          : application.custom_sign_in_domain;
             auto token = control::apps::issue_jwt(
-                application, *key, **user, "https://" + host + "/v1/apps/" + application.id);
+                application, **key, **user, "https://" + host + "/v1/apps/" + application.id);
             co_return token
                 ? ApiResult::success(
                       {{"access_token", *token}, {"token_type", "Bearer"}, {"expires_in", 900}})
@@ -1558,58 +1690,103 @@ void register_application_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_application_webhook",
         .title = "Create application webhook",
-        .description = "Create a signed lifecycle webhook and return its secret once.",
+        .description =
+            "Create a signed lifecycle webhook and return its secret once. The webhook and its "
+            "sealed secret live in the workspace Zetta of the application's workspace: "
+            "`workspace_id` must name that workspace.",
         .input_schema =
             input_schema({{"application_id", {{"type", "string"}}},
+                          {"workspace_id", {{"type", "string"}}},
                           {"url", {{"type", "string"}}},
                           {"events", {{"type", "array"}, {"items", {{"type", "string"}}}}}},
-                         json::array({"application_id", "url", "events"})),
+                         json::array({"application_id", "workspace_id", "url", "events"})),
         .output_schema = object_schema(),
         .kind = CapabilityKind::Action,
         .object = "application",
         .action = "admin",
         .resolve_object = application_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             const auto events = input.at("events").get<std::vector<std::string>>();
             if (!valid_https_url(input.at("url"), false)) {
-                return ApiResult::failure("invalid_input", "webhook URL must use HTTPS", "/url");
+                co_return ApiResult::failure("invalid_input", "webhook URL must use HTTPS", "/url");
             }
             if (events.empty() || std::ranges::any_of(events, [](const std::string& value) {
                     return std::ranges::find(lifecycle_events, value) == lifecycle_events.end();
                 })) {
-                return ApiResult::failure(
+                co_return ApiResult::failure(
                     "invalid_input", "webhook event is unsupported", "/events");
             }
-            const std::string secret = control::identity_crypto::random_secret();
-            auto webhook = context.store->create_application_webhook(
-                {input.at("application_id"), input.at("url"), events, secret});
-            if (!webhook) {
-                return from_store_error(webhook.error());
+            auto application = application_in_workspace(input, context);
+            if (!application) {
+                co_return application.error();
             }
-            json output = control::to_json(*webhook);
+            auto records = application_records(*application, context);
+            if (!records) {
+                co_return records.error();
+            }
+            control::ApplicationWebhook webhook;
+            webhook.id = control::new_uuid_v4();
+            webhook.application_id = application->id;
+            webhook.url = input.at("url");
+            webhook.events = events;
+            const std::string secret = control::identity_crypto::random_secret();
+            auto envelope = context.store->encrypt_application_credential(
+                webhook_secret_purpose(webhook.id), secret);
+            if (!envelope) {
+                co_return from_store_error(envelope.error());
+            }
+            webhook.encrypted_secret = std::move(*envelope);
+            auto created = control::settled(
+                co_await control::create_application_webhook(*records, std::move(webhook)));
+            if (!created) {
+                co_return from_records_error(created.error());
+            }
+            json output = control::to_json(*created);
             output["secret"] = secret;
-            return ApiResult::success(std::move(output));
+            co_return ApiResult::success(std::move(output));
         }});
-    registry.add(
-        Capability{.name = "list_application_webhooks",
-                   .title = "List application webhooks",
-                   .description = "List lifecycle webhook registrations without their secrets.",
-                   .input_schema = input_schema(
-                       {{"application_id", {{"type", "string"}}}, {"limit", {{"type", "integer"}}}},
-                       json::array({"application_id"})),
-                   .output_schema = items_schema(),
-                   .kind = CapabilityKind::Read,
-                   .object = "application",
-                   .action = "read",
-                   .resolve_object = application_object,
-                   .authorizes_candidates = true,
-                   .handler = [](const json& input, ApiContext& context) {
-                       if (auto denied = authorize_application_list(input, context)) {
-                           return *denied;
-                       }
-                       return list_result(context.store->list_application_webhooks(
-                           input.at("application_id"), limit_of(input)));
-                   }});
+    registry.add(Capability{
+        .name = "list_application_webhooks",
+        .title = "List application webhooks",
+        .description =
+            "List lifecycle webhook registrations, newest first, without their secrets. They live "
+            "in the workspace Zetta of the application's workspace: `workspace_id` must name that "
+            "workspace.",
+        .input_schema = input_schema({{"application_id", {{"type", "string"}}},
+                                      {"workspace_id", {{"type", "string"}}},
+                                      {"limit", {{"type", "integer"}}}},
+                                     json::array({"application_id", "workspace_id"})),
+        .output_schema = items_schema(),
+        .kind = CapabilityKind::Read,
+        .object = "application",
+        .action = "read",
+        .resolve_object = application_object,
+        .authorizes_candidates = true,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (auto denied = authorize_application_list(input, context)) {
+                co_return *denied;
+            }
+            auto application = application_in_workspace(input, context);
+            if (!application) {
+                co_return application.error();
+            }
+            auto records = application_records(*application, context);
+            if (!records) {
+                co_return records.error();
+            }
+            auto webhooks = control::settled(co_await control::list_application_webhooks(
+                *records, application->id, static_cast<std::size_t>(limit_of(input))));
+            if (!webhooks) {
+                co_return from_records_error(webhooks.error());
+            }
+            json items = json::array();
+            for (const auto& webhook : *webhooks) {
+                items.push_back(control::to_json(webhook));
+            }
+            co_return ApiResult::success({{"items", std::move(items)}});
+        }});
     registry.add(Capability{
         .name = "list_application_webhook_events",
         .title = "List application webhook events",
@@ -1695,17 +1872,22 @@ void register_application_capabilities(Registry& registry) {
             if (!application) {
                 co_return application.error();
             }
-            auto webhook = context.store->get_application_webhook(input.at("webhook_id"));
-            if (!webhook) {
-                co_return from_store_error(webhook.error());
-            }
-            if (webhook->application_id != application->id) {
-                co_return ApiResult::failure("not_found",
-                                             "event or webhook belongs to another application");
-            }
             auto records = application_records(*application, context);
             if (!records) {
                 co_return records.error();
+            }
+            auto found = control::settled(co_await control::get_application_webhook(
+                *records, application->id, input.at("webhook_id")));
+            if (!found) {
+                co_return from_records_error(found.error());
+            }
+            if (!*found) {
+                co_return ApiResult::failure("not_found",
+                                             "event or webhook belongs to another application");
+            }
+            auto webhook = opened_webhook(std::move(**found), context);
+            if (!webhook) {
+                co_return webhook.error();
             }
             auto event = control::settled(co_await control::get_application_webhook_event(
                 *records, application->id, input.at("event_id")));

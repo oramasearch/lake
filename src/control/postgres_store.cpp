@@ -45,6 +45,11 @@ namespace lake::control {
 
 namespace {
 
+// The credential purposes Store::encrypt_application_credential serves.
+bool application_credential_purpose(std::string_view purpose) {
+    return purpose.starts_with("application.jwt.") || purpose.starts_with("application.webhook.");
+}
+
 // Migration 0046's assignment of the retired opportunities rows (db/schema.sql), rerun before each
 // copy. The workspace the scan's task ran in owns its Opportunities; a task that named none falls
 // back to its space's only live workspace; every other row is recorded without a workspace.
@@ -149,6 +154,28 @@ constexpr std::string_view legacy_application_directory_resolution_sql =
     "r.application_id JOIN workspaces w ON w.id = a.workspace_id AND w.desired <> 'deleted' WHERE "
     "s.object_table = r.object_table AND s.object_id = r.object_id AND s.workspace_id IS NULL AND "
     "s.outcome = 'needs_selection'";
+// Migration 0056's assignment of the retired auth_app_signing_keys and auth_app_webhooks rows
+// (db/schema.sql), rerun before each copy: each application's key ring and each webhook belong to
+// the application's workspace, are needs_selection while it has none, and workspace_deleted when
+// that workspace is gone. The resolution statement assigns recorded needs_selection rows once their
+// application has a live workspace.
+constexpr std::string_view legacy_application_credential_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT c.object_table, c.object_id, a.customer_id, CASE WHEN w.desired = 'deleted' "
+    "THEN NULL ELSE a.workspace_id END, CASE WHEN a.workspace_id IS NULL THEN 'needs_selection' "
+    "WHEN w.desired = 'deleted' THEN 'workspace_deleted' ELSE 'application_workspace' END FROM "
+    "(SELECT DISTINCT 'auth_app_signing_keys' AS object_table, application_id AS object_id, "
+    "application_id FROM auth_app_signing_keys UNION ALL SELECT 'auth_app_webhooks', id, "
+    "application_id FROM auth_app_webhooks) c JOIN auth_applications a ON a.id = c.application_id "
+    "LEFT JOIN workspaces w ON w.id = a.workspace_id ON CONFLICT DO NOTHING";
+constexpr std::string_view legacy_application_credential_resolution_sql =
+    "UPDATE workspace_assignments s SET workspace_id = a.workspace_id, outcome = "
+    "'application_workspace' FROM (SELECT DISTINCT 'auth_app_signing_keys' AS object_table, "
+    "application_id AS object_id, application_id FROM auth_app_signing_keys UNION ALL SELECT "
+    "'auth_app_webhooks', id, application_id FROM auth_app_webhooks) c JOIN auth_applications a "
+    "ON a.id = c.application_id JOIN workspaces w ON w.id = a.workspace_id AND w.desired <> "
+    "'deleted' WHERE s.object_table = c.object_table AND s.object_id = c.object_id AND "
+    "s.workspace_id IS NULL AND s.outcome = 'needs_selection'";
 
 // Migration 0054's assignment of the retired forge_records rows (db/schema.sql), rerun before each
 // copy: each row belongs to its repository's workspace, is needs_selection while the repository
@@ -1787,9 +1814,6 @@ constexpr const char* application_columns =
     "id::text, customer_id::text, pool_id, name, allowed_origins::text, redirect_uris::text, "
     "coalesce(custom_sign_in_domain,''), theme::text, created_at::text, updated_at::text, "
     "coalesce(workspace_id::text,'')";
-constexpr const char* application_webhook_columns =
-    "id::text, application_id::text, url, array_to_json(events)::text, encrypted_secret, "
-    "enabled, created_at::text, updated_at::text";
 
 Application application_of(const pqxx::row& row) {
     return Application{
@@ -1804,18 +1828,6 @@ Application application_of(const pqxx::row& row) {
         row[8].as<std::string>(),
         row[9].as<std::string>(),
         row[10].as<std::string>()};
-}
-
-ApplicationWebhook application_webhook_of(const pqxx::row& row, std::string secret) {
-    return ApplicationWebhook{
-        row[0].as<std::string>(),
-        row[1].as<std::string>(),
-        row[2].as<std::string>(),
-        nlohmann::json::parse(row[3].as<std::string>()).get<std::vector<std::string>>(),
-        std::move(secret),
-        row[5].as<bool>(),
-        row[6].as<std::string>(),
-        row[7].as<std::string>()};
 }
 
 void remove_scim_user_access(pqxx::work& tx,
@@ -3372,11 +3384,6 @@ public:
                 return std::unexpected(
                     StoreError{"invalid_input", "application customer policy object is missing"});
             }
-            const std::string purpose = "application.jwt." + input.id;
-            const auto encrypted_seed = encrypt_secret(tx, purpose, input.signing_key.seed);
-            if (!encrypted_seed) {
-                return std::unexpected(encrypted_seed.error());
-            }
             const pqxx::result rows = tx.exec_params(
                 std::string("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
                             "allowed_origins, redirect_uris, custom_sign_in_domain, theme, "
@@ -3393,14 +3400,6 @@ public:
                 input.custom_sign_in_domain,
                 input.theme.dump(),
                 input.workspace_id);
-            tx.exec_params("INSERT INTO auth_app_signing_keys (application_id, kid, version, "
-                           "encrypted_seed, public_key, current) VALUES "
-                           "($1::uuid, $2, $3, $4, $5, true)",
-                           input.id,
-                           input.signing_key.kid,
-                           input.signing_key.version,
-                           *encrypted_seed,
-                           input.signing_key.public_key);
             tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) VALUES "
                            "('application', $1, $2::uuid)",
                            input.id,
@@ -3466,83 +3465,24 @@ public:
         });
     }
 
-    Result<ApplicationSigningKey>
-    rotate_application_signing_key(const ApplicationSigningKey& input) override {
-        return with_tx<ApplicationSigningKey>([&](pqxx::work& tx) -> Result<ApplicationSigningKey> {
-            const std::string purpose = "application.jwt." + input.application_id;
-            const auto encrypted_seed = encrypt_secret(tx, purpose, input.seed);
-            if (!encrypted_seed) {
-                return std::unexpected(encrypted_seed.error());
-            }
-            tx.exec_params("UPDATE auth_app_signing_keys SET current = false, retired_at = "
-                           "now() WHERE application_id = $1::uuid AND current",
-                           input.application_id);
-            const pqxx::result rows = tx.exec_params(
-                "INSERT INTO auth_app_signing_keys (application_id, kid, version, "
-                "encrypted_seed, public_key, current) VALUES ($1::uuid, $2, $3, $4, $5, true) "
-                "RETURNING created_at::text",
-                input.application_id,
-                input.kid,
-                input.version,
-                *encrypted_seed,
-                input.public_key);
-            ApplicationSigningKey output = input;
-            output.current = true;
-            output.created_at = rows[0][0].as<std::string>();
-            return output;
+    Result<std::string> encrypt_application_credential(const std::string& purpose,
+                                                       const std::string& plaintext) override {
+        if (!application_credential_purpose(purpose) || plaintext.empty()) {
+            return std::unexpected(StoreError{"invalid_input", "not an application credential"});
+        }
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            return encrypt_secret(tx, purpose, plaintext);
         });
     }
 
-    Result<ApplicationSigningKey>
-    current_application_signing_key(const std::string& application_id) override {
-        return with_tx<ApplicationSigningKey>([&](pqxx::work& tx) -> Result<ApplicationSigningKey> {
-            const pqxx::result rows =
-                tx.exec_params("SELECT kid, version, encrypted_seed, public_key, created_at::text, "
-                               "coalesce(retired_at::text,'') FROM auth_app_signing_keys WHERE "
-                               "application_id = $1::uuid AND current",
-                               application_id);
-            if (rows.empty()) {
-                return std::unexpected(
-                    StoreError{"not_found", "application has no current signing key"});
-            }
-            const auto seed = decrypt_secret(
-                tx, "application.jwt." + application_id, rows[0][2].as<std::string>());
-            if (!seed) {
-                return std::unexpected(seed.error());
-            }
-            return ApplicationSigningKey{application_id,
-                                         rows[0][0].as<std::string>(),
-                                         *seed,
-                                         rows[0][3].as<std::string>(),
-                                         rows[0][1].as<int>(),
-                                         true,
-                                         rows[0][4].as<std::string>(),
-                                         rows[0][5].as<std::string>()};
+    Result<std::string> decrypt_application_credential(const std::string& purpose,
+                                                       const std::string& envelope) override {
+        if (!application_credential_purpose(purpose)) {
+            return std::unexpected(StoreError{"invalid_input", "not an application credential"});
+        }
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            return decrypt_secret(tx, purpose, envelope);
         });
-    }
-
-    Result<std::vector<ApplicationSigningKey>>
-    list_application_signing_keys(const std::string& application_id) override {
-        return with_tx<std::vector<ApplicationSigningKey>>(
-            [&](pqxx::work& tx) -> Result<std::vector<ApplicationSigningKey>> {
-                const pqxx::result rows =
-                    tx.exec_params("SELECT kid, version, public_key, current, created_at::text, "
-                                   "coalesce(retired_at::text,'') FROM auth_app_signing_keys WHERE "
-                                   "application_id = $1::uuid ORDER BY version",
-                                   application_id);
-                std::vector<ApplicationSigningKey> output;
-                for (const auto& row : rows) {
-                    output.push_back(ApplicationSigningKey{application_id,
-                                                           row[0].as<std::string>(),
-                                                           {},
-                                                           row[2].as<std::string>(),
-                                                           row[1].as<int>(),
-                                                           row[3].as<bool>(),
-                                                           row[4].as<std::string>(),
-                                                           row[5].as<std::string>()});
-                }
-                return output;
-            });
     }
 
     Result<int> revoke_application_user_sessions(const std::string& application_id,
@@ -3676,68 +3616,96 @@ public:
             });
     }
 
-    Result<ApplicationWebhook>
-    create_application_webhook(const NewApplicationWebhook& input) override {
-        return with_tx<ApplicationWebhook>([&](pqxx::work& tx) -> Result<ApplicationWebhook> {
-            const std::string id = new_uuid_v4();
-            const auto encrypted = encrypt_secret(tx, "application.webhook." + id, input.secret);
-            if (!encrypted) {
-                return std::unexpected(encrypted.error());
-            }
-            const pqxx::result rows = tx.exec_params(
-                std::string(
-                    "INSERT INTO auth_app_webhooks (id, application_id, url, events, "
-                    "encrypted_secret) VALUES ($1::uuid, $2::uuid, $3, $4, $5) RETURNING ") +
-                    application_webhook_columns,
-                id,
-                input.application_id,
-                input.url,
-                input.events,
-                *encrypted);
-            return application_webhook_of(rows[0], input.secret);
+    Result<void> assign_legacy_application_credentials() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec(std::string(legacy_application_credential_assignment_sql));
+            tx.exec(std::string(legacy_application_credential_resolution_sql));
+            return {};
         });
     }
 
-    Result<ApplicationWebhook> get_application_webhook(const std::string& id) override {
-        return with_tx<ApplicationWebhook>([&](pqxx::work& tx) -> Result<ApplicationWebhook> {
-            const pqxx::result rows =
-                tx.exec_params(std::string("SELECT ") + application_webhook_columns +
-                                   " FROM auth_app_webhooks WHERE id = $1::uuid",
-                               id);
-            if (rows.empty()) {
-                return std::unexpected(
-                    StoreError{"not_found", "application webhook does not exist"});
-            }
-            const auto secret =
-                decrypt_secret(tx, "application.webhook." + id, rows[0][4].as<std::string>());
-            if (!secret) {
-                return std::unexpected(secret.error());
-            }
-            return application_webhook_of(rows[0], *secret);
-        });
-    }
-
-    Result<std::vector<ApplicationWebhook>>
-    list_application_webhooks(const std::string& application_id, int limit) override {
-        return with_tx<std::vector<ApplicationWebhook>>(
-            [&](pqxx::work& tx) -> Result<std::vector<ApplicationWebhook>> {
+    Result<std::vector<LegacyApplicationSigningKeyRing>>
+    legacy_application_signing_keys(const std::string& after_application_id, int limit) override {
+        return with_tx<std::vector<LegacyApplicationSigningKeyRing>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyApplicationSigningKeyRing>> {
                 const pqxx::result rows = tx.exec_params(
-                    std::string("SELECT ") + application_webhook_columns +
-                        " FROM auth_app_webhooks WHERE application_id = $1::uuid ORDER BY "
-                        "created_at DESC LIMIT $2",
-                    application_id,
-                    limit);
-                std::vector<ApplicationWebhook> output;
-                for (const auto& row : rows) {
-                    const std::string id = row[0].as<std::string>();
-                    const auto secret =
-                        decrypt_secret(tx, "application.webhook." + id, row[4].as<std::string>());
-                    if (!secret) {
-                        return std::unexpected(secret.error());
+                    "SELECT k.application_id::text, k.kid, k.version, k.encrypted_seed, "
+                    "k.public_key, k.current, (extract(epoch FROM k.created_at) * 1000000)::bigint, "
+                    "COALESCE((extract(epoch FROM k.retired_at) * 1000000)::bigint, 0), "
+                    "COALESCE(app.customer_id::text, ''), COALESCE(a.workspace_id::text, ''), "
+                    "COALESCE(a.outcome, 'needs_selection') FROM auth_app_signing_keys k "
+                    "LEFT JOIN auth_applications app ON app.id = k.application_id "
+                    "LEFT JOIN workspace_assignments a ON a.object_table = 'auth_app_signing_keys' "
+                    "AND a.object_id = k.application_id WHERE k.application_id IN (SELECT DISTINCT "
+                    "application_id FROM auth_app_signing_keys WHERE ($1 = '' OR application_id > "
+                    "NULLIF($1, '')::uuid) ORDER BY application_id LIMIT $2) "
+                    "ORDER BY k.application_id, k.version",
+                    after_application_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyApplicationSigningKeyRing> rings;
+                for (const pqxx::row& row : rows) {
+                    const std::string application_id = row[0].as<std::string>();
+                    if (rings.empty() || rings.back().ring.application_id != application_id) {
+                        LegacyApplicationSigningKeyRing legacy;
+                        legacy.ring.application_id = application_id;
+                        legacy.ring.at_us = row[6].as<std::int64_t>();
+                        legacy.customer_id = row[8].as<std::string>();
+                        legacy.workspace_id = row[9].as<std::string>();
+                        legacy.outcome = row[10].as<std::string>();
+                        rings.push_back(std::move(legacy));
                     }
-                    output.push_back(application_webhook_of(row, *secret));
+                    ApplicationSigningKey key;
+                    key.application_id = application_id;
+                    key.kid = row[1].as<std::string>();
+                    key.version = row[2].as<int>();
+                    key.encrypted_seed = row[3].as<std::string>();
+                    key.public_key = row[4].as<std::string>();
+                    key.current = row[5].as<bool>();
+                    key.created_at = record_instant(row[6].as<std::int64_t>());
+                    const auto retired_us = row[7].as<std::int64_t>();
+                    key.retired_at = retired_us == 0 ? std::string() : record_instant(retired_us);
+                    rings.back().ring.keys.push_back(std::move(key));
                 }
-                return output;
+                return rings;
+            });
+    }
+
+    Result<std::vector<LegacyApplicationWebhook>>
+    legacy_application_webhooks(const std::string& after_id, int limit) override {
+        return with_tx<std::vector<LegacyApplicationWebhook>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyApplicationWebhook>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT h.id::text, h.application_id::text, h.url, "
+                    "array_to_json(h.events)::text, h.encrypted_secret, h.enabled, "
+                    "(extract(epoch FROM h.created_at) * 1000000)::bigint, "
+                    "(extract(epoch FROM h.updated_at) * 1000000)::bigint, "
+                    "COALESCE(app.customer_id::text, ''), COALESCE(a.workspace_id::text, ''), "
+                    "COALESCE(a.outcome, 'needs_selection') FROM auth_app_webhooks h "
+                    "LEFT JOIN auth_applications app ON app.id = h.application_id "
+                    "LEFT JOIN workspace_assignments a ON a.object_table = 'auth_app_webhooks' "
+                    "AND a.object_id = h.id WHERE ($1 = '' OR h.id > NULLIF($1, '')::uuid) "
+                    "ORDER BY h.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyApplicationWebhook> webhooks;
+                for (const pqxx::row& row : rows) {
+                    LegacyApplicationWebhook legacy;
+                    legacy.webhook.id = row[0].as<std::string>();
+                    legacy.webhook.application_id = row[1].as<std::string>();
+                    legacy.webhook.url = row[2].as<std::string>();
+                    legacy.webhook.events = nlohmann::json::parse(row[3].as<std::string>())
+                                                .get<std::vector<std::string>>();
+                    legacy.webhook.encrypted_secret = row[4].as<std::string>();
+                    legacy.webhook.enabled = row[5].as<bool>();
+                    legacy.webhook.at_us = row[6].as<std::int64_t>();
+                    legacy.webhook.created_at = record_instant(legacy.webhook.at_us);
+                    legacy.webhook.updated_at = record_instant(row[7].as<std::int64_t>());
+                    legacy.customer_id = row[8].as<std::string>();
+                    legacy.workspace_id = row[9].as<std::string>();
+                    legacy.outcome = row[10].as<std::string>();
+                    webhooks.push_back(std::move(legacy));
+                }
+                return webhooks;
             });
     }
 

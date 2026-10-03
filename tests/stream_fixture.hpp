@@ -10,6 +10,8 @@
 #include <pqxx/pqxx>
 
 #include "lake/control/agent_bus.hpp"
+#include "lake/control/application_credential_records.hpp"
+#include "lake/control/apps.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -254,6 +256,42 @@ inline std::string ready_workspace(control::Store& store, const std::filesystem:
     std::ofstream(directory / (service->slug + ".json"))
         << nlohmann::json{{"kind", "zetta"}, {"token", "token-" + name}}.dump();
     return row->id;
+}
+
+// Writes a first signing key for an application created directly in `store`, as
+// register_application does (lake#352): the seed enveloped by the store, the key ring in the
+// application's workspace Zetta, reached through `workspaces`.
+inline void seed_application_signing_key(control::Store& store,
+                                         const std::shared_ptr<control::WorkspaceService>& workspaces,
+                                         const std::string& customer,
+                                         const std::string& workspace,
+                                         const std::string& application_id,
+                                         std::string_view instance_kek) {
+    auto key = control::apps::generate_signing_key(application_id, 1);
+    if (!key) {
+        throw std::runtime_error(key.error());
+    }
+    auto envelope =
+        store.encrypt_application_credential("application.jwt." + application_id, key->seed);
+    if (!envelope) {
+        throw std::runtime_error(envelope.error().message);
+    }
+    key->encrypted_seed = *envelope;
+    key->seed.clear();
+    auto records = control::WorkspaceRecords::open(
+        [workspaces, customer, workspace](std::string capability, bool read, nlohmann::json input) {
+            return workspaces->call(customer, workspace, std::move(capability), read,
+                                    std::move(input));
+        },
+        workspace, instance_kek);
+    if (!records) {
+        throw std::runtime_error(records.error().message);
+    }
+    auto written = control::settled(liquid::runtime::block_on(control::create_application_signing_keys(
+        *records, {.application_id = application_id, .keys = {*key}})));
+    if (!written) {
+        throw std::runtime_error(written.error().message);
+    }
 }
 
 } // namespace lake::test

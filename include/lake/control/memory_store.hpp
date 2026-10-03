@@ -112,12 +112,10 @@ public:
     get_application_by_domain(const std::string& custom_sign_in_domain) override;
     Result<Application> update_application_theme(const std::string& id,
                                                  const nlohmann::json& theme) override;
-    Result<ApplicationSigningKey>
-    rotate_application_signing_key(const ApplicationSigningKey& value) override;
-    Result<ApplicationSigningKey>
-    current_application_signing_key(const std::string& application_id) override;
-    Result<std::vector<ApplicationSigningKey>>
-    list_application_signing_keys(const std::string& application_id) override;
+    Result<std::string> encrypt_application_credential(const std::string& purpose,
+                                                       const std::string& plaintext) override;
+    Result<std::string> decrypt_application_credential(const std::string& purpose,
+                                                       const std::string& envelope) override;
     Result<int> revoke_application_user_sessions(const std::string& application_id,
                                                  const std::string& user_id) override;
     Result<void> delete_application_user_credentials(const std::string& application_id,
@@ -130,11 +128,15 @@ public:
     // Tests: rows of the retired tables as an earlier lake wrote them (instant and owner kept).
     void seed_legacy_application_user(ApplicationUser user);
     void seed_legacy_application_organization(ApplicationOrganization organization);
-    Result<ApplicationWebhook>
-    create_application_webhook(const NewApplicationWebhook& value) override;
-    Result<ApplicationWebhook> get_application_webhook(const std::string& id) override;
-    Result<std::vector<ApplicationWebhook>>
-    list_application_webhooks(const std::string& application_id, int limit) override;
+    Result<void> assign_legacy_application_credentials() override;
+    Result<std::vector<LegacyApplicationSigningKeyRing>>
+    legacy_application_signing_keys(const std::string& after_application_id, int limit) override;
+    Result<std::vector<LegacyApplicationWebhook>>
+    legacy_application_webhooks(const std::string& after_id, int limit) override;
+    // Tests: rows of the retired tables as an earlier lake wrote them (the key's seed and the
+    // webhook's secret are enveloped here, as that lake did).
+    void seed_legacy_application_signing_key(ApplicationSigningKey key);
+    void seed_legacy_application_webhook(ApplicationWebhook webhook);
     Result<void> assign_legacy_application_webhook_events() override;
     Result<std::vector<LegacyApplicationWebhookEvent>>
     legacy_application_webhook_events(const std::string& after_id, int limit) override;
@@ -534,14 +536,19 @@ private:
     std::vector<PolicyObject> policy_objects_;
     std::vector<Grant> grants_;
     std::vector<Application> applications_;
-    std::vector<ApplicationSigningKey> application_signing_keys_;
+    std::vector<ApplicationSigningKey> application_signing_keys_; // retired rows (0056)
+    // The envelope's data key per credential purpose, as the keystore table holds them.
+    std::map<std::string, std::string> application_credential_keys_;
+    // Retired rows' owners: "auth_app_signing_keys\n<application>" or
+    // "auth_app_webhooks\n<webhook>" -> workspace, outcome (migration 0056).
+    std::map<std::string, std::pair<std::string, std::string>> legacy_application_credential_assignments_;
     // Rows of the retired auth_app_users and auth_app_organizations tables (seeded by tests), and
     // their owners: row id -> workspace, outcome (migration 0055).
     std::vector<ApplicationUser> legacy_application_users_;
     std::vector<ApplicationOrganization> legacy_application_organizations_;
     std::map<std::string, std::pair<std::string, std::string>>
         legacy_application_directory_assignments_;
-    std::vector<ApplicationWebhook> application_webhooks_;
+    std::vector<ApplicationWebhook> application_webhooks_; // retired rows (0056)
     std::vector<ApplicationWebhookEvent> application_webhook_events_;
     std::vector<ApplicationWebhookDelivery> application_webhook_deliveries_;
     // Retired rows' owners: event id -> workspace, outcome (migration 0049).

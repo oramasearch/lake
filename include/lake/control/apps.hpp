@@ -27,6 +27,10 @@ struct Application {
     std::string workspace_id;
 };
 
+// One Ed25519 key of an application. `seed` is the private key in the clear, present only between
+// generating or opening it and signing; what is kept is `encrypted_seed`, the secrets subsystem's
+// envelope (purpose `application.jwt.<application id>`), inside the sealed key ring record of the
+// application's workspace (lake#352).
 struct ApplicationSigningKey {
     std::string application_id;
     std::string kid;
@@ -36,6 +40,19 @@ struct ApplicationSigningKey {
     bool current = false;
     std::string created_at;
     std::string retired_at;
+    std::string encrypted_seed;
+};
+
+// Every signing key of one application, in version order with exactly one current: one record in
+// the workspace Zetta of the application's workspace, so a rotation is one conditional write.
+// `revision` is the engine revision it was read at and `lake_revision` lake's own (1 until the
+// first rotation after the record was written).
+struct ApplicationSigningKeyRing {
+    std::string application_id;
+    std::vector<ApplicationSigningKey> keys;
+    std::int64_t at_us = 0;
+    std::int64_t lake_revision = 1;
+    std::int64_t revision = 0;
 };
 
 struct NewApplication {
@@ -47,7 +64,6 @@ struct NewApplication {
     std::vector<std::string> redirect_uris;
     std::string custom_sign_in_domain;
     nlohmann::json theme = nlohmann::json::object();
-    ApplicationSigningKey signing_key;
     std::string workspace_id; // a live workspace of the customer (migration 0049)
 };
 
@@ -109,6 +125,10 @@ struct NewApplicationOrganization {
     nlohmann::json metadata = nlohmann::json::object();
 };
 
+// A lifecycle webhook of an application, kept in the workspace Zetta of the application's
+// workspace (lake#355). `secret` is the signing secret in the clear, present only between creating
+// or opening it and signing; what is kept is `encrypted_secret`, the secrets subsystem's envelope
+// (purpose `application.webhook.<webhook id>`), inside the sealed record.
 struct ApplicationWebhook {
     std::string id;
     std::string application_id;
@@ -118,13 +138,8 @@ struct ApplicationWebhook {
     bool enabled = true;
     std::string created_at;
     std::string updated_at;
-};
-
-struct NewApplicationWebhook {
-    std::string application_id;
-    std::string url;
-    std::vector<std::string> events;
-    std::string secret;
+    std::string encrypted_secret;
+    std::int64_t at_us = 0; // created_at in microseconds since the Unix epoch
 };
 
 // One lifecycle event of an application. It lives in the workspace Zetta of the application's
@@ -166,6 +181,23 @@ struct LegacyApplicationWebhookEvent {
 };
 struct LegacyApplicationWebhookDelivery {
     ApplicationWebhookDelivery delivery;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
+};
+
+// Rows of the retired auth_app_signing_keys and auth_app_webhooks tables with their recorded owner
+// (migration 0056), for the one-shot copy only. A key ring is every key row of one application;
+// its owner, like each webhook's, is the application's workspace, or empty with the reason it is
+// not (`needs_selection`). Credentials stay the envelopes the table held.
+struct LegacyApplicationSigningKeyRing {
+    ApplicationSigningKeyRing ring;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
+};
+struct LegacyApplicationWebhook {
+    ApplicationWebhook webhook;
     std::string customer_id;
     std::string workspace_id;
     std::string outcome;

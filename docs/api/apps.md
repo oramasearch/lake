@@ -11,7 +11,8 @@ own `lake` pool. A credential from one pool is never considered by another pool.
 The registration records a display name, exact allowed origins, redirect URIs, an optional custom
 sign-in host, a JSON theme, and the **workspace** of the space the application belongs to
 (`workspace_id`, required and never changed). That workspace's Zetta holds the application's
-users and organizations ([Where users and organizations live](#where-users-and-organizations-live-lake353-lake354))
+users and organizations ([Where users and organizations live](#where-users-and-organizations-live-lake353-lake354)),
+its signing keys and webhooks ([Where keys and webhooks live](#where-keys-and-webhooks-live-lake352-lake355)),
 and its lifecycle events and webhook delivery attempts ([Lifecycle webhooks](#lifecycle-webhooks)). Browser requests carrying an `Origin` header must come from the
 hosted page itself or an allowed origin. Redirects use only a registered URI. The custom host is a
 DNS and ingress concern: route that host to lake with a valid certificate, then lake selects the
@@ -28,8 +29,8 @@ denial, and failure.
 | `register_application` | customer `admin` | application, including its new `pool_id` and its `workspace_id` |
 | `list_applications`, `get_application` | customer/application `read` | registrations without key material |
 | `update_application_theme` | application `admin` | updated registration |
-| `rotate_application_signing_key` | application `admin` | new key ID and version |
-| `application_jwks` | public | all retained public verification keys |
+| `rotate_application_signing_key` | application `admin`; `workspace_id` must be the application's | new key ID and version |
+| `application_jwks` | public; by `application_id` alone | all retained public verification keys |
 | `issue_application_jwt` | application `write`; `workspace_id` must be the application's | short-lived user access token |
 | `begin_application_authorization` | application `write` | one-use code, state, and exact registered redirect for the signed-in lake user |
 | `exchange_application_authorization_code` | public client | EdDSA access and ID tokens after exact redirect and PKCE S256 verification |
@@ -37,8 +38,8 @@ denial, and failure.
 | `suspend_application_user`, `delete_application_user` | application `admin`; `workspace_id` must be the application's | suspended profile or deletion confirmation |
 | `list_application_organizations` | application `read`; `workspace_id` must be the application's | application-owned organizations, newest first |
 | `create_application_organization`, `update_application_organization`, `delete_application_organization` | application `admin`; `workspace_id` must be the application's | organization lifecycle result; a TAAP identity or name the application already has is `conflict` |
-| `create_application_webhook` | application `admin` | webhook registration and its secret, returned once |
-| `list_application_webhooks` | application `read` | secret-free registrations |
+| `create_application_webhook` | application `admin`; `workspace_id` must be the application's | webhook registration and its secret, returned once |
+| `list_application_webhooks` | application `read`; `workspace_id` must be the application's | secret-free registrations, newest first |
 | `list_application_webhook_events` | application `read`; `workspace_id` must be the application's | events, newest first, each with its delivery attempts |
 | `retry_application_webhook` | application `admin`; `workspace_id` must be the application's | the last appended attempt |
 
@@ -221,9 +222,51 @@ another workspace or to the lake Zetta.
   deletes its Zetta and its records. The application's events then can no longer be written, so
   its sign-ins fail until the application is registered again in a live workspace.
 
-Signing seeds and webhook secrets are AES-256-GCM protected through application-specific keystore
-purposes before Postgres storage. They never appear in list, application, event, or audit output.
-The webhook registrations and their secrets stay in PostgreSQL until lake#355.
+### Where keys and webhooks live (lake#352, lake#355)
+
+An application's signing keys and its webhooks, with their signing secrets, are records in the
+workspace Zetta of the application's workspace: the sealed collections
+`lake_auth_app_signing_keys` and `lake_auth_app_webhooks`
+([workspace-records.md](../architecture/workspace-records.md)). Lake's PostgreSQL holds no key,
+public key, webhook URL or secret, and nothing falls back to it, to another workspace or to the
+lake Zetta.
+
+- **Credentials stay enveloped.** A signing seed or webhook secret is first protected by the
+  secrets subsystem's envelope: AES-256-GCM under a data key for the purpose
+  `application.jwt.<application id>` or `application.webhook.<webhook id>`, wrapped by
+  `LAKE_INSTANCE_KEK` in the `keystore` table (`Store::encrypt_application_credential`). That
+  envelope is kept only inside the record's sealed body, which the workspace's own record key seals
+  again. The value is opened only to sign a token or a delivery, and never appears in list,
+  application, event, or audit output. The keystore rows are wrapped data keys, not credentials;
+  they move with the keystore (lake#324).
+- **Keys.** One record per application, keyed by the application id, holds every key in version
+  order with exactly one current: the key ring. `register_application` writes it into the chosen
+  workspace with `if_absent` before the application row exists, so no application exists without
+  a key (a registration refused afterwards takes the ring back out).
+  `rotate_application_signing_key` reads the ring, retires the current key and adds the next one in
+  **one write conditional on the revision it read** (`if_revision`). A concurrent rotation makes
+  that write `conflict`; lake rereads and makes the next version, so a rotation is never lost and
+  there is never more than one current key. Retired public keys stay in the JWKS.
+- **The JWKS** is read anonymously by relying parties that know only the application id. Lake reads
+  the application's routing pointer (`auth_applications.workspace_id`) and then one `get_record`
+  of the key ring; it opens no private key. The raw route keeps its five-minute cache header.
+  Sign-up, sign-in and the code exchange find the workspace the same way, since their protocols
+  carry no workspace; `issue_application_jwt` takes the application's `workspace_id`. Every issuer
+  reads the key on its asynchronous path.
+- **Webhooks.** One record per webhook, keyed by its id and written once with `if_absent`. Each
+  lifecycle event lists the application's webhooks in the same workspace (one `list_records`) and
+  opens the secret of each subscribed webhook to sign its delivery. `create_application_webhook`,
+  `list_application_webhooks` and `rotate_application_signing_key` take the application's
+  `workspace_id`; a missing, malformed, unknown, foreign or other workspace of the space is
+  `invalid_input` at `/workspace_id`. The application page passes the application's own.
+- **Not ready, or no workspace.** A workspace that is not ready, or a legacy application with none,
+  answers `workspace_not_ready`: no token is issued, no JWKS is served and no webhook is created.
+- **Deletion.** Deleting the workspace deletes the application's keys and webhooks with its Zetta;
+  its JWKS and sign-ins then fail rather than read anything elsewhere.
+- **Before the copy.** An application registered before this change has its keys and webhooks only
+  in the retired tables until the operator's copy runs, so its sign-ins fail and its JWKS is empty
+  until then (cutover:
+  [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-application-keys-and-webhooks-dev-cluster)).
 
 ## ApplicationAgent and Ship Apps
 
@@ -276,10 +319,18 @@ missing, malformed, unknown and foreign `workspace_id`, least privilege, a works
 ready, and workspace deletion. `WorkspaceRecordStores.TheOneShotCopyMovesApplicationUsersAndOrganizations`
 covers their copy in both stores and `PostgresApplicationUsers.MigrationRecordsEachRowsOwnerForTheCopy`
 migration `0055`.
+`ApplicationAuth.KeysAndWebhooksLiveInTheApplicationsWorkspace` covers keys and webhooks in two
+spaces with two workspaces each: sealed records only at the application's endpoint and none in the
+control store, the anonymous JWKS by application id, tokens verifying with the application's key
+only, missing, malformed, unknown and foreign `workspace_id` for every caller, deliveries signed
+with the opened secret, rotation, least privilege, a workspace that is not ready, and deletion.
+`ApplicationAuth.AConcurrentRotationIsRereadNotLost` races two rotations and a stale write.
 `PostgresApplications` exercises the registry capabilities against migration `0016_auth_apps` and
 the routing trigger of `0049`. `PostgresApplicationWebhooks.MigrationRecordsEachEventsOwnerForTheCopy`
 covers migration `0049`, and `WorkspaceRecordStores.TheOneShotCopyMovesApplicationEventsAndTheirDeliveries`
-the copy in both stores.
+the copy in both stores. `PostgresApplicationCredentials.MigrationRecordsEachRowsOwnerForTheCopy`
+covers migration `0056`, and `WorkspaceRecordStores.TheOneShotCopyMovesApplicationKeysAndWebhooks`
+the key and webhook copy in both stores, including signing with copied keys and secrets.
 `IdentityExit.PostgresProvesIdentityPkiAndDynamicSecrets` starts from a liquid TAAP-key lake
 session, completes the PKCE code exchange as a test relying party, and validates the ID token
 signature and claims against the application's JWKS.

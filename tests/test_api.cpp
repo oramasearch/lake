@@ -2096,8 +2096,6 @@ TEST(ApplicationHttp, HostedAndCustomDomainPagesUseTheApplicationPool) {
         store->create_customer({"individual", owner->id, "", "http-application-owner"});
     ASSERT_TRUE(customer) << customer.error().message;
     const std::string application_id = lake::control::new_uuid_v4();
-    const auto key = lake::control::apps::generate_signing_key(application_id, 1);
-    ASSERT_TRUE(key) << key.error();
     // Sign-ups record the application's events in its workspace Zetta (lake#356).
     const auto zetta = std::make_shared<lake::test::StreamCaller>();
     const auto service_dir =
@@ -2113,7 +2111,6 @@ TEST(ApplicationHttp, HostedAndCustomDomainPagesUseTheApplicationPool) {
                                    .redirect_uris = {"https://product.example.test/callback"},
                                    .custom_sign_in_domain = "login.product.example.test",
                                    .theme = {{"accent_color", "#123456"}},
-                                   .signing_key = *key,
                                    .workspace_id = workspace_id});
     ASSERT_TRUE(application) << application.error().message;
 
@@ -2124,6 +2121,10 @@ TEST(ApplicationHttp, HostedAndCustomDomainPagesUseTheApplicationPool) {
     options.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     options.workspaces = std::make_shared<lake::control::WorkspaceService>(
         lake::control::WorkspaceConfig{service_dir.string(), 0}, store, zetta);
+    // Its signing key lives in its workspace Zetta (lake#352).
+    lake::test::seed_application_signing_key(*store, options.workspaces, customer->id,
+                                              workspace_id, application_id,
+                                              options.instance_kek);
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
 
@@ -2190,7 +2191,7 @@ TEST(ApplicationHttp, HostedAndCustomDomainPagesUseTheApplicationPool) {
     EXPECT_NE(jwks.find(" 200 "), std::string::npos) << jwks;
     const json keys = response_json(jwks);
     ASSERT_EQ(keys.at("keys").size(), 1);
-    EXPECT_EQ(keys.at("keys").at(0).at("kid"), key->kid);
+    EXPECT_EQ(keys.at("keys").at(0).at("kid"), "app-" + application_id + "-1");
     server.stop();
 }
 

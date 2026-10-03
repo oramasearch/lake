@@ -93,3 +93,11 @@ workspace, and `transfer_repository` is no longer part of `Store`.
 `lake_metering_build_records` per-result records, written `if_absent`, plus the legacy row ids
 migration `0053` shares. `store.hpp` replaces the metering store methods with
 `assign_legacy_metering` and the two `legacy_metering_*` reads, which serve only the copy.
+`application_credential_records.hpp` holds the application's credentials in its workspace (lake#352,
+lake#355): the key ring codec (one record per application, every key in version order, one
+current; `rotate_application_signing_keys` writes it with `if_revision` and rereads on a conflict)
+and the webhook codec (one record per webhook, written `if_absent`). `apps.hpp` gives
+`ApplicationSigningKey` its `encrypted_seed` and `ApplicationWebhook` its `encrypted_secret` (the
+secrets envelopes kept inside the seal) and declares `ApplicationSigningKeyRing` and the
+`LegacyApplicationSigningKeyRing`/`LegacyApplicationWebhook` rows the copy reads; `store.hpp`
+declares `encrypt_application_credential`/`decrypt_application_credential`.

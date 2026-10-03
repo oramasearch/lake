@@ -23,6 +23,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/application_user_records.hpp"
+#include "lake/control/application_credential_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/ask_messages.hpp"
@@ -1162,15 +1163,12 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationEventsAndTheirDelive
     const auto application = [&](const std::string& customer, const std::string& workspace,
                                  const std::string& name) {
         const std::string id = lake::control::new_uuid_v4();
-        auto key = lake::control::apps::generate_signing_key(id, 1);
-        EXPECT_TRUE(key);
         auto created = t.store->create_application({.id = id,
                                                     .customer_id = customer,
                                                     .pool_id = "app:" + id,
                                                     .name = name,
                                                     .allowed_origins = {"https://a.example.test"},
                                                     .redirect_uris = {},
-                                                    .signing_key = *key,
                                                     .workspace_id = workspace});
         EXPECT_TRUE(created) << created.error().message;
         return id;
@@ -1358,15 +1356,12 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationUsersAndOrganization
     auto& second = t.spaces[1];
     const auto application = [&](const std::string& customer, const std::string& workspace) {
         const std::string id = lake::control::new_uuid_v4();
-        auto key = lake::control::apps::generate_signing_key(id, 1);
-        EXPECT_TRUE(key);
         auto created = t.store->create_application({.id = id,
                                                     .customer_id = customer,
                                                     .pool_id = "app:" + id,
                                                     .name = "directory",
                                                     .allowed_origins = {"https://a.example.test"},
                                                     .redirect_uris = {},
-                                                    .signing_key = *key,
                                                     .workspace_id = workspace});
         EXPECT_TRUE(created) << created.error().message;
         return id;
@@ -1565,6 +1560,250 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationUsersAndOrganization
     operator_context.operator_credential = false;
     operator_context.acting_identity = first.principal.taap_id;
     EXPECT_EQ(copy("auth_app_users", "plan").error.code, "unauthorized");
+}
+
+// lake#352 and lake#355: the one-shot copy moves each application's signing keys (one key ring)
+// and each webhook into the application's workspace, with the private keys and secrets as the
+// envelopes the tables held. After the copy the keys sign and the secrets sign deliveries.
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationKeysAndWebhooks) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    auto& first = t.spaces[0];
+    auto& second = t.spaces[1];
+    const auto application = [&](const std::string& customer, const std::string& workspace,
+                                 const std::string& name) {
+        const std::string id = lake::control::new_uuid_v4();
+        auto created = t.store->create_application({.id = id,
+                                                    .customer_id = customer,
+                                                    .pool_id = "app:" + id,
+                                                    .name = name,
+                                                    .allowed_origins = {"https://a.example.test"},
+                                                    .redirect_uris = {},
+                                                    .workspace_id = workspace});
+        EXPECT_TRUE(created) << created.error().message;
+        return id;
+    };
+    // The first space's application is in its lab workspace, the second space's in its first; one
+    // more application's workspace is deleted before the copy.
+    const std::string lab_app = application(first.customer_id, first.workspaces[1], "lab app");
+    const std::string their_app = application(second.customer_id, second.workspaces[0], "theirs");
+    const std::string gone_app = application(first.customer_id, first.workspaces[0], "gone");
+    struct Legacy {
+        std::vector<lake::control::ApplicationSigningKey> keys;
+        lake::control::ApplicationWebhook webhook;
+        std::string secret;
+    };
+    std::map<std::string, Legacy> legacy;
+    const auto keys_of = [&](const std::string& application_id, int versions) {
+        Legacy& row = legacy[application_id];
+        for (int version = 1; version <= versions; ++version) {
+            auto key = lake::control::apps::generate_signing_key(application_id, version);
+            EXPECT_TRUE(key);
+            key->current = version == versions;
+            key->created_at = "2026-09-0" + std::to_string(version) + "T10:00:00Z";
+            key->retired_at = key->current ? "" : "2026-09-0" + std::to_string(version + 1) + "T10:00:00Z";
+            row.keys.push_back(*key);
+        }
+        row.secret = "secret-" + application_id;
+        row.webhook = {.id = lake::control::new_uuid_v4(),
+                       .application_id = application_id,
+                       .url = "https://hooks.example.test/" + application_id,
+                       .events = {"organization.created"},
+                       .secret = row.secret,
+                       .enabled = true,
+                       .at_us = 1'790'000'000'000'000};
+    };
+    keys_of(lab_app, 2);
+    keys_of(their_app, 1);
+    keys_of(gone_app, 1);
+    std::string legacy_app; // PostgreSQL only: an application from before migration 0049
+    const auto insert = [&](pqxx::work& tx, const Legacy& row) {
+        for (const auto& key : row.keys) {
+            const auto envelope = t.store->encrypt_application_credential(
+                "application.jwt." + key.application_id, key.seed);
+            ASSERT_TRUE(envelope) << envelope.error().message;
+            tx.exec_params("INSERT INTO auth_app_signing_keys (application_id, kid, version, "
+                           "encrypted_seed, public_key, current, created_at, retired_at) VALUES "
+                           "($1::uuid, $2, $3, $4, $5, $6, $7::timestamptz, "
+                           "NULLIF($8, '')::timestamptz)",
+                           key.application_id, key.kid, key.version, *envelope, key.public_key,
+                           key.current, key.created_at, key.retired_at);
+        }
+        const auto envelope = t.store->encrypt_application_credential(
+            "application.webhook." + row.webhook.id, row.secret);
+        ASSERT_TRUE(envelope) << envelope.error().message;
+        tx.exec_params("INSERT INTO auth_app_webhooks (id, application_id, url, events, "
+                       "encrypted_secret, created_at, updated_at) VALUES ($1::uuid, $2::uuid, $3, "
+                       "$4, $5, to_timestamp($6::double precision / 1000000), "
+                       "to_timestamp($6::double precision / 1000000))",
+                       row.webhook.id, row.webhook.application_id, row.webhook.url,
+                       row.webhook.events, *envelope, row.webhook.at_us);
+    };
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        // An application registered before 0049 in a space with two workspaces has none.
+        legacy_app = lake::control::new_uuid_v4();
+        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
+        tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
+                       "allowed_origins) VALUES ($1::uuid, $2::uuid, $3, 'legacy', "
+                       "'[\"https://legacy.example.test\"]'::jsonb)",
+                       legacy_app, second.customer_id, "app:" + legacy_app);
+        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
+        keys_of(legacy_app, 1);
+        for (const auto& [id, row] : legacy) {
+            insert(tx, row);
+        }
+        tx.commit();
+    } else {
+        auto& memory = static_cast<lake::control::InMemoryStore&>(*t.store);
+        for (const auto& [id, row] : legacy) {
+            for (const auto& key : row.keys) {
+                memory.seed_legacy_application_signing_key(key);
+            }
+            memory.seed_legacy_application_webhook(row.webhook);
+        }
+    }
+    ASSERT_TRUE(t.store->update_workspace(first.workspaces[0], {.desired = "deleted"}));
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    std::string sent_signature, sent_event, sent_payload;
+    operator_context.webhook_sender = [&](const std::string&, const json& headers,
+                                          const std::string& payload) {
+        sent_signature = headers.at("X-Lake-Signature");
+        sent_event = headers.at("X-Lake-Event-Id");
+        sent_payload = payload;
+        return lake::api::WebhookDeliveryResult{.status = 204};
+    };
+    const auto call = [&](const std::string& name, json input) {
+        operator_context.request_id = lake::control::new_uuid_v4();
+        const auto completed =
+            liquid::runtime::block_on(t.registry.call_async(name, input, operator_context));
+        EXPECT_TRUE(completed);
+        return completed ? *completed : lake::api::ApiResult::failure("store_error", "incomplete");
+    };
+    const auto copy = [&](std::string collection, std::string mode) {
+        return call("copy_workspace_records", {{"collection", collection}, {"mode", mode}});
+    };
+    // Rows of the deleted workspace are reported and do not block; the legacy application's do.
+    const std::size_t unresolved = GetParam() ? 2U : 1U;
+    for (const std::string collection : {"auth_app_signing_keys", "auth_app_webhooks"}) {
+        const auto plan = copy(collection, "plan");
+        ASSERT_TRUE(plan.ok) << plan.error.message;
+        EXPECT_EQ(plan.value["rows"], legacy.size()) << collection;
+        EXPECT_EQ(plan.value["unresolved"].size(), unresolved) << collection;
+        const auto before = copy(collection, "verify");
+        EXPECT_EQ(before.value["missing"].size(), 2U) << collection;
+        EXPECT_FALSE(before.value["complete"]);
+        const auto copied = copy(collection, "copy");
+        ASSERT_TRUE(copied.ok) << copied.error.message;
+        EXPECT_EQ(copied.value["copied"], 2) << collection;
+        const auto rerun = copy(collection, "copy");
+        EXPECT_EQ(rerun.value["copied"], 0) << "a rerun copies nothing twice";
+        EXPECT_EQ(rerun.value["already_present"], 2);
+        const auto verified = copy(collection, "verify");
+        EXPECT_EQ(verified.value["verified"], 2) << collection;
+        EXPECT_TRUE(verified.value["missing"].empty());
+        EXPECT_TRUE(verified.value["mismatched"].empty());
+        EXPECT_EQ(verified.value["complete"], !GetParam()) << collection;
+    }
+    // Each ring and webhook is only in its own application's workspace, keyed as lake reads it,
+    // and the envelopes stay sealed.
+    const std::string lab_url = "http://" + first.workspaces[1] + ".test";
+    const std::string their_url = "http://" + second.workspaces[0] + ".test";
+    ASSERT_EQ(t.zetta->records[lab_url].rows("auth_app_signing_keys").size(), 1U);
+    EXPECT_EQ(t.zetta->records[lab_url].rows("auth_app_signing_keys").begin()->first, lab_app);
+    EXPECT_EQ(t.zetta->records[lab_url].rows("auth_app_webhooks").size(), 1U);
+    EXPECT_EQ(t.zetta->records[their_url].rows("auth_app_signing_keys").size(), 1U);
+    EXPECT_EQ(t.zetta->records[their_url].rows("auth_app_webhooks").size(), 1U);
+    EXPECT_TRUE(t.zetta->records["http://" + second.workspaces[1] + ".test"].collections.empty());
+    for (const auto& [key, record] : t.zetta->records[lab_url].rows("auth_app_signing_keys")) {
+        EXPECT_EQ(record.dump().find(legacy[lab_app].keys[0].public_key), std::string::npos);
+    }
+
+    // The JWKS reads both copied keys; the copied current key opens and signs.
+    const auto jwks = call("application_jwks", {{"application_id", lab_app}});
+    ASSERT_TRUE(jwks.ok) << jwks.error.message;
+    ASSERT_EQ(jwks.value["keys"].size(), 2U);
+    EXPECT_EQ(jwks.value["keys"][1]["x"], legacy[lab_app].keys[1].public_key);
+    const auto user = t.store->create_user(
+        {"taap:1:ed25519:copied-key-" + lake::control::new_uuid_v4(), "", "Copied key user"});
+    ASSERT_TRUE(user) << user.error().message;
+    {
+        // The application's user lives in its workspace too (lake#353).
+        auto records = lake::api::workspace_records(operator_context, first.customer_id,
+                                                    first.workspaces[1]);
+        ASSERT_TRUE(records) << records.error().message;
+        lake::control::ApplicationUser member;
+        member.application_id = lab_app;
+        member.user_id = user->id;
+        member.taap_id = user->taap_id;
+        member.display_name = user->display_name;
+        member.status = "active";
+        ASSERT_TRUE(lake::control::settled(liquid::runtime::block_on(
+            lake::control::create_application_user(*records, std::move(member)))));
+    }
+    const auto issued = call("issue_application_jwt", {{"application_id", lab_app},
+                                                       {"workspace_id", first.workspaces[1]},
+                                                       {"user_id", user->id}});
+    ASSERT_TRUE(issued.ok) << issued.error.message;
+    EXPECT_FALSE(issued.value["access_token"].get<std::string>().empty());
+
+    // The copied webhook signs a delivery with the secret the table held.
+    const auto webhooks = call("list_application_webhooks",
+                               {{"application_id", lab_app}, {"workspace_id", first.workspaces[1]}});
+    ASSERT_TRUE(webhooks.ok) << webhooks.error.message;
+    ASSERT_EQ(webhooks.value["items"].size(), 1U);
+    EXPECT_EQ(webhooks.value["items"][0]["id"], legacy[lab_app].webhook.id);
+    ASSERT_TRUE(call("create_application_organization",
+                     {{"application_id", lab_app},
+                      {"workspace_id", first.workspaces[1]},
+                      {"taap_id", "taap:1:ed25519:copied-org-" + lake::control::new_uuid_v4()},
+                      {"name", "copied"}})
+                    .ok);
+    EXPECT_EQ(sent_signature, lake::control::apps::webhook_signature(legacy[lab_app].secret,
+                                                                     sent_event, sent_payload));
+
+    // A rotation after the copy (a later lake revision) is accepted by verify: every copied key is
+    // still there, retired.
+    ASSERT_TRUE(call("rotate_application_signing_key",
+                     {{"application_id", lab_app}, {"workspace_id", first.workspaces[1]}})
+                    .ok);
+    const auto after_rotation = copy("auth_app_signing_keys", "verify");
+    EXPECT_EQ(after_rotation.value["verified"], 2);
+    EXPECT_TRUE(after_rotation.value["mismatched"].empty());
+
+    if (GetParam()) {
+        // Assigning the legacy application its workspace resolves its rows on the next run.
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       legacy_app, second.workspaces[1]);
+        tx.commit();
+        for (const std::string collection : {"auth_app_signing_keys", "auth_app_webhooks"}) {
+            const auto resolved = copy(collection, "copy");
+            EXPECT_EQ(resolved.value["copied"], 1) << collection;
+            EXPECT_EQ(resolved.value["unresolved"].size(), 1U) << "only the deleted workspace's";
+            EXPECT_TRUE(copy(collection, "verify").value["complete"]) << collection;
+        }
+    }
+
+    // A changed copy is reported, never silently accepted: a ring written under another key does
+    // not open there.
+    auto& their_rows = t.zetta->records[their_url].rows("auth_app_webhooks");
+    auto& lab_rows = t.zetta->records[lab_url].rows("auth_app_webhooks");
+    their_rows.begin()->second["value"] = lab_rows.begin()->second["value"];
+    const auto tampered = copy("auth_app_webhooks", "verify");
+    EXPECT_EQ(tampered.value["missing"].size(), 1U) << "a row that no longer opens is missing";
+    EXPECT_FALSE(tampered.value["complete"]);
 }
 
 // lake#348, lake#349: repository transfer and build records live in the workspace Zetta of the

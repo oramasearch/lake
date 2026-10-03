@@ -230,10 +230,10 @@ stored. The migration follows metering migration `0014`.
 | Table | Purpose |
 |---|---|
 | `auth_applications` | Registration, isolated pool, exact origins and redirects, custom host, and theme. |
-| `auth_app_signing_keys` | Per-application Ed25519 public keys and encrypted signing seeds, including rotation state. |
+| `auth_app_signing_keys` | Per-application Ed25519 public keys and encrypted signing seeds, including rotation state. Retired by `0056`: each application's keys live in its workspace Zetta. |
 | `auth_app_users` | Pool membership and active or suspended status for application users. Retired by `0055_application_user_workspaces` (lake#353): users live in the application's workspace Zetta, and this table is read only by the one-shot copy until a later migration drops it. |
 | `auth_app_organizations` | Application-facing organization profiles and metadata. Retired by `0055` (lake#354), with the users. |
-| `auth_app_webhooks` | Event filters, destination, enabled state, and encrypted signing secret. |
+| `auth_app_webhooks` | Event filters, destination, enabled state, and encrypted signing secret. Retired by `0056`: webhooks live in the application's workspace Zetta. |
 | `auth_app_webhook_events` | Immutable lifecycle event payloads. Retired by `0049`: events live in the application's workspace Zetta. |
 | `auth_app_webhook_deliveries` | Every delivery attempt, outcome, signature, and error. Retired by `0049`, with the events. |
 | `auth_app_guard` | Guard table for this migration. |
@@ -667,3 +667,20 @@ resolution no longer joins `auth_app_users`: a session issued in an application'
 against the user's record in the workspace before it is returned, and suspension and deletion
 revoke the pool's sessions. Idempotent; guard `application_user_workspaces_guard`. The operator
 reads neither table, but vendors the schema and selects that guard before the binary is deployed.
+
+## Application credential workspaces migration
+
+`0056_application_credential_workspaces` (lake#352, lake#355) retires `auth_app_signing_keys` and
+`auth_app_webhooks`: an application's signing keys (one key ring record per application) and its
+webhooks live in the workspace Zetta of the application's workspace (`auth_applications.workspace_id`,
+`0049`), with each seed and secret kept as the secrets envelope the table held, inside the sealed
+record. The migration records each key ring's owner (`object_id` is the application) and each
+webhook's in `workspace_assignments`: `application_workspace`, `needs_selection` while the
+application has no workspace (warned, and resolved by the copy once it is assigned), or
+`workspace_deleted` when that workspace is gone (warned; it does not hold the copy back). Lake no
+longer writes or reads either table except through the operator-only `copy_workspace_records`,
+which reapplies the assignment before each run. The `keystore` rows of the `application.jwt.*` and
+`application.webhook.*` purposes stay: they are the wrapped data keys that open the envelopes.
+Nothing is dropped. Idempotent; guard `application_credential_workspaces_guard`. Mechanism and
+cutover:
+[`../architecture/workspace-records.md`](../architecture/workspace-records.md#cutover-runbook-application-keys-and-webhooks-dev-cluster).

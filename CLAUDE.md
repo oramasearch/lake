@@ -53,7 +53,10 @@ migration `0045`); the PostgreSQL table stays until a later migration drops it a
 verified on dev. Drive share links are the first mutable collection (lake#350, migration `0048`): their bearer
 token names its workspace, and only a content-free route for pre-move tokens stays central.
 migration `0045`); application lifecycle events and webhook delivery attempts follow (lake#356,
-lake#357, migration `0049`, in the application's workspace). Each PostgreSQL table stays until a
+lake#357, migration `0049`, in the application's workspace), and its signing keys and webhooks with
+their secrets (lake#352, lake#355, migration `0056`: one key ring per application rotated by one
+conditional write; seeds and secrets stay secrets envelopes inside the seal; the anonymous JWKS
+finds the workspace by the application id). Each PostgreSQL table stays until a
 later migration drops it after the copy is verified on dev.
 Repository usage follows (lake#348, lake#349, migration `0053`): exact hourly transfer counters and
 one build record per result in the repository's workspace Zetta, written from a bounded in-process

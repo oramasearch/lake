@@ -2736,3 +2736,55 @@ CREATE TABLE IF NOT EXISTS application_user_workspaces_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0055_application_user_workspaces')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0056_application_credential_workspaces: an application's signing keys (lake#352) and its
+-- lifecycle webhooks with their signing secrets (lake#355) live in the workspace Zetta of the
+-- application's workspace (auth_applications.workspace_id, 0049; docs/api/apps.md,
+-- docs/architecture/workspace-records.md). Lake no longer writes or reads auth_app_signing_keys
+-- or auth_app_webhooks; the operator's one-shot copy (copy_workspace_records) moves each
+-- application's keys (one key ring record per application) and each webhook into that workspace
+-- and verifies it. The private keys and secrets move as the envelopes these tables hold and stay
+-- inside the sealed records; the copy never opens them.
+--
+-- Each key ring's owner (object_id = the application) and each webhook's owner is recorded in
+-- workspace_assignments: the application's workspace (application_workspace), needs_selection
+-- while the application has none (it is reported, and resolved by the copy once the application
+-- is assigned), or workspace_deleted when that workspace is gone (its records went with it and do
+-- not hold the copy back). Nothing is dropped here; a later migration drops both tables once the
+-- copy has been verified on every environment.
+-- ---------------------------------------------------------------------------------------------
+DO $$
+DECLARE
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations
+                   WHERE version = '0056_application_credential_workspaces') THEN
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT c.object_table, c.object_id, a.customer_id,
+                   CASE WHEN w.desired = 'deleted' THEN NULL ELSE a.workspace_id END,
+                   CASE WHEN a.workspace_id IS NULL THEN 'needs_selection'
+                        WHEN w.desired = 'deleted' THEN 'workspace_deleted'
+                        ELSE 'application_workspace' END
+            FROM (SELECT DISTINCT 'auth_app_signing_keys' AS object_table,
+                         application_id AS object_id, application_id
+                  FROM auth_app_signing_keys
+                  UNION ALL
+                  SELECT 'auth_app_webhooks', id, application_id FROM auth_app_webhooks) c
+                 JOIN auth_applications a ON a.id = c.application_id
+                 LEFT JOIN workspaces w ON w.id = a.workspace_id
+            ON CONFLICT DO NOTHING;
+        FOR unresolved IN SELECT * FROM workspace_assignments WHERE workspace_id IS NULL
+                           AND object_table IN ('auth_app_signing_keys', 'auth_app_webhooks') LOOP
+            RAISE WARNING 'application credential not copied (%): table=%, object=%, customer=%',
+                unresolved.outcome, unresolved.object_table, unresolved.object_id,
+                unresolved.customer_id;
+        END LOOP;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS application_credential_workspaces_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0056_application_credential_workspaces')
+    ON CONFLICT DO NOTHING;

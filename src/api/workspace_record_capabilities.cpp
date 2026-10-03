@@ -4,7 +4,8 @@
 // (opportunities, lake#376; stream_owners, lake#379; drive_share_links, lake#350;
 // auth_app_webhook_events and auth_app_webhook_deliveries, lake#356 and lake#357; metering_usage
 // and metering_build_records, lake#348 and lake#349; forge_records, lake#341; auth_app_users and
-// auth_app_organizations, lake#353 and lake#354). A collection
+// auth_app_organizations, lake#353 and lake#354; auth_app_signing_keys and auth_app_webhooks,
+// lake#352 and lake#355). A collection
 // leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
 // and verified on dev, dropped by migration 0050, lake#483).
 
@@ -18,6 +19,7 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/control/application_user_records.hpp"
+#include "lake/control/application_credential_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/forge_records.hpp"
@@ -32,7 +34,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 10> copy_collections = {"opportunities",
+constexpr std::array<std::string_view, 12> copy_collections = {"opportunities",
                                                                "stream_owners",
                                                                "drive_share_links",
                                                                "auth_app_webhook_events",
@@ -41,7 +43,9 @@ constexpr std::array<std::string_view, 10> copy_collections = {"opportunities",
                                                                "metering_build_records",
                                                                "forge_records",
                                                                "auth_app_users",
-                                                               "auth_app_organizations"};
+                                                               "auth_app_organizations",
+                                                               "auth_app_signing_keys",
+                                                               "auth_app_webhooks"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -442,6 +446,7 @@ liquid::runtime::task<ApiResult> copy_application_rows(ApiContext& context, std:
     std::map<std::string, std::map<std::string, std::vector<const Row*>>> by_workspace;
     for (const Row& row : rows) {
         if (row.workspace_id.empty()) {
+            blocking = blocking || row.outcome != "workspace_deleted";
             unresolved.push_back({{"id", ops.id(row)},
                                   {"customer_id", row.customer_id},
                                   {"outcome", row.outcome}});
@@ -811,6 +816,132 @@ liquid::runtime::task<ApiResult> copy_application_organizations(ApiContext& cont
         context, "auth_app_organizations", mode, *rows, limit, OrganizationCopy{});
 }
 
+// An application's key ring (lake#352): one record per application, keyed by it. The envelope of
+// each private key is copied as the table held it, never opened. A ring a rotation has changed
+// since the copy (a later lake revision) still holds every copied key, retired.
+struct SigningKeyCopy {
+    using Present = std::map<std::string, control::ApplicationSigningKeyRing>;
+    static std::string id(const control::LegacyApplicationSigningKeyRing& row) {
+        return row.ring.application_id;
+    }
+    static std::string application_id(const control::LegacyApplicationSigningKeyRing& row) {
+        return row.ring.application_id;
+    }
+    static liquid::runtime::task<control::ZettaControlResult<Present>>
+    present(control::WorkspaceRecords& records, std::string application_id) {
+        auto ring = control::settled(
+            co_await control::get_application_signing_keys(records, application_id));
+        if (!ring) {
+            co_return control::ZettaControlResult<Present>(std::unexpected(ring.error()));
+        }
+        Present present;
+        if (*ring) {
+            present.emplace(application_id, std::move(**ring));
+        }
+        co_return control::ZettaControlResult<Present>(std::move(present));
+    }
+    static bool same(const control::ApplicationSigningKeyRing& stored,
+                     const control::LegacyApplicationSigningKeyRing& row) {
+        const bool rotated = stored.lake_revision > 1;
+        for (const control::ApplicationSigningKey& source : row.ring.keys) {
+            const auto found = std::ranges::find_if(stored.keys, [&](const auto& key) {
+                return key.version == source.version;
+            });
+            if (found == stored.keys.end() || found->kid != source.kid ||
+                found->public_key != source.public_key ||
+                found->encrypted_seed != source.encrypted_seed) {
+                return false;
+            }
+            if (!rotated && (found->current != source.current ||
+                             found->created_at != source.created_at ||
+                             found->retired_at != source.retired_at)) {
+                return false;
+            }
+        }
+        return rotated || stored.keys.size() == row.ring.keys.size();
+    }
+    static liquid::runtime::task<control::ZettaControlResult<void>>
+    write(control::WorkspaceRecords& records, const control::LegacyApplicationSigningKeyRing& row) {
+        auto created = control::settled(
+            co_await control::create_application_signing_keys(records, row.ring));
+        if (!created) {
+            co_return control::ZettaControlResult<void>(std::unexpected(created.error()));
+        }
+        co_return control::ZettaControlResult<void>();
+    }
+};
+
+// An application's webhook (lake#355), keyed by its id, with its secret's envelope as the table
+// held it.
+struct WebhookCopy {
+    using Present = std::map<std::string, control::ApplicationWebhook>;
+    static std::string id(const control::LegacyApplicationWebhook& row) {
+        return row.webhook.id;
+    }
+    static std::string application_id(const control::LegacyApplicationWebhook& row) {
+        return row.webhook.application_id;
+    }
+    static liquid::runtime::task<control::ZettaControlResult<Present>>
+    present(control::WorkspaceRecords& records, std::string application_id) {
+        auto webhooks = control::settled(
+            co_await control::list_application_webhooks(records, application_id));
+        if (!webhooks) {
+            co_return control::ZettaControlResult<Present>(std::unexpected(webhooks.error()));
+        }
+        Present present;
+        for (auto& webhook : *webhooks) {
+            const std::string key = webhook.id;
+            present.emplace(key, std::move(webhook));
+        }
+        co_return control::ZettaControlResult<Present>(std::move(present));
+    }
+    static bool same(const control::ApplicationWebhook& stored,
+                     const control::LegacyApplicationWebhook& row) {
+        const auto& source = row.webhook;
+        return stored.application_id == source.application_id && stored.url == source.url &&
+               stored.events == source.events && stored.enabled == source.enabled &&
+               stored.encrypted_secret == source.encrypted_secret && stored.at_us == source.at_us;
+    }
+    static liquid::runtime::task<control::ZettaControlResult<void>>
+    write(control::WorkspaceRecords& records, const control::LegacyApplicationWebhook& row) {
+        auto created =
+            control::settled(co_await control::create_application_webhook(records, row.webhook));
+        if (!created) {
+            co_return control::ZettaControlResult<void>(std::unexpected(created.error()));
+        }
+        co_return control::ZettaControlResult<void>();
+    }
+};
+
+liquid::runtime::task<ApiResult> copy_application_signing_keys(ApiContext& context,
+                                                               const std::string& mode,
+                                                               const std::string& after,
+                                                               int limit) {
+    if (auto assigned = context.store->assign_legacy_application_credentials(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_application_signing_keys(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    co_return co_await copy_application_rows(context, "auth_app_signing_keys", mode, *rows, limit,
+                                             SigningKeyCopy{});
+}
+
+liquid::runtime::task<ApiResult> copy_application_webhooks(ApiContext& context,
+                                                           const std::string& mode,
+                                                           const std::string& after, int limit) {
+    if (auto assigned = context.store->assign_legacy_application_credentials(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_application_webhooks(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    co_return co_await copy_application_rows(context, "auth_app_webhooks", mode, *rows, limit,
+                                             WebhookCopy{});
+}
+
 // The rows of one retired metering table grouped by the workspace that owns them. Rows whose
 // workspace was deleted are reported but do not block completion: their records went with it.
 template <class Row>
@@ -1162,6 +1293,12 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "metering_build_records") {
                 co_return co_await copy_metering_build_records(context, mode, after, limit);
+            }
+            if (input.at("collection") == "auth_app_signing_keys") {
+                co_return co_await copy_application_signing_keys(context, mode, after, limit);
+            }
+            if (input.at("collection") == "auth_app_webhooks") {
+                co_return co_await copy_application_webhooks(context, mode, after, limit);
             }
             if (input.at("collection") == "auth_app_webhook_deliveries") {
                 co_return co_await copy_application_webhook_deliveries(context, mode, after,

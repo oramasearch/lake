@@ -7151,16 +7151,20 @@ struct ApiServer::Impl {
                 customer_id = workspace->customer_id;
             }
         }
+        // The first signing key is written into the workspace (lake#352): asynchronously.
+        auto completed = co_await registry.call_async(
+            "register_application",
+            {{"customer_id", customer_id},
+             {"workspace_id", workspace_id},
+             {"name", form_field(body, "name")},
+             {"allowed_origins", form_lines(form_field(body, "allowed_origins"))},
+             {"redirect_uris", form_lines(form_field(body, "redirect_uris"))},
+             {"custom_sign_in_domain", form_field(body, "custom_sign_in_domain")},
+             {"theme", {{"accent_color", form_field(body, "accent_color")}}}},
+            context);
         const ApiResult result =
-            registry.call("register_application",
-                          {{"customer_id", customer_id},
-                           {"workspace_id", workspace_id},
-                           {"name", form_field(body, "name")},
-                           {"allowed_origins", form_lines(form_field(body, "allowed_origins"))},
-                           {"redirect_uris", form_lines(form_field(body, "redirect_uris"))},
-                           {"custom_sign_in_domain", form_field(body, "custom_sign_in_domain")},
-                           {"theme", {{"accent_color", form_field(body, "accent_color")}}}},
-                          context);
+            completed ? std::move(*completed)
+                      : ApiResult::failure("store_error", completed.error().message);
         if (!result.ok) {
             co_return co_await serve_applications_page(route, result.error.message);
         }
@@ -7368,17 +7372,29 @@ struct ApiServer::Impl {
         }
         ApiContext context = context_for(route);
         const std::string application_id = form_field(body, "application_id");
-        const ApiResult result =
-            registry.call("create_application_webhook",
-                          {{"application_id", application_id},
-                           {"url", form_field(body, "url")},
-                           {"events", comma_separated(form_field(body, "events"))}},
-                          context);
-        if (!result.ok) {
-            co_return co_await serve_page_error(route, result);
+        // The webhook is kept in the application's workspace (lake#355), which the form does not
+        // choose: it is the one the application was registered in.
+        const ApiResult application =
+            registry.call("get_application", {{"id", application_id}}, context);
+        if (!application.ok) {
+            co_return co_await serve_page_error(route, application);
+        }
+        auto created = co_await registry.call_async(
+            "create_application_webhook",
+            {{"application_id", application_id},
+             {"workspace_id", application_from_json(application.value).workspace_id},
+             {"url", form_field(body, "url")},
+             {"events", comma_separated(form_field(body, "events"))}},
+            context);
+        if (!created) {
+            co_return co_await serve_page_error(
+                route, ApiResult::failure("store_error", created.error().message));
+        }
+        if (!created->ok) {
+            co_return co_await serve_page_error(route, *created);
         }
         co_return co_await serve_application_events(
-            route, context, application_id, result.value.value("secret", ""));
+            route, context, application_id, created->value.value("secret", ""));
     }
 
     boost::http::route_task serve_application_identity_page(boost::http::route_params& route,
@@ -7530,11 +7546,15 @@ struct ApiServer::Impl {
             result.value.value("authorization_url", "/apps/" + application->id + "/sign-in"));
     }
 
+    // The public keys are read from the application's workspace Zetta (lake#352).
     boost::http::route_task serve_application_jwks(boost::http::route_params& route) {
         ApiContext context = context_for(route);
-        const ApiResult result = registry.call(
+        auto completed = co_await registry.call_async(
             "application_jwks", {{"application_id", route_value(route, "id")}}, context);
-        return send_text(route,
+        const ApiResult result =
+            completed ? std::move(*completed)
+                      : ApiResult::failure("store_error", completed.error().message);
+        co_return co_await send_text(route,
                          boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
                          result.ok ? result.value.dump() : rest_envelope(result).dump(),
                          "application/json; charset=utf-8",

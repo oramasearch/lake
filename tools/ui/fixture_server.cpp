@@ -25,6 +25,7 @@
 #include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/application_user_records.hpp"
+#include "lake/control/application_credential_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/drive_share_links.hpp"
@@ -201,12 +202,6 @@ int main(int argc, char** argv) {
         store,
         std::make_shared<FixtureWorkspaces>());
     const std::string application_id = lake::control::new_uuid_v4();
-    auto application_key = lake::control::apps::generate_signing_key(application_id, 1);
-    if (!application_key) {
-        std::println(
-            stderr, "lake-ui-fixture: create application signing key: {}", application_key.error());
-        return 1;
-    }
     const auto application =
         require(store->create_application(
                     {.id = application_id,
@@ -217,7 +212,6 @@ int main(int argc, char** argv) {
                      .redirect_uris = {"https://console.example.test/callback"},
                      .custom_sign_in_domain = "login.console.example.test",
                      .theme = {{"accent_color", "#0f62fe"}, {"background_color", "#f8f8fa"}},
-                     .signing_key = *application_key,
                      .workspace_id = console_workspace.id}),
                 "create application");
     const auto application_account =
@@ -262,6 +256,24 @@ int main(int argc, char** argv) {
             lake::control::put_new_application_organization(*records, std::move(app_organization)));
         if (!user_written || !*user_written || !organization_written || !*organization_written) {
             std::println(stderr, "lake-ui-fixture: create application user or organization failed");
+            return 1;
+        }
+        // Its signing key lives in the same workspace (lake#352), enveloped by the store.
+        auto application_key = lake::control::apps::generate_signing_key(application.id, 1);
+        if (!application_key) {
+            std::println(stderr, "lake-ui-fixture: create application signing key: {}",
+                         application_key.error());
+            return 1;
+        }
+        application_key->encrypted_seed =
+            require(store->encrypt_application_credential("application.jwt." + application.id,
+                                                          application_key->seed),
+                    "envelope application signing key");
+        application_key->seed.clear();
+        auto ring = liquid::runtime::block_on(lake::control::create_application_signing_keys(
+            *records, {.application_id = application.id, .keys = {*application_key}}));
+        if (!ring || !*ring) {
+            std::println(stderr, "lake-ui-fixture: create application signing key failed");
             return 1;
         }
         lake::control::ApplicationWebhookEvents events(*records);

@@ -13,6 +13,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/web_ui.hpp"
+#include "lake/control/application_credential_records.hpp"
 #include "lake/control/application_user_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
@@ -195,6 +196,7 @@ TEST(ApplicationAuth, RegistrationHostedIdentityJwtWebhooksAndIsolation) {
         };
     const ApiResult webhook = surface.call("create_application_webhook",
                                            {{"application_id", application_id},
+                                            {"workspace_id", surface.workspace_id},
                                             {"url", "https://hooks.example.test/lifecycle"},
                                             {"events", json::array({"session.started"})}});
     ASSERT_TRUE(webhook.ok) << webhook.error.message;
@@ -491,6 +493,7 @@ TEST(ApplicationAuth, AnAttemptIsClaimedOnceAndSentOnce) {
     };
     const ApiResult webhook = surface.call("create_application_webhook",
                                            {{"application_id", application_id},
+                                            {"workspace_id", surface.workspace_id},
                                             {"url", "https://hooks.example.test/lifecycle"},
                                             {"events", json::array({"organization.created"})}});
     ASSERT_TRUE(webhook.ok) << webhook.error.message;
@@ -856,6 +859,308 @@ TEST(ApplicationAuth, UsersAndOrganizationsLiveInTheApplicationsWorkspace) {
     EXPECT_EQ(users(second_id, lab).error.path, "/workspace_id");
     EXPECT_FALSE(sign_in(second, "person@example.test").ok);
     EXPECT_TRUE(users(first_id, home).ok);
+}
+
+// lake#352 and lake#355: an application's signing keys and its webhooks with their secrets live in
+// the workspace Zetta of the application's workspace, sealed, among two spaces with two workspaces
+// each. The JWKS is read anonymously by the application id alone.
+TEST(ApplicationAuth, KeysAndWebhooksLiveInTheApplicationsWorkspace) {
+    ApplicationSurface surface;
+    const std::string home = surface.workspace_id;
+    const std::string lab = surface.workspaces->add(surface.owned, surface.customer_id, "lab");
+    const auto other_owner = surface.store.create_user(
+        {"taap:1:ed25519:credential-other", "credential-other@example.test", "Other"});
+    ASSERT_TRUE(other_owner);
+    const auto other_customer =
+        surface.store.create_customer({"individual", other_owner->id, "", "credential-other"});
+    ASSERT_TRUE(other_customer);
+    const std::string theirs = surface.workspaces->add(surface.owned, other_customer->id, "theirs");
+    const std::string theirs_too =
+        surface.workspaces->add(surface.owned, other_customer->id, "theirs-too");
+    int sends = 0;
+    surface.context.webhook_sender = [&](const std::string&, const json&, const std::string&) {
+        ++sends;
+        return lake::api::WebhookDeliveryResult{.status = 204};
+    };
+
+    const ApiResult first = surface.register_application("Client one", home);
+    const ApiResult second = surface.register_application("Client two", lab);
+    ASSERT_TRUE(first.ok) << first.error.message;
+    ASSERT_TRUE(second.ok) << second.error.message;
+    const auto their_app = surface.call(
+        "register_application",
+        {{"customer_id", other_customer->id},
+         {"workspace_id", theirs_too},
+         {"name", "Their client"},
+         {"allowed_origins", json::array({"https://their.example.test"})},
+         {"redirect_uris", json::array({"https://their.example.test/callback"})}});
+    ASSERT_TRUE(their_app.ok) << their_app.error.message;
+    const std::string first_id = first.value.at("id");
+    const std::string second_id = second.value.at("id");
+
+    // Each key ring is stored only at its own application's workspace endpoint, sealed: neither
+    // the key id nor the public key nor the seed's envelope is readable there, and the control
+    // store keeps no key row.
+    const std::string home_url = "http://workspace.test";
+    const std::string lab_url = "http://lab.test";
+    EXPECT_EQ(surface.records(home_url, "auth_app_signing_keys").size(), 1U);
+    EXPECT_EQ(surface.records(lab_url, "auth_app_signing_keys").size(), 1U);
+    EXPECT_EQ(surface.records("http://theirs-too.test", "auth_app_signing_keys").size(), 1U);
+    EXPECT_TRUE(surface.records("http://theirs.test", "auth_app_signing_keys").empty());
+    EXPECT_EQ(surface.records(home_url, "auth_app_signing_keys").begin()->first, first_id);
+    for (const auto& [key, record] : surface.records(home_url, "auth_app_signing_keys")) {
+        EXPECT_EQ(record.dump().find("app-" + first_id), std::string::npos) << "sealed body";
+        EXPECT_EQ(record.dump().find("encrypted_seed"), std::string::npos) << "sealed body";
+    }
+    EXPECT_TRUE(surface.store.legacy_application_signing_keys("", 5000)->empty());
+
+    // The JWKS is anonymous and needs only the application id; the routing pointer names the
+    // workspace. A sign-in's token verifies with it.
+    const auto jwks = [&](const std::string& application_id) {
+        lake::api::ApiContext anonymous;
+        anonymous.store = &surface.store;
+        anonymous.workspaces = surface.context.workspaces;
+        anonymous.instance_kek = surface.context.instance_kek;
+        anonymous.request_id = lake::control::new_uuid_v4();
+        auto completed = liquid::runtime::block_on(surface.registry.call_async(
+            "application_jwks", {{"application_id", application_id}}, anonymous));
+        EXPECT_TRUE(completed);
+        return completed ? *completed : ApiResult::failure("store_error", "did not complete");
+    };
+    const auto first_keys = jwks(first_id);
+    ASSERT_TRUE(first_keys.ok) << first_keys.error.message;
+    ASSERT_EQ(first_keys.value.at("keys").size(), 1U);
+    EXPECT_EQ(first_keys.value.at("keys").at(0).at("kid"), "app-" + first_id + "-1");
+    const auto signed_up = surface.call("sign_up_password",
+                                        {{"pool_id", first.value.at("pool_id")},
+                                         {"email", "credential-user@example.test"},
+                                         {"password", "correct horse battery staple"},
+                                         {"display_name", "Credential user"},
+                                         {"identity_document", "{}"}});
+    ASSERT_TRUE(signed_up.ok) << signed_up.error.message;
+    EXPECT_TRUE(verifies_with_jwk(signed_up.value.at("access_token"),
+                                  first_keys.value.at("keys").at(0)));
+    EXPECT_FALSE(verifies_with_jwk(signed_up.value.at("access_token"),
+                                   jwks(second_id).value.at("keys").at(0)))
+        << "another application's key";
+    EXPECT_EQ(jwks(lake::control::new_uuid_v4()).error.code, "not_found");
+
+    // Webhooks: created, listed and kept in the application's workspace, the secret returned once
+    // and sealed there. Missing, malformed, unknown and foreign workspace ids are refused at
+    // /workspace_id for every caller of the collection.
+    const auto create_webhook = [&](const std::string& application_id, json workspace) {
+        json input{{"application_id", application_id},
+                   {"url", "https://hooks.example.test/" + application_id},
+                   {"events", json::array({"organization.created"})}};
+        if (!workspace.is_null()) {
+            input["workspace_id"] = workspace;
+        }
+        return surface.call("create_application_webhook", input);
+    };
+    const auto list_webhooks = [&](const std::string& application_id, json workspace) {
+        json input{{"application_id", application_id}};
+        if (!workspace.is_null()) {
+            input["workspace_id"] = workspace;
+        }
+        return surface.call("list_application_webhooks", input);
+    };
+    const auto rotate = [&](const std::string& application_id, json workspace) {
+        json input{{"application_id", application_id}};
+        if (!workspace.is_null()) {
+            input["workspace_id"] = workspace;
+        }
+        return surface.call("rotate_application_signing_key", input);
+    };
+    const ApiResult webhook = create_webhook(first_id, home);
+    ASSERT_TRUE(webhook.ok) << webhook.error.message;
+    const std::string secret = webhook.value.at("secret");
+    ASSERT_TRUE(create_webhook(second_id, lab).ok);
+    EXPECT_EQ(surface.records(home_url, "auth_app_webhooks").size(), 1U);
+    EXPECT_EQ(surface.records(lab_url, "auth_app_webhooks").size(), 1U);
+    for (const auto& [key, record] : surface.records(home_url, "auth_app_webhooks")) {
+        EXPECT_EQ(key, webhook.value.at("id").get<std::string>());
+        EXPECT_EQ(record.dump().find(secret), std::string::npos) << "sealed secret";
+        EXPECT_EQ(record.dump().find("hooks.example.test"), std::string::npos) << "sealed body";
+    }
+    EXPECT_TRUE(surface.store.legacy_application_webhooks("", 5000)->empty());
+    const auto listed = list_webhooks(first_id, home);
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value.at("items").size(), 1U);
+    EXPECT_EQ(listed.value.at("items").at(0).at("id"), webhook.value.at("id"));
+    EXPECT_FALSE(listed.value.at("items").at(0).contains("secret"));
+    for (const json& wrong : {json(lab), json(theirs), json(lake::control::new_uuid_v4()),
+                              json("not-a-workspace"), json(nullptr)}) {
+        for (const auto& refused :
+             {create_webhook(first_id, wrong), list_webhooks(first_id, wrong), rotate(first_id, wrong)}) {
+            EXPECT_EQ(refused.error.code, "invalid_input") << wrong;
+            EXPECT_EQ(refused.error.path, "/workspace_id") << wrong;
+        }
+    }
+    EXPECT_EQ(surface.records(home_url, "auth_app_webhooks").size(), 1U);
+
+    // An event is signed with the secret opened from the workspace.
+    std::string sent_signature, sent_payload, sent_event;
+    surface.context.webhook_sender = [&](const std::string&, const json& headers,
+                                         const std::string& payload) {
+        ++sends;
+        sent_signature = headers.at("X-Lake-Signature");
+        sent_event = headers.at("X-Lake-Event-Id");
+        sent_payload = payload;
+        return lake::api::WebhookDeliveryResult{.status = 204};
+    };
+    ASSERT_TRUE(surface
+                    .call("create_application_organization",
+                          {{"application_id", first_id},
+                           {"workspace_id", home},
+                           {"taap_id", "taap:1:ed25519:credential-org"},
+                           {"name", "credential org"}})
+                    .ok);
+    EXPECT_EQ(sends, 1);
+    EXPECT_EQ(sent_signature,
+              lake::control::apps::webhook_signature(secret, sent_event, sent_payload));
+    // A webhook id of another application is not found through this one.
+    const auto events = surface.call("list_application_webhook_events",
+                                     {{"application_id", first_id}, {"workspace_id", home}});
+    ASSERT_TRUE(events.ok) << events.error.message;
+    const auto second_hooks = list_webhooks(second_id, lab);
+    ASSERT_TRUE(second_hooks.ok);
+    EXPECT_EQ(surface
+                  .call("retry_application_webhook",
+                        {{"application_id", first_id},
+                         {"workspace_id", home},
+                         {"event_id", events.value.at("items").at(0).at("id")},
+                         {"webhook_id", second_hooks.value.at("items").at(0).at("id")}})
+                  .error.code,
+              "not_found");
+
+    // Rotation keeps the old public key, retires it, and signs new tokens with the next key.
+    const auto rotated = rotate(first_id, home);
+    ASSERT_TRUE(rotated.ok) << rotated.error.message;
+    EXPECT_EQ(rotated.value.at("version"), 2);
+    const auto rotated_keys = jwks(first_id);
+    ASSERT_EQ(rotated_keys.value.at("keys").size(), 2U);
+    const auto signed_in = surface.call("sign_in_password",
+                                        {{"pool_id", first.value.at("pool_id")},
+                                         {"email", "credential-user@example.test"},
+                                         {"password", "correct horse battery staple"}});
+    ASSERT_TRUE(signed_in.ok) << signed_in.error.message;
+    EXPECT_TRUE(verifies_with_jwk(signed_in.value.at("access_token"),
+                                  rotated_keys.value.at("keys").at(1)));
+    EXPECT_FALSE(verifies_with_jwk(signed_in.value.at("access_token"),
+                                   rotated_keys.value.at("keys").at(0)));
+    EXPECT_EQ(jwks(second_id).value.at("keys").size(), 1U) << "another application unchanged";
+
+    // Least privilege: a reader of one application lists its webhooks but cannot create one or
+    // rotate its keys, and cannot read another application's.
+    const auto reader = surface.store.create_user(
+        {"taap:1:ed25519:credential-reader", "credential-reader@example.test", "Reader"});
+    ASSERT_TRUE(reader);
+    const auto object = surface.store.find_policy_object("application", first_id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(surface.store.create_grant({reader->taap_id, object->id, "read",
+                                            "credential-reader-attestation", "admin",
+                                            "credential-reader-request"}));
+    surface.context.operator_credential = false;
+    surface.context.acting_identity = reader->taap_id;
+    EXPECT_TRUE(list_webhooks(first_id, home).ok);
+    EXPECT_EQ(list_webhooks(second_id, lab).error.code, "unauthorized");
+    EXPECT_EQ(create_webhook(first_id, home).error.code, "unauthorized");
+    EXPECT_EQ(rotate(first_id, home).error.code, "unauthorized");
+    surface.context.operator_credential = true;
+    surface.context.acting_identity = "admin";
+    EXPECT_EQ(jwks(first_id).value.at("keys").size(), 2U);
+
+    // A workspace that is not ready refuses keys and webhooks instead of falling back.
+    const auto lab_row = surface.store.get_workspace(lab);
+    ASSERT_TRUE(surface.store.set_service_status(lab_row->zetta_service_id, "Provisioning", "",
+                                                 lab_url));
+    EXPECT_EQ(jwks(second_id).error.code, "workspace_not_ready");
+    EXPECT_EQ(rotate(second_id, lab).error.code, "workspace_not_ready");
+    EXPECT_EQ(list_webhooks(second_id, lab).error.code, "workspace_not_ready");
+    EXPECT_EQ(surface
+                  .call("issue_application_jwt",
+                        {{"application_id", second_id}, {"user_id", lake::control::new_uuid_v4()}})
+                  .ok,
+              false);
+    EXPECT_EQ(surface.records(lab_url, "auth_app_signing_keys").size(), 1U);
+    ASSERT_TRUE(surface.store.set_service_status(lab_row->zetta_service_id, "Ready", "", lab_url));
+
+    // Deleting a workspace takes its application's keys and webhooks with it; the other workspace
+    // keeps its own.
+    ASSERT_TRUE(surface.store.update_workspace(lab, {.desired = "deleted"}));
+    EXPECT_FALSE(jwks(second_id).ok);
+    EXPECT_EQ(list_webhooks(second_id, lab).error.path, "/workspace_id");
+    EXPECT_EQ(jwks(first_id).value.at("keys").size(), 2U);
+    EXPECT_EQ(list_webhooks(first_id, home).value.at("items").size(), 1U);
+}
+
+// A rotation is one write conditional on the revision it read: a concurrent rotation is reread and
+// the next version made, so there is always exactly one current key and none is lost.
+TEST(ApplicationAuth, AConcurrentRotationIsRereadNotLost) {
+    ApplicationSurface surface;
+    const ApiResult application = surface.register_application("Client one");
+    ASSERT_TRUE(application.ok) << application.error.message;
+    const std::string id = application.value.at("id");
+    auto records = lake::api::workspace_records(surface.context, surface.customer_id,
+                                                surface.workspace_id);
+    ASSERT_TRUE(records) << records.error().message;
+    const auto make = [&](int version)
+        -> std::expected<lake::control::ApplicationSigningKey, lake::control::ZettaControlError> {
+        auto key = lake::control::apps::generate_signing_key(id, version);
+        key->encrypted_seed = *surface.store.encrypt_application_credential(
+            "application.jwt." + id, key->seed);
+        return *key;
+    };
+    int calls = 0;
+    auto rotated = lake::control::settled(liquid::runtime::block_on(
+        lake::control::rotate_application_signing_keys(*records, id, [&](int version) {
+            if (++calls == 1) {
+                // Another lake process rotates between this read and this write.
+                const auto raced = lake::control::settled(liquid::runtime::block_on(
+                    lake::control::rotate_application_signing_keys(*records, id, make)));
+                EXPECT_TRUE(raced);
+                EXPECT_EQ(raced->version, 2);
+            }
+            return make(version);
+        })));
+    ASSERT_TRUE(rotated) << rotated.error().message;
+    EXPECT_EQ(calls, 2) << "the conflicting write was reread";
+    EXPECT_EQ(rotated->version, 3);
+    const auto ring = lake::control::settled(
+        liquid::runtime::block_on(lake::control::get_application_signing_keys(*records, id)));
+    ASSERT_TRUE(ring && *ring);
+    ASSERT_EQ((*ring)->keys.size(), 3U);
+    EXPECT_EQ(std::ranges::count_if((*ring)->keys, &lake::control::ApplicationSigningKey::current), 1);
+    EXPECT_TRUE((*ring)->keys.back().current);
+    EXPECT_EQ((*ring)->lake_revision, 3);
+
+    // A stale write is refused by the engine: conditional on the revision read, never last-writer.
+    auto stale = **ring;
+    const auto first_write = lake::control::settled(liquid::runtime::block_on(records->put(
+        lake::control::ApplicationSigningKeysCodec::collection, id,
+        lake::control::ApplicationSigningKeysCodec::lookup(stale),
+        lake::control::ApplicationSigningKeysCodec::encode(stale),
+        lake::control::RecordCondition{.if_revision = stale.revision}, stale.lake_revision + 1,
+        stale.at_us)));
+    ASSERT_TRUE(first_write) << first_write.error().message;
+    const auto second_write = lake::control::settled(liquid::runtime::block_on(records->put(
+        lake::control::ApplicationSigningKeysCodec::collection, id,
+        lake::control::ApplicationSigningKeysCodec::lookup(stale),
+        lake::control::ApplicationSigningKeysCodec::encode(stale),
+        lake::control::RecordCondition{.if_revision = stale.revision}, stale.lake_revision + 1,
+        stale.at_us)));
+    ASSERT_FALSE(second_write);
+    EXPECT_EQ(second_write.error().code, "conflict");
+
+    // A ring copied into another application's key does not open as that application's.
+    const auto other = surface.register_application("Client two");
+    ASSERT_TRUE(other.ok);
+    auto& rows = surface.records("http://workspace.test", "auth_app_signing_keys");
+    rows[other.value.at("id")]["value"] = rows[id]["value"];
+    const auto moved = lake::control::settled(liquid::runtime::block_on(
+        lake::control::get_application_signing_keys(*records, other.value.at("id"))));
+    ASSERT_TRUE(moved);
+    EXPECT_FALSE(*moved);
 }
 
 } // namespace

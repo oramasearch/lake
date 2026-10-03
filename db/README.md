@@ -139,3 +139,13 @@ copy once it has one), or `workspace_deleted`. A user row's id is md5(applicatio
 id) as a UUID. Nothing is dropped; `users`, `credentials` and `sessions` stay. The latest guard is
 `application_user_workspaces_guard`; the operator must vendor this schema and update its guard
 before rollout. See [apps.md](../docs/api/apps.md#where-users-and-organizations-live-lake353-lake354).
+Migration `0056_application_credential_workspaces` retires `auth_app_signing_keys` and
+`auth_app_webhooks` (lake#352, lake#355): an application's signing keys (one key ring per
+application) and its webhooks live in the workspace Zetta of the application's workspace, each
+seed and secret kept as the secrets envelope the table held, inside the sealed record. It records
+each key ring's (by application) and webhook's owner in `workspace_assignments` for
+`copy_workspace_records`: `application_workspace`, `needs_selection` while the application has no
+workspace (resolved by the copy once it has one), or `workspace_deleted`. Nothing is dropped. The
+latest guard is `application_credential_workspaces_guard`; the operator must vendor this schema and
+update its guard before rollout. See
+[apps.md](../docs/api/apps.md#where-keys-and-webhooks-live-lake352-lake355).
