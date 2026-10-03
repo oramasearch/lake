@@ -192,6 +192,7 @@ add_library(lake-core STATIC
   src/control/zetta_workspace.cpp
   src/control/workspace_records.cpp
   src/control/ask_messages.cpp
+  src/control/opportunities.cpp
   "${LAKE_LIQUID_SOURCE_DIR}/src/scan/detectors.cpp"
   src/version.cpp
   src/api/web_ui.cpp

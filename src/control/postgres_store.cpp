@@ -56,6 +56,20 @@ constexpr std::string_view legacy_ask_message_assignment_sql =
     "workspaces w2 WHERE w2.customer_id = m.customer_id AND w2.desired <> 'deleted') = 1 WHERE "
     "m.customer_id IS NOT NULL ON CONFLICT DO NOTHING";
 
+// Migration 0046's assignment of the retired opportunities rows (db/schema.sql), rerun before each
+// copy. The workspace the scan's task ran in owns its Opportunities; a task that named none falls
+// back to its space's only live workspace; every other row is recorded without a workspace.
+constexpr std::string_view legacy_opportunity_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'opportunities', o.id, o.customer_id, CASE WHEN t.workspace_id IS NULL "
+    "THEN w.id WHEN tw.id IS NOT NULL THEN tw.id END, CASE WHEN tw.id IS NOT NULL THEN "
+    "'task_workspace' WHEN t.workspace_id IS NOT NULL THEN 'deleted_workspace' WHEN w.id IS NOT "
+    "NULL THEN 'sole_workspace' ELSE 'needs_selection' END FROM opportunities o JOIN agent_tasks "
+    "t ON t.id = o.task_id LEFT JOIN workspaces tw ON tw.id = t.workspace_id AND tw.customer_id "
+    "= o.customer_id AND tw.desired <> 'deleted' LEFT JOIN workspaces w ON w.customer_id = "
+    "o.customer_id AND w.desired <> 'deleted' AND (SELECT count(*) FROM workspaces w2 WHERE "
+    "w2.customer_id = o.customer_id AND w2.desired <> 'deleted') = 1 ON CONFLICT DO NOTHING";
+
 } // namespace
 
 namespace identity_crypto {
@@ -5850,90 +5864,53 @@ public:
         });
     }
 
-    static constexpr const char* opportunity_columns =
-        "id::text, customer_id::text, task_id::text, rank, intent, solution, methodology, why, "
-        "payload::text, status, project, to_char(created_at AT TIME ZONE 'UTC', "
-        "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')";
-
-    static Opportunity opportunity_from(const pqxx::row& row) {
-        Opportunity out;
-        out.id = row[0].as<std::string>();
-        out.customer_id = row[1].as<std::string>();
-        out.task_id = row[2].as<std::string>();
-        out.rank = row[3].as<int>();
-        out.intent = row[4].as<std::string>();
-        out.solution = row[5].as<std::string>();
-        out.methodology = row[6].as<std::string>();
-        out.why = row[7].as<std::string>();
-        out.payload = nlohmann::json::parse(row[8].as<std::string>(), nullptr, false);
-        out.status = row[9].as<std::string>();
-        out.project = row[10].as<std::string>();
-        out.created_at = row[11].as<std::string>();
-        return out;
-    }
-
-    Result<void> record_opportunities(const std::vector<Opportunity>& rows) override {
-        if (rows.empty()) {
-            return {};
-        }
+    Result<void> assign_legacy_opportunities() override {
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
-            // Written once per scan: a second settle of the same task finds its rows.
-            if (!tx.exec_params("SELECT 1 FROM opportunities WHERE task_id = $1::uuid LIMIT 1",
-                                rows.front().task_id)
-                     .empty()) {
-                return {};
-            }
-            for (const Opportunity& row : rows) {
-                tx.exec_params(
-                    "INSERT INTO opportunities (customer_id, task_id, rank, intent, "
-                    "solution, methodology, why, payload, status) VALUES ($1::uuid, "
-                    "$2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9) ON CONFLICT DO NOTHING",
-                    row.customer_id,
-                    row.task_id,
-                    row.rank,
-                    row.intent,
-                    row.solution,
-                    row.methodology,
-                    row.why,
-                    row.payload.dump(),
-                    row.status);
-            }
+            tx.exec(std::string(legacy_opportunity_assignment_sql));
             return {};
         });
     }
 
-    Result<std::vector<Opportunity>> list_opportunities(const std::string& customer_id) override {
-        return with_tx<std::vector<Opportunity>>([&](pqxx::work& tx)
-                                                     -> Result<std::vector<Opportunity>> {
-            const pqxx::result rows = tx.exec_params(
-                std::string("SELECT ") + opportunity_columns +
-                    " FROM opportunities WHERE customer_id = $1::uuid ORDER BY created_at DESC, "
-                    "rank",
-                customer_id);
-            std::vector<Opportunity> out;
-            for (const pqxx::row& row : rows) {
-                out.push_back(opportunity_from(row));
-            }
-            return out;
-        });
-    }
-
-    Result<Opportunity> set_opportunity_status(const std::string& id,
-                                               const std::string& status,
-                                               const std::string& project) override {
-        return with_tx<Opportunity>([&](pqxx::work& tx) -> Result<Opportunity> {
-            const pqxx::result rows = tx.exec_params(
-                std::string("UPDATE opportunities SET status = $2, project = $3, updated_at = "
-                            "now() WHERE id = $1::uuid RETURNING ") +
-                    opportunity_columns,
-                id,
-                status,
-                project);
-            if (rows.empty()) {
-                return std::unexpected(StoreError{"not_found", "no opportunity " + id});
-            }
-            return opportunity_from(rows[0]);
-        });
+    Result<std::vector<LegacyOpportunity>> legacy_opportunities(const std::string& after_id,
+                                                                int limit) override {
+        return with_tx<std::vector<LegacyOpportunity>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyOpportunity>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT o.id::text, o.customer_id::text, o.task_id::text, o.rank, o.intent, "
+                    "o.solution, o.methodology, o.why, o.payload::text, o.status, o.project, "
+                    "(extract(epoch FROM o.created_at) * 1000000)::bigint, "
+                    "COALESCE(a.workspace_id::text, ''), COALESCE(a.outcome, 'needs_selection') "
+                    "FROM opportunities o LEFT JOIN workspace_assignments a "
+                    "ON a.object_table = 'opportunities' AND a.object_id = o.id "
+                    "WHERE ($1 = '' OR o.id > NULLIF($1, '')::uuid) ORDER BY o.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyOpportunity> out;
+                for (const pqxx::row& row : rows) {
+                    LegacyOpportunity legacy;
+                    Opportunity& value = legacy.opportunity;
+                    value.id = row[0].as<std::string>();
+                    value.customer_id = row[1].as<std::string>();
+                    value.task_id = row[2].as<std::string>();
+                    value.rank = row[3].as<int>();
+                    value.intent = row[4].as<std::string>();
+                    value.solution = row[5].as<std::string>();
+                    value.methodology = row[6].as<std::string>();
+                    value.why = row[7].as<std::string>();
+                    value.payload = nlohmann::json::parse(row[8].as<std::string>(), nullptr, false);
+                    if (value.payload.is_discarded()) {
+                        value.payload = nlohmann::json::object();
+                    }
+                    value.status = row[9].as<std::string>();
+                    value.project = row[10].as<std::string>();
+                    value.at_us = row[11].as<std::int64_t>();
+                    value.created_at = record_instant(value.at_us);
+                    legacy.workspace_id = row[12].as<std::string>();
+                    legacy.outcome = row[13].as<std::string>();
+                    out.push_back(std::move(legacy));
+                }
+                return out;
+            });
     }
 
     Result<AgentTask> get_agent_task(const std::string& id) override {

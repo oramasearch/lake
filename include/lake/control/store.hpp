@@ -445,13 +445,18 @@ struct StreamOwner {
     std::string customer_id, workspace_id, topic, created_by;
 };
 
-// One Opportunity Auto-Suggest recommended (or declined, status not_yet), kept across scans.
+// One Opportunity Auto-Suggest recommended (or declined, status not_yet), kept across scans. It
+// lives in the workspace Zetta of the workspace its scan ran in (lake#376,
+// control/opportunities.hpp); the control store only reads the retired opportunities table for
+// the one-shot copy.
 struct Opportunity {
     std::string id, customer_id, task_id;
     int rank = 0;
     std::string intent, solution, methodology, why;
     nlohmann::json payload = nlohmann::json::object();
     std::string status = "new", project, created_at;
+    std::int64_t at_us = 0;        // created_at in microseconds since the Unix epoch
+    std::int64_t lake_revision = 1; // 1 as the scan wrote it, one more for each status change
 };
 
 // One message of an Ask Orama conversation (docs/api/ask-orama.md, lake#236). It lives in the
@@ -467,6 +472,14 @@ struct AskMessage {
 // it is copied into, or empty with the reason it is not (`needs_selection`, `no_customer`).
 struct LegacyAskMessage {
     AskMessage message;
+    std::string workspace_id;
+    std::string outcome;
+};
+// A row of the retired opportunities table with its recorded owner (migration 0046): the
+// workspace it is copied into, or empty with the reason it is not (`needs_selection`,
+// `deleted_workspace`).
+struct LegacyOpportunity {
+    Opportunity opportunity;
     std::string workspace_id;
     std::string outcome;
 };
@@ -1097,13 +1110,12 @@ public:
     virtual Result<void> fail_agent_task(const std::string& id, const std::string& message) = 0;
     virtual Result<void> mark_agent_task_published(const std::string& id) = 0;
     virtual Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) = 0;
-    // Opportunities: a finished scan's rows are written once (a second call for the same task
-    // writes nothing); newest scan first.
-    virtual Result<void> record_opportunities(const std::vector<Opportunity>&) = 0;
-    virtual Result<std::vector<Opportunity>> list_opportunities(const std::string& customer_id) = 0;
-    virtual Result<Opportunity> set_opportunity_status(const std::string& id,
-                                                       const std::string& status,
-                                                       const std::string& project) = 0;
+    // The retired opportunities table (lake#376), for the one-shot copy into workspace Zettas
+    // only. Assigning records each unassigned row's owner in workspace_assignments, as migration
+    // 0046 does, for rows written after it; listing pages by id, oldest id first.
+    virtual Result<void> assign_legacy_opportunities() = 0;
+    virtual Result<std::vector<LegacyOpportunity>> legacy_opportunities(const std::string& after_id,
+                                                                        int limit) = 0;
     // The retired ask_messages table (lake#370), for the one-shot copy into workspace Zettas only.
     // Assigning records each unassigned row's owner in workspace_assignments, as migration 0045
     // does, for rows written after it; listing pages by id, oldest id first.

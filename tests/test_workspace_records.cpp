@@ -1,6 +1,7 @@
 // Lake's records in workspace Zettas (docs/architecture/workspace-records.md, lake#370), with Ask
-// Orama conversations as the first collection: sealing, multi-part bodies, structural isolation
-// between workspaces and spaces, workspace deletion, and the operator's one-shot copy.
+// Orama conversations as the first collection and Design → Opportunities as the first mutable one
+// (lake#376): sealing, structural isolation between workspaces and spaces, conditional writes,
+// workspace deletion, and the operator's one-shot copy.
 
 #include <cstdlib>
 #include <filesystem>
@@ -20,6 +21,7 @@
 #include "lake/audit/audit.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/opportunities.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/workspace_records.hpp"
 #include "lake/control/zetta_control.hpp"
@@ -356,11 +358,49 @@ struct TwoSpaces {
     }
 
     lake::api::ApiResult read(const Space& space, json input) {
+        return call(space, "get_ask_conversation", std::move(input));
+    }
+
+    lake::api::ApiResult call(const Space& space, const std::string& capability, json input) {
         auto context = this->context(space);
-        const auto completed = liquid::runtime::block_on(
-            registry.call_async("get_ask_conversation", input, context));
+        const auto completed =
+            liquid::runtime::block_on(registry.call_async(capability, input, context));
         EXPECT_TRUE(completed);
         return *completed;
+    }
+
+    // A Discover scan Auto-Suggest finished in a workspace: one suggestion and one decline.
+    std::string scan(const Space& space, const std::string& workspace_id, const std::string& intent) {
+        const auto task = store->create_agent_task({.customer_id = space.customer_id,
+                                                    .agent = "agent-autosuggest",
+                                                    .kind = "discover",
+                                                    .workspace_id = workspace_id,
+                                                    .body = {{"message", "scan"}},
+                                                    .scopes = {"list_datasets"},
+                                                    .requested_by_user_id = space.principal.user_id});
+        EXPECT_TRUE(task) << task.error().message;
+        EXPECT_TRUE(store->claim_agent_task(task->id, "agent-autosuggest", "sha"));
+        const json profile{
+            {"suggested", json::array({{{"intent", intent},
+                                        {"solution", "S-1"},
+                                        {"methodology", "gbdt"},
+                                        {"why_this_data_supports_it", "a label exists"}}})},
+            {"declined", json::array({{{"intent", intent + " later"}, {"reason", "no timestamp"}}})}};
+        EXPECT_TRUE(store->record_agent_task_event(
+            task->id, "agent-autosuggest", "Succeeded", "",
+            {{"ok", true}, {"result", {{"project_profile", profile}}}}));
+        return task->id;
+    }
+
+    json opportunities(const Space& space, std::size_t workspace, std::string task = {}) {
+        json input{{"customer_id", space.customer_id},
+                   {"workspace_id", space.workspaces[workspace]}};
+        if (!task.empty()) {
+            input["task_id"] = task;
+        }
+        const auto listed = call(space, "list_opportunities", input);
+        EXPECT_TRUE(listed.ok) << listed.error.message;
+        return listed.value.value("opportunities", json::array());
     }
 };
 
@@ -593,6 +633,337 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesEachOwnedRowOnceAndVerifiesIt) 
         auto context = t.context(first);
         const auto completed = liquid::runtime::block_on(t.registry.call_async(
             "copy_workspace_records", {{"collection", "ask_messages"}, {"mode", "plan"}}, context));
+        return *completed;
+    }();
+    EXPECT_FALSE(refused.ok) << "only the operator copies";
+}
+
+TEST_P(WorkspaceRecordStores, OpportunitiesStayInTheWorkspaceTheirScanRanIn) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const std::string home_scan = t.scan(first, first.workspaces[0], "Predict churn");
+    const std::string lab_scan = t.scan(first, first.workspaces[1], "Group customers");
+    const std::string theirs_scan = t.scan(second, second.workspaces[0], "Forecast demand");
+
+    // Reading a finished scan saves its Opportunities in the scan's own workspace, once.
+    auto home = t.opportunities(first, 0, home_scan);
+    ASSERT_EQ(home.size(), 2U);
+    EXPECT_EQ(home[0]["intent"], "Predict churn");
+    EXPECT_EQ(home[0]["status"], "new");
+    EXPECT_EQ(home[1]["status"], "not_yet");
+    EXPECT_EQ(home[0]["id"], lake::control::opportunity_id(home_scan, 1));
+    EXPECT_EQ(t.opportunities(first, 0, home_scan).size(), 2U) << "a second settle writes nothing";
+    EXPECT_TRUE(t.opportunities(first, 1, home_scan).empty())
+        << "a scan of another workspace is not saved here, even when named";
+    EXPECT_EQ(t.opportunities(first, 1, lab_scan).size(), 2U);
+    EXPECT_EQ(t.opportunities(second, 0, theirs_scan).size(), 2U);
+    EXPECT_TRUE(t.opportunities(second, 1).empty());
+    for (const auto& space : t.spaces) {
+        for (const auto& workspace : space.workspaces) {
+            const auto& rows =
+                t.zetta->records["http://" + workspace + ".test"].rows("opportunities");
+            EXPECT_EQ(rows.size(), workspace == second.workspaces[1] ? 0U : 2U) << workspace;
+            for (const auto& [key, row] : rows) {
+                EXPECT_EQ(row.dump().find("churn"), std::string::npos) << "sealed at rest";
+            }
+        }
+    }
+    // A later scan is listed first.
+    const std::string newer = t.scan(first, first.workspaces[0], "Score leads");
+    home = t.opportunities(first, 0, newer);
+    ASSERT_EQ(home.size(), 4U);
+    EXPECT_EQ(home[0]["intent"], "Score leads");
+    EXPECT_EQ(home[2]["intent"], "Predict churn");
+
+    // Dismissing is a conditional write in the owning workspace only.
+    const std::string id = home[2]["id"];
+    const auto dismiss = [&](const auto& space, std::size_t workspace, const std::string& target) {
+        return t.call(space, "dismiss_opportunity", {{"customer_id", space.customer_id},
+                                                     {"workspace_id", space.workspaces[workspace]},
+                                                     {"opportunity_id", target}});
+    };
+    EXPECT_EQ(dismiss(first, 1, id).error.code, "not_found") << "another workspace of the space";
+    EXPECT_EQ(dismiss(second, 0, id).error.code, "not_found") << "another space";
+    EXPECT_EQ(dismiss(first, 0, "not-an-id").error.code, "not_found");
+    const auto dismissed = dismiss(first, 0, id);
+    ASSERT_TRUE(dismissed.ok) << dismissed.error.message;
+    EXPECT_EQ(dismissed.value["status"], "dismissed");
+    EXPECT_EQ(dismissed.value["intent"], "Predict churn") << "nothing but the status changes";
+    EXPECT_EQ(t.opportunities(first, 0)[2]["status"], "dismissed");
+
+    // Creating a project from another workspace's Opportunity finds none.
+    const auto elsewhere = t.call(first, "create_projects_from_opportunities",
+                                  {{"customer_id", first.customer_id},
+                                   {"workspace_id", first.workspaces[1]},
+                                   {"opportunity_ids", json::array({id})}});
+    EXPECT_EQ(elsewhere.error.code, "not_found");
+
+    // Another space's workspace, or another space's id, is refused.
+    const auto foreign = t.call(second, "list_opportunities", {{"customer_id", second.customer_id},
+                                                               {"workspace_id", first.workspaces[0]}});
+    EXPECT_EQ(foreign.error.code, "invalid_input");
+    EXPECT_EQ(foreign.error.path, "/customer_id");
+    const auto trespass = t.call(second, "list_opportunities", {{"customer_id", first.customer_id},
+                                                                {"workspace_id", first.workspaces[0]}});
+    EXPECT_FALSE(trespass.ok);
+    EXPECT_EQ(trespass.error.code, "unauthorized") << "no read on another space";
+    const auto trespass_write = t.call(second, "dismiss_opportunity",
+                                       {{"customer_id", first.customer_id},
+                                        {"workspace_id", first.workspaces[0]},
+                                        {"opportunity_id", id}});
+    EXPECT_EQ(trespass_write.error.code, "unauthorized") << "no write on another space";
+
+    // Missing, malformed and unknown workspace ids name the field, for reads and writes.
+    for (const std::string capability : {"list_opportunities", "dismiss_opportunity"}) {
+        json input{{"customer_id", first.customer_id}};
+        if (capability == "dismiss_opportunity") {
+            input["opportunity_id"] = id;
+        }
+        const auto missing = t.call(first, capability, input);
+        EXPECT_EQ(missing.error.code, "invalid_input") << capability;
+        EXPECT_EQ(missing.error.path, "/workspace_id") << capability;
+        for (const std::string& bad :
+             std::vector<std::string>{"not-a-workspace", lake::control::new_uuid_v4()}) {
+            input["workspace_id"] = bad;
+            const auto refused = t.call(first, capability, input);
+            EXPECT_EQ(refused.error.code, "invalid_input") << capability << " " << bad;
+            EXPECT_EQ(refused.error.path, "/workspace_id") << capability << " " << bad;
+        }
+    }
+
+    // A workspace that is not ready refuses instead of falling back anywhere.
+    const auto lab_workspace = t.store->get_workspace(first.workspaces[1]);
+    t.status(lab_workspace->zetta_service_id, "Provisioning",
+             "http://" + first.workspaces[1] + ".test");
+    const auto not_ready = t.call(first, "list_opportunities",
+                                  {{"customer_id", first.customer_id},
+                                   {"workspace_id", first.workspaces[1]}});
+    EXPECT_EQ(not_ready.error.code, "workspace_not_ready");
+
+    // Deleting a workspace takes its Opportunities with it; the other workspace keeps its own.
+    ASSERT_TRUE(t.store->update_workspace(first.workspaces[1], {.desired = "deleted"}));
+    const auto deleted = t.call(first, "list_opportunities", {{"customer_id", first.customer_id},
+                                                              {"workspace_id", first.workspaces[1]}});
+    EXPECT_EQ(deleted.error.code, "invalid_input");
+    EXPECT_EQ(deleted.error.path, "/workspace_id");
+    EXPECT_EQ(t.opportunities(first, 0).size(), 4U);
+}
+
+TEST(WorkspaceRecords, AnOpportunityStatusChangeRereadsAfterAConcurrentWrite) {
+    DirectRecords direct;
+    auto records = direct.open();
+    lake::control::Opportunity row{.customer_id = "customer-1",
+                                   .task_id = lake::control::new_uuid_v4(),
+                                   .rank = 1,
+                                   .intent = "Predict churn",
+                                   .status = "new"};
+    const auto written = run(lake::control::record_opportunities(records, {row, [&] {
+        auto declined = row;
+        declined.rank = 2;
+        declined.intent = "Forecast";
+        declined.status = "not_yet";
+        return declined;
+    }()}));
+    ASSERT_TRUE(written) << written.error().message;
+    EXPECT_EQ(*written, 2U);
+    EXPECT_EQ(*run(lake::control::record_opportunities(records, {row})), 0U)
+        << "a scan already saved is not written again";
+    const std::string id = lake::control::opportunity_id(row.task_id, 1);
+    EXPECT_EQ(id, lake::control::opportunity_id(row.task_id, 1)) << "the key is derived";
+    EXPECT_NE(id, lake::control::opportunity_id(row.task_id, 2));
+    EXPECT_EQ(id[14], '8') << "a version 8 UUID";
+
+    // A write that lands between the read and the write is reread, not overwritten blindly.
+    auto& stored = direct.tables->rows("opportunities").at(id);
+    const auto before = stored["revision"].get<std::int64_t>();
+    bool raced = false;
+    auto racing = WorkspaceRecords::open(
+        [&, tables = direct.tables](std::string capability, bool, json input)
+            -> liquid::runtime::task<lake::control::ZettaControlResult<json>> {
+            if (capability == "put_record" && !raced) {
+                raced = true;
+                auto& live = tables->rows("opportunities").at(id);
+                live["revision"] = live["revision"].get<std::int64_t>() + 1000;
+            }
+            co_return tables->run(capability, input);
+        },
+        direct.workspace_id, kek);
+    ASSERT_TRUE(racing);
+    const auto changed = run(lake::control::set_opportunity_status(*racing, "customer-1", id,
+                                                                   "project", "churn-1a2b"));
+    ASSERT_TRUE(changed) << changed.error().message;
+    EXPECT_TRUE(raced);
+    EXPECT_EQ(changed->status, "project");
+    EXPECT_EQ(changed->project, "churn-1a2b");
+    EXPECT_EQ(changed->lake_revision, 2);
+    EXPECT_NE(direct.tables->rows("opportunities").at(id)["revision"].get<std::int64_t>(), before);
+    EXPECT_EQ(run(lake::control::set_opportunity_status(records, "customer-2", id, "dismissed", ""))
+                  .error()
+                  .code,
+              "not_found")
+        << "another space's id never opens it";
+    EXPECT_EQ(run(lake::control::set_opportunity_status(records, "customer-1", id, "gone", ""))
+                  .error()
+                  .code,
+              "invalid_input");
+    const auto listed = run(lake::control::list_opportunities(records, "customer-1"));
+    ASSERT_TRUE(listed);
+    ASSERT_EQ(listed->size(), 2U);
+    EXPECT_EQ(listed->at(0).status, "project");
+    EXPECT_EQ(listed->at(1).status, "not_yet");
+}
+
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesEachOpportunityToItsScansWorkspace) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    auto& first = t.spaces[0];
+    auto& second = t.spaces[1];
+    const auto task = [&](const TwoSpaces::Space& space, const std::string& workspace_id) {
+        const auto made = t.store->create_agent_task({.customer_id = space.customer_id,
+                                                      .agent = "agent-autosuggest",
+                                                      .kind = "discover",
+                                                      .workspace_id = workspace_id,
+                                                      .scopes = {"list_datasets"}});
+        EXPECT_TRUE(made) << made.error().message;
+        return made->id;
+    };
+    const std::string home_scan = task(first, first.workspaces[0]);
+    const std::string lab_scan = task(first, first.workspaces[1]);
+    // The second space has two workspaces; its scan's own workspace still owns its rows.
+    const std::string theirs_scan = task(second, second.workspaces[1]);
+    // The first space's lab is deleted: its scan's rows went with it and are only reported.
+    ASSERT_TRUE(t.store->update_workspace(first.workspaces[1], {.desired = "deleted"}));
+    const auto legacy_row = [](std::string customer, std::string scan, int rank, std::string status,
+                               std::int64_t at_us) {
+        lake::control::Opportunity row;
+        row.id = lake::control::new_uuid_v4();
+        row.customer_id = std::move(customer);
+        row.task_id = std::move(scan);
+        row.rank = rank;
+        row.intent = "intent " + std::to_string(rank);
+        row.solution = "S-" + std::to_string(rank);
+        row.methodology = "gbdt";
+        row.why = "a label exists";
+        row.payload = {{"intent", row.intent}, {"required_first", {"entity resolution"}}};
+        row.status = std::move(status);
+        row.project = row.status == "project" ? "churn-1a2b" : "";
+        row.at_us = at_us;
+        return row;
+    };
+    std::vector<lake::control::Opportunity> legacy = {
+        legacy_row(first.customer_id, home_scan, 1, "project", 1'790'000'000'000'001),
+        legacy_row(first.customer_id, home_scan, 2, "not_yet", 1'790'000'000'000'001),
+        legacy_row(first.customer_id, lab_scan, 1, "new", 1'790'000'000'000'002),
+        legacy_row(second.customer_id, theirs_scan, 1, "dismissed", 1'790'000'000'000'003)};
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        for (const auto& row : legacy) {
+            tx.exec_params("INSERT INTO opportunities (id, customer_id, task_id, rank, intent, "
+                           "solution, methodology, why, payload, status, project, created_at) "
+                           "VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9::jsonb, "
+                           "$10, $11, to_timestamp($12::double precision / 1000000))",
+                           row.id, row.customer_id, row.task_id, row.rank, row.intent,
+                           row.solution, row.methodology, row.why, row.payload.dump(), row.status,
+                           row.project, row.at_us);
+        }
+        tx.commit();
+    } else {
+        for (const auto& row : legacy) {
+            static_cast<lake::control::InMemoryStore&>(*t.store).seed_legacy_opportunity(row);
+        }
+    }
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    operator_context.request_id = lake::control::new_uuid_v4();
+    const auto copy = [&](std::string mode) {
+        const auto completed = liquid::runtime::block_on(t.registry.call_async(
+            "copy_workspace_records", {{"collection", "opportunities"}, {"mode", mode}},
+            operator_context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+
+    const auto plan = copy("plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["rows"], 4);
+    EXPECT_EQ(plan.value["assigned"], 3);
+    ASSERT_EQ(plan.value["unresolved"].size(), 1U);
+    EXPECT_EQ(plan.value["unresolved"][0]["id"], legacy[2].id);
+    EXPECT_EQ(plan.value["unresolved"][0]["outcome"], "deleted_workspace");
+    const std::string home_url = "http://" + first.workspaces[0] + ".test";
+    const std::string theirs_url = "http://" + second.workspaces[1] + ".test";
+    EXPECT_TRUE(t.zetta->records[home_url].collections.empty()) << "a plan writes nothing";
+
+    const auto before = copy("verify");
+    ASSERT_TRUE(before.ok);
+    EXPECT_EQ(before.value["missing"].size(), 3U);
+    EXPECT_FALSE(before.value["complete"]);
+
+    const auto copied = copy("copy");
+    ASSERT_TRUE(copied.ok) << copied.error.message;
+    EXPECT_EQ(copied.value["copied"], 3);
+    EXPECT_EQ(t.zetta->records[home_url].rows("opportunities").size(), 2U);
+    EXPECT_EQ(t.zetta->records[theirs_url].rows("opportunities").size(), 1U);
+    EXPECT_TRUE(t.zetta->records["http://" + second.workspaces[0] + ".test"]
+                    .rows("opportunities")
+                    .empty())
+        << "the space's other workspace gets none of the scan's rows";
+    const auto rerun = copy("copy");
+    EXPECT_EQ(rerun.value["copied"], 0) << "a rerun copies nothing twice";
+    EXPECT_EQ(rerun.value["already_present"], 3);
+
+    const auto verified = copy("verify");
+    ASSERT_TRUE(verified.ok);
+    EXPECT_EQ(verified.value["verified"], 3);
+    EXPECT_TRUE(verified.value["missing"].empty());
+    EXPECT_TRUE(verified.value["mismatched"].empty());
+    EXPECT_FALSE(verified.value["complete"]) << "the deleted workspace's row is still reported";
+
+    // The person reads the copies back in the owning workspace, keyed by scan and rank, with
+    // their decisions; a settle of the same scan afterwards writes nothing.
+    auto home = t.opportunities(first, 0);
+    ASSERT_EQ(home.size(), 2U);
+    EXPECT_EQ(home[0]["id"], lake::control::opportunity_id(home_scan, 1));
+    EXPECT_EQ(home[0]["status"], "project");
+    EXPECT_EQ(home[0]["project"], "churn-1a2b");
+    EXPECT_EQ(home[0]["detail"]["required_first"][0], "entity resolution");
+    EXPECT_EQ(home[1]["status"], "not_yet");
+    auto theirs = t.opportunities(second, 1);
+    ASSERT_EQ(theirs.size(), 1U);
+    EXPECT_EQ(theirs[0]["status"], "dismissed");
+
+    // A status the person changes after the copy is theirs, not a difference; a changed scan row
+    // is reported.
+    const auto dismissed = t.call(first, "dismiss_opportunity",
+                                  {{"customer_id", first.customer_id},
+                                   {"workspace_id", first.workspaces[0]},
+                                   {"opportunity_id", home[1]["id"]}});
+    ASSERT_TRUE(dismissed.ok) << dismissed.error.message;
+    EXPECT_TRUE(copy("verify").value["mismatched"].empty());
+    auto& copied_rows = t.zetta->records[home_url].rows("opportunities");
+    copied_rows.at(lake::control::opportunity_id(home_scan, 2))["value"] =
+        copied_rows.at(lake::control::opportunity_id(home_scan, 1))["value"];
+    EXPECT_EQ(copy("verify").value["missing"].size(), 1U) << "a row that no longer opens is missing";
+
+    const auto refused = [&] {
+        auto context = t.context(first);
+        const auto completed = liquid::runtime::block_on(t.registry.call_async(
+            "copy_workspace_records", {{"collection", "opportunities"}, {"mode", "plan"}},
+            context));
         return *completed;
     }();
     EXPECT_FALSE(refused.ok) << "only the operator copies";

@@ -100,10 +100,10 @@ workspace work without an explicit review of this table and the test map.
 | Route | Calls | Rounds |
 |---|---:|---:|
 | `/w/:workspace_id/ask` | 0 | 0 |
-| `/w/:workspace_id/design/discover` | 1 | 1 |
+| `/w/:workspace_id/design/discover` | 2 | 1 |
 | `/w/:workspace_id/design/methodologies` | 1 | 1 |
 | `/w/:workspace_id/design/methodology` | 2 | 1 |
-| `/w/:workspace_id/design/opportunities` | 1 | 1 |
+| `/w/:workspace_id/design/opportunities` | 2 | 1 |
 | `/w/:workspace_id/design/pipeline` | 3 | 1 |
 | `/w/:workspace_id/design/project` | 9 | 2 |
 | `/w/:workspace_id/design/projects` | 1 | 1 |
@@ -130,6 +130,10 @@ Train → Runs, a run page and Ship → Models each add a concurrent `list_studi
 trial runs and models are named by their study (lake#449). A study page with trials reads up to
 eight trials' `get_run_metrics` in a second round, after the study names them; the fixture's study
 has none, so its budget stays at one round.
+
+Design → Opportunities (and `/design/discover`, the same page) reads its saved Opportunities from
+the workspace's records (`list_records`, lake#376) concurrently with `list_methodologies`; both
+capabilities are fixed for it.
 
 Five pages also have their exact Zetta capabilities fixed, one entry per call: Ask Orama and
 Agents none, Search Indexes `list_indexes`, Models `list_models` and `list_studies` (lake#449),

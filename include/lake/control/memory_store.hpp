@@ -316,11 +316,11 @@ public:
     Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) override;
     // Moves a task's clocks back, so tests reach a deadline without waiting for it.
     void age_agent_task(const std::string& id, std::chrono::seconds by);
-    Result<void> record_opportunities(const std::vector<Opportunity>&) override;
-    Result<std::vector<Opportunity>> list_opportunities(const std::string& customer_id) override;
-    Result<Opportunity> set_opportunity_status(const std::string& id,
-                                               const std::string& status,
-                                               const std::string& project) override;
+    Result<void> assign_legacy_opportunities() override;
+    Result<std::vector<LegacyOpportunity>> legacy_opportunities(const std::string& after_id,
+                                                                int limit) override;
+    // A row of the retired opportunities table, as an earlier lake wrote it (tests of the copy).
+    void seed_legacy_opportunity(Opportunity opportunity);
     // Sets a task's status directly; tests and local demos call it.
     Result<void> set_agent_task_status(const std::string& id,
                                        std::string phase,
@@ -591,7 +591,8 @@ private:
         std::chrono::steady_clock::time_point created, published, started, lease_until;
     };
     std::map<std::string, TaskClock> agent_task_clocks_;
-    std::vector<Opportunity> opportunities_;
+    std::vector<Opportunity> legacy_opportunities_;
+    std::map<std::string, std::pair<std::string, std::string>> legacy_opportunity_assignments_; // workspace, outcome
     std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;
     std::map<std::string, std::vector<PkiRecoveryShareEvidence>> pki_recovery_evidence_;
     struct CustomerKekRecord {

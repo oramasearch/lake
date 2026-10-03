@@ -26,6 +26,7 @@
 #include "workspace_bus.hpp"
 #include "workspace_records_api.hpp"
 #include "lake/control/ask_messages.hpp"
+#include "lake/control/opportunities.hpp"
 
 namespace lake::api {
 
@@ -2269,12 +2270,13 @@ liquid::runtime::task<void> report_on_asking_turn(ApiContext& context,
     co_return {};
 }
 
-// A finished Discover scan's Opportunities become rows, once (lake#269): what Auto-Suggest
-// suggested (new) and what it declined (not_yet), in its order.
-void settle_discover(ApiContext& context, const control::AgentTask& task) {
-    if (task.kind != "discover" || task.phase != "Succeeded" || !context.store ||
-        !task.result.is_object()) {
-        return;
+// A finished Discover scan's Opportunities become records, once (lake#269), in the workspace Zetta
+// of the workspace the scan ran in (lake#376): what Auto-Suggest suggested (new) and what it
+// declined (not_yet), in its order. A task that names no workspace has nowhere to keep them.
+liquid::runtime::task<ApiResult> settle_discover(ApiContext& context, control::AgentTask task) {
+    if (task.kind != "discover" || task.phase != "Succeeded" || !task.result.is_object() ||
+        task.workspace_id.empty()) {
+        co_return ApiResult::success(json::object());
     }
     const json profile = task.result.value("result", json::object())
                              .value("project_profile", json::object());
@@ -2300,7 +2302,23 @@ void settle_discover(ApiContext& context, const control::AgentTask& task) {
                         .payload = item,
                         .status = "not_yet"});
     }
-    context.store->record_opportunities(rows);
+    // An item without an intent is not an Opportunity anyone can act on.
+    std::erase_if(rows, [](const control::Opportunity& row) { return row.intent.empty(); });
+    if (rows.empty()) {
+        co_return ApiResult::success(json::object());
+    }
+    auto records = workspace_records(context, task.customer_id, task.workspace_id);
+    if (!records) {
+        co_return ApiResult::failure(records.error().code, records.error().message,
+                                     records.error().path);
+    }
+    auto written =
+        control::settled(co_await control::record_opportunities(*records, std::move(rows)));
+    if (!written) {
+        co_return ApiResult::failure(written.error().code, written.error().message,
+                                     written.error().path);
+    }
+    co_return ApiResult::success({{"written", *written}});
 }
 
 json opportunity_json(const control::Opportunity& row) {
@@ -3282,23 +3300,33 @@ void register_agent_flow_capabilities(Registry& registry) {
             // Saved Opportunities by id (Design → Opportunities), or Opportunities as given.
             json items = input.value("opportunities", json::array());
             std::vector<std::string> ids;
+            std::optional<control::WorkspaceRecords> records;
             if (const json chosen = input.value("opportunity_ids", json::array());
                 !chosen.empty() && context.store) {
-                auto saved = context.store->list_opportunities(customer_id);
+                // Saved Opportunities live in this workspace's Zetta (lake#376).
+                auto opened = workspace_records(context, customer_id, input.at("workspace_id"));
+                if (!opened) {
+                    co_return ApiResult::failure(opened.error().code, opened.error().message,
+                                                 opened.error().path);
+                }
+                records.emplace(std::move(*opened));
                 for (const json& id : chosen) {
-                    const auto row = saved ? std::ranges::find(*saved, id.get<std::string>(),
-                                                               &control::Opportunity::id)
-                                           : std::vector<control::Opportunity>::iterator{};
-                    if (!saved || row == saved->end()) {
-                        co_return ApiResult::failure("not_found", "no such Opportunity " +
-                                                                      id.get<std::string>());
+                    const std::string wanted = id.get<std::string>();
+                    auto row = control::settled(
+                        co_await control::get_opportunity(*records, customer_id, wanted));
+                    if (!row) {
+                        co_return ApiResult::failure(row.error().code, row.error().message,
+                                                     row.error().path);
                     }
-                    json item = row->payload.is_object() ? row->payload : json::object();
-                    item["intent"] = row->intent;
-                    if (!row->solution.empty()) item["solution"] = row->solution;
-                    if (!row->methodology.empty()) item["methodology"] = row->methodology;
+                    if (!*row) {
+                        co_return ApiResult::failure("not_found", "no such Opportunity " + wanted);
+                    }
+                    json item = (*row)->payload.is_object() ? (*row)->payload : json::object();
+                    item["intent"] = (*row)->intent;
+                    if (!(*row)->solution.empty()) item["solution"] = (*row)->solution;
+                    if (!(*row)->methodology.empty()) item["methodology"] = (*row)->methodology;
                     items.push_back(std::move(item));
-                    ids.push_back(row->id);
+                    ids.push_back((*row)->id);
                 }
             }
             if (items.empty()) {
@@ -3366,8 +3394,9 @@ void register_agent_flow_capabilities(Registry& registry) {
                         co_return compiled;
                     }
                 }
-                if (position < ids.size()) {
-                    context.store->set_opportunity_status(ids[position], "project", name);
+                if (position < ids.size() && records) {
+                    static_cast<void>(control::settled(co_await control::set_opportunity_status(
+                        *records, customer_id, ids[position], "project", name)));
                 }
                 ++position;
                 // The Project Agent designs its pipeline in the background; the project page
@@ -3773,7 +3802,9 @@ void register_agent_run_capabilities(Registry& registry) {
                  context.acting_identity != "admin")) {
                 co_return ApiResult::failure("not_found", "no such task in this space");
             }
-            settle_discover(context, *task);
+            // The scan's Opportunities are kept the first time it is read finished; a workspace
+            // that cannot take them now is retried on the next read.
+            static_cast<void>(called(co_await settle_discover(context, *task)));
             json out = task_json(*task);
             // A project's pipeline design is applied once it is done, wherever it is read.
             if (const ApiResult built = called(co_await settle_build(context, *task)); !built.ok) {
@@ -3784,11 +3815,13 @@ void register_agent_run_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_opportunities",
         .title = "List Opportunities",
-        .description = "What Auto-Suggest recommended for the space's data, kept across scans, "
-                       "newest scan first: each Opportunity's intent, catalogue solution, "
-                       "methodology, why the data supports it, and its status (new, project, "
-                       "dismissed, or not_yet when Auto-Suggest declined it). `task_id` settles a "
-                       "scan that just finished.",
+        .description = "What Auto-Suggest recommended for the space's data in this workspace, kept "
+                       "across scans, newest scan first: each Opportunity's intent, catalogue "
+                       "solution, methodology, why the data supports it, and its status (new, "
+                       "project, dismissed, or not_yet when Auto-Suggest declined it). "
+                       "Opportunities live in the workspace Zetta of the workspace their scan ran "
+                       "in; another workspace of the space never lists them. `task_id` settles a "
+                       "scan of this workspace that just finished.",
         .input_schema = customer_agent_schema({{"task_id", {{"type", "string"}}}}, json::array()),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -3796,34 +3829,57 @@ void register_agent_run_capabilities(Registry& registry) {
         .action = "read",
         .resolve_object = customer_object,
         .authorizes_candidates = true,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return unavailable();
+                co_return unavailable();
             }
             if (auto refused = authorize_customer_read(input, context)) {
-                return *refused;
+                co_return *refused;
             }
             const std::string customer_id = input.at("customer_id");
-            if (const std::string id = input.value("task_id", std::string()); !id.empty()) {
-                if (auto task = context.store->get_agent_task(id);
-                    task && task->customer_id == customer_id) {
-                    settle_discover(context, *task);
-                }
+            const std::string workspace_id = input.at("workspace_id");
+            auto records = workspace_records(context, customer_id, workspace_id);
+            if (!records) {
+                co_return ApiResult::failure(records.error().code, records.error().message,
+                                             records.error().path);
             }
-            auto rows = context.store->list_opportunities(customer_id);
+            auto rows =
+                control::settled(co_await control::list_opportunities(*records, customer_id));
             if (!rows) {
-                return ApiResult::failure(rows.error().code, rows.error().message);
+                co_return ApiResult::failure(rows.error().code, rows.error().message,
+                                             rows.error().path);
+            }
+            // A scan of this workspace that finished and is not saved yet is saved now, once.
+            if (const std::string id = input.value("task_id", std::string());
+                !id.empty() && std::ranges::none_of(*rows, [&](const control::Opportunity& row) {
+                    return row.task_id == id;
+                })) {
+                if (auto task = context.store->get_agent_task(id);
+                    task && task->customer_id == customer_id &&
+                    task->workspace_id == workspace_id) {
+                    const ApiResult settled = called(co_await settle_discover(context, *task));
+                    if (settled.ok && settled.value.value("written", 0) > 0) {
+                        rows = control::settled(
+                            co_await control::list_opportunities(*records, customer_id));
+                        if (!rows) {
+                            co_return ApiResult::failure(rows.error().code, rows.error().message,
+                                                         rows.error().path);
+                        }
+                    }
+                }
             }
             json out = json::array();
             for (const control::Opportunity& row : *rows) {
                 out.push_back(opportunity_json(row));
             }
-            return ApiResult::success({{"opportunities", std::move(out)}});
+            co_return ApiResult::success({{"opportunities", std::move(out)}});
         }});
     registry.add(Capability{
         .name = "dismiss_opportunity",
         .title = "Dismiss an Opportunity",
-        .description = "Mark one Opportunity as not wanted; it stays listed as dismissed.",
+        .description = "Mark one Opportunity of this workspace as not wanted; it stays listed as "
+                       "dismissed.",
         .input_schema = customer_agent_schema({{"opportunity_id", {{"type", "string"}}}},
                                               json::array({"opportunity_id"})),
         .output_schema = {{"type", "object"}},
@@ -3831,18 +3887,31 @@ void register_agent_run_capabilities(Registry& registry) {
         .object = "customer",
         .action = "write",
         .resolve_object = customer_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return unavailable();
+                co_return unavailable();
             }
-            agent_audit(context, "opportunity.dismiss", input.at("customer_id"),
-                        {{"opportunity_id", input.at("opportunity_id")}});
-            auto row = context.store->set_opportunity_status(input.at("opportunity_id"),
-                                                             "dismissed", "");
-            if (!row || row->customer_id != input.at("customer_id").get<std::string>()) {
-                return ApiResult::failure("not_found", "no such Opportunity in this space");
+            const std::string customer_id = input.at("customer_id");
+            agent_audit(context, "opportunity.dismiss", customer_id,
+                        {{"opportunity_id", input.at("opportunity_id")},
+                         {"workspace_id", input.at("workspace_id")}});
+            auto records = workspace_records(context, customer_id, input.at("workspace_id"));
+            if (!records) {
+                co_return ApiResult::failure(records.error().code, records.error().message,
+                                             records.error().path);
             }
-            return ApiResult::success(opportunity_json(*row));
+            auto row = control::settled(co_await control::set_opportunity_status(
+                *records, customer_id, input.at("opportunity_id"), "dismissed", ""));
+            if (!row) {
+                if (row.error().code == "not_found") {
+                    co_return ApiResult::failure("not_found",
+                                                 "no such Opportunity in this workspace");
+                }
+                co_return ApiResult::failure(row.error().code, row.error().message,
+                                             row.error().path);
+            }
+            co_return ApiResult::success(opportunity_json(*row));
         }});
     registry.add(Capability{
         .name = "agent_turn",
@@ -4772,7 +4841,7 @@ void register_agent_bus_capabilities(Registry& registry) {
             if (!task) {
                 co_return ApiResult::failure(task.error().code, task.error().message);
             }
-            settle_discover(context, *task);
+            static_cast<void>(called(co_await settle_discover(context, *task)));
             static_cast<void>(co_await settle_build(context, *task));
             co_return ApiResult::success({{"events", std::move(events)},
                                           {"next_sequence", next},

@@ -45,8 +45,8 @@ Lake's records move into workspace Zettas through one mechanism,
 [`docs/architecture/workspace-records.md`](docs/architecture/workspace-records.md): sealed
 `lake_*` collections in each workspace Zetta's keyed record store (zetta#1231, Zetta dev with
 #1233 or later), an operator one-shot copy and verification, and a per-table checklist. Ask Orama conversations are the first collection (lake#370,
-migration `0045`); the PostgreSQL table stays until a later migration drops it after the copy is
-verified on dev.
+migration `0045`); Design → Opportunities are the first mutable one (lake#376, migration `0046`).
+Each PostgreSQL table stays until a later migration drops it after the copy is verified on dev.
 
 ## Historical status — superseded 2026-09-08
 

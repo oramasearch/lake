@@ -196,7 +196,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `agent_cron_runs` | workspace | Run history and results. [Follow-up](https://github.com/oramasearch/lake/issues/372). |
 | `agent_tasks` | workspace | Bodies and conversation data move; keep IDs/workspace/agent/dispatch deadlines. [Follow-up](https://github.com/oramasearch/lake/issues/374). |
 | `agent_task_status` | workspace | Answers, messages and credential hashes move; keep dispatch claim/terminal state. [Follow-up](https://github.com/oramasearch/lake/issues/375). |
-| `opportunities` | workspace | Auto-Suggest output and decisions. [Follow-up](https://github.com/oramasearch/lake/issues/376). |
+| `opportunities` | workspace | Auto-Suggest output and decisions. **Moved** to each workspace Zetta's `lake_opportunities` record collection by [lake#376](https://github.com/oramasearch/lake/issues/376) ([workspace-records.md](workspace-records.md)): saved in the workspace the scan ran in, status changes are conditional writes; the table is read only by the one-shot copy until a later migration drops it. |
 | `apps` | workspace | App configuration, environment, Secret refs and token hashes; workspace ID added here. [Follow-up](https://github.com/oramasearch/lake/issues/377). |
 | `builds` | workspace | Build inputs, results and token hashes; workspace ID added here. [Follow-up](https://github.com/oramasearch/lake/issues/378). |
 | `stream_owners` | workspace | Topic creator ownership follows the workspace incarnation. [Follow-up](https://github.com/oramasearch/lake/issues/379). |

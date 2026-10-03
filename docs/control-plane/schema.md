@@ -449,7 +449,8 @@ Contract and capabilities: [`../api/agent-launches.md`](../api/agent-launches.md
 background, with its body, scopes, deadline and when it was last published on the agent bus),
 `agent_task_status` (written by lake when an agent claims the task and as it reports: phase, message,
 answer and the **SHA-256** of the task's credential, cleared when the task finishes) and `opportunities` (Design → Opportunities:
-what Auto-Suggest recommended, kept across scans, with what the person did with each). Idempotent;
+what Auto-Suggest recommended, kept across scans, with what the person did with each; retired by
+`0046`, below, when Opportunities moved into workspace Zettas). Idempotent;
 guard `agent_tasks_guard`. Contract: [`../api/agent-bus.md`](../api/agent-bus.md).
 
 ## Agent task events migration
@@ -541,3 +542,17 @@ reapplies the same assignment before each run. No column is added and nothing is
 table is dropped by a later migration after the copy is verified. Idempotent; guard
 `ask_message_workspaces_guard`. The operator vendors it and selects that guard before the binary
 is deployed. Mechanism and cutover: [`../architecture/workspace-records.md`](../architecture/workspace-records.md).
+
+## Opportunity workspaces migration
+
+`0046_opportunity_workspaces` records, in `workspace_assignments`, the workspace that owns each
+retired `opportunities` row: the workspace the scan's agent task names (`task_workspace`); for a
+task written before tasks named their workspace, the space's only live workspace
+(`sole_workspace`); otherwise `needs_selection`. A row whose scan ran in a workspace that has since
+been deleted is recorded as `deleted_workspace` without a workspace: it went with that workspace
+and is never moved into another. Each unassigned row is reported by a warning. Design →
+Opportunities live in the owning workspace Zetta (lake#376), and lake no longer writes or reads the
+table except through the operator-only `copy_workspace_records`, which reapplies the same
+assignment before each run. No column is added and nothing is dropped. Idempotent; guard
+`opportunity_workspaces_guard`. The operator vendors it and selects that guard before the binary is
+deployed. Mechanism and cutover: [`../architecture/workspace-records.md`](../architecture/workspace-records.md).

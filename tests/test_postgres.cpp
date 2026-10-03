@@ -1519,6 +1519,124 @@ TEST(PostgresAskMessages, MigrationRecordsEachRowsOwnerForTheCopy) {
     EXPECT_TRUE(listed.at(spaceless).workspace_id.empty());
 }
 
+// Migration 0046 (lake#376): each Opportunity's owner is the workspace its scan ran in, else the
+// space's only live workspace; a deleted workspace's rows and ambiguous rows are only reported.
+TEST(PostgresOpportunities, MigrationRecordsEachRowsOwnerForTheCopy) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "opportunity-migration-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    std::vector<std::string> customers;
+    std::vector<std::vector<std::string>> workspaces(2);
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "opportunity-migration-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+        // The second space has three workspaces (two once one is deleted), so a scan that names
+        // none cannot be assigned.
+        for (int count = 0; count <= index * 2; ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            workspaces[index].push_back(workspace->id);
+        }
+    }
+    pqxx::connection connection(uri);
+    // A scan; an empty workspace is a task written before tasks named their workspace (0038).
+    const auto scan = [&](const std::string& customer, const std::string& workspace) {
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE agent_tasks DISABLE TRIGGER agent_task_workspace_routing");
+        const std::string id =
+            tx.exec_params("INSERT INTO agent_tasks (customer_id, agent, kind, scopes, "
+                           "workspace_id) VALUES ($1::uuid, 'agent-autosuggest', 'discover', "
+                           "ARRAY['list_datasets'], NULLIF($2, '')::uuid) RETURNING id::text",
+                           customer, workspace)[0][0]
+                .as<std::string>();
+        tx.exec("ALTER TABLE agent_tasks ENABLE TRIGGER agent_task_workspace_routing");
+        tx.commit();
+        return id;
+    };
+    const auto insert = [&](const std::string& customer, const std::string& task) {
+        pqxx::work tx(connection);
+        const std::string id = tx.exec_params(
+            "INSERT INTO opportunities (customer_id, task_id, rank, intent) VALUES ($1::uuid, "
+            "$2::uuid, (SELECT count(*) + 1 FROM opportunities WHERE task_id = $2::uuid), "
+            "'Predict churn') RETURNING id::text",
+            customer, task)[0][0].as<std::string>();
+        tx.commit();
+        return id;
+    };
+    const std::string own_scan = insert(customers[1], scan(customers[1], workspaces[1][1]));
+    const std::string sole = insert(customers[0], scan(customers[0], ""));
+    const std::string ambiguous = insert(customers[1], scan(customers[1], ""));
+    const std::string doomed_task = scan(customers[1], workspaces[1][0]);
+    const std::string doomed = insert(customers[1], doomed_task);
+    ASSERT_TRUE(store->update_workspace(workspaces[1][0], {.desired = "deleted"}));
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0046_opportunity_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0046_opportunity_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = 'opportunities' AND object_id = $1::uuid",
+            id);
+        return found.empty() ? std::pair<std::string, std::string>{}
+                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    using Outcome = std::pair<std::string, std::string>;
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome(own_scan), (Outcome{"task_workspace", workspaces[1][1]}))
+            << "the scan's workspace owns it, though the space has several";
+        EXPECT_EQ(outcome(sole), (Outcome{"sole_workspace", workspaces[0][0]}));
+        EXPECT_EQ(outcome(ambiguous), (Outcome{"needs_selection", ""}));
+        EXPECT_EQ(outcome(doomed), (Outcome{"deleted_workspace", ""}))
+            << "a deleted workspace's rows are never moved into another";
+    }
+    const std::string late = insert(customers[0], scan(customers[0], workspaces[0][0]));
+    EXPECT_TRUE(outcome(late).first.empty());
+    ASSERT_TRUE(store->assign_legacy_opportunities());
+    EXPECT_EQ(outcome(late), (Outcome{"task_workspace", workspaces[0][0]}))
+        << "a row written after the migration";
+
+    std::map<std::string, lake::control::LegacyOpportunity> listed;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_opportunities(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            listed.emplace(row.opportunity.id, row);
+        }
+        after = page->back().opportunity.id;
+    }
+    ASSERT_TRUE(listed.contains(own_scan));
+    EXPECT_EQ(listed.at(own_scan).workspace_id, workspaces[1][1]);
+    EXPECT_EQ(listed.at(own_scan).opportunity.intent, "Predict churn");
+    EXPECT_EQ(listed.at(own_scan).opportunity.status, "new");
+    EXPECT_GT(listed.at(own_scan).opportunity.at_us, 0);
+    EXPECT_EQ(listed.at(ambiguous).outcome, "needs_selection");
+    EXPECT_EQ(listed.at(doomed).outcome, "deleted_workspace");
+    EXPECT_TRUE(listed.at(doomed).workspace_id.empty());
+}
+
 // Agent launches, their credential and cron schedules against the production
 // store (docs/api/agent-launches.md, lake#231).
 TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTheContract) {

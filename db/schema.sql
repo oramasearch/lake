@@ -2288,3 +2288,49 @@ CREATE TABLE IF NOT EXISTS ask_message_workspaces_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0045_ask_message_workspaces')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0046_opportunity_workspaces: Design → Opportunities live in the workspace Zetta of the workspace
+-- their scan ran in (lake#376, docs/architecture/workspace-records.md). Lake no longer writes or
+-- reads opportunities; the operator's one-shot copy (copy_workspace_records) moves each row into
+-- its workspace and verifies it. This migration only records each row's owner: the workspace the
+-- scan's agent task names owns its rows (task_workspace); a task that names none falls back to a
+-- space with exactly one live workspace (sole_workspace); a task whose workspace is deleted is
+-- recorded as deleted_workspace and every other row as needs_selection, both without a workspace.
+-- No column is added and nothing is dropped; a later migration drops the table once the copy has
+-- been verified on every environment.
+-- ---------------------------------------------------------------------------------------------
+DO $$
+DECLARE
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0046_opportunity_workspaces') THEN
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT 'opportunities', o.id, o.customer_id,
+                   CASE WHEN t.workspace_id IS NULL THEN w.id WHEN tw.id IS NOT NULL THEN tw.id END,
+                   CASE WHEN tw.id IS NOT NULL THEN 'task_workspace'
+                        WHEN t.workspace_id IS NOT NULL THEN 'deleted_workspace'
+                        WHEN w.id IS NOT NULL THEN 'sole_workspace'
+                        ELSE 'needs_selection' END
+            FROM opportunities o JOIN agent_tasks t ON t.id = o.task_id
+                 LEFT JOIN workspaces tw ON tw.id = t.workspace_id
+                      AND tw.customer_id = o.customer_id AND tw.desired <> 'deleted'
+                 LEFT JOIN workspaces w ON w.customer_id = o.customer_id
+                      AND w.desired <> 'deleted'
+                      AND (SELECT count(*) FROM workspaces w2 WHERE w2.customer_id = o.customer_id
+                           AND w2.desired <> 'deleted') = 1
+            ON CONFLICT DO NOTHING;
+        FOR unresolved IN SELECT * FROM workspace_assignments
+                           WHERE workspace_id IS NULL AND object_table = 'opportunities' LOOP
+            RAISE WARNING 'workspace_id requires selection: table=%, object=%, customer=%, outcome=%',
+                unresolved.object_table, unresolved.object_id, unresolved.customer_id,
+                unresolved.outcome;
+        END LOOP;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS opportunity_workspaces_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0046_opportunity_workspaces')
+    ON CONFLICT DO NOTHING;
