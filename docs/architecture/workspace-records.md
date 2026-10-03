@@ -7,7 +7,8 @@ out of lake's PostgreSQL uses it and applies the [checklist](#checklist-for-each
 That covers lake#315, #316–#384 and the other "Move … into workspace Zettas" issues.
 `ask_messages` is the first collection to move, `opportunities` (lake#376) the first mutable one, and
 `stream_owners` (lake#379) the first keyed by a unique name. Application lifecycle events and their
-webhook delivery attempts (lake#356, lake#357) follow.
+webhook delivery attempts (lake#356, lake#357) follow, and then an application's users and
+organizations (lake#353, lake#354), the first records with uniqueness claims beside them.
 
 The rule it implements is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in
 a workspace Zetta, including credentials, secrets and metrics. Lake's PostgreSQL and the lake Zetta
@@ -20,8 +21,8 @@ still open.
 |---|---|
 | `WorkspaceRecords`, `RecordSet<Codec>` | Implemented on Zetta's keyed record store ([zetta#1231](https://github.com/oramasearch/zetta/issues/1231), merged in zetta PR #1233 to `dev`, `82f617e`). Unit tests run against an engine fake; an opt-in test runs against a real Zetta node built from that commit. |
 | Append-only collections | Implemented. `ask_messages` and `auth_app_webhook_events` have moved; the `ask_messages` table is dropped (migration `0050`, lake#483). |
-| Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. `drive_share_links` (lake#350) has moved: revocation is a conditional `put` on the revision read. `auth_app_webhook_deliveries` (lake#357) claims each attempt with `if_absent` and settles it with `if_revision`. `metering_usage` (lake#348) adds to an hourly counter with `if_revision`, and `metering_build_records` (lake#349) records each build result once with `if_absent`. `forge_records` (lake#341) has moved into the workspace of each record's repository: edits are conditional `put`s on the revision read, and the push path reads branch protection once before the push. |
-| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `opportunities`, `stream_owners`, `drive_share_links`, `auth_app_webhook_events`, `auth_app_webhook_deliveries`, `metering_usage`, `metering_build_records` and `forge_records`. `ask_messages` left the list with its table: a request for it is `invalid_input`. |
+| Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. `drive_share_links` (lake#350) has moved: revocation is a conditional `put` on the revision read. `auth_app_webhook_deliveries` (lake#357) claims each attempt with `if_absent` and settles it with `if_revision`. `metering_usage` (lake#348) adds to an hourly counter with `if_revision`, and `metering_build_records` (lake#349) records each build result once with `if_absent`. `forge_records` (lake#341) has moved into the workspace of each record's repository: edits are conditional `put`s on the revision read, and the push path reads branch protection once before the push. `auth_app_users` and `auth_app_organizations` (lake#353, lake#354) have moved into the application's workspace: a status change or rename is a conditional `put` on the revision read, and a pool user's email and an organization's TAAP identity and name are claims written `if_absent` in the same collection. |
+| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `opportunities`, `stream_owners`, `drive_share_links`, `auth_app_webhook_events`, `auth_app_webhook_deliveries`, `metering_usage`, `metering_build_records`, `forge_records`, `auth_app_users` and `auth_app_organizations`. `ask_messages` left the list with its table: a request for it is `invalid_input`. |
 | Dropping the moved tables from PostgreSQL | `ask_messages` is dropped by migration `0050_drop_ask_messages` (lake#483), after its copy was verified on dev; its `workspace_assignments` rows stay. Each other table is dropped by a later migration once its copy is verified on the dev cluster. |
 
 **Zetta dependency.** A workspace Zetta must run Zetta `dev` at or after zetta PR #1233
@@ -49,9 +50,9 @@ A page that reads one collection therefore pays one workspace round trip.
 |---|---|---|
 | Append-only log, read back by key | `ask_messages` (#370), `sso_provisioning_logs` (#333), `auth_app_webhook_events` (#356), `agent_cron_runs` (#372), `offline_recovery_notifications` (#339), `audit_events` (#317) | `append`: one `put_record` with `if_absent`. `list` is newest first by the lookup index, then put in order. Set `retention_ms` where a purge applies. |
 | Work items sent once, with retry history | `auth_app_webhook_deliveries` (#357) | One record per attempt, keyed by `index_of(collection, "<item>\n<attempt>")`. Claim it pending with `put(if_absent)` before the side effect and settle it with `put(if_revision)` after: only the caller whose claim succeeded performs it. |
-| Mutable rows found by id | `opportunities` (#376, **moved**), `drive_share_links` (#350, **moved**), `repositories` (#315), `apps` (#377), `stores` (#365), `forge_records` (#341, **moved**), `platform_environments` (#358) | `get`, then `put` with `if_revision`, or `update`, which retries on `409` by rereading. `remove` with `if_revision`. |
+| Mutable rows found by id | `opportunities` (#376, **moved**), `drive_share_links` (#350, **moved**), `repositories` (#315), `apps` (#377), `stores` (#365), `forge_records` (#341, **moved**), `auth_app_users` (#353, **moved**), `auth_app_organizations` (#354, **moved**), `platform_environments` (#358) | `get`, then `put` with `if_revision`, or `update`, which retries on `409` by rereading. `remove` with `if_revision`. |
 | One-use codes, sessions, replay evidence, claims | `sessions` (#323), `identity_oauth_flows` (#326), `identity_webauthn_challenges` (#327), `identity_taap_assertions` (#361), `auth_app_authorization_codes` (#363), `offline_recovery_attempts` (#336), `agent_task_status` claims (#375) | Consume with `remove(id, if_revision)`. Only one caller succeeds; the others get `conflict` or `not_found`. Expiry is the collection's `retention_ms`. |
-| Unique names | `stream_owners` (#379, done), repository and app names | A name-keyed record written with `if_absent`, using a blind key (see [Keys](#record-format)). |
+| Unique names | `stream_owners` (#379, done), an application user's email and an application organization's TAAP identity and name (#353, #354, done), repository and app names | A name-keyed record written with `if_absent`, using a blind key (see [Keys](#record-format)). A value that must be unique beside a record found by id is a **claim** in that record's collection: it names its holder, has its own lookup so listings never show it, is released with `remove(if_revision)` by its holder, and an abandoned one (older than its grace period, naming a holder that does not exist) is taken over with `if_revision`. |
 | Secrets and credentials | `secrets_*` (#328–#332), `keystore` (#324), `pki_authorities` (#342), `custodial_identities` (#364), `auth_app_signing_keys` (#352), `oauth_providers` (#325) | Records whose sealed body holds the secrets subsystem's existing envelope ciphertext. Zetta's connection store is not used (lake seals its own secrets). |
 | Exact counters that may be billed | `metering_usage` (#348, **moved**), `metering_build_records` (#349, **moved**) | Records, never metrics, since a metric point is not fsynced on its own. A counter is one record per workspace and hour, added to with `if_revision` from an in-process buffer that is flushed off the request path (`MeteringRecorder`); each counted item (a build result) is one record written `if_absent` ([metering.md](../api/metering.md)). |
 | Operational metrics | Prometheus series (#384) | Zetta's labelled time series (`create_metric`/`record_metric`/`query_metric`). |
@@ -245,6 +246,7 @@ copy is verified.
 | `Stores/WorkspaceRecordStores.TheOneShotCopyMovesMeteringIntoEachSpacesWorkspace/{Memory,Postgres}`, `PostgresMetering.MigrationRecordsEachRowsOwnerForTheCopy`, `PostgresSync.PushAndPullUsePostgresControlPlane` | The metering copy beside lake's own counters and build records, rows without transfer left out, `needs_selection` blocking, tamper detection, operator only; migration 0053; a real push and pull flushed into the repository's workspace and nothing in PostgreSQL |
 | `Stores/WorkspaceRecordStores.ForgeRecordsLiveInTheirRepositorysWorkspace/{Memory,Postgres}`, `Forge.*`, `Export.*`, `GitHubImport.*`, `PostgresSync.EnforcesBranchProtectionAtReferenceUpdates`, `SyncHttp.*ProtectedRefusal*`, `PostgresForgeScenario.*` | Forge records (lake#341) in their repository's workspace among two spaces with two workspaces each: stored sealed only at their own endpoint, another workspace's or repository's ids `not_found`, a record copied elsewhere not opening, conditional updates keeping both changes and a stale revision refused, least privilege, missing and unknown `repository_id`, a repository without a workspace (`conflict`), a workspace that is not ready and workspace deletion, for the capabilities and for branch protection read before a push; export, import and GitHub import; a real push refused and accepted by rules read from the workspace |
 | `Stores/WorkspaceRecordStores.TheOneShotCopyMovesForgeRecordsIntoTheirRepositorysWorkspace/{Memory,Postgres}`, `PostgresForgeRecords.MigrationRecordsEachRowsOwnerForTheCopy` | The `forge_records` copy: plan, verify, copy, rerun, read back through the capabilities with original ids and instants, `needs_selection` blocking and `workspace_deleted` not, a later edit accepted, tamper detection, operator only; migration 0054 outcomes on a rerun, late rows, a repository assigned after review, paged legacy listing |
+| `ApplicationAuth.UsersAndOrganizationsLiveInTheApplicationsWorkspace`, `Stores/WorkspaceRecordStores.TheOneShotCopyMovesApplicationUsersAndOrganizations/{Memory,Postgres}`, `PostgresApplicationUsers.MigrationRecordsEachRowsOwnerForTheCopy` | Application users and organizations (lake#353, lake#354) in the application's workspace among two spaces and two workspaces of one: sealed records and claims at their own endpoint only, a duplicate email, TAAP identity or name refused, fresh and abandoned claims, a sign-up completed at the next sign-in, an account that is not a user refused with its session revoked, suspension, deletion, renames, missing, malformed, unknown and foreign `workspace_id`, least privilege, not ready, workspace deletion; the copy (plan, verify, copy, rerun, read back, claims holding, a later status change accepted, tamper detection, `needs_selection` resolved, operator only); migration 0055 outcomes on a rerun, late rows, resolution, paging |
 | `WorkspaceRecordsZetta.TheEngineStoresAndReturnsSealedRecords` | Runs with `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` against a node built from Zetta dev with #1233: append, list, a 20 KB body, `if_absent` conflict with `details.revision`, `update`, a stale `if_revision`, conditional delete |
 | `HttpResponseIsolation.AskOrama*`, `…TheAgentFactory*`, `AgentRuns.EveryAgentFlowTheSiteOffersIsACapability`, `PagePerformance.*` | The pages and the capability end to end, and the page budgets |
 
@@ -308,6 +310,36 @@ gets its route on the next copy run after its assignment is chosen.
 - **Membership-change window.** During a membership change, two owners can briefly both accept a
   conditional write to the same key. Lake's claims are safe only on a fully meshed StatefulSet,
   which is what the operator runs.
+
+## Cutover runbook: application users and organizations, dev cluster
+
+Migration `0055_application_user_workspaces` (lake#353, lake#354). Each row's owner is its
+application's workspace (`auth_applications.workspace_id`, migration `0049`), so there is no
+selection step of its own: a row is `needs_selection` only while its application has no workspace.
+These steps are for the coordinator and are not run by this change.
+
+1. Workspace Zettas run Zetta `dev` at or after `82f617e`, as for `ask_messages`.
+2. Have the operator vendor `db/schema.sql` through `0055_application_user_workspaces` and select
+   `application_user_workspaces_guard`. Apply the schema, then read the warnings
+   `application auth_app_users not copied (needs_selection|workspace_deleted)` and the same for
+   `auth_app_organizations`.
+3. Deploy the lake image built from this change. Application users and organizations are read and
+   written only in the application's workspace. Until step 4 finishes, **earlier users of an
+   application cannot sign in to it** (they are not users of the application in its workspace yet;
+   each refused sign-in's session is revoked), its user and organization lists are empty, and a new
+   sign-up with an earlier user's email fails on lake's own account table; run step 4 right after
+   the deploy. The user and organization capabilities now require `workspace_id`.
+4. Run `POST /v1/copy_workspace_records {"collection":"auth_app_users","mode":"plan"}` with the
+   operator bearer, then `{"mode":"copy"}` following `next_after` until it is null, then
+   `{"mode":"verify"}` over every page; then the same for `auth_app_organizations`. The copy writes
+   each pool user's email claim and each organization's TAAP and name claims with its record; a
+   claim another holder already has is reported as that row's error, never taken over.
+5. Rows of an application without a workspace stay `needs_selection` and keep `complete` false:
+   assign the application's workspace as in step 5 of the application events runbook below, or
+   delete the application (dev data may be deleted); the next run copies them. Rows recorded
+   `workspace_deleted` went with their workspace and do not block. Repeat step 4.
+6. Once `verify` answers `complete: true` on every page of both collections, file the migration
+   that drops `auth_app_users` and `auth_app_organizations`, with the copy output attached.
 
 ## Cutover runbook: application events and deliveries, dev cluster
 

@@ -2077,17 +2077,18 @@ TEST(Workspaces, ASearchKeyFromAnOlderSessionLastsAsLongAsTheSession) {
     context.credential_expires_at_unix = now + 10 * 24 * 60 * 60; // ten days left
     context.request_id = lake::control::new_uuid_v4();
 
-    const auto capped =
-        registry.call("create_token",
-                      {{"name", "search docs"}, {"scopes", json::array({"search_index"})}},
-                      context);
+    const auto capped = *liquid::runtime::block_on(
+        registry.call_async("create_token",
+                            {{"name", "search docs"}, {"scopes", json::array({"search_index"})}},
+                            context));
     ASSERT_TRUE(capped.ok) << capped.error.message;
     context.request_id = lake::control::new_uuid_v4();
-    const auto too_long = registry.call("create_token",
-                                        {{"name", "search docs"},
-                                         {"scopes", json::array({"search_index"})},
-                                         {"expires_in_seconds", 30 * 24 * 60 * 60}},
-                                        context);
+    const auto too_long =
+        *liquid::runtime::block_on(registry.call_async("create_token",
+                                                       {{"name", "search docs"},
+                                                        {"scopes", json::array({"search_index"})},
+                                                        {"expires_in_seconds", 30 * 24 * 60 * 60}},
+                                                       context));
     EXPECT_FALSE(too_long.ok) << "an explicit lifetime past the session is still refused";
 }
 

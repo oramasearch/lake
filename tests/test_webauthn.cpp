@@ -26,12 +26,13 @@ lake::api::ApiResult register_response(lake::api::Registry& registry,
                                        std::string_view origin = "https://lake.example") {
     const std::string challenge = options["public_key"]["challenge"];
     const CeremonyResponse response = authenticator.registration(challenge, "lake.example", origin);
-    return registry.call("register_passkey",
-                         {{"challenge", challenge},
-                          {"client_data_json", response.client_data_json},
-                          {"attestation_object", response.authenticator_data},
-                          {"name", "software passkey"}},
-                         context);
+    return *liquid::runtime::block_on(
+        registry.call_async("register_passkey",
+                            {{"challenge", challenge},
+                             {"client_data_json", response.client_data_json},
+                             {"attestation_object", response.authenticator_data},
+                             {"name", "software passkey"}},
+                            context));
 }
 
 lake::api::ApiResult sign_in_response(lake::api::Registry& registry,
@@ -42,14 +43,15 @@ lake::api::ApiResult sign_in_response(lake::api::Registry& registry,
     const std::string challenge = options["public_key"]["challenge"];
     const CeremonyResponse response =
         authenticator.assertion(challenge, "lake.example", "https://lake.example", sign_count);
-    return registry.call("sign_in_passkey",
-                         {{"challenge", challenge},
-                          {"credential_id", response.credential_id},
-                          {"client_data_json", response.client_data_json},
-                          {"authenticator_data", response.authenticator_data},
-                          {"signature", response.signature},
-                          {"device_name", "software authenticator"}},
-                         context);
+    return *liquid::runtime::block_on(
+        registry.call_async("sign_in_passkey",
+                            {{"challenge", challenge},
+                             {"credential_id", response.credential_id},
+                             {"client_data_json", response.client_data_json},
+                             {"authenticator_data", response.authenticator_data},
+                             {"signature", response.signature},
+                             {"device_name", "software authenticator"}},
+                            context));
 }
 
 } // namespace

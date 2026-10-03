@@ -1702,10 +1702,18 @@ std::expected<control::NewToken, ApiError> attenuated_token(const json& input,
     return token;
 }
 
-ApiResult issued_result(control::Result<control::IssuedSession> issued,
-                        ApiContext& context,
-                        std::string_view lifecycle_event = "session.started") {
-    return application_session_result(std::move(issued), context, lifecycle_event);
+ApiResult session_answer(std::expected<ApiResult, liquid::error> completed) {
+    return completed ? std::move(*completed)
+                     : ApiResult::failure("store_error", completed.error().message);
+}
+
+// A session the store issued, completed by application_session_result: in an application's pool
+// the user's record is read in the application's workspace (lake#353), so this is asynchronous.
+liquid::runtime::task<ApiResult> issued_result(control::Result<control::IssuedSession> issued,
+                                               ApiContext& context,
+                                               std::string lifecycle_event = "session.started") {
+    co_return session_answer(co_await application_session_result(
+        std::move(issued), context, std::move(lifecycle_event)));
 }
 
 ApiResult authorized_object_list_result(control::Result<std::vector<control::PolicyObject>> rows,
@@ -2037,23 +2045,23 @@ void register_identity_capabilities(Registry& registry) {
         .object = "authentication",
         .action = "write",
         .resolve_object = global_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store)
-                return no_store();
+                co_return no_store();
             const std::string pool_id = input.value("pool_id", "lake");
             if (const ApiResult origin = authorize_application_origin(context, pool_id);
                 !origin.ok) {
-                return origin;
+                co_return origin;
             }
-            return issued_result(
-                context.store->sign_up_password({pool_id,
-                                                 input.value("email", ""),
-                                                 input.value("password", ""),
-                                                 input.value("display_name", ""),
-                                                 input.value("device_name", "browser"),
-                                                 input.value("identity_document", "")}),
-                context,
-                "user.created");
+            co_return session_answer(
+                co_await sign_up_password_session({pool_id,
+                                                   input.value("email", ""),
+                                                   input.value("password", ""),
+                                                   input.value("display_name", ""),
+                                                   input.value("device_name", "browser"),
+                                                   input.value("identity_document", "")},
+                                                  context));
         }});
     registry.add(
         Capability{.name = "sign_in_password",
@@ -2074,21 +2082,22 @@ void register_identity_capabilities(Registry& registry) {
                    .object = "authentication",
                    .action = "write",
                    .resolve_object = global_object,
-                   .handler = [](const json& input, ApiContext& context) {
+                   .async_handler = [](const json& input,
+                                       ApiContext& context) -> liquid::runtime::task<ApiResult> {
                        if (!context.store)
-                           return no_store();
+                           co_return no_store();
                        const std::string pool_id = input.value("pool_id", "lake");
                        if (const ApiResult origin = authorize_application_origin(context, pool_id);
                            !origin.ok) {
-                           return origin;
+                           co_return origin;
                        }
-                       return issued_result(
+                       co_return session_answer(co_await issued_result(
                            context.store->sign_in_password({pool_id,
                                                             input.value("email", ""),
                                                             input.value("password", ""),
                                                             "",
                                                             input.value("device_name", "browser")}),
-                           context);
+                           context));
                    }});
     registry.add(Capability{
         .name = "sign_in_taap",
@@ -2111,14 +2120,15 @@ void register_identity_capabilities(Registry& registry) {
         .object = "authentication",
         .action = "write",
         .resolve_object = global_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return no_store();
+                co_return no_store();
             }
             const std::string pool_id = input.value("pool_id", "lake");
             if (const ApiResult origin = authorize_application_origin(context, pool_id);
                 !origin.ok) {
-                return origin;
+                co_return origin;
             }
             auto verified = control::identity_crypto::verify_taap_sign_in(
                 input.at("identity_document").get<std::string>(),
@@ -2127,17 +2137,17 @@ void register_identity_capabilities(Registry& registry) {
                 input.at("issued_at").get<std::int64_t>(),
                 input.at("signature"));
             if (!verified) {
-                return ApiResult::failure("unauthorized", verified.error());
+                co_return ApiResult::failure("unauthorized", verified.error());
             }
             context.authentication_method = "taap";
             context.audit_details = {{"taap_id", verified->taap_id},
                                      {"assertion_id", verified->assertion_id}};
-            return issued_result(
+            co_return session_answer(co_await issued_result(
                 context.store->sign_in_taap({pool_id,
                                              verified->taap_id,
                                              verified->assertion_id,
                                              input.value("device_name", "taap-key")}),
-                context);
+                context));
         }});
     registry.add(
         Capability{.name = "verify_mfa",
@@ -2159,21 +2169,22 @@ void register_identity_capabilities(Registry& registry) {
                    .object = "authentication",
                    .action = "write",
                    .resolve_object = global_object,
-                   .handler = [](const json& input, ApiContext& context) {
+                   .async_handler = [](const json& input,
+                                       ApiContext& context) -> liquid::runtime::task<ApiResult> {
                        if (!context.store)
-                           return no_store();
+                           co_return no_store();
                        const std::string pool_id = input.value("pool_id", "lake");
                        if (const ApiResult origin = authorize_application_origin(context, pool_id);
                            !origin.ok) {
-                           return origin;
+                           co_return origin;
                        }
-                       return issued_result(
+                       co_return session_answer(co_await issued_result(
                            context.store->sign_in_totp({pool_id,
                                                         input.value("email", ""),
                                                         input.value("password", ""),
                                                         input.value("code", ""),
                                                         input.value("device_name", "browser")}),
-                           context);
+                           context));
                    }});
     registry.add(Capability{
         .name = "enroll_mfa",
@@ -2191,21 +2202,21 @@ void register_identity_capabilities(Registry& registry) {
         .object = "principal",
         .action = "write",
         .resolve_object = self_object,
-        .handler = [](const json&, ApiContext& context) {
+        .async_handler = [](const json&, ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store)
-                return no_store();
+                co_return no_store();
             auto result = context.store->enroll_mfa(context.acting_user_id, context.pool_id);
             if (!result)
-                return from_store_error(result.error());
-            const ApiResult event =
-                emit_application_mfa_change(context, context.pool_id, "totp", true);
+                co_return from_store_error(result.error());
+            const ApiResult event = session_answer(
+                co_await emit_application_mfa_change(context, context.pool_id, "totp", true));
             if (!event.ok) {
-                return event;
+                co_return event;
             }
-            return ApiResult::success({{"otpauth_uri",
-                                        "otpauth://totp/lake:" + context.acting_user_id +
-                                            "?secret=" + result->secret + "&issuer=lake"},
-                                       {"recovery_codes", result->recovery_codes}});
+            co_return ApiResult::success({{"otpauth_uri",
+                                           "otpauth://totp/lake:" + context.acting_user_id +
+                                               "?secret=" + result->secret + "&issuer=lake"},
+                                          {"recovery_codes", result->recovery_codes}});
         }});
     registry.add(Capability{
         .name = "disable_mfa",
@@ -2220,18 +2231,19 @@ void register_identity_capabilities(Registry& registry) {
         .object = "principal",
         .action = "write",
         .resolve_object = self_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return no_store();
+                co_return no_store();
             }
             const auto result = context.store->disable_mfa(
                 context.acting_user_id, context.pool_id, input.value("code", ""));
             if (!result) {
-                return from_store_error(result.error());
+                co_return from_store_error(result.error());
             }
-            const ApiResult event =
-                emit_application_mfa_change(context, context.pool_id, "totp", false);
-            return event.ok ? ApiResult::success({{"disabled", true}}) : event;
+            const ApiResult event = session_answer(
+                co_await emit_application_mfa_change(context, context.pool_id, "totp", false));
+            co_return event.ok ? ApiResult::success({{"disabled", true}}) : event;
         }});
     registry.add(Capability{
         .name = "begin_passkey_registration",
@@ -2301,9 +2313,10 @@ void register_identity_capabilities(Registry& registry) {
         .object = "principal",
         .action = "write",
         .resolve_object = self_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store)
-                return no_store();
+                co_return no_store();
             const std::string pool_id =
                 context.operator_credential ? input.value("pool_id", "lake") : context.pool_id;
             auto result = context.store->register_passkey({context.acting_user_id,
@@ -2314,10 +2327,11 @@ void register_identity_capabilities(Registry& registry) {
                                                            input.value("name", "passkey"),
                                                            identity_options(context)});
             if (!result) {
-                return from_store_error(result.error());
+                co_return from_store_error(result.error());
             }
-            const ApiResult event = emit_application_mfa_change(context, pool_id, "passkey", true);
-            return event.ok ? ApiResult::success({{"registered", true}}) : event;
+            const ApiResult event = session_answer(
+                co_await emit_application_mfa_change(context, pool_id, "passkey", true));
+            co_return event.ok ? ApiResult::success({{"registered", true}}) : event;
         }});
     registry.add(Capability{
         .name = "begin_passkey_sign_in",
@@ -2386,16 +2400,17 @@ void register_identity_capabilities(Registry& registry) {
         .object = "authentication",
         .action = "write",
         .resolve_object = global_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return no_store();
+                co_return no_store();
             }
             const std::string pool_id = input.value("pool_id", "lake");
             if (const ApiResult origin = authorize_application_origin(context, pool_id);
                 !origin.ok) {
-                return origin;
+                co_return origin;
             }
-            return issued_result(
+            co_return session_answer(co_await issued_result(
                 context.store->sign_in_passkey({pool_id,
                                                 input.value("challenge", ""),
                                                 input.value("credential_id", ""),
@@ -2403,7 +2418,7 @@ void register_identity_capabilities(Registry& registry) {
                                                 input.value("authenticator_data", ""),
                                                 input.value("signature", ""),
                                                 input.value("device_name", "browser")}),
-                context);
+                context));
         }});
     registry.add(Capability{
         .name = "register_oauth_provider",
@@ -2583,16 +2598,18 @@ void register_identity_capabilities(Registry& registry) {
         .object = "principal",
         .action = "write",
         .resolve_object = self_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return no_store();
+                co_return no_store();
             }
             const auto token = attenuated_token(input, context);
             if (!token) {
-                return ApiResult::failure(
+                co_return ApiResult::failure(
                     token.error().code, token.error().message, token.error().path);
             }
-            return issued_result(context.store->create_token(*token), context);
+            co_return session_answer(
+                co_await issued_result(context.store->create_token(*token), context));
         }});
     registry.add(Capability{.name = "list_sessions",
                             .title = "List sessions",
@@ -2870,18 +2887,21 @@ void register_sso_capabilities(Registry& registry) {
         .object = "authentication",
         .action = "write",
         .resolve_object = global_object,
-        .handler = [](const json& input, ApiContext& context) {
-            return context.store ? issued_result(context.store->sign_in_sso(
-                                                     {input.value("provider_id", ""),
-                                                      input.value("issuer", ""),
-                                                      input.value("subject", ""),
-                                                      input.value("email", ""),
-                                                      input.value("display_name", ""),
-                                                      input.value("taap_id", ""),
-                                                      input.value("device_name", "browser"),
-                                                      input.value("claims", json::object())}),
-                                                 context)
-                                 : no_store();
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store) {
+                co_return no_store();
+            }
+            co_return session_answer(co_await issued_result(
+                context.store->sign_in_sso({input.value("provider_id", ""),
+                                            input.value("issuer", ""),
+                                            input.value("subject", ""),
+                                            input.value("email", ""),
+                                            input.value("display_name", ""),
+                                            input.value("taap_id", ""),
+                                            input.value("device_name", "browser"),
+                                            input.value("claims", json::object())}),
+                context));
         }});
     registry.add(Capability{
         .name = "sign_in_saml",
@@ -2901,33 +2921,35 @@ void register_sso_capabilities(Registry& registry) {
         .object = "authentication",
         .action = "write",
         .resolve_object = global_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return no_store();
+                co_return no_store();
             }
             auto provider = context.store->get_sso_provider(input.at("provider_id"));
             if (!provider) {
-                return from_store_error(provider.error());
+                co_return from_store_error(provider.error());
             }
             if (provider->protocol != "saml") {
-                return ApiResult::failure("invalid_input", "provider is not a SAML provider");
+                co_return ApiResult::failure("invalid_input", "provider is not a SAML provider");
             }
             auto assertion =
                 control::saml::verify_response(input.at("saml_response").get<std::string>(),
                                                provider->signing_certificate,
                                                provider->issuer);
             if (!assertion) {
-                return ApiResult::failure("unauthorized", assertion.error());
+                co_return ApiResult::failure("unauthorized", assertion.error());
             }
-            return issued_result(context.store->sign_in_sso({provider->id,
-                                                             assertion->issuer,
-                                                             assertion->subject,
-                                                             assertion->email,
-                                                             assertion->display_name,
-                                                             input.value("taap_id", ""),
-                                                             input.value("device_name", "browser"),
-                                                             assertion->claims}),
-                                 context);
+            co_return session_answer(co_await issued_result(
+                context.store->sign_in_sso({provider->id,
+                                            assertion->issuer,
+                                            assertion->subject,
+                                            assertion->email,
+                                            assertion->display_name,
+                                            input.value("taap_id", ""),
+                                            input.value("device_name", "browser"),
+                                            assertion->claims}),
+                context));
         }});
     registry.add(Capability{
         .name = "upsert_scim_user",

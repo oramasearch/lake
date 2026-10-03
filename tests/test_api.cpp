@@ -5937,7 +5937,8 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     user_context.credential_kind = principal->kind;
     user_context.credential_expires_at_unix = principal->expires_at_unix;
 
-    const ApiResult enrollment = s.registry.call("enroll_mfa", json::object(), user_context);
+    const ApiResult enrollment = *liquid::runtime::block_on(
+        s.registry.call_async("enroll_mfa", json::object(), user_context));
     ASSERT_TRUE(enrollment.ok) << enrollment.error.message;
     EXPECT_TRUE(
         enrollment.value["otpauth_uri"].get<std::string>().starts_with("otpauth://totp/lake:"));
@@ -5962,18 +5963,18 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
                                      {"code", first_recovery}});
     EXPECT_FALSE(reused.ok);
 
-    const ApiResult stale_disable =
-        s.registry.call("disable_mfa", {{"code", first_recovery}}, user_context);
+    const ApiResult stale_disable = *liquid::runtime::block_on(
+        s.registry.call_async("disable_mfa", {{"code", first_recovery}}, user_context));
     EXPECT_EQ(stale_disable.error.code, "unauthorized");
-    const ApiResult disabled =
-        s.registry.call("disable_mfa", {{"code", second_recovery}}, user_context);
+    const ApiResult disabled = *liquid::runtime::block_on(
+        s.registry.call_async("disable_mfa", {{"code", second_recovery}}, user_context));
     ASSERT_TRUE(disabled.ok) << disabled.error.message;
     EXPECT_TRUE(s.call("sign_in_password", sign_in_input).ok);
 
-    const ApiResult token =
-        s.registry.call("create_token",
-                        {{"name", "read sessions"}, {"scopes", json::array({"list_sessions"})}},
-                        user_context);
+    const ApiResult token = *liquid::runtime::block_on(s.registry.call_async(
+        "create_token",
+        {{"name", "read sessions"}, {"scopes", json::array({"list_sessions"})}},
+        user_context));
     ASSERT_TRUE(token.ok) << token.error.message;
     EXPECT_FALSE(token.value["session"]["expires_at"].get<std::string>().empty());
 
@@ -5988,25 +5989,27 @@ TEST(Identity, PasswordSessionsTokensAndRevocation) {
     token_context.session_credential = true;
     token_context.scopes = token_principal->scopes;
     EXPECT_TRUE(s.registry.call("list_sessions", json::object(), token_context).ok);
-    EXPECT_EQ(
-        s.registry.call("create_token", {{"name", "no"}, {"scopes", json::array()}}, token_context)
-            .error.code,
-        "unauthorized");
+    EXPECT_EQ(liquid::runtime::block_on(
+                  s.registry.call_async(
+                      "create_token", {{"name", "no"}, {"scopes", json::array()}}, token_context))
+                  ->error.code,
+              "unauthorized");
 
     const std::string session_id = sign_up.value["session"]["id"];
     ASSERT_TRUE(s.store.revoke_session(user_id, session_id));
     EXPECT_FALSE(s.store.context_for(browser_secret));
-    const ApiResult static_without_reason = s.registry.call(
+    const ApiResult static_without_reason = *liquid::runtime::block_on(s.registry.call_async(
         "create_token",
         {{"name", "legacy"}, {"scopes", json::array({"list_sessions"})}, {"static", true}},
-        user_context);
+        user_context));
     EXPECT_EQ(static_without_reason.error.code, "invalid_input");
-    const ApiResult static_token = s.registry.call("create_token",
-                                                   {{"name", "legacy"},
-                                                    {"scopes", json::array({"list_sessions"})},
-                                                    {"static", true},
-                                                    {"reason", "migration"}},
-                                                   user_context);
+    const ApiResult static_token = *liquid::runtime::block_on(
+        s.registry.call_async("create_token",
+                              {{"name", "legacy"},
+                               {"scopes", json::array({"list_sessions"})},
+                               {"static", true},
+                               {"reason", "migration"}},
+                              user_context));
     EXPECT_FALSE(static_token.ok);
     EXPECT_EQ(static_token.error.code, "unauthorized");
     EXPECT_FALSE(s.store.context_for(token.value["secret"]));

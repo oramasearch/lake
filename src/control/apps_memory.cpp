@@ -1,5 +1,7 @@
 #include "lake/control/memory_store.hpp"
 
+#include "lake/control/application_user_records.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <ranges>
@@ -186,104 +188,35 @@ InMemoryStore::list_application_signing_keys(const std::string& application_id) 
     return output;
 }
 
-Result<ApplicationUser> InMemoryStore::register_application_user(const std::string& application_id,
-                                                                 const std::string& user_id) {
-    std::lock_guard lock(mutex_);
-    const auto existing =
-        std::ranges::find_if(application_users_, [&](const ApplicationUser& item) {
-            return item.application_id == application_id && item.user_id == user_id;
-        });
-    if (existing != application_users_.end()) {
-        return *existing;
-    }
-    const auto user =
-        std::ranges::find_if(users_, [&](const User& value) { return value.id == user_id; });
-    if (user == users_.end()) {
-        return std::unexpected(StoreError{"not_found", "application user does not exist"});
-    }
-    const std::string now = now_iso8601();
-    application_users_.push_back(ApplicationUser{application_id,
-                                                 user->id,
-                                                 user->taap_id,
-                                                 user->email,
-                                                 user->display_name,
-                                                 "active",
-                                                 now,
-                                                 now});
-    return application_users_.back();
-}
-
-Result<ApplicationUser> InMemoryStore::get_application_user(const std::string& application_id,
+Result<int> InMemoryStore::revoke_application_user_sessions(const std::string& application_id,
                                                             const std::string& user_id) {
-    std::lock_guard lock(mutex_);
-    const auto value = std::ranges::find_if(application_users_, [&](const ApplicationUser& item) {
-        return item.application_id == application_id && item.user_id == user_id;
-    });
-    if (value == application_users_.end()) {
-        return std::unexpected(StoreError{"not_found", "application user does not exist"});
-    }
-    return *value;
-}
-
-Result<std::vector<ApplicationUser>> InMemoryStore::list_application_users(
-    const std::string& application_id, const std::string& query, int limit) {
-    std::lock_guard lock(mutex_);
-    const std::string needle = lowercase(query);
-    std::vector<ApplicationUser> output;
-    for (auto value = application_users_.rbegin(); value != application_users_.rend(); ++value) {
-        if (value->application_id != application_id) {
-            continue;
-        }
-        if (!needle.empty() && lowercase(value->email).find(needle) == std::string::npos &&
-            lowercase(value->display_name).find(needle) == std::string::npos) {
-            continue;
-        }
-        output.push_back(*value);
-    }
-    limit_rows(output, limit);
-    return output;
-}
-
-Result<ApplicationUser> InMemoryStore::set_application_user_status(
-    const std::string& application_id, const std::string& user_id, const std::string& status) {
-    std::lock_guard lock(mutex_);
-    if (status != "active" && status != "suspended") {
-        return std::unexpected(StoreError{"invalid_input", "application user status is invalid"});
-    }
-    const auto value = std::ranges::find_if(application_users_, [&](const ApplicationUser& item) {
-        return item.application_id == application_id && item.user_id == user_id;
-    });
-    if (value == application_users_.end()) {
-        return std::unexpected(StoreError{"not_found", "application user does not exist"});
-    }
-    value->status = status;
-    value->updated_at = now_iso8601();
-    if (status == "suspended") {
-        const auto application = std::ranges::find_if(
-            applications_, [&](const Application& item) { return item.id == application_id; });
-        for (Session& session : sessions_) {
-            if (application != applications_.end() && session.user_id == user_id &&
-                session.pool_id == application->pool_id && session.revoked_at.empty()) {
-                session.revoked_at = value->updated_at;
-            }
-        }
-    }
-    return *value;
-}
-
-Result<void> InMemoryStore::delete_application_user(const std::string& application_id,
-                                                    const std::string& user_id) {
     std::lock_guard lock(mutex_);
     const auto application = std::ranges::find_if(
         applications_, [&](const Application& item) { return item.id == application_id; });
-    const auto value = std::ranges::find_if(application_users_, [&](const ApplicationUser& item) {
-        return item.application_id == application_id && item.user_id == user_id;
-    });
-    if (application == applications_.end() || value == application_users_.end()) {
-        return std::unexpected(StoreError{"not_found", "application user does not exist"});
+    if (application == applications_.end()) {
+        return std::unexpected(StoreError{"not_found", "application does not exist"});
+    }
+    const std::string now = now_iso8601();
+    int revoked = 0;
+    for (Session& session : sessions_) {
+        if (session.user_id == user_id && session.pool_id == application->pool_id &&
+            session.revoked_at.empty()) {
+            session.revoked_at = now;
+            ++revoked;
+        }
+    }
+    return revoked;
+}
+
+Result<void> InMemoryStore::delete_application_user_credentials(const std::string& application_id,
+                                                                const std::string& user_id) {
+    std::lock_guard lock(mutex_);
+    const auto application = std::ranges::find_if(
+        applications_, [&](const Application& item) { return item.id == application_id; });
+    if (application == applications_.end()) {
+        return std::unexpected(StoreError{"not_found", "application does not exist"});
     }
     const std::string pool_id = application->pool_id;
-    application_users_.erase(value);
     std::erase_if(passwords_, [&](const PasswordCredential& item) {
         return item.user_id == user_id && item.pool_id == pool_id;
     });
@@ -299,72 +232,103 @@ Result<void> InMemoryStore::delete_application_user(const std::string& applicati
     return {};
 }
 
-Result<ApplicationOrganization>
-InMemoryStore::create_application_organization(const NewApplicationOrganization& input) {
+void InMemoryStore::seed_legacy_application_user(ApplicationUser user) {
     std::lock_guard lock(mutex_);
-    if (input.application_id.empty() || input.taap_id.empty() || input.name.empty()) {
-        return std::unexpected(StoreError{
-            "invalid_input", "organization application, TAAP identity, and name are required"});
-    }
-    if (std::ranges::none_of(applications_,
-                             [&](const auto& value) { return value.id == input.application_id; })) {
-        return std::unexpected(StoreError{"not_found", "application does not exist"});
-    }
-    if (std::ranges::any_of(application_organizations_, [&](const auto& value) {
-            return value.application_id == input.application_id &&
-                   (value.taap_id == input.taap_id ||
-                    lowercase(value.name) == lowercase(input.name));
-        })) {
-        return std::unexpected(StoreError{"conflict", "application organization already exists"});
-    }
-    const std::string now = now_iso8601();
-    application_organizations_.push_back(ApplicationOrganization{
-        new_uuid_v4(), input.application_id, input.taap_id, input.name, input.metadata, now, now});
-    return application_organizations_.back();
+    legacy_application_users_.push_back(std::move(user));
 }
 
-Result<std::vector<ApplicationOrganization>>
-InMemoryStore::list_application_organizations(const std::string& application_id, int limit) {
+void InMemoryStore::seed_legacy_application_organization(ApplicationOrganization organization) {
     std::lock_guard lock(mutex_);
-    std::vector<ApplicationOrganization> output;
-    for (auto value = application_organizations_.rbegin();
-         value != application_organizations_.rend();
-         ++value) {
-        if (value->application_id == application_id) {
-            output.push_back(*value);
+    if (organization.id.empty()) {
+        organization.id = new_uuid_v4();
+    }
+    legacy_application_organizations_.push_back(std::move(organization));
+}
+
+Result<void> InMemoryStore::assign_legacy_application_directory() {
+    std::lock_guard lock(mutex_);
+    const auto assign = [&](const std::string& row_id, const std::string& application_id) {
+        const auto application = std::ranges::find_if(
+            applications_, [&](const Application& value) { return value.id == application_id; });
+        if (application == applications_.end()) {
+            return;
         }
+        auto& assigned = legacy_application_directory_assignments_[row_id];
+        if (assigned.first.empty()) {
+            assigned = application->workspace_id.empty()
+                           ? std::pair<std::string, std::string>{"", "needs_selection"}
+                           : std::pair<std::string, std::string>{application->workspace_id,
+                                                                 "application_workspace"};
+        }
+    };
+    for (const ApplicationUser& user : legacy_application_users_) {
+        assign(application_user_row_id(user.application_id, user.user_id), user.application_id);
     }
-    limit_rows(output, limit);
-    return output;
-}
-
-Result<ApplicationOrganization> InMemoryStore::update_application_organization(
-    const std::string& id, const std::string& name, const nlohmann::json& metadata) {
-    std::lock_guard lock(mutex_);
-    const auto value = std::ranges::find_if(application_organizations_,
-                                            [&](const auto& item) { return item.id == id; });
-    if (value == application_organizations_.end()) {
-        return std::unexpected(StoreError{"not_found", "application organization does not exist"});
+    for (const ApplicationOrganization& organization : legacy_application_organizations_) {
+        assign(organization.id, organization.application_id);
     }
-    if (!name.empty()) {
-        value->name = name;
-    }
-    if (!metadata.is_null()) {
-        value->metadata = metadata;
-    }
-    value->updated_at = now_iso8601();
-    return *value;
-}
-
-Result<void> InMemoryStore::delete_application_organization(const std::string& id) {
-    std::lock_guard lock(mutex_);
-    const auto value = std::ranges::find_if(application_organizations_,
-                                            [&](const auto& item) { return item.id == id; });
-    if (value == application_organizations_.end()) {
-        return std::unexpected(StoreError{"not_found", "application organization does not exist"});
-    }
-    application_organizations_.erase(value);
     return {};
+}
+
+Result<std::vector<LegacyApplicationUser>>
+InMemoryStore::legacy_application_users(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<LegacyApplicationUser> rows;
+    for (const ApplicationUser& user : legacy_application_users_) {
+        LegacyApplicationUser row{application_user_row_id(user.application_id, user.user_id),
+                                  user,
+                                  "",
+                                  "",
+                                  "needs_selection"};
+        if (!after_id.empty() && row.id <= after_id) {
+            continue;
+        }
+        const auto application = std::ranges::find_if(applications_, [&](const Application& value) {
+            return value.id == user.application_id;
+        });
+        if (application != applications_.end()) {
+            row.customer_id = application->customer_id;
+        }
+        if (const auto found = legacy_application_directory_assignments_.find(row.id);
+            found != legacy_application_directory_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
+    }
+    std::ranges::sort(rows, {}, &LegacyApplicationUser::id);
+    if (rows.size() > static_cast<std::size_t>(std::clamp(limit, 1, 5000))) {
+        rows.resize(static_cast<std::size_t>(std::clamp(limit, 1, 5000)));
+    }
+    return rows;
+}
+
+Result<std::vector<LegacyApplicationOrganization>>
+InMemoryStore::legacy_application_organizations(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<ApplicationOrganization> ordered = legacy_application_organizations_;
+    std::ranges::sort(ordered, {}, &ApplicationOrganization::id);
+    std::vector<LegacyApplicationOrganization> rows;
+    for (const ApplicationOrganization& organization : ordered) {
+        if ((!after_id.empty() && organization.id <= after_id) ||
+            static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            continue;
+        }
+        LegacyApplicationOrganization row{organization, "", "", "needs_selection"};
+        const auto application = std::ranges::find_if(applications_, [&](const Application& value) {
+            return value.id == organization.application_id;
+        });
+        if (application != applications_.end()) {
+            row.customer_id = application->customer_id;
+        }
+        if (const auto found = legacy_application_directory_assignments_.find(organization.id);
+            found != legacy_application_directory_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
 }
 
 Result<ApplicationWebhook>

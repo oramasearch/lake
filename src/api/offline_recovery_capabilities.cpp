@@ -1,5 +1,7 @@
 #include "lake/api/capabilities.hpp"
 
+#include "lake/api/apps.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -128,12 +130,16 @@ audit::IdentityOptions identity_options(const ApiContext& context) {
     return {.configured_seed = context.identity_seed, .instance_kek = context.instance_kek};
 }
 
-ApiResult issued_result(control::Result<control::IssuedSession> issued) {
-    if (!issued) {
-        return from_store_error(issued.error());
-    }
-    return ApiResult::success(
-        {{"session", control::to_json(issued->session)}, {"secret", issued->secret}});
+ApiResult answer(std::expected<ApiResult, liquid::error> completed) {
+    return completed ? std::move(*completed)
+                     : ApiResult::failure("store_error", completed.error().message);
+}
+
+// A recovered session. In an application's pool it is returned only to an active user of the
+// application, read in the application's workspace (lake#353); otherwise it is revoked.
+liquid::runtime::task<ApiResult> issued_result(control::Result<control::IssuedSession> issued,
+                                               ApiContext& context) {
+    co_return answer(co_await checked_application_session(std::move(issued), context));
 }
 
 void register_offline_grant_issue(Registry& registry) {
@@ -291,32 +297,36 @@ void register_cached_read_check(Registry& registry) {
 }
 
 void register_recovery_entry_points(Registry& registry) {
-    registry.add(
-        Capability{.name = "recover_with_code",
-                   .title = "Recover with MFA code",
-                   .description = "Consume one MFA recovery code and issue a browser session.",
-                   .input_schema = {{"type", "object"},
-                                    {"properties",
-                                     {{"pool_id", {{"type", "string"}}},
-                                      {"email", {{"type", "string"}}},
-                                      {"code", {{"type", "string"}}},
-                                      {"device_name", {{"type", "string"}}}}},
-                                    {"required", json::array({"email", "code"})},
-                                    {"additionalProperties", false}},
-                   .output_schema = object_schema(),
-                   .kind = CapabilityKind::Action,
-                   .requires_auth = false,
-                   .object = "authentication",
-                   .action = "write",
-                   .resolve_object = global_object,
-                   .handler = [](const json& input, ApiContext& context) {
-                       return context.store ? issued_result(context.store->recover_with_code(
-                                                  input.value("pool_id", "lake"),
-                                                  input.at("email"),
-                                                  input.at("code"),
-                                                  input.value("device_name", "recovered device")))
-                                            : no_store();
-                   }});
+    registry.add(Capability{
+        .name = "recover_with_code",
+        .title = "Recover with MFA code",
+        .description = "Consume one MFA recovery code and issue a browser session.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"pool_id", {{"type", "string"}}},
+                           {"email", {{"type", "string"}}},
+                           {"code", {{"type", "string"}}},
+                           {"device_name", {{"type", "string"}}}}},
+                         {"required", json::array({"email", "code"})},
+                         {"additionalProperties", false}},
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Action,
+        .requires_auth = false,
+        .object = "authentication",
+        .action = "write",
+        .resolve_object = global_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store) {
+                co_return no_store();
+            }
+            co_return answer(co_await issued_result(
+                context.store->recover_with_code(input.value("pool_id", "lake"),
+                                                 input.at("email"),
+                                                 input.at("code"),
+                                                 input.value("device_name", "recovered device")),
+                context));
+        }});
     registry.add(Capability{
         .name = "begin_email_recovery",
         .title = "Begin email recovery",
@@ -410,12 +420,16 @@ void register_recovery_completion_and_delivery(Registry& registry) {
         .object = "authentication",
         .action = "write",
         .resolve_object = global_object,
-        .handler = [](const json& input, ApiContext& context) {
-            return context.store ? issued_result(context.store->complete_recovery(
-                                       input.at("recovery_id"),
-                                       input.at("token"),
-                                       input.value("device_name", "recovered device")))
-                                 : no_store();
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store) {
+                co_return no_store();
+            }
+            co_return answer(co_await issued_result(
+                context.store->complete_recovery(input.at("recovery_id"),
+                                                 input.at("token"),
+                                                 input.value("device_name", "recovered device")),
+                context));
         }});
 }
 

@@ -7185,31 +7185,44 @@ struct ApiServer::Impl {
             "no-store");
     }
 
+    // An application's users and organizations are read from the workspace Zetta of the
+    // application's workspace (lake#353, lake#354): the capabilities take that workspace.
     boost::http::route_task serve_application_users_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
         const std::string id = query_value(route, "id");
         const ApiResult application = registry.call("get_application", {{"id", id}}, context);
-        const ApiResult rows = registry.call(
-            "list_application_users", {{"application_id", id}, {"limit", 500}}, context);
         if (!application.ok) {
-            return serve_page_error(route, application);
+            co_return co_await serve_page_error(route, application);
         }
+        const control::Application parsed = application_from_json(application.value);
+        const ApiResult rows = unwrap(co_await registry.call_async(
+            "list_application_users",
+            {{"application_id", id}, {"workspace_id", parsed.workspace_id}, {"limit", 500}},
+            context));
         if (!rows.ok) {
-            return serve_page_error(route, rows);
+            co_return co_await serve_page_error(route, rows);
         }
         std::vector<control::ApplicationUser> users;
         for (const auto& value : rows.value.at("items")) {
             users.push_back(application_user_from_json(value));
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_application_users(
-                             application_from_json(application.value), users, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_application_users(parsed, users, viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
+    }
+
+    // The workspace of the application a form names, for the capabilities that need it.
+    std::string application_workspace(const std::string& application_id) {
+        if (!options.store) {
+            return {};
+        }
+        const auto application = options.store->get_application(application_id);
+        return application ? application->workspace_id : std::string();
     }
 
     boost::http::route_task serve_application_user_suspend(boost::http::route_params& route) {
@@ -7220,10 +7233,12 @@ struct ApiServer::Impl {
         }
         ApiContext context = context_for(route);
         const std::string application_id = form_field(body, "application_id");
-        const ApiResult result = registry.call(
-            "suspend_application_user",
-            {{"application_id", application_id}, {"user_id", form_field(body, "user_id")}},
-            context);
+        const ApiResult result = unwrap(
+            co_await registry.call_async("suspend_application_user",
+                                         {{"application_id", application_id},
+                                          {"workspace_id", application_workspace(application_id)},
+                                          {"user_id", form_field(body, "user_id")}},
+                                         context));
         if (!result.ok) {
             co_return co_await serve_page_error(route, result);
         }
@@ -7233,29 +7248,31 @@ struct ApiServer::Impl {
     boost::http::route_task serve_application_organizations_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
         const std::string id = query_value(route, "id");
         const ApiResult application = registry.call("get_application", {{"id", id}}, context);
-        const ApiResult rows = registry.call(
-            "list_application_organizations", {{"application_id", id}, {"limit", 500}}, context);
         if (!application.ok) {
-            return serve_page_error(route, application);
+            co_return co_await serve_page_error(route, application);
         }
+        const control::Application parsed = application_from_json(application.value);
+        const ApiResult rows = unwrap(co_await registry.call_async(
+            "list_application_organizations",
+            {{"application_id", id}, {"workspace_id", parsed.workspace_id}, {"limit", 500}},
+            context));
         if (!rows.ok) {
-            return serve_page_error(route, rows);
+            co_return co_await serve_page_error(route, rows);
         }
         std::vector<control::ApplicationOrganization> organizations;
         for (const auto& value : rows.value.at("items")) {
             organizations.push_back(application_organization_from_json(value));
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_application_organizations(application_from_json(application.value),
-                                                          organizations,
-                                                          viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_application_organizations(parsed, organizations, viewer_for(context)),
+            "text/html; charset=utf-8",
+            "no-store");
     }
 
     boost::http::route_task
@@ -7267,11 +7284,13 @@ struct ApiServer::Impl {
         }
         ApiContext context = context_for(route);
         const std::string application_id = form_field(body, "application_id");
-        const ApiResult result = registry.call("create_application_organization",
-                                               {{"application_id", application_id},
-                                                {"name", form_field(body, "name")},
-                                                {"taap_id", form_field(body, "taap_id")}},
-                                               context);
+        const ApiResult result = unwrap(
+            co_await registry.call_async("create_application_organization",
+                                         {{"application_id", application_id},
+                                          {"workspace_id", application_workspace(application_id)},
+                                          {"name", form_field(body, "name")},
+                                          {"taap_id", form_field(body, "taap_id")}},
+                                         context));
         if (!result.ok) {
             co_return co_await serve_page_error(route, result);
         }
@@ -7287,11 +7306,12 @@ struct ApiServer::Impl {
         }
         ApiContext context = context_for(route);
         const std::string application_id = form_field(body, "application_id");
-        const ApiResult result =
-            registry.call("delete_application_organization",
-                          {{"application_id", application_id},
-                           {"organization_id", form_field(body, "organization_id")}},
-                          context);
+        const ApiResult result = unwrap(
+            co_await registry.call_async("delete_application_organization",
+                                         {{"application_id", application_id},
+                                          {"workspace_id", application_workspace(application_id)},
+                                          {"organization_id", form_field(body, "organization_id")}},
+                                         context));
         if (!result.ok) {
             co_return co_await serve_page_error(route, result);
         }
@@ -7415,7 +7435,8 @@ struct ApiServer::Impl {
         if (capability == "verify_mfa") {
             input["code"] = form_field(body, "code");
         }
-        const ApiResult result = registry.call(std::string(capability), input, context);
+        const ApiResult result =
+            unwrap(co_await registry.call_async(std::string(capability), input, context));
         if (!result.ok && result.error.code == "mfa_required") {
             co_return co_await redirect(route, "/apps/" + application->id + "/mfa");
         }
@@ -7458,7 +7479,8 @@ struct ApiServer::Impl {
         }
         ApiContext context = context_for(route);
         context.public_host = request_host(route);
-        const ApiResult result = registry.call(std::string(capability), input, context);
+        const ApiResult result =
+            unwrap(co_await registry.call_async(std::string(capability), input, context));
         const std::string body = rest_envelope(result).dump();
         route.status(http::int_to_status(static_cast<unsigned>(rest_status(result))));
         route.res.set(http::field::content_type, "application/json; charset=utf-8");
@@ -7749,7 +7771,8 @@ struct ApiServer::Impl {
         } else if (!expiry.empty()) {
             input["expires_in_seconds"] = std::atoi(expiry.c_str());
         }
-        const ApiResult result = registry.call("create_token", input, context);
+        const ApiResult result =
+            unwrap(co_await registry.call_async("create_token", input, context));
         McpPage page{.origin = public_origin(route), .groups = agent_docs::tool_groups(registry)};
         if (result.ok) {
             page.key = result.value.value("secret", "");
@@ -8002,14 +8025,14 @@ struct ApiServer::Impl {
             co_return http::route_error(read_error);
         }
         ApiContext context = context_for(route);
-        const ApiResult result =
-            registry.call("sign_up_password",
-                          {{"email", form_field(body, "email")},
-                           {"display_name", form_field(body, "display_name")},
-                           {"password", form_field(body, "password")},
-                           {"device_name", form_field(body, "device_name")},
-                           {"identity_document", form_field(body, "identity_document")}},
-                          context);
+        const ApiResult result = unwrap(co_await registry.call_async(
+            "sign_up_password",
+            {{"email", form_field(body, "email")},
+             {"display_name", form_field(body, "display_name")},
+             {"password", form_field(body, "password")},
+             {"device_name", form_field(body, "device_name")},
+             {"identity_document", form_field(body, "identity_document")}},
+            context));
         if (!result.ok) {
             co_return co_await send_text(route,
                                          http::int_to_status(rest_status(result)),
@@ -8030,11 +8053,12 @@ struct ApiServer::Impl {
             co_return http::route_error(read_error);
         }
         ApiContext context = context_for(route);
-        const ApiResult result = registry.call("sign_in_password",
-                                               {{"email", form_field(body, "email")},
-                                                {"password", form_field(body, "password")},
-                                                {"device_name", form_field(body, "device_name")}},
-                                               context);
+        const ApiResult result =
+            unwrap(co_await registry.call_async("sign_in_password",
+                                                {{"email", form_field(body, "email")},
+                                                 {"password", form_field(body, "password")},
+                                                 {"device_name", form_field(body, "device_name")}},
+                                                context));
         if (!result.ok && result.error.code == "mfa_required") {
             co_return co_await redirect(route, "/mfa");
         }
@@ -8059,12 +8083,13 @@ struct ApiServer::Impl {
             co_return http::route_error(read_error);
         }
         ApiContext context = context_for(route);
-        const ApiResult result = registry.call("verify_mfa",
-                                               {{"email", form_field(body, "email")},
-                                                {"password", form_field(body, "password")},
-                                                {"code", form_field(body, "code")},
-                                                {"device_name", form_field(body, "device_name")}},
-                                               context);
+        const ApiResult result =
+            unwrap(co_await registry.call_async("verify_mfa",
+                                                {{"email", form_field(body, "email")},
+                                                 {"password", form_field(body, "password")},
+                                                 {"code", form_field(body, "code")},
+                                                 {"device_name", form_field(body, "device_name")}},
+                                                context));
         if (!result.ok) {
             co_return co_await send_text(
                 route,
@@ -8088,7 +8113,8 @@ struct ApiServer::Impl {
             co_return http::route_error(read_error);
         }
         ApiContext context = context_for(route);
-        const ApiResult result = registry.call("enroll_mfa", nlohmann::json::object(), context);
+        const ApiResult result =
+            unwrap(co_await registry.call_async("enroll_mfa", nlohmann::json::object(), context));
         if (!result.ok) {
             co_return co_await send_text(
                 route,
@@ -8120,8 +8146,8 @@ struct ApiServer::Impl {
             co_return http::route_error(read_error);
         }
         ApiContext context = context_for(route);
-        const ApiResult result =
-            registry.call("disable_mfa", {{"code", form_field(body, "code")}}, context);
+        const ApiResult result = unwrap(co_await registry.call_async(
+            "disable_mfa", {{"code", form_field(body, "code")}}, context));
         if (!result.ok) {
             co_return co_await send_text(
                 route,
@@ -8218,7 +8244,8 @@ struct ApiServer::Impl {
         if (const std::string expiry = form_field(body, "expires_in_seconds"); !expiry.empty()) {
             input["expires_in_seconds"] = std::atoi(expiry.c_str());
         }
-        const ApiResult result = registry.call("create_token", input, context);
+        const ApiResult result =
+            unwrap(co_await registry.call_async("create_token", input, context));
         std::vector<control::Session> sessions;
         if (context.authorized && !context.operator_credential) {
             if (auto rows = options.store->list_sessions(context.acting_user_id, context.pool_id)) {
@@ -8364,8 +8391,8 @@ struct ApiServer::Impl {
             context.acting_user_id = principal->user_id;
             context.acting_identity = principal->taap_id;
         }
-        const ApiResult session_result =
-            application_session_result(std::move(issued), context, "session.started");
+        const ApiResult session_result = unwrap(
+            co_await application_session_result(std::move(issued), context, "session.started"));
         if (!session_result.ok) {
             co_return co_await back(session_result.error.message);
         }
@@ -8520,8 +8547,8 @@ struct ApiServer::Impl {
             context.acting_identity = principal->taap_id;
         }
         const std::string issued_pool = issued->session.pool_id;
-        const ApiResult application_result =
-            application_session_result(std::move(issued), context, "session.started");
+        const ApiResult application_result = unwrap(
+            co_await application_session_result(std::move(issued), context, "session.started"));
         if (!application_result.ok) {
             co_return co_await oauth_error(
                 route, http::status::service_unavailable, application_result.error.message);

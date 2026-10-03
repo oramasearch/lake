@@ -374,19 +374,25 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
               {"identity_document", signed_identity_document("application-" + suffix)}});
     ASSERT_TRUE(sign_up.ok) << sign_up.error.message;
     EXPECT_TRUE(sign_up.value.contains("access_token"));
-    const auto users = call("list_application_users", {{"application_id", application_id}});
+    const auto users = call("list_application_users",
+                            {{"application_id", application_id}, {"workspace_id", workspace_id}});
     ASSERT_TRUE(users.ok) << users.error.message;
     ASSERT_EQ(users.value.at("items").size(), 1);
     const std::string user_id = users.value.at("items").at(0).at("user_id");
-    EXPECT_TRUE(
-        call("export_application_user", {{"application_id", application_id}, {"user_id", user_id}})
-            .ok);
-    EXPECT_TRUE(
-        call("issue_application_jwt", {{"application_id", application_id}, {"user_id", user_id}})
-            .ok);
+    EXPECT_TRUE(call("export_application_user",
+                     {{"application_id", application_id},
+                      {"workspace_id", workspace_id},
+                      {"user_id", user_id}})
+                    .ok);
+    EXPECT_TRUE(call("issue_application_jwt",
+                     {{"application_id", application_id},
+                      {"workspace_id", workspace_id},
+                      {"user_id", user_id}})
+                    .ok);
 
     const auto organization = call("create_application_organization",
                                    {{"application_id", application_id},
+                                    {"workspace_id", workspace_id},
                                     {"taap_id", "taap:1:ed25519:postgres-app-org-" + suffix},
                                     {"name", "Postgres organization"},
                                     {"metadata", {{"plan", "test"}}}});
@@ -400,9 +406,12 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
     const auto subscribed = events.value.at("items").front();
     EXPECT_EQ(subscribed.at("event"), "organization.created");
 
-    EXPECT_TRUE(call("list_application_organizations", {{"application_id", application_id}}).ok);
+    EXPECT_TRUE(call("list_application_organizations",
+                     {{"application_id", application_id}, {"workspace_id", workspace_id}})
+                    .ok);
     EXPECT_TRUE(call("update_application_organization",
                      {{"application_id", application_id},
+                      {"workspace_id", workspace_id},
                       {"organization_id", organization_id},
                       {"name", "Updated organization"},
                       {"metadata", {{"plan", "updated"}}}})
@@ -437,19 +446,25 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
                   0);
     }
     EXPECT_TRUE(call("delete_application_organization",
-                     {{"application_id", application_id}, {"organization_id", organization_id}})
+                     {{"application_id", application_id},
+                      {"workspace_id", workspace_id},
+                      {"organization_id", organization_id}})
                     .ok);
-    EXPECT_TRUE(
-        call("suspend_application_user", {{"application_id", application_id}, {"user_id", user_id}})
-            .ok);
+    EXPECT_TRUE(call("suspend_application_user",
+                     {{"application_id", application_id},
+                      {"workspace_id", workspace_id},
+                      {"user_id", user_id}})
+                    .ok);
     EXPECT_FALSE(call("sign_in_password",
                       {{"pool_id", pool_id},
                        {"email", "postgres-app-user-" + suffix + "@example.test"},
                        {"password", "correct horse battery staple"}})
                      .ok);
-    EXPECT_TRUE(
-        call("delete_application_user", {{"application_id", application_id}, {"user_id", user_id}})
-            .ok);
+    EXPECT_TRUE(call("delete_application_user",
+                     {{"application_id", application_id},
+                      {"workspace_id", workspace_id},
+                      {"user_id", user_id}})
+                    .ok);
 }
 
 TEST(PostgresIdentity, SessionsTokensAndDeviceRevocation) {
@@ -803,11 +818,11 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
 
     const auto enrolled = store->enroll_mfa(target_principal->user_id, "lake");
     ASSERT_TRUE(enrolled) << enrolled.error().message;
-    const lake::api::ApiResult code =
-        registry.call("recover_with_code",
-                      {{"email", "offline-target-" + suffix + "@example.test"},
-                       {"code", enrolled->recovery_codes.front()}},
-                      anonymous);
+    const lake::api::ApiResult code = *liquid::runtime::block_on(
+        registry.call_async("recover_with_code",
+                            {{"email", "offline-target-" + suffix + "@example.test"},
+                             {"code", enrolled->recovery_codes.front()}},
+                            anonymous));
     ASSERT_TRUE(code.ok) << code.error.message;
     EXPECT_TRUE(store->context_for(code.value["secret"]));
 
@@ -827,10 +842,10 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
     const auto email_delivery =
         claim_recovery_delivery(registry, operator_context, email.value["id"]);
     ASSERT_TRUE(email_delivery.ok) << email_delivery.error.message;
-    const lake::api::ApiResult email_restored = registry.call(
+    const lake::api::ApiResult email_restored = *liquid::runtime::block_on(registry.call_async(
         "complete_recovery",
         {{"recovery_id", email.value["id"]}, {"token", email_delivery.value["token"]}},
-        anonymous);
+        anonymous));
     ASSERT_TRUE(email_restored.ok) << email_restored.error.message;
     EXPECT_TRUE(store->context_for(email_restored.value["secret"]));
 
@@ -870,10 +885,10 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
     const auto admin_delivery =
         claim_recovery_delivery(registry, operator_context, admin_started.value["id"]);
     ASSERT_TRUE(admin_delivery.ok) << admin_delivery.error.message;
-    const lake::api::ApiResult admin_restored = registry.call(
+    const lake::api::ApiResult admin_restored = *liquid::runtime::block_on(registry.call_async(
         "complete_recovery",
         {{"recovery_id", admin_started.value["id"]}, {"token", admin_delivery.value["token"]}},
-        anonymous);
+        anonymous));
     ASSERT_TRUE(admin_restored.ok) << admin_restored.error.message;
     EXPECT_TRUE(store->context_for(admin_restored.value["secret"]));
     EXPECT_TRUE(

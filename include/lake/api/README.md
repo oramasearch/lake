@@ -88,3 +88,9 @@ page fills a slow panel from; `web_ui_your_agents` and `web_ui_new_index` render
 evaluation knows the repository's workspace. `RepositoryHomeData::workspace` and
 `web_ui_repositories`' workspaces let the repository pages name the owning workspace. See
 [repositories.md](../../../docs/ui/repositories.md#the-owning-workspace).
+
+`apps.hpp` declares the asynchronous application identity helpers: `application_session_result`
+and `checked_application_session` check a session issued in an application's pool against the
+user's record in the application's workspace before returning it, and `sign_up_password_session`
+claims a pool user's email there before the account exists (lake#353). See
+[apps.md](../../../docs/api/apps.md#where-users-and-organizations-live-lake353-lake354).

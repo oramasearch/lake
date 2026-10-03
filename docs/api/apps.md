@@ -11,7 +11,8 @@ own `lake` pool. A credential from one pool is never considered by another pool.
 The registration records a display name, exact allowed origins, redirect URIs, an optional custom
 sign-in host, a JSON theme, and the **workspace** of the space the application belongs to
 (`workspace_id`, required and never changed). That workspace's Zetta holds the application's
-lifecycle events and webhook delivery attempts ([Lifecycle webhooks](#lifecycle-webhooks)). Browser requests carrying an `Origin` header must come from the
+users and organizations ([Where users and organizations live](#where-users-and-organizations-live-lake353-lake354))
+and its lifecycle events and webhook delivery attempts ([Lifecycle webhooks](#lifecycle-webhooks)). Browser requests carrying an `Origin` header must come from the
 hosted page itself or an allowed origin. Redirects use only a registered URI. The custom host is a
 DNS and ingress concern: route that host to lake with a valid certificate, then lake selects the
 application by `Host`.
@@ -29,13 +30,13 @@ denial, and failure.
 | `update_application_theme` | application `admin` | updated registration |
 | `rotate_application_signing_key` | application `admin` | new key ID and version |
 | `application_jwks` | public | all retained public verification keys |
-| `issue_application_jwt` | application `write` | short-lived user access token |
+| `issue_application_jwt` | application `write`; `workspace_id` must be the application's | short-lived user access token |
 | `begin_application_authorization` | application `write` | one-use code, state, and exact registered redirect for the signed-in lake user |
 | `exchange_application_authorization_code` | public client | EdDSA access and ID tokens after exact redirect and PKCE S256 verification |
-| `list_application_users`, `export_application_user` | application `read` | pool user profiles and status |
-| `suspend_application_user`, `delete_application_user` | application `admin` | suspended profile or deletion confirmation |
-| `list_application_organizations` | application `read` | application-owned organizations |
-| `create_application_organization`, `update_application_organization`, `delete_application_organization` | application `admin` | organization lifecycle result |
+| `list_application_users`, `export_application_user` | application `read`; `workspace_id` must be the application's | pool user profiles and status, newest first |
+| `suspend_application_user`, `delete_application_user` | application `admin`; `workspace_id` must be the application's | suspended profile or deletion confirmation |
+| `list_application_organizations` | application `read`; `workspace_id` must be the application's | application-owned organizations, newest first |
+| `create_application_organization`, `update_application_organization`, `delete_application_organization` | application `admin`; `workspace_id` must be the application's | organization lifecycle result; a TAAP identity or name the application already has is `conflict` |
 | `create_application_webhook` | application `admin` | webhook registration and its secret, returned once |
 | `list_application_webhooks` | application `read` | secret-free registrations |
 | `list_application_webhook_events` | application `read`; `workspace_id` must be the application's | events, newest first, each with its delivery attempts |
@@ -48,6 +49,61 @@ session bearer, bounded by issuer scopes, expiry and ancestry; it does not also 
 application JWT. Its `session.started` lifecycle event is retained. The derivation policy and REST/MCP
 PostgreSQL coverage are in [identity.md](identity.md#token-derivation-and-revocation). Suspending a user revokes that user's sessions in this pool immediately;
 deleting one removes this pool's credentials and sessions. Neither action touches another pool.
+
+### Where users and organizations live (lake#353, lake#354)
+
+An application's users and organizations are records in the workspace Zetta of the application's
+workspace: the sealed collections `lake_auth_app_users` and `lake_auth_app_organizations`
+([workspace-records.md](../architecture/workspace-records.md)). Lake's PostgreSQL keeps neither,
+and nothing falls back to it, to another workspace or to the lake Zetta. What stays in PostgreSQL
+is lake's own account of the person (the `users` row, the pool's credentials and sessions), which
+`identity_documents`, `credentials` and `sessions` move separately (lake#320, lake#322, lake#323).
+
+- **A user record** holds the application, the account id, its TAAP identity, email, display name,
+  `status` (`active` or `suspended`) and whether it signed up in the application's own pool. It is
+  keyed by the blind index of `application, user`, so a lake user who authorized two applications of
+  one workspace has one record in each. Listing an application's users is one `list_records`; a
+  search reads them all and filters email and display name, as the `ILIKE` did.
+- **Unique within an application.** A pool user's email (compared in lowercase, as the pool's
+  sign-in compares it) and an organization's TAAP identity and name are each a claim record in the
+  same collection, keyed by the blind index of the value and written with `if_absent`. The claim
+  names its holder, so two sign-ups with one email, or two organizations with one name, cannot both
+  succeed: the second is `conflict`. A claim younger than two minutes always holds, because its
+  sign-up may still be in flight; an older one whose holder does not exist (an account lake never
+  created, an organization with no record) was abandoned and is taken over with `if_revision`.
+- **Sign-up.** A password sign-up in an application's pool claims the email for an account id chosen
+  first, then creates the account with that id in lake's store, then writes the user record. A
+  failed account creation releases the claim. If lake stops after the account exists but before the
+  record is written, the next sign-in completes it, because the claim names the account. A first
+  OAuth sign-in in the pool creates the account in lake's store and then claims its email (when it
+  has one) and writes the record.
+- **Every session issued in an application's pool is checked there.** Password, TOTP, passkey,
+  TAAP, OAuth, recovery and token sessions in an application's pool are returned only after the
+  user's record is read in the application's workspace and is `active`; otherwise the new session
+  is revoked and the caller receives `unauthorized` (`application user is suspended`, or the
+  account is not a user of the application), or `workspace_not_ready`. Resolving a session on a
+  later request no longer reads the user's status: suspension writes the status first and then
+  revokes the pool's sessions, and a sign-in reads the status after its session exists, so a
+  session issued while a suspension lands is revoked by one or the other. A suspended user with TOTP
+  enrolled is told `mfa_required` and refused at the TOTP step, where the suspended check used to
+  come first.
+- **Asynchronous callers.** The sign-in, sign-up, MFA, passkey, recovery, SSO and token
+  capabilities, and every user and organization capability, are asynchronous: they await the
+  workspace instead of blocking a runtime thread (`block_on`), as lake#341 did for push. REST, MCP
+  and the hosted pages call them through `Registry::call_async`; a synchronous `Registry::call`
+  answers `capability requires asynchronous dispatch`.
+- **Reading and writing.** The user and organization capabilities take the application's
+  `workspace_id`. A missing, malformed, unknown, foreign or other workspace of the space is
+  `invalid_input` at `/workspace_id`; the pages pass the application's own. An organization
+  rename claims the new name first, writes the organization over the revision it read and then
+  releases the old name; a concurrent change is `conflict` and releases the new claim.
+- **Workspace not ready, or deleted.** A workspace that is not ready refuses every read, write and
+  sign-in of its applications with `workspace_not_ready`. Deleting a workspace deletes its Zetta
+  with the users and organizations of its applications, whose sign-ins then fail.
+- **Cutover.** Users from before the move are in the workspace only once the operator's one-shot copy
+  (`copy_workspace_records`, migration `0055_application_user_workspaces`) has run; until then their
+  sign-ins are refused as not users of the application. The runbook is in
+  [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-application-users-and-organizations-dev-cluster).
 
 ## Hosted pages and HTTP routes
 
@@ -197,7 +253,7 @@ page is [the Ship Apps UI](../ui/apps.md).
 cmake --build build
 LAKE_TEST_DB_URI=postgresql://lake:password@127.0.0.1:5432/lake_test \
   ctest --test-dir build --output-on-failure \
-    -R 'ApplicationAuth|ApplicationHttp|PostgresApplications|TheOneShotCopyMovesApplication'
+    -R 'ApplicationAuth|ApplicationHttp|PostgresApplications|PostgresApplicationUsers|TheOneShotCopyMovesApplication'
 ```
 
 `ApplicationAuth` verifies a real Ed25519 JWT against the returned JWKS and checks its audience,
@@ -210,6 +266,16 @@ workspaces in one space, missing, malformed, unknown and foreign `workspace_id`,
 list but not retry, a workspace that is not ready, and workspace deletion.
 `ApplicationAuth.AnAttemptIsClaimedOnceAndSentOnce` proves a claimed attempt is not sent by a
 second caller and that an abandoned claim does not block retries.
+`ApplicationAuth.UsersAndOrganizationsLiveInTheApplicationsWorkspace` covers users and
+organizations in two spaces and two workspaces of one space: sealed records and claims only at the
+application's own endpoint, a second sign-up with the same email (in any case) and a second
+organization with the same TAAP identity or name refused, a fresh claim holding and an abandoned one
+taken over, a sign-up completed at the next sign-in, an account that is not a user refused with no
+live session left, suspension, deletion freeing the email, renames and deletions freeing names,
+missing, malformed, unknown and foreign `workspace_id`, least privilege, a workspace that is not
+ready, and workspace deletion. `WorkspaceRecordStores.TheOneShotCopyMovesApplicationUsersAndOrganizations`
+covers their copy in both stores and `PostgresApplicationUsers.MigrationRecordsEachRowsOwnerForTheCopy`
+migration `0055`.
 `PostgresApplications` exercises the registry capabilities against migration `0016_auth_apps` and
 the routing trigger of `0049`. `PostgresApplicationWebhooks.MigrationRecordsEachEventsOwnerForTheCopy`
 covers migration `0049`, and `WorkspaceRecordStores.TheOneShotCopyMovesApplicationEventsAndTheirDeliveries`

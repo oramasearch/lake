@@ -221,6 +221,15 @@ through `liquid::runtime::block_on`, and `list_application_webhook_events` and
 `retry_application_webhook` are asynchronous and take the application's `workspace_id`.
 `copy_workspace_records` also copies `auth_app_webhook_events` and `auth_app_webhook_deliveries`.
 The applications page registers into a chosen workspace, and the event log page reads it.
+An application's users and organizations live in the same workspace (lake#353, lake#354):
+`app_capabilities.cpp` reads and writes them there, the user and organization capabilities take the
+application's `workspace_id`, and `application_session_result` checks every session issued in an
+application's pool against the user's record before returning it, revoking it otherwise.
+`sign_up_password_session` claims a pool user's email before the account exists. These, the
+identity capabilities in `capabilities.cpp` (sign-up, sign-in, TOTP, passkey, SSO, MFA, tokens) and
+recovery in `offline_recovery_capabilities.cpp` are asynchronous, with no `block_on`; the hosted
+pages call them through `call_async`. `copy_workspace_records` also copies `auth_app_users` and
+`auth_app_organizations`.
 Repositories belong to one workspace (lake#315, part 1). `create_repository`,
 `import_repository` (`export_capabilities.cpp`) and `import_github_repository` require
 `workspace_id`, checked by `repository_workspace` (declared in `capabilities.hpp`);

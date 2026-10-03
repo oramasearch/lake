@@ -2463,7 +2463,16 @@ Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& inp
         return std::unexpected(StoreError{"store_error", "could not create identity"});
     const std::string identity = "taap:1:ed25519:" + identity_secret;
     const std::string now = now_iso8601();
-    const User user{new_uuid_v4(), identity, input.email, input.display_name, now, now};
+    if (!input.user_id.empty() &&
+        std::ranges::any_of(users_, [&](const User& value) { return value.id == input.user_id; })) {
+        return std::unexpected(StoreError{"conflict", "user already exists"});
+    }
+    const User user{input.user_id.empty() ? new_uuid_v4() : input.user_id,
+                    identity,
+                    input.email,
+                    input.display_name,
+                    now,
+                    now};
     const std::string password_hash = identity_crypto::hash_secret(input.password);
     if (password_hash.empty())
         return std::unexpected(StoreError{"store_error", "could not protect password"});
@@ -2485,16 +2494,6 @@ Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& inp
     users_.push_back(user);
     passwords_.push_back(
         PasswordCredential{users_.back().id, pool, input.email, password_hash, ""});
-    if (application != applications_.end()) {
-        application_users_.push_back(ApplicationUser{application->id,
-                                                     users_.back().id,
-                                                     users_.back().taap_id,
-                                                     users_.back().email,
-                                                     users_.back().display_name,
-                                                     "active",
-                                                     now,
-                                                     now});
-    }
     if (pool == "lake") {
         customers_.push_back(Customer{new_uuid_v4(), "individual", user.id, "", handle, now, now});
         policy_objects_.push_back(
@@ -2511,6 +2510,7 @@ Result<IssuedSession> InMemoryStore::sign_up_password(const NewPasswordUser& inp
     devices_.push_back(devices.front());
     sessions_.push_back(sessions.front());
     issued.session.reason.clear();
+    issued.created_user = true;
     return issued;
 }
 
@@ -2520,16 +2520,6 @@ Result<IssuedSession> InMemoryStore::sign_in_password(const PasswordSignIn& inpu
     for (const auto& credential : passwords_) {
         if (credential.pool_id != pool || lower(credential.email) != lower(input.email))
             continue;
-        const auto app_user = std::ranges::find_if(application_users_, [&](const auto& value) {
-            const auto application = std::ranges::find_if(applications_, [&](const auto& app) {
-                return app.id == value.application_id && app.pool_id == pool;
-            });
-            return application != applications_.end() && value.user_id == credential.user_id;
-        });
-        if (pool != "lake" &&
-            (app_user == application_users_.end() || app_user->status != "active")) {
-            return std::unexpected(StoreError{"unauthorized", "application user is suspended"});
-        }
         if (!identity_crypto::verify_secret(credential.password, input.password))
             return std::unexpected(StoreError{"unauthorized", "invalid email or password"});
         if (!credential.totp_secret.empty())
@@ -2636,16 +2626,6 @@ Result<IssuedSession> InMemoryStore::sign_in_totp(const PasswordSignIn& input) {
     for (auto& credential : passwords_) {
         if (credential.pool_id != pool || lower(credential.email) != lower(input.email))
             continue;
-        const auto app_user = std::ranges::find_if(application_users_, [&](const auto& value) {
-            const auto application = std::ranges::find_if(applications_, [&](const auto& app) {
-                return app.id == value.application_id && app.pool_id == pool;
-            });
-            return application != applications_.end() && value.user_id == credential.user_id;
-        });
-        if (pool != "lake" &&
-            (app_user == application_users_.end() || app_user->status != "active")) {
-            return std::unexpected(StoreError{"unauthorized", "application user is suspended"});
-        }
         const bool valid_totp =
             identity_crypto::verify_totp(credential.totp_secret, input.totp_code);
         auto recovery =
@@ -2805,16 +2785,6 @@ Result<IssuedSession> InMemoryStore::sign_in_passkey(const PasskeyAssertion& inp
             credential.credential_id != input.credential_id || !credential.revoked_at.empty()) {
             continue;
         }
-        const auto app_user = std::ranges::find_if(application_users_, [&](const auto& value) {
-            const auto application = std::ranges::find_if(applications_, [&](const auto& app) {
-                return app.id == value.application_id && app.pool_id == input.pool_id;
-            });
-            return application != applications_.end() && value.user_id == credential.user_id;
-        });
-        if (input.pool_id != "lake" &&
-            (app_user == application_users_.end() || app_user->status != "active")) {
-            return std::unexpected(StoreError{"unauthorized", "application user is suspended"});
-        }
         const auto sign_count =
             identity_crypto::verify_passkey_assertion(input.client_data_json,
                                                       input.authenticator_data,
@@ -2863,16 +2833,6 @@ Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
     const std::string subject = input.provider + ":" + input.subject;
     for (const auto& credential : oauth_credentials_) {
         if (credential.pool_id == pool && credential.subject == subject) {
-            const auto app_user =
-                std::ranges::find_if(application_users_, [&](const ApplicationUser& value) {
-                    return application != applications_.end() &&
-                           value.application_id == application->id &&
-                           value.user_id == credential.user_id;
-                });
-            if (pool != "lake" &&
-                (app_user == application_users_.end() || app_user->status != "active")) {
-                return std::unexpected(StoreError{"unauthorized", "application user is suspended"});
-            }
             Device& device = add_device(devices_, credential.user_id, input.device_name);
             IssuedSession issued = add_session(
                 sessions_, credential.user_id, pool, device.id, "browser", "", {"*"}, "", 86400);
@@ -2890,22 +2850,13 @@ Result<IssuedSession> InMemoryStore::sign_in_oauth(const OAuthIdentity& input) {
     const std::string identity = "taap:1:ed25519:" + identity_crypto::random_secret();
     users_.push_back(User{new_uuid_v4(), identity, input.email, input.display_name, now, now});
     oauth_credentials_.push_back(OAuthCredential{users_.back().id, pool, subject});
-    if (application != applications_.end()) {
-        application_users_.push_back(ApplicationUser{application->id,
-                                                     users_.back().id,
-                                                     users_.back().taap_id,
-                                                     users_.back().email,
-                                                     users_.back().display_name,
-                                                     "active",
-                                                     now,
-                                                     now});
-    }
     Device& device = add_device(devices_, users_.back().id, input.device_name);
     IssuedSession issued =
         add_session(sessions_, users_.back().id, pool, device.id, "browser", "", {"*"}, "", 86400);
     if (issued.secret.empty())
         return std::unexpected(StoreError{"store_error", "could not issue session"});
     issued.session.reason.clear();
+    issued.created_user = true;
     return issued;
 }
 
@@ -3296,19 +3247,6 @@ Result<Principal> InMemoryStore::context_for(const std::string& secret) {
             users_, [&](const User& row) { return row.id == session.user_id; });
         if (user == users_.end() || user->taap_id.empty())
             return std::unexpected(StoreError{"unauthorized", "session identity is unavailable"});
-        if (session.pool_id != "lake") {
-            const auto app_user =
-                std::ranges::find_if(application_users_, [&](const ApplicationUser& value) {
-                    const auto application =
-                        std::ranges::find_if(applications_, [&](const Application& app) {
-                            return app.id == value.application_id && app.pool_id == session.pool_id;
-                        });
-                    return application != applications_.end() && value.user_id == session.user_id;
-                });
-            if (app_user == application_users_.end() || app_user->status != "active") {
-                return std::unexpected(StoreError{"unauthorized", "application user is suspended"});
-            }
-        }
         session.last_used_at = now_iso8601();
         return Principal{session.user_id,
                          user->taap_id,

@@ -231,8 +231,8 @@ stored. The migration follows metering migration `0014`.
 |---|---|
 | `auth_applications` | Registration, isolated pool, exact origins and redirects, custom host, and theme. |
 | `auth_app_signing_keys` | Per-application Ed25519 public keys and encrypted signing seeds, including rotation state. |
-| `auth_app_users` | Pool membership and active or suspended status for application users. |
-| `auth_app_organizations` | Application-facing organization profiles and metadata. |
+| `auth_app_users` | Pool membership and active or suspended status for application users. Retired by `0055_application_user_workspaces` (lake#353): users live in the application's workspace Zetta, and this table is read only by the one-shot copy until a later migration drops it. |
+| `auth_app_organizations` | Application-facing organization profiles and metadata. Retired by `0055` (lake#354), with the users. |
 | `auth_app_webhooks` | Event filters, destination, enabled state, and encrypted signing secret. |
 | `auth_app_webhook_events` | Immutable lifecycle event payloads. Retired by `0049`: events live in the application's workspace Zetta. |
 | `auth_app_webhook_deliveries` | Every delivery attempt, outcome, signature, and error. Retired by `0049`, with the events. |
@@ -648,3 +648,22 @@ assign it), which the copy's rerun of the assignment resolves once the repositor
 row is reported by a warning. No column is added and nothing is dropped. Idempotent; guard
 `forge_record_workspaces_guard`. The operator reads no forge table, but vendors the schema and
 selects that guard before the binary is deployed.
+
+## Application user workspaces migration
+
+`0055_application_user_workspaces` (lake#353, lake#354) retires `auth_app_users` and
+`auth_app_organizations`: lake no longer writes or reads them. An application's users and
+organizations live in the workspace Zetta of the application's workspace
+([`../api/apps.md`](../api/apps.md#where-users-and-organizations-live-lake353-lake354)), with a pool
+user's email and an organization's TAAP identity and name as claims written `if_absent` there. The
+migration only records each row's owner in `workspace_assignments` for the operator's copy: the
+application's workspace (`application_workspace`); `needs_selection` while the application has no
+workspace (`0049` could not assign it), which the copy's rerun of the assignment resolves once it is
+assigned; or `workspace_deleted` when that workspace is gone, which does not hold the copy back. A
+user row has no id column, so its `object_id` is md5(application id, newline, user id) as a UUID,
+the id lake computes too. Each unresolved row is reported by a warning. No column is added and
+nothing is dropped; the `users` rows and the pool's credentials and sessions stay. Session
+resolution no longer joins `auth_app_users`: a session issued in an application's pool is checked
+against the user's record in the workspace before it is returned, and suspension and deletion
+revoke the pool's sessions. Idempotent; guard `application_user_workspaces_guard`. The operator
+reads neither table, but vendors the schema and selects that guard before the binary is deployed.

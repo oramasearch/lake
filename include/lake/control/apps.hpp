@@ -51,6 +51,10 @@ struct NewApplication {
     std::string workspace_id; // a live workspace of the customer (migration 0049)
 };
 
+// One user of an application. It lives in the workspace Zetta of the application's workspace
+// (lake#353, control/application_user_records.hpp), not in lake's PostgreSQL. `own_pool` is true
+// for a user who signed up in the application's own pool; that user's email is claimed once per
+// application there. A lake user who authorized the application keeps their lake email, unclaimed.
 struct ApplicationUser {
     std::string application_id;
     std::string user_id;
@@ -60,8 +64,14 @@ struct ApplicationUser {
     std::string status;
     std::string created_at;
     std::string updated_at;
+    bool own_pool = false;
+    std::int64_t at_us = 0;         // created_at in microseconds since the Unix epoch
+    std::int64_t revision = 0;      // the engine revision it was read at
+    std::int64_t lake_revision = 0; // 1 when written, one more for each change
 };
 
+// One organization an application manages for its users, in the same workspace (lake#354). Its
+// TAAP identity and its name are each unique within the application.
 struct ApplicationOrganization {
     std::string id;
     std::string application_id;
@@ -70,6 +80,26 @@ struct ApplicationOrganization {
     nlohmann::json metadata = nlohmann::json::object();
     std::string created_at;
     std::string updated_at;
+    std::int64_t at_us = 0;
+    std::int64_t revision = 0;
+    std::int64_t lake_revision = 0;
+};
+
+// Rows of the retired auth_app_users and auth_app_organizations tables with their recorded owner
+// (migration 0055), for the one-shot copy only. A user row's `id` is md5(application id, newline,
+// user id) as a UUID, since the table has no id column.
+struct LegacyApplicationUser {
+    std::string id;
+    ApplicationUser user;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
+};
+struct LegacyApplicationOrganization {
+    ApplicationOrganization organization;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
 };
 
 struct NewApplicationOrganization {

@@ -118,25 +118,18 @@ public:
     current_application_signing_key(const std::string& application_id) override;
     Result<std::vector<ApplicationSigningKey>>
     list_application_signing_keys(const std::string& application_id) override;
-    Result<ApplicationUser> register_application_user(const std::string& application_id,
-                                                      const std::string& user_id) override;
-    Result<ApplicationUser> get_application_user(const std::string& application_id,
+    Result<int> revoke_application_user_sessions(const std::string& application_id,
                                                  const std::string& user_id) override;
-    Result<std::vector<ApplicationUser>> list_application_users(const std::string& application_id,
-                                                                const std::string& query,
-                                                                int limit) override;
-    Result<ApplicationUser> set_application_user_status(const std::string& application_id,
-                                                        const std::string& user_id,
-                                                        const std::string& status) override;
-    Result<void> delete_application_user(const std::string& application_id,
-                                         const std::string& user_id) override;
-    Result<ApplicationOrganization>
-    create_application_organization(const NewApplicationOrganization& value) override;
-    Result<std::vector<ApplicationOrganization>>
-    list_application_organizations(const std::string& application_id, int limit) override;
-    Result<ApplicationOrganization> update_application_organization(
-        const std::string& id, const std::string& name, const nlohmann::json& metadata) override;
-    Result<void> delete_application_organization(const std::string& id) override;
+    Result<void> delete_application_user_credentials(const std::string& application_id,
+                                                     const std::string& user_id) override;
+    Result<void> assign_legacy_application_directory() override;
+    Result<std::vector<LegacyApplicationUser>> legacy_application_users(const std::string& after_id,
+                                                                        int limit) override;
+    Result<std::vector<LegacyApplicationOrganization>>
+    legacy_application_organizations(const std::string& after_id, int limit) override;
+    // Tests: rows of the retired tables as an earlier lake wrote them (instant and owner kept).
+    void seed_legacy_application_user(ApplicationUser user);
+    void seed_legacy_application_organization(ApplicationOrganization organization);
     Result<ApplicationWebhook>
     create_application_webhook(const NewApplicationWebhook& value) override;
     Result<ApplicationWebhook> get_application_webhook(const std::string& id) override;
@@ -542,8 +535,12 @@ private:
     std::vector<Grant> grants_;
     std::vector<Application> applications_;
     std::vector<ApplicationSigningKey> application_signing_keys_;
-    std::vector<ApplicationUser> application_users_;
-    std::vector<ApplicationOrganization> application_organizations_;
+    // Rows of the retired auth_app_users and auth_app_organizations tables (seeded by tests), and
+    // their owners: row id -> workspace, outcome (migration 0055).
+    std::vector<ApplicationUser> legacy_application_users_;
+    std::vector<ApplicationOrganization> legacy_application_organizations_;
+    std::map<std::string, std::pair<std::string, std::string>>
+        legacy_application_directory_assignments_;
     std::vector<ApplicationWebhook> application_webhooks_;
     std::vector<ApplicationWebhookEvent> application_webhook_events_;
     std::vector<ApplicationWebhookDelivery> application_webhook_deliveries_;

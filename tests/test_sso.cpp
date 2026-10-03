@@ -34,9 +34,12 @@ struct SsoSurface {
         context.instance_kek = "sso-test-instance-kek";
     }
 
+    // Through the asynchronous path, as REST and MCP call every capability.
     ApiResult call(const std::string& name, json input = json::object()) {
         context.request_id.clear();
-        return registry.call(name, input, context);
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        return completed ? std::move(*completed)
+                         : ApiResult::failure("store_error", completed.error().message);
     }
 };
 

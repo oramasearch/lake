@@ -109,6 +109,13 @@ delivery attempts in the application's workspace (lake#356, lake#357), each atte
 and the two `legacy_application_webhook_*` reads serve only the copy (migration
 `0049_application_webhook_workspaces`), and `create_application` stores the application's
 immutable `workspace_id`.
+`application_user_records.cpp` follows: an application's users and organizations in the
+application's workspace (lake#353, lake#354), with uniqueness claims beside them. The stores no
+longer write or read `auth_app_users` or `auth_app_organizations`, and session resolution no longer
+joins them; they keep the pool's own part (`revoke_application_user_sessions`,
+`delete_application_user_credentials`), `assign_legacy_application_directory` and the two
+`legacy_application_*` reads for the copy (migration `0055_application_user_workspaces`). A sign-up
+takes the caller's `user_id`, and a sign-up or first OAuth sign-in reports `created_user`.
 Repositories carry the workspace they belong to (migration `0051_repository_workspaces`, lake#315).
 Both stores refuse `create_repository` without a live workspace of the repository's space and
 filter `list_repositories` by an optional workspace; `transfer_repository` is gone from the store

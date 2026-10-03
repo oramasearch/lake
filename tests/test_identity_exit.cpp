@@ -1,6 +1,7 @@
 #include "audit_test_support.hpp"
 #include "personal_customer_test_support.hpp"
 #include "postgres_fixture.hpp"
+#include "stream_fixture.hpp"
 
 #include <gtest/gtest.h>
 
@@ -170,7 +171,8 @@ TEST(IdentityExit, PostgresProvesIdentityPkiAndDynamicSecrets) {
     }
     ASSERT_FALSE(document.empty());
 
-    auto store = lake::control::make_postgres_store(uri, std::string(instance_kek));
+    std::shared_ptr<lake::control::Store> store =
+        lake::control::make_postgres_store(uri, std::string(instance_kek));
     lake::control::pki::Service pki;
     Registry registry;
     lake::api::register_core_capabilities(registry, "test");
@@ -182,7 +184,9 @@ TEST(IdentityExit, PostgresProvesIdentityPkiAndDynamicSecrets) {
     context.pki = &pki;
     const auto call = [&](const std::string& name, json input = json::object()) {
         context.request_id = lake::control::new_uuid_v4();
-        return registry.call(name, input, context);
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        return completed ? std::move(*completed)
+                         : ApiResult::failure("store_error", completed.error().message);
     };
 
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
@@ -241,12 +245,19 @@ TEST(IdentityExit, PostgresProvesIdentityPkiAndDynamicSecrets) {
     context.authentication_method = "taap";
     context.scopes = {"*"};
 
-    const auto workspace = store->create_workspace({customer->id, "identity-exit", "prod", ""});
-    ASSERT_TRUE(workspace) << workspace.error().message;
+    // The application's users live in its workspace Zetta (lake#353): authorizing writes the
+    // signed-in user's record there.
+    const auto zetta = std::make_shared<lake::test::StreamCaller>();
+    const auto service_dir = lake::test::fixture_path("identity-exit-workspaces-" + suffix);
+    const auto workspaces = std::make_shared<lake::control::WorkspaceService>(
+        lake::control::WorkspaceConfig{service_dir.string(), 0}, store, zetta);
+    context.workspaces = workspaces.get();
+    const std::string workspace_id = lake::test::ready_workspace(
+        *store, service_dir, customer->id, "identity-exit-" + suffix, uri);
     const ApiResult application =
         call("register_application",
              {{"customer_id", customer->id},
-              {"workspace_id", workspace->id},
+              {"workspace_id", workspace_id},
               {"name", "Identity exit relying party"},
               {"allowed_origins", json::array({"https://rp.example.test"})},
               {"redirect_uris", json::array({"https://rp.example.test/callback"})}});

@@ -17,11 +17,12 @@
 
 #include "api/forge_records_api.hpp"
 #include "api/workspace_records_api.hpp"
-#include "lake/api/forge.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/forge.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/application_user_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/ask_messages.hpp"
@@ -1341,6 +1342,229 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationEventsAndTheirDelive
     first_row->second["value"] = second_row->second["value"];
     const auto tampered = copy("auth_app_webhook_deliveries", "verify");
     EXPECT_EQ(tampered.value["missing"].size(), 1U) << "a row that no longer opens is missing";
+}
+
+// lake#353, lake#354: the one-shot copy moves each retired application user and organization row
+// into its application's workspace, with the claims that keep a pool user's email and an
+// organization's TAAP identity and name unique there. A row whose application has no workspace is
+// unresolved until it is assigned (PostgreSQL), one whose workspace was deleted does not block.
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationUsersAndOrganizations) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    auto& first = t.spaces[0];
+    auto& second = t.spaces[1];
+    const auto application = [&](const std::string& customer, const std::string& workspace) {
+        const std::string id = lake::control::new_uuid_v4();
+        auto key = lake::control::apps::generate_signing_key(id, 1);
+        EXPECT_TRUE(key);
+        auto created = t.store->create_application({.id = id,
+                                                    .customer_id = customer,
+                                                    .pool_id = "app:" + id,
+                                                    .name = "directory",
+                                                    .allowed_origins = {"https://a.example.test"},
+                                                    .redirect_uris = {},
+                                                    .signing_key = *key,
+                                                    .workspace_id = workspace});
+        EXPECT_TRUE(created) << created.error().message;
+        return id;
+    };
+    const std::string lab_app = application(first.customer_id, first.workspaces[1]);
+    const std::string their_app = application(second.customer_id, second.workspaces[0]);
+    std::vector<lake::control::ApplicationUser> users;
+    std::vector<lake::control::ApplicationOrganization> organizations;
+    const auto user = [&](const std::string& application_id,
+                          const std::string& email,
+                          const std::string& status,
+                          std::int64_t at_us) {
+        lake::control::ApplicationUser row;
+        row.application_id = application_id;
+        row.user_id = lake::control::new_uuid_v4();
+        row.taap_id = "taap:copy-" + row.user_id;
+        row.email = email;
+        row.display_name = "Copied " + email;
+        row.status = status;
+        row.own_pool = true;
+        row.at_us = at_us;
+        row.created_at = lake::control::record_instant(at_us);
+        row.updated_at = row.created_at;
+        users.push_back(row);
+    };
+    const auto organization =
+        [&](const std::string& application_id, const std::string& name, std::int64_t at_us) {
+            lake::control::ApplicationOrganization row;
+            row.id = lake::control::new_uuid_v4();
+            row.application_id = application_id;
+            row.taap_id = "taap:copy-org-" + name;
+            row.name = name;
+            row.metadata = {{"plan", "copied"}};
+            row.at_us = at_us;
+            row.created_at = lake::control::record_instant(at_us);
+            row.updated_at = row.created_at;
+            organizations.push_back(row);
+        };
+    user(lab_app, "one@example.test", "active", 1'790'000'000'000'000);
+    user(lab_app, "two@example.test", "suspended", 1'790'000'000'100'000);
+    user(their_app, "one@example.test", "active", 1'790'000'000'200'000);
+    organization(lab_app, "Lab organization", 1'790'000'000'300'000);
+    organization(their_app, "Their organization", 1'790'000'000'400'000);
+    std::string legacy_app; // PostgreSQL only: an application without a workspace yet
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        legacy_app = lake::control::new_uuid_v4();
+        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
+        tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
+                       "allowed_origins) VALUES ($1::uuid, $2::uuid, $3, 'legacy', "
+                       "'[\"https://legacy.example.test\"]'::jsonb)",
+                       legacy_app,
+                       second.customer_id,
+                       "app:" + legacy_app);
+        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
+        user(legacy_app, "legacy@example.test", "active", 1'790'000'000'500'000);
+        for (const auto& row : users) {
+            tx.exec_params("INSERT INTO users (id, taap_id, email, display_name, pool_id) VALUES "
+                           "($1::uuid, $2, $3, $4, $5)",
+                           row.user_id,
+                           row.taap_id,
+                           row.email,
+                           row.display_name,
+                           "app:" + row.application_id);
+            tx.exec_params("INSERT INTO auth_app_users (application_id, user_id, status, "
+                           "created_at, updated_at) VALUES ($1::uuid, $2::uuid, $3, "
+                           "to_timestamp($4::double precision / 1000000), "
+                           "to_timestamp($4::double precision / 1000000))",
+                           row.application_id,
+                           row.user_id,
+                           row.status,
+                           row.at_us);
+        }
+        for (const auto& row : organizations) {
+            tx.exec_params("INSERT INTO auth_app_organizations (id, application_id, taap_id, name, "
+                           "metadata, created_at, updated_at) VALUES ($1::uuid, $2::uuid, $3, $4, "
+                           "$5::jsonb, to_timestamp($6::double precision / 1000000), "
+                           "to_timestamp($6::double precision / 1000000))",
+                           row.id,
+                           row.application_id,
+                           row.taap_id,
+                           row.name,
+                           row.metadata.dump(),
+                           row.at_us);
+        }
+        tx.commit();
+    } else {
+        auto& memory = static_cast<lake::control::InMemoryStore&>(*t.store);
+        for (const auto& row : users) {
+            memory.seed_legacy_application_user(row);
+        }
+        for (const auto& row : organizations) {
+            memory.seed_legacy_application_organization(row);
+        }
+    }
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    operator_context.request_id = lake::control::new_uuid_v4();
+    const auto call = [&](const std::string& name, const json& input) {
+        const auto completed =
+            liquid::runtime::block_on(t.registry.call_async(name, input, operator_context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+    const auto copy = [&](std::string collection, std::string mode) {
+        return call("copy_workspace_records", {{"collection", collection}, {"mode", mode}});
+    };
+    const std::size_t unresolved = GetParam() ? 1U : 0U;
+    for (const std::string collection : {"auth_app_users", "auth_app_organizations"}) {
+        const bool user_rows = collection == "auth_app_users";
+        const std::size_t owned = user_rows ? 3U : 2U;
+        const std::size_t total = owned + (user_rows ? unresolved : 0U);
+        const auto plan = copy(collection, "plan");
+        ASSERT_TRUE(plan.ok) << plan.error.message;
+        EXPECT_EQ(plan.value["rows"], total) << collection;
+        EXPECT_EQ(plan.value["unresolved"].size(), user_rows ? unresolved : 0U) << collection;
+        const auto before = copy(collection, "verify");
+        EXPECT_EQ(before.value["missing"].size(), owned) << collection;
+        EXPECT_FALSE(before.value["complete"]);
+        const auto copied = copy(collection, "copy");
+        ASSERT_TRUE(copied.ok) << copied.error.message;
+        EXPECT_EQ(copied.value["copied"], owned) << collection << copied.value.dump();
+        const auto rerun = copy(collection, "copy");
+        EXPECT_EQ(rerun.value["copied"], 0) << "a rerun copies nothing twice";
+        EXPECT_EQ(rerun.value["already_present"], owned);
+        const auto verified = copy(collection, "verify");
+        EXPECT_EQ(verified.value["verified"], owned) << collection;
+        EXPECT_TRUE(verified.value["missing"].empty());
+        EXPECT_TRUE(verified.value["mismatched"].empty());
+        EXPECT_EQ(verified.value["complete"], !user_rows || unresolved == 0) << collection;
+    }
+    // Each row and its claims are only in its own application's workspace: two users and two
+    // email claims in the lab, one of each in the other space's workspace.
+    const std::string lab_url = "http://" + first.workspaces[1] + ".test";
+    const std::string their_url = "http://" + second.workspaces[0] + ".test";
+    EXPECT_EQ(t.zetta->records[lab_url].rows("auth_app_users").size(), 4U);
+    EXPECT_EQ(t.zetta->records[their_url].rows("auth_app_users").size(), 2U);
+    EXPECT_EQ(t.zetta->records[lab_url].rows("auth_app_organizations").size(), 3U)
+        << "the organization and its TAAP and name claims";
+    EXPECT_TRUE(t.zetta->records["http://" + first.workspaces[0] + ".test"].collections.empty());
+
+    // The capabilities read the copies back, with their original ids, instants and status.
+    const auto listed = call("list_application_users",
+                             {{"application_id", lab_app}, {"workspace_id", first.workspaces[1]}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["items"].size(), 2U);
+    EXPECT_EQ(listed.value["items"][0]["user_id"], users[1].user_id) << "newest first";
+    EXPECT_EQ(listed.value["items"][0]["status"], "suspended");
+    EXPECT_EQ(listed.value["items"][1]["created_at"], users[0].created_at);
+    const auto orgs = call("list_application_organizations",
+                           {{"application_id", lab_app}, {"workspace_id", first.workspaces[1]}});
+    ASSERT_TRUE(orgs.ok) << orgs.error.message;
+    ASSERT_EQ(orgs.value["items"].size(), 1U);
+    EXPECT_EQ(orgs.value["items"][0]["id"], organizations[0].id);
+    // The copied claims hold: the organization's name is taken in its application.
+    const auto duplicate = call("create_application_organization",
+                                {{"application_id", lab_app},
+                                 {"workspace_id", first.workspaces[1]},
+                                 {"taap_id", "taap:copy-org-new"},
+                                 {"name", "Lab organization"}});
+    EXPECT_EQ(duplicate.error.code, "conflict");
+
+    // A status changed in the workspace after the copy is the workspace's, not a difference.
+    ASSERT_TRUE(call("suspend_application_user",
+                     {{"application_id", lab_app},
+                      {"workspace_id", first.workspaces[1]},
+                      {"user_id", users[0].user_id}})
+                    .ok);
+    EXPECT_TRUE(copy("auth_app_users", "verify").value["mismatched"].empty());
+
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       legacy_app,
+                       second.workspaces[1]);
+        tx.commit();
+        const auto resolved = copy("auth_app_users", "copy");
+        EXPECT_EQ(resolved.value["copied"], 1);
+        EXPECT_TRUE(resolved.value["unresolved"].empty());
+        EXPECT_TRUE(copy("auth_app_users", "verify").value["complete"]);
+    }
+
+    // A changed copy is reported, never silently accepted.
+    for (auto& [key, row] : t.zetta->records[their_url].rows("auth_app_organizations")) {
+        row["value"] = "tampered";
+    }
+    EXPECT_EQ(copy("auth_app_organizations", "verify").value["missing"].size(), 1U);
+    // Operator only.
+    operator_context.operator_credential = false;
+    operator_context.acting_identity = first.principal.taap_id;
+    EXPECT_EQ(copy("auth_app_users", "plan").error.code, "unauthorized");
 }
 
 // lake#348, lake#349: repository transfer and build records live in the workspace Zetta of the

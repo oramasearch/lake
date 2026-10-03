@@ -407,6 +407,16 @@ workspace that is not ready, deletion, and an attempt claimed by another caller 
 stores; `PostgresApplicationWebhooks.MigrationRecordsEachEventsOwnerForTheCopy` migration
 `0049_application_webhook_workspaces`. `stream_fixture.hpp`'s `ready_workspace` makes a Ready
 workspace over either store for tests that sign into an application pool.
+Application users and organizations (lake#353, lake#354):
+`ApplicationAuth.UsersAndOrganizationsLiveInTheApplicationsWorkspace` covers two spaces, two
+workspaces in one, sealed records and claims at the application's endpoint only, duplicate emails,
+TAAP identities and names, fresh and abandoned claims, a sign-up completed at the next sign-in, an
+account that is not a user, suspension, deletion, renames, missing, malformed, unknown and foreign
+`workspace_id`, least privilege, a workspace that is not ready and workspace deletion;
+`WorkspaceRecordStores.TheOneShotCopyMovesApplicationUsersAndOrganizations` the copy in both
+stores; `PostgresApplicationUsers.MigrationRecordsEachRowsOwnerForTheCopy` migration
+`0055_application_user_workspaces`. The identity capabilities are asynchronous, so tests call them
+through `call_async`.
 
 Repository usage in workspace Zettas (lake#348, lake#349): `test_workspace_records.cpp`'s
 `RepositoryUsageStaysInEachRepositorysWorkspace` covers `MeteringRecorder` across two spaces with

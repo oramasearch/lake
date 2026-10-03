@@ -200,6 +200,8 @@ struct Session {
 struct IssuedSession {
     Session session;
     std::string secret;
+    // True when this call created the user (a sign-up, or a first OAuth sign-in in a pool).
+    bool created_user = false;
 };
 struct Principal {
     std::string user_id, taap_id, session_id, device_id, pool_id, kind;
@@ -213,6 +215,9 @@ struct Principal {
 };
 struct NewPasswordUser {
     std::string pool_id, email, password, display_name, device_name, identity_document;
+    // The new user's id, chosen by the caller so that an application's workspace can record the
+    // user before lake's own row exists (lake#353); empty: the store chooses one.
+    std::string user_id;
 };
 struct PasswordSignIn {
     std::string pool_id, email, password, totp_code, device_name;
@@ -988,24 +993,24 @@ public:
     current_application_signing_key(const std::string& application_id) = 0;
     virtual Result<std::vector<ApplicationSigningKey>>
     list_application_signing_keys(const std::string& application_id) = 0;
-    virtual Result<ApplicationUser> register_application_user(const std::string& application_id,
-                                                              const std::string& user_id) = 0;
-    virtual Result<ApplicationUser> get_application_user(const std::string& application_id,
+    // An application's users and organizations live in the workspace Zetta of the application's
+    // workspace (lake#353, lake#354, control/application_user_records.hpp). The store keeps only
+    // what is lake's own: the pool's sessions and credentials of a user, which a suspension revokes
+    // and a deletion removes, and the retired tables for the one-shot copy. Revoking answers how
+    // many sessions it revoked; deleting answers not_found when the application does not exist.
+    virtual Result<int> revoke_application_user_sessions(const std::string& application_id,
                                                          const std::string& user_id) = 0;
-    virtual Result<std::vector<ApplicationUser>> list_application_users(
-        const std::string& application_id, const std::string& query, int limit) = 0;
-    virtual Result<ApplicationUser> set_application_user_status(const std::string& application_id,
-                                                                const std::string& user_id,
-                                                                const std::string& status) = 0;
-    virtual Result<void> delete_application_user(const std::string& application_id,
-                                                 const std::string& user_id) = 0;
-    virtual Result<ApplicationOrganization>
-    create_application_organization(const NewApplicationOrganization& value) = 0;
-    virtual Result<std::vector<ApplicationOrganization>>
-    list_application_organizations(const std::string& application_id, int limit) = 0;
-    virtual Result<ApplicationOrganization> update_application_organization(
-        const std::string& id, const std::string& name, const nlohmann::json& metadata) = 0;
-    virtual Result<void> delete_application_organization(const std::string& id) = 0;
+    virtual Result<void> delete_application_user_credentials(const std::string& application_id,
+                                                             const std::string& user_id) = 0;
+    // The retired auth_app_users and auth_app_organizations tables (migration 0055). Assigning
+    // records each unassigned row's owner in workspace_assignments, as the migration does, for rows
+    // written after it, and resolves needs_selection rows whose application has since been assigned
+    // a workspace. Listing pages by row id, oldest id first.
+    virtual Result<void> assign_legacy_application_directory() = 0;
+    virtual Result<std::vector<LegacyApplicationUser>>
+    legacy_application_users(const std::string& after_id, int limit) = 0;
+    virtual Result<std::vector<LegacyApplicationOrganization>>
+    legacy_application_organizations(const std::string& after_id, int limit) = 0;
     virtual Result<ApplicationWebhook>
     create_application_webhook(const NewApplicationWebhook& value) = 0;
     virtual Result<ApplicationWebhook> get_application_webhook(const std::string& id) = 0;

@@ -24,6 +24,7 @@
 
 #include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/application_user_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/drive_share_links.hpp"
@@ -219,18 +220,14 @@ int main(int argc, char** argv) {
                      .signing_key = *application_key,
                      .workspace_id = console_workspace.id}),
                 "create application");
-    require(store->sign_up_password({application.pool_id,
-                                     "app-user@example.test",
-                                     "correct horse battery staple",
-                                     "Application User",
-                                     "fixture browser",
-                                     "{}"}),
-            "create application user");
-    require(store->create_application_organization({application.id,
-                                                    "taap:1:ed25519:ui-fixture-app-organization",
-                                                    "Example Workspace",
-                                                    {{"plan", "enterprise"}}}),
-            "create application organization");
+    const auto application_account =
+        require(store->sign_up_password({application.pool_id,
+                                         "app-user@example.test",
+                                         "correct horse battery staple",
+                                         "Application User",
+                                         "fixture browser",
+                                         "{}"}),
+                "create application user");
     {
         auto records = lake::control::WorkspaceRecords::open(
             [workspaces, customer = organization_customer.id, id = console_workspace.id](
@@ -241,6 +238,30 @@ int main(int argc, char** argv) {
         if (!records) {
             std::println(stderr, "lake-ui-fixture: open workspace records: {}",
                          records.error().message);
+            return 1;
+        }
+        // The application's user and organization live in its workspace (lake#353, lake#354).
+        const auto account =
+            require(store->get_user(application_account.session.user_id), "read application user");
+        lake::control::ApplicationUser user;
+        user.application_id = application.id;
+        user.user_id = account.id;
+        user.taap_id = account.taap_id;
+        user.email = account.email;
+        user.display_name = account.display_name;
+        user.status = "active";
+        user.own_pool = true;
+        lake::control::ApplicationOrganization app_organization;
+        app_organization.application_id = application.id;
+        app_organization.taap_id = "taap:1:ed25519:ui-fixture-app-organization";
+        app_organization.name = "Example Workspace";
+        app_organization.metadata = {{"plan", "enterprise"}};
+        auto user_written = liquid::runtime::block_on(
+            lake::control::create_application_user(*records, std::move(user)));
+        auto organization_written = liquid::runtime::block_on(
+            lake::control::put_new_application_organization(*records, std::move(app_organization)));
+        if (!user_written || !*user_written || !organization_written || !*organization_written) {
+            std::println(stderr, "lake-ui-fixture: create application user or organization failed");
             return 1;
         }
         lake::control::ApplicationWebhookEvents events(*records);
