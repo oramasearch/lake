@@ -16,6 +16,7 @@
 #include <pqxx/pqxx>
 
 #include "api/forge_records_api.hpp"
+#include "audit_test_support.hpp"
 #include "api/secret_records_api.hpp"
 #include "control/secrets_crypto.hpp"
 #include "api/workspace_records_api.hpp"
@@ -35,6 +36,8 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/metering.hpp"
 #include "lake/control/opportunities.hpp"
+#include "lake/control/platform.hpp"
+#include "lake/control/platform_records.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/secret_records.hpp"
 #include "lake/control/stream_owners.hpp"
@@ -2624,6 +2627,542 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesForgeRecordsIntoTheirRepository
     auto person = t.context(first);
     const auto refused = liquid::runtime::block_on(t.registry.call_async(
         "copy_workspace_records", {{"collection", "forge_records"}, {"mode", "plan"}}, person));
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->error.code, "unauthorized");
+}
+
+// The operator's deployment control plane as lake reads it (docs/api/platform.md): three tables of
+// rows, filtered by nothing (every row is this lake's).
+struct PlatformControl final : lake::control::ZettaControl {
+    std::vector<json> deployments, environment_env, domains;
+
+    liquid::runtime::task<lake::control::ZettaControlResult<lake::control::ZettaRows>>
+    sql(std::string statement, std::string) override {
+        using Rows = lake::control::ZettaControlResult<lake::control::ZettaRows>;
+        if (statement.find("environment_env") != std::string::npos) {
+            co_return Rows(environment_env);
+        }
+        if (statement.find("domains") != std::string::npos) {
+            co_return Rows(domains);
+        }
+        co_return Rows(deployments);
+    }
+    liquid::runtime::task<lake::control::ZettaControlResult<void>> append(std::string table,
+                                                                        json row) override {
+        (table == lake::control::environment_env_table ? environment_env
+         : table == lake::control::domains_table       ? domains
+                                                       : deployments)
+            .push_back(std::move(row));
+        co_return lake::control::ZettaControlResult<void>{};
+    }
+};
+
+json platform_deployment(const std::string& repository, const std::string& environment,
+                         const std::string& phase, const std::string& updated_at) {
+    return {{"operator", "operator-a"}, {"lake", "lake.example"},
+            {"repository", repository},  {"environment", environment},
+            {"kind", "application"},     {"change", "change-" + repository.substr(0, 8)},
+            {"image", "registry.example/app@sha256:0123"},
+            {"deployment_id", "deployment-" + repository},
+            {"requested_by", "admin"},   {"requested_at", "2026-10-01T00:00:00Z"},
+            {"phase", phase},            {"namespace", "ns-" + repository.substr(0, 8)},
+            {"url", "https://" + repository.substr(0, 8) + ".example"},
+            {"message", ""},             {"updated_at", updated_at},
+            {"ordering_token", ""}};
+}
+
+// The sync's opener: the workspace caller, as the server's owner loop hands it.
+lake::control::PlatformRecordsOpener platform_opener(
+    std::shared_ptr<lake::control::WorkspaceService> service) {
+    return [service](const std::string& customer_id, const std::string& workspace_id) {
+        return WorkspaceRecords::open(
+            [service, customer_id, workspace_id](std::string capability, bool read, json input) {
+                return service->call(customer_id, workspace_id, std::move(capability), read,
+                                     std::move(input));
+            },
+            workspace_id, kek);
+    };
+}
+
+// lake#358, lake#359: a repository's environments and the operator rows lake mirrors for it live
+// only in the workspace Zetta of the repository's workspace.
+TEST_P(WorkspaceRecordStores, PlatformEnvironmentsLiveInTheirRepositorysWorkspace) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    auto control = std::make_shared<PlatformControl>();
+    lake::control::PlatformService platform(
+        t.store, control, nullptr,
+        lake::control::PlatformConfig{.lake = "lake.example", .instance_kek = std::string(kek)});
+    struct Placed {
+        const TwoSpaces::Space* space;
+        std::string workspace, repository;
+    };
+    std::vector<Placed> placed; // first/home, first/lab, second/home, second/lab
+    for (const auto& space : t.spaces) {
+        for (std::size_t index = 0; index < space.workspaces.size(); ++index) {
+            const auto repository = t.store->create_repository(
+                {space.customer_id, "deploy-" + std::to_string(index), "", "private",
+                 space.workspaces[index]});
+            ASSERT_TRUE(repository) << repository.error().message;
+            placed.push_back({&space, space.workspaces[index], repository->id});
+            control->deployments.push_back(platform_deployment(
+                repository->id, "production", "deploying", "2026-10-01T00:01:00Z"));
+            control->environment_env.push_back(
+                {{"lake", "lake.example"}, {"repository", repository->id},
+                 {"environment", "production"}, {"key", "COLOR"}, {"value", "blue-secretless"},
+                 {"deleted", false}, {"set_by", "admin"},
+                 {"updated_at", "2026-10-01T00:01:00Z"}, {"ordering_token", ""}});
+        }
+    }
+    const auto sync = [&] {
+        const auto completed = liquid::runtime::block_on(platform.sync(platform_opener(t.service)));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+    ASSERT_TRUE(sync()) << "every workspace is ready";
+    const auto call = [&](const TwoSpaces::Space& space, const std::string& capability,
+                          json input) {
+        auto context = t.context(space);
+        context.platform = &platform;
+        const auto completed =
+            liquid::runtime::block_on(t.registry.call_async(capability, input, context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+    // Each repository's environment and rows are stored, sealed, only at its own workspace's
+    // endpoint; nothing of them is in the control store but the environment's policy object.
+    for (const auto& where : placed) {
+        auto& tables = t.zetta->records["http://" + where.workspace + ".test"];
+        EXPECT_EQ(tables.rows("platform_environments").size(), 1U) << where.workspace;
+        EXPECT_EQ(tables.rows("platform_mirror").size(), 2U) << where.workspace;
+        for (const std::string collection : {"platform_environments", "platform_mirror"}) {
+            for (const auto& [key, row] : tables.rows(collection)) {
+                EXPECT_EQ(row.dump().find("production"), std::string::npos) << "sealed";
+                EXPECT_EQ(row.dump().find("blue-secretless"), std::string::npos) << "sealed";
+            }
+        }
+        const auto object = t.store->find_policy_object(
+            "environment", lake::control::platform_environment_id(where.repository, "production"));
+        ASSERT_TRUE(object) << object.error().message;
+        const auto read = call(*where.space, "get_environment",
+                               {{"repository_id", where.repository}, {"environment", "production"}});
+        ASSERT_TRUE(read.ok) << read.error.message;
+        EXPECT_EQ(read.value["object_id"], object->id);
+        EXPECT_EQ(read.value["deployment"]["phase"], "deploying");
+        EXPECT_EQ(read.value["env"][0]["value"], "blue-secretless");
+        const auto listed = call(*where.space, "list_environments",
+                                 {{"repository_id", where.repository}});
+        ASSERT_TRUE(listed.ok) << listed.error.message;
+        ASSERT_EQ(listed.value["items"].size(), 1U);
+        EXPECT_EQ(listed.value["items"][0]["id"],
+                  lake::control::platform_environment_id(where.repository, "production"));
+    }
+    // A sync that sees nothing new writes nothing, and a newer row replaces the older one.
+    const auto writes = [&](const std::string& workspace) {
+        std::size_t count = 0;
+        for (const auto& call : t.zetta->records["http://" + workspace + ".test"].calls) {
+            count += call == "put_record" ? 1 : 0;
+        }
+        return count;
+    };
+    const std::size_t before = writes(placed[0].workspace);
+    ASSERT_TRUE(sync());
+    EXPECT_EQ(writes(placed[0].workspace), before);
+    control->deployments.push_back(
+        platform_deployment(placed[0].repository, "production", "ready", "2026-10-01T00:02:00Z"));
+    ASSERT_TRUE(sync());
+    EXPECT_EQ(writes(placed[0].workspace), before + 1);
+    EXPECT_EQ(call(first, "get_environment",
+                   {{"repository_id", placed[0].repository}, {"environment", "production"}})
+                  .value["deployment"]["phase"],
+              "ready");
+
+    // Mutable rows: an older row never replaces a newer one, and a write at a revision someone
+    // has since replaced is refused.
+    auto context = t.context(first);
+    {
+        auto records = lake::api::workspace_records(context, first.customer_id,
+                                                    placed[0].workspace);
+        ASSERT_TRUE(records);
+        const auto older = run(lake::control::put_platform_mirror_record(
+            *records, placed[0].repository,
+            {"deployment", "deployment-" + placed[0].repository,
+             platform_deployment(placed[0].repository, "production", "pending",
+                                 "2026-10-01T00:00:30Z"),
+             "now"}));
+        ASSERT_TRUE(older);
+        EXPECT_FALSE(*older);
+        const std::string key =
+            lake::control::platform_mirror_id("deployment", "deployment-" + placed[0].repository);
+        const auto stored = run(records->get(lake::control::PlatformMirrorCodec::collection, key));
+        ASSERT_TRUE(stored && *stored);
+        const auto stale = run(records->put(
+            lake::control::PlatformMirrorCodec::collection, key,
+            lake::control::platform_record_lookup(placed[0].repository), (*stored)->body,
+            lake::control::RecordCondition{.if_revision = (*stored)->revision - 1}, 9,
+            (*stored)->at_us));
+        ASSERT_FALSE(stale);
+        EXPECT_EQ(stale.error().code, "conflict");
+        // Two writers that create one environment at once create it once.
+        lake::control::PlatformEnvironment twin{"", placed[0].repository, "production",
+                                                lake::control::new_uuid_v4(), "", 0};
+        const auto again = run(lake::control::put_platform_environment_record(*records, twin));
+        ASSERT_TRUE(again) << again.error().message;
+        EXPECT_NE(again->object_id, twin.object_id) << "the first writer's environment answers";
+    }
+    // A record copied into another workspace does not open there: ownership cannot change.
+    auto& home = t.zetta->records["http://" + placed[0].workspace + ".test"];
+    auto& lab = t.zetta->records["http://" + placed[1].workspace + ".test"];
+    const std::string moved =
+        lake::control::platform_environment_id(placed[0].repository, "staging-moved");
+    lab.rows("platform_environments")[moved] =
+        home.rows("platform_environments").begin()->second;
+    EXPECT_EQ(call(first, "list_environments", {{"repository_id", placed[1].repository}})
+                  .value["items"]
+                  .size(),
+              1U);
+    lab.rows("platform_environments").erase(moved);
+
+    // Least privilege: another space sees none of the environments and its listing never reaches
+    // the workspace; a single environment is refused; ids name their field.
+    const std::size_t calls_before = home.calls.size();
+    const auto foreign = call(second, "list_environments", {{"repository_id", placed[0].repository}});
+    ASSERT_TRUE(foreign.ok) << foreign.error.message;
+    EXPECT_TRUE(foreign.value["items"].empty());
+    EXPECT_TRUE(call(second, "list_deployments", {{"repository_id", placed[0].repository}})
+                    .value["items"]
+                    .empty());
+    EXPECT_EQ(home.calls.size(), calls_before) << "no workspace call for a caller who may not read";
+    EXPECT_EQ(call(second, "get_environment",
+                   {{"repository_id", placed[0].repository}, {"environment", "production"}})
+                  .error.code,
+              "unauthorized");
+    EXPECT_EQ(call(second, "set_environment_env",
+                   {{"repository_id", placed[0].repository}, {"environment", "production"},
+                    {"key", "COLOR"}, {"value", "red"}})
+                  .error.code,
+              "unauthorized");
+    const auto missing = call(first, "get_environment", {{"repository_id", placed[0].repository}});
+    EXPECT_EQ(missing.error.code, "invalid_input");
+    EXPECT_EQ(missing.error.path, "/environment");
+    EXPECT_EQ(call(first, "list_environments", json::object()).error.path, "/repository_id");
+    for (const std::string& bad :
+         std::vector<std::string>{"not-a-repository", lake::control::new_uuid_v4()}) {
+        const auto refused = call(first, "get_environment",
+                                  {{"repository_id", bad}, {"environment", "production"}});
+        EXPECT_FALSE(refused.ok) << bad;
+        EXPECT_EQ(refused.error.path, "/repository_id") << bad;
+        EXPECT_EQ(call(first, "list_environments", {{"repository_id", bad}}).error.path,
+                  "/repository_id")
+            << bad;
+    }
+    const auto unknown = call(first, "get_environment",
+                              {{"repository_id", placed[0].repository}, {"environment", "nope"}});
+    EXPECT_EQ(unknown.error.code, "not_found");
+    EXPECT_EQ(unknown.error.path, "/environment");
+
+    // A workspace that is not ready: its repository's reads are refused, the sync marks only that
+    // repository stale, and the service stays healthy.
+    const auto lab_workspace = t.store->get_workspace(placed[1].workspace);
+    t.status(lab_workspace->zetta_service_id, "Provisioning",
+             "http://" + placed[1].workspace + ".test");
+    EXPECT_EQ(call(first, "get_environment",
+                   {{"repository_id", placed[1].repository}, {"environment", "production"}})
+                  .error.code,
+              "workspace_not_ready");
+    control->deployments.push_back(
+        platform_deployment(placed[1].repository, "production", "ready", "2026-10-01T00:03:00Z"));
+    const auto partial = sync();
+    ASSERT_FALSE(partial);
+    EXPECT_EQ(partial.error().code, "workspace_not_ready");
+    EXPECT_FALSE(platform.degraded());
+    EXPECT_TRUE(platform.stale_since(placed[1].repository));
+    EXPECT_FALSE(platform.stale_since(placed[0].repository));
+    t.ready(placed[1].workspace);
+    EXPECT_TRUE(call(first, "get_environment",
+                     {{"repository_id", placed[1].repository}, {"environment", "production"}})
+                    .value.contains("stale_since"));
+    ASSERT_TRUE(sync());
+    const auto refreshed = call(first, "get_environment",
+                                {{"repository_id", placed[1].repository},
+                                 {"environment", "production"}});
+    EXPECT_FALSE(refreshed.value.contains("stale_since"));
+    EXPECT_EQ(refreshed.value["deployment"]["phase"], "ready");
+
+    if (GetParam()) {
+        // A repository without a workspace has nowhere to keep environments: refused, never a
+        // fallback, and the sync reports it.
+        const auto orphan = t.store->create_repository(
+            {first.customer_id, "orphan", "", "private", first.workspaces[0]});
+        ASSERT_TRUE(orphan);
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE repositories SET workspace_id = NULL WHERE id = $1::uuid",
+                       orphan->id);
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.commit();
+        control->deployments.push_back(
+            platform_deployment(orphan->id, "production", "deploying", "2026-10-01T00:04:00Z"));
+        const auto unassigned = sync();
+        ASSERT_FALSE(unassigned);
+        EXPECT_NE(unassigned.error().message.find("no workspace"), std::string::npos);
+        const auto listed = call(first, "list_deployments", {{"repository_id", orphan->id}});
+        EXPECT_TRUE(listed.ok) << "no environment object yet, so nothing to read";
+        const auto parent = t.store->find_policy_object("repository", orphan->id);
+        ASSERT_TRUE(t.store->create_policy_object(
+            {"environment", lake::control::platform_environment_id(orphan->id, "production"),
+             parent->id, "admin", "orphan-environment", true}));
+        const auto refused = call(first, "list_environments", {{"repository_id", orphan->id}});
+        EXPECT_EQ(refused.error.code, "conflict");
+        EXPECT_EQ(refused.error.path, "/repository_id");
+        control->deployments.pop_back();
+    }
+
+    // Workspace deletion: once the repository and its workspace are deleted, the records go with
+    // the workspace, and the other workspace keeps its own.
+    ASSERT_TRUE(call(first, "delete_repository", {{"id", placed[1].repository}}).ok);
+    ASSERT_TRUE(t.store->update_workspace(placed[1].workspace, {.desired = "deleted"}));
+    EXPECT_FALSE(call(first, "get_environment",
+                      {{"repository_id", placed[1].repository}, {"environment", "production"}})
+                     .ok);
+    EXPECT_TRUE(call(first, "get_environment",
+                     {{"repository_id", placed[0].repository}, {"environment", "production"}})
+                    .ok);
+}
+
+// lake#358, lake#359: the operator's one-shot copy moves platform_mirror and then
+// platform_environments into each repository's workspace; the environments keep their policy
+// objects, so the grants on them still decide who reads them.
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesPlatformEnvironmentsAndTheMirror) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    auto& first = t.spaces[0];
+    auto& second = t.spaces[1];
+    auto control = std::make_shared<PlatformControl>();
+    lake::control::PlatformService platform(
+        t.store, control, nullptr,
+        lake::control::PlatformConfig{.lake = "lake.example", .instance_kek = std::string(kek)});
+    const auto repository = [&](const TwoSpaces::Space& space, std::size_t workspace,
+                                const std::string& name) {
+        const auto created = t.store->create_repository(
+            {space.customer_id, name, "", "private", space.workspaces[workspace]});
+        EXPECT_TRUE(created) << created.error().message;
+        return *created;
+    };
+    const auto home = repository(first, 0, "home");
+    const auto lab = repository(first, 1, "lab");
+    const auto gone = repository(second, 1, "gone");
+    std::optional<lake::control::Repository> orphan;
+    std::optional<pqxx::connection> connection;
+    if (GetParam()) {
+        connection.emplace(database_uri_);
+        orphan = repository(first, 0, "orphan");
+        pqxx::work tx(*connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE repositories SET workspace_id = NULL WHERE id = $1::uuid",
+                       orphan->id);
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.commit();
+    }
+    // What an earlier lake left: environments with random ids, and the rows it mirrored.
+    std::map<std::string, std::string> legacy_objects; // repository -> environment object
+    const auto environment = [&](const lake::control::Repository& owner, const std::string& name) {
+        if (!GetParam()) {
+            const auto seeded = static_cast<lake::control::InMemoryStore&>(*t.store)
+                                    .seed_legacy_platform_environment(owner.id, name);
+            EXPECT_TRUE(seeded) << seeded.error().message;
+            legacy_objects[owner.id] = seeded->object_id;
+            return;
+        }
+        const auto parent = t.store->find_policy_object("repository", owner.id);
+        const std::string id = lake::control::new_uuid_v4();
+        const auto object = t.store->create_policy_object(
+            {"environment", id, parent->id, "admin", "legacy-" + id, true});
+        ASSERT_TRUE(object) << object.error().message;
+        legacy_objects[owner.id] = object->id;
+        pqxx::work tx(*connection);
+        tx.exec_params("INSERT INTO platform_environments (id, repository_id, name, object_id, "
+                       "created_at) VALUES ($1::uuid, $2::uuid, $3, $4::uuid, "
+                       "'2026-09-01T00:00:00Z')",
+                       id, owner.id, name, object->id);
+        tx.commit();
+    };
+    const auto mirrored = [&](const std::string& kind, const std::string& key, json value) {
+        if (!GetParam()) {
+            static_cast<lake::control::InMemoryStore&>(*t.store).seed_legacy_platform_mirror_row(
+                {kind, key, value, "2026-09-01T00:00:00Z"});
+            return;
+        }
+        pqxx::work tx(*connection);
+        tx.exec_params("INSERT INTO platform_mirror (kind, key, value, seen_at) VALUES ($1, $2, "
+                       "$3::jsonb, '2026-09-01T00:00:00Z')",
+                       kind, key, value.dump());
+        tx.commit();
+    };
+    environment(home, "production");
+    environment(lab, "staging");
+    environment(gone, "production");
+    const json home_deployment =
+        platform_deployment(home.id, "production", "ready", "2026-09-01T00:00:00Z");
+    mirrored("deployment", "deployment-" + home.id, home_deployment);
+    mirrored("environment_env", lab.id + "/staging/COLOR",
+             {{"lake", "lake.example"}, {"repository", lab.id}, {"environment", "staging"},
+              {"key", "COLOR"}, {"value", "green"}, {"deleted", false},
+              {"updated_at", "2026-09-01T00:00:00Z"}});
+    mirrored("domain", gone.id + "/production/gone.example",
+             {{"repository", gone.id}, {"environment", "production"}, {"host", "gone.example"},
+              {"updated_at", "2026-09-01T00:00:00Z"}});
+    mirrored("domain", "stranger/production/x.example",
+             {{"repository", lake::control::new_uuid_v4()}, {"environment", "production"},
+              {"host", "x.example"}, {"updated_at", "2026-09-01T00:00:00Z"}});
+    if (GetParam()) {
+        environment(*orphan, "production");
+        mirrored("deployment", "deployment-" + orphan->id,
+                 platform_deployment(orphan->id, "production", "ready", "2026-09-01T00:00:00Z"));
+    }
+    // The release's repository is deleted, then its workspace: its rows went with it.
+    ASSERT_TRUE(t.call(second, "delete_repository", {{"id", gone.id}}).ok);
+    ASSERT_TRUE(t.store->update_workspace(second.workspaces[1], {.desired = "deleted"}));
+
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    operator_context.request_id = lake::control::new_uuid_v4();
+    const auto copy = [&](const std::string& collection, std::string mode) {
+        const auto completed = liquid::runtime::block_on(t.registry.call_async(
+            "copy_workspace_records", {{"collection", collection}, {"mode", mode}},
+            operator_context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+
+    // The mirror first.
+    auto plan = copy("platform_mirror", "plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["rows"], GetParam() ? 5 : 4);
+    EXPECT_EQ(plan.value["assigned"], 2);
+    std::map<std::string, std::string> outcomes;
+    for (const auto& unresolved : plan.value["unresolved"]) {
+        outcomes[unresolved["kind"].get<std::string>() + ":" +
+                 unresolved["repository_id"].get<std::string>()] = unresolved["outcome"];
+    }
+    EXPECT_EQ(outcomes["domain:" + gone.id], "workspace_deleted");
+    EXPECT_EQ(outcomes["domain:"], "unknown_repository");
+    if (GetParam()) {
+        EXPECT_EQ(outcomes["deployment:" + orphan->id], "needs_selection");
+    }
+    EXPECT_TRUE(t.zetta->records["http://" + first.workspaces[0] + ".test"].collections.empty())
+        << "a plan writes nothing";
+    EXPECT_EQ(copy("platform_mirror", "verify").value["missing"].size(), 2U);
+    auto copied = copy("platform_mirror", "copy");
+    ASSERT_TRUE(copied.ok) << copied.error.message;
+    EXPECT_EQ(copied.value["copied"], 2);
+    EXPECT_EQ(copy("platform_mirror", "copy").value["already_present"], 2)
+        << "a rerun copies nothing twice";
+    auto verified = copy("platform_mirror", "verify");
+    EXPECT_EQ(verified.value["verified"], 2);
+    EXPECT_EQ(verified.value["complete"], !GetParam())
+        << "deleted workspaces and unknown repositories do not hold the copy back; an unassigned "
+           "repository does";
+
+    // Then the environments, under their derived ids, with the policy objects they had.
+    plan = copy("platform_environments", "plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["assigned"], 2);
+    copied = copy("platform_environments", "copy");
+    ASSERT_TRUE(copied.ok) << copied.error.message;
+    EXPECT_EQ(copied.value["copied"], 2);
+    EXPECT_EQ(copy("platform_environments", "copy").value["already_present"], 2);
+    verified = copy("platform_environments", "verify");
+    EXPECT_EQ(verified.value["verified"], 2);
+    EXPECT_TRUE(verified.value["mismatched"].empty());
+    EXPECT_EQ(verified.value["complete"], !GetParam());
+
+    // Each environment is read through the capabilities from its own workspace only, with its
+    // derived id, its old policy object and the rows mirrored before the move.
+    const auto call = [&](const TwoSpaces::Space& space, const std::string& capability,
+                          json input) {
+        auto context = t.context(space);
+        context.platform = &platform;
+        const auto completed =
+            liquid::runtime::block_on(t.registry.call_async(capability, input, context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+    const auto production = call(first, "get_environment",
+                                 {{"repository_id", home.id}, {"environment", "production"}});
+    ASSERT_TRUE(production.ok) << production.error.message;
+    EXPECT_EQ(production.value["id"], lake::control::platform_environment_id(home.id, "production"));
+    EXPECT_EQ(production.value["object_id"], legacy_objects[home.id]);
+    EXPECT_EQ(production.value["deployment"]["phase"], "ready");
+    const auto staging =
+        call(first, "get_environment", {{"repository_id", lab.id}, {"environment", "staging"}});
+    ASSERT_TRUE(staging.ok) << staging.error.message;
+    EXPECT_EQ(staging.value["env"][0]["value"], "green");
+    EXPECT_EQ(t.zetta->records["http://" + first.workspaces[0] + ".test"]
+                  .rows("platform_environments")
+                  .size(),
+              1U);
+    EXPECT_EQ(t.zetta->records["http://" + first.workspaces[1] + ".test"]
+                  .rows("platform_mirror")
+                  .size(),
+              1U);
+    // A grant on the old policy object still decides who reads the environment.
+    EXPECT_EQ(call(second, "get_environment",
+                   {{"repository_id", home.id}, {"environment", "production"}})
+                  .error.code,
+              "unauthorized");
+    ASSERT_TRUE(t.store->create_grant({second.principal.taap_id, legacy_objects[home.id], "read",
+                                       "attestation", "admin", "legacy-read-grant"}));
+    EXPECT_TRUE(call(second, "get_environment",
+                     {{"repository_id", home.id}, {"environment", "production"}})
+                    .ok);
+
+    // A newer row the sync mirrors after the copy is accepted by verify, and seen by readers;
+    // the sync records only the new phase.
+    control->deployments.push_back(home_deployment);
+    control->deployments.push_back(
+        platform_deployment(home.id, "production", "healthy", "2026-10-02T00:00:00Z"));
+    static_cast<void>(liquid::runtime::block_on(platform.sync(platform_opener(t.service))));
+    EXPECT_EQ(copy("platform_mirror", "verify").value["verified"], 2);
+    EXPECT_EQ(call(first, "get_environment",
+                   {{"repository_id", home.id}, {"environment", "production"}})
+                  .value["deployment"]["phase"],
+              "healthy");
+    const auto events = lake::test::audit_events(*t.store, {});
+    ASSERT_TRUE(events);
+    std::vector<std::string> phases;
+    for (const auto& event : *events) {
+        if (event.draft.kind == "platform.deployment.phase") {
+            phases.push_back(event.draft.details.at("phase"));
+        }
+    }
+    EXPECT_EQ(phases, (std::vector<std::string>{"healthy"}))
+        << "a phase mirrored before the move is not recorded again";
+
+    // A swapped value does not open: verify reports it.
+    auto& lab_rows =
+        t.zetta->records["http://" + first.workspaces[1] + ".test"].rows("platform_mirror");
+    lab_rows.begin()->second["value"] = "AAAA";
+    EXPECT_EQ(copy("platform_mirror", "verify").value["missing"].size(), 1U);
+
+    // Only the operator copies.
+    auto person = t.context(first);
+    const auto refused = liquid::runtime::block_on(t.registry.call_async(
+        "copy_workspace_records", {{"collection", "platform_mirror"}, {"mode", "plan"}}, person));
     ASSERT_TRUE(refused);
     EXPECT_EQ(refused->error.code, "unauthorized");
 }

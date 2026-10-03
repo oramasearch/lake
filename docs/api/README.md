@@ -87,7 +87,11 @@ import validation.
 fidelity report.
 
 [`platform.md`](platform.md) defines the operator-control mirror, its total row-ordering guarantee,
-environment/domain mutations, and Loki-compatible log reads.
+environment/domain mutations, and Loki-compatible log reads. Environments and the mirrored rows
+live in the workspace Zetta of the repository's workspace (lake#358, lake#359): a repository
+without a workspace is `conflict` at `/repository_id`, and an environment's policy object is found
+in PostgreSQL, so a refused caller reaches no workspace
+([platform.md](platform.md#where-environments-live-lake358-lake359)).
 
 [`registry.md`](registry.md) defines the OCI Distribution, npm, Python, and debuginfod protocol
 routes, build-push credentials, exact-repository app pull credentials, and exact-byte integration

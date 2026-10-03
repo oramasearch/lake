@@ -184,6 +184,7 @@ add_library(lake-core STATIC
   src/control/agents.cpp
   src/control/pki.cpp
   src/control/platform.cpp
+  src/control/platform_records.cpp
   src/control/zetta_control.cpp
   src/control/agent_library.cpp
   src/control/agent_bus.cpp

@@ -76,6 +76,53 @@ struct LegacyForgeRecord {
     std::string workspace_id;
     std::string outcome;
 };
+// A repository's runtime environment (docs/api/platform.md). It lives in the workspace Zetta of the
+// repository's workspace (lake#358, control/platform_records.hpp); its id is
+// platform_environment_id(repository, name) and names its `environment` policy object, which stays
+// in the control store with its grants.
+struct PlatformEnvironment {
+    std::string id;
+    std::string repository_id;
+    std::string name;
+    std::string object_id;
+    std::string created_at;
+    std::int64_t at_us = 0; // created_at in microseconds since the Unix epoch
+};
+// The last operator-control row lake observed for one deployment, environment value or domain
+// (`kind` is deployment, environment_env or domain). It lives in the workspace Zetta of the
+// repository the row names (lake#359, control/platform_records.hpp).
+struct PlatformMirrorRow {
+    std::string kind;
+    std::string key;
+    nlohmann::json value;
+    std::string seen_at;
+    std::int64_t revision = 0;      // the workspace engine's revision (conditional writes)
+    std::int64_t lake_revision = 1; // lake's revision inside the seal
+};
+// A row of the retired platform_environments table (migration 0060) with its recorded owner: its
+// repository's workspace, or empty with the reason it is not copied (`needs_selection` while the
+// repository has no workspace, `workspace_deleted` when that workspace is gone). `id` is the row's
+// own id, which workspace_assignments names; `environment.id` is the same legacy id, and the copy
+// writes the record under the derived one.
+struct LegacyPlatformEnvironment {
+    std::string id;
+    PlatformEnvironment environment;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
+};
+// A row of the retired platform_mirror table (migration 0060). `id` is md5(kind, newline, key) as
+// a UUID (platform_mirror_id), which SQL computes the same way. `outcome` is also
+// `unknown_repository` for a row naming no repository lake has.
+struct LegacyPlatformMirrorRow {
+    std::string id;
+    PlatformMirrorRow row;
+    std::int64_t at_us = 0; // seen_at in microseconds since the Unix epoch
+    std::string repository_id;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
+};
 // A drive share link (docs/api/sharing.md). It lives in the workspace Zetta of the workspace that
 // holds it (lake#350, control/drive_share_links.hpp); the control store keeps only its synthetic
 // `share-link:<id>` grant, the content-free route of a link made before the move, and the retired
@@ -923,6 +970,18 @@ public:
     virtual Result<void> assign_legacy_forge_records() = 0;
     virtual Result<std::vector<LegacyForgeRecord>>
     legacy_forge_records(const std::string& after_id, int limit) = 0;
+    // The retired platform_environments and platform_mirror tables (lake#358, lake#359), for the
+    // one-shot copy into workspace Zettas only. Assigning records each unassigned row's owner in
+    // workspace_assignments, as migration 0060 does, for rows an earlier lake wrote after it, and
+    // resolves needs_selection rows whose repository has since been assigned a workspace;
+    // assigning environments also gives each environment's policy object its derived external id.
+    // Listing pages by row id, oldest id first.
+    virtual Result<void> assign_legacy_platform_environments() = 0;
+    virtual Result<std::vector<LegacyPlatformEnvironment>>
+    legacy_platform_environments(const std::string& after_id, int limit) = 0;
+    virtual Result<void> assign_legacy_platform_mirror() = 0;
+    virtual Result<std::vector<LegacyPlatformMirrorRow>>
+    legacy_platform_mirror(const std::string& after_id, int limit) = 0;
     // Drive share links live in workspace Zettas (lake#350). The control store answers only the
     // route of a link made before the move, from its token digest; `not_found` otherwise.
     virtual Result<DriveShareLinkRoute> drive_share_link_route(const std::string& token_hash) = 0;

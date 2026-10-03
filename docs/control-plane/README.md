@@ -29,3 +29,6 @@ immutable workspace of each repository (lake#315).
 [schema.md](schema.md#secret-lease-workspaces-migration-0058_secret_lease_workspaces) documents
 `0058_secret_lease_workspaces`, which retires `secrets_dynamic_leases` for the workspace Zettas and
 keeps `secret_lease_routes`, the leases' content-free route and due index (lake#362).
+[schema.md](schema.md#platform-workspaces-migration-0060_platform_workspaces) documents
+`0060_platform_workspaces`, which retires `platform_environments` and `platform_mirror` for the
+workspace Zettas (lake#358, lake#359).

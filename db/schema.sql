@@ -2985,3 +2985,78 @@ CREATE TABLE IF NOT EXISTS application_settings_workspaces_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0059_application_settings_workspaces')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0060_platform_workspaces: repository environments and the platform mirror live in the workspace
+-- Zetta of their repository's workspace (lake#358, lake#359, docs/api/platform.md,
+-- docs/architecture/workspace-records.md). Lake no longer writes or reads platform_environments or
+-- platform_mirror; the operator's one-shot copy (copy_workspace_records) moves each row into its
+-- workspace and verifies it.
+--
+-- An environment's id is now md5(repository id, newline, name) as a UUID, which lake computes the
+-- same way. Its `environment` policy object stays here with its grants, and takes that id as its
+-- external id, so lake finds it from the repository and the name without reading the workspace.
+-- An object is renamed only when no other environment object already has that id.
+--
+-- Each row's owner is its repository's workspace (repositories.workspace_id, 0051), recorded in
+-- workspace_assignments as repository_workspace: an environment under its row id, a mirror row
+-- under md5(kind, newline, key). A row whose repository has no workspace yet is needs_selection and
+-- is reported; the copy assigns it once the repository is assigned. A row whose repository's
+-- workspace was deleted is workspace_deleted: it went with that workspace and does not hold the
+-- copy back. A mirror row naming no repository lake has is reported and not assigned. Nothing is
+-- dropped here; a later migration drops both tables once the copy has been verified on every
+-- environment.
+-- ---------------------------------------------------------------------------------------------
+DO $$
+DECLARE
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0060_platform_workspaces') THEN
+        UPDATE objects o
+           SET external_id = md5(e.repository_id::text || E'\n' || e.name)::uuid::text,
+               updated_at = now()
+          FROM platform_environments e
+         WHERE o.id = e.object_id
+           AND o.external_id <> md5(e.repository_id::text || E'\n' || e.name)::uuid::text
+           AND NOT EXISTS (SELECT 1 FROM objects t
+                            WHERE t.object_type = 'environment'
+                              AND t.external_id = md5(e.repository_id::text || E'\n' || e.name)::uuid::text);
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT 'platform_environments', e.id, r.customer_id,
+                   CASE WHEN w.desired = 'deleted' THEN NULL ELSE r.workspace_id END,
+                   CASE WHEN r.workspace_id IS NULL THEN 'needs_selection'
+                        WHEN w.desired = 'deleted' THEN 'workspace_deleted'
+                        ELSE 'repository_workspace' END
+            FROM platform_environments e JOIN repositories r ON r.id = e.repository_id
+                 LEFT JOIN workspaces w ON w.id = r.workspace_id
+            ON CONFLICT DO NOTHING;
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT 'platform_mirror', md5(m.kind || E'\n' || m.key)::uuid, r.customer_id,
+                   CASE WHEN w.desired = 'deleted' THEN NULL ELSE r.workspace_id END,
+                   CASE WHEN r.workspace_id IS NULL THEN 'needs_selection'
+                        WHEN w.desired = 'deleted' THEN 'workspace_deleted'
+                        ELSE 'repository_workspace' END
+            FROM platform_mirror m JOIN repositories r ON r.id::text = m.value->>'repository'
+                 LEFT JOIN workspaces w ON w.id = r.workspace_id
+            ON CONFLICT DO NOTHING;
+        FOR unresolved IN SELECT * FROM workspace_assignments
+                           WHERE workspace_id IS NULL
+                             AND object_table IN ('platform_environments', 'platform_mirror') LOOP
+            RAISE WARNING 'platform row not copied (%): table=%, object=%, customer=%',
+                unresolved.outcome, unresolved.object_table, unresolved.object_id,
+                unresolved.customer_id;
+        END LOOP;
+        FOR unresolved IN SELECT m.kind, m.key FROM platform_mirror m
+                           WHERE NOT EXISTS (SELECT 1 FROM repositories r
+                                              WHERE r.id::text = m.value->>'repository') LOOP
+            RAISE WARNING 'platform mirror row not copied (unknown_repository): kind=%, key=%',
+                unresolved.kind, unresolved.key;
+        END LOOP;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS platform_workspaces_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0060_platform_workspaces')
+    ON CONFLICT DO NOTHING;

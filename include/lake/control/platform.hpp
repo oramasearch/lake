@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <expected>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -10,8 +12,8 @@
 #include <liquid/runtime.hpp>
 #include <nlohmann/json.hpp>
 
-#include "lake/control/platform_store.hpp"
 #include "lake/control/store.hpp"
+#include "lake/control/workspace_records.hpp"
 #include "lake/control/zetta_control.hpp"
 
 namespace lake::control {
@@ -52,8 +54,20 @@ struct PlatformConfig {
     std::chrono::seconds sync_interval{15};
     std::string identity_seed;
     std::string instance_kek;
+    // Every this many polls the sync rereads every repository's workspace instead of trusting
+    // what it wrote last (one in-process cache per replica).
+    int full_sync_every = 20;
 };
 
+// Opens the records of one workspace of one space (the API layer binds it to the workspace
+// caller). The sync uses it to reach each repository's workspace.
+using PlatformRecordsOpener = std::function<ZettaControlResult<WorkspaceRecords>(
+    const std::string& customer_id, const std::string& workspace_id)>;
+
+// Lake's view of the operator's deployment control plane (docs/api/platform.md). The sync reads
+// the operator-control rows and keeps each repository's environments and last-seen rows in the
+// workspace Zetta of the repository's workspace (lake#358, lake#359); every read and write takes
+// that workspace's records, which the caller has opened for the repository.
 class PlatformService {
 public:
     PlatformService(std::shared_ptr<Store> store,
@@ -61,32 +75,42 @@ public:
                     std::shared_ptr<LokiSource> logs,
                     PlatformConfig config);
 
-    liquid::runtime::task<PlatformResult<void>> sync();
+    // One poll. Failing to read the operator control plane degrades the whole service; failing to
+    // reach one repository's workspace marks only that repository stale and is retried next poll.
+    liquid::runtime::task<PlatformResult<void>> sync(PlatformRecordsOpener open);
     [[nodiscard]] bool sync_due() const;
     [[nodiscard]] bool degraded() const;
     [[nodiscard]] std::optional<std::string> stale_since() const;
+    // Since when this repository's mirror has not been refreshed: the service's own stale marker,
+    // else the repository's.
+    [[nodiscard]] std::optional<std::string> stale_since(const std::string& repository_id) const;
 
-    PlatformResult<nlohmann::json> list_environments(const std::string& repository_id) const;
-    PlatformResult<nlohmann::json> get_environment(const std::string& repository_id,
-                                                   const std::string& environment) const;
-    PlatformResult<nlohmann::json> list_deployments(const std::string& repository_id,
-                                                    const std::string& environment,
-                                                    int limit) const;
     liquid::runtime::task<PlatformResult<nlohmann::json>>
-    environment_logs(std::string repository_id,
+    list_environments(WorkspaceRecords& records, std::string repository_id) const;
+    liquid::runtime::task<PlatformResult<nlohmann::json>>
+    get_environment(WorkspaceRecords& records, std::string repository_id,
+                    std::string environment) const;
+    liquid::runtime::task<PlatformResult<nlohmann::json>>
+    list_deployments(WorkspaceRecords& records, std::string repository_id,
+                     std::string environment, int limit) const;
+    liquid::runtime::task<PlatformResult<nlohmann::json>>
+    environment_logs(WorkspaceRecords& records,
+                     std::string repository_id,
                      std::string environment,
                      std::string since,
                      int limit,
                      std::string direction);
     liquid::runtime::task<PlatformResult<nlohmann::json>>
     app_logs(std::string app_id, std::string since, int limit, std::string direction);
-    liquid::runtime::task<PlatformResult<void>> set_environment_env(std::string repository_id,
+    liquid::runtime::task<PlatformResult<void>> set_environment_env(WorkspaceRecords& records,
+                                                                    std::string repository_id,
                                                                     std::string environment,
                                                                     std::string key,
                                                                     std::string value,
                                                                     bool deleted,
                                                                     std::string actor);
-    liquid::runtime::task<PlatformResult<void>> change_domain(std::string repository_id,
+    liquid::runtime::task<PlatformResult<void>> change_domain(WorkspaceRecords& records,
+                                                              std::string repository_id,
                                                               std::string environment,
                                                               std::string host,
                                                               std::string tls,
@@ -95,13 +119,18 @@ public:
 
 private:
     PlatformResult<void> require_writable() const;
-    PlatformResult<nlohmann::json> environment_document(const std::string& repository_id,
-                                                        const std::string& environment) const;
+    liquid::runtime::task<PlatformResult<nlohmann::json>>
+    environment_document(WorkspaceRecords& records, std::string repository_id,
+                         std::string environment) const;
+    // The environment's policy object (created on first sight) and its workspace record.
+    liquid::runtime::task<PlatformResult<PlatformEnvironment>>
+    ensure_environment(WorkspaceRecords& records, const Repository& repository,
+                       const std::string& name);
     void mark_failed();
     void mark_succeeded();
+    void mark_repository(const std::string& repository_id, bool mirrored);
 
     std::shared_ptr<Store> store_;
-    PlatformStore* platform_store_ = nullptr;
     std::shared_ptr<ZettaControl> control_;
     std::shared_ptr<LokiSource> logs_;
     PlatformConfig config_;
@@ -109,6 +138,13 @@ private:
     bool degraded_ = false;
     std::optional<std::string> stale_since_;
     std::chrono::steady_clock::time_point next_sync_ = std::chrono::steady_clock::now();
+    // Repositories whose workspace could not be written, and since when.
+    std::map<std::string, std::string> stale_repositories_;
+    // What the last successful sync wrote per repository, so an unchanged repository costs no
+    // workspace call; forgotten every `full_sync_every` polls, so a workspace that lost its
+    // records (recreated) is written again.
+    std::map<std::string, std::string> mirrored_;
+    int syncs_since_full_ = 0;
 };
 
 } // namespace lake::control

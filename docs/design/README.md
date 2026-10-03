@@ -42,3 +42,6 @@ implemented and not yet deployed.
 
 [status.md](status.md) records forge records in the repository's workspace Zetta (lake#341, migration
 `0054`) as implemented and not yet deployed.
+
+[status.md](status.md) records repository environments and the platform mirror in the repository's
+workspace Zetta (lake#358, lake#359, migration `0060`) as implemented and not yet deployed.

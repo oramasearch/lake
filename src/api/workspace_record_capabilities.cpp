@@ -6,7 +6,8 @@
 // and metering_build_records, lake#348 and lake#349; forge_records, lake#341; auth_app_users and
 // auth_app_organizations, lake#353 and lake#354; auth_app_signing_keys and auth_app_webhooks,
 // lake#352 and lake#355; the five secrets tables, lake#328-#332; dynamic leases, lake#362;
-// auth_applications, the settings of each application, lake#351). A collection
+// auth_applications, the settings of each application, lake#351; platform_environments and
+// platform_mirror, lake#358 and lake#359). A collection
 // leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
 // and verified on dev, dropped by migration 0050, lake#483).
 
@@ -27,6 +28,7 @@
 #include "lake/control/forge_records.hpp"
 #include "lake/control/metering.hpp"
 #include "lake/control/opportunities.hpp"
+#include "lake/control/platform_records.hpp"
 #include "lake/control/secret_records.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/stream_owners.hpp"
@@ -38,7 +40,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 19> copy_collections = {"opportunities",
+constexpr std::array<std::string_view, 21> copy_collections = {"opportunities",
                                                                "stream_owners",
                                                                "drive_share_links",
                                                                "auth_app_webhook_events",
@@ -56,7 +58,9 @@ constexpr std::array<std::string_view, 19> copy_collections = {"opportunities",
                                                                "secrets_entries",
                                                                "secrets_versions",
                                                                "secrets_dynamic_leases",
-                                                               "auth_applications"};
+                                                               "auth_applications",
+                                                               "platform_environments",
+                                                               "platform_mirror"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -1285,6 +1289,187 @@ liquid::runtime::task<ApiResult> copy_forge_records(ApiContext& context, const s
                           std::move(unresolved), tallies, blocking);
 }
 
+// The retired platform_mirror table (lake#359): each row goes to the workspace of the repository
+// it names, under platform_mirror_id(kind, key), the key the sync writes. Per workspace, one
+// listing per repository. A row the sync has since replaced by a newer operator-control row is
+// verified, not mismatched. Rows of a deleted workspace, or naming no repository lake has, are
+// reported and do not hold the copy back. Copy this collection before platform_environments.
+liquid::runtime::task<ApiResult> copy_platform_mirror(ApiContext& context, const std::string& mode,
+                                                      const std::string& after, int limit) {
+    if (auto assigned = context.store->assign_legacy_platform_mirror(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_platform_mirror(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    json unresolved = json::array();
+    bool blocking = false;
+    std::map<std::string, std::map<std::string, std::vector<const control::LegacyPlatformMirrorRow*>>>
+        by_workspace; // workspace -> repository -> rows
+    for (const control::LegacyPlatformMirrorRow& row : *rows) {
+        const bool valid = row.row.value.is_object() && control::is_platform_mirror_kind(row.row.kind);
+        if (row.workspace_id.empty() || !valid) {
+            const std::string outcome = valid ? row.outcome : std::string("invalid");
+            unresolved.push_back({{"id", row.id},
+                                  {"kind", row.row.kind},
+                                  {"repository_id", row.repository_id},
+                                  {"customer_id", row.customer_id},
+                                  {"outcome", outcome}});
+            blocking = blocking ||
+                       (outcome != "workspace_deleted" && outcome != "unknown_repository");
+        } else {
+            by_workspace[row.workspace_id][row.repository_id].push_back(&row);
+        }
+    }
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, repositories] : by_workspace) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = repositories.begin()->second.front()->customer_id;
+        for (const auto& [repository_id, owned] : repositories) {
+            tally.rows += owned.size();
+        }
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        for (const auto& [repository_id, owned] : repositories) {
+            auto present = control::settled(
+                co_await control::list_platform_mirror_records(*records, repository_id));
+            if (!present) {
+                tally.error = present.error().code + ": " + present.error().message;
+                break;
+            }
+            std::map<std::string, json> stored;
+            for (const control::PlatformMirrorRow& row : *present) {
+                stored.emplace(control::platform_mirror_id(row.kind, row.key), row.value);
+            }
+            for (const control::LegacyPlatformMirrorRow* row : owned) {
+                const auto found = stored.find(row->id);
+                if (mode == "verify") {
+                    if (found == stored.end()) {
+                        tally.missing.push_back(row->id);
+                    } else if (found->second != row->row.value &&
+                               !control::platform_row_is_newer(found->second, row->row.value)) {
+                        tally.mismatched.push_back(row->id);
+                    } else {
+                        ++tally.verified;
+                    }
+                    continue;
+                }
+                if (found != stored.end()) {
+                    ++tally.already_present;
+                    continue;
+                }
+                auto written = control::settled(co_await control::put_platform_mirror_record(
+                    *records, repository_id, row->row, row->at_us));
+                if (!written) {
+                    tally.error = written.error().code + ": " + written.error().message;
+                    break;
+                }
+                if (*written) {
+                    ++tally.copied;
+                } else {
+                    ++tally.already_present; // the sync mirrored it, or a newer row, first
+                }
+            }
+            if (!tally.error.empty()) {
+                break;
+            }
+        }
+    }
+    co_return copy_result("platform_mirror", mode, rows->size(), limit,
+                          rows->empty() ? std::string() : rows->back().id, std::move(unresolved),
+                          tallies, blocking);
+}
+
+// The retired platform_environments table (lake#358): each environment goes to its repository's
+// workspace under its derived id, platform_environment_id(repository, name), with the policy
+// object it had (migration 0060 gave that object the same external id) and its creation instant.
+// An environment the sync created first, with the same policy object, counts as present.
+liquid::runtime::task<ApiResult> copy_platform_environments(ApiContext& context,
+                                                            const std::string& mode,
+                                                            const std::string& after, int limit) {
+    if (auto assigned = context.store->assign_legacy_platform_environments(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_platform_environments(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    json unresolved = json::array();
+    bool blocking = false;
+    std::map<std::string, std::vector<const control::LegacyPlatformEnvironment*>> by_workspace;
+    for (const control::LegacyPlatformEnvironment& row : *rows) {
+        if (row.workspace_id.empty()) {
+            unresolved.push_back({{"id", row.id},
+                                  {"repository_id", row.environment.repository_id},
+                                  {"customer_id", row.customer_id},
+                                  {"outcome", row.outcome}});
+            blocking = blocking || row.outcome != "workspace_deleted";
+        } else {
+            by_workspace[row.workspace_id].push_back(&row);
+        }
+    }
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, owned] : by_workspace) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = owned.front()->customer_id;
+        tally.rows = owned.size();
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        for (const control::LegacyPlatformEnvironment* row : owned) {
+            const control::PlatformEnvironment& source = row->environment;
+            auto present = control::settled(co_await control::get_platform_environment_record(
+                *records, source.repository_id, source.name));
+            if (!present) {
+                tally.error = present.error().code + ": " + present.error().message;
+                break;
+            }
+            if (mode == "verify") {
+                if (!*present) {
+                    tally.missing.push_back(row->id);
+                } else if ((*present)->object_id != source.object_id) {
+                    tally.mismatched.push_back(row->id);
+                } else {
+                    ++tally.verified;
+                }
+                continue;
+            }
+            if (*present) {
+                ++tally.already_present;
+                continue;
+            }
+            auto written = control::settled(
+                co_await control::put_platform_environment_record(*records, source));
+            if (!written) {
+                tally.error = written.error().code + ": " + written.error().message;
+                break;
+            }
+            // A concurrent writer's record (another policy object) answers instead of ours;
+            // verify reports it.
+            if (written->object_id == source.object_id) {
+                ++tally.copied;
+            } else {
+                ++tally.already_present;
+            }
+        }
+    }
+    co_return copy_result("platform_environments", mode, rows->size(), limit,
+                          rows->empty() ? std::string() : rows->back().id, std::move(unresolved),
+                          tallies, blocking);
+}
+
 // The retired secrets tables (lake#328-#332): every row goes to the workspace of its mount's route
 // (secret_mount_routes, migration 0057), under the key a live call derives for it, so a copied
 // secret, key or data key is found exactly as one written after the cutover. A row whose mount has
@@ -1774,6 +1959,12 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "forge_records") {
                 co_return co_await copy_forge_records(context, mode, after, limit);
+            }
+            if (input.at("collection") == "platform_mirror") {
+                co_return co_await copy_platform_mirror(context, mode, after, limit);
+            }
+            if (input.at("collection") == "platform_environments") {
+                co_return co_await copy_platform_environments(context, mode, after, limit);
             }
             if (input.at("collection") == "auth_app_users") {
                 co_return co_await copy_application_users(context, mode, after, limit);

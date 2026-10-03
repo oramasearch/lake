@@ -33,7 +33,6 @@
 
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
-#include "lake/control/platform_store.hpp"
 #include "secrets_crypto.hpp"
 
 #include <pqxx/pqxx>
@@ -247,6 +246,48 @@ constexpr std::string_view legacy_secret_owner_joins =
     "sw.id = r.workspace_id LEFT JOIN workspace_assignments sa ON sa.object_table = "
     "'secrets_mounts' AND sa.object_id = o.mount_id";
 constexpr std::string_view instant_text_format = "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'";
+
+// Migration 0060's assignment of the retired platform tables (db/schema.sql), rerun before each
+// copy (lake#358, lake#359). Each environment's policy object first takes the environment's
+// derived id, md5(repository, newline, name), unless another object already has it (an
+// environment an earlier lake made during the rollout, which verify then reports). Each row
+// belongs to its repository's workspace, is needs_selection while the repository has none and
+// workspace_deleted when that workspace is gone; the second statement of each pair resolves
+// recorded needs_selection rows once their repository has a live workspace. A mirror row's id is
+// md5(kind, newline, key); a row naming no repository lake has is not assigned.
+constexpr std::string_view legacy_platform_environment_object_sql =
+    "UPDATE objects o SET external_id = md5(e.repository_id::text || E'\\n' || e.name)::uuid::text, "
+    "updated_at = now() FROM platform_environments e WHERE o.id = e.object_id AND o.external_id <> "
+    "md5(e.repository_id::text || E'\\n' || e.name)::uuid::text AND NOT EXISTS (SELECT 1 FROM "
+    "objects t WHERE t.object_type = 'environment' AND t.external_id = md5(e.repository_id::text "
+    "|| E'\\n' || e.name)::uuid::text)";
+constexpr std::string_view legacy_platform_environment_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'platform_environments', e.id, r.customer_id, CASE WHEN w.desired = "
+    "'deleted' THEN NULL ELSE r.workspace_id END, CASE WHEN r.workspace_id IS NULL THEN "
+    "'needs_selection' WHEN w.desired = 'deleted' THEN 'workspace_deleted' ELSE "
+    "'repository_workspace' END FROM platform_environments e JOIN repositories r ON r.id = "
+    "e.repository_id LEFT JOIN workspaces w ON w.id = r.workspace_id ON CONFLICT DO NOTHING";
+constexpr std::string_view legacy_platform_environment_resolution_sql =
+    "UPDATE workspace_assignments s SET workspace_id = r.workspace_id, outcome = "
+    "'repository_workspace' FROM platform_environments e JOIN repositories r ON r.id = "
+    "e.repository_id JOIN workspaces w ON w.id = r.workspace_id AND w.desired <> 'deleted' WHERE "
+    "s.object_table = 'platform_environments' AND s.object_id = e.id AND s.workspace_id IS NULL "
+    "AND s.outcome = 'needs_selection'";
+constexpr std::string_view legacy_platform_mirror_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'platform_mirror', md5(m.kind || E'\\n' || m.key)::uuid, r.customer_id, "
+    "CASE WHEN w.desired = 'deleted' THEN NULL ELSE r.workspace_id END, CASE WHEN r.workspace_id "
+    "IS NULL THEN 'needs_selection' WHEN w.desired = 'deleted' THEN 'workspace_deleted' ELSE "
+    "'repository_workspace' END FROM platform_mirror m JOIN repositories r ON r.id::text = "
+    "m.value->>'repository' LEFT JOIN workspaces w ON w.id = r.workspace_id ON CONFLICT DO "
+    "NOTHING";
+constexpr std::string_view legacy_platform_mirror_resolution_sql =
+    "UPDATE workspace_assignments s SET workspace_id = r.workspace_id, outcome = "
+    "'repository_workspace' FROM platform_mirror m JOIN repositories r ON r.id::text = "
+    "m.value->>'repository' JOIN workspaces w ON w.id = r.workspace_id AND w.desired <> 'deleted' "
+    "WHERE s.object_table = 'platform_mirror' AND s.object_id = md5(m.kind || E'\\n' || "
+    "m.key)::uuid AND s.workspace_id IS NULL AND s.outcome = 'needs_selection'";
 
 constexpr std::string_view legacy_forge_record_resolution_sql =
     "UPDATE workspace_assignments s SET workspace_id = r.workspace_id, outcome = "
@@ -1913,7 +1954,7 @@ void remove_scim_user_access(pqxx::work& tx,
                    external_id);
 }
 
-class PostgresStore final : public Store, public PlatformStore {
+class PostgresStore final : public Store {
 public:
     PostgresStore(std::string uri, std::string instance_kek)
         : uri_(std::move(uri)), instance_kek_(std::move(instance_kek)) {}
@@ -1930,149 +1971,6 @@ public:
         if (!result)
             return std::unexpected(StoreError{"store_unavailable", result.error().message});
         return {};
-    }
-
-    Result<PlatformEnvironment> ensure_platform_environment(const std::string& repository_id,
-                                                            const std::string& name) override {
-        if (repository_id.empty() || name.empty()) {
-            return std::unexpected(
-                StoreError{"invalid_input", "repository_id and environment name are required"});
-        }
-        return with_tx<PlatformEnvironment>([&](pqxx::work& tx) -> Result<PlatformEnvironment> {
-            const pqxx::result existing = tx.exec_params(
-                "SELECT id::text, repository_id::text, name, object_id::text, created_at::text "
-                "FROM platform_environments WHERE repository_id = $1::uuid AND name = $2",
-                repository_id,
-                name);
-            if (!existing.empty()) {
-                return PlatformEnvironment{existing[0][0].as<std::string>(),
-                                           existing[0][1].as<std::string>(),
-                                           existing[0][2].as<std::string>(),
-                                           existing[0][3].as<std::string>(),
-                                           existing[0][4].as<std::string>()};
-            }
-            const pqxx::result parents =
-                tx.exec_params("SELECT id::text FROM objects WHERE object_type = 'repository' AND "
-                               "external_id = $1",
-                               repository_id);
-            if (parents.empty()) {
-                return std::unexpected(
-                    StoreError{"not_found", "repository policy object is missing"});
-            }
-            const std::string environment_id = new_uuid_v4();
-            const pqxx::result objects =
-                tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) "
-                               "VALUES ('environment', $1, $2::uuid) RETURNING id::text",
-                               environment_id,
-                               parents[0][0].as<std::string>());
-            const pqxx::result rows = tx.exec_params(
-                "INSERT INTO platform_environments (id, repository_id, name, object_id) "
-                "VALUES ($1::uuid, $2::uuid, $3, $4::uuid) "
-                "RETURNING id::text, repository_id::text, name, object_id::text, created_at::text",
-                environment_id,
-                repository_id,
-                name,
-                objects[0][0].as<std::string>());
-            return PlatformEnvironment{rows[0][0].as<std::string>(),
-                                       rows[0][1].as<std::string>(),
-                                       rows[0][2].as<std::string>(),
-                                       rows[0][3].as<std::string>(),
-                                       rows[0][4].as<std::string>()};
-        });
-    }
-
-    Result<PlatformEnvironment> get_platform_environment(const std::string& repository_id,
-                                                         const std::string& name) override {
-        return with_tx<PlatformEnvironment>([&](pqxx::work& tx) -> Result<PlatformEnvironment> {
-            const pqxx::result rows = tx.exec_params(
-                "SELECT id::text, repository_id::text, name, object_id::text, created_at::text "
-                "FROM platform_environments WHERE repository_id = $1::uuid AND name = $2",
-                repository_id,
-                name);
-            if (rows.empty()) {
-                return std::unexpected(StoreError{"not_found", "no environment " + name});
-            }
-            return PlatformEnvironment{rows[0][0].as<std::string>(),
-                                       rows[0][1].as<std::string>(),
-                                       rows[0][2].as<std::string>(),
-                                       rows[0][3].as<std::string>(),
-                                       rows[0][4].as<std::string>()};
-        });
-    }
-
-    Result<std::vector<PlatformEnvironment>>
-    list_platform_environments(const std::string& repository_id) override {
-        return with_tx<std::vector<PlatformEnvironment>>(
-            [&](pqxx::work& tx) -> Result<std::vector<PlatformEnvironment>> {
-                pqxx::result rows;
-                if (repository_id.empty()) {
-                    rows = tx.exec("SELECT id::text, repository_id::text, name, object_id::text, "
-                                   "created_at::text FROM platform_environments ORDER BY name");
-                } else {
-                    rows = tx.exec_params(
-                        "SELECT id::text, repository_id::text, name, object_id::text, "
-                        "created_at::text FROM platform_environments "
-                        "WHERE repository_id = $1::uuid ORDER BY name",
-                        repository_id);
-                }
-                std::vector<PlatformEnvironment> output;
-                for (const pqxx::row& row : rows) {
-                    output.push_back(PlatformEnvironment{row[0].as<std::string>(),
-                                                         row[1].as<std::string>(),
-                                                         row[2].as<std::string>(),
-                                                         row[3].as<std::string>(),
-                                                         row[4].as<std::string>()});
-                }
-                return output;
-            });
-    }
-
-    Result<void> upsert_platform_mirror(const PlatformMirrorRow& row) override {
-        if (row.kind.empty() || row.key.empty() || !row.value.is_object()) {
-            return std::unexpected(
-                StoreError{"invalid_input", "platform mirror row is incomplete"});
-        }
-        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
-            tx.exec_params("INSERT INTO platform_mirror (kind, key, value, seen_at) "
-                           "VALUES ($1, $2, $3::jsonb, $4::timestamptz) "
-                           "ON CONFLICT (kind, key) DO UPDATE SET value = EXCLUDED.value, "
-                           "seen_at = EXCLUDED.seen_at",
-                           row.kind,
-                           row.key,
-                           row.value.dump(),
-                           row.seen_at);
-            return {};
-        });
-    }
-
-    Result<std::vector<PlatformMirrorRow>> list_platform_mirror(const std::string& kind) override {
-        return with_tx<std::vector<PlatformMirrorRow>>(
-            [&](pqxx::work& tx) -> Result<std::vector<PlatformMirrorRow>> {
-                pqxx::result rows;
-                if (kind.empty()) {
-                    rows = tx.exec("SELECT kind, key, value::text, seen_at::text "
-                                   "FROM platform_mirror ORDER BY kind, key");
-                } else {
-                    rows = tx.exec_params(
-                        "SELECT kind, key, value::text, seen_at::text FROM platform_mirror "
-                        "WHERE kind = $1 ORDER BY key",
-                        kind);
-                }
-                std::vector<PlatformMirrorRow> output;
-                for (const pqxx::row& row : rows) {
-                    const nlohmann::json value =
-                        nlohmann::json::parse(row[2].as<std::string>(), nullptr, false);
-                    if (value.is_discarded() || !value.is_object()) {
-                        return std::unexpected(
-                            StoreError{"store_error", "platform mirror contains invalid JSON"});
-                    }
-                    output.push_back(PlatformMirrorRow{row[0].as<std::string>(),
-                                                       row[1].as<std::string>(),
-                                                       value,
-                                                       row[3].as<std::string>()});
-                }
-                return output;
-            });
     }
 
     Result<User> create_user(const NewUser& in) override {
@@ -2432,6 +2330,95 @@ public:
                     records.push_back(std::move(legacy));
                 }
                 return records;
+            });
+    }
+
+    Result<void> assign_legacy_platform_environments() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec(std::string(legacy_platform_environment_object_sql));
+            tx.exec(std::string(legacy_platform_environment_assignment_sql));
+            tx.exec(std::string(legacy_platform_environment_resolution_sql));
+            return {};
+        });
+    }
+
+    Result<std::vector<LegacyPlatformEnvironment>>
+    legacy_platform_environments(const std::string& after_id, int limit) override {
+        return with_tx<std::vector<LegacyPlatformEnvironment>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyPlatformEnvironment>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT e.id::text, e.repository_id::text, e.name, e.object_id::text, "
+                    "(extract(epoch FROM e.created_at) * 1000000)::bigint, "
+                    "COALESCE(r.customer_id::text, ''), COALESCE(a.workspace_id::text, ''), "
+                    "COALESCE(a.outcome, 'needs_selection') "
+                    "FROM platform_environments e LEFT JOIN repositories r ON r.id = "
+                    "e.repository_id LEFT JOIN workspace_assignments a ON a.object_table = "
+                    "'platform_environments' AND a.object_id = e.id "
+                    "WHERE ($1 = '' OR e.id > NULLIF($1, '')::uuid) ORDER BY e.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyPlatformEnvironment> environments;
+                for (const pqxx::row& row : rows) {
+                    LegacyPlatformEnvironment legacy;
+                    legacy.id = row[0].as<std::string>();
+                    legacy.environment.id = legacy.id;
+                    legacy.environment.repository_id = row[1].as<std::string>();
+                    legacy.environment.name = row[2].as<std::string>();
+                    legacy.environment.object_id = row[3].as<std::string>();
+                    legacy.environment.at_us = row[4].as<std::int64_t>();
+                    legacy.environment.created_at = record_instant(legacy.environment.at_us);
+                    legacy.customer_id = row[5].as<std::string>();
+                    legacy.workspace_id = row[6].as<std::string>();
+                    legacy.outcome = row[7].as<std::string>();
+                    environments.push_back(std::move(legacy));
+                }
+                return environments;
+            });
+    }
+
+    Result<void> assign_legacy_platform_mirror() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec(std::string(legacy_platform_mirror_assignment_sql));
+            tx.exec(std::string(legacy_platform_mirror_resolution_sql));
+            return {};
+        });
+    }
+
+    Result<std::vector<LegacyPlatformMirrorRow>>
+    legacy_platform_mirror(const std::string& after_id, int limit) override {
+        return with_tx<std::vector<LegacyPlatformMirrorRow>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyPlatformMirrorRow>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT md5(m.kind || E'\\n' || m.key)::uuid::text, m.kind, m.key, "
+                    "m.value::text, m.seen_at::text, "
+                    "(extract(epoch FROM m.seen_at) * 1000000)::bigint, "
+                    "COALESCE(r.id::text, ''), COALESCE(r.customer_id::text, ''), "
+                    "COALESCE(a.workspace_id::text, ''), COALESCE(a.outcome, CASE WHEN r.id IS "
+                    "NULL THEN 'unknown_repository' ELSE 'needs_selection' END) "
+                    "FROM platform_mirror m LEFT JOIN repositories r ON r.id::text = "
+                    "m.value->>'repository' LEFT JOIN workspace_assignments a ON a.object_table = "
+                    "'platform_mirror' AND a.object_id = md5(m.kind || E'\\n' || m.key)::uuid "
+                    "WHERE ($1 = '' OR md5(m.kind || E'\\n' || m.key)::uuid > "
+                    "NULLIF($1, '')::uuid) ORDER BY md5(m.kind || E'\\n' || m.key)::uuid LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyPlatformMirrorRow> mirror;
+                for (const pqxx::row& row : rows) {
+                    LegacyPlatformMirrorRow legacy;
+                    legacy.id = row[0].as<std::string>();
+                    legacy.row.kind = row[1].as<std::string>();
+                    legacy.row.key = row[2].as<std::string>();
+                    legacy.row.value = nlohmann::json::parse(row[3].as<std::string>(), nullptr,
+                                                             false);
+                    legacy.row.seen_at = row[4].as<std::string>();
+                    legacy.at_us = row[5].as<std::int64_t>();
+                    legacy.repository_id = row[6].as<std::string>();
+                    legacy.customer_id = row[7].as<std::string>();
+                    legacy.workspace_id = row[8].as<std::string>();
+                    legacy.outcome = row[9].as<std::string>();
+                    mirror.push_back(std::move(legacy));
+                }
+                return mirror;
             });
     }
 

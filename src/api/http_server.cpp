@@ -12187,18 +12187,20 @@ struct ApiServer::Impl {
     boost::http::route_task serve_deployments_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
         const ApiResult rows = registry.call("list_repositories", {{"limit", 500}}, context);
         if (!rows.ok) {
-            return serve_page_error(route, rows);
+            co_return co_await serve_page_error(route, rows);
         }
         std::vector<DeploymentSummary> environments;
         std::string stale_since;
         for (const auto& value : rows.value.at("items")) {
             control::Repository repository = repository_from_json(value);
-            const ApiResult listed =
-                registry.call("list_environments", {{"repository_id", repository.id}}, context);
+            // Each repository's environments are in its own workspace; one that cannot be read
+            // (no workspace, not ready) is skipped like one the caller may not read.
+            const ApiResult listed = unwrap(co_await registry.call_async(
+                "list_environments", {{"repository_id", repository.id}}, context));
             if (!listed.ok) {
                 continue;
             }
@@ -12210,36 +12212,37 @@ struct ApiServer::Impl {
                 environments.push_back({repository, item});
             }
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_deployments(environments, stale_since, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_deployments(environments, stale_since,
+                                                        viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_environments_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         const std::string repository_id = query_value(route, "repository_id");
         if (repository_id.empty()) {
-            return redirect(route, "/repositories");
+            co_return co_await redirect(route, "/repositories");
         }
         const ApiResult repository =
             registry.call("get_repository", {{"id", repository_id}}, context);
         if (!repository.ok) {
-            return serve_repository_page_error(route, context, repository);
+            co_return co_await serve_repository_page_error(route, context, repository);
         }
-        const ApiResult environments =
-            registry.call("list_environments", {{"repository_id", repository_id}}, context);
+        const ApiResult environments = unwrap(co_await registry.call_async(
+            "list_environments", {{"repository_id", repository_id}}, context));
         if (!environments.ok) {
-            return serve_repository_page_error(route, context, environments);
+            co_return co_await serve_repository_page_error(route, context, environments);
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_environments(repository_from_json(repository.value),
-                                             environments.value,
-                                             viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_environments(repository_from_json(repository.value),
+                                                         environments.value,
+                                                         viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_environment_page(boost::http::route_params& route) {
@@ -12247,33 +12250,33 @@ struct ApiServer::Impl {
         const std::string repository_id = query_value(route, "repository_id");
         const std::string name = query_value(route, "name");
         if (repository_id.empty() || name.empty()) {
-            return redirect(route, "/repositories");
+            co_return co_await redirect(route, "/repositories");
         }
         const ApiResult repository =
             registry.call("get_repository", {{"id", repository_id}}, context);
         if (!repository.ok) {
-            return serve_repository_page_error(route, context, repository);
+            co_return co_await serve_repository_page_error(route, context, repository);
         }
-        const ApiResult environment = registry.call(
-            "get_environment", {{"repository_id", repository_id}, {"environment", name}}, context);
+        const ApiResult environment = unwrap(co_await registry.call_async(
+            "get_environment", {{"repository_id", repository_id}, {"environment", name}},
+            context));
         if (!environment.ok) {
-            return serve_repository_page_error(route, context, environment);
+            co_return co_await serve_repository_page_error(route, context, environment);
         }
-        const ApiResult deployments =
-            registry.call("list_deployments",
-                          {{"repository_id", repository_id}, {"environment", name}, {"limit", 100}},
-                          context);
+        const ApiResult deployments = unwrap(co_await registry.call_async(
+            "list_deployments",
+            {{"repository_id", repository_id}, {"environment", name}, {"limit", 100}}, context));
         if (!deployments.ok) {
-            return serve_repository_page_error(route, context, deployments);
+            co_return co_await serve_repository_page_error(route, context, deployments);
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_environment(repository_from_json(repository.value),
-                                            environment.value,
-                                            deployments.value,
-                                            viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_environment(repository_from_json(repository.value),
+                                                        environment.value,
+                                                        deployments.value,
+                                                        viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_logs_page(boost::http::route_params& route) {
@@ -17641,7 +17644,24 @@ void ApiServer::drain() {
         }
     }
     if (impl_->options.platform && impl_->options.platform->sync_due()) {
-        static_cast<void>(liquid::runtime::block_on(impl_->options.platform->sync()));
+        // The mirror lives in each repository's workspace (lake#358, lake#359).
+        control::WorkspaceService* workspaces = impl_->options.workspaces.get();
+        const std::string kek = impl_->options.instance_kek;
+        static_cast<void>(liquid::runtime::block_on(impl_->options.platform->sync(
+            [workspaces, kek](const std::string& customer_id, const std::string& workspace_id)
+                -> control::ZettaControlResult<control::WorkspaceRecords> {
+                if (!workspaces) {
+                    return std::unexpected(control::ZettaControlError{
+                        "workspace_not_ready", "a workspace Zetta is required"});
+                }
+                return control::WorkspaceRecords::open(
+                    [workspaces, customer_id, workspace_id](std::string capability, bool read,
+                                                            nlohmann::json input) {
+                        return workspaces->call(customer_id, workspace_id, std::move(capability),
+                                                read, std::move(input));
+                    },
+                    workspace_id, kek);
+            })));
     }
 }
 

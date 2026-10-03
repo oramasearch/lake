@@ -26,7 +26,9 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/zetta_control.hpp"
+#include "api/workspace_records_api.hpp"
 #include "repository_test_support.hpp"
+#include "workspace_fixture.hpp"
 
 namespace {
 
@@ -233,10 +235,16 @@ json environment_env_row(const std::string& repository,
             {"ordering_token", std::move(ordering_token)}};
 }
 
+constexpr std::string_view platform_kek =
+    "706c6174666f726d2d746573742d6b656b2d706c6174666f726d2d746573742d";
+
+// The repository's environments and mirror live in its workspace's Zetta (lake#358, lake#359):
+// every fixture repository sits in a Ready workspace with its own record store.
 class PlatformFixture : public testing::Test {
 protected:
     std::shared_ptr<lake::control::InMemoryStore> store =
         std::make_shared<lake::control::InMemoryStore>();
+    std::unique_ptr<lake::test::RecordWorkspaces> workspaces;
     std::shared_ptr<FakeZettaControl> control = std::make_shared<FakeZettaControl>();
     std::shared_ptr<FakeLoki> loki = std::make_shared<FakeLoki>();
     std::unique_ptr<lake::control::PlatformService> platform;
@@ -246,15 +254,15 @@ protected:
 
     void reset_platform() {
         store = std::make_shared<lake::control::InMemoryStore>();
+        workspaces = std::make_unique<lake::test::RecordWorkspaces>(store);
         control = std::make_shared<FakeZettaControl>();
         loki = std::make_shared<FakeLoki>();
         const auto user = store->create_user({"admin", "admin@example.test", "Admin"});
         ASSERT_TRUE(user);
         const auto customer = store->create_customer({"individual", user->id, "", "admin"});
         ASSERT_TRUE(customer);
-        const auto created = store->create_repository({customer->id, "platform", "", "private",
-                                                       lake::test::repository_workspace(
-                                                           *store, customer->id)});
+        const auto created = store->create_repository(
+            {customer->id, "platform", "", "private", workspaces->create(customer->id, "home")});
         ASSERT_TRUE(created);
         repository = *created;
         platform = std::make_unique<lake::control::PlatformService>(
@@ -264,31 +272,77 @@ protected:
             lake::control::PlatformConfig{
                 .lake = "lake.example",
                 .identity_seed = "",
-                .instance_kek = "platform-test-kek",
+                .instance_kek = std::string(platform_kek),
             });
+        context.store = store.get();
+        context.platform = platform.get();
+        context.workspaces = workspaces->service.get();
     }
 
     void SetUp() override {
-        reset_platform();
-        control->deployments.push_back(
-            deployment_row(repository.id, "deploying", "2026-09-06T00:01:00Z"));
         lake::api::register_core_capabilities(registry, "test");
-        context.store = store.get();
-        context.platform = platform.get();
         context.authorized = true;
         context.acting_identity = "admin";
         context.operator_credential = true;
-        context.instance_kek = "platform-test-kek";
+        context.instance_kek = std::string(platform_kek);
+        reset_platform();
+        control->deployments.push_back(
+            deployment_row(repository.id, "deploying", "2026-09-06T00:01:00Z"));
+    }
+
+    // What the server's owner loop hands the sync: the workspace caller.
+    lake::control::PlatformRecordsOpener opener() {
+        return [service = workspaces->service](const std::string& customer_id,
+                                                const std::string& workspace_id) {
+            return lake::control::WorkspaceRecords::open(
+                [service, customer_id, workspace_id](std::string capability, bool read,
+                                                     json input) {
+                    return service->call(customer_id, workspace_id, std::move(capability), read,
+                                         std::move(input));
+                },
+                workspace_id, platform_kek);
+        };
     }
 
     PlatformResult<void> sync() {
-        auto completed = liquid::runtime::block_on(platform->sync());
+        auto completed = liquid::runtime::block_on(platform->sync(opener()));
         EXPECT_TRUE(completed) << (completed ? "" : completed.error().message);
         if (!completed) {
             return std::unexpected(
                 lake::control::PlatformError{"store_error", completed.error().message});
         }
         return std::move(*completed);
+    }
+
+    lake::control::WorkspaceRecords records() {
+        auto opened =
+            lake::api::workspace_records(context, repository.customer_id, repository.workspace_id);
+        EXPECT_TRUE(opened) << (opened ? "" : opened.error().message);
+        return std::move(*opened);
+    }
+
+    template <class Task> PlatformResult<json> finish(Task task) {
+        auto completed = liquid::runtime::block_on(std::move(task));
+        if (!completed) {
+            return std::unexpected(
+                lake::control::PlatformError{"store_error", completed.error().message});
+        }
+        return std::move(*completed);
+    }
+
+    PlatformResult<json> list_environments() {
+        auto opened = records();
+        return finish(platform->list_environments(opened, repository.id));
+    }
+
+    PlatformResult<json> get_environment(const std::string& name) {
+        auto opened = records();
+        return finish(platform->get_environment(opened, repository.id, name));
+    }
+
+    PlatformResult<json> list_deployments(const std::string& name, int limit) {
+        auto opened = records();
+        return finish(platform->list_deployments(opened, repository.id, name, limit));
     }
 
     ApiResult call_async(const std::string& name, json input) {
@@ -341,7 +395,7 @@ TEST(LokiHttpSource, UsesQueryRangeAndReturnsAStableCursor) {
 
 TEST_F(PlatformFixture, SyncCreatesEnvironmentLatestPhaseAndAuditEvent) {
     ASSERT_TRUE(sync());
-    auto environments = platform->list_environments(repository.id);
+    auto environments = list_environments();
     ASSERT_TRUE(environments);
     ASSERT_EQ(environments->at("items").size(), 1U);
     EXPECT_EQ(environments->at("items").at(0).at("phase"), "deploying");
@@ -359,7 +413,7 @@ TEST_F(PlatformFixture, SyncCreatesEnvironmentLatestPhaseAndAuditEvent) {
     control->deployments.push_back(
         deployment_row(repository.id, "healthy", "2026-09-06T00:03:00Z"));
     ASSERT_TRUE(sync());
-    const auto environment = platform->get_environment(repository.id, "production");
+    const auto environment = get_environment("production");
     ASSERT_TRUE(environment);
     EXPECT_EQ(environment->at("deployment").at("phase"), "healthy");
     events = lake::test::audit_events(*store, {});
@@ -377,7 +431,7 @@ TEST_F(PlatformFixture, EnvironmentValuesDomainsAndSecretScanningUseAppendOnlyRo
     control->environment_env.push_back(
         environment_env_row(repository.id, "COLOR", "", true, "2026-09-06T00:02:00Z"));
     ASSERT_TRUE(sync());
-    auto environment = platform->get_environment(repository.id, "production");
+    auto environment = get_environment("production");
     ASSERT_TRUE(environment);
     EXPECT_TRUE(environment->at("env").empty());
 
@@ -405,7 +459,7 @@ TEST_F(PlatformFixture, EnvironmentValuesDomainsAndSecretScanningUseAppendOnlyRo
                                    {"tls", "acme"}});
     ASSERT_TRUE(domain.ok) << domain.error.message;
     EXPECT_FALSE(control->domains.back().at("ordering_token").get<std::string>().empty());
-    environment = platform->get_environment(repository.id, "production");
+    environment = get_environment("production");
     ASSERT_TRUE(environment);
     ASSERT_EQ(environment->at("domains").size(), 1U);
     EXPECT_EQ(environment->at("domains").at(0).at("status"), "pending");
@@ -418,7 +472,7 @@ TEST_F(PlatformFixture, EnvironmentValuesDomainsAndSecretScanningUseAppendOnlyRo
     ready_domain["updated_at"] = "2099-09-06T00:03:00Z";
     control->domains.push_back(std::move(ready_domain));
     ASSERT_TRUE(sync());
-    environment = platform->get_environment(repository.id, "production");
+    environment = get_environment("production");
     ASSERT_TRUE(environment);
     EXPECT_EQ(environment->at("domains").at(0).at("status"), "ready");
 }
@@ -453,7 +507,7 @@ TEST_F(PlatformFixture, SameInstantEnvironmentEditsRespectOrderingToken) {
     };
 
     ASSERT_TRUE(sync());
-    const auto environment = platform->get_environment(repository.id, "production");
+    const auto environment = get_environment("production");
     ASSERT_TRUE(environment);
     ASSERT_EQ(environment->at("env").size(), 1U);
     EXPECT_EQ(environment->at("env").at(0).at("key"), "UNSET_THEN_SET");
@@ -480,7 +534,7 @@ TEST_F(PlatformFixture, PlatformReducersProduceTheSameResultForEveryInputOrder) 
             control->deployments.push_back(deployment_rows.at(index));
         }
         ASSERT_TRUE(sync());
-        const auto environment = platform->get_environment(repository.id, "production");
+        const auto environment = get_environment("production");
         ASSERT_TRUE(environment);
         ASSERT_EQ(environment->at("env").size(), 1U);
         EXPECT_EQ(environment->at("env").at(0).at("value"), "blue");
@@ -520,7 +574,7 @@ TEST_F(PlatformFixture, UnreachableControlServesStaleMirrorAndRefusesWrites) {
     const auto failed = sync();
     ASSERT_FALSE(failed);
     EXPECT_TRUE(platform->degraded());
-    const auto environment = platform->get_environment(repository.id, "production");
+    const auto environment = get_environment("production");
     ASSERT_TRUE(environment);
     EXPECT_TRUE(environment->contains("stale_since"));
     ApiResult write = call_async("set_environment_env",
@@ -534,16 +588,14 @@ TEST_F(PlatformFixture, UnreachableControlServesStaleMirrorAndRefusesWrites) {
 
 TEST_F(PlatformFixture, ReadRoleCannotWriteAndDeployRoleIsRequiredForDomains) {
     ASSERT_TRUE(sync());
-    const auto environment = platform->get_environment(repository.id, "production");
+    const auto environment = get_environment("production");
     ASSERT_TRUE(environment);
     ASSERT_TRUE(store->create_grant(
         {"reader", environment->at("object_id"), "read", "attestation", "admin", "read-grant"}));
     context.acting_identity = "reader";
     context.operator_credential = false;
-    ApiResult read =
-        registry.call("get_environment",
-                      {{"repository_id", repository.id}, {"environment", "production"}},
-                      context);
+    ApiResult read = call_async(
+        "get_environment", {{"repository_id", repository.id}, {"environment", "production"}});
     EXPECT_TRUE(read.ok) << read.error.message;
     ApiResult set = call_async("set_environment_env",
                                {{"repository_id", repository.id},
@@ -576,16 +628,16 @@ TEST_F(PlatformFixture, ReadRoleCannotWriteAndDeployRoleIsRequiredForDomains) {
 
 TEST_F(PlatformFixture, RenderersAndDiscoveryExposePlatformSurface) {
     ASSERT_TRUE(sync());
-    json environments = *platform->list_environments(repository.id);
+    json environments = *list_environments();
     environments["stale_since"] = "2026-09-06T00:04:00Z";
     const std::string list_page = lake::api::web_ui_environments(repository, environments);
     EXPECT_NE(list_page.find("Platform data is stale"), std::string::npos);
     EXPECT_NE(list_page.find("production"), std::string::npos);
     EXPECT_NE(list_page.find("sha256:0123456789ab"), std::string::npos);
 
-    json environment = *platform->get_environment(repository.id, "production");
+    json environment = *get_environment("production");
     const std::string detail_page = lake::api::web_ui_environment(
-        repository, environment, *platform->list_deployments(repository.id, "production", 100));
+        repository, environment, *list_deployments("production", 100));
     EXPECT_NE(detail_page.find("Environment Variables"), std::string::npos);
     EXPECT_NE(detail_page.find("Deployment History"), std::string::npos);
     EXPECT_NE(detail_page.find("platform/domain/create"), std::string::npos);

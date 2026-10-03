@@ -84,6 +84,17 @@ the copy. Dynamic leases (lake#362) are `lake_secrets_dynamic_leases` records
 `SecretLeaseRoute`, which is also the expiry loop's due index (`record_secret_lease_route`,
 `get_secret_lease_route`, `reschedule_secret_lease`, `delete_secret_lease_route`,
 `claim_due_secret_leases`), and `legacy_dynamic_secret_leases` for the copy.
+`unwrap_secret_data_key`, `rotate_customer_kek`, `retire_customer_kek`), dynamic leases (lake#362)
+and the legacy reads for the copy.
+`platform_records.hpp` holds the platform codecs (lake#358, lake#359): `lake_platform_environments`
+(an environment keyed by `platform_environment_id`, written `if_absent`) and `lake_platform_mirror`
+(the last operator-control row per `platform_mirror_id`, replaced only by a newer row at the
+revision read), both found by the repository, and the row order (`platform_row_order`).
+`PlatformEnvironment` and `PlatformMirrorRow` moved into `store.hpp`, and `platform_store.hpp` is
+gone: `Store` keeps only the legacy reads of the two tables for the copy
+(`LegacyPlatformEnvironment`, `LegacyPlatformMirrorRow`). `PlatformService` (`platform.hpp`) reads
+and writes through the repository's `WorkspaceRecords`, and its sync takes a
+`PlatformRecordsOpener`.
 `application_webhook_records.hpp` holds the application
 event and delivery-attempt codecs and the claim/settle pair that sends each attempt once
 (lake#356, lake#357); `apps.hpp` gives `Application` its `workspace_id` and declares the
