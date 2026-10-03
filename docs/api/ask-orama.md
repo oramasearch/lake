@@ -10,10 +10,21 @@ shows it and keeps it honest.
 - **Ask Orama** in the top bar of every signed-in page. It opens `/ask?from=<the page>`, so the
   conversation knows where it started.
 - `/ask`: the conversation, a **Talk to** selector (Ask Orama first, then the library's other running
-  chat agents, then the space's own chat-capable agents), and a message box. *Start a new
+  chat agents a person uses, then the space's own chat-capable agents), and a message box. The
+  library's internal tooling (Eval Generator and the two corpus generators, `internal: true` in
+  `list_agent_library`) is never offered, even where it runs (lake#451); `control::talk_to_agents`
+  builds the list. *Start a new
   conversation* begins another. An agent's reply is rendered as markdown (tables, lists, code) through
   lake's one renderer, which escapes every character first, so a reply cannot inject HTML; what the
   person typed is shown as typed.
+- **While a turn runs** the conversation says which agent is working (*Ask Orama is working…*, or
+  *Waiting for Ask Orama to start…* before an agent claims it), for how long, the turn's latest
+  progress message, and the attempt when lake retried it. When Ask Orama brings in another agent,
+  lake reports that on the person's turn: *Ask Orama asked ExperimentsAgent: …*, then each of the
+  subagent's progress messages (*ExperimentsAgent: …*) and *ExperimentsAgent finished; writing the
+  answer.* (lake#451, see [the agent bus](agent-bus.md#delegated-turns)). The page reads this from
+  the `get_agent_task` call it already makes; it adds no workspace call. Replies and delegations
+  name agents as people call them (*ExperimentsAgent*, not `agent-experiments`).
 - Each of Ask Orama's **proposals** (a change it wants to make) is shown with its capability and its
   impact, and a **Confirm** button. A confirmed proposal shows *Confirmed* and is never offered again.
 
@@ -48,6 +59,13 @@ shows it and keeps it honest.
 | `POST /ask/confirm` | runs one stored proposal (`message_id`, `index`) as the person and records the outcome |
 
 ## Verify
+
+`HttpResponseIsolation.AskOramaOffersPeoplesAgentsAndSaysWhoIsWorkingOnALongTurn` (lake#451): a
+running internal generator is not in *Talk to*; the page waits, then names Ask Orama working; Ask
+Orama's turn key delegates to Auto-Suggest, and the person's turn shows the delegation, the
+subagent's progress (also published on the workspace's `agent-events` for the asking turn) and its
+finish; the answer replaces the working notice. `Workspaces.TalkToOffersOnlyRunningAgentsAPersonUses`
+covers the list on its own.
 
 `HttpServer/HttpResponseIsolation.AskOramaAnswersProposesAndRunsOnlyWhatThePersonConfirms`: the link
 on every page, a turn carrying the page and a turn key, the proposal shown, nothing created before

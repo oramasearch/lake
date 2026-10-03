@@ -500,10 +500,18 @@ Result<std::vector<audit::Event>> InMemoryStore::list_audit_events(const audit::
         if (!filter.to.empty() && event.occurred_at > filter.to) {
             continue;
         }
-        events.push_back(event);
-        if (filter.limit > 0 && events.size() >= static_cast<std::size_t>(filter.limit)) {
-            break;
+        if (event.draft.outcome == "success" &&
+            std::ranges::find(filter.omit_successful_actions, event.draft.action) !=
+                filter.omit_successful_actions.end()) {
+            continue;
         }
+        events.push_back(event);
+    }
+    if (filter.newest_first) {
+        std::ranges::reverse(events);
+    }
+    if (filter.limit > 0 && events.size() > static_cast<std::size_t>(filter.limit)) {
+        events.resize(static_cast<std::size_t>(filter.limit));
     }
     return events;
 }
@@ -1985,6 +1993,26 @@ Result<User> InMemoryStore::get_user(const std::string& id) {
         if (u.id == id)
             return u;
     return std::unexpected(StoreError{"not_found", "no user " + id});
+}
+
+Result<std::map<std::string, std::string>>
+InMemoryStore::principal_names(const std::vector<std::string>& taap_ids) {
+    std::lock_guard lock(mutex_);
+    std::map<std::string, std::string> names;
+    for (const std::string& taap_id : taap_ids) {
+        for (const User& user : users_) {
+            if (!taap_id.empty() && user.taap_id == taap_id) {
+                names[taap_id] = user.display_name.empty() ? user.email : user.display_name;
+            }
+        }
+        for (const Organization& organization : organizations_) {
+            if (!taap_id.empty() && organization.taap_id == taap_id &&
+                !organization.display_name.empty()) {
+                names[taap_id] = organization.display_name;
+            }
+        }
+    }
+    return names;
 }
 
 Result<Organization> InMemoryStore::create_organization(const NewOrganization& in) {

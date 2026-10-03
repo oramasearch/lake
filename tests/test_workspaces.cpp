@@ -2912,12 +2912,41 @@ TEST(Workspaces, TheAgentLibraryListsEverySpecializedAgentAndWhatRuns) {
     EXPECT_EQ(agents[3].at("name"), "ExperimentsAgent");
     EXPECT_EQ(agents[3].at("status"), "Available");
     EXPECT_EQ(agents[4].at("status"), "Not running on this lake");
-    // Every library agent is one you can talk to (lake#263): the generators too.
+    // Every library agent takes a conversation (lake#263), but the generators are Orama's own
+    // tooling (lake#451): listed here, never offered in Ask Orama's Talk to.
     EXPECT_EQ(agents[6].at("status"), "Not running on this lake");
     EXPECT_EQ(agents[6].at("runs_as"), "service");
     for (const auto& agent : agents) {
         EXPECT_TRUE(agent.at("chat").get<bool>()) << agent.at("key");
+        const bool internal = agent.at("key") == "agent-eval-generator" ||
+                              agent.at("key") == "agent-autosuggest-corpus" ||
+                              agent.at("key") == "agent-project-corpus";
+        EXPECT_EQ(agent.at("internal").get<bool>(), internal) << agent.at("key");
+        EXPECT_EQ(agent.at("used_in").get<std::string>().find("Talk to"), std::string::npos)
+            << agent.at("key");
     }
+}
+
+TEST(Workspaces, TalkToOffersOnlyRunningAgentsAPersonUses) {
+    const json library = lake::control::agent_library_json({{"agent-ask-orama", "http://ask"},
+                                                            {"agent-experiments", "http://x"},
+                                                            {"agent-eval-generator", "http://e"},
+                                                            {"agent-autosuggest-corpus", "http://a"},
+                                                            {"agent-project-corpus", "http://p"}});
+    const json offered = lake::control::talk_to_agents(library);
+    EXPECT_EQ(offered,
+              json::array({{{"id", "agent-ask-orama"}, {"name", "Ask Orama"}},
+                           {{"id", "agent-experiments"}, {"name", "ExperimentsAgent"}}}));
+    // An older answer without the flag still never lists internal tooling.
+    json unflagged = library;
+    for (json& agent : unflagged["agents"]) {
+        agent.erase("internal");
+    }
+    EXPECT_EQ(lake::control::talk_to_agents(unflagged), offered);
+    EXPECT_EQ(lake::control::talk_to_agents(json()), json::array({{{"id", "agent-ask-orama"},
+                                                                  {"name", "Ask Orama"}}}));
+    EXPECT_EQ(lake::control::agent_display_name("agent-experiments"), "ExperimentsAgent");
+    EXPECT_EQ(lake::control::agent_display_name("a-1"), "a-1");
 }
 
 TEST(Workspaces, AgentsPageShowsYourAgentsTheStudioFormAndTheAgentLibrary) {

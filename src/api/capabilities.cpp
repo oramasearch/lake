@@ -8,6 +8,7 @@
 #include <expected>
 #include <format>
 #include <limits>
+#include <map>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -20,6 +21,7 @@
 #include "lake/api/forge.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/sync_store.hpp"
+#include "lake/control/agent_library.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/pki.hpp"
@@ -1164,12 +1166,38 @@ json audit_filter_input() {
               {"outcome", {{"type", "string"}}},
               {"from", {{"type", "string"}}},
               {"to", {{"type", "string"}}},
-              {"limit", {{"type", "integer"}}}}},
+              {"limit", {{"type", "integer"}}},
+              {"order", {{"type", "string"}, {"enum", json::array({"newest", "oldest"})}}},
+              {"include_reads", {{"type", "boolean"}}}}},
             {"additionalProperties", false}};
 }
 
-audit::Filter audit_filter_of(const json& input) {
-    return audit::Filter{
+// How a query reads the log when its input does not say (lake#445). Queries a person reads put
+// the newest events first; export keeps append order, the order the chain verifies in.
+struct AuditDefaults {
+    bool newest_first = true;
+    bool include_reads = true;
+};
+
+// The capabilities whose events are reads: a Read capability, or one the policy checks as a
+// read (workspace_query). A browser polls these, so a person's activity leaves out their
+// successful events unless asked (lake#445).
+std::vector<std::string> read_capability_names(const ApiContext& context) {
+    std::vector<std::string> names;
+    if (context.registry == nullptr) {
+        return names;
+    }
+    for (const auto& capability : context.registry->list()) {
+        if (capability->kind == CapabilityKind::Read || capability->action == "read") {
+            names.push_back(capability->name);
+        }
+    }
+    return names;
+}
+
+audit::Filter
+audit_filter_of(const json& input, const ApiContext& context, AuditDefaults defaults = {}) {
+    audit::Filter filter{
         .principal = input.value("principal", ""),
         .object = input.value("object", ""),
         .outcome = input.value("outcome", ""),
@@ -1179,6 +1207,84 @@ audit::Filter audit_filter_of(const json& input) {
         .request_id = input.value("request_id", ""),
         .after_id = input.value("after_id", ""),
     };
+    // after_id continues a page in append order; an explicit order always wins.
+    filter.newest_first = input.contains("order")
+                              ? input.at("order") == "newest"
+                              : defaults.newest_first && filter.after_id.empty();
+    if (!input.value("include_reads", defaults.include_reads)) {
+        filter.omit_successful_actions = read_capability_names(context);
+    }
+    return filter;
+}
+
+// What people call an audit principal (lake#445): a person's or organization's name, a library
+// agent's name, or a plain description of a lake credential. An identity lake cannot name stays
+// as recorded.
+std::string principal_display_name(const std::string& principal,
+                                   const std::map<std::string, std::string>& names) {
+    if (const auto found = names.find(principal); found != names.end()) {
+        return found->second;
+    }
+    const auto agent_name = [](std::string_view key) {
+        const control::LibraryAgent* agent = control::library_agent(key);
+        return agent ? std::string(agent->name) : std::string(key);
+    };
+    if (principal == "admin") {
+        return "Lake operator";
+    }
+    if (principal == "anonymous") {
+        return "Anonymous";
+    }
+    if (principal.starts_with("agent-service:")) {
+        return agent_name(std::string_view(principal).substr(14));
+    }
+    if (principal.starts_with("app:")) {
+        return "App " + principal.substr(4, principal.find(':', 4) - 4);
+    }
+    if (principal.starts_with("build:")) {
+        return "Build " + principal.substr(6, principal.find(':', 6) - 6);
+    }
+    if (principal.starts_with("share-link:")) {
+        return "Share link";
+    }
+    if (principal.starts_with("sso-provider/")) {
+        return "SSO provider";
+    }
+    return principal;
+}
+
+// Audit events as a person reads them: each carries `principal_name` and, for a workspace call,
+// the inner `capability` it called (lake#445). The signed fields are unchanged.
+ApiResult audit_items(const std::vector<audit::Event>& events, ApiContext& context) {
+    std::vector<std::string> identities;
+    for (const audit::Event& event : events) {
+        if (std::ranges::find(identities, event.draft.principal) == identities.end()) {
+            identities.push_back(event.draft.principal);
+        }
+    }
+    std::map<std::string, std::string> names;
+    if (auto found = context.store->principal_names(identities)) {
+        names = std::move(*found);
+    }
+    json items = json::array();
+    for (const audit::Event& event : events) {
+        json item = audit::to_json(event);
+        std::string name = principal_display_name(event.draft.principal, names);
+        const json& details = event.draft.details;
+        if (const auto agent = details.find("acting_agent");
+            agent != details.end() && agent->is_string()) {
+            const control::LibraryAgent* library = control::library_agent(agent->get<std::string>());
+            name = (library ? std::string(library->name) : agent->get<std::string>()) + " for " +
+                   name;
+        }
+        item["principal_name"] = std::move(name);
+        if (const auto capability = details.find("capability");
+            capability != details.end() && capability->is_string()) {
+            item["capability"] = *capability;
+        }
+        items.push_back(std::move(item));
+    }
+    return ApiResult::success({{"items", std::move(items)}});
 }
 
 audit::IdentityOptions identity_options(const ApiContext& context) {
@@ -4805,7 +4911,10 @@ void register_audit_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "audit",
         .title = "Query audit events",
-        .description = "Query signed audit events by principal, object, outcome and time.",
+        .description = "Query signed audit events by principal, object, outcome and time, newest "
+                       "first unless `order` is `oldest` or `after_id` continues a page. Each "
+                       "event names its principal (`principal_name`) and, for a workspace call, "
+                       "the inner `capability`.",
         .input_schema = audit_filter_input(),
         .output_schema = list_schema(audit_event_schema()),
         .kind = CapabilityKind::Read,
@@ -4816,20 +4925,19 @@ void register_audit_capabilities(Registry& registry) {
             if (!context.store) {
                 return no_store();
             }
-            auto events = context.store->list_audit_events(audit_filter_of(input));
+            auto events = context.store->list_audit_events(audit_filter_of(input, context));
             if (!events) {
                 return from_store_error(events.error());
             }
-            json items = json::array();
-            for (const audit::Event& event : *events) {
-                items.push_back(audit::to_json(event));
-            }
-            return ApiResult::success({{"items", std::move(items)}});
+            return audit_items(*events, context);
         }});
     registry.add(Capability{
         .name = "my_audit",
         .title = "Query my audit events",
-        .description = "The signed-in principal's own signed audit events, filtered like audit.",
+        .description =
+            "The signed-in principal's own signed audit events, filtered like audit, newest first. "
+            "Successful reads (the polling a browser does) are left out unless `include_reads` "
+            "is true; failed and denied reads always appear.",
         .input_schema = audit_filter_input(),
         .output_schema = list_schema(audit_event_schema()),
         .kind = CapabilityKind::Read,
@@ -4843,17 +4951,14 @@ void register_audit_capabilities(Registry& registry) {
             if (context.acting_identity.empty()) {
                 return ApiResult::failure("unauthorized", "no signed-in principal");
             }
-            audit::Filter filter = audit_filter_of(input);
+            audit::Filter filter =
+                audit_filter_of(input, context, {.newest_first = true, .include_reads = false});
             filter.principal = context.acting_identity;
             auto events = context.store->list_audit_events(filter);
             if (!events) {
                 return from_store_error(events.error());
             }
-            json items = json::array();
-            for (const audit::Event& event : *events) {
-                items.push_back(audit::to_json(event));
-            }
-            return ApiResult::success({{"items", std::move(items)}});
+            return audit_items(*events, context);
         }});
     registry.add(Capability{
         .name = "export_audit",
@@ -4869,7 +4974,8 @@ void register_audit_capabilities(Registry& registry) {
             if (!context.store) {
                 return no_store();
             }
-            auto events = context.store->list_audit_events(audit_filter_of(input));
+            auto events = context.store->list_audit_events(
+                audit_filter_of(input, context, {.newest_first = false, .include_reads = true}));
             if (!events) {
                 return from_store_error(events.error());
             }

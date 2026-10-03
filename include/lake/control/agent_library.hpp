@@ -19,7 +19,11 @@ struct LibraryAgent {
     std::string_view purpose; // one sentence: what it does
     std::string_view used_in; // where a person meets it in lake
     std::string_view runs_as; // service | agent-runtime | offline
-    bool chat = false;        // takes a conversation in Ask Orama
+    bool chat = false;        // takes a conversation
+    // Orama's own tooling (the eval and corpus generators, lake#451): listed in the Agent Library
+    // for the record, but never offered in Ask Orama's *Talk to* list, which holds only agents a
+    // person uses.
+    bool internal = false;
 };
 
 inline constexpr std::array<LibraryAgent, 9> agent_library{{
@@ -68,22 +72,25 @@ inline constexpr std::array<LibraryAgent, 9> agent_library{{
      "Eval Generator",
      "Writes a realistic test case on request: a role, the problem they face and real-looking "
      "data for it, the way Orama tests its own agents. It publishes nothing.",
-     "Ask Orama → Talk to Eval Generator, or ask Ask Orama for a test case",
+     "Orama's own agent tests; not offered in Ask Orama",
      "service",
+     true,
      true},
     {"agent-autosuggest-corpus",
      "Auto-Suggest Corpus Generator",
      "Writes one example of what is worth building for a business situation you describe, "
      "checked against the test cases so it never repeats one.",
-     "Ask Orama → Talk to Auto-Suggest Corpus Generator",
+     "Orama's own agent tests; not offered in Ask Orama",
      "service",
+     true,
      true},
     {"agent-project-corpus",
      "Project Corpus Generator",
      "Records a worked example of building (or changing) a pipeline on your own data, every "
      "step checked against what your workspace really returns. It changes nothing.",
-     "Ask Orama → Talk to Project Corpus Generator",
+     "Orama's own agent tests; not offered in Ask Orama",
      "service",
+     true,
      true},
 }};
 
@@ -96,7 +103,15 @@ std::map<std::string, std::string> parse_agent_endpoints(std::string_view text);
 // LAKE_AGENT_LEASE_SECONDS: key=seconds pairs, bounded to 60..3600; omitted keys use 600.
 std::expected<std::map<std::string, int>, std::string> parse_agent_leases(std::string_view text);
 
-// The library as the API and the pages show it: each agent with `deployed` and its status.
+// The library as the API and the pages show it: each agent with `deployed`, `internal` and its
+// status.
 nlohmann::json agent_library_json(const std::map<std::string, std::string>& endpoints);
+
+// Ask Orama's *Talk to* entries from that library (lake#451): Ask Orama first, then every other
+// running chat agent a person uses, as {id, name}. Internal tooling is left out.
+nlohmann::json talk_to_agents(const nlohmann::json& library);
+
+// What people call an agent, by its library key; any other id (an agent of the space) as given.
+std::string agent_display_name(std::string_view key);
 
 } // namespace lake::control

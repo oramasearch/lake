@@ -2015,6 +2015,31 @@ public:
         });
     }
 
+    Result<std::map<std::string, std::string>>
+    principal_names(const std::vector<std::string>& taap_ids) override {
+        if (taap_ids.empty()) {
+            return std::map<std::string, std::string>{};
+        }
+        return with_tx<std::map<std::string, std::string>>(
+            [&](pqxx::work& tx) -> Result<std::map<std::string, std::string>> {
+                const pqxx::result rows = tx.exec_params(
+                    "WITH wanted AS (SELECT jsonb_array_elements_text($1::jsonb) AS taap_id) "
+                    "SELECT users.taap_id, COALESCE(NULLIF(users.display_name, ''), users.email) "
+                    "FROM users JOIN wanted USING (taap_id) "
+                    "UNION ALL SELECT organizations.taap_id, organizations.display_name "
+                    "FROM organizations JOIN wanted USING (taap_id) "
+                    "WHERE organizations.display_name <> ''",
+                    nlohmann::json(taap_ids).dump());
+                std::map<std::string, std::string> names;
+                for (const pqxx::row& row : rows) {
+                    if (!row[1].is_null()) {
+                        names[row[0].as<std::string>()] = row[1].as<std::string>();
+                    }
+                }
+                return names;
+            });
+    }
+
     Result<Organization> create_organization(const NewOrganization& in) override {
         return with_tx<Organization>([&](pqxx::work& tx) -> Result<Organization> {
             std::optional<std::string> parent_id;
@@ -4058,7 +4083,10 @@ public:
                         "AND ($7 = '' OR request_id = $7) "
                         "AND ($8 = '' OR sequence > "
                         "(SELECT sequence FROM audit_events WHERE id::text = $8)) "
-                        "ORDER BY sequence ASC LIMIT $6",
+                        "AND NOT (outcome = 'success' AND action IN "
+                        "(SELECT jsonb_array_elements_text($9::jsonb))) "
+                        "ORDER BY sequence " +
+                        (filter.newest_first ? "DESC" : "ASC") + " LIMIT $6",
                     filter.principal,
                     filter.object,
                     filter.outcome,
@@ -4066,7 +4094,8 @@ public:
                     filter.to,
                     filter.limit,
                     filter.request_id,
-                    filter.after_id);
+                    filter.after_id,
+                    nlohmann::json(filter.omit_successful_actions).dump());
                 std::vector<audit::Event> events;
                 for (const pqxx::row& row : rows) {
                     events.push_back(audit_event_of(row));

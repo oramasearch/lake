@@ -5,6 +5,12 @@ accepted atomically before workspace publication; only a Running task accepts th
 first terminal write wins. Apps, Experiments and Project panels show the persisted retry notice
 without extra workspace requests. See [agent leases](../../docs/api/agent-bus.md).
 
+A delegated `agent_turn` from a task credential names its asking task (`parent_task_id`), and
+`publish_agent_event` reports the delegated task's progress on that asking task (lake#451). The Ask
+page renders the running turn it already reads (agent, latest message, attempts, elapsed time) and
+builds *Talk to* with `control::talk_to_agents`, which leaves out internal library agents. See
+[ask-orama.md](../../docs/api/ask-orama.md) and [delegated turns](../../docs/api/agent-bus.md#delegated-turns).
+
 Page reads share authentication and customer selection within each GET, and batch independent
 workspace and local reads with `when_all`. Data uses a projected dataset/database list from `system.datasets`; dataset
 details own metadata and the bounded sample. `Server-Timing` reports actual outbound calls and
@@ -112,7 +118,10 @@ authentication redirects use `/sign-in`. OpenAPI describes account tokens. The b
 verification are in [front-door.md](../../docs/ui/front-door.md).
 
 Audit query and export schemas accept exact `request_id` and append-order `after_id` filters.
-Their contract and regression coverage are in [audit.md](../../docs/api/audit.md).
+`audit` and `my_audit` return the newest events first, name each principal (`principal_name`) and
+a workspace call's inner `capability`; `my_audit` leaves out successful reads unless
+`include_reads` is set (lake#445). Their contract and regression coverage are in
+[audit.md](../../docs/api/audit.md).
 
 The common request context compares operator bearers in constant time before any session lookup.
 User bearers and cookies use the same indexed PostgreSQL resolver; see `docs/api/auth.md`.

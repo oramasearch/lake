@@ -635,6 +635,36 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
     return state;
 }
 
+// The agent a task, launch or schedule credential belongs to. Those credentials act as the person
+// who started the agent, so the audit principal names the person; this names the agent (lake#445).
+std::string acting_agent(const ApiContext& context) {
+    const auto id_after = [&](std::string_view prefix) -> std::string {
+        return context.credential_session_id.starts_with(prefix)
+                   ? context.credential_session_id.substr(prefix.size())
+                   : std::string();
+    };
+    if (context.credential_kind == "agent_task") {
+        if (const std::string id = id_after("task:"); !id.empty()) {
+            if (const auto task = context.store->get_agent_task(id)) {
+                return task->agent;
+            }
+        }
+    } else if (context.credential_kind == "agent_launch") {
+        if (const std::string id = id_after("launch:"); !id.empty()) {
+            if (const auto launch = context.store->get_agent_launch(id)) {
+                return launch->agent_name.empty() ? launch->agent_id : launch->agent_name;
+            }
+        }
+    } else if (context.credential_kind == "agent_schedule") {
+        if (const std::string id = id_after("schedule:"); !id.empty()) {
+            if (const auto schedule = context.store->get_agent_cron_schedule(id)) {
+                return schedule->agent_name.empty() ? schedule->agent_id : schedule->agent_name;
+            }
+        }
+    }
+    return {};
+}
+
 ApiResult finish_call(const Capability* capability,
                       const std::string& name,
                       ApiResult result,
@@ -655,6 +685,9 @@ ApiResult finish_call(const Capability* capability,
                                  : (name == "set_audit_retention" ? "retention" : "capability");
     nlohmann::json details = context.audit_details;
     details["error_code"] = result.ok ? "" : result.error.code;
+    if (const std::string agent = acting_agent(context); !agent.empty()) {
+        details["acting_agent"] = agent;
+    }
     const audit::EventDraft event{
         .customer_id = context.audit_customer_id,
         .kind = kind,

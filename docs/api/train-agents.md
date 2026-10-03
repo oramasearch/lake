@@ -52,9 +52,14 @@ where it runs, manifesto, goal, trigger, status), the **Pipelines** granted to i
 | `agent-experiments` | ExperimentsAgent | Train → Experiments: Run an Experiment; Ask Orama and Project Agent training delegates | its own service |
 | `agent-autosuggest` | Auto-Suggest | Design: Discover Opportunities; Ask Orama's subagent | its own service |
 | `agent-creator` | AgentCreator | Train: Agents, Create with the Agent Factory | `agent-runtime` |
-| `agent-eval-generator` | Eval Generator | A realistic test case on request (a role, their problem, real-looking data), with its own invented tables; publishes nothing (lake#263) | service |
-| `agent-autosuggest-corpus` | Auto-Suggest Corpus Generator | One example of what is worth building for a situation you describe, checked against the test cases; writes nothing to the corpus (lake#263) | service |
-| `agent-project-corpus` | Project Corpus Generator | A worked example of building or changing a pipeline on your own data, replayed against your workspace; changes nothing (lake#263) | service |
+| `agent-eval-generator` | Eval Generator | Internal: Orama's own agent tests. A realistic test case on request (a role, their problem, real-looking data), with its own invented tables; publishes nothing (lake#263) | service |
+| `agent-autosuggest-corpus` | Auto-Suggest Corpus Generator | Internal: Orama's own agent tests. One example of what is worth building for a situation you describe, checked against the test cases; writes nothing to the corpus (lake#263) | service |
+| `agent-project-corpus` | Project Corpus Generator | Internal: Orama's own agent tests. A worked example of building or changing a pipeline on your own data, replayed against your workspace; changes nothing (lake#263) | service |
+
+The three generators carry `internal: true` in `list_agent_library` (lake#451). The library page
+badges them *Orama internal*, and Ask Orama's *Talk to* never offers them, even where they run:
+they are tooling for Orama's evaluations, not agents a customer uses. `agent_turn` still reaches
+them by key for that tooling.
 
 Status is *Available* when the operator lists the agent in `LAKE_AGENT_ENDPOINTS`, *Not running on
 this lake* otherwise, and *Offline tool* for the three agents that produce evaluations and
@@ -66,7 +71,7 @@ study records and trial data stay in the selected workspace Zetta.
 
 The page (2026-09-27, the UX review) says what each agent does for the person and where to use it,
 in plain words: *Agent · What it does for you · Where to use it* and a badge (*Available*, *Not
-available here*). Every library agent can be talked to (lake#263: the three generators were offline tools until 2026-09-27). The create form's fields are
+available here*). Every library agent takes a conversation (lake#263: the three generators were offline tools until 2026-09-27); the three internal generators are not offered in Ask Orama (lake#451). The create form's fields are
 *What it's for*, *Where it works*, **Instructions** (stored as the record's `manifesto`), *What
 success looks like* (`goal`), *What it may do* (`skills`), *Model* and *Runs on its own*
 (`trigger`).

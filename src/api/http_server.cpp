@@ -8,6 +8,7 @@
 #include "lake/api/server.hpp"
 
 #include "lake/control/agents.hpp"
+#include "lake/control/agent_library.hpp"
 #include "lake/control/agent_bus.hpp"
 
 #include <algorithm>
@@ -9625,22 +9626,13 @@ struct ApiServer::Impl {
     }
 
     // Ask Orama first, then every other agent that takes a conversation: the library's running
-    // chat agents and the space's own chat-capable agents.
+    // chat agents a person uses (never its internal tooling, lake#451) and the space's own
+    // chat-capable agents.
     liquid::runtime::task<nlohmann::json> ask_agents(ApiContext& context, std::string customer_id) {
-        nlohmann::json agents =
-            nlohmann::json::array({{{"id", "agent-ask-orama"}, {"name", "Ask Orama"}}});
         const ApiResult library = unwrap(
             co_await workspace_call("list_agent_library", nlohmann::json::object(), context));
-        if (library.ok) {
-            for (const nlohmann::json& agent :
-                 library.value.value("agents", nlohmann::json::array())) {
-                const std::string key = agent.value("key", std::string());
-                if (key != "agent-ask-orama" && agent.value("chat", false) &&
-                    agent.value("deployed", false)) {
-                    agents.push_back({{"id", key}, {"name", agent.value("name", key)}});
-                }
-            }
-        }
+        nlohmann::json agents =
+            control::talk_to_agents(library.ok ? library.value : nlohmann::json::object());
         const ApiResult own = unwrap(co_await workspace_call("workspace_query",
                                                              {{"customer_id", customer_id},
                                                               {"capability", "list_agents"},
@@ -9658,9 +9650,11 @@ struct ApiServer::Impl {
         co_return agents;
     }
 
-    // A background turn of a conversation (lake#269). True while it runs; once it finished, its
-    // answer becomes the conversation's assistant message, once, and this answers false.
-    liquid::runtime::task<bool> settle_turn(ApiContext& context,
+    // A background turn of a conversation (lake#269). While it runs, the task as get_agent_task
+    // reads it (its agent, latest progress message, attempts and start), so the page can say who
+    // is working and what it last reported (lake#451); once it finished, its answer becomes the
+    // conversation's assistant message, once, and this answers null.
+    liquid::runtime::task<nlohmann::json> settle_turn(ApiContext& context,
                                             std::string customer_id,
                                             std::string task_id,
                                             std::string conversation,
@@ -9668,18 +9662,18 @@ struct ApiServer::Impl {
         const ApiResult got = unwrap(co_await workspace_call(
             "get_agent_task", {{"customer_id", customer_id}, {"task_id", task_id}}, context));
         if (!got.ok || !options.store) {
-            co_return false;
+            co_return nullptr;
         }
         const std::string status = got.value.value("status", std::string());
         if (status == "pending" || status == "running") {
-            co_return true;
+            co_return got.value;
         }
         auto messages = options.store->ask_conversation(conversation, context.acting_user_id, 200);
         if (messages) {
             for (const control::AskMessage& message : *messages) {
                 if (message.payload.is_object() &&
                     message.payload.value("task_id", std::string()) == task_id) {
-                    co_return false;
+                    co_return nullptr;
                 }
             }
         }
@@ -9715,7 +9709,7 @@ struct ApiServer::Impl {
                                            std::move(text),
                                            std::move(payload),
                                            ""});
-        co_return false;
+        co_return nullptr;
     }
 
     boost::http::route_task serve_ask_page(boost::http::route_params& route) {
@@ -9735,7 +9729,10 @@ struct ApiServer::Impl {
         if (!page.task_id.empty() && !page.conversation_id.empty()) {
             auto working = co_await settle_turn(
                 context, page.customer_id, page.task_id, page.conversation_id, false);
-            page.working = working && *working;
+            page.working = working && working->is_object();
+            if (page.working) {
+                page.turn = std::move(*working);
+            }
         }
         if (page.conversation_id.empty()) {
             page.conversation_id = control::new_uuid_v4();
@@ -9961,7 +9958,7 @@ struct ApiServer::Impl {
         if (!page.task_id.empty() && !page.conversation_id.empty()) {
             auto working = co_await settle_turn(
                 context, page.customer_id, page.task_id, page.conversation_id, true);
-            page.working = working && *working;
+            page.working = working && working->is_object();
         }
         if (page.conversation_id.empty()) {
             page.conversation_id = control::new_uuid_v4();
@@ -14347,14 +14344,20 @@ struct ApiServer::Impl {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
             return redirect(route, "/sign-in");
+        // Newest first, and without the successful reads a browser polls, unless asked
+        // (lake#445).
+        const bool include_reads = query_value(route, "reads") == "all";
         const audit::Filter filter{
             .object = query_value(route, "object"),
             .outcome = query_value(route, "outcome"),
             .from = query_value(route, "from"),
             .to = query_value(route, "to"),
             .limit = 500,
+            .newest_first = query_value(route, "order") != "oldest",
         };
-        nlohmann::json input = {{"limit", filter.limit}};
+        nlohmann::json input = {{"limit", filter.limit},
+                                {"order", filter.newest_first ? "newest" : "oldest"},
+                                {"include_reads", include_reads}};
         for (const auto& [key, value] :
              {std::pair<const char*, const std::string&>{"object", filter.object},
               {"outcome", filter.outcome},
@@ -14367,13 +14370,18 @@ struct ApiServer::Impl {
         if (!result.ok) {
             return serve_page_error(route, result);
         }
+        const nlohmann::json items = result.value.value("items", nlohmann::json::array());
         std::vector<audit::Event> events;
-        for (const nlohmann::json& item : result.value.value("items", nlohmann::json::array())) {
+        for (const nlohmann::json& item : items) {
             events.push_back(audit::event_from_json(item));
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_audit(events, filter, nlohmann::json::object(), viewer_for(ctx)),
+                         web_ui_audit(events,
+                                      filter,
+                                      nlohmann::json::object(),
+                                      viewer_for(ctx),
+                                      audit_page_view(items, include_reads)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -14389,8 +14397,10 @@ struct ApiServer::Impl {
             .from = query_value(route, "from"),
             .to = query_value(route, "to"),
             .limit = 500,
+            .newest_first = query_value(route, "order") != "oldest",
         };
-        nlohmann::json input = {{"limit", filter.limit}};
+        nlohmann::json input = {{"limit", filter.limit},
+                                {"order", filter.newest_first ? "newest" : "oldest"}};
         if (!filter.principal.empty())
             input["principal"] = filter.principal;
         if (!filter.object.empty())
@@ -14405,8 +14415,9 @@ struct ApiServer::Impl {
         if (!result.ok) {
             return serve_page_error(route, result);
         }
+        const nlohmann::json items = result.value.value("items", nlohmann::json::array());
         std::vector<audit::Event> events;
-        for (const nlohmann::json& item : result.value.value("items", nlohmann::json::array())) {
+        for (const nlohmann::json& item : items) {
             events.push_back(audit::event_from_json(item));
         }
         nlohmann::json log_configuration;
@@ -14420,7 +14431,11 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_audit(events, filter, log_configuration, viewer_for(ctx)),
+                         web_ui_audit(events,
+                                      filter,
+                                      log_configuration,
+                                      viewer_for(ctx),
+                                      audit_page_view(items)),
                          "text/html; charset=utf-8",
                          "no-store");
     }

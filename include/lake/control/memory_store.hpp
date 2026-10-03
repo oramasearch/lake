@@ -30,6 +30,8 @@ public:
     Result<User> create_user(const NewUser&) override;
     Result<std::vector<User>> list_users(int limit) override;
     Result<User> get_user(const std::string& id) override;
+    Result<std::map<std::string, std::string>>
+    principal_names(const std::vector<std::string>& taap_ids) override;
     Result<Organization> create_organization(const NewOrganization&) override;
     Result<std::vector<Organization>> list_organizations(int limit) override;
     Result<Organization> get_organization(const std::string& id) override;

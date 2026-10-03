@@ -286,6 +286,9 @@ struct AskPage {
     // A turn is running in the background (lake#269): the page says so and checks again.
     bool working = false;
     std::string task_id;
+    // The running turn as get_agent_task reads it (lake#451): which agent works, its latest
+    // progress message, its attempts and when it started.
+    nlohmann::json turn = nlohmann::json::object();
     nlohmann::json messages = nlohmann::json::array();
     nlohmann::json agents = nlohmann::json::array();
 };
@@ -497,10 +500,22 @@ std::string web_ui_metering(const nlohmann::json& usage, WebUiViewer viewer = tr
 std::string web_ui_transparency(std::string_view identity,
                                 const nlohmann::json& scan,
                                 WebUiViewer viewer = false);
+// What the audit and activity pages show beside the signed events (lake#445).
+struct AuditPageView {
+    // By event id: the principal's name and, for a workspace call, the inner capability, as the
+    // audit capabilities return them.
+    std::map<std::string, std::string> principal_names;
+    std::map<std::string, std::string> capabilities;
+    // Whether successful reads are in the list; /activity leaves them out by default.
+    bool include_reads = true;
+};
+// The page's view of `audit` / `my_audit` items: the events plus their names and capabilities.
+AuditPageView audit_page_view(const nlohmann::json& items, bool include_reads = true);
 std::string web_ui_audit(const std::vector<audit::Event>& events,
                          const audit::Filter& filter,
                          const nlohmann::json& log_configuration = nlohmann::json::object(),
-                         WebUiViewer viewer = true);
+                         WebUiViewer viewer = true,
+                         const AuditPageView& view = {});
 std::string web_ui_exports(const control::Repository& repository,
                            const std::vector<control::ForgeRecord>& exports,
                            WebUiViewer viewer = true);

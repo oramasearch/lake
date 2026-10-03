@@ -103,6 +103,27 @@ at 30 seconds; Lake clamps accordingly and allows a 40-second transport timeout.
 backoff is required until [Zetta's longer poll](https://github.com/oramasearch/zetta/issues/1174)
 lands. The at-most-one-receive-per-minute deployment acceptance is not claimed by this PR.
 
+## Delegated turns
+
+An agent that delegates calls `agent_turn` with its own task credential (Ask Orama's `delegate`).
+Lake then records the asking task's ID as `parent_task_id` in the delegated task's body and reports
+the delegated turn on the asking turn (lake#451), so whoever follows the asking turn sees which
+agent is working without following a second task:
+
+- at dispatch, the asking task's message becomes *Ask Orama asked ExperimentsAgent: <request>*;
+- each accepted `progress` event of the delegated task becomes *ExperimentsAgent: <message>* on the
+  asking task (*ExperimentsAgent is working.* for an empty message or the generic *Working on it*);
+- its `result` becomes *ExperimentsAgent finished; writing the answer.*, and `failed`
+  *ExperimentsAgent did not finish: <message>*.
+
+Each report is applied to the asking task with `record_agent_task_event` (it stays `Running`; this
+renews its lease) and published on the workspace's `agent-events` as a `progress` event of the
+asking task, carrying `delegated_task_id` and `delegated_agent`. Reports are best effort: an
+asking turn that already finished, or a workspace publication that fails, leaves the delegated
+turn unaffected. Lake's own retry notices for the delegated task are not mirrored. The bus still
+carries only task IDs; nothing new is stored in PostgreSQL beyond the task's existing message and
+body.
+
 ## What the bus loses, the store recovers
 
 Stage-1 pub/sub is in memory and survives a restart only on a best-effort basis
