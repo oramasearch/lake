@@ -150,6 +150,16 @@ Nothing is dropped. Lake reads and writes secrets only in workspace records
 ([secrets.md](../api/secrets.md#where-secrets-live-lake328-332)); a customer KEK rotation still
 rewraps the retired `secrets_data_keys` rows in its transaction so the one-shot copy can read them.
 
+## Secret lease workspaces (migration `0058_secret_lease_workspaces`)
+
+| Table or change | Purpose |
+|---|---|
+| `secret_lease_routes` | One row per dynamic lease (lake#362): its mount (foreign key to `secret_mount_routes`), space and workspace (`enforce_workspace_routing`: a live workspace of the same space, never changed), and `due_at`, when the expiry loop must next look at it (NULL once the lease is revoked or expired in its workspace; partial index `secret_lease_routes_due_idx`). Content-free dispatch; no role, value or ciphertext. |
+| `secrets_dynamic_leases` | Retired: leases live in `lake_secrets_dynamic_leases` in their mount's workspace Zetta, and the table is read only by the one-shot copy until a later migration drops it. The migration reports each lease whose mount has no route. |
+| `secret_lease_workspaces_guard` | Guard table for migration `0058_secret_lease_workspaces`. |
+
+Nothing is dropped. See [secrets.md](../api/secrets.md#where-leases-live-lake362).
+
 ## SSO and federation (migration `0010_sso_federation`)
 
 | Table | Purpose |
@@ -294,7 +304,7 @@ local policy binding only.
 | `identity_taap_assertions` | One-use digest ledger binding each accepted liquid-key sign-in assertion to its lake user and pool. |
 | `auth_app_authorization_codes` | Five-minute application code hashes with exact redirect, PKCE S256 challenge, nonce, user, and one-use timestamp. |
 | `pki_certificates.revoked_at` and `agent` profile | Immediate agent-certificate status plus rotation linkage through the existing `renewed_from_id`. |
-| `secrets_dynamic_leases` | Encrypted generated credential, role, bounded expiry, revocation, and renewal count for each mount lease. Since 0057 the value is sealed with the mount data key read from the mount's workspace. |
+| `secrets_dynamic_leases` | Encrypted generated credential, role, bounded expiry, revocation, and renewal count for each mount lease. Since 0057 the value is sealed with the mount data key read from the mount's workspace; retired by `0058_secret_lease_workspaces` (lake#362), when leases moved into that workspace. |
 | `identity_exit_guard` | Guard table for migration `0020_identity_exit`. |
 
 Dynamic-secret ciphertext uses the existing mount/customer key hierarchy. Authorization codes and

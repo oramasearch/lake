@@ -4,7 +4,9 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -13,6 +15,7 @@
 #include "api/workspace_records_api.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/api/server.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/secret_records.hpp"
 #include "workspace_fixture.hpp"
@@ -327,19 +330,331 @@ TEST_F(SecretsCapabilities, AKekRotationAWorkspaceCouldNotFinishIsFinishedByTheN
     EXPECT_EQ(second.value.at("value").at("v"), "second");
 }
 
-TEST_F(SecretsCapabilities, DynamicLeasesUseTheMountDataKeyInItsWorkspace) {
+std::int64_t now_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+// A lease record and route as lake writes them, with chosen instants (no waiting for a clock).
+void place_lease(const ApiContext& context, const std::string& customer_id,
+                 const std::string& workspace_id, const std::string& mount_id,
+                 const std::string& lease_id, std::int64_t expires_us,
+                 std::string revoked_at = {}) {
+    auto records = lake::api::workspace_records(context, customer_id, workspace_id);
+    ASSERT_TRUE(records) << records.error().message;
+    lake::control::SecretLeaseRecord lease;
+    lease.id = lease_id;
+    lease.mount_id = mount_id;
+    lease.role = "reader";
+    lease.ciphertext = "c2VhbGVkLWNyZWRlbnRpYWw";
+    lease.expires_us = expires_us;
+    lease.revoked_at = std::move(revoked_at);
+    ASSERT_TRUE(context.store->record_secret_lease_route(
+        {lease_id, mount_id, customer_id, workspace_id,
+         lease.revoked_at.empty() ? expires_us : now_us() - 1}));
+    const auto written = lake::control::settled(liquid::runtime::block_on(records->put(
+        lake::control::SecretLeaseCodec::collection, lease_id,
+        lake::control::SecretLeaseCodec::lookup(mount_id),
+        lake::control::SecretLeaseCodec::encode(lease),
+        lake::control::RecordCondition{.if_absent = true}, 1, expires_us - 60'000'000)));
+    ASSERT_TRUE(written) << written.error().message;
+}
+
+std::optional<lake::control::SecretLeaseRecord> lease_record(const ApiContext& context,
+                                                             const std::string& customer_id,
+                                                             const std::string& workspace_id,
+                                                             const std::string& lease_id) {
+    auto records = lake::api::workspace_records(context, customer_id, workspace_id);
+    EXPECT_TRUE(records) << records.error().message;
+    const auto got = lake::control::settled(liquid::runtime::block_on(
+        records->get(lake::control::SecretLeaseCodec::collection, lease_id)));
+    EXPECT_TRUE(got) << got.error().message;
+    return got && *got ? lake::control::SecretLeaseCodec::decode(**got) : std::nullopt;
+}
+
+lake::api::SecretLeaseSweep sweep(const ApiContext& context) {
+    const auto swept = liquid::runtime::block_on(lake::api::expire_secret_leases(context));
+    EXPECT_TRUE(swept);
+    return swept ? *swept : lake::api::SecretLeaseSweep{};
+}
+
+// lake#362: a lease is a sealed record of its mount's workspace; the control store keeps only its
+// content-free route, which is the expiry loop's due index.
+TEST_F(SecretsCapabilities, DynamicLeasesLiveInTheMountsWorkspace) {
     const ApiResult leased =
         call("lease_dynamic_secret",
              {{"mount_id", mount_id}, {"role", "reader"}, {"lifetime_seconds", 60}});
     ASSERT_TRUE(leased.ok) << leased.error.message;
-    EXPECT_TRUE(leased.value.at("value").contains("password"));
+    const std::string password = leased.value.at("value").at("password");
+    const std::string username = leased.value.at("value").at("username");
     const std::string lease_id = leased.value.at("lease").at("id");
-    ASSERT_TRUE(call("renew_dynamic_secret", {{"lease_id", lease_id}}).ok);
-    ASSERT_TRUE(call("revoke_dynamic_secret", {{"lease_id", lease_id}}).ok);
+    EXPECT_EQ(leased.value.at("lease").at("workspace_id"), workspace_id);
+    EXPECT_EQ(leased.value.at("lease").at("renewals"), 0);
+
+    auto& rows = workspaces.records(workspace_id).rows("secrets_dynamic_leases");
+    ASSERT_EQ(rows.size(), 1U);
+    const std::string stored = rows.begin()->second.dump();
+    EXPECT_EQ(stored.find(password), std::string::npos);
+    EXPECT_EQ(stored.find(username), std::string::npos);
+    EXPECT_EQ(stored.find("reader"), std::string::npos);
+    auto record = lease_record(context, customer_id, workspace_id, lease_id);
+    ASSERT_TRUE(record);
+    ASSERT_TRUE(record->ciphertext);
+    EXPECT_EQ(record->ciphertext->find(password), std::string::npos);
+    const auto route = store->get_secret_lease_route(lease_id);
+    ASSERT_TRUE(route);
+    EXPECT_EQ(route->mount_id, mount_id);
+    EXPECT_EQ(route->workspace_id, workspace_id);
+    EXPECT_EQ(route->due_us, record->expires_us) << "due exactly when the lease expires";
+
+    const ApiResult renewed =
+        call("renew_dynamic_secret", {{"lease_id", lease_id}, {"lifetime_seconds", 600}});
+    ASSERT_TRUE(renewed.ok) << renewed.error.message;
+    EXPECT_EQ(renewed.value.at("renewals"), 1);
+    record = lease_record(context, customer_id, workspace_id, lease_id);
+    ASSERT_TRUE(record);
+    EXPECT_GT(record->expires_us, route->due_us);
+    EXPECT_EQ(store->get_secret_lease_route(lease_id)->due_us, record->expires_us)
+        << "the due index follows a renewal";
+    EXPECT_EQ(call("renew_dynamic_secret", {{"lease_id", lease_id}, {"lifetime_seconds", 3601}})
+                  .error.code,
+              "invalid_input");
+
+    const ApiResult revoked = call("revoke_dynamic_secret", {{"lease_id", lease_id}});
+    ASSERT_TRUE(revoked.ok) << revoked.error.message;
+    EXPECT_FALSE(revoked.value.at("revoked_at").is_null());
+    record = lease_record(context, customer_id, workspace_id, lease_id);
+    ASSERT_TRUE(record);
+    EXPECT_FALSE(record->ciphertext) << "a revoked credential's sealed value is erased";
+    EXPECT_EQ(store->get_secret_lease_route(lease_id)->due_us, 0) << "settled";
+    const ApiResult again = call("revoke_dynamic_secret", {{"lease_id", lease_id}});
+    ASSERT_TRUE(again.ok) << "revocation is idempotent";
+    EXPECT_EQ(again.value.at("revoked_at"), revoked.value.at("revoked_at"));
+    const ApiResult refused = call("renew_dynamic_secret", {{"lease_id", lease_id}});
+    EXPECT_EQ(refused.error.code, "conflict") << "a revoked lease is never renewed";
+
+    for (const std::string bad : {std::string("not-a-lease"), lake::control::new_uuid_v4()}) {
+        for (const std::string capability : {"renew_dynamic_secret", "revoke_dynamic_secret"}) {
+            const ApiResult missing = call(capability, {{"lease_id", bad}});
+            EXPECT_EQ(missing.error.code, "not_found") << capability << " " << bad;
+            EXPECT_EQ(missing.error.path, "/lease_id") << capability << " " << bad;
+        }
+    }
+    EXPECT_EQ(call("revoke_dynamic_secret", json::object()).error.code, "invalid_input");
     EXPECT_EQ(call("lease_dynamic_secret",
                    {{"mount_id", lake::control::new_uuid_v4()}, {"role", "reader"}})
                   .error.code,
               "not_found");
+    EXPECT_EQ(call("lease_dynamic_secret",
+                   {{"mount_id", mount_id}, {"role", "reader"}, {"lifetime_seconds", 0}})
+                  .error.code,
+              "invalid_input");
+    EXPECT_EQ(rows.size(), 1U) << "a refused lease writes nothing";
+}
+
+// A renewal that read the lease active loses to a revocation or an expiry written meanwhile: its
+// write is conditional on the revision it read, so it rereads and finds the lease settled.
+TEST_F(SecretsCapabilities, ARenewalRacingARevocationOrAnExpiryCannotReviveTheLease) {
+    auto& tables = workspaces.records(workspace_id);
+    for (const std::string settle : {"revoke", "expire"}) {
+        const ApiResult leased =
+            call("lease_dynamic_secret",
+                 {{"mount_id", mount_id}, {"role", "writer"}, {"lifetime_seconds", 60}});
+        ASSERT_TRUE(leased.ok) << leased.error.message;
+        const std::string lease_id = leased.value.at("lease").at("id");
+        auto& rows = tables.rows("secrets_dynamic_leases");
+        const json active = rows.at(lease_id);
+        // The settled state another lake process writes.
+        if (settle == "revoke") {
+            ASSERT_TRUE(call("revoke_dynamic_secret", {{"lease_id", lease_id}}).ok);
+        } else {
+            auto records = lake::api::workspace_records(context, customer_id, workspace_id);
+            ASSERT_TRUE(records);
+            auto record = lease_record(context, customer_id, workspace_id, lease_id);
+            ASSERT_TRUE(record);
+            record->expires_us = now_us() - 1;
+            ASSERT_TRUE(lake::control::settled(liquid::runtime::block_on(records->put(
+                lake::control::SecretLeaseCodec::collection, lease_id,
+                lake::control::SecretLeaseCodec::lookup(mount_id),
+                lake::control::SecretLeaseCodec::encode(*record),
+                lake::control::RecordCondition{.if_revision = record->revision},
+                record->lake_revision + 1, record->at_us))));
+            ASSERT_TRUE(store->reschedule_secret_lease(lease_id, now_us() - 1));
+            const auto swept = sweep(context);
+            EXPECT_EQ(swept.expired, 1U);
+        }
+        const json settled = rows.at(lease_id);
+        // The renewal reads the active copy; the settled one lands before its write.
+        rows[lease_id] = active;
+        tables.before_put[lease_id] = [lease_id, settled](lake::test::RecordTables& tables) {
+            json landed = settled;
+            landed["revision"] = ++tables.clock;
+            tables.rows("secrets_dynamic_leases")[lease_id] = landed;
+        };
+        const ApiResult renewed = call("renew_dynamic_secret", {{"lease_id", lease_id}});
+        EXPECT_EQ(renewed.error.code, "conflict") << settle;
+        EXPECT_TRUE(tables.before_put.empty()) << settle << ": the renewal did try to write";
+        const auto record = lease_record(context, customer_id, workspace_id, lease_id);
+        ASSERT_TRUE(record) << settle;
+        EXPECT_TRUE(record->settled()) << settle;
+        EXPECT_FALSE(record->ciphertext) << settle;
+        EXPECT_EQ(record->renewals, 0) << settle;
+        EXPECT_EQ(store->get_secret_lease_route(lease_id)->due_us, 0) << settle;
+    }
+}
+
+// The expiry loop reads the control store's due index and only the workspaces that hold a due
+// lease: a workspace whose leases are all active is not called at all.
+TEST_F(SecretsCapabilities, TheExpiryLoopReadsOnlyTheWorkspacesOfDueLeases) {
+    const std::string quiet_workspace = workspaces.create(customer_id, "quiet");
+    const std::string slow_workspace = workspaces.create(customer_id, "slow");
+    const auto mount_in = [&](const std::string& workspace, const std::string& name) {
+        const ApiResult mount = call("create_secret_mount",
+                                     {{"customer_id", customer_id},
+                                      {"workspace_id", workspace},
+                                      {"organization_id", organization_id},
+                                      {"name", name}});
+        EXPECT_TRUE(mount.ok) << mount.error.message;
+        return mount.value.at("id").get<std::string>();
+    };
+    const std::string quiet_mount = mount_in(quiet_workspace, "quiet");
+    const std::string slow_mount = mount_in(slow_workspace, "slow");
+    for (int index = 0; index < 3; ++index) {
+        ASSERT_TRUE(call("lease_dynamic_secret",
+                         {{"mount_id", quiet_mount}, {"role", "reader"}, {"lifetime_seconds", 600}})
+                        .ok);
+    }
+    const std::int64_t past = now_us() - 1'000'000;
+    const std::string expired = lake::control::new_uuid_v4();
+    const std::string revoked = lake::control::new_uuid_v4();
+    const std::string renewed = lake::control::new_uuid_v4();
+    const std::string waiting = lake::control::new_uuid_v4();
+    place_lease(context, customer_id, workspace_id, mount_id, expired, past);
+    place_lease(context, customer_id, workspace_id, mount_id, revoked, now_us() + 600'000'000,
+                lake::control::record_instant(past));
+    // Renewed after it was indexed: the index is earlier than the record.
+    place_lease(context, customer_id, workspace_id, mount_id, renewed, now_us() + 600'000'000);
+    ASSERT_TRUE(store->reschedule_secret_lease(renewed, past));
+    place_lease(context, customer_id, slow_workspace, slow_mount, waiting, past);
+    // A route whose record has not been written yet (a lease being created) is kept.
+    const std::string unwritten = lake::control::new_uuid_v4();
+    ASSERT_TRUE(store->record_secret_lease_route(
+        {unwritten, mount_id, customer_id, workspace_id, past}));
+
+    workspaces.status(slow_workspace, "Provisioning");
+    workspaces.records(quiet_workspace).calls.clear();
+    workspaces.records(workspace_id).calls.clear();
+    const auto first = sweep(context);
+    EXPECT_EQ(first.claimed, 5U);
+    EXPECT_EQ(first.expired, 1U);
+    EXPECT_EQ(first.settled, 1U) << "the revoked lease";
+    EXPECT_EQ(first.rescheduled, 1U);
+    EXPECT_EQ(first.failed, 2U) << "the not-ready workspace's lease and the unwritten route";
+    EXPECT_EQ(first.removed, 0U);
+    EXPECT_TRUE(workspaces.records(quiet_workspace).calls.empty())
+        << "a workspace without due leases is never read";
+    EXPECT_FALSE(workspaces.records(workspace_id).calls.empty());
+
+    const auto expired_record = lease_record(context, customer_id, workspace_id, expired);
+    ASSERT_TRUE(expired_record);
+    EXPECT_FALSE(expired_record->expired_at.empty());
+    EXPECT_FALSE(expired_record->ciphertext) << "an expired credential's sealed value is erased";
+    EXPECT_EQ(store->get_secret_lease_route(expired)->due_us, 0);
+    EXPECT_EQ(call("renew_dynamic_secret", {{"lease_id", expired}}).error.code, "conflict");
+    const ApiResult revoke_expired = call("revoke_dynamic_secret", {{"lease_id", expired}});
+    ASSERT_TRUE(revoke_expired.ok) << revoke_expired.error.message;
+    const auto revoked_record = lease_record(context, customer_id, workspace_id, revoked);
+    ASSERT_TRUE(revoked_record);
+    EXPECT_FALSE(revoked_record->ciphertext);
+    EXPECT_TRUE(revoked_record->expired_at.empty());
+    const auto renewed_record = lease_record(context, customer_id, workspace_id, renewed);
+    ASSERT_TRUE(renewed_record && renewed_record->ciphertext) << "an active lease is untouched";
+    EXPECT_EQ(store->get_secret_lease_route(renewed)->due_us, renewed_record->expires_us);
+
+    // Held: a second pass right away claims nothing, so two replicas do not both take a lease.
+    EXPECT_EQ(sweep(context).claimed, 0U);
+    // The not-ready workspace's lease is settled once it is ready and its hold has passed.
+    workspaces.ready(slow_workspace);
+    ASSERT_TRUE(store->reschedule_secret_lease(waiting, past));
+    const auto second = sweep(context);
+    EXPECT_EQ(second.expired, 1U);
+    EXPECT_FALSE(lease_record(context, customer_id, slow_workspace, waiting)->ciphertext);
+
+    // A deleted workspace took its leases with it: their routes are settled without a call.
+    const std::string doomed = lake::control::new_uuid_v4();
+    place_lease(context, customer_id, slow_workspace, slow_mount, doomed, past);
+    ASSERT_TRUE(store->update_workspace(slow_workspace, {.desired = "deleted"}));
+    workspaces.records(slow_workspace).calls.clear();
+    const auto third = sweep(context);
+    EXPECT_EQ(third.settled, 1U);
+    EXPECT_TRUE(workspaces.records(slow_workspace).calls.empty());
+    EXPECT_EQ(store->get_secret_lease_route(doomed)->due_us, 0);
+}
+
+// A renewal that lands between the loop's read and its write wins: the loop rereads, finds the
+// lease active and moves its due instant to the renewed expiry.
+TEST_F(SecretsCapabilities, ARenewalThatBeatsTheExpiryLoopIsKept) {
+    const std::string lease_id = lake::control::new_uuid_v4();
+    place_lease(context, customer_id, workspace_id, mount_id, lease_id, now_us() - 1);
+    auto& tables = workspaces.records(workspace_id);
+    const std::int64_t renewed_until = now_us() + 600'000'000;
+    // The renewed copy, as another process's conditional write leaves it.
+    const json before = tables.rows("secrets_dynamic_leases").at(lease_id);
+    auto record = lease_record(context, customer_id, workspace_id, lease_id);
+    ASSERT_TRUE(record);
+    record->expires_us = renewed_until;
+    record->renewals = 1;
+    {
+        auto records = lake::api::workspace_records(context, customer_id, workspace_id);
+        ASSERT_TRUE(records);
+        ASSERT_TRUE(lake::control::settled(liquid::runtime::block_on(records->put(
+            lake::control::SecretLeaseCodec::collection, lease_id,
+            lake::control::SecretLeaseCodec::lookup(mount_id),
+            lake::control::SecretLeaseCodec::encode(*record),
+            lake::control::RecordCondition{.if_revision = record->revision},
+            record->lake_revision + 1, record->at_us))));
+    }
+    const json renewed = tables.rows("secrets_dynamic_leases").at(lease_id);
+    tables.rows("secrets_dynamic_leases")[lease_id] = before;
+    tables.before_put[lease_id] = [lease_id, renewed](lake::test::RecordTables& tables) {
+        json landed = renewed;
+        landed["revision"] = ++tables.clock;
+        tables.rows("secrets_dynamic_leases")[lease_id] = landed;
+    };
+    const auto swept = sweep(context);
+    EXPECT_TRUE(tables.before_put.empty()) << "the loop did try to expire it";
+    EXPECT_EQ(swept.expired, 0U);
+    EXPECT_EQ(swept.rescheduled, 1U);
+    const auto kept = lease_record(context, customer_id, workspace_id, lease_id);
+    ASSERT_TRUE(kept);
+    EXPECT_TRUE(kept->active(now_us()));
+    EXPECT_TRUE(kept->ciphertext);
+    EXPECT_EQ(kept->renewals, 1);
+    EXPECT_EQ(store->get_secret_lease_route(lease_id)->due_us, renewed_until);
+}
+
+// The server's owner loop runs the expiry pass on its tick (drain()).
+TEST_F(SecretsCapabilities, TheServersOwnerLoopSettlesDueLeases) {
+    const std::string lease_id = lake::control::new_uuid_v4();
+    place_lease(context, customer_id, workspace_id, mount_id, lease_id, now_us() - 1);
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.node_name = "lease-expiry";
+    options.admin_token = "lease-expiry-admin";
+    options.instance_kek = std::string(kek);
+    options.store = store;
+    options.workspaces = workspaces.service;
+    options.secret_lease_expiry_interval = std::chrono::milliseconds(0);
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+    server.drain();
+    const auto record = lease_record(context, customer_id, workspace_id, lease_id);
+    ASSERT_TRUE(record);
+    EXPECT_FALSE(record->expired_at.empty());
+    EXPECT_FALSE(record->ciphertext);
+    EXPECT_EQ(store->get_secret_lease_route(lease_id)->due_us, 0);
+    server.stop();
 }
 
 TEST_F(SecretsCapabilities, MissingMountGrantIsDeniedAndAudited) {

@@ -7960,63 +7960,102 @@ public:
         });
     }
 
-    Result<DynamicSecretLease> lease_dynamic_secret(const NewDynamicSecretLease& input) override {
-        if (input.id.empty() || input.role.empty() || input.encrypted_value.empty() ||
-            input.lifetime_seconds < 1 || input.lifetime_seconds > 3600) {
-            return std::unexpected(StoreError{"invalid_input", "dynamic-secret lease is invalid"});
-        }
-        return with_tx<DynamicSecretLease>([&](pqxx::work& tx) -> Result<DynamicSecretLease> {
-            tx.exec_params("INSERT INTO secrets_dynamic_leases "
-                           "(id, mount_id, role, encrypted_value, expires_at) "
-                           "VALUES ($1::uuid, $2::uuid, $3, $4, "
-                           "now() + make_interval(secs => $5))",
-                           input.id,
-                           input.mount_id,
-                           input.role,
-                           input.encrypted_value,
-                           input.lifetime_seconds);
-            return dynamic_secret_lease_tx(tx, input.id);
-        });
+    static constexpr std::string_view secret_lease_route_columns =
+        "lease_id::text, mount_id::text, customer_id::text, workspace_id::text, "
+        "COALESCE((extract(epoch FROM due_at) * 1000000)::bigint, 0), "
+        "(extract(epoch FROM created_at) * 1000000)::bigint";
+
+    static SecretLeaseRoute secret_lease_route_row(const pqxx::row& row) {
+        return SecretLeaseRoute{row[0].as<std::string>(), row[1].as<std::string>(),
+                                row[2].as<std::string>(), row[3].as<std::string>(),
+                                row[4].as<std::int64_t>(), row[5].as<std::int64_t>()};
     }
 
-    Result<DynamicSecretLease> get_dynamic_secret_lease(const std::string& id) override {
-        return with_tx<DynamicSecretLease>(
-            [&](pqxx::work& tx) { return dynamic_secret_lease_tx(tx, id); });
-    }
-
-    Result<DynamicSecretLease> renew_dynamic_secret_lease(const std::string& id,
-                                                          int lifetime_seconds) override {
-        if (lifetime_seconds < 1 || lifetime_seconds > 3600) {
-            return std::unexpected(
-                StoreError{"invalid_input", "lease lifetime must be at most one hour"});
-        }
-        return with_tx<DynamicSecretLease>([&](pqxx::work& tx) -> Result<DynamicSecretLease> {
-            const pqxx::result rows = tx.exec_params(
-                "UPDATE secrets_dynamic_leases SET expires_at = now() + make_interval(secs => $2), "
-                "renewals = renewals + 1 WHERE id = $1::uuid AND revoked_at IS NULL "
-                "AND expires_at > now() RETURNING id::text",
-                id,
-                lifetime_seconds);
-            if (rows.empty()) {
-                return std::unexpected(
-                    StoreError{"conflict", "dynamic-secret lease is not active"});
+    Result<SecretLeaseRoute> record_secret_lease_route(const SecretLeaseRoute& input) override {
+        return with_tx<SecretLeaseRoute>([&](pqxx::work& tx) -> Result<SecretLeaseRoute> {
+            const pqxx::result mount = tx.exec_params(
+                "SELECT 1 FROM secret_mount_routes WHERE mount_id = $1::uuid "
+                "AND workspace_id = $2::uuid AND customer_id = $3::uuid",
+                input.mount_id,
+                input.workspace_id,
+                input.customer_id);
+            if (mount.empty()) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "a lease's route must name its mount's workspace"});
             }
-            return dynamic_secret_lease_tx(tx, id);
+            tx.exec_params(
+                "INSERT INTO secret_lease_routes (lease_id, mount_id, customer_id, workspace_id, "
+                "due_at) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, CASE WHEN $5::bigint = "
+                "0 THEN NULL ELSE to_timestamp($5::double precision / 1000000) END) "
+                "ON CONFLICT (lease_id) DO NOTHING",
+                input.lease_id,
+                input.mount_id,
+                input.customer_id,
+                input.workspace_id,
+                input.due_us);
+            const pqxx::result rows =
+                tx.exec_params("SELECT " + std::string(secret_lease_route_columns) +
+                                   " FROM secret_lease_routes WHERE lease_id = $1::uuid",
+                               input.lease_id);
+            return secret_lease_route_row(rows[0]);
         });
     }
 
-    Result<DynamicSecretLease> revoke_dynamic_secret_lease(const std::string& id) override {
-        return with_tx<DynamicSecretLease>([&](pqxx::work& tx) -> Result<DynamicSecretLease> {
-            const pqxx::result rows = tx.exec_params(
-                "UPDATE secrets_dynamic_leases SET revoked_at = coalesce(revoked_at, now()) "
-                "WHERE id = $1::uuid RETURNING id::text",
-                id);
+    Result<SecretLeaseRoute> get_secret_lease_route(const std::string& lease_id) override {
+        return with_tx<SecretLeaseRoute>([&](pqxx::work& tx) -> Result<SecretLeaseRoute> {
+            const pqxx::result rows =
+                tx.exec_params("SELECT " + std::string(secret_lease_route_columns) +
+                                   " FROM secret_lease_routes WHERE lease_id = $1::uuid",
+                               lease_id);
             if (rows.empty()) {
                 return std::unexpected(
                     StoreError{"not_found", "dynamic-secret lease does not exist"});
             }
-            return dynamic_secret_lease_tx(tx, id);
+            return secret_lease_route_row(rows[0]);
         });
+    }
+
+    Result<void> reschedule_secret_lease(const std::string& lease_id,
+                                         std::int64_t due_us) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params("UPDATE secret_lease_routes SET due_at = CASE WHEN $2::bigint <= 0 "
+                           "THEN NULL ELSE to_timestamp($2::double precision / 1000000) END "
+                           "WHERE lease_id = $1::uuid AND due_at IS NOT NULL",
+                           lease_id,
+                           due_us);
+            return {};
+        });
+    }
+
+    Result<void> delete_secret_lease_route(const std::string& lease_id) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params("DELETE FROM secret_lease_routes WHERE lease_id = $1::uuid", lease_id);
+            return {};
+        });
+    }
+
+    // One statement claims the due routes: rows another loop holds are skipped, not waited for.
+    Result<std::vector<SecretLeaseRoute>> claim_due_secret_leases(int limit,
+                                                                  int hold_seconds) override {
+        return with_tx<std::vector<SecretLeaseRoute>>(
+            [&](pqxx::work& tx) -> Result<std::vector<SecretLeaseRoute>> {
+                const pqxx::result rows = tx.exec_params(
+                    "WITH due AS (SELECT lease_id, due_at FROM secret_lease_routes "
+                    "WHERE due_at <= now() ORDER BY due_at LIMIT $1 FOR UPDATE SKIP LOCKED) "
+                    "UPDATE secret_lease_routes r SET due_at = now() + make_interval(secs => $2) "
+                    "FROM due WHERE r.lease_id = due.lease_id RETURNING r.lease_id::text, "
+                    "r.mount_id::text, r.customer_id::text, r.workspace_id::text, "
+                    "(extract(epoch FROM due.due_at) * 1000000)::bigint, "
+                    "(extract(epoch FROM r.created_at) * 1000000)::bigint",
+                    std::clamp(limit, 1, 5000),
+                    std::max(hold_seconds, 1));
+                std::vector<SecretLeaseRoute> claimed;
+                for (const pqxx::row& row : rows) {
+                    claimed.push_back(secret_lease_route_row(row));
+                }
+                std::ranges::sort(claimed, {}, &SecretLeaseRoute::due_us);
+                return claimed;
+            });
     }
 
     Result<CustomerKekRotation> rotate_customer_kek(const std::string& customer_id,
@@ -8352,6 +8391,47 @@ public:
                     keys.push_back(std::move(legacy));
                 }
                 return keys;
+            });
+    }
+
+    // A lease follows its mount: the mount's route, whether the mount is a legacy one or one made
+    // after 0057 (which has no secrets_mounts row).
+    Result<std::vector<LegacyDynamicSecretLease>>
+    legacy_dynamic_secret_leases(const std::string& after_id, int limit) override {
+        return with_tx<std::vector<LegacyDynamicSecretLease>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyDynamicSecretLease>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT o.id::text, o.mount_id::text, COALESCE(r.customer_id::text, "
+                    "lm.customer_id::text, ''), o.role, o.encrypted_value, "
+                    "(extract(epoch FROM o.created_at) * 1000000)::bigint, "
+                    "(extract(epoch FROM o.expires_at) * 1000000)::bigint, "
+                    "COALESCE(to_char(o.revoked_at AT TIME ZONE 'UTC', " +
+                        std::string(instant_text_format) +
+                        "), ''), COALESCE((extract(epoch FROM o.revoked_at) * 1000000)::bigint, "
+                        "0), o.renewals, " +
+                        std::string(legacy_secret_owner_columns) +
+                        " FROM secrets_dynamic_leases o LEFT JOIN secrets_mounts lm ON lm.id = "
+                        "o.mount_id" +
+                        std::string(legacy_secret_owner_joins) +
+                        " WHERE ($1 = '' OR o.id > NULLIF($1, '')::uuid) ORDER BY o.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyDynamicSecretLease> leases;
+                for (const pqxx::row& row : rows) {
+                    LegacyDynamicSecretLease legacy;
+                    legacy.id = row[0].as<std::string>();
+                    legacy.role = row[3].as<std::string>();
+                    legacy.encrypted_value = row[4].as<std::string>();
+                    legacy.at_us = row[5].as<std::int64_t>();
+                    legacy.expires_us = row[6].as<std::int64_t>();
+                    legacy.revoked_at = row[7].as<std::string>();
+                    legacy.revoked_us = row[8].as<std::int64_t>();
+                    legacy.renewals = row[9].as<int>();
+                    legacy.owner = legacy_secret_owner(row, 10, row[2].as<std::string>(),
+                                                       row[1].as<std::string>());
+                    leases.push_back(std::move(legacy));
+                }
+                return leases;
             });
     }
 
@@ -8785,24 +8865,6 @@ private:
                                     rows[0][8].as<std::string>(),
                                     rows[0][9].as<std::string>(),
                                     rows[0][10].as<std::string>()};
-    }
-
-    Result<DynamicSecretLease> dynamic_secret_lease_tx(pqxx::work& tx, const std::string& id) {
-        const pqxx::result rows =
-            tx.exec_params("SELECT id::text, mount_id::text, role, expires_at::text, "
-                           "coalesce(revoked_at::text,''), renewals, created_at::text "
-                           "FROM secrets_dynamic_leases WHERE id = $1::uuid",
-                           id);
-        if (rows.empty()) {
-            return std::unexpected(StoreError{"not_found", "dynamic-secret lease does not exist"});
-        }
-        return DynamicSecretLease{rows[0][0].as<std::string>(),
-                                  rows[0][1].as<std::string>(),
-                                  rows[0][2].as<std::string>(),
-                                  rows[0][3].as<std::string>(),
-                                  rows[0][4].as<std::string>(),
-                                  rows[0][5].as<int>(),
-                                  rows[0][6].as<std::string>()};
     }
 
     Result<Application> application_by(std::string_view predicate, const std::string& value) {

@@ -109,17 +109,76 @@ The operator does not read secrets: `LakeSealedSecret` with a `lake` source asks
 
 ## Dynamic leases
 
-`lease_dynamic_secret` generates a response-only username and password for a named role and stores
-their encrypted JSON under the mount data-key hierarchy: lake seals it with the mount data key read
-from the mount's workspace, and the lease row itself stays in PostgreSQL until lake#362 moves it. The response includes lease metadata and
-the value once. `renew_dynamic_secret` extends an active, unexpired lease and increments its
-renewal count. `revoke_dynamic_secret` records immediate revocation and is idempotent. Initial and
-renewed lifetimes are positive and capped at one hour.
+| Capability | Authorization | Input | Result |
+|---|---|---|---|
+| `lease_dynamic_secret` | `write` on the mount | `mount_id`, `role`, `lifetime_seconds?` (1-3600, default 300) | `lease` metadata and the generated `value`, once |
+| `renew_dynamic_secret` | `write` on the lease's mount | `lease_id`, `lifetime_seconds?` | lease metadata |
+| `revoke_dynamic_secret` | `write` on the lease's mount | `lease_id` | lease metadata |
+
+`lease_dynamic_secret` generates a response-only username and password for a named role. Lake seals
+them with the mount data key read from the mount's workspace (associated data
+`lake dynamic secret/<mount>/<lease id>`) and keeps the lease in that workspace. The response
+includes the lease metadata (`id`, `mount_id`, `workspace_id`, `role`, `expires_at`, `revoked_at`,
+`expired_at`, `renewals`, `created_at`) and the value once. `renew_dynamic_secret` extends an
+active, unexpired lease to `now + lifetime_seconds` (never shortening it) and increments its renewal
+count; a revoked or expired lease is `conflict`. `revoke_dynamic_secret` records immediate
+revocation, erases the sealed value and is idempotent. Lifetimes are positive and capped at one
+hour.
+
+### Where leases live (lake#362)
+
+| Where | What |
+|---|---|
+| Workspace Zetta, `lake_secrets_dynamic_leases` | One record per lease, keyed by the lease id, in its mount's workspace: mount, role, the sealed value (null once revoked or expired), expiry, revocation and expiry instants, renewals |
+| PostgreSQL `secret_lease_routes` | Lease id → mount, space, workspace, and `due_at`: when the expiry loop must next look at the lease. No role, value or ciphertext: dispatch only |
+
+A lease belongs to its mount's workspace; neither changes. Renew and revoke name only the lease, so
+lake reads the lease's route to find the mount (whose route decides authorization, from PostgreSQL
+only: a refused caller reaches no workspace) and works only in that workspace. A malformed or
+unknown `lease_id` is `not_found` at `/lease_id`; a missing one is `invalid_input`. A workspace that
+is not ready answers `workspace_not_ready`, and a deleted workspace took its leases with it.
+
+**Every change is a conditional write.** A new lease's route is written first, then its record
+`if_absent`. Renew, revoke and the expiry loop each rewrite the record at the engine revision they
+read and reread on a conflict. A renewal that read the lease active therefore cannot land on a lease
+another process revoked or expired in the meantime: its write fails, it rereads, finds the lease
+settled and answers `conflict`. A revocation or expiry is never undone.
+
+**Expiry runs on a schedule, from a due index.** The server's owner loop (every
+`secret_lease_expiry_interval`, ten seconds by default) runs one expiry pass. It does not read every
+workspace. It claims the routes whose `due_at` has passed from `secret_lease_routes`, earliest first,
+with `FOR UPDATE SKIP LOCKED`, and holds each for 60 seconds so another replica's pass does not take
+it. Then, in each claimed lease's workspace only:
+
+- an expired lease gets `expired_at` and its sealed value erased;
+- a revoked lease whose value is still there has it erased;
+- a lease renewed since it was indexed gets its new expiry as `due_at`.
+
+A settled lease's `due_at` becomes NULL and is never set again. `due_at` is a hint that is never
+later than the expiry in the record. A renewal only moves the expiry forward, and the record, not the
+index, decides whether a lease is active. So a lost or reordered index write only makes the pass look
+at a lease early. A workspace that is not ready keeps its leases claimed until the hold passes, and
+they are tried again then. A deleted workspace's routes are settled without a call. A route whose
+record was never written is removed after five minutes: a create stopped between its two writes,
+and its caller got an error. Counters: `lake_secret_leases_settled_total{outcome}` and
+`lake_secret_lease_sweep_errors_total`.
 
 Each lifecycle call records a signed `dynamic_secret` audit event whose object is the lease ID and
-whose details name only the mount, lease, operation, and outcome. When a transparency log is
-configured, that signed audit record is also appended as a digest-checked `audit_event/1` entry.
-No generated username, password, ciphertext, or KEK is present in the audit event or log entry.
+whose details name only the mount, workspace, lease, operation, and outcome. When a transparency log
+is configured, that signed audit record is also appended as a digest-checked `audit_event/1` entry.
+No generated username, password, ciphertext, or KEK is present in the audit event or log entry. The
+expiry pass is not a capability call and records no audit event.
+
+### Migration and cutover (lake#362)
+
+Migration `0058_secret_lease_workspaces` adds `secret_lease_routes` (immutable workspace through
+`enforce_workspace_routing`, a foreign key to the mount's route, a partial index on `due_at`) and
+reports each legacy lease whose mount has no route. A lease follows its mount: it has no assignment
+rows of its own. Nothing is dropped. `copy_workspace_records` with collection
+`secrets_dynamic_leases` writes each lease's route (due at its expiry, or at once if revoked) and
+then its record, copying the ciphertext unopened; verify accepts later renewals, revocations and
+expiries. The dev cutover is in
+[workspace-records.md](../architecture/workspace-records.md#cutover-runbook-dynamic-leases-dev-cluster).
 
 ## What the exit scenario proves
 
@@ -141,5 +200,7 @@ deliberately does not render values. Mutations remain capability calls.
 | `Stores/WorkspaceRecordStores.TheOneShotCopyMovesSecretsIntoTheirMountsWorkspace/{Memory,Postgres}` | The five collections: plan, copy, rerun, verify, legacy ciphertexts read and decrypted through the capabilities, a later put, undelete and KEK rotation accepted, `needs_selection` resolved, `workspace_deleted` not blocking, tamper detection, operator only |
 | `PostgresSecrets.MigrationRecordsEachMountsOwnerAndRoute` | Migration 0057 on a rerun: outcomes, routes, the dropped foreign key, immutable routes, a reviewed assignment, late mounts, every child row following its mount |
 | `PostgresCapabilities.SecretsAndEncryptionRoundTrip`, `IdentityExit.*` | The round trip against the numbered schema with nothing but the route in PostgreSQL; leases on a workspace mount |
+| `SecretsCapabilities.DynamicLeasesLiveInTheMountsWorkspace`, `…ARenewalRacingARevocationOrAnExpiryCannotReviveTheLease`, `…TheExpiryLoopReadsOnlyTheWorkspacesOfDueLeases`, `…ARenewalThatBeatsTheExpiryLoopIsKept`, `…TheServersOwnerLoopSettlesDueLeases` | Leases (lake#362): a sealed record and a content-free route, renewal moving the due index, revocation erasing the value and settling the route, malformed and unknown `lease_id`; a renewal racing a revocation or an expiry refused, an expiry pass racing a renewal keeping it; the pass reading no workspace without a due lease, holding claims, a not-ready and a deleted workspace, a route without a record kept while fresh; the server tick |
+| `Stores/WorkspaceRecordStores.DynamicLeasesLiveInTheirMountsWorkspace/{Memory,Postgres}`, `…TheOneShotCopyMovesDynamicLeasesIntoTheirMountsWorkspace/{Memory,Postgres}`, `PostgresSecrets.LeaseRoutesAreAContentFreeDueIndex` | Two spaces with two workspaces each, records only at their own endpoint and none in PostgreSQL, another space's person refused before any workspace call, a record copied elsewhere, not ready, expiry in its own workspace, an abandoned route removed, workspace deletion; the copy (plan, copy, rerun, verify, renewal and expiry after the copy, `needs_selection` resolved, tamper detection, operator only); migration 0058, the claim and hold, settled routes never due again, the legacy listing |
 
 The pure page renderer test checks escaping and absence of secret values.

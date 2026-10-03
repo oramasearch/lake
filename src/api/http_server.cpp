@@ -84,6 +84,7 @@
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_ui.hpp"
 #include "route_guard.hpp"
+#include "secret_records_api.hpp"
 #include "workspace_records_api.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/audit/audit.hpp"
@@ -5152,6 +5153,7 @@ struct ApiServer::Impl {
     ServerOptions options;
     telemetry::Metrics metrics;
     std::chrono::steady_clock::time_point next_topic_reap{};
+    std::chrono::steady_clock::time_point next_secret_lease_sweep{};
     std::size_t reported_bus_reaps = 0;
     // Repository usage on its way to the workspace Zettas (lake#348); null without workspaces.
     std::unique_ptr<MeteringRecorder> metering_recorder;
@@ -15276,6 +15278,31 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
+    // Settles the dynamic-secret leases that are due (lake#362) and counts what it did.
+    void expire_secret_leases() {
+        ApiContext context;
+        context.store = options.store.get();
+        context.workspaces = options.workspaces.get();
+        context.instance_kek = options.instance_kek;
+        const auto sweep = liquid::runtime::block_on(api::expire_secret_leases(context));
+        if (!sweep) {
+            metrics.increment_counter("lake_secret_lease_sweep_errors_total");
+            return;
+        }
+        const auto count = [this](const char* outcome, std::size_t value) {
+            if (value > 0) {
+                metrics.increment_counter("lake_secret_leases_settled_total",
+                                          {{"outcome", outcome}},
+                                          static_cast<double>(value));
+            }
+        };
+        count("expired", sweep->expired);
+        count("settled", sweep->settled);
+        count("rescheduled", sweep->rescheduled);
+        count("removed", sweep->removed);
+        count("failed", sweep->failed);
+    }
+
     // Writes the repository usage counted since the last flush to the workspace Zettas, off the
     // request path (lake#348), and reports what was written, kept or dropped as counters.
     void flush_metering() {
@@ -17527,6 +17554,11 @@ void ApiServer::drain() {
          impl_->metering_recorder->pending() * 2 >= impl_->options.metering_max_pending)) {
         impl_->next_metering_flush = now + impl_->options.metering_flush_interval;
         impl_->flush_metering();
+    }
+    if (impl_->options.store && impl_->options.workspaces && !impl_->options.instance_kek.empty() &&
+        now >= impl_->next_secret_lease_sweep) {
+        impl_->next_secret_lease_sweep = now + impl_->options.secret_lease_expiry_interval;
+        impl_->expire_secret_leases();
     }
     if (impl_->options.store && impl_->options.workspaces && now >= impl_->next_topic_reap) {
         impl_->next_topic_reap = now + std::chrono::minutes(1);

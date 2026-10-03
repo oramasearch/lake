@@ -1261,12 +1261,26 @@ public:
     virtual Result<void> retire_customer_kek(const std::string& customer_id,
                                              std::uint64_t previous_version) = 0;
 
-    // Dynamic leases stay here (lake#362); their value is sealed by the caller.
-    virtual Result<DynamicSecretLease> lease_dynamic_secret(const NewDynamicSecretLease& value) = 0;
-    virtual Result<DynamicSecretLease> get_dynamic_secret_lease(const std::string& id) = 0;
-    virtual Result<DynamicSecretLease> renew_dynamic_secret_lease(const std::string& id,
-                                                                  int lifetime_seconds) = 0;
-    virtual Result<DynamicSecretLease> revoke_dynamic_secret_lease(const std::string& id) = 0;
+    // Dynamic leases live in their mount's workspace Zetta (lake#362). The control store keeps
+    // each lease's content-free route (secret_lease_routes, migration 0058), which is also the
+    // expiry loop's due index: the loop asks it which leases are due instead of reading every
+    // workspace.
+    //
+    // A new route for a lease of a routed mount, in that mount's workspace and space. A lease
+    // that already has a route answers it unchanged. `invalid_input` at /mount_id when the mount
+    // has no route or the route names another workspace.
+    virtual Result<SecretLeaseRoute> record_secret_lease_route(const SecretLeaseRoute& value) = 0;
+    virtual Result<SecretLeaseRoute> get_secret_lease_route(const std::string& lease_id) = 0;
+    // Moves a lease's due instant; 0 settles it. A settled route is never made due again.
+    virtual Result<void> reschedule_secret_lease(const std::string& lease_id,
+                                                 std::int64_t due_us) = 0;
+    // The route of a lease whose workspace record was never written.
+    virtual Result<void> delete_secret_lease_route(const std::string& lease_id) = 0;
+    // Up to `limit` routes due now, earliest first, each held for `hold_seconds` (its due instant
+    // moved that far ahead) so that another replica's loop does not take it meanwhile; a loop
+    // that stops leaves them to be taken again once the hold passes.
+    virtual Result<std::vector<SecretLeaseRoute>> claim_due_secret_leases(int limit,
+                                                                          int hold_seconds) = 0;
 
     // The retired secrets tables, for the one-shot copy only. assign_legacy_secrets records each
     // legacy mount's owner (migration 0057's rule) and the route of every assigned mount; the
@@ -1282,6 +1296,8 @@ public:
     legacy_encryption_keys(const std::string& after_id, int limit) = 0;
     virtual Result<std::vector<LegacySecretDataKey>>
     legacy_secret_data_keys(const std::string& after_id, int limit) = 0;
+    virtual Result<std::vector<LegacyDynamicSecretLease>>
+    legacy_dynamic_secret_leases(const std::string& after_id, int limit) = 0;
 
     // Identity core. All bearer and cookie values are resolved here on every
     // request so a revoked session or device is rejected immediately.

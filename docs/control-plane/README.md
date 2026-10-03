@@ -25,3 +25,7 @@ immutable workspace of each repository (lake#315).
 
 [schema.md](schema.md#forge-record-workspaces-migration) documents
 `0054_forge_record_workspaces`, which retires `forge_records` for the workspace Zettas (lake#341).
+
+[schema.md](schema.md#secret-lease-workspaces-migration-0058_secret_lease_workspaces) documents
+`0058_secret_lease_workspaces`, which retires `secrets_dynamic_leases` for the workspace Zettas and
+keeps `secret_lease_routes`, the leases' content-free route and due index (lake#362).

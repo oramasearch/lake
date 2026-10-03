@@ -78,8 +78,12 @@ by its id, and its name claim), `lake_secrets_entries`, `lake_secrets_versions`,
 blind index (`WorkspaceRecords::index_of`). `secrets.hpp` gives `SecretMount` its `workspace_id`
 and declares `SecretMountRoute`, `WrappedDataKey`, `CustomerKekState` and the `LegacySecret*` rows.
 `Store` keeps for secrets only the content-free routes, the customer KEK (`wrap_secret_data_key`,
-`unwrap_secret_data_key`, `rotate_customer_kek`, `retire_customer_kek`), dynamic leases (lake#362)
-and the legacy reads for the copy.
+`unwrap_secret_data_key`, `rotate_customer_kek`, `retire_customer_kek`) and the legacy reads for
+the copy. Dynamic leases (lake#362) are `lake_secrets_dynamic_leases` records
+(`SecretLeaseCodec`, `SecretLeaseRecord`, `to_lease`); `Store` keeps only each lease's content-free
+`SecretLeaseRoute`, which is also the expiry loop's due index (`record_secret_lease_route`,
+`get_secret_lease_route`, `reschedule_secret_lease`, `delete_secret_lease_route`,
+`claim_due_secret_leases`), and `legacy_dynamic_secret_leases` for the copy.
 `application_webhook_records.hpp` holds the application
 event and delivery-attempt codecs and the claim/settle pair that sends each attempt once
 (lake#356, lake#357); `apps.hpp` gives `Application` its `workspace_id` and declares the

@@ -85,25 +85,33 @@ struct PutSecret {
     std::uint64_t check_and_set = 0;
 };
 
+// A generated credential's lease (docs/api/secrets.md#dynamic-leases, lake#362). The lease and its
+// sealed value live in the mount's workspace Zetta (control/secret_records.hpp); `expired_at` is
+// set, and the value erased, when the expiry loop settles a lease whose lifetime ran out.
 struct DynamicSecretLease {
     std::string id;
     std::string mount_id;
+    std::string workspace_id;
     std::string role;
     std::string expires_at;
     std::string revoked_at;
+    std::string expired_at;
     int renewals = 0;
     std::string created_at;
 };
 
-// A lease whose value the caller has already sealed under the mount data key (associated data
-// "lake dynamic secret/<mount>/<lease id>"): the lease row stays in the control store (lake#362),
-// the key that opens it is in the mount's workspace.
-struct NewDynamicSecretLease {
-    std::string id;
+// Where a lease lives, and when the expiry loop must next look at it (secret_lease_routes,
+// migration 0058, lake#362): multitenancy and dispatch only. It names no role, value or
+// ciphertext; the workspace is the mount's and never changes. `due_us` is a hint, never later
+// than the lease's expiry in its workspace record (which is the truth); 0 once the lease is
+// revoked or expired there, when nothing is left to do.
+struct SecretLeaseRoute {
+    std::string lease_id;
     std::string mount_id;
-    std::string role;
-    std::string encrypted_value;
-    int lifetime_seconds = 0;
+    std::string customer_id;
+    std::string workspace_id;
+    std::int64_t due_us = 0;
+    std::int64_t created_us = 0;
 };
 
 struct IssuedDynamicSecret {
@@ -202,6 +210,20 @@ struct LegacySecretDataKey {
     std::uint64_t key_version = 0;
     WrappedDataKey wrapped; // kek_version: the customer's current KEK, which wraps every row
     std::int64_t at_us = 0;
+    LegacySecretOwner owner;
+};
+
+// A row of the retired secrets_dynamic_leases table, read only by the one-shot copy. It follows
+// its mount: `owner` is the mount's route, as for the other secrets rows.
+struct LegacyDynamicSecretLease {
+    std::string id;
+    std::string role;
+    std::string encrypted_value; // sealed under the mount data key, "lake dynamic secret/<m>/<id>"
+    std::int64_t at_us = 0;
+    std::int64_t expires_us = 0;
+    std::string revoked_at;
+    std::int64_t revoked_us = 0;
+    int renewals = 0;
     LegacySecretOwner owner;
 };
 

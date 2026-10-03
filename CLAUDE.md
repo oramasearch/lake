@@ -68,6 +68,12 @@ workspace's Zetta with the existing envelope (instance KEK, customer KEK, data k
 keeps only the content-free `secret_mount_routes`, the policy objects and the customer KEK. Version
 numbers are claimed `if_absent`, and a customer KEK rotation rewraps every workspace's data keys
 before it forgets the replaced KEK. See `docs/api/secrets.md`.
+Dynamic-secret leases follow (lake#362, migration `0058`): each lease is a sealed record in its
+mount's workspace, and PostgreSQL keeps only `secret_lease_routes` (lease → mount, workspace, and
+`due_at`), the content-free route and due index. Renew, revoke and the owner loop's expiry pass
+rewrite a lease at the revision read, so a renewal never revives a revoked or expired lease; the
+pass claims due routes and reads only the workspaces that hold them. See
+`docs/api/secrets.md#dynamic-leases`.
 Forge records follow (lake#341, migration `0054`): issues, reviews, comments, releases, webhooks,
 exports and branch protection rules live in the workspace Zetta of their repository's workspace,
 found by repository and kind; the push path reads branch protection there once before the push

@@ -105,8 +105,12 @@ of a pre-move token) and `assign_legacy_drive_share_links`/`legacy_drive_share_l
 `secret_records.cpp` is the secrets collections' codecs (lake#328-#332); the stores no longer hold
 mounts, secrets, keys or data keys. They keep `secret_mount_routes` and the mount's policy objects
 (`create_secret_mount_route`), the customer KEK, which wraps and unwraps data keys without leaving
-the store and keeps the replaced version during a rotation, dynamic leases, and
-`assign_legacy_secrets`/`legacy_secret_*` for the copy (migration `0057_secret_workspaces`). A KEK
+the store and keeps the replaced version during a rotation, and
+`assign_legacy_secrets`/`legacy_secret_*` for the copy (migration `0057_secret_workspaces`). Dynamic
+leases are records of their mount's workspace (lake#362, `SecretLeaseCodec` here); the stores keep
+only `secret_lease_routes`, the content-free route and due index (migration
+`0058_secret_lease_workspaces`; PostgreSQL claims due rows with `FOR UPDATE SKIP LOCKED` and holds
+them), and `legacy_dynamic_secret_leases` for the copy. A KEK
 rotation still rewraps the retired `secrets_data_keys` rows and the PKI authorities in its
 transaction.
 `application_webhook_records.cpp` is the next: an application's lifecycle events and its webhook

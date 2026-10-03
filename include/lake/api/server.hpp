@@ -133,6 +133,10 @@ struct ServerOptions {
     // on every drain() tick. At most `metering_max_pending` counters are held.
     std::chrono::milliseconds metering_flush_interval{std::chrono::seconds(5)};
     std::size_t metering_max_pending = 4096;
+    // Dynamic-secret leases that are due (expired, or revoked and not yet settled) are settled in
+    // their workspaces by the owner loop at this interval (docs/api/secrets.md, lake#362). It
+    // reads the control store's due index, never every workspace. Zero settles on every drain().
+    std::chrono::milliseconds secret_lease_expiry_interval{std::chrono::seconds(10)};
 };
 
 // Prefer the full configured origin. public_host is already the browser-facing

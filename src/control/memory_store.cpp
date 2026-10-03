@@ -272,9 +272,11 @@ nlohmann::json to_json(const SecretMetadata& metadata) {
 nlohmann::json to_json(const DynamicSecretLease& value) {
     return {{"id", value.id},
             {"mount_id", value.mount_id},
+            {"workspace_id", value.workspace_id},
             {"role", value.role},
             {"expires_at", value.expires_at},
             {"revoked_at", nullable(value.revoked_at)},
+            {"expired_at", nullable(value.expired_at)},
             {"renewals", value.renewals},
             {"created_at", value.created_at}};
 }
@@ -5638,65 +5640,84 @@ Result<void> InMemoryStore::retire_customer_kek(const std::string& customer_id,
     return {};
 }
 
-Result<DynamicSecretLease> InMemoryStore::lease_dynamic_secret(const NewDynamicSecretLease& input) {
-    if (input.id.empty() || input.role.empty() || input.encrypted_value.empty() ||
-        input.lifetime_seconds < 1 || input.lifetime_seconds > 3600) {
-        return std::unexpected(StoreError{"invalid_input", "dynamic-secret lease is invalid"});
-    }
-    std::lock_guard lock(mutex_);
-    const auto expires =
-        std::chrono::system_clock::now() + std::chrono::seconds{input.lifetime_seconds};
-    DynamicSecretLease lease{
-        input.id,
-        input.mount_id,
-        input.role,
-        std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(expires)),
-        "",
-        0,
-        now_iso8601()};
-    dynamic_secret_leases_.push_back(lease);
-    return lease;
+namespace {
+
+std::int64_t now_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
 }
 
-Result<DynamicSecretLease> InMemoryStore::get_dynamic_secret_lease(const std::string& id) {
+} // namespace
+
+Result<SecretLeaseRoute> InMemoryStore::record_secret_lease_route(const SecretLeaseRoute& input) {
     std::lock_guard lock(mutex_);
-    const auto found = std::ranges::find(dynamic_secret_leases_, id, &DynamicSecretLease::id);
-    if (found == dynamic_secret_leases_.end()) {
+    if (const auto found =
+            std::ranges::find(secret_lease_routes_, input.lease_id, &SecretLeaseRoute::lease_id);
+        found != secret_lease_routes_.end()) {
+        return *found;
+    }
+    const auto mount =
+        std::ranges::find(secret_mount_routes_, input.mount_id, &SecretMountRoute::mount_id);
+    if (input.lease_id.empty() || mount == secret_mount_routes_.end() ||
+        mount->workspace_id != input.workspace_id || mount->customer_id != input.customer_id) {
+        return std::unexpected(StoreError{
+            "invalid_input", "a lease's route must name its mount's workspace"});
+    }
+    SecretLeaseRoute route = input;
+    route.created_us = now_us();
+    secret_lease_routes_.push_back(route);
+    return route;
+}
+
+Result<SecretLeaseRoute> InMemoryStore::get_secret_lease_route(const std::string& lease_id) {
+    std::lock_guard lock(mutex_);
+    const auto found =
+        std::ranges::find(secret_lease_routes_, lease_id, &SecretLeaseRoute::lease_id);
+    if (found == secret_lease_routes_.end()) {
         return std::unexpected(StoreError{"not_found", "dynamic-secret lease does not exist"});
     }
     return *found;
 }
 
-Result<DynamicSecretLease> InMemoryStore::renew_dynamic_secret_lease(const std::string& id,
-                                                                     int lifetime_seconds) {
-    if (lifetime_seconds < 1 || lifetime_seconds > 3600) {
-        return std::unexpected(
-            StoreError{"invalid_input", "lease lifetime must be at most one hour"});
-    }
+Result<void> InMemoryStore::reschedule_secret_lease(const std::string& lease_id,
+                                                    std::int64_t due_us) {
     std::lock_guard lock(mutex_);
-    const auto found = std::ranges::find(dynamic_secret_leases_, id, &DynamicSecretLease::id);
-    if (found == dynamic_secret_leases_.end()) {
-        return std::unexpected(StoreError{"not_found", "dynamic-secret lease does not exist"});
+    const auto found =
+        std::ranges::find(secret_lease_routes_, lease_id, &SecretLeaseRoute::lease_id);
+    if (found != secret_lease_routes_.end() && found->due_us != 0) {
+        found->due_us = std::max<std::int64_t>(due_us, 0);
     }
-    if (!found->revoked_at.empty() || found->expires_at <= now_iso8601()) {
-        return std::unexpected(StoreError{"conflict", "dynamic-secret lease is not active"});
-    }
-    const auto expires = std::chrono::system_clock::now() + std::chrono::seconds{lifetime_seconds};
-    found->expires_at = std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(expires));
-    ++found->renewals;
-    return *found;
+    return {};
 }
 
-Result<DynamicSecretLease> InMemoryStore::revoke_dynamic_secret_lease(const std::string& id) {
+Result<void> InMemoryStore::delete_secret_lease_route(const std::string& lease_id) {
     std::lock_guard lock(mutex_);
-    const auto found = std::ranges::find(dynamic_secret_leases_, id, &DynamicSecretLease::id);
-    if (found == dynamic_secret_leases_.end()) {
-        return std::unexpected(StoreError{"not_found", "dynamic-secret lease does not exist"});
+    std::erase_if(secret_lease_routes_,
+                  [&](const SecretLeaseRoute& route) { return route.lease_id == lease_id; });
+    return {};
+}
+
+Result<std::vector<SecretLeaseRoute>> InMemoryStore::claim_due_secret_leases(int limit,
+                                                                             int hold_seconds) {
+    std::lock_guard lock(mutex_);
+    const std::int64_t now = now_us();
+    std::vector<SecretLeaseRoute*> due;
+    for (SecretLeaseRoute& route : secret_lease_routes_) {
+        if (route.due_us != 0 && route.due_us <= now) {
+            due.push_back(&route);
+        }
     }
-    if (found->revoked_at.empty()) {
-        found->revoked_at = now_iso8601();
+    std::ranges::sort(due, {}, [](const SecretLeaseRoute* route) { return route->due_us; });
+    std::vector<SecretLeaseRoute> claimed;
+    for (SecretLeaseRoute* route : due) {
+        if (static_cast<int>(claimed.size()) >= std::clamp(limit, 1, 5000)) {
+            break;
+        }
+        claimed.push_back(*route);
+        route->due_us = now + std::int64_t{std::max(hold_seconds, 1)} * 1'000'000;
     }
-    return *found;
+    return claimed;
 }
 
 Result<CustomerKekRotation> InMemoryStore::rotate_customer_kek(const std::string& customer_id,
@@ -5995,6 +6016,22 @@ InMemoryStore::legacy_secret_data_keys(const std::string& after_id, int limit) {
                                         workspaces_, row.owner.customer_id, row.owner.mount_id);
     }
     return legacy_page(std::move(rows), after_id, limit, &LegacySecretDataKey::id);
+}
+
+void InMemoryStore::seed_legacy_dynamic_secret_lease(LegacyDynamicSecretLease lease) {
+    std::lock_guard lock(mutex_);
+    legacy_dynamic_secret_leases_.push_back(std::move(lease));
+}
+
+Result<std::vector<LegacyDynamicSecretLease>>
+InMemoryStore::legacy_dynamic_secret_leases(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<LegacyDynamicSecretLease> rows = legacy_dynamic_secret_leases_;
+    for (LegacyDynamicSecretLease& row : rows) {
+        row.owner = legacy_secret_owner(legacy_secret_assignments_, secret_mount_routes_,
+                                        workspaces_, row.owner.customer_id, row.owner.mount_id);
+    }
+    return legacy_page(std::move(rows), after_id, limit, &LegacyDynamicSecretLease::id);
 }
 
 Result<OfflineGrant> InMemoryStore::issue_offline_grant(const NewOfflineGrant& input) {

@@ -25,5 +25,7 @@ The forge record store operations are gone (lake#341): the wrapper forwards only
 
 The secret store operations are replaced (lake#328-#332): the wrapper forwards the mount routes,
 the customer KEK operations (`wrap_secret_data_key`, `unwrap_secret_data_key`,
-`customer_kek_state`, `rotate_customer_kek`, `retire_customer_kek`), dynamic leases and the
-`legacy_secret_*` reads, each under its own operation label.
+`customer_kek_state`, `rotate_customer_kek`, `retire_customer_kek`), the lease routes
+(`record_secret_lease_route`, `get_secret_lease_route`, `reschedule_secret_lease`,
+`delete_secret_lease_route`, `claim_due_secret_leases`, lake#362) and the `legacy_secret_*` and
+`legacy_dynamic_secret_leases` reads, each under its own operation label.
