@@ -1175,10 +1175,26 @@ std::string share_link_actions(std::string_view role) {
 std::string drive_share_link_url(const control::Repository& repository,
                                  std::string_view ref,
                                  std::string_view path,
+                                 std::string_view workspace_id,
                                  std::string_view link_id) {
     return "/drive/share/link?repository_id=" + url_component(repository.id) +
            "&ref=" + url_component(ref) + "&path=" + url_component(path) +
-           "&link_id=" + url_component(link_id);
+           "&workspace_id=" + url_component(workspace_id) + "&link_id=" + url_component(link_id);
+}
+
+// The sharing page of a folder with the links of one workspace.
+std::string drive_share_url(const control::Repository& repository,
+                            std::string_view ref,
+                            std::string_view path,
+                            std::string_view workspace_id) {
+    return "/drive/share?repository_id=" + url_component(repository.id) +
+           "&ref=" + url_component(ref) + "&path=" + url_component(path) +
+           "&workspace_id=" + url_component(workspace_id);
+}
+
+std::string workspace_hidden(std::string_view workspace_id) {
+    return std::format("<input type=\"hidden\" name=\"workspace_id\" value=\"{}\">",
+                       web_ui_escape(workspace_id));
 }
 
 std::string drive_entry_actions(const control::Repository& repository,
@@ -9807,9 +9823,32 @@ std::string web_ui_drive_conflict(const control::Repository& repository,
     return repository_shell("lake — drive conflict", repository, "Conflict", content, viewer);
 }
 
+std::string web_ui_drive_share_workspaces(const control::Repository& repository,
+                                          std::string_view ref,
+                                          std::string_view path,
+                                          const DriveShareWorkspaces& workspaces,
+                                          WebUiViewer viewer) {
+    std::string content = std::format(
+        "<p class=\"eyebrow\">drive sharing</p><h1>Share {}</h1><p class=\"sub\">A folder's "
+        "links are held in one of this space's workspaces. Choose the workspace whose links you "
+        "want to see or create.</p>",
+        web_ui_escape(path));
+    content += "<ul class=\"stack\">";
+    for (const auto& [id, name] : workspaces.choices) {
+        content += "<li>" + row_link(drive_share_url(repository, ref, path, id), name) + "</li>";
+    }
+    if (workspaces.choices.empty()) {
+        content += "<li class=\"empty\">This space has no workspace yet. Create one before making "
+                   "a link.</li>";
+    }
+    content += "</ul>";
+    return repository_shell("lake — drive sharing", repository, "Sharing", content, viewer);
+}
+
 std::string web_ui_drive_share(const control::Repository& repository,
                                std::string_view ref,
                                std::string_view path,
+                               const DriveShareWorkspaces& workspaces,
                                const std::vector<control::EffectiveAccessEntry>& access,
                                const std::vector<nlohmann::json>& links,
                                std::string_view created_link,
@@ -9867,7 +9906,7 @@ std::string web_ui_drive_share(const control::Repository& repository,
         "the link can open this live folder until its expiry or revocation.</p><form "
         "class=\"stack\" "
         "method=\"post\" action=\"/drive/share/link\">" +
-        hidden +
+        hidden + workspace_hidden(workspaces.selected) +
         "<label>What link holders can do<select name=\"role\"><option value=\"read\">View — "
         "browse and download</option><option value=\"write\">Write scope — capability-aware "
         "clients only</option></select></label><label>Until when (UTC)<input name=\"expires_at\" "
@@ -9878,10 +9917,22 @@ std::string web_ui_drive_share(const control::Repository& repository,
         "<section class=\"panel\"><h3>Independent Copy</h3><p>Downloaded bytes stop being a "
         "live object. They cannot be updated or recalled by changing access "
         "here.</p></section></div>";
+    std::string held_in = workspaces.selected;
+    std::string others;
+    for (const auto& [id, name] : workspaces.choices) {
+        if (id == workspaces.selected) {
+            held_in = name;
+        } else {
+            others += (others.empty() ? "" : " · ") +
+                      row_link(drive_share_url(repository, ref, path, id), name);
+        }
+    }
     content +=
         "<h2>Folder Share Management</h2><p class=\"sub\">A link is a continuing capability, "
         "not an attachment. Revoking it prevents its next open; copies already downloaded remain "
-        "independent.</p><table><thead><tr><th>Who can access</th><th>What they can "
+        "independent.</p><p class=\"muted\">Links held in workspace <strong>" +
+        web_ui_escape(held_in) + "</strong>" +
+        (others.empty() ? std::string() : ". Other workspaces: " + others) + "</p><table><thead><tr><th>Who can access</th><th>What they can "
         "do</th><th>Until "
         "when</th><th>State</th><th></th></tr></thead><tbody>";
     for (const nlohmann::json& link : links) {
@@ -9893,15 +9944,17 @@ std::string web_ui_drive_share(const control::Repository& repository,
             "action=\"/drive/share/revoke\"><input type=\"hidden\" name=\"link_id\" "
             "value=\"{}\"><input type=\"hidden\" name=\"repository_id\" value=\"{}\"><input "
             "type=\"hidden\" name=\"ref\" value=\"{}\"><input type=\"hidden\" name=\"path\" "
-            "value=\"{}\"><button type=\"submit\">Revoke link</button></form></td></tr>",
+            "value=\"{}\">{}<button type=\"submit\">Revoke link</button></form></td></tr>",
             web_ui_escape(share_link_actions(link.value("role", ""))),
             web_ui_escape(link.value("expires_at", "")),
             web_ui_escape(share_link_state(link)),
-            web_ui_escape(drive_share_link_url(repository, ref, path, link_id)),
+            web_ui_escape(
+                drive_share_link_url(repository, ref, path, workspaces.selected, link_id)),
             web_ui_escape(link_id),
             web_ui_escape(repository.id),
             web_ui_escape(ref),
-            web_ui_escape(path));
+            web_ui_escape(path),
+            workspace_hidden(workspaces.selected));
     }
     if (links.empty()) {
         content += "<tr><td colspan=\"4\" class=\"empty\">No links.</td></tr>";
@@ -9913,6 +9966,7 @@ std::string web_ui_drive_share(const control::Repository& repository,
 std::string web_ui_drive_share_link(const control::Repository& repository,
                                     std::string_view ref,
                                     std::string_view path,
+                                    std::string_view workspace_id,
                                     const nlohmann::json& link,
                                     std::string_view error,
                                     WebUiViewer viewer) {
@@ -9936,14 +9990,14 @@ std::string web_ui_drive_share_link(const control::Repository& repository,
             "downloaded.</p><form method=\"post\" action=\"/drive/share/revoke\">" +
             std::format("<input type=\"hidden\" name=\"link_id\" value=\"{}\">",
                         web_ui_escape(link.value("id", ""))) +
-            drive_hidden_context(repository, ref, path) +
+            drive_hidden_context(repository, ref, path) + workspace_hidden(workspace_id) +
             "<input type=\"hidden\" name=\"return_to\" value=\"detail\"><button class=\"danger\" "
             "type=\"submit\">Revoke link</button></form></section>";
     } else {
         content += "<p class=\"notice\">This link no longer opens the folder.</p>";
     }
     content +=
-        row_link("/drive/share?" + drive_query(repository, ref, path), "Back to folder shares");
+        row_link(drive_share_url(repository, ref, path, workspace_id), "Back to folder shares");
     return repository_shell("lake — drive share link", repository, "Share Link", content, viewer);
 }
 

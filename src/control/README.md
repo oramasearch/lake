@@ -97,3 +97,7 @@ one-shot copy (migration `0045_ask_message_workspaces`). `stream_owners.cpp` is 
 (lake#379): one `if_absent` record per topic, keyed by the topic's blind index; the stores keep only
 `assign_legacy_stream_owners` and `legacy_stream_owners` for the copy (migration
 `0047_stream_owner_workspaces`).
+one-shot copy (migration `0045_ask_message_workspaces`). `drive_share_links.cpp` is the drive share
+link collection (lake#350); the stores keep only `drive_share_link_route` (the content-free route
+of a pre-move token) and `assign_legacy_drive_share_links`/`legacy_drive_share_links` for the copy
+(migration `0048_drive_share_link_workspaces`).

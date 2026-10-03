@@ -203,3 +203,8 @@ the `workspace_query`/`workspace_act` allow-lists, so only lake reaches its `lak
 (lake#370, `docs/architecture/workspace-records.md`). `stream_capabilities.cpp` reads and claims
 topic creators in the topic's workspace (`lake_stream_owners`, lake#379), and
 `copy_workspace_records` also copies the retired `stream_owners` rows.
+(lake#370, `docs/architecture/workspace-records.md`). Drive share links (`drive_capabilities.cpp`,
+lake#350) live in the workspace named by `workspace_id` on create, list (`drive_effective_access`)
+and revoke, and by the bearer token on resolve, preview and download; the sharing pages carry the
+workspace in their URLs and forms (`http_server.cpp`, `web_ui.cpp`). `copy_workspace_records` also
+copies `drive_share_links`.

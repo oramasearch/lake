@@ -84,3 +84,12 @@ reported. Topic creators now live in the topic's workspace Zetta (lake#379), so 
 writes or reads the table except through `copy_workspace_records`. It adds no column and drops
 nothing. The latest guard is `stream_owner_workspaces_guard`; the operator must vendor this schema
 and update its guard before rollout. See [streams.md](../docs/control-plane/streams.md).
+Migration `0048_drive_share_link_workspaces` records the owner of each retired `drive_share_links`
+row in `workspace_assignments` (the only live workspace of the repository's space; otherwise
+`needs_selection`) and creates `drive_share_link_routes`: for each assigned row, the content-free
+route (token digest → link id, workspace) that lets a pre-move bearer token find its workspace.
+Drive share links now live in the workspace Zetta that holds them (lake#350); a new token names its
+workspace itself. Lake no longer writes or reads `drive_share_links` except through
+`copy_workspace_records`, which reapplies the assignment and routes before each run. Nothing is
+dropped. The latest guard is `drive_share_link_workspaces_guard`; the operator must vendor this
+schema and update its guard before rollout. See [sharing.md](../docs/api/sharing.md).

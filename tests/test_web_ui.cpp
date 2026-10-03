@@ -418,8 +418,10 @@ TEST(WebUi, DriveSharingAnswersAccessExpiryAndRevocationQuestions) {
                               {"expires_at", "2030-01-01T00:00:00Z"},
                               {"active", true},
                               {"revoked_at", nullptr}};
-    const std::string share =
-        lake::api::web_ui_drive_share(repository, "main", "docs", {access}, {link}, "", "");
+    const lake::api::DriveShareWorkspaces workspaces{
+        "w-home", {{"w-home", "Home"}, {"w-lab", "Lab<&>"}}};
+    const std::string share = lake::api::web_ui_drive_share(
+        repository, "main", "docs", workspaces, {access}, {link}, "", "");
     EXPECT_NE(share.find("Who Can Access This Folder Now"), std::string::npos);
     EXPECT_NE(share.find("People"), std::string::npos);
     EXPECT_NE(share.find("Organization"), std::string::npos);
@@ -429,10 +431,23 @@ TEST(WebUi, DriveSharingAnswersAccessExpiryAndRevocationQuestions) {
     EXPECT_NE(share.find("Revoke link"), std::string::npos);
     EXPECT_NE(share.find("person&lt;&amp;&gt;"), std::string::npos);
     EXPECT_EQ(share.find("person<&>"), std::string::npos);
+    // Links are held in one workspace (lake#350): its forms carry it, the others are offered.
+    EXPECT_NE(share.find("Links held in workspace <strong>Home</strong>"), std::string::npos);
+    EXPECT_NE(share.find("name=\"workspace_id\" value=\"w-home\""), std::string::npos);
+    EXPECT_NE(share.find("workspace_id=w-lab"), std::string::npos);
+    EXPECT_NE(share.find("Lab&lt;&amp;&gt;"), std::string::npos);
+    EXPECT_NE(share.find("workspace_id=w-home&amp;link_id=link-1"), std::string::npos);
     expect_theme_scripts(share);
 
+    const std::string chooser = lake::api::web_ui_drive_share_workspaces(
+        repository, "main", "docs", {"", workspaces.choices});
+    EXPECT_NE(chooser.find("Choose the workspace"), std::string::npos);
+    EXPECT_NE(chooser.find("workspace_id=w-lab"), std::string::npos);
+    expect_theme_scripts(chooser);
+
     const std::string detail =
-        lake::api::web_ui_drive_share_link(repository, "main", "docs", link, "");
+        lake::api::web_ui_drive_share_link(repository, "main", "docs", "w-home", link, "");
+    EXPECT_NE(detail.find("name=\"workspace_id\" value=\"w-home\""), std::string::npos);
     EXPECT_NE(detail.find("Revoking prevents this link"), std::string::npos);
     EXPECT_NE(detail.find("It does not recall files"), std::string::npos);
     EXPECT_NE(detail.find("action=\"/drive/share/revoke\""), std::string::npos);

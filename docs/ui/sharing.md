@@ -31,10 +31,19 @@ Lake does not currently expose a passcode field on create_drive_share_link. The 
 shows a disabled passcode control and says that no passcode is sent or stored. It does not imply a
 passcode protection that the capability cannot enforce.
 
+## Which workspace holds the links
+
+A folder's links live in one workspace of the repository's space (lake#350). The sharing pages
+carry it as `workspace_id` in every URL and form. GET /drive/share without one redirects to the same
+page with the person's remembered workspace, or the space's only workspace, written into the URL.
+When the space has several and none is remembered, the page asks which one, and only after the
+policy engine confirms that the person can share the folder. The management table names the
+workspace whose links it lists and links to the space's other workspaces.
+
 ## Manage and inspect links
 
 The folder page lists every link on that folder with its audience, allowed use, expiry, and active,
-expired, or revoked state. GET /drive/share/link?...&link_id=<id> is the individual link page.
+expired, or revoked state. GET /drive/share/link?...&workspace_id=<id>&link_id=<id> is the individual link page.
 It repeats the four answers and provides POST /drive/share/revoke only while the link is active.
 That route calls revoke_drive_share_link; it never changes policy directly.
 
@@ -69,7 +78,11 @@ bytes are revocable.
 ## Verification
 
 WebUi.DriveSharingAnswersAccessExpiryAndRevocationQuestions asserts the four questions, passcode
-limitation, revocation consequence, route forms, and escaped sharing values.
+limitation, revocation consequence, route forms, the workspace carried by every link form and the
+workspace chooser, and escaped sharing values.
+`SharedLinkScenario.SharingPagesNameTheWorkspaceThatHoldsTheLinks` checks the redirect to the
+space's only workspace, a second workspace without the links, the chooser, and its refusal to a
+person who cannot share the folder.
 Drive.FolderSharingMatchesAuthorizeAndLinksExpire also proves the recipient's
 drive_shared_with_me result. The seeded fixture captures the folder sharing page, an individual
 link page, and a recipient's shared-with-me page in both themes through the production HTTP

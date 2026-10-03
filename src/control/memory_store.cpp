@@ -4292,98 +4292,78 @@ Result<ForgeRecord> InMemoryStore::update_forge_record(const std::string& id,
     return *record;
 }
 
-Result<DriveShareLink> InMemoryStore::create_drive_share_link(const NewDriveShareLink& input) {
+Result<DriveShareLinkRoute>
+InMemoryStore::drive_share_link_route(const std::string& token_hash) {
     std::lock_guard lock(mutex_);
-    if (repository_by_id(repositories_, input.repository_id) == repositories_.end()) {
-        return std::unexpected(
-            StoreError{"invalid_input", "repository_id does not reference a repository"});
-    }
-    const auto object = std::ranges::find(policy_objects_, input.object_id, &PolicyObject::id);
-    if (object == policy_objects_.end() || object->object_type != "path") {
-        return std::unexpected(
-            StoreError{"invalid_input", "object_id does not reference a drive folder"});
-    }
-    if (input.token_hash.empty() || input.expires_at.empty() ||
-        (input.role != "read" && input.role != "write")) {
-        return std::unexpected(StoreError{
-            "invalid_input", "share link requires a token, expiry, and read or write role"});
-    }
-    if (std::ranges::any_of(drive_share_links_, [&](const DriveShareLink& link) {
-            return link.token_hash == input.token_hash;
-        })) {
-        return std::unexpected(StoreError{"conflict", "share link token already exists"});
-    }
-    const std::string now = now_iso8601();
-    const std::string id = new_uuid_v4();
-    drive_share_links_.push_back(DriveShareLink{id,
-                                                input.repository_id,
-                                                input.object_id,
-                                                input.node_id,
-                                                input.path,
-                                                input.role,
-                                                input.token_hash,
-                                                input.expires_at,
-                                                "",
-                                                input.created_by_taap_id,
-                                                now});
-    grants_.push_back(Grant{new_uuid_v4(),
-                            "share-link:" + id,
-                            input.object_id,
-                            input.role,
-                            "drive_share_link/" + id,
-                            input.created_by_taap_id,
-                            now,
-                            now});
-    return drive_share_links_.back();
-}
-
-Result<DriveShareLink> InMemoryStore::get_drive_share_link(const std::string& id) {
-    std::lock_guard lock(mutex_);
-    const auto link = std::ranges::find(drive_share_links_, id, &DriveShareLink::id);
-    if (link == drive_share_links_.end()) {
-        return std::unexpected(StoreError{"not_found", "no drive share link " + id});
-    }
-    return *link;
-}
-
-Result<DriveShareLink>
-InMemoryStore::get_drive_share_link_by_token_hash(const std::string& token_hash) {
-    std::lock_guard lock(mutex_);
-    const auto link =
-        std::ranges::find(drive_share_links_, token_hash, &DriveShareLink::token_hash);
-    if (link == drive_share_links_.end()) {
+    const auto route = drive_share_link_routes_.find(token_hash);
+    if (route == drive_share_link_routes_.end()) {
         return std::unexpected(StoreError{"not_found", "share link is not recognized"});
     }
-    return *link;
+    return route->second;
 }
 
-Result<std::vector<DriveShareLink>> InMemoryStore::list_drive_share_links(
-    const std::string& repository_id, const std::string& object_id, int limit) {
+void InMemoryStore::seed_legacy_drive_share_link(DriveShareLink link) {
     std::lock_guard lock(mutex_);
-    std::vector<DriveShareLink> output;
-    for (auto link = drive_share_links_.rbegin(); link != drive_share_links_.rend(); ++link) {
-        if (link->repository_id == repository_id &&
-            (object_id.empty() || link->object_id == object_id)) {
-            output.push_back(*link);
+    if (link.id.empty()) {
+        link.id = new_uuid_v4();
+    }
+    legacy_drive_share_links_.push_back(std::move(link));
+}
+
+Result<void> InMemoryStore::assign_legacy_drive_share_links() {
+    std::lock_guard lock(mutex_);
+    for (const DriveShareLink& link : legacy_drive_share_links_) {
+        const auto repository = repository_by_id(repositories_, link.repository_id);
+        if (repository == repositories_.end()) {
+            continue;
         }
-        if (limit > 0 && output.size() >= static_cast<std::size_t>(limit)) {
+        if (!legacy_drive_share_assignments_.contains(link.id)) {
+            std::vector<std::string> live;
+            for (const Workspace& workspace : workspaces_) {
+                if (workspace.customer_id == repository->customer_id &&
+                    workspace.desired != "deleted") {
+                    live.push_back(workspace.id);
+                }
+            }
+            legacy_drive_share_assignments_[link.id] =
+                live.size() == 1
+                    ? std::pair<std::string, std::string>{live.front(), "sole_workspace"}
+                    : std::pair<std::string, std::string>{"", "needs_selection"};
+        }
+        const auto& [workspace_id, outcome] = legacy_drive_share_assignments_.at(link.id);
+        if (!workspace_id.empty()) {
+            drive_share_link_routes_[link.token_hash] = DriveShareLinkRoute{link.id, workspace_id};
+        }
+    }
+    return {};
+}
+
+Result<std::vector<LegacyDriveShareLink>>
+InMemoryStore::legacy_drive_share_links(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<DriveShareLink> ordered = legacy_drive_share_links_;
+    std::ranges::sort(ordered, {}, &DriveShareLink::id);
+    std::vector<LegacyDriveShareLink> rows;
+    for (const DriveShareLink& link : ordered) {
+        if (!after_id.empty() && link.id <= after_id) {
+            continue;
+        }
+        if (static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
             break;
         }
+        LegacyDriveShareLink row{link, "", "", "needs_selection"};
+        if (const auto repository = repository_by_id(repositories_, link.repository_id);
+            repository != repositories_.end()) {
+            row.customer_id = repository->customer_id;
+        }
+        if (const auto found = legacy_drive_share_assignments_.find(link.id);
+            found != legacy_drive_share_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
     }
-    return output;
-}
-
-Result<DriveShareLink> InMemoryStore::revoke_drive_share_link(const std::string& id) {
-    std::lock_guard lock(mutex_);
-    const auto link = std::ranges::find(drive_share_links_, id, &DriveShareLink::id);
-    if (link == drive_share_links_.end()) {
-        return std::unexpected(StoreError{"not_found", "no drive share link " + id});
-    }
-    if (!link->revoked_at.empty()) {
-        return std::unexpected(StoreError{"conflict", "drive share link is already revoked"});
-    }
-    link->revoked_at = now_iso8601();
-    return *link;
+    return rows;
 }
 
 Result<Team> InMemoryStore::create_team(const NewTeam& in) {

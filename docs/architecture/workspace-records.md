@@ -19,9 +19,9 @@ still open.
 |---|---|
 | `WorkspaceRecords`, `RecordSet<Codec>` | Implemented on Zetta's keyed record store ([zetta#1231](https://github.com/oramasearch/zetta/issues/1231), merged in zetta PR #1233 to `dev`, `82f617e`). Unit tests run against an engine fake; an opt-in test runs against a real Zetta node built from that commit. |
 | Append-only collections | Implemented. `ask_messages` has moved. |
-| Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. |
-| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `ask_messages`, `opportunities` and `stream_owners`. |
-| Dropping `ask_messages`, `opportunities` and `stream_owners` from PostgreSQL | Not part of these changes. A later migration drops each once its copy is verified on the dev cluster. |
+| Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. `drive_share_links` (lake#350) has moved: revocation is a conditional `put` on the revision read. |
+| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `ask_messages`, `opportunities`, `stream_owners` and `drive_share_links`. |
+| Dropping `ask_messages`, `opportunities`, `stream_owners` and `drive_share_links` from PostgreSQL | Not part of these changes. A later migration drops each once its copy is verified on the dev cluster. |
 
 **Zetta dependency.** A workspace Zetta must run Zetta `dev` at or after zetta PR #1233
 (`82f617e`). An older engine has no record store and answers `put_record` as an unknown
@@ -47,7 +47,7 @@ A page that reads one collection therefore pays one workspace round trip.
 | Shape | Examples (follow-up) | How |
 |---|---|---|
 | Append-only log, read back by key | `ask_messages` (#370), `sso_provisioning_logs` (#333), `auth_app_webhook_events` (#356), `auth_app_webhook_deliveries` (#357), `agent_cron_runs` (#372), `offline_recovery_notifications` (#339), `audit_events` (#317) | `append`: one `put_record` with `if_absent`. `list` is newest first by the lookup index, then put in order. Set `retention_ms` where a purge applies. |
-| Mutable rows found by id | `opportunities` (#376, **moved**), `repositories` (#315), `apps` (#377), `stores` (#365), `forge_records` (#341), `platform_environments` (#358) | `get`, then `put` with `if_revision`, or `update`, which retries on `409` by rereading. `remove` with `if_revision`. |
+| Mutable rows found by id | `opportunities` (#376, **moved**), `drive_share_links` (#350, **moved**), `repositories` (#315), `apps` (#377), `stores` (#365), `forge_records` (#341), `platform_environments` (#358) | `get`, then `put` with `if_revision`, or `update`, which retries on `409` by rereading. `remove` with `if_revision`. |
 | One-use codes, sessions, replay evidence, claims | `sessions` (#323), `identity_oauth_flows` (#326), `identity_webauthn_challenges` (#327), `identity_taap_assertions` (#361), `auth_app_authorization_codes` (#363), `offline_recovery_attempts` (#336), `agent_task_status` claims (#375) | Consume with `remove(id, if_revision)`. Only one caller succeeds; the others get `conflict` or `not_found`. Expiry is the collection's `retention_ms`. |
 | Unique names | `stream_owners` (#379, done), repository and app names | A name-keyed record written with `if_absent`, using a blind key (see [Keys](#record-format)). |
 | Secrets and credentials | `secrets_*` (#328–#332), `keystore` (#324), `pki_authorities` (#342), `custodial_identities` (#364), `auth_app_signing_keys` (#352), `oauth_providers` (#325) | Records whose sealed body holds the secrets subsystem's existing envelope ciphertext. Zetta's connection store is not used (lake seals its own secrets). |
@@ -233,6 +233,7 @@ copy is verified.
 | `Streams.CreatorOwnershipLivesInTheTopicsWorkspaceZetta`, `Streams.ExistingOwnershipCannotBeReassignedAfterAnExternalDrop` | Topic creators at their own workspace endpoint across two spaces and two workspaces; blind keys; the `if_absent` claim; missing, malformed, unknown and foreign `workspace_id`; a workspace that is not ready; workspace deletion; release on drop |
 | `Stores/WorkspaceRecordStores.TheOneShotCopyMovesEachTopicCreatorIntoItsWorkspace/{Memory,Postgres}` | The `stream_owners` copy: plan, paged copy, rerun, verify, read back per workspace, tamper detection, `unknown_workspace` blocking and `workspace_deleted` not blocking completion, operator only |
 | `PostgresStreamOwners.MigrationRecordsEachRowsWorkspaceForTheCopy` | Migration 0047 outcomes on a rerun, the md5 row id lake and SQL share, late rows, paging, a workspace deleted after assignment |
+| `Drive.ShareLinksLiveOnlyInTheWorkspaceThatHoldsThem`, `Stores/WorkspaceRecordStores.TheOneShotCopyMovesDriveShareLinksAndRoutesTheirTokens/{Memory,Postgres}`, `PostgresDriveShareLinks.MigrationRecordsOwnersAndContentFreeRoutes`, `SharedLinkScenario.*` | Drive share links (lake#350): two spaces with two workspaces each, self-routing tokens, forged and moved records, revocation conflicts, not-ready and deleted workspaces, the copy and its routes, migration 0048, the signed-out recipient and the sharing pages |
 | `WorkspaceRecordsZetta.TheEngineStoresAndReturnsSealedRecords` | Runs with `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` against a node built from Zetta dev with #1233: append, list, a 20 KB body, `if_absent` conflict with `details.revision`, `update`, a stale `if_revision`, conditional delete |
 | `HttpResponseIsolation.AskOrama*`, `…TheAgentFactory*`, `AgentRuns.EveryAgentFlowTheSiteOffersIsACapability`, `PagePerformance.*` | The pages and the capability end to end, and the page budgets |
 
@@ -268,6 +269,24 @@ to it, one store per workspace endpoint.
 9. Update the inventory row in [workspace-data-plane.md](workspace-data-plane.md), the API doc, the
    schema doc and `db/README.md`, and write the cutover steps in the pull request.
 10. Once the copy is verified on dev, file or ship the migration that drops the table.
+
+## Records a signed-out caller reaches: `drive_share_links`
+
+A drive share link (lake#350) is read by someone who may not be signed in and holds only its
+bearer token, so no page path or input names the workspace. The token does:
+`<workspace id>.<link id>.<secret>`. Lake reads the workspace's multitenancy row (its space and
+whether it is live), opens that workspace's records, `get`s the link by key, and compares the
+token's digest with the one sealed in the record. Tokens issued before the move do not have that
+shape. Migration `0048_drive_share_link_workspaces` and each copy run record a content-free route for
+them in `drive_share_link_routes` (token digest → link id, workspace), which is dispatch and stays
+central. Revocation is a conditional `put` on the revision read; a second revocation is `conflict`.
+The `share-link:<id>` grant stays in the policy store. The full contract is
+[sharing.md](../api/sharing.md#where-links-live).
+
+The cutover is the same as for `ask_messages`, with `{"collection":"drive_share_links"}`: vendor
+the schema through `0048` and select `drive_share_link_workspaces_guard`, deploy, then `plan`, `copy`
+and `verify`. Until a link is copied, its old token resolves to `not_found`. A `needs_selection` row
+gets its route on the next copy run after its assignment is chosen.
 
 ## Zetta follow-ups and limits
 

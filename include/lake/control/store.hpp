@@ -63,13 +63,30 @@ struct NewForgeRecord {
     std::string repository_id, kind;
     nlohmann::json value;
 };
+// A drive share link (docs/api/sharing.md). It lives in the workspace Zetta of the workspace that
+// holds it (lake#350, control/drive_share_links.hpp); the control store keeps only its synthetic
+// `share-link:<id>` grant, the content-free route of a link made before the move, and the retired
+// drive_share_links table for the one-shot copy.
 struct DriveShareLink {
     std::string id, repository_id, object_id, node_id, path, role, token_hash, expires_at,
         revoked_at, created_by_taap_id, created_at;
+    std::int64_t at_us = 0;         // created_at in microseconds since the Unix epoch
+    std::int64_t revision = 0;      // the workspace engine's revision (conditional writes)
+    std::int64_t lake_revision = 1; // lake's revision inside the seal
 };
-struct NewDriveShareLink {
-    std::string repository_id, object_id, node_id, path, role, token_hash, expires_at,
-        created_by_taap_id, request_id;
+// A row of the retired drive_share_links table with its recorded owner (migration 0048): the
+// workspace it is copied into, or empty with the reason it is not (`needs_selection`).
+struct LegacyDriveShareLink {
+    DriveShareLink link;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
+};
+// Where a link made before lake#350 lives: content-free dispatch from its token digest to its
+// workspace and record key (drive_share_link_routes).
+struct DriveShareLinkRoute {
+    std::string link_id;
+    std::string workspace_id;
 };
 struct Team {
     std::string id, organization_id, name, display_name, created_at, updated_at;
@@ -875,13 +892,15 @@ public:
     list_forge_records(const std::string& repository_id, const std::string& kind, int limit) = 0;
     virtual Result<ForgeRecord> update_forge_record(const std::string& id,
                                                     const nlohmann::json& value) = 0;
-    virtual Result<DriveShareLink> create_drive_share_link(const NewDriveShareLink&) = 0;
-    virtual Result<DriveShareLink> get_drive_share_link(const std::string& id) = 0;
-    virtual Result<DriveShareLink>
-    get_drive_share_link_by_token_hash(const std::string& token_hash) = 0;
-    virtual Result<std::vector<DriveShareLink>> list_drive_share_links(
-        const std::string& repository_id, const std::string& object_id, int limit) = 0;
-    virtual Result<DriveShareLink> revoke_drive_share_link(const std::string& id) = 0;
+    // Drive share links live in workspace Zettas (lake#350). The control store answers only the
+    // route of a link made before the move, from its token digest; `not_found` otherwise.
+    virtual Result<DriveShareLinkRoute> drive_share_link_route(const std::string& token_hash) = 0;
+    // The retired drive_share_links table, for the one-shot copy into workspace Zettas only.
+    // Assigning records each unassigned row's owner in workspace_assignments and the route of each
+    // assigned row, as migration 0048 does, for rows written after it; listing pages by id.
+    virtual Result<void> assign_legacy_drive_share_links() = 0;
+    virtual Result<std::vector<LegacyDriveShareLink>>
+    legacy_drive_share_links(const std::string& after_id, int limit) = 0;
 
     virtual Result<Team> create_team(const NewTeam&) = 0;
     virtual Result<std::vector<Team>> list_teams(const std::string& organization_id, int limit) = 0;

@@ -5,7 +5,9 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <print>
 #include <ranges>
 #include <string>
@@ -23,8 +25,13 @@
 #include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/apps.hpp"
+#include "lake/control/drive_share_links.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/workspace_records.hpp"
+#include "lake/control/zetta_workspace.hpp"
 #include "lake/search/index.hpp"
+// The keyed record store tests use for workspace Zettas: drive links are workspace records.
+#include "../../tests/record_fixture.hpp"
 
 namespace {
 
@@ -93,6 +100,25 @@ std::string share_token_hash(std::string_view token) {
     return output;
 }
 
+// The fixture's workspace Zettas: only lake's own records (drive share links, lake#350), one
+// record store per workspace endpoint. Every other workspace capability is unknown here.
+class FixtureWorkspaces final : public lake::control::WorkspaceCaller {
+public:
+    liquid::runtime::task<lake::control::ZettaControlResult<nlohmann::json>>
+    call(std::string url, std::string, std::string capability, bool, nlohmann::json input) override {
+        std::lock_guard lock(mutex_);
+        if (lake::test::RecordTables::handles(capability, input)) {
+            co_return records_[url].run(capability, input);
+        }
+        co_return lake::control::ZettaControlResult<nlohmann::json>(std::unexpected(
+            lake::control::ZettaControlError{"unknown_capability", "not in the UI fixture"}));
+    }
+
+private:
+    std::mutex mutex_;
+    std::map<std::string, lake::test::RecordTables> records_;
+};
+
 void write_manifest(const std::filesystem::path& path,
                     const std::vector<std::tuple<std::string, std::string, std::string>>& pages) {
     std::filesystem::create_directories(path.parent_path());
@@ -116,8 +142,9 @@ int main(int argc, char** argv) {
     const std::filesystem::path store_root = argv[1];
     const std::filesystem::path manifest = argv[2];
     const std::string admin_token = "ui-fixture-admin";
-    const std::string instance_kek = "ui-fixture-instance-kek";
-    const std::string share_token = "ui-fixture-share-token";
+    // Hexadecimal, as LAKE_INSTANCE_KEK is: workspace records are sealed under keys derived from it.
+    const std::string instance_kek =
+        "75692d666978747572652d696e7374616e63652d6b656b2d3030303030303030";
 
     auto store = std::make_shared<lake::control::InMemoryStore>();
     const auto issued = require(store->sign_up_password({"lake",
@@ -399,16 +426,60 @@ int main(int argc, char** argv) {
                                  "admin",
                                  "ui-fixture-shared-recipient"}),
             "create shared recipient grant");
-    const auto share_link = require(store->create_drive_share_link({repository.id,
-                                                                    docs_object.id,
-                                                                    docs_node_id,
-                                                                    "docs",
-                                                                    "read",
-                                                                    share_token_hash(share_token),
-                                                                    "2030-01-01T00:00:00Z",
-                                                                    "admin",
-                                                                    "ui-fixture-share"}),
-                                    "create drive share link");
+    // The folder's link lives in the organization's workspace Zetta; centrally only its grant.
+    const auto service_dir = store_root / "ui-fixture-services";
+    std::filesystem::create_directories(service_dir);
+    auto workspaces = std::make_shared<lake::control::WorkspaceService>(
+        lake::control::WorkspaceConfig{service_dir.string(), 0},
+        store,
+        std::make_shared<FixtureWorkspaces>());
+    const auto workspace = require(
+        store->create_workspace({organization_customer.id, "research", "dev", ""}),
+        "create workspace");
+    const auto workspace_zetta =
+        require(store->get_service(workspace.zetta_service_id), "read workspace Zetta");
+    if (const auto ready = store->set_service_status(
+            workspace_zetta.id, "Ready", "", "http://" + workspace.id + ".fixture");
+        !ready) {
+        std::println(stderr, "lake-ui-fixture: mark workspace ready: {}", ready.error().message);
+        return 1;
+    }
+    std::ofstream(service_dir / (workspace_zetta.slug + ".json"))
+        << nlohmann::json{{"kind", "zetta"}, {"token", "ui-fixture-workspace"}}.dump();
+    lake::control::DriveShareLink share_link;
+    share_link.id = lake::control::new_uuid_v4();
+    const std::string share_token =
+        lake::control::drive_share_token(workspace.id, share_link.id, "ui-fixture-share-secret");
+    share_link.repository_id = repository.id;
+    share_link.object_id = docs_object.id;
+    share_link.node_id = docs_node_id;
+    share_link.path = "docs";
+    share_link.role = "read";
+    share_link.token_hash = share_token_hash(share_token);
+    share_link.expires_at = "2030-01-01T00:00:00Z";
+    share_link.created_by_taap_id = "admin";
+    {
+        auto records = require(
+            lake::control::WorkspaceRecords::open(
+                [workspaces, customer = organization_customer.id, id = workspace.id](
+                    std::string capability, bool read, nlohmann::json input) {
+                    return workspaces->call(customer, id, std::move(capability), read,
+                                            std::move(input));
+                },
+                workspace.id, instance_kek),
+            "open workspace records");
+        lake::control::DriveShareLinks links(records);
+        require(lake::control::settled(liquid::runtime::block_on(links.append(
+                    share_link, lake::control::RecordWrite{share_link.id, 0}))),
+                "create drive share link");
+    }
+    require(store->create_grant({"share-link:" + share_link.id,
+                                 docs_object.id,
+                                 "read",
+                                 "drive_share_link/" + share_link.id,
+                                 "admin",
+                                 "ui-fixture-share"}),
+            "create drive share link grant");
     require(store->create_forge_record(
                 {repository.id,
                  "export",
@@ -615,12 +686,14 @@ int main(int argc, char** argv) {
              "/drive/conflict?repository_id={}&ref={}&path=conflict.txt", repository.id, ref)},
         {"drive-share",
          operator_token,
-         std::format("/drive/share?repository_id={}&ref={}&path=docs", repository.id, ref)},
+         std::format("/drive/share?repository_id={}&ref={}&path=docs&workspace_id={}",
+                     repository.id, ref, workspace.id)},
         {"drive-share-link",
          operator_token,
-         std::format("/drive/share/link?repository_id={}&ref={}&path=docs&link_id={}",
+         std::format("/drive/share/link?repository_id={}&ref={}&path=docs&workspace_id={}&link_id={}",
                      repository.id,
                      ref,
+                     workspace.id,
                      share_link.id)},
         {"shared-with-me", shared_recipient_issued.secret, "/shared-with-me"},
         {"shared-link", "-", std::format("/share/{}", share_token)},
@@ -635,6 +708,7 @@ int main(int argc, char** argv) {
     options.instance_kek = instance_kek;
     options.store_root = store_root.string();
     options.store = store;
+    options.workspaces = workspaces;
     options.search = std::make_shared<lake::search::Service>(store_root);
     lake::api::ApiServer server(options);
     if (!server.start()) {

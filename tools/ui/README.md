@@ -32,5 +32,6 @@ every governed text, status, focus, and boundary pair, and fails below the docum
 See [`docs/ui/design-system.md`](../../docs/ui/design-system.md).
 
 The `shared-link` page includes `docs/nested/hello.txt` to exercise folder traversal, preview,
-and download without a session. Its links stay under `/share/<token>` and call the same recipient
+and download without a session. Its link lives in a workspace of the organization (lake#350); the
+fixture's workspace Zetta serves only lake's records, from the tests' `RecordTables`. Its links stay under `/share/<token>` and call the same recipient
 capabilities as REST and MCP. See [sharing](../../docs/ui/sharing.md) for the delivery checks.

@@ -485,7 +485,9 @@ TEST(PostgresCapabilities, OrganizationSpaceMembershipsCarryTheirGrantToTheSpace
     EXPECT_TRUE(may(founder->taap_id, "admin"));
 }
 
-TEST(PostgresCapabilities, DriveShareLinksRoundTrip) {
+// Migration 0048 (lake#350): each retired drive_share_links row gets the owner it is copied into
+// and, once assigned, a content-free route from the token digest a pre-move token presents.
+TEST(PostgresDriveShareLinks, MigrationRecordsOwnersAndContentFreeRoutes) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
@@ -494,43 +496,134 @@ TEST(PostgresCapabilities, DriveShareLinksRoundTrip) {
         uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     ASSERT_TRUE(store->ping()) << store->ping().error().message;
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    const std::string node_id = suffix + "000000000000000000000000";
-    const auto user = store->create_user(
-        {"taap:1:ed25519:drive-" + suffix, "drive-" + suffix + "@example.test", "Drive"});
-    ASSERT_TRUE(user);
-    const auto customer = store->create_customer({"individual", user->id, "", "drive-" + suffix});
-    ASSERT_TRUE(customer);
-    const auto repository =
-        store->create_repository({customer->id, "drive-" + suffix, "", "private"});
-    ASSERT_TRUE(repository);
-    const auto repository_object = store->find_policy_object("repository", repository->id);
-    ASSERT_TRUE(repository_object);
-    const auto folder = store->create_policy_object({"path",
-                                                     repository->id + ":" + node_id,
-                                                     repository_object->id,
-                                                     user->taap_id,
-                                                     "request-folder-" + suffix,
-                                                     true});
-    ASSERT_TRUE(folder);
-    const auto link = store->create_drive_share_link({repository->id,
-                                                      folder->id,
-                                                      node_id,
-                                                      "shared",
-                                                      "read",
-                                                      "token-hash-" + suffix,
-                                                      "2999-01-01T00:00:00Z",
-                                                      user->taap_id,
-                                                      "request-link-" + suffix});
-    ASSERT_TRUE(link) << link.error().message;
-    EXPECT_EQ(link->expires_at, "2999-01-01T00:00:00.000000Z");
-    EXPECT_EQ(store->get_drive_share_link(link->id)->path, "shared");
-    EXPECT_EQ(store->get_drive_share_link_by_token_hash("token-hash-" + suffix)->id, link->id);
-    const auto listed = store->list_drive_share_links(repository->id, folder->id, 10);
-    ASSERT_TRUE(listed);
-    ASSERT_EQ(listed->size(), 1u);
-    const auto revoked = store->revoke_drive_share_link(link->id);
-    ASSERT_TRUE(revoked);
-    EXPECT_FALSE(revoked->revoked_at.empty());
+    std::vector<std::string> repositories, folders, workspaces;
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "drive-migration-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:1:ed25519:" + name, "", "Drive"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        const auto repository = store->create_repository({customer->id, "drive", "", "private"});
+        ASSERT_TRUE(repository) << repository.error().message;
+        const auto parent = store->find_policy_object("repository", repository->id);
+        ASSERT_TRUE(parent);
+        const auto folder = store->create_policy_object(
+            {"path", repository->id + ":" + suffix + "000000000000000000000000", parent->id,
+             user->taap_id, "request-folder-" + name, true});
+        ASSERT_TRUE(folder) << folder.error().message;
+        repositories.push_back(repository->id);
+        folders.push_back(folder->id);
+        // The second space has two workspaces, so its links cannot be assigned by themselves.
+        for (int count = 0; count <= index; ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            if (index == 0) {
+                workspaces.push_back(workspace->id);
+            }
+        }
+    }
+    pqxx::connection connection(uri);
+    const auto insert = [&](int space, const std::string& token_hash) {
+        pqxx::work tx(connection);
+        const std::string id =
+            tx.exec_params("INSERT INTO drive_share_links (repository_id, object_id, node_id, "
+                           "path, role, token_hash, expires_at, created_by_taap_id) VALUES "
+                           "($1::uuid, $2::uuid, $3, 'shared', 'read', $4, "
+                           "'2999-01-01T00:00:00Z', 'taap:1:ed25519:creator') RETURNING id::text",
+                           repositories[space], folders[space],
+                           suffix + "000000000000000000000000", token_hash)[0][0]
+                .as<std::string>();
+        tx.commit();
+        return id;
+    };
+    const std::string owned = insert(0, "owned-" + suffix);
+    const std::string ambiguous = insert(1, "ambiguous-" + suffix);
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0048_drive_share_link_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0048_drive_share_link_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = 'drive_share_links' AND object_id = $1::uuid",
+            id);
+        return found.empty() ? std::pair<std::string, std::string>{}
+                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome(owned),
+                  (std::pair<std::string, std::string>{"sole_workspace", workspaces[0]}));
+        EXPECT_EQ(outcome(ambiguous).first, "needs_selection");
+    }
+    const auto route = store->drive_share_link_route("owned-" + suffix);
+    ASSERT_TRUE(route) << route.error().message;
+    EXPECT_EQ(route->link_id, owned);
+    EXPECT_EQ(route->workspace_id, workspaces[0]);
+    EXPECT_EQ(store->drive_share_link_route("ambiguous-" + suffix).error().code, "not_found")
+        << "an unassigned link has no route until its workspace is chosen";
+    {
+        // The route is dispatch only: no path, role, expiry or creator.
+        pqxx::work tx(connection);
+        const auto columns = tx.exec(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = "
+            "'drive_share_link_routes' AND table_schema = current_schema() ORDER BY column_name");
+        std::vector<std::string> names;
+        for (const auto& row : columns) {
+            names.push_back(row[0].as<std::string>());
+        }
+        EXPECT_EQ(names, (std::vector<std::string>{"link_id", "recorded_at", "token_hash",
+                                                   "workspace_id"}));
+    }
+
+    // A row written after the migration, and an operator's reviewed choice, are picked up by the
+    // assignment each copy reruns.
+    const std::string late = insert(0, "late-" + suffix);
+    EXPECT_TRUE(outcome(late).first.empty());
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE workspace_assignments SET workspace_id = w.id FROM workspaces w "
+                       "JOIN repositories r ON r.customer_id = w.customer_id WHERE "
+                       "object_table = 'drive_share_links' AND object_id = $1::uuid AND "
+                       "r.id = $2::uuid AND w.name = 'ws-1'",
+                       ambiguous, repositories[1]);
+        tx.commit();
+    }
+    ASSERT_TRUE(store->assign_legacy_drive_share_links());
+    EXPECT_EQ(outcome(late).first, "sole_workspace");
+    EXPECT_EQ(store->drive_share_link_route("late-" + suffix)->link_id, late);
+    EXPECT_EQ(store->drive_share_link_route("ambiguous-" + suffix)->link_id, ambiguous);
+
+    std::map<std::string, lake::control::LegacyDriveShareLink> listed;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_drive_share_links(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            listed.emplace(row.link.id, row);
+        }
+        after = page->back().link.id;
+    }
+    ASSERT_TRUE(listed.contains(owned));
+    EXPECT_EQ(listed.at(owned).workspace_id, workspaces[0]);
+    EXPECT_EQ(listed.at(owned).link.expires_at, "2999-01-01T00:00:00.000000Z");
+    EXPECT_EQ(listed.at(owned).link.token_hash, "owned-" + suffix);
+    EXPECT_GT(listed.at(owned).link.at_us, 0);
+    EXPECT_FALSE(listed.at(owned).customer_id.empty());
+    EXPECT_FALSE(listed.at(ambiguous).workspace_id.empty());
 }
 
 TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {

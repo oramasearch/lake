@@ -167,7 +167,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `pki_recovery_shares` | workspace | Recovery-share evidence. [Follow-up](https://github.com/oramasearch/lake/issues/347). |
 | `metering_usage` | workspace | Usage measurements, independent of billing design. [Follow-up](https://github.com/oramasearch/lake/issues/348). |
 | `metering_build_records` | workspace | Build compute measurements. [Follow-up](https://github.com/oramasearch/lake/issues/349). |
-| `drive_share_links` | workspace | Application share tokens and configuration. [Follow-up](https://github.com/oramasearch/lake/issues/350). |
+| `drive_share_links` | workspace | Drive share links: token digest, folder, role, expiry, revocation. **Moved** to each workspace Zetta's `lake_drive_share_links` record collection by [lake#350](https://github.com/oramasearch/lake/issues/350) ([sharing.md](../api/sharing.md#where-links-live)); the synthetic `share-link:<id>` grant stays a grant, and `drive_share_link_routes` (multitenancy/dispatch: token digest → workspace for pre-move tokens) stays central. The table is read only by the one-shot copy until a later migration drops it. |
 | `auth_applications` | workspace | Application identity-pool configuration. [Follow-up](https://github.com/oramasearch/lake/issues/351). |
 | `auth_app_signing_keys` | workspace | Application signing credentials. [Follow-up](https://github.com/oramasearch/lake/issues/352). |
 | `auth_app_users` | workspace | Application user records. [Follow-up](https://github.com/oramasearch/lake/issues/353). |

@@ -63,3 +63,9 @@ first mutable collection (Design → Opportunities, lake#376): derived keys, con
 writes; `Store` keeps only the legacy reads of the retired `opportunities` table
 (`LegacyOpportunity`). See
 `docs/architecture/workspace-records.md`.
+the retired `ask_messages` table, for the copy (`LegacyAskMessage`). See
+`docs/architecture/workspace-records.md`. `drive_share_links.hpp` is the drive share link codec
+(lake#350): a mutable record per link keyed by its id and found by repository and folder, and the
+bearer token format `<workspace id>.<link id>.<secret>` that routes a recipient to the workspace.
+`Store` keeps only the content-free route of a pre-move token (`drive_share_link_route`) and the
+legacy reads of `drive_share_links` for the copy (`LegacyDriveShareLink`).
