@@ -7,7 +7,7 @@ The HTTP server exposes three operational routes:
 | Route | Authentication | Response |
 |---|---|---|
 | `GET /healthz` | none | `200 {"ok":true,"platform":"ready|degraded"}` while the HTTP process is serving; `platform` is omitted when operator sync is not configured |
-| `GET /readyz` | none | `200 {"ok":true,"store":"<kind>"}` after a successful store ping; otherwise `503` with the JSON error envelope |
+| `GET /readyz` | none | `200 {"ok":true,"store":"<kind>","store_root":"open|waiting|opening"}` after a successful store ping when the store root is open or is being handed over from a predecessor; otherwise `503` with the JSON error envelope (control store down, store root opening on a cold start or failed, or stopping after SIGTERM). `store_root` is omitted without a store root. See [`../deployment/store-volume.md`](../deployment/store-volume.md#the-hand-off) |
 | `GET /metrics` | the existing bearer or `lake_session` cookie | Prometheus text exposition; unauthorized requests receive the normal `403` JSON error |
 
 `lake-core` contains a process-local metrics registry with counters, gauges and histograms. It
@@ -33,6 +33,10 @@ to `store_unavailable`.
 When operator Zetta sync fails, `platform` changes to `degraded` while `/readyz` remains ready as
 long as the local control store responds. Environment reads continue from the mirror with a
 `stale_since` marker, and platform mutations fail with `store_unavailable`.
+
+The store-root owner writes `{"event":"store_owner",...}` lines to stderr: `waiting` (with the
+holder), `open` (with `handoff`, `waited_ms` and `opened_ms`), `failed`, `abandoned`, and
+`released` or `not_owned` at shutdown (with `drain_ms` and `unfinished_requests`).
 
 Every completed request writes one JSON object to stdout with RFC 3339 UTC `ts`, `method`,
 query-free `path`, `route`, `status`, `duration_ms` and `node`. Startup is also one JSON object and

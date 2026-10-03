@@ -1,9 +1,11 @@
 # API implementation
 
-`store_owner.cpp` holds the exclusive owner lock on `LAKE_STORE_ROOT`. `ApiServer::start` takes it
-before anything under the root is opened and refuses to start when another process holds it;
-`stop` releases it after in-flight requests finish (lake#467,
-[store-volume.md](../../docs/deployment/store-volume.md#one-process-per-store-root)).
+`store_owner.cpp` holds the exclusive owner lock on `LAKE_STORE_ROOT`, with a bounded wait for a
+predecessor. `ApiServer::start` binds first; its owner thread takes the lock and opens the customer
+stores (each with liquid's `exclusive_owner`), while the `store_root` middleware holds every request
+but probes, metrics and static assets until the root is open and `/readyz` reports the hand-off.
+`stop` drains in-flight requests, closes the stores and releases the lock (lake#467, lake#479,
+[store-volume.md](../../docs/deployment/store-volume.md#the-hand-off)).
 lake#452: `/w/<workspace>` and `/w/<workspace>/` redirect to the workspace's home; the selectors
 label the viewer's personal space *Personal space* and workspaces by name, and wrap onto their own
 row at phone width; `workspace_act create_project` says whether a name is missing or taken;

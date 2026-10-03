@@ -69,7 +69,7 @@ jobs:
         run: |
           git init -q _external/liquid
           git -C _external/liquid remote add origin git@github.com:oramasearch/liquid.git
-          git -C _external/liquid fetch -q --depth 1 origin aa60e8788b883f3e041706741650277fd5befdcb
+          git -C _external/liquid fetch -q --depth 1 origin df2ae4df3d2851fac2881efeb2cfc6dab090eca8
           git -C _external/liquid checkout -q FETCH_HEAD
           git -C _external/liquid submodule update --init --recursive --depth 1
 

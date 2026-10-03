@@ -1,11 +1,13 @@
 # Tests
 
-`test_shared_store.cpp` (lake#467) checks that one lake process owns a store root. The PostgreSQL
-case starts real `lake` binaries on one root: a second process must refuse with the owner named,
-and after the owner drains on SIGTERM under concurrent pushes, drive writes, registry uploads and
-transparency appends, every acknowledged write must read back from a successor, the customer store
-must reopen and pass a libliquid dry-run collection, and the log must rebuild its tree. See
-[store-volume.md](../docs/deployment/store-volume.md#one-process-per-store-root).
+`test_shared_store.cpp` (lake#467, lake#479) checks that one lake process owns a store root and
+hands it over. The PostgreSQL cases start real `lake` binaries on one root: a successor started
+beside a serving owner must become Ready while it waits, hold a drive write sent to it until the
+owner has had SIGTERM, and serve it then; with writers routed first to both processes and then to
+the successor, no response may be a 503 and no request may fail, every acknowledged write must read
+back from the successor, the customer store must reopen and pass a libliquid dry-run collection,
+and the log must rebuild its tree. A successor whose wait expires must exit 1 naming the owner. See
+[store-volume.md](../docs/deployment/store-volume.md#the-hand-off).
 lake#452: `WebUi.PhoneWidthGivesTheWorkspacePickerItsOwnRow` checks the top bar's rendered order
 and the 40rem rules; `WorkspaceNavigationHttp.SelectorRedirectsRememberedWorkspaceAndValidatesForms`
 covers workspace labels and the `/w/<workspace>/` home redirect;

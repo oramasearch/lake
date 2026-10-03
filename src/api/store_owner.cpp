@@ -1,11 +1,13 @@
 #include "lake/api/store_owner.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <format>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include <fcntl.h>
@@ -51,8 +53,8 @@ std::filesystem::path StoreOwnerLock::lock_path(const std::filesystem::path& sto
     return store_root / ".lake-owner.lock";
 }
 
-std::expected<StoreOwnerLock, std::string>
-StoreOwnerLock::acquire(const std::filesystem::path& store_root, std::string_view node_name) {
+std::expected<StoreOwnerLock, std::string> StoreOwnerLock::acquire(
+    const std::filesystem::path& store_root, std::string_view node_name, const StoreOwnerWait& wait) {
     std::error_code error;
     std::filesystem::create_directories(store_root, error);
     if (error) {
@@ -66,24 +68,52 @@ StoreOwnerLock::acquire(const std::filesystem::path& store_root, std::string_vie
         return std::unexpected(std::format(
             "could not open the store owner lock {}: {}", path.string(), std::strerror(errno)));
     }
-    if (::flock(descriptor, LOCK_EX | LOCK_NB) != 0) {
+    const auto deadline = std::chrono::steady_clock::now() + wait.limit;
+    auto pause = std::chrono::milliseconds(5);
+    bool reported = false;
+    for (;;) {
+        if (::flock(descriptor, LOCK_EX | LOCK_NB) == 0) {
+            break;
+        }
         const int lock_error = errno;
+        if (lock_error == EINTR) {
+            continue;
+        }
         if (lock_error != EWOULDBLOCK) {
             ::close(descriptor);
             return std::unexpected(std::format("could not lock the store owner lock {}: {}",
                                                path.string(),
                                                std::strerror(lock_error)));
         }
-        const std::string holder = holder_description(descriptor);
-        ::close(descriptor);
-        return std::unexpected(std::format(
-            "the store root {} is in use by another lake process: {}. One lake process owns a "
-            "store root at a time, because the liquid customer stores keep their pack position, "
-            "object map and index in process memory and a second writer would lose objects. "
-            "Stop the other process first; a Lake whose store is one ReadWriteOnce volume rolls "
-            "with Recreate (see docs/deployment/store-volume.md, lake#467)",
-            store_root.string(),
-            holder));
+        if (!reported) {
+            reported = true;
+            if (wait.on_held) {
+                wait.on_held(holder_description(descriptor));
+            }
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const bool abandoned = wait.abandoned && wait.abandoned();
+        if (abandoned || now >= deadline) {
+            const std::string holder = holder_description(descriptor);
+            ::close(descriptor);
+            if (abandoned) {
+                return std::unexpected(std::format(
+                    "stopped while waiting for the store root {} held by {}", store_root.string(), holder));
+            }
+            return std::unexpected(std::format(
+                "the store root {} is still in use by another lake process after waiting {} ms: "
+                "{}. One lake process owns a store root at a time, because lake's search index, "
+                "registry indexes, TUF metadata and timestamps under it are single-process state; "
+                "a successor waits for the owner to drain and exit. Raise "
+                "LAKE_STORE_OWNER_WAIT_SECONDS above the owner's drain, or stop the other process "
+                "(see docs/deployment/store-volume.md, lake#479)",
+                store_root.string(),
+                wait.limit.count(),
+                holder));
+        }
+        std::this_thread::sleep_for(
+            std::min(pause, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
+        pause = std::min(pause * 2, std::chrono::milliseconds(100));
     }
     StoreOwnerLock lock(descriptor);
     const std::string since = std::format(

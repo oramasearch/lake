@@ -2481,8 +2481,12 @@ control::EncryptionKey encryption_key_from_json(const nlohmann::json& value) {
 
 class LiquidCustomerStores final : public SyncStore {
 public:
-    explicit LiquidCustomerStores(std::string root) : root_(std::move(root)) {}
+    LiquidCustomerStores(std::string root, std::chrono::milliseconds owner_wait)
+        : root_(std::move(root)), owner_wait_(owner_wait) {}
 
+    // Opens every existing customer store and repository/result index. The server runs it once
+    // it owns the store root and before store-touching requests are admitted, so every existing
+    // store's liquid owner lock is taken off the request path (lake#479).
     SyncStoreResult<void> warm_metering() try {
         if (root_.empty()) {
             return {};
@@ -2495,6 +2499,14 @@ public:
             return std::unexpected(SyncStoreError{"io", error.message()});
         }
         for (const auto& customer : std::filesystem::directory_iterator(root_, error)) {
+            if (std::filesystem::is_directory(customer.path() / "store", error)) {
+                std::lock_guard lock(mutex_);
+                const auto opened = open_customer(customer.path().filename().string());
+                if (!opened) {
+                    return std::unexpected(opened.error());
+                }
+            }
+            error.clear();
             const auto repositories = customer.path() / "repositories";
             if (!std::filesystem::is_directory(repositories, error)) {
                 error.clear();
@@ -4216,7 +4228,13 @@ private:
             return existing->second.get();
         }
         const std::filesystem::path path = std::filesystem::path(root_) / customer_id / "store";
-        auto opened = liquid::runtime::block_on(liquid::store::open(path));
+        // Exclusive: the store holds liquid's owner lock on <store>/store.lock until close()
+        // (liquid#321). The server's root lock already serializes processes, so this wait is
+        // the second line of defense against any other writer of this one store.
+        liquid::store_options options;
+        options.exclusive_owner = true;
+        options.owner_wait = owner_wait_;
+        auto opened = liquid::runtime::block_on(liquid::store::open(path, std::move(options)));
         if (!opened) {
             return std::unexpected(error_of(opened.error()));
         }
@@ -4740,9 +4758,19 @@ private:
     }
 
     std::string root_;
+    std::chrono::milliseconds owner_wait_;
     std::mutex mutex_;
     std::map<std::string, std::unique_ptr<liquid::store>> stores_;
     std::map<std::string, std::unique_ptr<RepositoryState>> repositories_;
+
+public:
+    // Destroys every open repository, then every store, which releases their liquid owner locks.
+    // The server calls it after the last request has finished.
+    void close() {
+        std::lock_guard lock(mutex_);
+        repositories_.clear();
+        stores_.clear();
+    }
 };
 
 struct OutboundRequest {
@@ -5067,6 +5095,50 @@ private:
     std::map<std::string, std::shared_ptr<const boost::corosio::tls_context>> tls_contexts_;
 };
 
+// Where the store root stands (lake#479). `opening`: the owner thread is taking the root's lock
+// or opening its stores; `waiting`: another process holds the root and this one waits for it to
+// drain; `open`: this process owns the root and its stores are open (or it has no root);
+// `failed`: the wait expired or the open failed, and the process exits.
+enum class StoreRootState : int { opening, waiting, open, failed };
+
+std::string_view to_string(StoreRootState state) {
+    switch (state) {
+    case StoreRootState::opening:
+        return "opening";
+    case StoreRootState::waiting:
+        return "waiting";
+    case StoreRootState::open:
+        return "open";
+    case StoreRootState::failed:
+        return "failed";
+    }
+    return "unknown";
+}
+
+// Requests that never read or write the store root, and so are answered while the store root is
+// still being handed over: the probes, metrics and the embedded static assets. Every other
+// request waits for the open, because a capability can reach the root indirectly (the audit
+// mirror into the transparency log, search, registry indexes) and a missed route would let two
+// processes write the root at once.
+bool store_root_exempt(std::string_view path) {
+    return path == "/healthz" || path == "/readyz" || path == "/metrics" ||
+           path == "/style.css" || path == web_ui_stylesheet_url() ||
+           path.starts_with("/fonts/") || path.starts_with("/assets/experiments/");
+}
+
+// Counts a route handler as in flight from its first step until it completes, so stop() can
+// wait for the requests it has already accepted.
+boost::http::route_task count_in_flight(std::atomic<int>& counter, boost::http::route_task task) {
+    counter.fetch_add(1);
+    struct Finished {
+        std::atomic<int>& counter;
+        ~Finished() {
+            counter.fetch_sub(1);
+        }
+    } finished{counter};
+    co_return co_await std::move(task);
+}
+
 } // namespace
 
 struct ApiServer::Impl {
@@ -5103,8 +5175,23 @@ struct ApiServer::Impl {
     unsigned short bound_port = 0;
     std::string failure_reason;
     std::vector<std::string> get_routes;
-    // Exclusive ownership of options.store_root while the server runs (lake#467).
+    // Exclusive ownership of options.store_root while the server runs (lake#467). The owner
+    // thread takes it, waiting for a predecessor to release it, then opens the customer stores;
+    // store_root_state tells requests and /readyz where that stands (lake#479).
     StoreOwnerLock store_owner;
+    std::thread owner_thread;
+    std::atomic<StoreRootState> store_root_state{StoreRootState::opening};
+    // Set once another process was found holding the root: this server reported Ready while it
+    // waited, so it stays Ready through the open that follows.
+    std::atomic<bool> store_root_handoff{false};
+    std::atomic<bool> owner_wait_abandoned{false};
+    // stop() has begun: new requests close their connection, /readyz answers 503.
+    std::atomic<bool> draining{false};
+    // Route handlers running now (every guarded handler counts itself).
+    std::atomic<int> in_flight{0};
+    mutable std::mutex store_root_mutex;
+    std::string store_root_holder;
+    std::string store_root_failure;
     std::mutex work_mutex;
     std::condition_variable work_cv;
     std::chrono::steady_clock::time_point next_timestamp_renewal_check =
@@ -5113,7 +5200,7 @@ struct ApiServer::Impl {
     std::map<std::string, std::chrono::steady_clock::time_point> app_auth_denials;
 
     explicit Impl(ServerOptions opts)
-        : options(std::move(opts)), sync_store(options.store_root),
+        : options(std::move(opts)), sync_store(options.store_root, options.store_owner_wait),
           artifacts(options.store_root, options.node_name) {
         if (web_ui_stylesheet_url().empty()) {
             failure_reason = "could not calculate the stylesheet asset hash";
@@ -14801,11 +14888,153 @@ struct ApiServer::Impl {
                              "application/json; charset=utf-8",
                              "no-store");
         }
+        // The store-root half of readiness (lake#479, docs/deployment/store-volume.md). Ready
+        // when the root is open, and also while a predecessor holds it: requests sent here wait
+        // for the hand-off instead of failing, and a surge rollout stops the predecessor only
+        // after this pod is Ready, so withholding readiness here would deadlock the rollout. Not
+        // ready during an uncontended open, after a failed one, or once stop() has begun.
+        const StoreRootState state = store_root_state.load();
+        if (draining.load()) {
+            return send_text(route,
+                             boost::http::status::service_unavailable,
+                             error_body("store_unavailable", "lake is stopping"),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        }
+        const bool ready = state == StoreRootState::open || state == StoreRootState::waiting ||
+                           (state == StoreRootState::opening && store_root_handoff.load());
+        if (!ready) {
+            std::string message = "the store root is " + std::string(to_string(state));
+            if (state == StoreRootState::failed) {
+                std::lock_guard lock(store_root_mutex);
+                message += ": " + store_root_failure;
+            }
+            return send_text(route,
+                             boost::http::status::service_unavailable,
+                             error_body("store_unavailable", message),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        }
+        nlohmann::json body{{"ok", true}, {"store", options.store->kind()}};
+        if (!options.store_root.empty()) {
+            body["store_root"] = std::string(to_string(state));
+            if (state != StoreRootState::open) {
+                std::lock_guard lock(store_root_mutex);
+                body["store_root_holder"] = store_root_holder;
+            }
+        }
         return send_text(route,
                          boost::http::status::ok,
-                         nlohmann::json{{"ok", true}, {"store", options.store->kind()}}.dump(),
+                         body.dump(),
                          "application/json; charset=utf-8",
                          "no-store");
+    }
+
+    void log_store_owner(nlohmann::json event) const {
+        event["event"] = "store_owner";
+        event["node"] = options.node_name;
+        std::println(stderr, "{}", event.dump());
+    }
+
+    // The owner thread: take the store root, waiting for a predecessor to drain, then open the
+    // customer stores. Requests that need the root wait for StoreRootState::open.
+    void own_store_root() {
+        const auto started = std::chrono::steady_clock::now();
+        StoreOwnerWait wait;
+        wait.limit = options.store_owner_wait;
+        wait.abandoned = [this] { return owner_wait_abandoned.load(); };
+        wait.on_held = [this](const std::string& holder) {
+            {
+                std::lock_guard lock(store_root_mutex);
+                store_root_holder = holder;
+            }
+            store_root_handoff.store(true);
+            store_root_state.store(StoreRootState::waiting);
+            log_store_owner({{"state", "waiting"},
+                             {"holder", holder},
+                             {"wait_ms", options.store_owner_wait.count()}});
+        };
+        auto owner = StoreOwnerLock::acquire(options.store_root, options.node_name, wait);
+        if (!owner) {
+            if (owner_wait_abandoned.load()) {
+                log_store_owner({{"state", "abandoned"}, {"error", owner.error()}});
+                return;
+            }
+            {
+                std::lock_guard lock(store_root_mutex);
+                store_root_failure = owner.error();
+            }
+            store_root_state.store(StoreRootState::failed);
+            log_store_owner({{"state", "failed"}, {"error", owner.error()}});
+            work_cv.notify_all();
+            return;
+        }
+        store_owner = std::move(*owner);
+        const auto acquired = std::chrono::steady_clock::now();
+        // Open the existing stores and indexes before store-touching requests are admitted.
+        const auto warmed = sync_store.warm_metering();
+        if (!warmed) {
+            std::println(stderr, "metering warmup: {}", warmed.error().message);
+        }
+        store_root_state.store(StoreRootState::open);
+        const auto milliseconds = [](auto duration) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+        };
+        log_store_owner({{"state", "open"},
+                         {"handoff", store_root_handoff.load()},
+                         {"waited_ms", milliseconds(acquired - started)},
+                         {"opened_ms", milliseconds(std::chrono::steady_clock::now() - acquired)}});
+    }
+
+    // Middleware: a request that may touch the store root waits, without blocking the io thread,
+    // until this process owns the root and has opened it. It never fails while a hand-off is in
+    // progress; it answers 503 only if the wait expired, the open failed, or the process is
+    // stopping before it ever owned the root.
+    boost::http::route_task await_store_root(boost::http::route_params& route) {
+        namespace http = boost::http;
+        if (store_root_state.load() == StoreRootState::open) {
+            co_return http::route_next;
+        }
+        const std::string path(route.url.path());
+        if (store_root_exempt(path)) {
+            co_return http::route_next;
+        }
+        // The owner thread gives up after store_owner_wait; the margin covers opening the stores.
+        const auto deadline =
+            std::chrono::steady_clock::now() + options.store_owner_wait + std::chrono::minutes(2);
+        boost::corosio::timer timer(io_context);
+        auto pause = std::chrono::milliseconds(5);
+        std::string reason = "lake gave up waiting for the store root";
+        for (;;) {
+            const StoreRootState state = store_root_state.load();
+            if (state == StoreRootState::open) {
+                co_return http::route_next;
+            }
+            if (state == StoreRootState::failed) {
+                std::lock_guard lock(store_root_mutex);
+                reason = store_root_failure;
+                break;
+            }
+            if (draining.load()) {
+                reason = "lake is stopping before it opened the store root";
+                break;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                break;
+            }
+            timer.expires_after(pause);
+            auto [error] = co_await timer.wait();
+            if (error) {
+                reason = "lake is stopping before it opened the store root";
+                break;
+            }
+            pause = std::min(pause * 2, std::chrono::milliseconds(100));
+        }
+        co_return co_await send_text(route,
+                                     http::status::service_unavailable,
+                                     error_body("store_unavailable", reason),
+                                     "application/json; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_metrics(boost::http::route_params& route) {
@@ -15302,31 +15531,25 @@ bool ApiServer::start() {
         }
     }
 
-    // One process owns the store root: the liquid customer stores hold their pack position,
-    // object map and index in memory, so a second writer loses objects (lake#467). The lock is
-    // taken before anything under the root is opened, and a held root refuses startup.
-    if (!impl.options.store_root.empty() && !impl.store_owner.held()) {
-        auto owner = StoreOwnerLock::acquire(impl.options.store_root, impl.options.node_name);
-        if (!owner) {
-            impl.failure_reason = owner.error();
-            return false;
-        }
-        impl.store_owner = std::move(*owner);
-    }
-
-    // Open existing repository/result indexes before accepting traffic. Usage reads do not
-    // create stores for empty customers or initialize these indexes on the first request.
-    const auto warmed = impl.sync_store.warm_metering();
-    if (!warmed) {
-        std::println(stderr, "metering warmup: {}", warmed.error().message);
-    }
+    // One process owns the store root (lake#467). The root is taken after the listener is up,
+    // by the owner thread started below: a successor answers probes and holds store-touching
+    // requests while its predecessor drains, instead of refusing to start (lake#479).
+    impl.store_root_state.store(impl.options.store_root.empty() ? StoreRootState::open
+                                                                : StoreRootState::opening);
+    impl.store_root_handoff.store(false);
+    impl.owner_wait_abandoned.store(false);
+    impl.draining.store(false);
 
     CatalogRouter router(impl.get_routes);
     // Every handler is guarded: an exception it throws is logged with the route and request id
-    // and answered 500, never a dropped connection (lake#440).
+    // and answered 500, never a dropped connection (lake#440). It also counts itself in flight
+    // for the drain in stop() (lake#479).
     const auto guarded = [&impl](std::string pattern, auto handler) {
         return guard_route(std::move(pattern),
-                           std::move(handler),
+                           [&impl, handler = std::move(handler)](
+                               http::route_params& route) -> http::route_task {
+                               return count_in_flight(impl.in_flight, handler(route));
+                           },
                            [&impl](http::route_params& route, const RouteFailure& failure) {
                                const auto timing = request_timing(route);
                                impl.record_request(route,
@@ -15354,7 +15577,8 @@ bool ApiServer::start() {
         // Reset before CORS or handlers add fields belonging to this request.
         route.res.clear();
         route.res.set_start_line(http::status::ok, route.req.version());
-        route.res.set_keep_alive(route.req.keep_alive());
+        // A draining server answers what it has accepted and closes each connection after it.
+        route.res.set_keep_alive(route.req.keep_alive() && !impl.draining.load());
         const auto start = std::chrono::steady_clock::now();
         start_request_timing(route, start);
         auto result = co_await cors(route);
@@ -15364,6 +15588,17 @@ bool ApiServer::start() {
         }
         co_return result;
     });
+    // Before any route that may touch the store root: wait for this process to own it.
+    router.use(guarded("store_root", [&impl](http::route_params& route) -> http::route_task {
+        auto result = co_await impl.await_store_root(route);
+        if (result.what() != http::route_what::next) {
+            const auto timing = request_timing(route);
+            const auto start = timing ? timing->started : std::chrono::steady_clock::now();
+            const RequestTimingScope timing_scope(route, start);
+            impl.record_request(route, impl.route_pattern_for(route), start);
+        }
+        co_return result;
+    }));
     router.use(guarded("workspace", [&impl](http::route_params& route) -> http::route_task {
         auto result = co_await impl.workspace_route(route);
         if (result.what() != http::route_what::next) {
@@ -16789,7 +17024,6 @@ bool ApiServer::start() {
     if (bind_error) {
         impl.failure_reason = "bind failed: " + bind_error.message();
         impl.server.reset();
-        impl.store_owner.release();
         return false;
     }
     impl.bound_port = impl.server->local_endpoint().port();
@@ -16797,6 +17031,9 @@ bool ApiServer::start() {
     impl.io_thread = std::thread([&impl] { impl.io_context.run(); });
     impl.is_running.store(true);
     impl.metrics.set_gauge("lake_up", {}, 1.0);
+    if (!impl.options.store_root.empty()) {
+        impl.owner_thread = std::thread([&impl] { impl.own_store_root(); });
+    }
     return true;
 }
 
@@ -16805,13 +17042,55 @@ void ApiServer::stop() {
     if (!impl.is_running.exchange(false))
         return;
     impl.metrics.set_gauge("lake_up", {}, 0.0);
+    // Stop taking new work: /readyz answers 503, every response closes its connection, a request
+    // still waiting for the store root is answered, and the owner thread stops waiting.
+    impl.draining.store(true);
+    impl.owner_wait_abandoned.store(true);
+    // Drain: let the requests already accepted finish. The count must read zero twice, so a
+    // request between two of its route steps is not taken for finished.
+    const auto drain_started = std::chrono::steady_clock::now();
+    const auto drain_deadline = drain_started + impl.options.drain_timeout;
+    int idle_reads = 0;
+    while (idle_reads < 2 && std::chrono::steady_clock::now() < drain_deadline) {
+        idle_reads = impl.in_flight.load() == 0 ? idle_reads + 1 : 0;
+        if (idle_reads < 2) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    const int abandoned_requests = impl.in_flight.load();
     impl.server->stop();
     impl.io_context.stop();
     if (impl.io_thread.joinable())
         impl.io_thread.join();
+    if (impl.owner_thread.joinable())
+        impl.owner_thread.join();
     impl.work_cv.notify_all();
-    // In-flight requests have finished; the next owner may open the store.
+    // In-flight requests have finished: close every store (releasing liquid's per-store owner
+    // locks), then the root lock, so the next owner opens a store nobody is writing.
+    const bool owned = impl.store_owner.held();
+    impl.sync_store.close();
     impl.store_owner.release();
+    if (!impl.options.store_root.empty()) {
+        impl.log_store_owner(
+            {{"state", owned ? "released" : "not_owned"},
+             {"drain_ms",
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - drain_started)
+                  .count()},
+             {"unfinished_requests", abandoned_requests}});
+    }
+}
+
+std::string ApiServer::fatal_error() const {
+    if (impl_->store_root_state.load() != StoreRootState::failed) {
+        return {};
+    }
+    std::lock_guard lock(impl_->store_root_mutex);
+    return impl_->store_root_failure;
+}
+
+bool ApiServer::store_root_open() const {
+    return impl_->store_root_state.load() == StoreRootState::open;
 }
 
 bool ApiServer::running() const {
@@ -16833,7 +17112,10 @@ std::vector<std::string> ApiServer::get_route_patterns() const {
 }
 
 void ApiServer::drain() {
-    impl_->renew_due_timestamps();
+    // Timestamp evidence lives under the store root: renew it only as its owner.
+    if (impl_->store_root_state.load() == StoreRootState::open) {
+        impl_->renew_due_timestamps();
+    }
     const auto now = std::chrono::steady_clock::now();
     if (impl_->options.store && impl_->options.workspaces && now >= impl_->next_topic_reap) {
         impl_->next_topic_reap = now + std::chrono::minutes(1);

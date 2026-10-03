@@ -55,10 +55,12 @@ PersistentVolume mount; Lake neither creates nor selects it. The required operat
 #132 and the companion schema and guard update is pull request #134. The source tree pins liquid
 #160 and #165 and implements push and pull over the customer store. Production requires a lake
 image containing those endpoints and the operator volume work before they are enabled there.
-One lake process owns the store root at a time and a second one refuses to start, so a Lake with
-one store volume runs one replica and rolls with `Recreate`; keep the operator's
-`spec.rollout.overlapOnSharedStore` off (lake#467,
-[`store-volume.md`](store-volume.md#one-process-per-store-root)).
+One lake process owns the store root at a time. From lake#479 a second process waits for the owner
+to drain and hands over without refusing a request, so a single-replica Lake on one store volume
+can roll with the operator's `spec.rollout.overlapOnSharedStore` (a surge) instead of `Recreate`.
+The image must contain lake#479 before the opt-in is turned on: an older image refuses to start
+beside the running pod and the surge stalls. See
+[`store-volume.md`](store-volume.md#the-hand-off).
 
 ## Runbook
 
