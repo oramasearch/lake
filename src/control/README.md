@@ -102,6 +102,13 @@ of a pre-move token) and `assign_legacy_drive_share_links`/`legacy_drive_share_l
 (migration `0048_drive_share_link_workspaces`). `forge_records.cpp` is the forge record collection
 (lake#341); the stores keep only `assign_legacy_forge_records`/`legacy_forge_records` for the copy
 (migration `0054_forge_record_workspaces`), and no longer write or read `forge_records`.
+`secret_records.cpp` is the secrets collections' codecs (lake#328-#332); the stores no longer hold
+mounts, secrets, keys or data keys. They keep `secret_mount_routes` and the mount's policy objects
+(`create_secret_mount_route`), the customer KEK, which wraps and unwraps data keys without leaving
+the store and keeps the replaced version during a rotation, dynamic leases, and
+`assign_legacy_secrets`/`legacy_secret_*` for the copy (migration `0057_secret_workspaces`). A KEK
+rotation still rewraps the retired `secrets_data_keys` rows and the PKI authorities in its
+transaction.
 `application_webhook_records.cpp` is the next: an application's lifecycle events and its webhook
 delivery attempts in the application's workspace (lake#356, lake#357), each attempt claimed with
 `if_absent` before it is sent and settled with `if_revision`. The stores no longer write or read

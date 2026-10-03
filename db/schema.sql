@@ -2788,3 +2788,80 @@ CREATE TABLE IF NOT EXISTS application_credential_workspaces_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0056_application_credential_workspaces')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0057_secret_workspaces: secrets live in the workspace Zetta of their mount (lake#328, #329,
+-- #330, #331, #332; docs/api/secrets.md, docs/architecture/workspace-records.md). A mount now
+-- belongs to one workspace of its customer's space, chosen at creation (create_secret_mount takes
+-- workspace_id) and never changed. The mount, its secret entries and versions, its named
+-- encryption keys and every data key are sealed records of that workspace's Zetta
+-- (lake_secrets_mounts, lake_secrets_entries, lake_secrets_versions,
+-- lake_secrets_encryption_keys, lake_secrets_data_keys); lake no longer writes or reads the five
+-- 0009 tables, which the operator's one-shot copy (copy_workspace_records) moves and verifies.
+--
+-- secret_mount_routes is the content-free route that remains: which workspace holds which mount,
+-- with the space and organization the policy graph needs. It names no mount name, secret name,
+-- value or key. The envelope is unchanged: LAKE_INSTANCE_KEK wraps the customer KEK (keystore,
+-- lake#324), the customer KEK wraps each data key, and the data keys seal the secrets. keystore
+-- gains the KEK a rotation replaced, kept until every workspace data key has been rewrapped.
+-- secrets_dynamic_leases stays (lake#362); it loses its foreign key to secrets_mounts, since a new
+-- mount has no row there.
+--
+-- A legacy mount is owned by the only live workspace of its space (sole_workspace) and gets its
+-- route here; every other mount is needs_selection and is reported. Its entries, versions, keys
+-- and data keys go where it goes and have no assignment rows of their own. Nothing is dropped; a
+-- later migration drops the five tables once the copy has been verified on every environment.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS secret_mount_routes (
+    mount_id        uuid        PRIMARY KEY,
+    customer_id     uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    organization_id uuid        NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    workspace_id    uuid        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS secret_mount_routes_workspace_idx
+    ON secret_mount_routes (customer_id, workspace_id, created_at DESC);
+
+-- A route names a live workspace of its own space; neither column changes afterwards.
+DROP TRIGGER IF EXISTS secret_mount_route_workspace_routing ON secret_mount_routes;
+CREATE TRIGGER secret_mount_route_workspace_routing BEFORE INSERT OR UPDATE ON secret_mount_routes
+    FOR EACH ROW EXECUTE FUNCTION enforce_workspace_routing();
+
+ALTER TABLE keystore ADD COLUMN IF NOT EXISTS previous_wrapped_key bytea;
+ALTER TABLE keystore ADD COLUMN IF NOT EXISTS previous_version integer;
+
+ALTER TABLE secrets_dynamic_leases DROP CONSTRAINT IF EXISTS secrets_dynamic_leases_mount_id_fkey;
+
+DO $$
+DECLARE
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0057_secret_workspaces') THEN
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT 'secrets_mounts', m.id, m.customer_id, w.id,
+                   CASE WHEN w.id IS NULL THEN 'needs_selection' ELSE 'sole_workspace' END
+            FROM secrets_mounts m LEFT JOIN workspaces w ON w.customer_id = m.customer_id
+                 AND w.desired <> 'deleted'
+                 AND (SELECT count(*) FROM workspaces w2 WHERE w2.customer_id = m.customer_id
+                      AND w2.desired <> 'deleted') = 1
+            ON CONFLICT DO NOTHING;
+        INSERT INTO secret_mount_routes (mount_id, customer_id, organization_id, workspace_id)
+            SELECT m.id, m.customer_id, m.organization_id, a.workspace_id
+            FROM secrets_mounts m JOIN workspace_assignments a
+                 ON a.object_table = 'secrets_mounts' AND a.object_id = m.id
+                 JOIN workspaces w ON w.id = a.workspace_id AND w.customer_id = m.customer_id
+                 AND w.desired <> 'deleted'
+            ON CONFLICT (mount_id) DO NOTHING;
+        FOR unresolved IN SELECT * FROM workspace_assignments
+                           WHERE workspace_id IS NULL AND object_table = 'secrets_mounts' LOOP
+            RAISE WARNING 'secret mount not copied (%): mount=%, customer=%',
+                unresolved.outcome, unresolved.object_id, unresolved.customer_id;
+        END LOOP;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS secret_workspaces_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0057_secret_workspaces')
+    ON CONFLICT DO NOTHING;

@@ -222,10 +222,19 @@ nlohmann::json to_json(const Grant& grant) {
             {"updated_at", grant.updated_at}};
 }
 
+nlohmann::json to_json(const SecretMountRoute& route) {
+    return {{"mount_id", route.mount_id},
+            {"customer_id", route.customer_id},
+            {"organization_id", route.organization_id},
+            {"workspace_id", route.workspace_id},
+            {"created_at", route.created_at}};
+}
+
 nlohmann::json to_json(const SecretMount& mount) {
     return {{"id", mount.id},
             {"customer_id", mount.customer_id},
             {"organization_id", mount.organization_id},
+            {"workspace_id", mount.workspace_id},
             {"name", mount.name},
             {"description", mount.description},
             {"created_at", mount.created_at},
@@ -5462,66 +5471,8 @@ Result<PkiRecoveryCeremonyRecord> InMemoryStore::complete_pki_recovery_ceremony(
     return *ceremony;
 }
 
-Result<void> InMemoryStore::store_data_key_locked(const std::string& customer_id,
-                                                  const std::string& owner_id,
-                                                  std::uint64_t version,
-                                                  const std::string& key) {
-    auto customer_key = customer_kek_locked(customer_id, true);
-    if (!customer_key || customer_key->size() != secrets_crypto::Key{}.size()) {
-        return std::unexpected(customer_key ? StoreError{"store_error", "customer key is invalid"}
-                                            : customer_key.error());
-    }
-    secrets_crypto::Key kek{};
-    std::copy(customer_key->begin(), customer_key->end(), kek.begin());
-    const std::string associated =
-        "lake data key/" + customer_id + "/" + owner_id + "/" + std::to_string(version);
-    auto wrapped = secrets_crypto::seal(kek, key, associated);
-    secrets_crypto::cleanse(kek);
-    if (!wrapped) {
-        return std::unexpected(wrapped.error());
-    }
-    data_keys_.push_back(DataKeyRecord{customer_id, owner_id, version, *wrapped});
-    return {};
-}
-
-Result<std::string> InMemoryStore::data_key_locked(const std::string& customer_id,
-                                                   const std::string& owner_id,
-                                                   std::uint64_t version) {
-    const auto record = std::ranges::find_if(data_keys_, [&](const DataKeyRecord& value) {
-        return value.customer_id == customer_id && value.owner_id == owner_id &&
-               value.version == version;
-    });
-    if (record == data_keys_.end()) {
-        return std::unexpected(StoreError{"not_found", "no data key version exists"});
-    }
-    auto customer_key = customer_kek_locked(customer_id, false);
-    if (!customer_key || customer_key->size() != secrets_crypto::Key{}.size()) {
-        return std::unexpected(customer_key ? StoreError{"store_error", "customer key is invalid"}
-                                            : customer_key.error());
-    }
-    secrets_crypto::Key kek{};
-    std::copy(customer_key->begin(), customer_key->end(), kek.begin());
-    const std::string associated =
-        "lake data key/" + customer_id + "/" + owner_id + "/" + std::to_string(version);
-    auto opened = secrets_crypto::open(kek, record->wrapped_key, associated);
-    secrets_crypto::cleanse(kek);
-    return opened;
-}
-
-Result<SecretMount> InMemoryStore::create_secret_mount(const NewSecretMount& input,
-                                                       const std::string& instance_kek) {
-    static_cast<void>(instance_kek);
+Result<SecretMountRoute> InMemoryStore::create_secret_mount_route(const SecretMountRoute& input) {
     std::lock_guard lock(mutex_);
-    if (input.customer_id.empty() || input.organization_id.empty() || !valid_handle(input.name)) {
-        return std::unexpected(
-            StoreError{"invalid_input",
-                       "customer_id, organization_id, and a lowercase mount name are required"});
-    }
-    const auto customer = std::ranges::find_if(
-        customers_, [&](const Customer& value) { return value.id == input.customer_id; });
-    const auto organization = std::ranges::find_if(organizations_, [&](const Organization& value) {
-        return value.id == input.organization_id;
-    });
     const auto customer_object =
         std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
             return value.object_type == "customer" && value.external_id == input.customer_id;
@@ -5531,26 +5482,24 @@ Result<SecretMount> InMemoryStore::create_secret_mount(const NewSecretMount& inp
             return value.object_type == "organization" &&
                    value.external_id == input.organization_id;
         });
-    if (customer == customers_.end() || organization == organizations_.end() ||
-        customer_object == policy_objects_.end() || organization_object == policy_objects_.end() ||
+    if (customer_object == policy_objects_.end() || organization_object == policy_objects_.end() ||
         organization_object->parent_id != customer_object->id) {
         return std::unexpected(
             StoreError{"invalid_input", "organization_id is not inside the customer namespace"});
     }
-    if (std::ranges::any_of(secret_mounts_, [&](const SecretMount& value) {
-            return value.customer_id == input.customer_id &&
-                   value.organization_id == input.organization_id && value.name == input.name;
+    const auto workspace = std::ranges::find(workspaces_, input.workspace_id, &Workspace::id);
+    if (workspace == workspaces_.end() || workspace->customer_id != input.customer_id ||
+        workspace->desired == "deleted") {
+        return std::unexpected(
+            StoreError{"invalid_input", "workspace_id must name a live workspace of this space"});
+    }
+    if (input.mount_id.empty() ||
+        std::ranges::any_of(secret_mount_routes_, [&](const SecretMountRoute& route) {
+            return route.mount_id == input.mount_id;
         })) {
         return std::unexpected(StoreError{"conflict", "secret mount already exists"});
     }
     const std::string now = now_iso8601();
-    SecretMount mount{new_uuid_v4(),
-                      input.customer_id,
-                      input.organization_id,
-                      input.name,
-                      input.description,
-                      now,
-                      now};
     const std::string environment_external =
         "secrets/" + input.customer_id + "/" + input.organization_id;
     auto environment = std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
@@ -5566,250 +5515,139 @@ Result<SecretMount> InMemoryStore::create_secret_mount(const NewSecretMount& inp
                                                true});
         environment = std::prev(policy_objects_.end());
     }
-    policy_objects_.push_back(
-        PolicyObject{new_uuid_v4(), "secret_mount", mount.id, environment->id, now, now, true});
-    auto data_key = secrets_crypto::random_key();
-    if (!data_key) {
-        policy_objects_.pop_back();
-        return std::unexpected(data_key.error());
-    }
-    const std::string raw(reinterpret_cast<const char*>(data_key->data()), data_key->size());
-    auto stored = store_data_key_locked(input.customer_id, mount.id, 1, raw);
-    secrets_crypto::cleanse(*data_key);
-    if (!stored) {
-        policy_objects_.pop_back();
-        return std::unexpected(stored.error());
-    }
-    secret_mounts_.push_back(mount);
-    return mount;
+    policy_objects_.push_back(PolicyObject{
+        new_uuid_v4(), "secret_mount", input.mount_id, environment->id, now, now, true});
+    SecretMountRoute route = input;
+    route.created_at = now;
+    secret_mount_routes_.push_back(route);
+    return route;
 }
 
-Result<std::vector<SecretMount>> InMemoryStore::list_secret_mounts(
-    const std::string& customer_id, const std::string& organization_id, int limit) {
+Result<SecretMountRoute> InMemoryStore::get_secret_mount_route(const std::string& mount_id) {
     std::lock_guard lock(mutex_);
-    std::vector<SecretMount> output;
-    for (auto mount = secret_mounts_.rbegin(); mount != secret_mounts_.rend(); ++mount) {
-        if ((customer_id.empty() || mount->customer_id == customer_id) &&
-            (organization_id.empty() || mount->organization_id == organization_id)) {
-            output.push_back(*mount);
+    const auto found = std::ranges::find(secret_mount_routes_, mount_id, &SecretMountRoute::mount_id);
+    if (found == secret_mount_routes_.end()) {
+        return std::unexpected(StoreError{"not_found", "no secret mount " + mount_id});
+    }
+    return *found;
+}
+
+Result<std::vector<SecretMountRoute>>
+InMemoryStore::list_secret_mount_routes(const std::string& customer_id,
+                                        const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<SecretMountRoute> routes;
+    for (auto route = secret_mount_routes_.rbegin(); route != secret_mount_routes_.rend();
+         ++route) {
+        if (route->customer_id == customer_id &&
+            (workspace_id.empty() || route->workspace_id == workspace_id)) {
+            routes.push_back(*route);
         }
     }
-    if (limit > 0 && output.size() > static_cast<std::size_t>(limit)) {
-        output.resize(static_cast<std::size_t>(limit));
-    }
-    return output;
+    return routes;
 }
 
-Result<SecretMount> InMemoryStore::get_secret_mount(const std::string& id) {
-    std::lock_guard lock(mutex_);
-    const auto mount = std::ranges::find_if(
-        secret_mounts_, [&](const SecretMount& value) { return value.id == id; });
-    if (mount == secret_mounts_.end()) {
-        return std::unexpected(StoreError{"not_found", "no secret mount " + id});
-    }
-    return *mount;
-}
-
-Result<SecretVersion> InMemoryStore::put_secret(const PutSecret& input,
-                                                const std::string& instance_kek) {
+Result<WrappedDataKey> InMemoryStore::wrap_secret_data_key(const std::string& customer_id,
+                                                           const std::string& owner_id,
+                                                           std::uint64_t key_version,
+                                                           const std::string& raw_key,
+                                                           const std::string& instance_kek) {
     static_cast<void>(instance_kek);
     std::lock_guard lock(mutex_);
-    if (input.name.empty() || input.name.size() > 1024 || !input.value.is_object() ||
-        !input.custom_metadata.is_object()) {
+    return wrap_data_key_locked(customer_id, owner_id, key_version, raw_key);
+}
+
+Result<WrappedDataKey> InMemoryStore::wrap_data_key_locked(const std::string& customer_id,
+                                                           const std::string& owner_id,
+                                                           std::uint64_t key_version,
+                                                           const std::string& raw_key) {
+    auto customer_key = customer_kek_locked(customer_id, true);
+    if (!customer_key || customer_key->size() != secrets_crypto::Key{}.size()) {
+        return std::unexpected(customer_key ? StoreError{"store_error", "customer key is invalid"}
+                                            : customer_key.error());
+    }
+    const auto record = std::ranges::find(customer_keks_, customer_id,
+                                          &CustomerKekRecord::customer_id);
+    secrets_crypto::Key kek{};
+    std::copy(customer_key->begin(), customer_key->end(), kek.begin());
+    const std::string associated =
+        "lake data key/" + customer_id + "/" + owner_id + "/" + std::to_string(key_version);
+    auto wrapped = secrets_crypto::seal(kek, raw_key, associated);
+    secrets_crypto::cleanse(kek);
+    if (!wrapped) {
+        return std::unexpected(wrapped.error());
+    }
+    return WrappedDataKey{record->version, *wrapped};
+}
+
+Result<std::string> InMemoryStore::unwrap_secret_data_key(const std::string& customer_id,
+                                                          const std::string& owner_id,
+                                                          std::uint64_t key_version,
+                                                          const WrappedDataKey& wrapped,
+                                                          const std::string& instance_kek) {
+    static_cast<void>(instance_kek);
+    std::lock_guard lock(mutex_);
+    const auto record = std::ranges::find(customer_keks_, customer_id,
+                                          &CustomerKekRecord::customer_id);
+    if (record == customer_keks_.end()) {
+        return std::unexpected(StoreError{"not_found", "no customer key exists"});
+    }
+    const std::string* raw_kek = wrapped.kek_version == record->version ? &record->key
+                                 : record->previous_version != 0 &&
+                                         wrapped.kek_version == record->previous_version
+                                     ? &record->previous_key
+                                     : nullptr;
+    if (raw_kek == nullptr || raw_kek->size() != secrets_crypto::Key{}.size()) {
         return std::unexpected(StoreError{
-            "invalid_input", "secret name, object value, and object metadata are required"});
+            "not_found", "no customer key version " + std::to_string(wrapped.kek_version) +
+                             " exists"});
     }
-    const auto mount = std::ranges::find_if(
-        secret_mounts_, [&](const SecretMount& value) { return value.id == input.mount_id; });
-    if (mount == secret_mounts_.end()) {
-        return std::unexpected(StoreError{"not_found", "no secret mount " + input.mount_id});
-    }
-    auto entry = std::ranges::find_if(secret_entries_, [&](const SecretEntryRecord& value) {
-        return value.metadata.mount_id == input.mount_id && value.metadata.name == input.name;
-    });
-    const std::uint64_t current =
-        entry == secret_entries_.end() ? 0 : entry->metadata.current_version;
-    if (input.check_and_set != 0 && input.check_and_set != current) {
-        return std::unexpected(StoreError{"conflict", "secret version changed"});
-    }
-    const std::uint64_t version = current + 1;
-    auto raw_key = data_key_locked(mount->customer_id, mount->id, 1);
-    if (!raw_key || raw_key->size() != secrets_crypto::Key{}.size()) {
-        return std::unexpected(raw_key ? StoreError{"store_error", "mount data key is invalid"}
-                                       : raw_key.error());
-    }
-    secrets_crypto::Key key{};
-    std::copy(raw_key->begin(), raw_key->end(), key.begin());
+    secrets_crypto::Key kek{};
+    std::copy(raw_kek->begin(), raw_kek->end(), kek.begin());
     const std::string associated =
-        "lake secret/" + mount->id + "/" + input.name + "/" + std::to_string(version);
-    auto ciphertext = secrets_crypto::seal(key, input.value.dump(), associated);
-    secrets_crypto::cleanse(key);
-    if (!ciphertext) {
-        return std::unexpected(ciphertext.error());
+        "lake data key/" + customer_id + "/" + owner_id + "/" + std::to_string(key_version);
+    auto opened = secrets_crypto::open(kek, wrapped.wrapped_key, associated);
+    secrets_crypto::cleanse(kek);
+    if (!opened || opened->size() != secrets_crypto::Key{}.size()) {
+        return std::unexpected(opened ? StoreError{"store_error", "data key is invalid"}
+                                      : opened.error());
     }
-    const std::string now = now_iso8601();
-    if (entry == secret_entries_.end()) {
-        SecretMetadata metadata{mount->id, input.name, 0, input.custom_metadata, {}, now, now};
-        secret_entries_.push_back(SecretEntryRecord{metadata, {}});
-        entry = std::prev(secret_entries_.end());
-        const auto mount_object =
-            std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
-                return value.object_type == "secret_mount" && value.external_id == mount->id;
-            });
-        policy_objects_.push_back(PolicyObject{new_uuid_v4(),
-                                               "secret",
-                                               mount->id + "/" + input.name,
-                                               mount_object->id,
-                                               now,
-                                               now,
-                                               true});
-    }
-    if (!input.custom_metadata.empty()) {
-        entry->metadata.custom_metadata = input.custom_metadata;
-    }
-    entry->metadata.current_version = version;
-    entry->metadata.updated_at = now;
-    entry->metadata.versions.push_back(SecretVersionMetadata{version, now, "", ""});
-    SecretVersion result{
-        mount->id, input.name, version, input.value, entry->metadata.custom_metadata, now, "", ""};
-    entry->versions.push_back(SecretVersionRecord{result, *ciphertext});
-    return result;
+    return opened;
 }
 
-Result<SecretVersion> InMemoryStore::read_secret(const std::string& mount_id,
-                                                 const std::string& name,
-                                                 std::uint64_t version,
-                                                 const std::string& instance_kek) {
-    static_cast<void>(instance_kek);
+Result<CustomerKekState> InMemoryStore::customer_kek_state(const std::string& customer_id) {
     std::lock_guard lock(mutex_);
-    const auto mount = std::ranges::find_if(
-        secret_mounts_, [&](const SecretMount& value) { return value.id == mount_id; });
-    const auto entry = std::ranges::find_if(secret_entries_, [&](const SecretEntryRecord& value) {
-        return value.metadata.mount_id == mount_id && value.metadata.name == name;
-    });
-    if (mount == secret_mounts_.end() || entry == secret_entries_.end()) {
-        return std::unexpected(StoreError{"not_found", "secret does not exist"});
+    const auto record = std::ranges::find(customer_keks_, customer_id,
+                                          &CustomerKekRecord::customer_id);
+    if (record == customer_keks_.end()) {
+        return std::unexpected(StoreError{"not_found", "no customer key exists"});
     }
-    const std::uint64_t selected = version == 0 ? entry->metadata.current_version : version;
-    const auto stored =
-        std::ranges::find_if(entry->versions, [&](const SecretVersionRecord& value) {
-            return value.version.version == selected;
-        });
-    if (stored == entry->versions.end()) {
-        return std::unexpected(StoreError{"not_found", "secret version does not exist"});
-    }
-    if (!stored->version.destroyed_at.empty()) {
-        return std::unexpected(StoreError{"not_found", "secret version was destroyed"});
-    }
-    if (!stored->version.deleted_at.empty()) {
-        return std::unexpected(StoreError{"not_found", "secret version is deleted"});
-    }
-    auto raw_key = data_key_locked(mount->customer_id, mount->id, 1);
-    if (!raw_key || raw_key->size() != secrets_crypto::Key{}.size()) {
-        return std::unexpected(raw_key ? StoreError{"store_error", "mount data key is invalid"}
-                                       : raw_key.error());
-    }
-    secrets_crypto::Key key{};
-    std::copy(raw_key->begin(), raw_key->end(), key.begin());
-    const std::string associated =
-        "lake secret/" + mount->id + "/" + name + "/" + std::to_string(selected);
-    auto plaintext = secrets_crypto::open(key, stored->ciphertext, associated);
-    secrets_crypto::cleanse(key);
-    if (!plaintext) {
-        return std::unexpected(plaintext.error());
-    }
-    nlohmann::json value = nlohmann::json::parse(*plaintext, nullptr, false);
-    if (value.is_discarded() || !value.is_object()) {
-        return std::unexpected(StoreError{"store_error", "stored secret is not valid JSON"});
-    }
-    SecretVersion result = stored->version;
-    result.value = std::move(value);
-    result.custom_metadata = entry->metadata.custom_metadata;
-    return result;
+    return CustomerKekState{record->version, record->previous_version};
 }
 
-Result<SecretMetadata> InMemoryStore::secret_metadata(const std::string& mount_id,
-                                                      const std::string& name) {
+Result<void> InMemoryStore::retire_customer_kek(const std::string& customer_id,
+                                                std::uint64_t previous_version) {
     std::lock_guard lock(mutex_);
-    const auto entry = std::ranges::find_if(secret_entries_, [&](const SecretEntryRecord& value) {
-        return value.metadata.mount_id == mount_id && value.metadata.name == name;
-    });
-    if (entry == secret_entries_.end()) {
-        return std::unexpected(StoreError{"not_found", "secret does not exist"});
+    const auto record = std::ranges::find(customer_keks_, customer_id,
+                                          &CustomerKekRecord::customer_id);
+    if (record != customer_keks_.end() && record->previous_version == previous_version) {
+        std::ranges::fill(record->previous_key, '\0');
+        record->previous_key.clear();
+        record->previous_version = 0;
     }
-    return entry->metadata;
+    return {};
 }
 
-Result<SecretMetadata>
-InMemoryStore::change_secret_versions(const std::string& mount_id,
-                                      const std::string& name,
-                                      const std::vector<std::uint64_t>& versions,
-                                      SecretVersionAction action) {
-    std::lock_guard lock(mutex_);
-    if (versions.empty()) {
-        return std::unexpected(StoreError{"invalid_input", "at least one version is required"});
-    }
-    auto entry = std::ranges::find_if(secret_entries_, [&](const SecretEntryRecord& value) {
-        return value.metadata.mount_id == mount_id && value.metadata.name == name;
-    });
-    if (entry == secret_entries_.end()) {
-        return std::unexpected(StoreError{"not_found", "secret does not exist"});
-    }
-    for (const std::uint64_t version : versions) {
-        const auto stored =
-            std::ranges::find_if(entry->versions, [&](const SecretVersionRecord& value) {
-                return value.version.version == version;
-            });
-        if (stored == entry->versions.end()) {
-            return std::unexpected(StoreError{"not_found", "secret version does not exist"});
-        }
-        if (action == SecretVersionAction::Undelete && !stored->version.destroyed_at.empty()) {
-            return std::unexpected(
-                StoreError{"conflict", "a destroyed secret version cannot be restored"});
-        }
-    }
-    const std::string now = now_iso8601();
-    for (const std::uint64_t version : versions) {
-        auto stored = std::ranges::find_if(entry->versions, [&](const SecretVersionRecord& value) {
-            return value.version.version == version;
-        });
-        if (action == SecretVersionAction::Delete && stored->version.destroyed_at.empty()) {
-            stored->version.deleted_at = now;
-        } else if (action == SecretVersionAction::Undelete) {
-            stored->version.deleted_at.clear();
-        } else if (action == SecretVersionAction::Destroy) {
-            stored->ciphertext.clear();
-            stored->version.value = nlohmann::json::object();
-            stored->version.deleted_at = now;
-            stored->version.destroyed_at = now;
-        }
-        auto metadata =
-            std::ranges::find_if(entry->metadata.versions, [&](const SecretVersionMetadata& value) {
-                return value.version == version;
-            });
-        metadata->deleted_at = stored->version.deleted_at;
-        metadata->destroyed_at = stored->version.destroyed_at;
-    }
-    entry->metadata.updated_at = now;
-    return entry->metadata;
-}
-
-Result<IssuedDynamicSecret> InMemoryStore::lease_dynamic_secret(const NewDynamicSecretLease& input,
-                                                                const std::string& instance_kek) {
-    static_cast<void>(instance_kek);
-    if (input.role.empty() || !input.value.is_object() || input.lifetime_seconds < 1 ||
-        input.lifetime_seconds > 3600) {
+Result<DynamicSecretLease> InMemoryStore::lease_dynamic_secret(const NewDynamicSecretLease& input) {
+    if (input.id.empty() || input.role.empty() || input.encrypted_value.empty() ||
+        input.lifetime_seconds < 1 || input.lifetime_seconds > 3600) {
         return std::unexpected(StoreError{"invalid_input", "dynamic-secret lease is invalid"});
     }
     std::lock_guard lock(mutex_);
-    if (std::ranges::none_of(
-            secret_mounts_, [&](const SecretMount& value) { return value.id == input.mount_id; })) {
-        return std::unexpected(StoreError{"not_found", "secret mount does not exist"});
-    }
     const auto expires =
         std::chrono::system_clock::now() + std::chrono::seconds{input.lifetime_seconds};
     DynamicSecretLease lease{
-        new_uuid_v4(),
+        input.id,
         input.mount_id,
         input.role,
         std::format("{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(expires)),
@@ -5817,7 +5655,7 @@ Result<IssuedDynamicSecret> InMemoryStore::lease_dynamic_secret(const NewDynamic
         0,
         now_iso8601()};
     dynamic_secret_leases_.push_back(lease);
-    return IssuedDynamicSecret{lease, input.value};
+    return lease;
 }
 
 Result<DynamicSecretLease> InMemoryStore::get_dynamic_secret_lease(const std::string& id) {
@@ -5861,408 +5699,6 @@ Result<DynamicSecretLease> InMemoryStore::revoke_dynamic_secret_lease(const std:
     return *found;
 }
 
-Result<EncryptionKey> InMemoryStore::create_encryption_key(const NewEncryptionKey& input,
-                                                           const std::string& instance_kek) {
-    static_cast<void>(instance_kek);
-    std::lock_guard lock(mutex_);
-    if (!valid_handle(input.name)) {
-        return std::unexpected(
-            StoreError{"invalid_input", "encryption key name must be a lowercase handle"});
-    }
-    const auto mount = std::ranges::find_if(
-        secret_mounts_, [&](const SecretMount& value) { return value.id == input.mount_id; });
-    if (mount == secret_mounts_.end()) {
-        return std::unexpected(StoreError{"not_found", "no secret mount " + input.mount_id});
-    }
-    if (std::ranges::any_of(encryption_keys_, [&](const EncryptionKey& value) {
-            return value.mount_id == input.mount_id && value.name == input.name;
-        })) {
-        return std::unexpected(StoreError{"conflict", "encryption key already exists"});
-    }
-    const std::string now = now_iso8601();
-    EncryptionKey key{new_uuid_v4(), input.mount_id, input.name, "", 1, now, now};
-    auto raw = secrets_crypto::random_key();
-    if (!raw) {
-        return std::unexpected(raw.error());
-    }
-    const std::string material(reinterpret_cast<const char*>(raw->data()), raw->size());
-    auto stored = store_data_key_locked(mount->customer_id, key.id, 1, material);
-    secrets_crypto::cleanse(*raw);
-    if (!stored) {
-        return std::unexpected(stored.error());
-    }
-    encryption_keys_.push_back(key);
-    return key;
-}
-
-Result<std::vector<EncryptionKey>> InMemoryStore::list_encryption_keys(const std::string& mount_id,
-                                                                       int limit) {
-    std::lock_guard lock(mutex_);
-    std::vector<EncryptionKey> output;
-    for (auto key = encryption_keys_.rbegin(); key != encryption_keys_.rend(); ++key) {
-        if (key->mount_id == mount_id) {
-            output.push_back(*key);
-        }
-    }
-    if (limit > 0 && output.size() > static_cast<std::size_t>(limit)) {
-        output.resize(static_cast<std::size_t>(limit));
-    }
-    return output;
-}
-
-Result<EncryptionKey> InMemoryStore::get_encryption_key(const std::string& mount_id,
-                                                        const std::string& name) {
-    std::lock_guard lock(mutex_);
-    const auto key = std::ranges::find_if(encryption_keys_, [&](const EncryptionKey& value) {
-        return value.mount_id == mount_id && value.name == name;
-    });
-    if (key == encryption_keys_.end()) {
-        return std::unexpected(StoreError{"not_found", "encryption key does not exist"});
-    }
-    return *key;
-}
-
-Result<EncryptionKey> InMemoryStore::rotate_encryption_key(const std::string& mount_id,
-                                                           const std::string& name,
-                                                           const std::string& instance_kek) {
-    static_cast<void>(instance_kek);
-    std::lock_guard lock(mutex_);
-    auto key = std::ranges::find_if(encryption_keys_, [&](const EncryptionKey& value) {
-        return value.mount_id == mount_id && value.name == name;
-    });
-    const auto mount = std::ranges::find_if(
-        secret_mounts_, [&](const SecretMount& value) { return value.id == mount_id; });
-    if (key == encryption_keys_.end() || mount == secret_mounts_.end()) {
-        return std::unexpected(StoreError{"not_found", "encryption key does not exist"});
-    }
-    auto raw = secrets_crypto::random_key();
-    if (!raw) {
-        return std::unexpected(raw.error());
-    }
-    const std::uint64_t version = key->current_version + 1;
-    const std::string material(reinterpret_cast<const char*>(raw->data()), raw->size());
-    auto stored = store_data_key_locked(mount->customer_id, key->id, version, material);
-    secrets_crypto::cleanse(*raw);
-    if (!stored) {
-        return std::unexpected(stored.error());
-    }
-    key->current_version = version;
-    key->updated_at = now_iso8601();
-    return *key;
-}
-
-Result<TransitValue> InMemoryStore::encrypt(const std::string& mount_id,
-                                            const std::string& name,
-                                            const std::string& plaintext,
-                                            const std::string& instance_kek) {
-    static_cast<void>(instance_kek);
-    std::lock_guard lock(mutex_);
-    const auto key = std::ranges::find_if(encryption_keys_, [&](const EncryptionKey& value) {
-        return value.mount_id == mount_id && value.name == name;
-    });
-    const auto mount = std::ranges::find_if(
-        secret_mounts_, [&](const SecretMount& value) { return value.id == mount_id; });
-    if (key == encryption_keys_.end() || mount == secret_mounts_.end()) {
-        return std::unexpected(StoreError{"not_found", "encryption key does not exist"});
-    }
-    auto decoded = secrets_crypto::base64url_decode(plaintext);
-    auto raw = data_key_locked(mount->customer_id, key->id, key->current_version);
-    if (!decoded || !raw || raw->size() != secrets_crypto::Key{}.size()) {
-        return std::unexpected(
-            !decoded ? decoded.error()
-                     : (!raw ? raw.error() : StoreError{"store_error", "data key is invalid"}));
-    }
-    secrets_crypto::Key material{};
-    std::copy(raw->begin(), raw->end(), material.begin());
-    auto encryption_key = secrets_crypto::derive(material, "lake transit encryption v1");
-    secrets_crypto::cleanse(material);
-    if (!encryption_key) {
-        return std::unexpected(encryption_key.error());
-    }
-    const std::string associated =
-        "lake transit/" + key->id + "/" + std::to_string(key->current_version);
-    auto sealed = secrets_crypto::seal(*encryption_key, *decoded, associated);
-    secrets_crypto::cleanse(*encryption_key);
-    if (!sealed) {
-        return std::unexpected(sealed.error());
-    }
-    return TransitValue{secrets_crypto::format_ciphertext({key->id, key->current_version, *sealed}),
-                        key->current_version,
-                        "aes-256-gcm"};
-}
-
-Result<TransitValue> InMemoryStore::decrypt(const std::string& mount_id,
-                                            const std::string& name,
-                                            const std::string& ciphertext,
-                                            const std::string& instance_kek) {
-    static_cast<void>(instance_kek);
-    std::lock_guard lock(mutex_);
-    const auto key = std::ranges::find_if(encryption_keys_, [&](const EncryptionKey& value) {
-        return value.mount_id == mount_id && value.name == name;
-    });
-    const auto mount = std::ranges::find_if(
-        secret_mounts_, [&](const SecretMount& value) { return value.id == mount_id; });
-    auto parsed = secrets_crypto::parse_ciphertext(ciphertext);
-    if (key == encryption_keys_.end() || mount == secret_mounts_.end()) {
-        return std::unexpected(StoreError{"not_found", "encryption key does not exist"});
-    }
-    if (!parsed || parsed->key_id != key->id) {
-        return std::unexpected(parsed ? StoreError{"invalid_input", "ciphertext names another key"}
-                                      : parsed.error());
-    }
-    auto raw = data_key_locked(mount->customer_id, key->id, parsed->version);
-    if (!raw || raw->size() != secrets_crypto::Key{}.size()) {
-        return std::unexpected(raw ? StoreError{"store_error", "data key is invalid"}
-                                   : raw.error());
-    }
-    secrets_crypto::Key material{};
-    std::copy(raw->begin(), raw->end(), material.begin());
-    auto encryption_key = secrets_crypto::derive(material, "lake transit encryption v1");
-    secrets_crypto::cleanse(material);
-    if (!encryption_key) {
-        return std::unexpected(encryption_key.error());
-    }
-    const std::string associated =
-        "lake transit/" + key->id + "/" + std::to_string(parsed->version);
-    auto plaintext = secrets_crypto::open(*encryption_key, parsed->sealed, associated);
-    secrets_crypto::cleanse(*encryption_key);
-    if (!plaintext) {
-        return std::unexpected(plaintext.error());
-    }
-    auto encoded = secrets_crypto::base64url_encode(*plaintext);
-    if (!encoded) {
-        return std::unexpected(encoded.error());
-    }
-    return TransitValue{*encoded, parsed->version, "base64url"};
-}
-
-Result<TransitValue> InMemoryStore::rewrap(const std::string& mount_id,
-                                           const std::string& name,
-                                           const std::string& ciphertext,
-                                           const std::string& instance_kek) {
-    static_cast<void>(instance_kek);
-    std::lock_guard lock(mutex_);
-    const auto key = std::ranges::find_if(encryption_keys_, [&](const EncryptionKey& value) {
-        return value.mount_id == mount_id && value.name == name;
-    });
-    const auto mount = std::ranges::find_if(
-        secret_mounts_, [&](const SecretMount& value) { return value.id == mount_id; });
-    auto parsed = secrets_crypto::parse_ciphertext(ciphertext);
-    if (key == encryption_keys_.end() || mount == secret_mounts_.end()) {
-        return std::unexpected(StoreError{"not_found", "encryption key does not exist"});
-    }
-    if (!parsed || parsed->key_id != key->id) {
-        return std::unexpected(parsed ? StoreError{"invalid_input", "ciphertext names another key"}
-                                      : parsed.error());
-    }
-    auto old_raw = data_key_locked(mount->customer_id, key->id, parsed->version);
-    auto new_raw = data_key_locked(mount->customer_id, key->id, key->current_version);
-    if (!old_raw || !new_raw || old_raw->size() != secrets_crypto::Key{}.size() ||
-        new_raw->size() != secrets_crypto::Key{}.size()) {
-        return std::unexpected(
-            !old_raw
-                ? old_raw.error()
-                : (!new_raw ? new_raw.error() : StoreError{"store_error", "data key is invalid"}));
-    }
-    secrets_crypto::Key old_material{};
-    secrets_crypto::Key new_material{};
-    std::copy(old_raw->begin(), old_raw->end(), old_material.begin());
-    std::copy(new_raw->begin(), new_raw->end(), new_material.begin());
-    auto old_key = secrets_crypto::derive(old_material, "lake transit encryption v1");
-    auto new_key = secrets_crypto::derive(new_material, "lake transit encryption v1");
-    secrets_crypto::cleanse(old_material);
-    secrets_crypto::cleanse(new_material);
-    if (!old_key || !new_key) {
-        return std::unexpected(!old_key ? old_key.error() : new_key.error());
-    }
-    const std::string old_associated =
-        "lake transit/" + key->id + "/" + std::to_string(parsed->version);
-    auto plaintext = secrets_crypto::open(*old_key, parsed->sealed, old_associated);
-    secrets_crypto::cleanse(*old_key);
-    if (!plaintext) {
-        secrets_crypto::cleanse(*new_key);
-        return std::unexpected(plaintext.error());
-    }
-    const std::string new_associated =
-        "lake transit/" + key->id + "/" + std::to_string(key->current_version);
-    auto sealed = secrets_crypto::seal(*new_key, *plaintext, new_associated);
-    secrets_crypto::cleanse(*new_key);
-    if (!sealed) {
-        return std::unexpected(sealed.error());
-    }
-    return TransitValue{secrets_crypto::format_ciphertext({key->id, key->current_version, *sealed}),
-                        key->current_version,
-                        "aes-256-gcm"};
-}
-
-Result<TransitValue> InMemoryStore::sign(const std::string& mount_id,
-                                         const std::string& name,
-                                         const std::string& message,
-                                         std::uint64_t version,
-                                         const std::string& instance_kek) {
-    static_cast<void>(instance_kek);
-    std::lock_guard lock(mutex_);
-    const auto key = std::ranges::find_if(encryption_keys_, [&](const EncryptionKey& value) {
-        return value.mount_id == mount_id && value.name == name;
-    });
-    const auto mount = std::ranges::find_if(
-        secret_mounts_, [&](const SecretMount& value) { return value.id == mount_id; });
-    if (key == encryption_keys_.end() || mount == secret_mounts_.end()) {
-        return std::unexpected(StoreError{"not_found", "encryption key does not exist"});
-    }
-    const std::uint64_t selected = version == 0 ? key->current_version : version;
-    auto decoded = secrets_crypto::base64url_decode(message);
-    auto raw = data_key_locked(mount->customer_id, key->id, selected);
-    if (!decoded || !raw || raw->size() != secrets_crypto::Key{}.size()) {
-        return std::unexpected(
-            !decoded ? decoded.error()
-                     : (!raw ? raw.error() : StoreError{"store_error", "data key is invalid"}));
-    }
-    secrets_crypto::Key material{};
-    std::copy(raw->begin(), raw->end(), material.begin());
-    auto signing_key = secrets_crypto::derive(material, "lake transit signing v1");
-    secrets_crypto::cleanse(material);
-    if (!signing_key) {
-        return std::unexpected(signing_key.error());
-    }
-    auto signature = secrets_crypto::sign(*signing_key, *decoded);
-    secrets_crypto::cleanse(*signing_key);
-    if (!signature) {
-        return std::unexpected(signature.error());
-    }
-    return TransitValue{*signature, selected, "ed25519"};
-}
-
-Result<TransitVerification> InMemoryStore::verify(const std::string& mount_id,
-                                                  const std::string& name,
-                                                  const std::string& message,
-                                                  const std::string& signature,
-                                                  std::uint64_t version,
-                                                  const std::string& instance_kek) {
-    static_cast<void>(instance_kek);
-    std::lock_guard lock(mutex_);
-    const auto key = std::ranges::find_if(encryption_keys_, [&](const EncryptionKey& value) {
-        return value.mount_id == mount_id && value.name == name;
-    });
-    const auto mount = std::ranges::find_if(
-        secret_mounts_, [&](const SecretMount& value) { return value.id == mount_id; });
-    if (key == encryption_keys_.end() || mount == secret_mounts_.end()) {
-        return std::unexpected(StoreError{"not_found", "encryption key does not exist"});
-    }
-    const std::uint64_t selected = version == 0 ? key->current_version : version;
-    auto decoded = secrets_crypto::base64url_decode(message);
-    auto raw = data_key_locked(mount->customer_id, key->id, selected);
-    if (!decoded || !raw || raw->size() != secrets_crypto::Key{}.size()) {
-        return std::unexpected(
-            !decoded ? decoded.error()
-                     : (!raw ? raw.error() : StoreError{"store_error", "data key is invalid"}));
-    }
-    secrets_crypto::Key material{};
-    std::copy(raw->begin(), raw->end(), material.begin());
-    auto signing_key = secrets_crypto::derive(material, "lake transit signing v1");
-    secrets_crypto::cleanse(material);
-    if (!signing_key) {
-        return std::unexpected(signing_key.error());
-    }
-    auto valid = secrets_crypto::verify(*signing_key, *decoded, signature);
-    secrets_crypto::cleanse(*signing_key);
-    if (!valid) {
-        return std::unexpected(valid.error());
-    }
-    return TransitVerification{*valid, selected, "ed25519"};
-}
-
-Result<TransitValue> InMemoryStore::hmac(const std::string& mount_id,
-                                         const std::string& name,
-                                         const std::string& message,
-                                         std::uint64_t version,
-                                         const std::string& instance_kek) {
-    static_cast<void>(instance_kek);
-    std::lock_guard lock(mutex_);
-    const auto key = std::ranges::find_if(encryption_keys_, [&](const EncryptionKey& value) {
-        return value.mount_id == mount_id && value.name == name;
-    });
-    const auto mount = std::ranges::find_if(
-        secret_mounts_, [&](const SecretMount& value) { return value.id == mount_id; });
-    if (key == encryption_keys_.end() || mount == secret_mounts_.end()) {
-        return std::unexpected(StoreError{"not_found", "encryption key does not exist"});
-    }
-    const std::uint64_t selected = version == 0 ? key->current_version : version;
-    auto decoded = secrets_crypto::base64url_decode(message);
-    auto raw = data_key_locked(mount->customer_id, key->id, selected);
-    if (!decoded || !raw || raw->size() != secrets_crypto::Key{}.size()) {
-        return std::unexpected(
-            !decoded ? decoded.error()
-                     : (!raw ? raw.error() : StoreError{"store_error", "data key is invalid"}));
-    }
-    secrets_crypto::Key material{};
-    std::copy(raw->begin(), raw->end(), material.begin());
-    auto hmac_key = secrets_crypto::derive(material, "lake transit hmac v1");
-    secrets_crypto::cleanse(material);
-    if (!hmac_key) {
-        return std::unexpected(hmac_key.error());
-    }
-    auto digest = secrets_crypto::hmac(*hmac_key, *decoded);
-    secrets_crypto::cleanse(*hmac_key);
-    if (!digest) {
-        return std::unexpected(digest.error());
-    }
-    return TransitValue{*digest, selected, "hmac-sha256"};
-}
-
-Result<DerivedEncryptionKey> InMemoryStore::derive_encryption_key(const std::string& mount_id,
-                                                                  const std::string& parent_name,
-                                                                  const std::string& name,
-                                                                  const std::string& context,
-                                                                  const std::string& instance_kek) {
-    static_cast<void>(instance_kek);
-    std::lock_guard lock(mutex_);
-    if (!valid_handle(name)) {
-        return std::unexpected(
-            StoreError{"invalid_input", "derived key name must be a lowercase handle"});
-    }
-    const auto parent = std::ranges::find_if(encryption_keys_, [&](const EncryptionKey& value) {
-        return value.mount_id == mount_id && value.name == parent_name;
-    });
-    const auto mount = std::ranges::find_if(
-        secret_mounts_, [&](const SecretMount& value) { return value.id == mount_id; });
-    if (parent == encryption_keys_.end() || mount == secret_mounts_.end()) {
-        return std::unexpected(StoreError{"not_found", "parent encryption key does not exist"});
-    }
-    if (std::ranges::any_of(encryption_keys_, [&](const EncryptionKey& value) {
-            return value.mount_id == mount_id && value.name == name;
-        })) {
-        return std::unexpected(StoreError{"conflict", "encryption key already exists"});
-    }
-    auto decoded_context = secrets_crypto::base64url_decode(context);
-    auto raw = data_key_locked(mount->customer_id, parent->id, parent->current_version);
-    if (!decoded_context || !raw || raw->size() != secrets_crypto::Key{}.size()) {
-        return std::unexpected(
-            !decoded_context
-                ? decoded_context.error()
-                : (!raw ? raw.error() : StoreError{"store_error", "data key is invalid"}));
-    }
-    secrets_crypto::Key material{};
-    std::copy(raw->begin(), raw->end(), material.begin());
-    auto derived = secrets_crypto::derive(material, "lake transit child v1/" + *decoded_context);
-    secrets_crypto::cleanse(material);
-    if (!derived) {
-        return std::unexpected(derived.error());
-    }
-    const std::string now = now_iso8601();
-    EncryptionKey child{new_uuid_v4(), mount_id, name, parent->id, 1, now, now};
-    const std::string child_material(reinterpret_cast<const char*>(derived->data()),
-                                     derived->size());
-    auto stored = store_data_key_locked(mount->customer_id, child.id, 1, child_material);
-    secrets_crypto::cleanse(*derived);
-    if (!stored) {
-        return std::unexpected(stored.error());
-    }
-    const std::uint64_t parent_version = parent->current_version;
-    encryption_keys_.push_back(child);
-    return DerivedEncryptionKey{child, parent_version};
-}
-
 Result<CustomerKekRotation> InMemoryStore::rotate_customer_kek(const std::string& customer_id,
                                                                const std::string& instance_kek) {
     static_cast<void>(instance_kek);
@@ -6273,28 +5709,30 @@ Result<CustomerKekRotation> InMemoryStore::rotate_customer_kek(const std::string
     if (current == customer_keks_.end() || current->key.size() != secrets_crypto::Key{}.size()) {
         return std::unexpected(StoreError{"not_found", "no customer key exists"});
     }
+    if (current->previous_version != 0) {
+        return std::unexpected(StoreError{
+            "conflict", "an earlier customer KEK rotation is still rewrapping data keys"});
+    }
     auto generated = secrets_crypto::random_key();
     if (!generated) {
         return std::unexpected(generated.error());
     }
     secrets_crypto::Key old_key{};
     std::copy(current->key.begin(), current->key.end(), old_key.begin());
+    const std::uint64_t version = current->version + 1;
+    // The retired secrets_data_keys rows stay readable for the one-shot copy.
     std::vector<std::string> replacements;
-    replacements.reserve(data_keys_.size());
-    for (const DataKeyRecord& record : data_keys_) {
-        if (record.customer_id != customer_id) {
+    replacements.reserve(legacy_secret_data_keys_.size());
+    for (const LegacySecretDataKey& record : legacy_secret_data_keys_) {
+        if (record.owner.customer_id != customer_id) {
             replacements.push_back({});
             continue;
         }
         const std::string associated = "lake data key/" + customer_id + "/" + record.owner_id +
-                                       "/" + std::to_string(record.version);
-        auto raw = secrets_crypto::open(old_key, record.wrapped_key, associated);
-        if (!raw) {
-            secrets_crypto::cleanse(old_key);
-            secrets_crypto::cleanse(*generated);
-            return std::unexpected(raw.error());
-        }
-        auto wrapped = secrets_crypto::seal(*generated, *raw, associated);
+                                       "/" + std::to_string(record.key_version);
+        auto raw = secrets_crypto::open(old_key, record.wrapped.wrapped_key, associated);
+        auto wrapped = raw ? secrets_crypto::seal(*generated, *raw, associated)
+                           : Result<std::string>(std::unexpected(raw.error()));
         if (!wrapped) {
             secrets_crypto::cleanse(old_key);
             secrets_crypto::cleanse(*generated);
@@ -6333,9 +5771,9 @@ Result<CustomerKekRotation> InMemoryStore::rotate_customer_kek(const std::string
     }
     secrets_crypto::cleanse(old_key);
     std::uint64_t rewrapped = 0;
-    for (std::size_t index = 0; index < data_keys_.size(); ++index) {
+    for (std::size_t index = 0; index < legacy_secret_data_keys_.size(); ++index) {
         if (!replacements[index].empty()) {
-            data_keys_[index].wrapped_key = std::move(replacements[index]);
+            legacy_secret_data_keys_[index].wrapped = {version, std::move(replacements[index])};
             ++rewrapped;
         }
     }
@@ -6348,10 +5786,215 @@ Result<CustomerKekRotation> InMemoryStore::rotate_customer_kek(const std::string
             ++rewrapped;
         }
     }
+    const std::uint64_t previous = current->version;
+    current->previous_key = std::move(current->key);
+    current->previous_version = previous;
     current->key.assign(reinterpret_cast<const char*>(generated->data()), generated->size());
     secrets_crypto::cleanse(*generated);
-    ++current->version;
-    return CustomerKekRotation{customer_id, current->version, rewrapped};
+    current->version = version;
+    return CustomerKekRotation{customer_id, version, rewrapped, previous};
+}
+
+namespace {
+
+// The owner of a retired secrets row, from its mount's assignment.
+LegacySecretOwner legacy_secret_owner(
+    const std::map<std::string, std::pair<std::string, std::string>>& assignments,
+    const std::vector<SecretMountRoute>& routes, const std::vector<Workspace>& workspaces,
+    std::string customer_id, std::string mount_id) {
+    LegacySecretOwner owner{std::move(customer_id), std::move(mount_id), "", "needs_selection"};
+    if (const auto found = assignments.find(owner.mount_id); found != assignments.end()) {
+        owner.outcome = found->second.second;
+    }
+    const auto route = std::ranges::find(routes, owner.mount_id, &SecretMountRoute::mount_id);
+    if (route == routes.end()) {
+        return owner;
+    }
+    const auto workspace = std::ranges::find(workspaces, route->workspace_id, &Workspace::id);
+    if (workspace != workspaces.end() && workspace->desired == "deleted") {
+        owner.outcome = "workspace_deleted";
+    } else {
+        owner.workspace_id = route->workspace_id;
+    }
+    return owner;
+}
+
+template <class Row, class Id>
+std::vector<Row> legacy_page(std::vector<Row> rows, const std::string& after_id, int limit, Id id) {
+    std::ranges::sort(rows, {}, id);
+    std::vector<Row> page;
+    for (Row& row : rows) {
+        if (!after_id.empty() && std::invoke(id, row) <= after_id) {
+            continue;
+        }
+        if (static_cast<int>(page.size()) >= std::clamp(limit, 1, 5000)) {
+            break;
+        }
+        page.push_back(std::move(row));
+    }
+    return page;
+}
+
+} // namespace
+
+void InMemoryStore::seed_legacy_secret_mount(SecretMount mount) {
+    std::lock_guard lock(mutex_);
+    LegacySecretMount legacy;
+    legacy.owner = {mount.customer_id, mount.id, "", "needs_selection"};
+    legacy.mount = std::move(mount);
+    legacy_secret_mounts_.push_back(std::move(legacy));
+}
+
+void InMemoryStore::seed_legacy_secret_entry(LegacySecretEntry entry) {
+    std::lock_guard lock(mutex_);
+    legacy_secret_entries_.push_back(std::move(entry));
+}
+
+void InMemoryStore::seed_legacy_secret_version(LegacySecretVersion version) {
+    std::lock_guard lock(mutex_);
+    legacy_secret_versions_.push_back(std::move(version));
+}
+
+void InMemoryStore::seed_legacy_encryption_key(LegacyEncryptionKey key) {
+    std::lock_guard lock(mutex_);
+    legacy_encryption_keys_.push_back(std::move(key));
+}
+
+Result<void> InMemoryStore::seed_legacy_secret_data_key(LegacySecretDataKey key,
+                                                        const std::string& raw_key) {
+    std::lock_guard lock(mutex_);
+    auto wrapped =
+        wrap_data_key_locked(key.owner.customer_id, key.owner_id, key.key_version, raw_key);
+    if (!wrapped) {
+        return std::unexpected(wrapped.error());
+    }
+    key.wrapped = *wrapped;
+    legacy_secret_data_keys_.push_back(std::move(key));
+    return {};
+}
+
+Result<void> InMemoryStore::assign_legacy_secrets() {
+    std::lock_guard lock(mutex_);
+    for (const LegacySecretMount& legacy : legacy_secret_mounts_) {
+        const SecretMount& mount = legacy.mount;
+        if (!legacy_secret_assignments_.contains(mount.id)) {
+            std::vector<const Workspace*> live;
+            for (const Workspace& workspace : workspaces_) {
+                if (workspace.customer_id == mount.customer_id && workspace.desired != "deleted") {
+                    live.push_back(&workspace);
+                }
+            }
+            legacy_secret_assignments_[mount.id] =
+                live.size() == 1
+                    ? std::pair<std::string, std::string>{live.front()->id, "sole_workspace"}
+                    : std::pair<std::string, std::string>{"", "needs_selection"};
+        }
+        const auto& [workspace_id, outcome] = legacy_secret_assignments_.at(mount.id);
+        const auto workspace = std::ranges::find(workspaces_, workspace_id, &Workspace::id);
+        if (workspace_id.empty() || workspace == workspaces_.end() ||
+            workspace->desired == "deleted" || workspace->customer_id != mount.customer_id ||
+            std::ranges::any_of(secret_mount_routes_, [&](const SecretMountRoute& route) {
+                return route.mount_id == mount.id;
+            })) {
+            continue;
+        }
+        secret_mount_routes_.push_back({mount.id, mount.customer_id, mount.organization_id,
+                                        workspace_id, now_iso8601()});
+        // The policy objects a mount made before 0057 has; added only where missing.
+        const std::string now = now_iso8601();
+        const std::string environment_external =
+            "secrets/" + mount.customer_id + "/" + mount.organization_id;
+        auto environment = std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
+            return value.object_type == "environment" && value.external_id == environment_external;
+        });
+        const auto organization = std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
+            return value.object_type == "organization" &&
+                   value.external_id == mount.organization_id;
+        });
+        if (environment == policy_objects_.end() && organization != policy_objects_.end()) {
+            policy_objects_.push_back(PolicyObject{new_uuid_v4(), "environment",
+                                                   environment_external, organization->id, now,
+                                                   now, true});
+            environment = std::prev(policy_objects_.end());
+        }
+        if (environment != policy_objects_.end() &&
+            std::ranges::none_of(policy_objects_, [&](const PolicyObject& value) {
+                return value.object_type == "secret_mount" && value.external_id == mount.id;
+            })) {
+            const std::string parent = environment->id;
+            policy_objects_.push_back(
+                PolicyObject{new_uuid_v4(), "secret_mount", mount.id, parent, now, now, true});
+        }
+    }
+    return {};
+}
+
+void InMemoryStore::select_legacy_secret_mount_workspace(const std::string& mount_id,
+                                                         const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    auto& assignment = legacy_secret_assignments_[mount_id];
+    if (assignment.first.empty()) {
+        assignment = {workspace_id, assignment.second.empty() ? "needs_selection"
+                                                              : assignment.second};
+    }
+}
+
+Result<std::vector<LegacySecretMount>>
+InMemoryStore::legacy_secret_mounts(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<LegacySecretMount> rows = legacy_secret_mounts_;
+    for (LegacySecretMount& row : rows) {
+        row.owner = legacy_secret_owner(legacy_secret_assignments_, secret_mount_routes_,
+                                        workspaces_, row.mount.customer_id, row.mount.id);
+        row.mount.workspace_id = row.owner.workspace_id;
+    }
+    return legacy_page(std::move(rows), after_id, limit,
+                       [](const LegacySecretMount& row) { return row.mount.id; });
+}
+
+Result<std::vector<LegacySecretEntry>>
+InMemoryStore::legacy_secret_entries(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<LegacySecretEntry> rows = legacy_secret_entries_;
+    for (LegacySecretEntry& row : rows) {
+        row.owner = legacy_secret_owner(legacy_secret_assignments_, secret_mount_routes_,
+                                        workspaces_, row.owner.customer_id, row.owner.mount_id);
+    }
+    return legacy_page(std::move(rows), after_id, limit, &LegacySecretEntry::id);
+}
+
+Result<std::vector<LegacySecretVersion>>
+InMemoryStore::legacy_secret_versions(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<LegacySecretVersion> rows = legacy_secret_versions_;
+    for (LegacySecretVersion& row : rows) {
+        row.owner = legacy_secret_owner(legacy_secret_assignments_, secret_mount_routes_,
+                                        workspaces_, row.owner.customer_id, row.owner.mount_id);
+    }
+    return legacy_page(std::move(rows), after_id, limit, &LegacySecretVersion::id);
+}
+
+Result<std::vector<LegacyEncryptionKey>>
+InMemoryStore::legacy_encryption_keys(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<LegacyEncryptionKey> rows = legacy_encryption_keys_;
+    for (LegacyEncryptionKey& row : rows) {
+        row.owner = legacy_secret_owner(legacy_secret_assignments_, secret_mount_routes_,
+                                        workspaces_, row.owner.customer_id, row.key.mount_id);
+    }
+    return legacy_page(std::move(rows), after_id, limit,
+                       [](const LegacyEncryptionKey& row) { return row.key.id; });
+}
+
+Result<std::vector<LegacySecretDataKey>>
+InMemoryStore::legacy_secret_data_keys(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<LegacySecretDataKey> rows = legacy_secret_data_keys_;
+    for (LegacySecretDataKey& row : rows) {
+        row.owner = legacy_secret_owner(legacy_secret_assignments_, secret_mount_routes_,
+                                        workspaces_, row.owner.customer_id, row.owner.mount_id);
+    }
+    return legacy_page(std::move(rows), after_id, limit, &LegacySecretDataKey::id);
 }
 
 Result<OfflineGrant> InMemoryStore::issue_offline_grant(const NewOfflineGrant& input) {

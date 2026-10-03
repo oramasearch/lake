@@ -29,6 +29,7 @@
 #include "lake/search/index.hpp"
 #include "repository_test_support.hpp"
 #include "temporary_directory.hpp"
+#include "workspace_fixture.hpp"
 
 namespace {
 
@@ -1006,20 +1007,25 @@ TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
 
-    auto store = lake::control::make_postgres_store(
+    std::shared_ptr<lake::control::Store> store = lake::control::make_postgres_store(
         uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
     ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    // Secrets live in their mount's workspace Zetta (lake#328): a Ready workspace whose record
+    // store is the test's.
+    lake::test::RecordWorkspaces workspaces(store, uri);
     Registry registry;
     lake::api::register_core_capabilities(registry, "test");
     ApiContext context;
     context.store = store.get();
+    context.workspaces = workspaces.service.get();
     context.authorized = true;
     context.operator_credential = true;
     context.acting_identity = "admin";
     context.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
     auto call = [&](const std::string& name, json input = json::object()) {
         context.request_id.clear();
-        return registry.call(name, input, context);
+        const auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        return completed ? *completed : ApiResult::failure("store_error", "did not complete");
     };
     const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
 
@@ -1031,14 +1037,33 @@ TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
                                      {"organization_id", organization.value.at("id")},
                                      {"name", "secrets-" + suffix}});
     ASSERT_TRUE(customer.ok) << customer.error.message;
+    const std::string workspace_id = workspaces.create(customer.value.at("id"), "secrets");
     const ApiResult mount = call("create_secret_mount",
                                  {{"customer_id", customer.value.at("id")},
+                                  {"workspace_id", workspace_id},
                                   {"organization_id", organization.value.at("id")},
                                   {"name", "mount-" + suffix}});
     ASSERT_TRUE(mount.ok) << mount.error.message;
     const std::string mount_id = mount.value.at("id");
     ASSERT_TRUE(call("get_secret_mount", {{"mount_id", mount_id}}).ok);
-    ASSERT_TRUE(call("list_secret_mounts", {{"customer_id", customer.value.at("id")}}).ok);
+    const ApiResult listed = call(
+        "list_secret_mounts", {{"customer_id", customer.value.at("id")}, {"workspace_id", workspace_id}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    EXPECT_EQ(listed.value.at("items").size(), 1U);
+    {
+        // Nothing of the mount is in PostgreSQL but its content-free route.
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        EXPECT_EQ(tx.exec_params("SELECT count(*) FROM secrets_mounts WHERE id = $1::uuid",
+                                 mount_id)[0][0]
+                      .as<int>(),
+                  0);
+        EXPECT_EQ(tx.exec_params("SELECT workspace_id::text FROM secret_mount_routes "
+                                 "WHERE mount_id = $1::uuid",
+                                 mount_id)[0][0]
+                      .as<std::string>(),
+                  workspace_id);
+    }
 
     const ApiResult first =
         call("put_secret",
@@ -1115,6 +1140,23 @@ TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
     const ApiResult after = call("read_secret", {{"mount_id", mount_id}, {"name", "database"}});
     ASSERT_TRUE(after.ok) << after.error.message;
     EXPECT_EQ(after.value.at("value").at("password"), "two");
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        const auto keystore = tx.exec_params(
+            "SELECT version, previous_version IS NULL FROM keystore WHERE customer_id = $1::uuid",
+            customer.value.at("id").get<std::string>());
+        EXPECT_EQ(keystore[0][0].as<int>(), 2);
+        EXPECT_TRUE(keystore[0][1].as<bool>()) << "the replaced KEK is forgotten once rewrapped";
+        for (const std::string table : {"secrets_entries", "secrets_encryption_keys"}) {
+            EXPECT_EQ(tx.exec_params("SELECT count(*) FROM " + table +
+                                         " WHERE mount_id = $1::uuid",
+                                     mount_id)[0][0]
+                          .as<int>(),
+                      0)
+                << table;
+        }
+    }
     ASSERT_TRUE(call("decrypt",
                      {{"mount_id", mount_id},
                       {"name", "transit"},
@@ -1130,6 +1172,185 @@ TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
     ASSERT_TRUE(event) << event.error().message;
     EXPECT_EQ(event->draft.outcome, "denied");
     EXPECT_EQ(event->draft.details.at("mount_id"), mount_id);
+}
+
+// lake#328-#332: migration 0057 gives each legacy mount the only live workspace of its space and
+// a route there, reports the rest, and drops the dynamic leases' foreign key to secrets_mounts;
+// the mount's entries, versions, keys and data keys follow its route.
+TEST(PostgresSecrets, MigrationRecordsEachMountsOwnerAndRoute) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    struct Space {
+        std::string organization_id, customer_id;
+        std::vector<std::string> workspaces;
+    };
+    const auto space = [&](const std::string& name, int workspaces) {
+        const auto organization = store->create_organization(
+            {"taap:1:ed25519:secret-migration-" + name + "-" + suffix, name, ""});
+        EXPECT_TRUE(organization) << organization.error().message;
+        const auto customer = store->create_customer(
+            {"organization", "", organization->id, "secret-migration-" + name + "-" + suffix});
+        EXPECT_TRUE(customer) << customer.error().message;
+        Space created{organization->id, customer->id, {}};
+        for (int index = 0; index < workspaces; ++index) {
+            const auto workspace =
+                store->create_workspace({customer->id, name + std::to_string(index), "dev", ""});
+            EXPECT_TRUE(workspace) << workspace.error().message;
+            created.workspaces.push_back(workspace->id);
+        }
+        return created;
+    };
+    const Space sole = space("sole", 1);
+    const Space several = space("several", 2);
+    const Space doomed = space("doomed", 1);
+    pqxx::connection connection(uri);
+    const auto mount = [&](const Space& owner, const std::string& name) {
+        pqxx::work tx(connection);
+        const std::string id =
+            tx.exec_params("INSERT INTO secrets_mounts (customer_id, organization_id, name) "
+                           "VALUES ($1::uuid, $2::uuid, $3) RETURNING id::text",
+                           owner.customer_id, owner.organization_id, name)[0][0]
+                .as<std::string>();
+        tx.commit();
+        return id;
+    };
+    const std::string owned = mount(sole, "owned");
+    const std::string waiting = mount(several, "waiting");
+    const std::string gone = mount(doomed, "gone");
+    std::string entry, key;
+    {
+        pqxx::work tx(connection);
+        entry = tx.exec_params("INSERT INTO secrets_entries (mount_id, name, current_version) "
+                               "VALUES ($1::uuid, 'database', 1) RETURNING id::text",
+                               owned)[0][0]
+                    .as<std::string>();
+        tx.exec_params("INSERT INTO secrets_versions (entry_id, version, ciphertext) VALUES "
+                       "($1::uuid, 1, 'sealed')",
+                       entry);
+        key = tx.exec_params("INSERT INTO secrets_encryption_keys (mount_id, name) VALUES "
+                             "($1::uuid, 'orders') RETURNING id::text",
+                             owned)[0][0]
+                  .as<std::string>();
+        tx.exec_params("INSERT INTO secrets_data_keys (customer_id, owner_kind, owner_id, "
+                       "key_version, wrapped_key) VALUES ($1::uuid, 'mount', $2::uuid, 1, 'w'), "
+                       "($1::uuid, 'encryption', $3::uuid, 1, 'w')",
+                       sole.customer_id, owned, key);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0057_secret_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0057_secret_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = 'secrets_mounts' AND object_id = $1::uuid",
+            id);
+        return found.empty() ? std::pair<std::string, std::string>{}
+                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    const auto route = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT workspace_id::text FROM secret_mount_routes WHERE mount_id = $1::uuid", id);
+        return found.empty() ? std::string() : found[0][0].as<std::string>();
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome(owned),
+                  (std::pair<std::string, std::string>{"sole_workspace", sole.workspaces[0]}));
+        EXPECT_EQ(outcome(waiting), (std::pair<std::string, std::string>{"needs_selection", ""}));
+        EXPECT_EQ(route(owned), sole.workspaces[0]);
+        EXPECT_EQ(route(gone), doomed.workspaces[0]);
+        EXPECT_TRUE(route(waiting).empty());
+    }
+    {
+        pqxx::work tx(connection);
+        EXPECT_TRUE(tx.exec("SELECT 1 FROM information_schema.table_constraints WHERE "
+                            "constraint_name = 'secrets_dynamic_leases_mount_id_fkey' AND "
+                            "table_schema = current_schema()")
+                        .empty());
+        // A route names a live workspace of its own space and never moves.
+        EXPECT_THROW(tx.exec_params("UPDATE secret_mount_routes SET workspace_id = $2::uuid "
+                                    "WHERE mount_id = $1::uuid",
+                                    owned, several.workspaces[0]),
+                     pqxx::check_violation);
+    }
+
+    // The deleted workspace's mount went with it; a reviewed choice routes the waiting one; a
+    // mount written after the migration is picked up by the assignment each copy reruns.
+    ASSERT_TRUE(store->update_workspace(doomed.workspaces[0], {.desired = "deleted"}));
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE workspace_assignments SET workspace_id = $2::uuid WHERE "
+                       "object_table = 'secrets_mounts' AND object_id = $1::uuid",
+                       waiting, several.workspaces[1]);
+        tx.commit();
+    }
+    const std::string late = mount(sole, "late");
+    ASSERT_TRUE(store->assign_legacy_secrets());
+    EXPECT_EQ(route(waiting), several.workspaces[1]);
+    EXPECT_EQ(route(late), sole.workspaces[0]);
+
+    std::map<std::string, lake::control::LegacySecretMount> mounts;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_secret_mounts(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            mounts.emplace(row.mount.id, row);
+        }
+        after = page->back().mount.id;
+    }
+    ASSERT_TRUE(mounts.contains(owned) && mounts.contains(waiting) && mounts.contains(gone));
+    EXPECT_EQ(mounts.at(owned).owner.workspace_id, sole.workspaces[0]);
+    EXPECT_EQ(mounts.at(owned).mount.name, "owned");
+    EXPECT_EQ(mounts.at(waiting).owner.workspace_id, several.workspaces[1]);
+    EXPECT_EQ(mounts.at(gone).owner.outcome, "workspace_deleted");
+    EXPECT_TRUE(mounts.at(gone).owner.workspace_id.empty());
+
+    const auto entries = store->legacy_secret_entries("", 5000);
+    ASSERT_TRUE(entries) << entries.error().message;
+    const auto found_entry = std::ranges::find(*entries, entry, &lake::control::LegacySecretEntry::id);
+    ASSERT_NE(found_entry, entries->end());
+    EXPECT_EQ(found_entry->owner.workspace_id, sole.workspaces[0]);
+    EXPECT_EQ(found_entry->owner.mount_id, owned);
+    const auto versions = store->legacy_secret_versions("", 5000);
+    ASSERT_TRUE(versions) << versions.error().message;
+    const auto found_version = std::ranges::find_if(*versions, [&](const auto& row) {
+        return row.owner.mount_id == owned;
+    });
+    ASSERT_NE(found_version, versions->end());
+    EXPECT_EQ(found_version->ciphertext, "sealed");
+    EXPECT_EQ(found_version->owner.workspace_id, sole.workspaces[0]);
+    const auto keys = store->legacy_encryption_keys("", 5000);
+    ASSERT_TRUE(keys) << keys.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*keys, [&](const auto& row) {
+        return row.key.id == key && row.owner.workspace_id == sole.workspaces[0];
+    }));
+    const auto data_keys = store->legacy_secret_data_keys("", 5000);
+    ASSERT_TRUE(data_keys) << data_keys.error().message;
+    EXPECT_EQ(std::ranges::count_if(*data_keys,
+                                    [&](const auto& row) {
+                                        return row.owner.mount_id == owned &&
+                                               row.owner.workspace_id == sole.workspaces[0];
+                                    }),
+              2)
+        << "a named key's data key follows its key's mount";
 }
 
 TEST(PostgresPlatform, EnvironmentBindingAndMirrorRoundTrip) {

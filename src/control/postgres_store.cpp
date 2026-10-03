@@ -188,6 +188,48 @@ constexpr std::string_view legacy_forge_record_assignment_sql =
     "w.desired = 'deleted' THEN 'workspace_deleted' ELSE 'repository_workspace' END FROM "
     "forge_records f JOIN repositories r ON r.id = f.repository_id LEFT JOIN workspaces w ON "
     "w.id = r.workspace_id ON CONFLICT DO NOTHING";
+// Secrets (lake#328-#332, migration 0057): a legacy mount is owned by the only live workspace of
+// its space, or waits for a reviewed assignment; every assigned mount gets its content-free route,
+// which is where its secrets, keys and data keys are copied to.
+constexpr std::string_view legacy_secret_mount_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'secrets_mounts', m.id, m.customer_id, w.id, CASE WHEN w.id IS NULL THEN "
+    "'needs_selection' ELSE 'sole_workspace' END FROM secrets_mounts m LEFT JOIN workspaces w ON "
+    "w.customer_id = m.customer_id AND w.desired <> 'deleted' AND (SELECT count(*) FROM "
+    "workspaces w2 WHERE w2.customer_id = m.customer_id AND w2.desired <> 'deleted') = 1 "
+    "ON CONFLICT DO NOTHING";
+constexpr std::string_view legacy_secret_mount_route_sql =
+    "INSERT INTO secret_mount_routes (mount_id, customer_id, organization_id, workspace_id) "
+    "SELECT m.id, m.customer_id, m.organization_id, a.workspace_id FROM secrets_mounts m JOIN "
+    "workspace_assignments a ON a.object_table = 'secrets_mounts' AND a.object_id = m.id JOIN "
+    "workspaces w ON w.id = a.workspace_id AND w.customer_id = m.customer_id AND w.desired <> "
+    "'deleted' ON CONFLICT (mount_id) DO NOTHING";
+// A routed legacy mount keeps the policy objects 0009 gave it; one without them (a row written
+// outside create_secret_mount) gets organization -> environment -> secret_mount here, as a new
+// mount does, so its grants resolve.
+constexpr std::string_view legacy_secret_environment_sql =
+    "INSERT INTO objects (object_type, external_id, parent_id) SELECT DISTINCT 'environment', "
+    "'secrets/' || m.customer_id::text || '/' || m.organization_id::text, o.id FROM "
+    "secret_mount_routes r JOIN secrets_mounts m ON m.id = r.mount_id JOIN objects o ON "
+    "o.object_type = 'organization' AND o.external_id = m.organization_id::text "
+    "ON CONFLICT (object_type, external_id) DO NOTHING";
+constexpr std::string_view legacy_secret_mount_object_sql =
+    "INSERT INTO objects (object_type, external_id, parent_id) SELECT 'secret_mount', "
+    "m.id::text, e.id FROM secret_mount_routes r JOIN secrets_mounts m ON m.id = r.mount_id JOIN "
+    "objects e ON e.object_type = 'environment' AND e.external_id = 'secrets/' || "
+    "m.customer_id::text || '/' || m.organization_id::text "
+    "ON CONFLICT (object_type, external_id) DO NOTHING";
+// The owner of a legacy row, from its mount (`o.mount_id`): the mount's route, unless that
+// workspace was deleted, and the mount's recorded assignment outcome.
+constexpr std::string_view legacy_secret_owner_columns =
+    "COALESCE(r.workspace_id::text, ''), COALESCE(sw.desired, ''), "
+    "COALESCE(sa.outcome, 'needs_selection')";
+constexpr std::string_view legacy_secret_owner_joins =
+    " LEFT JOIN secret_mount_routes r ON r.mount_id = o.mount_id LEFT JOIN workspaces sw ON "
+    "sw.id = r.workspace_id LEFT JOIN workspace_assignments sa ON sa.object_table = "
+    "'secrets_mounts' AND sa.object_id = o.mount_id";
+constexpr std::string_view instant_text_format = "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'";
+
 constexpr std::string_view legacy_forge_record_resolution_sql =
     "UPDATE workspace_assignments s SET workspace_id = r.workspace_id, outcome = "
     "'repository_workspace' FROM forge_records f JOIN repositories r ON r.id = f.repository_id "
@@ -1852,33 +1894,6 @@ void remove_scim_user_access(pqxx::work& tx,
                    "AND scim_group_members.user_external_id = $2",
                    provider_id,
                    external_id);
-}
-
-constexpr const char* secret_mount_columns =
-    "id::text, customer_id::text, organization_id::text, name, description, "
-    "created_at::text, updated_at::text";
-constexpr const char* encryption_key_columns =
-    "id::text, mount_id::text, name, coalesce(derived_from_id::text,''), "
-    "current_version, created_at::text, updated_at::text";
-
-SecretMount secret_mount_of(const pqxx::row& row) {
-    return SecretMount{row[0].as<std::string>(),
-                       row[1].as<std::string>(),
-                       row[2].as<std::string>(),
-                       row[3].as<std::string>(),
-                       row[4].as<std::string>(),
-                       row[5].as<std::string>(),
-                       row[6].as<std::string>()};
-}
-
-EncryptionKey encryption_key_of(const pqxx::row& row) {
-    return EncryptionKey{row[0].as<std::string>(),
-                         row[1].as<std::string>(),
-                         row[2].as<std::string>(),
-                         row[3].as<std::string>(),
-                         row[4].as<std::uint64_t>(),
-                         row[5].as<std::string>(),
-                         row[6].as<std::string>()};
 }
 
 class PostgresStore final : public Store, public PlatformStore {
@@ -7784,13 +7799,8 @@ public:
         });
     }
 
-    Result<SecretMount> create_secret_mount(const NewSecretMount& input,
-                                            const std::string& instance_kek) override {
-        if (!valid_handle(input.name)) {
-            return std::unexpected(
-                StoreError{"invalid_input", "mount name must be a lowercase handle"});
-        }
-        return with_tx<SecretMount>([&](pqxx::work& tx) -> Result<SecretMount> {
+    Result<SecretMountRoute> create_secret_mount_route(const SecretMountRoute& input) override {
+        return with_tx<SecretMountRoute>([&](pqxx::work& tx) -> Result<SecretMountRoute> {
             const pqxx::result scope = tx.exec_params(
                 "SELECT organization_object.id::text FROM objects AS organization_object "
                 "JOIN objects AS customer_object ON customer_object.id = "
@@ -7804,16 +7814,23 @@ public:
                 return std::unexpected(StoreError{
                     "invalid_input", "organization_id is not inside the customer namespace"});
             }
-            const pqxx::result rows =
-                tx.exec_params(std::string("INSERT INTO secrets_mounts ") +
-                                   "(customer_id, organization_id, name, description) "
-                                   "VALUES ($1::uuid, $2::uuid, $3, $4) RETURNING " +
-                                   secret_mount_columns,
-                               input.customer_id,
-                               input.organization_id,
-                               input.name,
-                               input.description);
-            const SecretMount mount = secret_mount_of(rows[0]);
+            const pqxx::result workspace = tx.exec_params(
+                "SELECT 1 FROM workspaces WHERE id = $1::uuid AND customer_id = $2::uuid "
+                "AND desired <> 'deleted'",
+                input.workspace_id,
+                input.customer_id);
+            if (workspace.empty()) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "workspace_id must name a live workspace of this space"});
+            }
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO secret_mount_routes (mount_id, customer_id, organization_id, "
+                "workspace_id) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid) "
+                "RETURNING created_at::text",
+                input.mount_id,
+                input.customer_id,
+                input.organization_id,
+                input.workspace_id);
             const std::string environment_external =
                 "secrets/" + input.customer_id + "/" + input.organization_id;
             const pqxx::result environment =
@@ -7826,291 +7843,139 @@ public:
                                scope[0][0].as<std::string>());
             tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) "
                            "VALUES ('secret_mount', $1, $2::uuid)",
-                           mount.id,
+                           input.mount_id,
                            environment[0][0].as<std::string>());
-            auto key = secrets_crypto::random_key();
-            if (!key) {
-                return std::unexpected(key.error());
-            }
-            auto stored =
-                store_data_key_tx(tx, mount.customer_id, "mount", mount.id, 1, *key, instance_kek);
-            secrets_crypto::cleanse(*key);
-            if (!stored) {
-                return std::unexpected(stored.error());
-            }
-            return mount;
+            SecretMountRoute route = input;
+            route.created_at = rows[0][0].as<std::string>();
+            return route;
         });
     }
 
-    Result<std::vector<SecretMount>> list_secret_mounts(const std::string& customer_id,
-                                                        const std::string& organization_id,
-                                                        int limit) override {
-        return with_tx<std::vector<SecretMount>>(
-            [&](pqxx::work& tx) -> Result<std::vector<SecretMount>> {
+    Result<SecretMountRoute> get_secret_mount_route(const std::string& mount_id) override {
+        return with_tx<SecretMountRoute>([&](pqxx::work& tx) -> Result<SecretMountRoute> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT mount_id::text, customer_id::text, organization_id::text, "
+                "workspace_id::text, created_at::text FROM secret_mount_routes "
+                "WHERE mount_id = $1::uuid",
+                mount_id);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no secret mount " + mount_id});
+            }
+            return SecretMountRoute{rows[0][0].as<std::string>(), rows[0][1].as<std::string>(),
+                                    rows[0][2].as<std::string>(), rows[0][3].as<std::string>(),
+                                    rows[0][4].as<std::string>()};
+        });
+    }
+
+    Result<std::vector<SecretMountRoute>>
+    list_secret_mount_routes(const std::string& customer_id,
+                             const std::string& workspace_id) override {
+        return with_tx<std::vector<SecretMountRoute>>(
+            [&](pqxx::work& tx) -> Result<std::vector<SecretMountRoute>> {
                 const pqxx::result rows = tx.exec_params(
-                    std::string("SELECT ") + secret_mount_columns +
-                        " FROM secrets_mounts WHERE "
-                        "(NULLIF($1, '') IS NULL OR customer_id = NULLIF($1, '')::uuid) AND "
-                        "(NULLIF($2, '') IS NULL OR organization_id = NULLIF($2, '')::uuid) "
-                        "ORDER BY created_at DESC LIMIT $3",
+                    "SELECT mount_id::text, customer_id::text, organization_id::text, "
+                    "workspace_id::text, created_at::text FROM secret_mount_routes "
+                    "WHERE customer_id = $1::uuid AND (NULLIF($2, '') IS NULL OR "
+                    "workspace_id = NULLIF($2, '')::uuid) ORDER BY created_at DESC, mount_id",
                     customer_id,
-                    organization_id,
-                    limit);
-                std::vector<SecretMount> output;
+                    workspace_id);
+                std::vector<SecretMountRoute> routes;
                 for (const pqxx::row& row : rows) {
-                    output.push_back(secret_mount_of(row));
+                    routes.push_back({row[0].as<std::string>(), row[1].as<std::string>(),
+                                      row[2].as<std::string>(), row[3].as<std::string>(),
+                                      row[4].as<std::string>()});
                 }
-                return output;
+                return routes;
             });
     }
 
-    Result<SecretMount> get_secret_mount(const std::string& id) override {
-        return with_tx<SecretMount>([&](pqxx::work& tx) { return secret_mount_tx(tx, id); });
-    }
-
-    Result<SecretVersion> put_secret(const PutSecret& input,
-                                     const std::string& instance_kek) override {
-        if (input.name.empty() || input.name.size() > 1024 || !input.value.is_object() ||
-            !input.custom_metadata.is_object()) {
-            return std::unexpected(StoreError{
-                "invalid_input", "secret name, object value, and object metadata are required"});
-        }
-        return with_tx<SecretVersion>([&](pqxx::work& tx) -> Result<SecretVersion> {
-            auto mount = secret_mount_tx(tx, input.mount_id);
-            if (!mount) {
-                return std::unexpected(mount.error());
+    Result<WrappedDataKey> wrap_secret_data_key(const std::string& customer_id,
+                                                const std::string& owner_id,
+                                                std::uint64_t key_version,
+                                                const std::string& raw_key,
+                                                const std::string& instance_kek) override {
+        return with_tx<WrappedDataKey>([&](pqxx::work& tx) -> Result<WrappedDataKey> {
+            auto customer_key = customer_kek_tx(tx, customer_id, instance_kek, true);
+            if (!customer_key) {
+                return std::unexpected(customer_key.error());
             }
-            pqxx::result entries = tx.exec_params(
-                "SELECT id::text, current_version, custom_metadata::text FROM secrets_entries "
-                "WHERE mount_id = $1::uuid AND name = $2 FOR UPDATE",
-                input.mount_id,
-                input.name);
-            std::string entry_id;
-            std::uint64_t current = 0;
-            nlohmann::json metadata = input.custom_metadata;
-            if (entries.empty()) {
-                entries =
-                    tx.exec_params("INSERT INTO secrets_entries (mount_id, name, custom_metadata) "
-                                   "VALUES ($1::uuid, $2, $3::jsonb) "
-                                   "RETURNING id::text, current_version, custom_metadata::text",
-                                   input.mount_id,
-                                   input.name,
-                                   input.custom_metadata.dump());
-                const pqxx::result mount_object = tx.exec_params(
-                    "SELECT id::text FROM objects WHERE object_type = 'secret_mount' "
-                    "AND external_id = $1",
-                    input.mount_id);
-                tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) "
-                               "VALUES ('secret', $1, $2::uuid)",
-                               input.mount_id + "/" + input.name,
-                               mount_object[0][0].as<std::string>());
-            } else {
-                current = entries[0][1].as<std::uint64_t>();
-                metadata = input.custom_metadata.empty()
-                               ? nlohmann::json::parse(entries[0][2].as<std::string>())
-                               : input.custom_metadata;
+            const pqxx::result keystore = tx.exec_params(
+                "SELECT version FROM keystore WHERE customer_id = $1::uuid", customer_id);
+            const std::string associated = "lake data key/" + customer_id + "/" + owner_id + "/" +
+                                           std::to_string(key_version);
+            auto wrapped = secrets_crypto::seal(*customer_key, raw_key, associated);
+            secrets_crypto::cleanse(*customer_key);
+            if (!wrapped) {
+                return std::unexpected(wrapped.error());
             }
-            entry_id = entries[0][0].as<std::string>();
-            if (input.check_and_set != 0 && input.check_and_set != current) {
-                return std::unexpected(StoreError{"conflict", "secret version changed"});
-            }
-            const std::uint64_t version = current + 1;
-            auto key = data_key_tx(tx, "mount", mount->id, 1, instance_kek);
-            if (!key) {
-                return std::unexpected(key.error());
-            }
-            const std::string associated =
-                "lake secret/" + mount->id + "/" + input.name + "/" + std::to_string(version);
-            auto ciphertext = secrets_crypto::seal(*key, input.value.dump(), associated);
-            secrets_crypto::cleanse(*key);
-            if (!ciphertext) {
-                return std::unexpected(ciphertext.error());
-            }
-            const pqxx::result created =
-                tx.exec_params("INSERT INTO secrets_versions (entry_id, version, ciphertext) "
-                               "VALUES ($1::uuid, $2, $3) RETURNING created_at::text",
-                               entry_id,
-                               version,
-                               *ciphertext);
-            const pqxx::result updated = tx.exec_params(
-                "UPDATE secrets_entries SET current_version = $2, custom_metadata = $3::jsonb, "
-                "updated_at = now() WHERE id = $1::uuid RETURNING updated_at::text",
-                entry_id,
-                version,
-                metadata.dump());
-            return SecretVersion{mount->id,
-                                 input.name,
-                                 version,
-                                 input.value,
-                                 metadata,
-                                 created[0][0].as<std::string>(),
-                                 "",
-                                 ""};
+            return WrappedDataKey{keystore[0][0].as<std::uint64_t>(), *wrapped};
         });
     }
 
-    Result<SecretVersion> read_secret(const std::string& mount_id,
-                                      const std::string& name,
-                                      std::uint64_t version,
-                                      const std::string& instance_kek) override {
-        return with_tx<SecretVersion>([&](pqxx::work& tx) -> Result<SecretVersion> {
-            auto mount = secret_mount_tx(tx, mount_id);
-            if (!mount) {
-                return std::unexpected(mount.error());
+    Result<std::string> unwrap_secret_data_key(const std::string& customer_id,
+                                               const std::string& owner_id,
+                                               std::uint64_t key_version,
+                                               const WrappedDataKey& wrapped,
+                                               const std::string& instance_kek) override {
+        return with_tx<std::string>([&](pqxx::work& tx) -> Result<std::string> {
+            auto customer_key = customer_kek_version_tx(tx, customer_id, instance_kek,
+                                                        wrapped.kek_version);
+            if (!customer_key) {
+                return std::unexpected(customer_key.error());
             }
+            const std::string associated = "lake data key/" + customer_id + "/" + owner_id + "/" +
+                                           std::to_string(key_version);
+            auto opened = secrets_crypto::open(*customer_key, wrapped.wrapped_key, associated);
+            secrets_crypto::cleanse(*customer_key);
+            if (!opened || opened->size() != secrets_crypto::Key{}.size()) {
+                return std::unexpected(opened ? StoreError{"store_error", "data key is invalid"}
+                                              : opened.error());
+            }
+            return std::move(*opened);
+        });
+    }
+
+    Result<CustomerKekState> customer_kek_state(const std::string& customer_id) override {
+        return with_tx<CustomerKekState>([&](pqxx::work& tx) -> Result<CustomerKekState> {
             const pqxx::result rows = tx.exec_params(
-                "SELECT versions.version, versions.ciphertext, versions.created_at::text, "
-                "coalesce(versions.deleted_at::text,''), "
-                "coalesce(versions.destroyed_at::text,''), entries.custom_metadata::text "
-                "FROM secrets_entries AS entries JOIN secrets_versions AS versions "
-                "ON versions.entry_id = entries.id WHERE entries.mount_id = $1::uuid "
-                "AND entries.name = $2 AND versions.version = "
-                "CASE WHEN $3 = 0 THEN entries.current_version ELSE $3 END",
-                mount_id,
-                name,
-                version);
+                "SELECT version, COALESCE(previous_version, 0) FROM keystore "
+                "WHERE customer_id = $1::uuid",
+                customer_id);
             if (rows.empty()) {
-                return std::unexpected(StoreError{"not_found", "secret version does not exist"});
+                return std::unexpected(StoreError{"not_found", "no customer key exists"});
             }
-            if (!rows[0][4].as<std::string>().empty()) {
-                return std::unexpected(StoreError{"not_found", "secret version was destroyed"});
-            }
-            if (!rows[0][3].as<std::string>().empty()) {
-                return std::unexpected(StoreError{"not_found", "secret version is deleted"});
-            }
-            auto key = data_key_tx(tx, "mount", mount_id, 1, instance_kek);
-            if (!key) {
-                return std::unexpected(key.error());
-            }
-            const std::uint64_t selected = rows[0][0].as<std::uint64_t>();
-            const std::string associated =
-                "lake secret/" + mount_id + "/" + name + "/" + std::to_string(selected);
-            auto plaintext = secrets_crypto::open(*key, rows[0][1].as<std::string>(), associated);
-            secrets_crypto::cleanse(*key);
-            if (!plaintext) {
-                return std::unexpected(plaintext.error());
-            }
-            nlohmann::json value = nlohmann::json::parse(*plaintext, nullptr, false);
-            if (value.is_discarded() || !value.is_object()) {
-                return std::unexpected(
-                    StoreError{"store_error", "stored secret is not valid JSON"});
-            }
-            return SecretVersion{mount_id,
-                                 name,
-                                 selected,
-                                 std::move(value),
-                                 nlohmann::json::parse(rows[0][5].as<std::string>()),
-                                 rows[0][2].as<std::string>(),
-                                 "",
-                                 ""};
+            return CustomerKekState{rows[0][0].as<std::uint64_t>(),
+                                    rows[0][1].as<std::uint64_t>()};
         });
     }
 
-    Result<SecretMetadata> secret_metadata(const std::string& mount_id,
-                                           const std::string& name) override {
-        return with_tx<SecretMetadata>(
-            [&](pqxx::work& tx) { return secret_metadata_tx(tx, mount_id, name); });
-    }
-
-    Result<SecretMetadata> change_secret_versions(const std::string& mount_id,
-                                                  const std::string& name,
-                                                  const std::vector<std::uint64_t>& versions,
-                                                  SecretVersionAction action) override {
-        if (versions.empty()) {
-            return std::unexpected(StoreError{"invalid_input", "at least one version is required"});
-        }
-        return with_tx<SecretMetadata>([&](pqxx::work& tx) -> Result<SecretMetadata> {
-            const pqxx::result entries = tx.exec_params(
-                "SELECT id::text FROM secrets_entries WHERE mount_id = $1::uuid AND name = $2 "
-                "FOR UPDATE",
-                mount_id,
-                name);
-            if (entries.empty()) {
-                return std::unexpected(StoreError{"not_found", "secret does not exist"});
-            }
-            const std::string entry_id = entries[0][0].as<std::string>();
-            for (const std::uint64_t version : versions) {
-                const pqxx::result row =
-                    tx.exec_params("SELECT destroyed_at IS NOT NULL FROM secrets_versions "
-                                   "WHERE entry_id = $1::uuid AND version = $2 FOR UPDATE",
-                                   entry_id,
-                                   version);
-                if (row.empty()) {
-                    return std::unexpected(
-                        StoreError{"not_found", "secret version does not exist"});
-                }
-                if (action == SecretVersionAction::Undelete && row[0][0].as<bool>()) {
-                    return std::unexpected(
-                        StoreError{"conflict", "a destroyed secret version cannot be restored"});
-                }
-            }
-            for (const std::uint64_t version : versions) {
-                if (action == SecretVersionAction::Delete) {
-                    tx.exec_params(
-                        "UPDATE secrets_versions SET deleted_at = COALESCE(deleted_at, now()) "
-                        "WHERE entry_id = $1::uuid AND version = $2 "
-                        "AND destroyed_at IS NULL",
-                        entry_id,
-                        version);
-                } else if (action == SecretVersionAction::Undelete) {
-                    tx.exec_params("UPDATE secrets_versions SET deleted_at = NULL "
-                                   "WHERE entry_id = $1::uuid AND version = $2",
-                                   entry_id,
-                                   version);
-                } else {
-                    tx.exec_params("UPDATE secrets_versions SET ciphertext = NULL, "
-                                   "deleted_at = COALESCE(deleted_at, now()), destroyed_at = now() "
-                                   "WHERE entry_id = $1::uuid AND version = $2",
-                                   entry_id,
-                                   version);
-                }
-            }
-            tx.exec_params("UPDATE secrets_entries SET updated_at = now() WHERE id = $1::uuid",
-                           entry_id);
-            return secret_metadata_tx(tx, mount_id, name);
+    Result<void> retire_customer_kek(const std::string& customer_id,
+                                     std::uint64_t previous_version) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec_params("UPDATE keystore SET previous_wrapped_key = NULL, previous_version = "
+                           "NULL WHERE customer_id = $1::uuid AND previous_version = $2",
+                           customer_id,
+                           previous_version);
+            return {};
         });
     }
 
-    Result<IssuedDynamicSecret> lease_dynamic_secret(const NewDynamicSecretLease& input,
-                                                     const std::string& instance_kek) override {
-        if (input.role.empty() || !input.value.is_object() || input.lifetime_seconds < 1 ||
-            input.lifetime_seconds > 3600) {
+    Result<DynamicSecretLease> lease_dynamic_secret(const NewDynamicSecretLease& input) override {
+        if (input.id.empty() || input.role.empty() || input.encrypted_value.empty() ||
+            input.lifetime_seconds < 1 || input.lifetime_seconds > 3600) {
             return std::unexpected(StoreError{"invalid_input", "dynamic-secret lease is invalid"});
         }
-        return with_tx<IssuedDynamicSecret>([&](pqxx::work& tx) -> Result<IssuedDynamicSecret> {
-            const std::string id = new_uuid_v4();
-            auto key = data_key_tx(tx, "mount", input.mount_id, 1, instance_kek);
-            if (!key) {
-                return std::unexpected(key.error());
-            }
-            const std::string associated = "lake dynamic secret/" + input.mount_id + "/" + id;
-            const auto encrypted = secrets_crypto::seal(*key, input.value.dump(), associated);
-            secrets_crypto::cleanse(*key);
-            if (!encrypted) {
-                return std::unexpected(encrypted.error());
-            }
-            const pqxx::result rows = tx.exec_params(
-                "INSERT INTO secrets_dynamic_leases "
-                "(id, mount_id, role, encrypted_value, expires_at) "
-                "VALUES ($1::uuid, $2::uuid, $3, $4, "
-                "now() + make_interval(secs => $5)) RETURNING id::text, mount_id::text, role, "
-                "expires_at::text, coalesce(revoked_at::text,''), renewals, created_at::text",
-                id,
-                input.mount_id,
-                input.role,
-                *encrypted,
-                input.lifetime_seconds);
-            if (rows.empty()) {
-                return std::unexpected(StoreError{"not_found", "secret mount does not exist"});
-            }
-            DynamicSecretLease lease{rows[0][0].as<std::string>(),
-                                     rows[0][1].as<std::string>(),
-                                     rows[0][2].as<std::string>(),
-                                     rows[0][3].as<std::string>(),
-                                     rows[0][4].as<std::string>(),
-                                     rows[0][5].as<int>(),
-                                     rows[0][6].as<std::string>()};
-            return IssuedDynamicSecret{std::move(lease), input.value};
+        return with_tx<DynamicSecretLease>([&](pqxx::work& tx) -> Result<DynamicSecretLease> {
+            tx.exec_params("INSERT INTO secrets_dynamic_leases "
+                           "(id, mount_id, role, encrypted_value, expires_at) "
+                           "VALUES ($1::uuid, $2::uuid, $3, $4, "
+                           "now() + make_interval(secs => $5))",
+                           input.id,
+                           input.mount_id,
+                           input.role,
+                           input.encrypted_value,
+                           input.lifetime_seconds);
+            return dynamic_secret_lease_tx(tx, input.id);
         });
     }
 
@@ -8154,344 +8019,35 @@ public:
         });
     }
 
-    Result<EncryptionKey> create_encryption_key(const NewEncryptionKey& input,
-                                                const std::string& instance_kek) override {
-        if (!valid_handle(input.name)) {
-            return std::unexpected(
-                StoreError{"invalid_input", "encryption key name must be a lowercase handle"});
-        }
-        return with_tx<EncryptionKey>([&](pqxx::work& tx) -> Result<EncryptionKey> {
-            auto mount = secret_mount_tx(tx, input.mount_id);
-            if (!mount) {
-                return std::unexpected(mount.error());
-            }
-            const pqxx::result rows = tx.exec_params(
-                std::string("INSERT INTO secrets_encryption_keys (mount_id, name) ") +
-                    "VALUES ($1::uuid, $2) RETURNING " + encryption_key_columns,
-                input.mount_id,
-                input.name);
-            const EncryptionKey key = encryption_key_of(rows[0]);
-            auto material = secrets_crypto::random_key();
-            if (!material) {
-                return std::unexpected(material.error());
-            }
-            auto stored = store_data_key_tx(
-                tx, mount->customer_id, "encryption", key.id, 1, *material, instance_kek);
-            secrets_crypto::cleanse(*material);
-            if (!stored) {
-                return std::unexpected(stored.error());
-            }
-            return key;
-        });
-    }
-
-    Result<std::vector<EncryptionKey>> list_encryption_keys(const std::string& mount_id,
-                                                            int limit) override {
-        return with_tx<std::vector<EncryptionKey>>(
-            [&](pqxx::work& tx) -> Result<std::vector<EncryptionKey>> {
-                const pqxx::result rows =
-                    tx.exec_params(std::string("SELECT ") + encryption_key_columns +
-                                       " FROM secrets_encryption_keys WHERE mount_id = $1::uuid "
-                                       "ORDER BY created_at DESC LIMIT $2",
-                                   mount_id,
-                                   limit);
-                std::vector<EncryptionKey> output;
-                for (const pqxx::row& row : rows) {
-                    output.push_back(encryption_key_of(row));
-                }
-                return output;
-            });
-    }
-
-    Result<EncryptionKey> get_encryption_key(const std::string& mount_id,
-                                             const std::string& name) override {
-        return with_tx<EncryptionKey>(
-            [&](pqxx::work& tx) { return encryption_key_tx(tx, mount_id, name); });
-    }
-
-    Result<EncryptionKey> rotate_encryption_key(const std::string& mount_id,
-                                                const std::string& name,
-                                                const std::string& instance_kek) override {
-        return with_tx<EncryptionKey>([&](pqxx::work& tx) -> Result<EncryptionKey> {
-            auto mount = secret_mount_tx(tx, mount_id);
-            auto key = encryption_key_tx(tx, mount_id, name);
-            if (!mount || !key) {
-                return std::unexpected(!mount ? mount.error() : key.error());
-            }
-            const pqxx::result locked =
-                tx.exec_params("SELECT current_version FROM secrets_encryption_keys WHERE id = "
-                               "$1::uuid FOR UPDATE",
-                               key->id);
-            const std::uint64_t version = locked[0][0].as<std::uint64_t>() + 1;
-            auto material = secrets_crypto::random_key();
-            if (!material) {
-                return std::unexpected(material.error());
-            }
-            auto stored = store_data_key_tx(
-                tx, mount->customer_id, "encryption", key->id, version, *material, instance_kek);
-            secrets_crypto::cleanse(*material);
-            if (!stored) {
-                return std::unexpected(stored.error());
-            }
-            const pqxx::result rows = tx.exec_params(
-                std::string("UPDATE secrets_encryption_keys SET current_version = $2, ") +
-                    "updated_at = now() WHERE id = $1::uuid RETURNING " + encryption_key_columns,
-                key->id,
-                version);
-            return encryption_key_of(rows[0]);
-        });
-    }
-
-    Result<TransitValue> encrypt(const std::string& mount_id,
-                                 const std::string& name,
-                                 const std::string& plaintext,
-                                 const std::string& instance_kek) override {
-        return with_tx<TransitValue>([&](pqxx::work& tx) -> Result<TransitValue> {
-            auto mount = secret_mount_tx(tx, mount_id);
-            auto key = encryption_key_tx(tx, mount_id, name);
-            if (!mount || !key) {
-                return std::unexpected(!mount ? mount.error() : key.error());
-            }
-            return encrypt_tx(tx, *mount, *key, plaintext, instance_kek);
-        });
-    }
-
-    Result<TransitValue> decrypt(const std::string& mount_id,
-                                 const std::string& name,
-                                 const std::string& ciphertext,
-                                 const std::string& instance_kek) override {
-        return with_tx<TransitValue>([&](pqxx::work& tx) -> Result<TransitValue> {
-            auto key = encryption_key_tx(tx, mount_id, name);
-            auto parsed = secrets_crypto::parse_ciphertext(ciphertext);
-            if (!key) {
-                return std::unexpected(key.error());
-            }
-            if (!parsed || parsed->key_id != key->id) {
-                return std::unexpected(
-                    parsed ? StoreError{"invalid_input", "ciphertext names another key"}
-                           : parsed.error());
-            }
-            auto material = data_key_tx(tx, "encryption", key->id, parsed->version, instance_kek);
-            if (!material) {
-                return std::unexpected(material.error());
-            }
-            auto encryption_key = secrets_crypto::derive(*material, "lake transit encryption v1");
-            secrets_crypto::cleanse(*material);
-            if (!encryption_key) {
-                return std::unexpected(encryption_key.error());
-            }
-            const std::string associated =
-                "lake transit/" + key->id + "/" + std::to_string(parsed->version);
-            auto plaintext = secrets_crypto::open(*encryption_key, parsed->sealed, associated);
-            secrets_crypto::cleanse(*encryption_key);
-            if (!plaintext) {
-                return std::unexpected(plaintext.error());
-            }
-            auto encoded = secrets_crypto::base64url_encode(*plaintext);
-            if (!encoded) {
-                return std::unexpected(encoded.error());
-            }
-            return TransitValue{*encoded, parsed->version, "base64url"};
-        });
-    }
-
-    Result<TransitValue> rewrap(const std::string& mount_id,
-                                const std::string& name,
-                                const std::string& ciphertext,
-                                const std::string& instance_kek) override {
-        return with_tx<TransitValue>([&](pqxx::work& tx) -> Result<TransitValue> {
-            auto mount = secret_mount_tx(tx, mount_id);
-            auto key = encryption_key_tx(tx, mount_id, name);
-            auto parsed = secrets_crypto::parse_ciphertext(ciphertext);
-            if (!mount || !key) {
-                return std::unexpected(!mount ? mount.error() : key.error());
-            }
-            if (!parsed || parsed->key_id != key->id) {
-                return std::unexpected(
-                    parsed ? StoreError{"invalid_input", "ciphertext names another key"}
-                           : parsed.error());
-            }
-            auto old_material =
-                data_key_tx(tx, "encryption", key->id, parsed->version, instance_kek);
-            if (!old_material) {
-                return std::unexpected(old_material.error());
-            }
-            auto old_key = secrets_crypto::derive(*old_material, "lake transit encryption v1");
-            secrets_crypto::cleanse(*old_material);
-            if (!old_key) {
-                return std::unexpected(old_key.error());
-            }
-            const std::string associated =
-                "lake transit/" + key->id + "/" + std::to_string(parsed->version);
-            auto plaintext = secrets_crypto::open(*old_key, parsed->sealed, associated);
-            secrets_crypto::cleanse(*old_key);
-            if (!plaintext) {
-                return std::unexpected(plaintext.error());
-            }
-            auto encoded = secrets_crypto::base64url_encode(*plaintext);
-            if (!encoded) {
-                return std::unexpected(encoded.error());
-            }
-            return encrypt_tx(tx, *mount, *key, *encoded, instance_kek);
-        });
-    }
-
-    Result<TransitValue> sign(const std::string& mount_id,
-                              const std::string& name,
-                              const std::string& message,
-                              std::uint64_t version,
-                              const std::string& instance_kek) override {
-        return with_tx<TransitValue>([&](pqxx::work& tx) -> Result<TransitValue> {
-            auto key = encryption_key_tx(tx, mount_id, name);
-            if (!key) {
-                return std::unexpected(key.error());
-            }
-            const std::uint64_t selected = version == 0 ? key->current_version : version;
-            auto decoded = secrets_crypto::base64url_decode(message);
-            auto material = data_key_tx(tx, "encryption", key->id, selected, instance_kek);
-            if (!decoded || !material) {
-                return std::unexpected(!decoded ? decoded.error() : material.error());
-            }
-            auto signing_key = secrets_crypto::derive(*material, "lake transit signing v1");
-            secrets_crypto::cleanse(*material);
-            if (!signing_key) {
-                return std::unexpected(signing_key.error());
-            }
-            auto signature = secrets_crypto::sign(*signing_key, *decoded);
-            secrets_crypto::cleanse(*signing_key);
-            if (!signature) {
-                return std::unexpected(signature.error());
-            }
-            return TransitValue{*signature, selected, "ed25519"};
-        });
-    }
-
-    Result<TransitVerification> verify(const std::string& mount_id,
-                                       const std::string& name,
-                                       const std::string& message,
-                                       const std::string& signature,
-                                       std::uint64_t version,
-                                       const std::string& instance_kek) override {
-        return with_tx<TransitVerification>([&](pqxx::work& tx) -> Result<TransitVerification> {
-            auto key = encryption_key_tx(tx, mount_id, name);
-            if (!key) {
-                return std::unexpected(key.error());
-            }
-            const std::uint64_t selected = version == 0 ? key->current_version : version;
-            auto decoded = secrets_crypto::base64url_decode(message);
-            auto material = data_key_tx(tx, "encryption", key->id, selected, instance_kek);
-            if (!decoded || !material) {
-                return std::unexpected(!decoded ? decoded.error() : material.error());
-            }
-            auto signing_key = secrets_crypto::derive(*material, "lake transit signing v1");
-            secrets_crypto::cleanse(*material);
-            if (!signing_key) {
-                return std::unexpected(signing_key.error());
-            }
-            auto valid = secrets_crypto::verify(*signing_key, *decoded, signature);
-            secrets_crypto::cleanse(*signing_key);
-            if (!valid) {
-                return std::unexpected(valid.error());
-            }
-            return TransitVerification{*valid, selected, "ed25519"};
-        });
-    }
-
-    Result<TransitValue> hmac(const std::string& mount_id,
-                              const std::string& name,
-                              const std::string& message,
-                              std::uint64_t version,
-                              const std::string& instance_kek) override {
-        return with_tx<TransitValue>([&](pqxx::work& tx) -> Result<TransitValue> {
-            auto key = encryption_key_tx(tx, mount_id, name);
-            if (!key) {
-                return std::unexpected(key.error());
-            }
-            const std::uint64_t selected = version == 0 ? key->current_version : version;
-            auto decoded = secrets_crypto::base64url_decode(message);
-            auto material = data_key_tx(tx, "encryption", key->id, selected, instance_kek);
-            if (!decoded || !material) {
-                return std::unexpected(!decoded ? decoded.error() : material.error());
-            }
-            auto hmac_key = secrets_crypto::derive(*material, "lake transit hmac v1");
-            secrets_crypto::cleanse(*material);
-            if (!hmac_key) {
-                return std::unexpected(hmac_key.error());
-            }
-            auto digest = secrets_crypto::hmac(*hmac_key, *decoded);
-            secrets_crypto::cleanse(*hmac_key);
-            if (!digest) {
-                return std::unexpected(digest.error());
-            }
-            return TransitValue{*digest, selected, "hmac-sha256"};
-        });
-    }
-
-    Result<DerivedEncryptionKey> derive_encryption_key(const std::string& mount_id,
-                                                       const std::string& parent_name,
-                                                       const std::string& name,
-                                                       const std::string& context,
-                                                       const std::string& instance_kek) override {
-        if (!valid_handle(name)) {
-            return std::unexpected(
-                StoreError{"invalid_input", "derived key name must be a lowercase handle"});
-        }
-        return with_tx<DerivedEncryptionKey>([&](pqxx::work& tx) -> Result<DerivedEncryptionKey> {
-            auto mount = secret_mount_tx(tx, mount_id);
-            auto parent = encryption_key_tx(tx, mount_id, parent_name);
-            if (!mount || !parent) {
-                return std::unexpected(!mount ? mount.error() : parent.error());
-            }
-            auto decoded_context = secrets_crypto::base64url_decode(context);
-            auto material =
-                data_key_tx(tx, "encryption", parent->id, parent->current_version, instance_kek);
-            if (!decoded_context || !material) {
-                return std::unexpected(!decoded_context ? decoded_context.error()
-                                                        : material.error());
-            }
-            auto derived =
-                secrets_crypto::derive(*material, "lake transit child v1/" + *decoded_context);
-            secrets_crypto::cleanse(*material);
-            if (!derived) {
-                return std::unexpected(derived.error());
-            }
-            const pqxx::result rows = tx.exec_params(
-                std::string("INSERT INTO secrets_encryption_keys ") +
-                    "(mount_id, name, derived_from_id) VALUES ($1::uuid, $2, $3::uuid) "
-                    "RETURNING " +
-                    encryption_key_columns,
-                mount_id,
-                name,
-                parent->id);
-            const EncryptionKey child = encryption_key_of(rows[0]);
-            auto stored = store_data_key_tx(
-                tx, mount->customer_id, "encryption", child.id, 1, *derived, instance_kek);
-            secrets_crypto::cleanse(*derived);
-            if (!stored) {
-                return std::unexpected(stored.error());
-            }
-            return DerivedEncryptionKey{child, parent->current_version};
-        });
-    }
-
     Result<CustomerKekRotation> rotate_customer_kek(const std::string& customer_id,
                                                     const std::string& instance_kek) override {
         return with_tx<CustomerKekRotation>([&](pqxx::work& tx) -> Result<CustomerKekRotation> {
+            const pqxx::result keystore =
+                tx.exec_params("SELECT version, previous_version IS NOT NULL FROM keystore "
+                               "WHERE customer_id = $1::uuid FOR UPDATE",
+                               customer_id);
+            if (keystore.empty()) {
+                return std::unexpected(StoreError{"not_found", "no customer key exists"});
+            }
+            if (keystore[0][1].as<bool>()) {
+                return std::unexpected(StoreError{
+                    "conflict", "an earlier customer KEK rotation is still rewrapping data keys"});
+            }
             auto root = secrets_crypto::instance_key(instance_kek);
             auto old_key = customer_kek_tx(tx, customer_id, instance_kek, false);
             if (!root || !old_key) {
                 return std::unexpected(!root ? root.error() : old_key.error());
             }
-            const pqxx::result keystore = tx.exec_params(
-                "SELECT version FROM keystore WHERE customer_id = $1::uuid FOR UPDATE",
-                customer_id);
-            const std::uint64_t version = keystore[0][0].as<std::uint64_t>() + 1;
+            const std::uint64_t previous = keystore[0][0].as<std::uint64_t>();
+            const std::uint64_t version = previous + 1;
             auto new_key = secrets_crypto::random_key();
             if (!new_key) {
                 secrets_crypto::cleanse(*root);
                 secrets_crypto::cleanse(*old_key);
                 return std::unexpected(new_key.error());
             }
+            // The retired secrets_data_keys rows stay readable for the one-shot copy until the
+            // table is dropped, so they are rewrapped here as before.
             const pqxx::result data_keys =
                 tx.exec_params("SELECT owner_kind, owner_id::text, key_version, wrapped_key "
                                "FROM secrets_data_keys "
@@ -8533,19 +8089,21 @@ public:
                 const std::string root_associated = "lake pki authority/" + customer_id + "/root";
                 const std::string intermediate_associated =
                     "lake pki authority/" + customer_id + "/intermediate";
-                auto root =
+                auto root_key =
                     secrets_crypto::open(*old_key, row[1].as<std::string>(), root_associated);
                 auto intermediate = secrets_crypto::open(
                     *old_key, row[2].as<std::string>(), intermediate_associated);
-                if (!root || !intermediate) {
+                if (!root_key || !intermediate) {
+                    secrets_crypto::cleanse(*root);
                     secrets_crypto::cleanse(*old_key);
                     secrets_crypto::cleanse(*new_key);
-                    return std::unexpected(!root ? root.error() : intermediate.error());
+                    return std::unexpected(!root_key ? root_key.error() : intermediate.error());
                 }
-                auto wrapped_root = secrets_crypto::seal(*new_key, *root, root_associated);
+                auto wrapped_root = secrets_crypto::seal(*new_key, *root_key, root_associated);
                 auto wrapped_intermediate =
                     secrets_crypto::seal(*new_key, *intermediate, intermediate_associated);
                 if (!wrapped_root || !wrapped_intermediate) {
+                    secrets_crypto::cleanse(*root);
                     secrets_crypto::cleanse(*old_key);
                     secrets_crypto::cleanse(*new_key);
                     return std::unexpected(!wrapped_root ? wrapped_root.error()
@@ -8568,7 +8126,10 @@ public:
             if (!wrapped_customer) {
                 return std::unexpected(wrapped_customer.error());
             }
-            tx.exec_params("UPDATE keystore SET wrapped_key = convert_to($2, 'UTF8'), "
+            // The replaced KEK is kept, still wrapped under its own version's associated data,
+            // until every workspace data key it wraps has been rewrapped (retire_customer_kek).
+            tx.exec_params("UPDATE keystore SET previous_wrapped_key = wrapped_key, "
+                           "previous_version = version, wrapped_key = convert_to($2, 'UTF8'), "
                            "version = $3, updated_at = now() WHERE customer_id = $1::uuid",
                            customer_id,
                            *wrapped_customer,
@@ -8576,8 +8137,222 @@ public:
             return CustomerKekRotation{
                 customer_id,
                 version,
-                static_cast<std::uint64_t>(data_keys.size() + authorities.size())};
+                static_cast<std::uint64_t>(data_keys.size() + authorities.size()),
+                previous};
         });
+    }
+
+    Result<void> assign_legacy_secrets() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec(std::string(legacy_secret_mount_assignment_sql));
+            tx.exec(std::string(legacy_secret_mount_route_sql));
+            tx.exec(std::string(legacy_secret_environment_sql));
+            tx.exec(std::string(legacy_secret_mount_object_sql));
+            return {};
+        });
+    }
+
+    static LegacySecretOwner legacy_secret_owner(const pqxx::row& row, int at,
+                                                 std::string customer_id, std::string mount_id) {
+        LegacySecretOwner owner{std::move(customer_id), std::move(mount_id), "", ""};
+        const std::string routed = row[at].as<std::string>();
+        const std::string desired = row[at + 1].as<std::string>();
+        owner.outcome = row[at + 2].as<std::string>();
+        if (!routed.empty() && desired == "deleted") {
+            owner.outcome = "workspace_deleted";
+        } else if (!routed.empty()) {
+            owner.workspace_id = routed;
+        }
+        return owner;
+    }
+
+    Result<std::vector<LegacySecretMount>> legacy_secret_mounts(const std::string& after_id,
+                                                                int limit) override {
+        return with_tx<std::vector<LegacySecretMount>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacySecretMount>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT o.mount_id::text, m.customer_id::text, m.organization_id::text, "
+                    "m.name, m.description, (extract(epoch FROM m.created_at) * 1000000)::bigint, "
+                    "to_char(m.updated_at AT TIME ZONE 'UTC', " +
+                        std::string(instant_text_format) + "), " +
+                        std::string(legacy_secret_owner_columns) +
+                        " FROM (SELECT id AS mount_id FROM secrets_mounts) o JOIN secrets_mounts "
+                        "m ON m.id = o.mount_id" +
+                        std::string(legacy_secret_owner_joins) +
+                        " WHERE ($1 = '' OR o.mount_id > NULLIF($1, '')::uuid) "
+                        "ORDER BY o.mount_id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacySecretMount> mounts;
+                for (const pqxx::row& row : rows) {
+                    LegacySecretMount legacy;
+                    legacy.mount.id = row[0].as<std::string>();
+                    legacy.mount.customer_id = row[1].as<std::string>();
+                    legacy.mount.organization_id = row[2].as<std::string>();
+                    legacy.mount.name = row[3].as<std::string>();
+                    legacy.mount.description = row[4].as<std::string>();
+                    legacy.mount.at_us = row[5].as<std::int64_t>();
+                    legacy.mount.created_at = record_instant(legacy.mount.at_us);
+                    legacy.mount.updated_at = row[6].as<std::string>();
+                    legacy.owner =
+                        legacy_secret_owner(row, 7, legacy.mount.customer_id, legacy.mount.id);
+                    legacy.mount.workspace_id = legacy.owner.workspace_id;
+                    mounts.push_back(std::move(legacy));
+                }
+                return mounts;
+            });
+    }
+
+    Result<std::vector<LegacySecretEntry>> legacy_secret_entries(const std::string& after_id,
+                                                                 int limit) override {
+        return with_tx<std::vector<LegacySecretEntry>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacySecretEntry>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT e.id::text, o.mount_id::text, m.customer_id::text, e.name, "
+                    "e.current_version, e.custom_metadata::text, "
+                    "(extract(epoch FROM e.created_at) * 1000000)::bigint, "
+                    "to_char(e.updated_at AT TIME ZONE 'UTC', " +
+                        std::string(instant_text_format) + "), " +
+                        std::string(legacy_secret_owner_columns) +
+                        " FROM secrets_entries e JOIN (SELECT id AS mount_id FROM secrets_mounts) "
+                        "o ON o.mount_id = e.mount_id JOIN secrets_mounts m ON m.id = o.mount_id" +
+                        std::string(legacy_secret_owner_joins) +
+                        " WHERE ($1 = '' OR e.id > NULLIF($1, '')::uuid) ORDER BY e.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacySecretEntry> entries;
+                for (const pqxx::row& row : rows) {
+                    LegacySecretEntry legacy;
+                    legacy.id = row[0].as<std::string>();
+                    legacy.name = row[3].as<std::string>();
+                    legacy.current_version = row[4].as<std::uint64_t>();
+                    legacy.custom_metadata = nlohmann::json::parse(row[5].as<std::string>());
+                    legacy.at_us = row[6].as<std::int64_t>();
+                    legacy.updated_at = row[7].as<std::string>();
+                    legacy.owner = legacy_secret_owner(row, 8, row[2].as<std::string>(),
+                                                       row[1].as<std::string>());
+                    entries.push_back(std::move(legacy));
+                }
+                return entries;
+            });
+    }
+
+    Result<std::vector<LegacySecretVersion>> legacy_secret_versions(const std::string& after_id,
+                                                                    int limit) override {
+        return with_tx<std::vector<LegacySecretVersion>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacySecretVersion>> {
+                const std::string instant = std::string(instant_text_format);
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT v.row_id::text, o.mount_id::text, m.customer_id::text, e.name, "
+                    "v.version, COALESCE(v.ciphertext, ''), "
+                    "(extract(epoch FROM v.created_at) * 1000000)::bigint, "
+                    "COALESCE(to_char(v.deleted_at AT TIME ZONE 'UTC', " +
+                        instant + "), ''), COALESCE(to_char(v.destroyed_at AT TIME ZONE 'UTC', " +
+                        instant + "), ''), " + std::string(legacy_secret_owner_columns) +
+                        " FROM (SELECT md5(entry_id::text || E'\\n' || version::text)::uuid AS "
+                        "row_id, * FROM secrets_versions) v JOIN secrets_entries e ON e.id = "
+                        "v.entry_id JOIN (SELECT id AS mount_id FROM secrets_mounts) o ON "
+                        "o.mount_id = e.mount_id JOIN secrets_mounts m ON m.id = o.mount_id" +
+                        std::string(legacy_secret_owner_joins) +
+                        " WHERE ($1 = '' OR v.row_id > NULLIF($1, '')::uuid) ORDER BY v.row_id "
+                        "LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacySecretVersion> versions;
+                for (const pqxx::row& row : rows) {
+                    LegacySecretVersion legacy;
+                    legacy.id = row[0].as<std::string>();
+                    legacy.name = row[3].as<std::string>();
+                    legacy.version = row[4].as<std::uint64_t>();
+                    legacy.ciphertext = row[5].as<std::string>();
+                    legacy.at_us = row[6].as<std::int64_t>();
+                    legacy.deleted_at = row[7].as<std::string>();
+                    legacy.destroyed_at = row[8].as<std::string>();
+                    legacy.owner = legacy_secret_owner(row, 9, row[2].as<std::string>(),
+                                                       row[1].as<std::string>());
+                    versions.push_back(std::move(legacy));
+                }
+                return versions;
+            });
+    }
+
+    Result<std::vector<LegacyEncryptionKey>> legacy_encryption_keys(const std::string& after_id,
+                                                                    int limit) override {
+        return with_tx<std::vector<LegacyEncryptionKey>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyEncryptionKey>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT k.id::text, o.mount_id::text, m.customer_id::text, k.name, "
+                    "COALESCE(k.derived_from_id::text, ''), k.current_version, "
+                    "(extract(epoch FROM k.created_at) * 1000000)::bigint, "
+                    "to_char(k.updated_at AT TIME ZONE 'UTC', " +
+                        std::string(instant_text_format) + "), " +
+                        std::string(legacy_secret_owner_columns) +
+                        " FROM secrets_encryption_keys k JOIN (SELECT id AS mount_id FROM "
+                        "secrets_mounts) o ON o.mount_id = k.mount_id JOIN secrets_mounts m ON "
+                        "m.id = o.mount_id" +
+                        std::string(legacy_secret_owner_joins) +
+                        " WHERE ($1 = '' OR k.id > NULLIF($1, '')::uuid) ORDER BY k.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyEncryptionKey> keys;
+                for (const pqxx::row& row : rows) {
+                    LegacyEncryptionKey legacy;
+                    legacy.key.id = row[0].as<std::string>();
+                    legacy.key.mount_id = row[1].as<std::string>();
+                    legacy.key.name = row[3].as<std::string>();
+                    legacy.key.derived_from = row[4].as<std::string>();
+                    legacy.key.current_version = row[5].as<std::uint64_t>();
+                    legacy.at_us = row[6].as<std::int64_t>();
+                    legacy.key.created_at = record_instant(legacy.at_us);
+                    legacy.key.updated_at = row[7].as<std::string>();
+                    legacy.owner = legacy_secret_owner(row, 8, row[2].as<std::string>(),
+                                                       legacy.key.mount_id);
+                    keys.push_back(std::move(legacy));
+                }
+                return keys;
+            });
+    }
+
+    Result<std::vector<LegacySecretDataKey>> legacy_secret_data_keys(const std::string& after_id,
+                                                                     int limit) override {
+        return with_tx<std::vector<LegacySecretDataKey>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacySecretDataKey>> {
+                // The row and the KEK version that wraps it are read in one snapshot: a rotation
+                // rewraps every row of the table in its own transaction.
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT o.row_id::text, o.mount_id::text, o.customer_id::text, o.owner_kind, "
+                    "o.owner_id::text, o.key_version, o.wrapped_key, "
+                    "(extract(epoch FROM o.created_at) * 1000000)::bigint, "
+                    "COALESCE((SELECT version FROM keystore k WHERE k.customer_id = "
+                    "o.customer_id), 0), " +
+                        std::string(legacy_secret_owner_columns) +
+                        " FROM (SELECT md5(d.owner_kind || E'\\n' || d.owner_id::text || E'\\n' "
+                        "|| d.key_version::text)::uuid AS row_id, CASE WHEN d.owner_kind = "
+                        "'mount' THEN d.owner_id ELSE (SELECT mount_id FROM "
+                        "secrets_encryption_keys WHERE id = d.owner_id) END AS mount_id, d.* "
+                        "FROM secrets_data_keys d) o" +
+                        std::string(legacy_secret_owner_joins) +
+                        " WHERE ($1 = '' OR o.row_id > NULLIF($1, '')::uuid) ORDER BY o.row_id "
+                        "LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacySecretDataKey> keys;
+                for (const pqxx::row& row : rows) {
+                    LegacySecretDataKey legacy;
+                    legacy.id = row[0].as<std::string>();
+                    legacy.owner_kind = row[3].as<std::string>();
+                    legacy.owner_id = row[4].as<std::string>();
+                    legacy.key_version = row[5].as<std::uint64_t>();
+                    legacy.wrapped.wrapped_key = row[6].as<std::string>();
+                    legacy.at_us = row[7].as<std::int64_t>();
+                    legacy.wrapped.kek_version = row[8].as<std::uint64_t>();
+                    legacy.owner = legacy_secret_owner(
+                        row, 9, row[2].as<std::string>(),
+                        row[1].is_null() ? std::string() : row[1].as<std::string>());
+                    keys.push_back(std::move(legacy));
+                }
+                return keys;
+            });
     }
 
     Result<OfflineGrant> issue_offline_grant(const NewOfflineGrant& input) override {
@@ -9063,27 +8838,36 @@ private:
                        kind);
     }
 
-    Result<SecretMount> secret_mount_tx(pqxx::work& tx, const std::string& id) {
-        const pqxx::result rows = tx.exec_params(std::string("SELECT ") + secret_mount_columns +
-                                                     " FROM secrets_mounts WHERE id = $1::uuid",
-                                                 id);
-        if (rows.empty()) {
-            return std::unexpected(StoreError{"not_found", "no secret mount " + id});
-        }
-        return secret_mount_of(rows[0]);
-    }
-
-    Result<EncryptionKey>
-    encryption_key_tx(pqxx::work& tx, const std::string& mount_id, const std::string& name) {
+    // The customer KEK of one version: the current one or, during a rotation, the previous one.
+    Result<secrets_crypto::Key> customer_kek_version_tx(pqxx::work& tx,
+                                                        const std::string& customer_id,
+                                                        const std::string& instance_kek,
+                                                        std::uint64_t version) {
         const pqxx::result rows = tx.exec_params(
-            std::string("SELECT ") + encryption_key_columns +
-                " FROM secrets_encryption_keys WHERE mount_id = $1::uuid AND name = $2",
-            mount_id,
-            name);
-        if (rows.empty()) {
-            return std::unexpected(StoreError{"not_found", "encryption key does not exist"});
+            "SELECT CASE WHEN version = $2 THEN convert_from(wrapped_key, 'UTF8') "
+            "WHEN previous_version = $2 THEN convert_from(previous_wrapped_key, 'UTF8') END "
+            "FROM keystore WHERE customer_id = $1::uuid",
+            customer_id,
+            version);
+        if (rows.empty() || rows[0][0].is_null()) {
+            return std::unexpected(StoreError{
+                "not_found", "no customer key version " + std::to_string(version) + " exists"});
         }
-        return encryption_key_of(rows[0]);
+        auto root = secrets_crypto::instance_key(instance_kek);
+        if (!root) {
+            return std::unexpected(root.error());
+        }
+        const std::string associated =
+            "lake customer kek/" + customer_id + "/" + std::to_string(version);
+        auto opened = secrets_crypto::open(*root, rows[0][0].as<std::string>(), associated);
+        secrets_crypto::cleanse(*root);
+        if (!opened || opened->size() != secrets_crypto::Key{}.size()) {
+            return std::unexpected(opened ? StoreError{"store_error", "customer key is invalid"}
+                                          : opened.error());
+        }
+        secrets_crypto::Key output{};
+        std::copy(opened->begin(), opened->end(), output.begin());
+        return output;
     }
 
     Result<secrets_crypto::Key> customer_kek_tx(pqxx::work& tx,
@@ -9135,137 +8919,19 @@ private:
             secrets_crypto::cleanse(*generated);
             return std::unexpected(wrapped.error());
         }
-        tx.exec_params("INSERT INTO keystore (purpose, wrapped_key, version, customer_id) "
-                       "VALUES ($1, convert_to($2, 'UTF8'), 1, $3::uuid)",
-                       "customer-kek/" + customer_id,
-                       *wrapped,
-                       customer_id);
+        const pqxx::result inserted =
+            tx.exec_params("INSERT INTO keystore (purpose, wrapped_key, version, customer_id) "
+                           "VALUES ($1, convert_to($2, 'UTF8'), 1, $3::uuid) "
+                           "ON CONFLICT (purpose) DO NOTHING RETURNING version",
+                           "customer-kek/" + customer_id,
+                           *wrapped,
+                           customer_id);
+        if (inserted.empty()) {
+            // Another replica created it first: use that one.
+            secrets_crypto::cleanse(*generated);
+            return customer_kek_tx(tx, customer_id, instance_kek, false);
+        }
         return generated;
-    }
-
-    Result<void> store_data_key_tx(pqxx::work& tx,
-                                   const std::string& customer_id,
-                                   const std::string& owner_kind,
-                                   const std::string& owner_id,
-                                   std::uint64_t version,
-                                   const secrets_crypto::Key& key,
-                                   const std::string& instance_kek) {
-        auto customer_key = customer_kek_tx(tx, customer_id, instance_kek, true);
-        if (!customer_key) {
-            return std::unexpected(customer_key.error());
-        }
-        const std::string associated =
-            "lake data key/" + customer_id + "/" + owner_id + "/" + std::to_string(version);
-        const std::string raw(reinterpret_cast<const char*>(key.data()), key.size());
-        auto wrapped = secrets_crypto::seal(*customer_key, raw, associated);
-        secrets_crypto::cleanse(*customer_key);
-        if (!wrapped) {
-            return std::unexpected(wrapped.error());
-        }
-        tx.exec_params("INSERT INTO secrets_data_keys "
-                       "(customer_id, owner_kind, owner_id, key_version, wrapped_key) "
-                       "VALUES ($1::uuid, $2, $3::uuid, $4, $5)",
-                       customer_id,
-                       owner_kind,
-                       owner_id,
-                       version,
-                       *wrapped);
-        return {};
-    }
-
-    Result<secrets_crypto::Key> data_key_tx(pqxx::work& tx,
-                                            const std::string& owner_kind,
-                                            const std::string& owner_id,
-                                            std::uint64_t version,
-                                            const std::string& instance_kek) {
-        const pqxx::result rows =
-            tx.exec_params("SELECT customer_id::text, wrapped_key FROM secrets_data_keys "
-                           "WHERE owner_kind = $1 AND owner_id = $2::uuid AND key_version = $3",
-                           owner_kind,
-                           owner_id,
-                           version);
-        if (rows.empty()) {
-            return std::unexpected(StoreError{"not_found", "no data key version exists"});
-        }
-        const std::string customer_id = rows[0][0].as<std::string>();
-        auto customer_key = customer_kek_tx(tx, customer_id, instance_kek, false);
-        if (!customer_key) {
-            return std::unexpected(customer_key.error());
-        }
-        const std::string associated =
-            "lake data key/" + customer_id + "/" + owner_id + "/" + std::to_string(version);
-        auto opened = secrets_crypto::open(*customer_key, rows[0][1].as<std::string>(), associated);
-        secrets_crypto::cleanse(*customer_key);
-        if (!opened || opened->size() != secrets_crypto::Key{}.size()) {
-            return std::unexpected(opened ? StoreError{"store_error", "data key is invalid"}
-                                          : opened.error());
-        }
-        secrets_crypto::Key output{};
-        std::copy(opened->begin(), opened->end(), output.begin());
-        return output;
-    }
-
-    Result<SecretMetadata>
-    secret_metadata_tx(pqxx::work& tx, const std::string& mount_id, const std::string& name) {
-        const pqxx::result entries = tx.exec_params(
-            "SELECT id::text, current_version, custom_metadata::text, created_at::text, "
-            "updated_at::text FROM secrets_entries WHERE mount_id = $1::uuid AND name = $2",
-            mount_id,
-            name);
-        if (entries.empty()) {
-            return std::unexpected(StoreError{"not_found", "secret does not exist"});
-        }
-        SecretMetadata metadata{mount_id,
-                                name,
-                                entries[0][1].as<std::uint64_t>(),
-                                nlohmann::json::parse(entries[0][2].as<std::string>()),
-                                {},
-                                entries[0][3].as<std::string>(),
-                                entries[0][4].as<std::string>()};
-        const pqxx::result versions =
-            tx.exec_params("SELECT version, created_at::text, coalesce(deleted_at::text,''), "
-                           "coalesce(destroyed_at::text,'') FROM secrets_versions "
-                           "WHERE entry_id = $1::uuid ORDER BY version",
-                           entries[0][0].as<std::string>());
-        for (const pqxx::row& row : versions) {
-            metadata.versions.push_back(SecretVersionMetadata{row[0].as<std::uint64_t>(),
-                                                              row[1].as<std::string>(),
-                                                              row[2].as<std::string>(),
-                                                              row[3].as<std::string>()});
-        }
-        return metadata;
-    }
-
-    Result<TransitValue> encrypt_tx(pqxx::work& tx,
-                                    const SecretMount& mount,
-                                    const EncryptionKey& key,
-                                    const std::string& plaintext,
-                                    const std::string& instance_kek) {
-        auto decoded = secrets_crypto::base64url_decode(plaintext);
-        if (!decoded) {
-            return std::unexpected(decoded.error());
-        }
-        auto raw = data_key_tx(tx, "encryption", key.id, key.current_version, instance_kek);
-        if (!raw) {
-            return std::unexpected(raw.error());
-        }
-        auto encryption_key = secrets_crypto::derive(*raw, "lake transit encryption v1");
-        secrets_crypto::cleanse(*raw);
-        if (!encryption_key) {
-            return std::unexpected(encryption_key.error());
-        }
-        const std::string associated =
-            "lake transit/" + key.id + "/" + std::to_string(key.current_version);
-        auto sealed = secrets_crypto::seal(*encryption_key, *decoded, associated);
-        secrets_crypto::cleanse(*encryption_key);
-        if (!sealed) {
-            return std::unexpected(sealed.error());
-        }
-        static_cast<void>(mount);
-        return TransitValue{
-            secrets_crypto::format_ciphertext({key.id, key.current_version, *sealed}),
-            key.current_version,
-            "aes-256-gcm"};
     }
 
     Result<WebAuthnChallenge> consume_webauthn_challenge(const std::string& ceremony,

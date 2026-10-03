@@ -149,3 +149,11 @@ workspace (resolved by the copy once it has one), or `workspace_deleted`. Nothin
 latest guard is `application_credential_workspaces_guard`; the operator must vendor this schema and
 update its guard before rollout. See
 [apps.md](../docs/api/apps.md#where-keys-and-webhooks-live-lake352-lake355).
+Migration `0057_secret_workspaces` retires the five 0009 secrets tables (lake#328-#332): mounts,
+secrets, versions, named keys and data keys live in the workspace Zetta of each mount. It adds
+`secret_mount_routes` (mount → workspace, content-free, immutable), gives each mount of a space with
+exactly one live workspace that workspace and its route (others are `needs_selection`), keeps a
+replaced customer KEK in `keystore` until rotation finishes, and drops `secrets_dynamic_leases`'
+foreign key to `secrets_mounts`. Nothing is dropped. The latest guard is
+`secret_workspaces_guard`; the operator must vendor this schema and update its guard before
+rollout. See [secrets.md](../docs/api/secrets.md#migration-and-cutover-lake328-332).

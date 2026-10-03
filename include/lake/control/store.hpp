@@ -1223,76 +1223,65 @@ public:
                                    const std::string& ceremony_id,
                                    const std::vector<PkiRecoveryShareEvidence>& evidence) = 0;
 
-    virtual Result<SecretMount> create_secret_mount(const NewSecretMount& value,
-                                                    const std::string& instance_kek) = 0;
-    virtual Result<std::vector<SecretMount>> list_secret_mounts(const std::string& customer_id,
-                                                                const std::string& organization_id,
-                                                                int limit) = 0;
-    virtual Result<SecretMount> get_secret_mount(const std::string& id) = 0;
-    virtual Result<SecretVersion> put_secret(const PutSecret& value,
-                                             const std::string& instance_kek) = 0;
-    virtual Result<SecretVersion> read_secret(const std::string& mount_id,
-                                              const std::string& name,
-                                              std::uint64_t version,
-                                              const std::string& instance_kek) = 0;
-    virtual Result<SecretMetadata> secret_metadata(const std::string& mount_id,
-                                                   const std::string& name) = 0;
-    virtual Result<SecretMetadata>
-    change_secret_versions(const std::string& mount_id,
-                           const std::string& name,
-                           const std::vector<std::uint64_t>& versions,
-                           SecretVersionAction action) = 0;
-    virtual Result<IssuedDynamicSecret> lease_dynamic_secret(const NewDynamicSecretLease& value,
-                                                             const std::string& instance_kek) = 0;
+    // Secrets (docs/api/secrets.md, lake#328-#332). Mounts, secrets, versions, named keys and data
+    // keys live in the mount's workspace Zetta (api/secret_records_api.hpp). The control store
+    // keeps only what is multitenancy or a root of the key hierarchy: each mount's content-free
+    // route and policy objects, and the customer KEK that wraps every data key.
+
+    // Records where a new mount lives and adds organization -> environment -> secret_mount to the
+    // policy graph. `invalid_input` at /organization_id when the organization is not inside the
+    // customer, at /workspace_id when the workspace is not a live workspace of that customer.
+    virtual Result<SecretMountRoute> create_secret_mount_route(const SecretMountRoute& value) = 0;
+    virtual Result<SecretMountRoute> get_secret_mount_route(const std::string& mount_id) = 0;
+    // A customer's routes, newest first; `workspace_id` empty: every workspace.
+    virtual Result<std::vector<SecretMountRoute>>
+    list_secret_mount_routes(const std::string& customer_id, const std::string& workspace_id) = 0;
+
+    // The customer KEK wraps and unwraps data keys without leaving the store. Wrapping creates the
+    // customer's KEK on first use and answers the version it used; unwrapping accepts the current
+    // version and, during a rotation, the previous one.
+    virtual Result<WrappedDataKey> wrap_secret_data_key(const std::string& customer_id,
+                                                        const std::string& owner_id,
+                                                        std::uint64_t key_version,
+                                                        const std::string& raw_key,
+                                                        const std::string& instance_kek) = 0;
+    virtual Result<std::string> unwrap_secret_data_key(const std::string& customer_id,
+                                                       const std::string& owner_id,
+                                                       std::uint64_t key_version,
+                                                       const WrappedDataKey& wrapped,
+                                                       const std::string& instance_kek) = 0;
+    virtual Result<CustomerKekState> customer_kek_state(const std::string& customer_id) = 0;
+    // A new current KEK; the replaced one is kept as `previous_version` until
+    // retire_customer_kek. Rewraps, in the same transaction, the customer's PKI authorities and the
+    // rows of the retired secrets_data_keys table (which the one-shot copy still reads). `conflict`
+    // while an earlier rotation's previous version is still kept.
+    virtual Result<CustomerKekRotation> rotate_customer_kek(const std::string& customer_id,
+                                                            const std::string& instance_kek) = 0;
+    // Forgets `previous_version` once no workspace data key is wrapped by it.
+    virtual Result<void> retire_customer_kek(const std::string& customer_id,
+                                             std::uint64_t previous_version) = 0;
+
+    // Dynamic leases stay here (lake#362); their value is sealed by the caller.
+    virtual Result<DynamicSecretLease> lease_dynamic_secret(const NewDynamicSecretLease& value) = 0;
     virtual Result<DynamicSecretLease> get_dynamic_secret_lease(const std::string& id) = 0;
     virtual Result<DynamicSecretLease> renew_dynamic_secret_lease(const std::string& id,
                                                                   int lifetime_seconds) = 0;
     virtual Result<DynamicSecretLease> revoke_dynamic_secret_lease(const std::string& id) = 0;
 
-    virtual Result<EncryptionKey> create_encryption_key(const NewEncryptionKey& value,
-                                                        const std::string& instance_kek) = 0;
-    virtual Result<std::vector<EncryptionKey>> list_encryption_keys(const std::string& mount_id,
-                                                                    int limit) = 0;
-    virtual Result<EncryptionKey> get_encryption_key(const std::string& mount_id,
-                                                     const std::string& name) = 0;
-    virtual Result<EncryptionKey> rotate_encryption_key(const std::string& mount_id,
-                                                        const std::string& name,
-                                                        const std::string& instance_kek) = 0;
-    virtual Result<TransitValue> encrypt(const std::string& mount_id,
-                                         const std::string& name,
-                                         const std::string& plaintext,
-                                         const std::string& instance_kek) = 0;
-    virtual Result<TransitValue> decrypt(const std::string& mount_id,
-                                         const std::string& name,
-                                         const std::string& ciphertext,
-                                         const std::string& instance_kek) = 0;
-    virtual Result<TransitValue> rewrap(const std::string& mount_id,
-                                        const std::string& name,
-                                        const std::string& ciphertext,
-                                        const std::string& instance_kek) = 0;
-    virtual Result<TransitValue> sign(const std::string& mount_id,
-                                      const std::string& name,
-                                      const std::string& message,
-                                      std::uint64_t version,
-                                      const std::string& instance_kek) = 0;
-    virtual Result<TransitVerification> verify(const std::string& mount_id,
-                                               const std::string& name,
-                                               const std::string& message,
-                                               const std::string& signature,
-                                               std::uint64_t version,
-                                               const std::string& instance_kek) = 0;
-    virtual Result<TransitValue> hmac(const std::string& mount_id,
-                                      const std::string& name,
-                                      const std::string& message,
-                                      std::uint64_t version,
-                                      const std::string& instance_kek) = 0;
-    virtual Result<DerivedEncryptionKey> derive_encryption_key(const std::string& mount_id,
-                                                               const std::string& parent_name,
-                                                               const std::string& name,
-                                                               const std::string& context,
-                                                               const std::string& instance_kek) = 0;
-    virtual Result<CustomerKekRotation> rotate_customer_kek(const std::string& customer_id,
-                                                            const std::string& instance_kek) = 0;
+    // The retired secrets tables, for the one-shot copy only. assign_legacy_secrets records each
+    // legacy mount's owner (migration 0057's rule) and the route of every assigned mount; the
+    // listings page by row id.
+    virtual Result<void> assign_legacy_secrets() = 0;
+    virtual Result<std::vector<LegacySecretMount>> legacy_secret_mounts(const std::string& after_id,
+                                                                        int limit) = 0;
+    virtual Result<std::vector<LegacySecretEntry>> legacy_secret_entries(const std::string& after_id,
+                                                                         int limit) = 0;
+    virtual Result<std::vector<LegacySecretVersion>>
+    legacy_secret_versions(const std::string& after_id, int limit) = 0;
+    virtual Result<std::vector<LegacyEncryptionKey>>
+    legacy_encryption_keys(const std::string& after_id, int limit) = 0;
+    virtual Result<std::vector<LegacySecretDataKey>>
+    legacy_secret_data_keys(const std::string& after_id, int limit) = 0;
 
     // Identity core. All bearer and cookie values are resolved here on every
     // request so a revoked session or device is rejected immediately.

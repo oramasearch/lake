@@ -348,74 +348,52 @@ public:
     complete_pki_recovery_ceremony(const std::string& customer_id,
                                    const std::string& ceremony_id,
                                    const std::vector<PkiRecoveryShareEvidence>& evidence) override;
-    Result<SecretMount> create_secret_mount(const NewSecretMount& value,
-                                            const std::string& instance_kek) override;
-    Result<std::vector<SecretMount>> list_secret_mounts(const std::string& customer_id,
-                                                        const std::string& organization_id,
-                                                        int limit) override;
-    Result<SecretMount> get_secret_mount(const std::string& id) override;
-    Result<SecretVersion> put_secret(const PutSecret& value,
-                                     const std::string& instance_kek) override;
-    Result<SecretVersion> read_secret(const std::string& mount_id,
-                                      const std::string& name,
-                                      std::uint64_t version,
-                                      const std::string& instance_kek) override;
-    Result<SecretMetadata> secret_metadata(const std::string& mount_id,
-                                           const std::string& name) override;
-    Result<SecretMetadata> change_secret_versions(const std::string& mount_id,
-                                                  const std::string& name,
-                                                  const std::vector<std::uint64_t>& versions,
-                                                  SecretVersionAction action) override;
-    Result<IssuedDynamicSecret> lease_dynamic_secret(const NewDynamicSecretLease& value,
-                                                     const std::string& instance_kek) override;
+    Result<SecretMountRoute> create_secret_mount_route(const SecretMountRoute& value) override;
+    Result<SecretMountRoute> get_secret_mount_route(const std::string& mount_id) override;
+    Result<std::vector<SecretMountRoute>>
+    list_secret_mount_routes(const std::string& customer_id,
+                             const std::string& workspace_id) override;
+    Result<WrappedDataKey> wrap_secret_data_key(const std::string& customer_id,
+                                                const std::string& owner_id,
+                                                std::uint64_t key_version,
+                                                const std::string& raw_key,
+                                                const std::string& instance_kek) override;
+    Result<std::string> unwrap_secret_data_key(const std::string& customer_id,
+                                               const std::string& owner_id,
+                                               std::uint64_t key_version,
+                                               const WrappedDataKey& wrapped,
+                                               const std::string& instance_kek) override;
+    Result<CustomerKekState> customer_kek_state(const std::string& customer_id) override;
+    Result<CustomerKekRotation> rotate_customer_kek(const std::string& customer_id,
+                                                    const std::string& instance_kek) override;
+    Result<void> retire_customer_kek(const std::string& customer_id,
+                                     std::uint64_t previous_version) override;
+    Result<DynamicSecretLease> lease_dynamic_secret(const NewDynamicSecretLease& value) override;
     Result<DynamicSecretLease> get_dynamic_secret_lease(const std::string& id) override;
     Result<DynamicSecretLease> renew_dynamic_secret_lease(const std::string& id,
                                                           int lifetime_seconds) override;
     Result<DynamicSecretLease> revoke_dynamic_secret_lease(const std::string& id) override;
-    Result<EncryptionKey> create_encryption_key(const NewEncryptionKey& value,
-                                                const std::string& instance_kek) override;
-    Result<std::vector<EncryptionKey>> list_encryption_keys(const std::string& mount_id,
-                                                            int limit) override;
-    Result<EncryptionKey> get_encryption_key(const std::string& mount_id,
-                                             const std::string& name) override;
-    Result<EncryptionKey> rotate_encryption_key(const std::string& mount_id,
-                                                const std::string& name,
-                                                const std::string& instance_kek) override;
-    Result<TransitValue> encrypt(const std::string& mount_id,
-                                 const std::string& name,
-                                 const std::string& plaintext,
-                                 const std::string& instance_kek) override;
-    Result<TransitValue> decrypt(const std::string& mount_id,
-                                 const std::string& name,
-                                 const std::string& ciphertext,
-                                 const std::string& instance_kek) override;
-    Result<TransitValue> rewrap(const std::string& mount_id,
-                                const std::string& name,
-                                const std::string& ciphertext,
-                                const std::string& instance_kek) override;
-    Result<TransitValue> sign(const std::string& mount_id,
-                              const std::string& name,
-                              const std::string& message,
-                              std::uint64_t version,
-                              const std::string& instance_kek) override;
-    Result<TransitVerification> verify(const std::string& mount_id,
-                                       const std::string& name,
-                                       const std::string& message,
-                                       const std::string& signature,
-                                       std::uint64_t version,
-                                       const std::string& instance_kek) override;
-    Result<TransitValue> hmac(const std::string& mount_id,
-                              const std::string& name,
-                              const std::string& message,
-                              std::uint64_t version,
-                              const std::string& instance_kek) override;
-    Result<DerivedEncryptionKey> derive_encryption_key(const std::string& mount_id,
-                                                       const std::string& parent_name,
-                                                       const std::string& name,
-                                                       const std::string& context,
-                                                       const std::string& instance_kek) override;
-    Result<CustomerKekRotation> rotate_customer_kek(const std::string& customer_id,
-                                                    const std::string& instance_kek) override;
+    Result<void> assign_legacy_secrets() override;
+    Result<std::vector<LegacySecretMount>> legacy_secret_mounts(const std::string& after_id,
+                                                                int limit) override;
+    Result<std::vector<LegacySecretEntry>> legacy_secret_entries(const std::string& after_id,
+                                                                 int limit) override;
+    Result<std::vector<LegacySecretVersion>> legacy_secret_versions(const std::string& after_id,
+                                                                    int limit) override;
+    Result<std::vector<LegacyEncryptionKey>> legacy_encryption_keys(const std::string& after_id,
+                                                                    int limit) override;
+    Result<std::vector<LegacySecretDataKey>> legacy_secret_data_keys(const std::string& after_id,
+                                                                     int limit) override;
+    // Rows of the retired secrets tables, as an earlier lake wrote them (tests of the copy). A
+    // data key is given raw and wrapped here by the customer's current KEK, as 0009 wrapped it.
+    void seed_legacy_secret_mount(SecretMount mount);
+    void seed_legacy_secret_entry(LegacySecretEntry entry);
+    void seed_legacy_secret_version(LegacySecretVersion version);
+    void seed_legacy_encryption_key(LegacyEncryptionKey key);
+    Result<void> seed_legacy_secret_data_key(LegacySecretDataKey key, const std::string& raw_key);
+    // An operator's reviewed choice for a mount migration 0057 left as needs_selection.
+    void select_legacy_secret_mount_workspace(const std::string& mount_id,
+                                              const std::string& workspace_id);
     Result<IssuedSession> sign_up_password(const NewPasswordUser&) override;
     Result<IssuedSession> sign_in_password(const PasswordSignIn&) override;
     Result<IssuedSession> sign_in_taap(const TaapSignIn&) override;
@@ -511,13 +489,10 @@ private:
     void derive_space_grant_locked(const Membership& membership, const std::string& role);
     void drop_space_grant_locked(const Membership& membership, const std::string& role);
     Result<std::string> customer_kek_locked(const std::string& customer_id, bool create);
-    Result<std::string> data_key_locked(const std::string& customer_id,
-                                        const std::string& owner_id,
-                                        std::uint64_t version);
-    Result<void> store_data_key_locked(const std::string& customer_id,
-                                       const std::string& owner_id,
-                                       std::uint64_t version,
-                                       const std::string& key);
+    Result<WrappedDataKey> wrap_data_key_locked(const std::string& customer_id,
+                                                const std::string& owner_id,
+                                                std::uint64_t key_version,
+                                                const std::string& raw_key);
     std::mutex mutex_;
     std::vector<User> users_;
     std::vector<Organization> organizations_;
@@ -601,27 +576,20 @@ private:
         std::string customer_id;
         std::string key;
         std::uint64_t version = 1;
-    };
-    struct DataKeyRecord {
-        std::string customer_id;
-        std::string owner_id;
-        std::uint64_t version = 1;
-        std::string wrapped_key;
-    };
-    struct SecretVersionRecord {
-        SecretVersion version;
-        std::string ciphertext;
-    };
-    struct SecretEntryRecord {
-        SecretMetadata metadata;
-        std::vector<SecretVersionRecord> versions;
+        // The KEK a rotation replaced, kept until retire_customer_kek.
+        std::string previous_key;
+        std::uint64_t previous_version = 0;
     };
     std::vector<CustomerKekRecord> customer_keks_;
-    std::vector<DataKeyRecord> data_keys_;
-    std::vector<SecretMount> secret_mounts_;
-    std::vector<SecretEntryRecord> secret_entries_;
+    std::vector<SecretMountRoute> secret_mount_routes_;
     std::vector<DynamicSecretLease> dynamic_secret_leases_;
-    std::vector<EncryptionKey> encryption_keys_;
+    std::vector<LegacySecretMount> legacy_secret_mounts_;
+    std::vector<LegacySecretEntry> legacy_secret_entries_;
+    std::vector<LegacySecretVersion> legacy_secret_versions_;
+    std::vector<LegacyEncryptionKey> legacy_encryption_keys_;
+    std::vector<LegacySecretDataKey> legacy_secret_data_keys_;
+    // mount id -> (workspace id, outcome), as migration 0057 records them.
+    std::map<std::string, std::pair<std::string, std::string>> legacy_secret_assignments_;
     struct PasswordCredential {
         std::string user_id, pool_id, email, password, totp_secret;
         std::vector<std::string> recovery_hashes;

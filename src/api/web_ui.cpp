@@ -8983,16 +8983,20 @@ web_ui_transparency(std::string_view identity, const nlohmann::json& scan, WebUi
 }
 
 std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts,
+                                 std::string_view workspace_id,
                                  WebUiViewer viewer) {
     std::string content =
         "<p class=\"eyebrow\">control plane</p><h1>Secret Mounts</h1>"
-        "<p class=\"sub\">Organization-scoped static secrets and named encryption keys. "
-        "Key material remains inside lake.</p>";
-    if (mounts.empty()) {
-        content += "<div class=\"panel empty\">No secret mounts you can read yet. An "
-                   "organization administrator creates them.</div>";
+        "<p class=\"sub\">Organization-scoped static secrets and named encryption keys, kept in "
+        "the workspace each mount was created in. Key material remains inside lake.</p>";
+    if (workspace_id.empty()) {
+        content += "<div class=\"panel empty\">Choose a workspace to see its secret mounts.</div>";
+    } else if (mounts.empty()) {
+        content += "<div class=\"panel empty\">No secret mounts you can read in workspace <code>" +
+                   web_ui_escape(workspace_id) +
+                   "</code> yet. An organization administrator creates them.</div>";
     } else {
-        content += "<table><thead><tr><th>Name</th><th>Organization</th><th>Customer</th>"
+        content += "<table><thead><tr><th>Name</th><th>Organization</th><th>Workspace</th>"
                    "<th>Description</th><th>Created</th><th></th></tr></thead><tbody>";
         for (const control::SecretMount& mount : mounts) {
             const std::string query = "mount_id=" + mount.id;
@@ -9001,7 +9005,7 @@ std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts
                                    "{}</td></tr>",
                                    web_ui_escape(mount.name),
                                    web_ui_escape(mount.organization_id),
-                                   web_ui_escape(mount.customer_id),
+                                   web_ui_escape(mount.workspace_id),
                                    web_ui_escape(mount.description),
                                    web_ui_escape(mount.created_at),
                                    row_link("/secrets?" + query, "secrets"),

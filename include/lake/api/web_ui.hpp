@@ -140,7 +140,10 @@ std::string web_ui_sso(std::string_view organization_id,
                        const std::vector<control::FederationIssuer>& issuers,
                        const std::vector<control::ProvisioningLog>& logs,
                        WebUiViewer viewer = true);
+// The mounts of one workspace (docs/api/secrets.md); an empty `workspace_id` asks the viewer to
+// choose a workspace first.
 std::string web_ui_secret_mounts(const std::vector<control::SecretMount>& mounts,
+                                 std::string_view workspace_id,
                                  WebUiViewer viewer = true);
 std::string web_ui_secrets(const control::SecretMount& mount,
                            std::string_view name,

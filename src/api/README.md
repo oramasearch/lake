@@ -259,3 +259,12 @@ token issuers read the current key with `application_signing_key` on their async
 no `block_on`. The `POST /applications` and `POST /application/webhooks` page actions and the raw
 JWKS route call the capabilities asynchronously. `copy_workspace_records` also
 copies `auth_app_signing_keys` and `auth_app_webhooks`.
+Secrets live in the workspace of their mount (lake#328-#332): `secret_records_api.hpp` declares
+`MountSecrets` (one mount's records, opened through the mount's route: put, read, metadata, version
+changes, named keys and transit), `create_secret_mount`, `list_secret_mounts` and
+`rotate_customer_kek`, which rewraps every data key of the space's workspaces before forgetting the
+replaced KEK. Every version and key-version number is claimed `if_absent` and every transition
+written at the revision read. `secrets_capabilities.cpp` is asynchronous over it; the policy
+decision reads only PostgreSQL, so a refused caller reaches no workspace. `copy_workspace_records`
+copies the five secrets collections, and the `/secret-mounts`, `/secrets` and `/encryption-keys`
+pages call the registry asynchronously (`/secret-mounts` lists one workspace).

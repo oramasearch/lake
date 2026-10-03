@@ -873,50 +873,60 @@ public:
             return store_->complete_pki_recovery_ceremony(customer_id, ceremony_id, evidence);
         });
     }
-    control::Result<control::SecretMount>
-    create_secret_mount(const control::NewSecretMount& value,
-                        const std::string& instance_kek) override {
-        return call("create_secret_mount",
-                    [&] { return store_->create_secret_mount(value, instance_kek); });
+    control::Result<control::SecretMountRoute>
+    create_secret_mount_route(const control::SecretMountRoute& value) override {
+        return call("create_secret_mount_route",
+                    [&] { return store_->create_secret_mount_route(value); });
     }
-    control::Result<std::vector<control::SecretMount>> list_secret_mounts(
-        const std::string& customer_id, const std::string& organization_id, int limit) override {
-        return call("list_secret_mounts", [&] {
-            return store_->list_secret_mounts(customer_id, organization_id, limit);
-        });
+    control::Result<control::SecretMountRoute>
+    get_secret_mount_route(const std::string& mount_id) override {
+        return call("get_secret_mount_route",
+                    [&] { return store_->get_secret_mount_route(mount_id); });
     }
-    control::Result<control::SecretMount> get_secret_mount(const std::string& id) override {
-        return call("get_secret_mount", [&] { return store_->get_secret_mount(id); });
+    control::Result<std::vector<control::SecretMountRoute>>
+    list_secret_mount_routes(const std::string& customer_id,
+                             const std::string& workspace_id) override {
+        return call("list_secret_mount_routes",
+                    [&] { return store_->list_secret_mount_routes(customer_id, workspace_id); });
     }
-    control::Result<control::SecretVersion> put_secret(const control::PutSecret& value,
-                                                       const std::string& instance_kek) override {
-        return call("put_secret", [&] { return store_->put_secret(value, instance_kek); });
-    }
-    control::Result<control::SecretVersion> read_secret(const std::string& mount_id,
-                                                        const std::string& name,
-                                                        std::uint64_t version,
-                                                        const std::string& instance_kek) override {
-        return call("read_secret",
-                    [&] { return store_->read_secret(mount_id, name, version, instance_kek); });
-    }
-    control::Result<control::SecretMetadata> secret_metadata(const std::string& mount_id,
-                                                             const std::string& name) override {
-        return call("secret_metadata", [&] { return store_->secret_metadata(mount_id, name); });
-    }
-    control::Result<control::SecretMetadata>
-    change_secret_versions(const std::string& mount_id,
-                           const std::string& name,
-                           const std::vector<std::uint64_t>& versions,
-                           control::SecretVersionAction action) override {
-        return call("change_secret_versions", [&] {
-            return store_->change_secret_versions(mount_id, name, versions, action);
-        });
-    }
-    control::Result<control::IssuedDynamicSecret>
-    lease_dynamic_secret(const control::NewDynamicSecretLease& value,
+    control::Result<control::WrappedDataKey>
+    wrap_secret_data_key(const std::string& customer_id,
+                         const std::string& owner_id,
+                         std::uint64_t key_version,
+                         const std::string& raw_key,
                          const std::string& instance_kek) override {
-        return call("lease_dynamic_secret",
-                    [&] { return store_->lease_dynamic_secret(value, instance_kek); });
+        return call("wrap_secret_data_key", [&] {
+            return store_->wrap_secret_data_key(customer_id, owner_id, key_version, raw_key,
+                                                instance_kek);
+        });
+    }
+    control::Result<std::string> unwrap_secret_data_key(const std::string& customer_id,
+                                                        const std::string& owner_id,
+                                                        std::uint64_t key_version,
+                                                        const control::WrappedDataKey& wrapped,
+                                                        const std::string& instance_kek) override {
+        return call("unwrap_secret_data_key", [&] {
+            return store_->unwrap_secret_data_key(customer_id, owner_id, key_version, wrapped,
+                                                  instance_kek);
+        });
+    }
+    control::Result<control::CustomerKekState>
+    customer_kek_state(const std::string& customer_id) override {
+        return call("customer_kek_state", [&] { return store_->customer_kek_state(customer_id); });
+    }
+    control::Result<control::CustomerKekRotation>
+    rotate_customer_kek(const std::string& customer_id, const std::string& instance_kek) override {
+        return call("rotate_customer_kek",
+                    [&] { return store_->rotate_customer_kek(customer_id, instance_kek); });
+    }
+    control::Result<void> retire_customer_kek(const std::string& customer_id,
+                                              std::uint64_t previous_version) override {
+        return call("retire_customer_kek",
+                    [&] { return store_->retire_customer_kek(customer_id, previous_version); });
+    }
+    control::Result<control::DynamicSecretLease>
+    lease_dynamic_secret(const control::NewDynamicSecretLease& value) override {
+        return call("lease_dynamic_secret", [&] { return store_->lease_dynamic_secret(value); });
     }
     control::Result<control::DynamicSecretLease>
     get_dynamic_secret_lease(const std::string& id) override {
@@ -933,91 +943,33 @@ public:
         return call("revoke_dynamic_secret_lease",
                     [&] { return store_->revoke_dynamic_secret_lease(id); });
     }
-    control::Result<control::EncryptionKey>
-    create_encryption_key(const control::NewEncryptionKey& value,
-                          const std::string& instance_kek) override {
-        return call("create_encryption_key",
-                    [&] { return store_->create_encryption_key(value, instance_kek); });
+    control::Result<void> assign_legacy_secrets() override {
+        return call("assign_legacy_secrets", [&] { return store_->assign_legacy_secrets(); });
     }
-    control::Result<std::vector<control::EncryptionKey>>
-    list_encryption_keys(const std::string& mount_id, int limit) override {
-        return call("list_encryption_keys",
-                    [&] { return store_->list_encryption_keys(mount_id, limit); });
+    control::Result<std::vector<control::LegacySecretMount>>
+    legacy_secret_mounts(const std::string& after_id, int limit) override {
+        return call("legacy_secret_mounts",
+                    [&] { return store_->legacy_secret_mounts(after_id, limit); });
     }
-    control::Result<control::EncryptionKey> get_encryption_key(const std::string& mount_id,
-                                                               const std::string& name) override {
-        return call("get_encryption_key",
-                    [&] { return store_->get_encryption_key(mount_id, name); });
+    control::Result<std::vector<control::LegacySecretEntry>>
+    legacy_secret_entries(const std::string& after_id, int limit) override {
+        return call("legacy_secret_entries",
+                    [&] { return store_->legacy_secret_entries(after_id, limit); });
     }
-    control::Result<control::EncryptionKey>
-    rotate_encryption_key(const std::string& mount_id,
-                          const std::string& name,
-                          const std::string& instance_kek) override {
-        return call("rotate_encryption_key",
-                    [&] { return store_->rotate_encryption_key(mount_id, name, instance_kek); });
+    control::Result<std::vector<control::LegacySecretVersion>>
+    legacy_secret_versions(const std::string& after_id, int limit) override {
+        return call("legacy_secret_versions",
+                    [&] { return store_->legacy_secret_versions(after_id, limit); });
     }
-    control::Result<control::TransitValue> encrypt(const std::string& mount_id,
-                                                   const std::string& name,
-                                                   const std::string& plaintext,
-                                                   const std::string& instance_kek) override {
-        return call("encrypt",
-                    [&] { return store_->encrypt(mount_id, name, plaintext, instance_kek); });
+    control::Result<std::vector<control::LegacyEncryptionKey>>
+    legacy_encryption_keys(const std::string& after_id, int limit) override {
+        return call("legacy_encryption_keys",
+                    [&] { return store_->legacy_encryption_keys(after_id, limit); });
     }
-    control::Result<control::TransitValue> decrypt(const std::string& mount_id,
-                                                   const std::string& name,
-                                                   const std::string& ciphertext,
-                                                   const std::string& instance_kek) override {
-        return call("decrypt",
-                    [&] { return store_->decrypt(mount_id, name, ciphertext, instance_kek); });
-    }
-    control::Result<control::TransitValue> rewrap(const std::string& mount_id,
-                                                  const std::string& name,
-                                                  const std::string& ciphertext,
-                                                  const std::string& instance_kek) override {
-        return call("rewrap",
-                    [&] { return store_->rewrap(mount_id, name, ciphertext, instance_kek); });
-    }
-    control::Result<control::TransitValue> sign(const std::string& mount_id,
-                                                const std::string& name,
-                                                const std::string& message,
-                                                std::uint64_t version,
-                                                const std::string& instance_kek) override {
-        return call("sign",
-                    [&] { return store_->sign(mount_id, name, message, version, instance_kek); });
-    }
-    control::Result<control::TransitVerification> verify(const std::string& mount_id,
-                                                         const std::string& name,
-                                                         const std::string& message,
-                                                         const std::string& signature,
-                                                         std::uint64_t version,
-                                                         const std::string& instance_kek) override {
-        return call("verify", [&] {
-            return store_->verify(mount_id, name, message, signature, version, instance_kek);
-        });
-    }
-    control::Result<control::TransitValue> hmac(const std::string& mount_id,
-                                                const std::string& name,
-                                                const std::string& message,
-                                                std::uint64_t version,
-                                                const std::string& instance_kek) override {
-        return call("hmac",
-                    [&] { return store_->hmac(mount_id, name, message, version, instance_kek); });
-    }
-    control::Result<control::DerivedEncryptionKey>
-    derive_encryption_key(const std::string& mount_id,
-                          const std::string& parent_name,
-                          const std::string& name,
-                          const std::string& context,
-                          const std::string& instance_kek) override {
-        return call("derive_encryption_key", [&] {
-            return store_->derive_encryption_key(
-                mount_id, parent_name, name, context, instance_kek);
-        });
-    }
-    control::Result<control::CustomerKekRotation>
-    rotate_customer_kek(const std::string& customer_id, const std::string& instance_kek) override {
-        return call("rotate_customer_kek",
-                    [&] { return store_->rotate_customer_kek(customer_id, instance_kek); });
+    control::Result<std::vector<control::LegacySecretDataKey>>
+    legacy_secret_data_keys(const std::string& after_id, int limit) override {
+        return call("legacy_secret_data_keys",
+                    [&] { return store_->legacy_secret_data_keys(after_id, limit); });
     }
 
     control::Result<control::IssuedSession>

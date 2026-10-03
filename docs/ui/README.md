@@ -90,7 +90,7 @@ Contextual links lead to exports, SSO, repository content, and drive views. The 
 | Artifact | `GET /artifact?repository_id=<uuid>&id=<result>` | one result, outputs, timing, cache/divergence state, verified attestations, and trace summary |
 | Search | `GET /search?query=<text>[&customer=<id>&repository=<id>&ref=<name>&change=<digest>&history=1]` | authorized hot branch-tip, immutable tag-snapshot, exact-change, or complete-history results with the selected query mode |
 | Transparency monitor | `GET /transparency?identity=<taap-id>` | public checkpoint-verified bulk-tile scan and every matching TAAP attestation |
-| Secret mounts | `GET /secret-mounts[?customer_id=<uuid>&organization_id=<uuid>]` | mounts the caller may read, with links to static secrets and named keys |
+| Secret mounts | `GET /secret-mounts[?workspace_id=<uuid>&organization_id=<uuid>]` | mounts the caller may read in one workspace (the one named, else the one last chosen), with links to static secrets and named keys |
 | Static secrets | `GET /secrets?mount_id=<uuid>[&name=<name>]` | custom metadata and version lifecycle; never secret values |
 | Encryption keys | `GET /encryption-keys?mount_id=<uuid>` | key names, current versions and derivation parent; never key material |
 | Drive folder | `GET /drive?repository_id=<uuid>&ref=<ref>&path=<path>[&view=list|grid&sort=name|size|modified&direction=asc|desc]` | breadcrumbs, folder and file cards or rows, size, modified time, and capability-backed create, upload, rename, move, and delete controls |

@@ -1,6 +1,7 @@
 # Encryption as a service
 
-**What.** Each secret mount can hold named, versioned encryption keys. Clients send data to a
+**What.** Each secret mount can hold named, versioned encryption keys, kept in the mount's
+workspace Zetta ([secrets.md](secrets.md#where-secrets-live-lake328-332)). Clients send data to a
 capability and receive ciphertext, a signature, a verification result or an HMAC; key material is
 never returned. Rotation changes the current version while keeping prior versions available for
 decrypt and verify.
@@ -23,7 +24,7 @@ KEK rotation requires `admin` on the customer.
 | `verify` | mount, name, message, signature, `version?` | `{valid, key_version, algorithm}` |
 | `hmac` | mount, name, base64url `message`, `version?` | base64url HMAC-SHA-256 |
 | `derive_encryption_key` | mount, `parent_name`, child `name`, base64url `context` | stored child-key metadata and parent version |
-| `rotate_customer_kek` | `customer_id` | new KEK version and count of rewrapped data keys |
+| `rotate_customer_kek` | `customer_id` | new KEK version and count of rewrapped data keys, across the space's workspaces |
 
 Omitting `version` selects the current named-key version. Encrypt always uses the current version.
 Decrypt and rewrap reject an envelope whose key id does not match the named key. Rewrap decrypts
@@ -42,15 +43,20 @@ LAKE_INSTANCE_KEK
 
 The Postgres service requires `LAKE_INSTANCE_KEK` to be exactly 32 bytes encoded as 64 hexadecimal
 characters. The instance key wraps each customer KEK in `keystore`; the customer KEK wraps mount
-and named-key material in `secrets_data_keys`. Protected payloads use AES-256-GCM with random
+and named-key material, held in the mount workspace's `lake_secrets_data_keys` records with the KEK
+version that wraps each one (lake#332). Protected payloads use AES-256-GCM with random
 96-bit nonces and associated data. Transit encryption derives an AES key from the named material
 with a fixed domain label. Signatures are Ed25519; MACs and child derivation use HMAC-SHA-256.
 
-Named-key rotation inserts a new wrapped data-key version and advances `current_version`. Old data
-keys remain wrapped, allowing old ciphertext to decrypt. Customer-KEK rotation generates a new
-KEK, unwraps and rewraps every `secrets_data_keys` row in one transaction, and replaces only the
-wrapped keys plus the KEK row. It does not update `secrets_versions`, so static ciphertext is not
-re-encrypted. The store interface keeps this boundary suitable for an HSM-backed KEK provider.
+Named-key rotation claims the next data-key version with `if_absent`, then advances the key's
+`current_version` at the revision it read (a rotation that stopped in between is completed by the
+next). Old data keys remain wrapped, allowing old ciphertext to decrypt. Customer-KEK rotation
+makes a new KEK current, keeps the replaced one, rewraps every data key in each workspace of the
+space conditionally on the revision read, and then forgets the replaced KEK; a workspace that is
+not ready leaves the rotation to be finished by the next one. It never re-encrypts secret versions.
+The customer KEK never leaves the store: data keys are wrapped and unwrapped by
+`Store::wrap_secret_data_key` and `unwrap_secret_data_key`, which keeps the boundary suitable for
+an HSM-backed KEK provider.
 
 Each operation is one signed audit event through `audit::record`, with caller, customer, mount,
 key and selected version. Plaintext, ciphertext, messages, signatures and MACs are excluded from

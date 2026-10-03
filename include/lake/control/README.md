@@ -72,6 +72,14 @@ review, release, webhook, delivery, export or rule, in the workspace of its repo
 keyed by its id and found by repository and kind (`forge_record_lookup`). `ForgeRecord` carries the
 engine and lake revisions; `Store` keeps only the legacy reads of `forge_records` for the copy
 (`LegacyForgeRecord`).
+`secret_records.hpp` holds the secrets codecs (lake#328-#332): `lake_secrets_mounts` (a mount keyed
+by its id, and its name claim), `lake_secrets_entries`, `lake_secrets_versions`,
+`lake_secrets_encryption_keys` and `lake_secrets_data_keys`, every name-selected record keyed by a
+blind index (`WorkspaceRecords::index_of`). `secrets.hpp` gives `SecretMount` its `workspace_id`
+and declares `SecretMountRoute`, `WrappedDataKey`, `CustomerKekState` and the `LegacySecret*` rows.
+`Store` keeps for secrets only the content-free routes, the customer KEK (`wrap_secret_data_key`,
+`unwrap_secret_data_key`, `rotate_customer_kek`, `retire_customer_kek`), dynamic leases (lake#362)
+and the legacy reads for the copy.
 `application_webhook_records.hpp` holds the application
 event and delivery-attempt codecs and the claim/settle pair that sends each attempt once
 (lake#356, lake#357); `apps.hpp` gives `Application` its `workspace_id` and declares the

@@ -197,6 +197,7 @@ add_library(lake-core STATIC
   src/control/drive_share_links.cpp
   src/control/forge_records.cpp
   src/control/application_user_records.cpp
+  src/control/secret_records.cpp
   src/control/application_webhook_records.cpp
   src/control/application_credential_records.cpp
   src/control/metering.cpp
@@ -239,6 +240,7 @@ add_library(lake-core STATIC
   src/api/build_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
+  src/api/secret_records_api.cpp
   src/api/offline_recovery_capabilities.cpp
   src/control/handles.cpp
   src/control/policy.cpp
