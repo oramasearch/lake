@@ -6,6 +6,11 @@ loaded once per `db/schema.sql` version, and drops it afterwards; a start-up swe
 stale `lake_fixture_*` databases. Fixtures use that database directly, with no nested schema. See
 [testing.md](../docs/build/testing.md#databases-the-runner-owns).
 
+A test's own socket clients (`liquid::http1::request`, liquid sync pushes and pulls) run on one
+thread through `one_thread_io.hpp`, never `liquid::runtime::block_on`, whose several runner threads
+hit a corosio close race (lake#510). The runner's terminate handler prints the uncaught exception
+and its stack. See [testing.md](../docs/build/testing.md#test-clients-run-their-sockets-on-one-thread).
+
 `lake-ui-fixture-pages` (lake#497) starts `lake-ui-fixture` and requests every page it seeds and
 every registered GET route; a fixture that cannot start, a seeded page that is not 200 HTML, or a
 5xx anywhere fails the suite. See [tools/ui/README.md](../tools/ui/README.md).

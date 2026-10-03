@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 
 #include "http1/client.hpp"
+#include "one_thread_io.hpp"
 #include "lake/api/server.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
@@ -56,13 +57,13 @@ public:
 
     std::pair<unsigned, json>
     request(const std::string& method, const std::string& path, const json& input = nullptr) {
-        const auto response = checked(liquid::runtime::block_on(liquid::http1::request(
+        const auto response = checked(lake::test::http_request(
             {.url = url_,
              .method = method,
              .suffix = path,
              .headers = {{"Authorization", "Bearer " + bearer},
                          {"Content-Type", "application/json"}},
-             .body = input.is_null() ? std::vector<std::byte>{} : bytes(input.dump())})));
+             .body = input.is_null() ? std::vector<std::byte>{} : bytes(input.dump())}));
         const std::string body(reinterpret_cast<const char*>(response.body.data()),
                                response.body.size());
         return {response.status, json::parse(body)};

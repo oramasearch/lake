@@ -2,13 +2,16 @@
 #include "postgres_fixture.hpp"
 
 #include <gtest/gtest.h>
+#include <execinfo.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <pqxx/pqxx>
 
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -301,6 +304,26 @@ private:
 
 std::unique_ptr<PostgresDatabase> database;
 
+// An abort names its exception and prints the stack it was thrown on (lake#510), so a crash on a
+// background thread in a parallel run is diagnosable from the test's log alone.
+[[noreturn]] void print_terminate() {
+    if (const auto current = std::current_exception()) {
+        try {
+            std::rethrow_exception(current);
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "terminate: uncaught exception: %s\n", error.what());
+        } catch (...) {
+            std::fprintf(stderr, "terminate: uncaught non-standard exception\n");
+        }
+    } else {
+        std::fprintf(stderr, "terminate: called without an exception\n");
+    }
+    void* frames[128];
+    const int count = backtrace(frames, 128);
+    backtrace_symbols_fd(frames, count, 2);
+    std::abort();
+}
+
 class DatabaseCleanup : public testing::EmptyTestEventListener {
 public:
     void OnTestStart(const testing::TestInfo&) override {
@@ -329,6 +352,7 @@ const char* lake::test::postgres_uri() {
 }
 
 int main(int argc, char** argv) {
+    std::set_terminate(print_terminate);
     testing::InitGoogleTest(&argc, argv);
     testing::UnitTest::GetInstance()->listeners().Append(new DatabaseCleanup);
     return RUN_ALL_TESTS();
