@@ -258,7 +258,7 @@ stored. The migration follows metering migration `0014`.
 
 | Table | Purpose |
 |---|---|
-| `auth_applications` | Registration, isolated pool, exact origins and redirects, custom host, and theme. |
+| `auth_applications` | Registration, isolated pool, exact origins and redirects, custom host, and theme. Split by `0059`: the row stays as content-free routing (id, space, pool, custom host, workspace), and the origins, redirects, name and theme live in the application's workspace Zetta. |
 | `auth_app_signing_keys` | Per-application Ed25519 public keys and encrypted signing seeds, including rotation state. Retired by `0056`: each application's keys live in its workspace Zetta. |
 | `auth_app_users` | Pool membership and active or suspended status for application users. Retired by `0055_application_user_workspaces` (lake#353): users live in the application's workspace Zetta, and this table is read only by the one-shot copy until a later migration drops it. |
 | `auth_app_organizations` | Application-facing organization profiles and metadata. Retired by `0055` (lake#354), with the users. |
@@ -713,3 +713,22 @@ which reapplies the assignment before each run. The `keystore` rows of the `appl
 Nothing is dropped. Idempotent; guard `application_credential_workspaces_guard`. Mechanism and
 cutover:
 [`../architecture/workspace-records.md`](../architecture/workspace-records.md#cutover-runbook-application-keys-and-webhooks-dev-cluster).
+
+## Application settings workspaces migration
+
+`0059_application_settings_workspaces` (lake#351) moves an application's settings, its `name`,
+`allowed_origins`, `redirect_uris` and `theme`, into one sealed record of the workspace Zetta of the
+application's workspace (`auth_applications.workspace_id`, `0049`). `auth_applications` stays as the
+content-free routing row: `id`, `customer_id` (the space and the policy object's parent), `pool_id`
+(named by the pool's sessions, credentials and tokens), `custom_sign_in_domain` (the `Host` a
+custom-domain page is requested on, unique across lake), `workspace_id`, `created_at` and
+`updated_at`. The four settings columns lose NOT NULL and their defaults; lake writes NULL there for
+every new application and reads them only through the operator-only `copy_workspace_records`
+(collection `auth_applications`), and `auth_applications_settings_check` keeps a row without a name
+free of settings. The migration records the owner of each row that still has a name in
+`workspace_assignments` under `object_table = 'auth_application_settings'` (`0049` already records
+the applications' routing under `auth_applications`): `application_workspace`, `needs_selection`
+while the application has no workspace (warned, and resolved by the copy once it is assigned), or
+`workspace_deleted` (warned; it does not hold the copy back). Nothing is dropped. Idempotent; guard
+`application_settings_workspaces_guard`. Mechanism and cutover:
+[`../architecture/workspace-records.md`](../architecture/workspace-records.md#cutover-runbook-application-settings-dev-cluster).

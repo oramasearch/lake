@@ -97,3 +97,6 @@ and `checked_application_session` check a session issued in an application's poo
 user's record in the application's workspace before returning it, and `sign_up_password_session`
 claims a pool user's email there before the account exists (lake#353). See
 [apps.md](../../../docs/api/apps.md#where-users-and-organizations-live-lake353-lake354).
+`apps.hpp` declares `configured_application`, which reads an application's settings record from
+its workspace onto the routing row the store returns (lake#351), and `configured`, which unwraps
+its completed answer; the identity capabilities and hosted pages use them.

@@ -26,6 +26,7 @@
 #include "lake/audit/audit.hpp"
 #include "lake/control/application_user_records.hpp"
 #include "lake/control/application_credential_records.hpp"
+#include "lake/control/application_settings_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/ask_messages.hpp"
@@ -1169,9 +1170,6 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationEventsAndTheirDelive
         auto created = t.store->create_application({.id = id,
                                                     .customer_id = customer,
                                                     .pool_id = "app:" + id,
-                                                    .name = name,
-                                                    .allowed_origins = {"https://a.example.test"},
-                                                    .redirect_uris = {},
                                                     .workspace_id = workspace});
         EXPECT_TRUE(created) << created.error().message;
         return id;
@@ -1362,9 +1360,6 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationUsersAndOrganization
         auto created = t.store->create_application({.id = id,
                                                     .customer_id = customer,
                                                     .pool_id = "app:" + id,
-                                                    .name = "directory",
-                                                    .allowed_origins = {"https://a.example.test"},
-                                                    .redirect_uris = {},
                                                     .workspace_id = workspace});
         EXPECT_TRUE(created) << created.error().message;
         return id;
@@ -1582,9 +1577,6 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationKeysAndWebhooks) {
         auto created = t.store->create_application({.id = id,
                                                     .customer_id = customer,
                                                     .pool_id = "app:" + id,
-                                                    .name = name,
-                                                    .allowed_origins = {"https://a.example.test"},
-                                                    .redirect_uris = {},
                                                     .workspace_id = workspace});
         EXPECT_TRUE(created) << created.error().message;
         return id;
@@ -1807,6 +1799,187 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationKeysAndWebhooks) {
     const auto tampered = copy("auth_app_webhooks", "verify");
     EXPECT_EQ(tampered.value["missing"].size(), 1U) << "a row that no longer opens is missing";
     EXPECT_FALSE(tampered.value["complete"]);
+}
+
+// lake#351: the one-shot copy moves the settings each application's auth_applications row still
+// holds (name, allowed origins, redirect URIs, theme) into the application's workspace, keyed by
+// the application, with the instant the row was created. The application then reads them there.
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationSettings) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    auto& first = t.spaces[0];
+    auto& second = t.spaces[1];
+    std::map<std::string, lake::control::ApplicationSettings> legacy;
+    const auto application = [&](const std::string& customer, const std::string& workspace,
+                                 const std::string& name) {
+        const std::string id = lake::control::new_uuid_v4();
+        auto created = t.store->create_application({.id = id,
+                                                    .customer_id = customer,
+                                                    .pool_id = "app:" + id,
+                                                    .workspace_id = workspace});
+        EXPECT_TRUE(created) << created.error().message;
+        legacy[id] = {.application_id = id,
+                      .customer_id = customer,
+                      .name = name,
+                      .allowed_origins = {"https://" + id + ".example.test"},
+                      .redirect_uris = {"https://" + id + ".example.test/callback"},
+                      .theme = {{"accent_color", "#123456"}},
+                      .at_us = 1'788'256'800'000'000};
+        return id;
+    };
+    // The first space's application is in its lab workspace, the second space's in its first; one
+    // more application's workspace is deleted before the copy.
+    const std::string lab_app = application(first.customer_id, first.workspaces[1], "Lab app");
+    const std::string their_app = application(second.customer_id, second.workspaces[0], "Theirs");
+    const std::string gone_app = application(first.customer_id, first.workspaces[0], "Gone");
+    std::string legacy_app; // PostgreSQL only: an application from before migration 0049
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        for (const auto& [id, settings] : legacy) {
+            tx.exec_params("UPDATE auth_applications SET name = $2, allowed_origins = $3::jsonb, "
+                           "redirect_uris = $4::jsonb, theme = $5::jsonb, created_at = "
+                           "to_timestamp($6::double precision / 1000000) WHERE id = $1::uuid",
+                           id, settings.name, json(settings.allowed_origins).dump(),
+                           json(settings.redirect_uris).dump(), settings.theme.dump(),
+                           settings.at_us);
+        }
+        legacy_app = lake::control::new_uuid_v4();
+        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
+        tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
+                       "allowed_origins) VALUES ($1::uuid, $2::uuid, $3, 'Legacy', "
+                       "'[\"https://legacy.example.test\"]'::jsonb)",
+                       legacy_app, second.customer_id, "app:" + legacy_app);
+        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
+        tx.commit();
+    } else {
+        auto& memory = static_cast<lake::control::InMemoryStore&>(*t.store);
+        for (const auto& [id, settings] : legacy) {
+            memory.seed_legacy_application_settings(settings);
+        }
+    }
+    ASSERT_TRUE(t.store->update_workspace(first.workspaces[0], {.desired = "deleted"}));
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    const auto call = [&](const std::string& name, json input) {
+        operator_context.request_id = lake::control::new_uuid_v4();
+        const auto completed =
+            liquid::runtime::block_on(t.registry.call_async(name, input, operator_context));
+        EXPECT_TRUE(completed);
+        return completed ? *completed : lake::api::ApiResult::failure("store_error", "incomplete");
+    };
+    const auto copy = [&](std::string mode) {
+        return call("copy_workspace_records", {{"collection", "auth_applications"}, {"mode", mode}});
+    };
+    const std::string lab_url = "http://" + first.workspaces[1] + ".test";
+    const std::string their_url = "http://" + second.workspaces[0] + ".test";
+
+    // Before the copy, an application whose settings are not in its workspace is not found, and
+    // nothing falls back to the control store.
+    EXPECT_EQ(call("get_application", {{"id", lab_app}}).error.code, "not_found");
+
+    // Rows of the deleted workspace are reported and do not block; the legacy application's do.
+    const std::size_t rows = legacy.size() + (GetParam() ? 1U : 0U);
+    const auto plan = copy("plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["rows"], rows);
+    EXPECT_EQ(plan.value["unresolved"].size(), GetParam() ? 2U : 1U);
+    const auto before = copy("verify");
+    EXPECT_EQ(before.value["missing"].size(), 2U);
+    EXPECT_FALSE(before.value["complete"]);
+    const auto copied = copy("copy");
+    ASSERT_TRUE(copied.ok) << copied.error.message;
+    EXPECT_EQ(copied.value["copied"], 2);
+    const auto rerun = copy("copy");
+    EXPECT_EQ(rerun.value["copied"], 0) << "a rerun copies nothing twice";
+    EXPECT_EQ(rerun.value["already_present"], 2);
+    const auto verified = copy("verify");
+    EXPECT_EQ(verified.value["verified"], 2);
+    EXPECT_TRUE(verified.value["missing"].empty());
+    EXPECT_TRUE(verified.value["mismatched"].empty());
+    EXPECT_EQ(verified.value["complete"], !GetParam());
+
+    // Each application's settings are only in its own workspace, keyed by it, and sealed.
+    ASSERT_EQ(t.zetta->records[lab_url].rows("auth_applications").size(), 1U);
+    EXPECT_EQ(t.zetta->records[lab_url].rows("auth_applications").begin()->first, lab_app);
+    EXPECT_EQ(t.zetta->records[their_url].rows("auth_applications").size(), 1U);
+    EXPECT_TRUE(t.zetta->records["http://" + second.workspaces[1] + ".test"].collections.empty());
+    for (const auto& [key, record] : t.zetta->records[lab_url].rows("auth_applications")) {
+        EXPECT_EQ(record.dump().find("Lab app"), std::string::npos) << "sealed body";
+        EXPECT_EQ(record.dump().find(lab_app + ".example.test"), std::string::npos);
+    }
+
+    // The application reads the copied settings, with the instant its row was created.
+    const auto read = call("get_application", {{"id", lab_app}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["name"], "Lab app");
+    EXPECT_EQ(read.value["redirect_uris"][0], "https://" + lab_app + ".example.test/callback");
+    EXPECT_EQ(read.value["theme"]["accent_color"], "#123456");
+    const auto listed = call("list_applications", {{"customer_id", first.customer_id}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["items"].size(), 2U);
+    for (const json& item : listed.value["items"]) {
+        if (item["id"] == lab_app) {
+            EXPECT_EQ(item["name"], "Lab app");
+        } else {
+            EXPECT_TRUE(item.contains("settings_unavailable")) << "the deleted workspace's";
+        }
+    }
+    auto records =
+        lake::api::workspace_records(operator_context, first.customer_id, first.workspaces[1]);
+    ASSERT_TRUE(records) << records.error().message;
+    const auto stored = lake::control::settled(liquid::runtime::block_on(
+        lake::control::get_application_settings(*records, lab_app, first.customer_id)));
+    ASSERT_TRUE(stored && *stored);
+    EXPECT_EQ((*stored)->at_us, 1'788'256'800'000'000);
+
+    // A theme changed after the copy (a later lake revision) is accepted by verify.
+    ASSERT_TRUE(call("update_application_theme",
+                     {{"application_id", lab_app},
+                      {"workspace_id", first.workspaces[1]},
+                      {"theme", {{"accent_color", "#abcdef"}}}})
+                    .ok);
+    const auto after_theme = copy("verify");
+    EXPECT_EQ(after_theme.value["verified"], 2);
+    EXPECT_TRUE(after_theme.value["mismatched"].empty());
+
+    if (GetParam()) {
+        // Assigning the legacy application its workspace resolves its settings on the next run.
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       legacy_app, second.workspaces[1]);
+        tx.commit();
+        const auto resolved = copy("copy");
+        EXPECT_EQ(resolved.value["copied"], 1);
+        EXPECT_EQ(resolved.value["unresolved"].size(), 1U) << "only the deleted workspace's";
+        EXPECT_TRUE(copy("verify").value["complete"]);
+        const auto legacy_read = call("get_application", {{"id", legacy_app}});
+        ASSERT_TRUE(legacy_read.ok) << legacy_read.error.message;
+        EXPECT_EQ(legacy_read.value["name"], "Legacy");
+        EXPECT_EQ(legacy_read.value["redirect_uris"], json::array());
+    }
+
+    // A changed copy is reported, never silently accepted: settings written under another key do
+    // not open there.
+    auto& their_rows = t.zetta->records[their_url].rows("auth_applications");
+    auto& lab_rows = t.zetta->records[lab_url].rows("auth_applications");
+    their_rows.begin()->second["value"] = lab_rows.begin()->second["value"];
+    const auto tampered = copy("verify");
+    EXPECT_EQ(tampered.value["missing"].size(), 1U) << "a row that no longer opens is missing";
+    EXPECT_FALSE(tampered.value["complete"]);
+
+    // Operator only.
+    operator_context.operator_credential = false;
+    EXPECT_EQ(copy("plan").error.code, "unauthorized");
 }
 
 // lake#348, lake#349: repository transfer and build records live in the workspace Zetta of the

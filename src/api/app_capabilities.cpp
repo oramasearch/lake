@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "lake/control/application_credential_records.hpp"
+#include "lake/control/application_settings_records.hpp"
 #include "lake/control/application_user_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -204,6 +205,18 @@ constexpr std::int64_t abandoned_claim_us = 5LL * 60 * 1'000'000;
 
 ApiResult from_records_error(const control::ZettaControlError& error) {
     return ApiResult::failure(error.code, error.message, error.path);
+}
+
+// The settings of a new application, from register_application's input.
+control::ApplicationSettings registration_settings(const std::string& id, const json& input) {
+    control::ApplicationSettings settings;
+    settings.application_id = id;
+    settings.customer_id = input.at("customer_id");
+    settings.name = input.at("name");
+    settings.allowed_origins = input.at("allowed_origins").get<std::vector<std::string>>();
+    settings.redirect_uris = input.at("redirect_uris").get<std::vector<std::string>>();
+    settings.theme = input.value("theme", json::object());
+    return settings;
 }
 
 // The secrets subsystem's envelope purposes of an application's credentials (lake#352, lake#355).
@@ -593,6 +606,40 @@ liquid::runtime::task<ApiResult> emit_and_return(const control::Application& app
 
 } // namespace
 
+liquid::runtime::task<std::expected<control::Application, ApiResult>>
+configured_application(control::Result<control::Application> routing, ApiContext& context) {
+    using Found = std::expected<control::Application, ApiResult>;
+    if (!routing) {
+        co_return Found(std::unexpected(from_store_error(routing.error())));
+    }
+    auto records = application_records(*routing, context);
+    if (!records) {
+        co_return Found(std::unexpected(records.error()));
+    }
+    auto settings = control::settled(co_await control::get_application_settings(
+        *records, routing->id, routing->customer_id));
+    if (!settings) {
+        co_return Found(std::unexpected(from_records_error(settings.error())));
+    }
+    if (!*settings) {
+        co_return Found(std::unexpected(ApiResult::failure(
+            "not_found", "application " + routing->id +
+                             " has no settings in its workspace yet (an operator copies them "
+                             "with copy_workspace_records)")));
+    }
+    control::Application application = std::move(*routing);
+    control::apply_settings(application, **settings);
+    co_return Found(std::move(application));
+}
+
+std::expected<control::Application, ApiResult>
+configured(std::expected<std::expected<control::Application, ApiResult>, liquid::error> completed) {
+    if (!completed) {
+        return std::unexpected(ApiResult::failure("store_error", completed.error().message));
+    }
+    return std::move(*completed);
+}
+
 liquid::runtime::task<ApiResult> emit_application_event(control::Application application,
                                                         std::string event,
                                                         json data,
@@ -820,9 +867,9 @@ void register_application_capabilities(Registry& registry) {
         .title = "Register application",
         .description =
             "Create an application user pool and its first Ed25519 JWT key, in one workspace of "
-            "the space: that workspace's Zetta holds the application's signing keys, webhooks, "
-            "users, organizations, lifecycle events and webhook delivery attempts. The workspace "
-            "never changes.",
+            "the space: that workspace's Zetta holds the application's settings (name, origins, "
+            "redirect URIs, theme), signing keys, webhooks, users, organizations, lifecycle "
+            "events and webhook delivery attempts. The workspace never changes.",
         .input_schema =
             input_schema({{"customer_id", {{"type", "string"}}},
                           {"name", {{"type", "string"}}},
@@ -871,22 +918,30 @@ void register_application_capabilities(Registry& registry) {
             if (!written) {
                 co_return from_records_error(written.error());
             }
+            // Its settings go there too (lake#351); the control store keeps only the routing row.
+            auto settings = control::settled(co_await control::create_application_settings(
+                *records, registration_settings(id, input)));
+            if (!settings) {
+                static_cast<void>(co_await records->remove(
+                    control::ApplicationSigningKeysCodec::collection, id, written->revision));
+                co_return from_records_error(settings.error());
+            }
             auto created = context.store->create_application(
                 {.id = id,
                  .customer_id = input.at("customer_id"),
                  .pool_id = "app:" + id,
-                 .name = input.at("name"),
-                 .allowed_origins = input.at("allowed_origins").get<std::vector<std::string>>(),
-                 .redirect_uris = input.at("redirect_uris").get<std::vector<std::string>>(),
                  .custom_sign_in_domain = input.value("custom_sign_in_domain", ""),
-                 .theme = input.value("theme", json::object()),
                  .workspace_id = input.at("workspace_id")});
             if (!created) {
-                // Nothing names the unused key ring: take it back out of the workspace.
+                // Nothing names the unused records: take them back out of the workspace.
                 static_cast<void>(co_await records->remove(
                     control::ApplicationSigningKeysCodec::collection, id, written->revision));
+                static_cast<void>(co_await records->remove(
+                    control::ApplicationSettingsCodec::collection, id, settings->revision));
+                co_return from_store_error(created.error());
             }
-            co_return one_result(std::move(created));
+            control::apply_settings(*created, *settings);
+            co_return ApiResult::success(control::to_json(*created));
         }});
     registry.add(Capability{
         .name = "list_applications",
@@ -900,7 +955,8 @@ void register_application_capabilities(Registry& registry) {
         .action = "read",
         .resolve_object = customer_object,
         .authorizes_candidates = true,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             const std::string customer_id = input.at("customer_id");
             context.audit_customer_id = customer_id;
             context.audit_kind = "application";
@@ -908,14 +964,14 @@ void register_application_capabilities(Registry& registry) {
             context.audit_details = {{"customer_id", customer_id}};
             auto applications = context.store->list_applications(customer_id, limit_of(input));
             if (!applications) {
-                return from_store_error(applications.error());
+                co_return from_store_error(applications.error());
             }
             std::vector<std::string> object_ids;
             std::vector<std::pair<control::Application, std::string>> candidates;
             for (const auto& application : *applications) {
                 auto object = context.store->find_policy_object("application", application.id);
                 if (!object) {
-                    return from_store_error(object.error());
+                    co_return from_store_error(object.error());
                 }
                 object_ids.push_back(object->id);
                 candidates.emplace_back(application, object->id);
@@ -926,15 +982,63 @@ void register_application_capabilities(Registry& registry) {
                                                       "read",
                                                       context.authorization_cache);
             if (!decisions) {
-                return from_store_error(decisions.error());
+                co_return from_store_error(decisions.error());
             }
-            json items = json::array();
+            // The settings of the readable applications, one list_records per workspace that
+            // holds any (lake#351). An application whose settings cannot be read is still listed,
+            // by its routing, with the reason.
+            std::vector<control::Application> allowed;
+            std::map<std::string, std::map<std::string, control::ApplicationSettings>> settings;
+            std::map<std::string, std::string> unavailable; // workspace -> reason
             for (const auto& [application, object_id] : candidates) {
-                if (decisions->at(object_id).allowed) {
-                    items.push_back(control::to_json(application));
+                if (!decisions->at(object_id).allowed) {
+                    continue;
+                }
+                allowed.push_back(application);
+                const std::string& workspace_id = application.workspace_id;
+                if (workspace_id.empty() || settings.contains(workspace_id) ||
+                    unavailable.contains(workspace_id)) {
+                    continue;
+                }
+                auto records = application_records(application, context);
+                if (!records) {
+                    unavailable[workspace_id] =
+                        records.error().error.code + ": " + records.error().error.message;
+                    continue;
+                }
+                auto listed = control::settled(
+                    co_await control::list_application_settings(*records, customer_id));
+                if (!listed) {
+                    unavailable[workspace_id] = listed.error().code + ": " + listed.error().message;
+                    continue;
+                }
+                auto& held = settings[workspace_id];
+                for (auto& value : *listed) {
+                    const std::string key = value.application_id;
+                    held.emplace(key, std::move(value));
                 }
             }
-            return ApiResult::success({{"items", std::move(items)}});
+            json items = json::array();
+            for (control::Application& application : allowed) {
+                std::string reason = "application has no workspace yet";
+                if (const auto failed = unavailable.find(application.workspace_id);
+                    failed != unavailable.end()) {
+                    reason = failed->second;
+                } else if (const auto held = settings.find(application.workspace_id);
+                           held != settings.end()) {
+                    const auto found = held->second.find(application.id);
+                    if (found != held->second.end()) {
+                        control::apply_settings(application, found->second);
+                        items.push_back(control::to_json(application));
+                        continue;
+                    }
+                    reason = "not_found: no settings in its workspace yet";
+                }
+                json item = control::to_json(application);
+                item["settings_unavailable"] = reason;
+                items.push_back(std::move(item));
+            }
+            co_return ApiResult::success({{"items", std::move(items)}});
         }});
     registry.add(Capability{
         .name = "begin_application_authorization",
@@ -959,9 +1063,11 @@ void register_application_capabilities(Registry& registry) {
         .resolve_object = application_object,
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
-            auto application = context.store->get_application(input.at("application_id"));
+            // The registered redirect URIs are the application's settings in its workspace.
+            auto application = configured(co_await configured_application(
+                context.store->get_application(input.at("application_id")), context));
             if (!application) {
-                co_return from_store_error(application.error());
+                co_return application.error();
             }
             const std::string redirect_uri = input.at("redirect_uri");
             if (std::ranges::find(application->redirect_uris, redirect_uri) ==
@@ -1118,36 +1224,66 @@ void register_application_capabilities(Registry& registry) {
                                           {"token_type", "Bearer"},
                                           {"expires_in", 900}});
         }});
-    registry.add(Capability{.name = "get_application",
-                            .title = "Get application",
-                            .description = "Read one application registered to sign its own users "
-                                           "in through lake, with its settings.",
-                            .input_schema =
-                                input_schema({{"id", {{"type", "string"}}}}, json::array({"id"})),
-                            .output_schema = object_schema(),
-                            .kind = CapabilityKind::Read,
-                            .object = "application",
-                            .action = "read",
-                            .resolve_object = application_id_object,
-                            .handler = [](const json& input, ApiContext& context) {
-                                return one_result(context.store->get_application(input.at("id")));
-                            }});
-    registry.add(
-        Capability{.name = "update_application_theme",
-                   .title = "Update application theme",
-                   .description = "Replace the hosted identity-page theme for an application.",
-                   .input_schema = input_schema(
-                       {{"application_id", {{"type", "string"}}}, {"theme", {{"type", "object"}}}},
-                       json::array({"application_id", "theme"})),
-                   .output_schema = object_schema(),
-                   .kind = CapabilityKind::Action,
-                   .object = "application",
-                   .action = "admin",
-                   .resolve_object = application_object,
-                   .handler = [](const json& input, ApiContext& context) {
-                       return one_result(context.store->update_application_theme(
-                           input.at("application_id"), input.at("theme")));
-                   }});
+    registry.add(Capability{
+        .name = "get_application",
+        .title = "Get application",
+        .description =
+            "Read one application registered to sign its own users in through lake, with its "
+            "settings (name, allowed origins, redirect URIs, theme) read from the workspace Zetta "
+            "of the application's workspace, the `workspace_id` it returns.",
+        .input_schema = input_schema({{"id", {{"type", "string"}}}}, json::array({"id"})),
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Read,
+        .object = "application",
+        .action = "read",
+        .resolve_object = application_id_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            auto application = configured(co_await configured_application(
+                context.store->get_application(input.at("id")), context));
+            if (!application) {
+                co_return application.error();
+            }
+            co_return ApiResult::success(control::to_json(*application));
+        }});
+    registry.add(Capability{
+        .name = "update_application_theme",
+        .title = "Update application theme",
+        .description =
+            "Replace the hosted identity-page theme for an application. The theme is part of the "
+            "application's settings in the workspace Zetta of its workspace: `workspace_id` must "
+            "name that workspace. The change is written conditionally on the revision read, so a "
+            "concurrent change is reread rather than lost.",
+        .input_schema = input_schema({{"application_id", {{"type", "string"}}},
+                                      {"workspace_id", {{"type", "string"}}},
+                                      {"theme", {{"type", "object"}}}},
+                                     json::array({"application_id", "workspace_id", "theme"})),
+        .output_schema = object_schema(),
+        .kind = CapabilityKind::Action,
+        .object = "application",
+        .action = "admin",
+        .resolve_object = application_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!input.at("theme").is_object()) {
+                co_return ApiResult::failure(
+                    "invalid_input", "application theme must be an object", "/theme");
+            }
+            auto found = application_and_records(input, context);
+            if (!found) {
+                co_return found.error();
+            }
+            const json theme = input.at("theme");
+            auto updated = control::settled(co_await control::update_application_settings(
+                found->records, found->application.id, found->application.customer_id,
+                [&](control::ApplicationSettings& settings) { settings.theme = theme; }));
+            if (!updated) {
+                co_return from_records_error(updated.error());
+            }
+            control::Application application = std::move(found->application);
+            control::apply_settings(application, *updated);
+            co_return ApiResult::success(control::to_json(application));
+        }});
     registry.add(Capability{
         .name = "rotate_application_signing_key",
         .title = "Rotate application signing key",

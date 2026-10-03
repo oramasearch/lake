@@ -183,6 +183,16 @@ webhook_signature(std::string_view secret, std::string_view event_id, std::strin
 
 } // namespace apps
 
+void apply_settings(Application& application, const ApplicationSettings& settings) {
+    application.name = settings.name;
+    application.allowed_origins = settings.allowed_origins;
+    application.redirect_uris = settings.redirect_uris;
+    application.theme = settings.theme;
+    if (!settings.updated_at.empty()) {
+        application.updated_at = settings.updated_at;
+    }
+}
+
 nlohmann::json to_json(const Application& value) {
     return {{"id", value.id},
             {"customer_id", value.customer_id},

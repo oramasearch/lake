@@ -392,10 +392,14 @@ public:
         return call("get_application_by_domain",
                     [&] { return store_->get_application_by_domain(domain); });
     }
-    control::Result<control::Application>
-    update_application_theme(const std::string& id, const nlohmann::json& theme) override {
-        return call("update_application_theme",
-                    [&] { return store_->update_application_theme(id, theme); });
+    control::Result<void> assign_legacy_application_settings() override {
+        return call("assign_legacy_application_settings",
+                    [&] { return store_->assign_legacy_application_settings(); });
+    }
+    control::Result<std::vector<control::LegacyApplicationSettings>>
+    legacy_application_settings(const std::string& after_id, int limit) override {
+        return call("legacy_application_settings",
+                    [&] { return store_->legacy_application_settings(after_id, limit); });
     }
     control::Result<std::string>
     encrypt_application_credential(const std::string& purpose,

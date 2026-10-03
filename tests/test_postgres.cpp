@@ -2962,8 +2962,6 @@ TEST(PostgresApplicationCredentials, MigrationRecordsEachRowsOwnerForTheCopy) {
         const auto created = store->create_application({.id = id,
                                                         .customer_id = customer,
                                                         .pool_id = "app:" + id,
-                                                        .name = "migration",
-                                                        .allowed_origins = {"https://m.test"},
                                                         .workspace_id = workspace});
         EXPECT_TRUE(created) << created.error().message;
         return id;
@@ -3110,6 +3108,152 @@ TEST(PostgresApplicationCredentials, MigrationRecordsEachRowsOwnerForTheCopy) {
     EXPECT_EQ(hooks.at(owned_hook).webhook.encrypted_secret, "envelope");
     EXPECT_EQ(hooks.at(owned_hook).webhook.events, std::vector<std::string>{"user.created"});
     EXPECT_GT(hooks.at(owned_hook).webhook.at_us, 0);
+}
+
+// Migration 0059 (lake#351) records the owner of each application's settings that the retired
+// auth_applications columns still hold: the application's workspace, needs_selection while it has
+// none, workspace_deleted when that workspace is gone. A routing row written after it holds no
+// settings and is not recorded; the copy's assignment resolves an application assigned after review.
+TEST(PostgresApplicationSettings, MigrationRecordsEachRowsOwnerForTheCopy) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "application-settings-migration-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    std::vector<std::string> customers;
+    std::vector<std::vector<std::string>> workspaces(2);
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "app-settings-migration-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+        for (int count = 0; count <= index; ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            workspaces[index].push_back(workspace->id);
+        }
+    }
+    pqxx::connection connection(uri);
+    // Applications as registered before 0059, with their settings in the row: one of the first
+    // space, one of the second space's from before 0049 (no workspace), one whose workspace is
+    // deleted.
+    const auto legacy = [&](const std::string& customer, const std::string& workspace) {
+        const std::string id = lake::control::new_uuid_v4();
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
+        tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
+                       "allowed_origins, redirect_uris, theme, workspace_id, created_at) VALUES "
+                       "($1::uuid, $2::uuid, $3, 'Legacy ' || $1, "
+                       "'[\"https://legacy.example.test\"]'::jsonb, "
+                       "'[\"https://legacy.example.test/callback\"]'::jsonb, "
+                       "'{\"accent_color\":\"#123456\"}'::jsonb, NULLIF($4, '')::uuid, "
+                       "'2026-09-01T10:00:00Z')",
+                       id, customer, "app:" + id, workspace);
+        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
+        tx.commit();
+        return id;
+    };
+    const std::string owned = legacy(customers[0], workspaces[0][0]);
+    const std::string ambiguous = legacy(customers[1], "");
+    const std::string gone = legacy(customers[1], workspaces[1][1]);
+    ASSERT_TRUE(store->update_workspace(workspaces[1][1], {.desired = "deleted"}));
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = "
+                "'0059_application_settings_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0059_application_settings_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = 'auth_application_settings' AND object_id = $1::uuid",
+            id);
+        return found.empty() ? std::pair<std::string, std::string>{}
+                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    using Outcome = std::pair<std::string, std::string>;
+    // The schema section from 0059 on, twice: the second run changes nothing.
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome(owned), (Outcome{"application_workspace", workspaces[0][0]}));
+        EXPECT_EQ(outcome(ambiguous), (Outcome{"needs_selection", ""}));
+        EXPECT_EQ(outcome(gone), (Outcome{"workspace_deleted", ""}));
+    }
+
+    // A new application's row is routing only: no settings, and nothing to copy.
+    const std::string routed = lake::control::new_uuid_v4();
+    ASSERT_TRUE(store->create_application({.id = routed,
+                                           .customer_id = customers[0],
+                                           .pool_id = "app:" + routed,
+                                           .custom_sign_in_domain = "login-" + suffix + ".test",
+                                           .workspace_id = workspaces[0][0]}));
+    {
+        pqxx::work tx(connection);
+        const auto row = tx.exec_params(
+            "SELECT name IS NULL AND allowed_origins IS NULL AND redirect_uris IS NULL AND theme "
+            "IS NULL FROM auth_applications WHERE id = $1::uuid",
+            routed);
+        EXPECT_TRUE(row[0][0].as<bool>()) << "the routing row holds no settings";
+        EXPECT_THROW(tx.exec_params("UPDATE auth_applications SET theme = '{}'::jsonb WHERE id = "
+                                    "$1::uuid",
+                                    routed),
+                     pqxx::check_violation)
+            << "settings without a name are refused";
+    }
+    ASSERT_TRUE(store->assign_legacy_application_settings());
+    EXPECT_TRUE(outcome(routed).first.empty());
+
+    // A reviewed assignment of the unassigned application resolves its settings.
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       ambiguous, workspaces[1][0]);
+        tx.commit();
+    }
+    ASSERT_TRUE(store->assign_legacy_application_settings());
+    EXPECT_EQ(outcome(ambiguous), (Outcome{"application_workspace", workspaces[1][0]}));
+    EXPECT_EQ(outcome(gone), (Outcome{"workspace_deleted", ""}));
+
+    // The settings page by application id, with the columns the rows held.
+    std::map<std::string, lake::control::LegacyApplicationSettings> rows;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_application_settings(after, 1);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        ASSERT_EQ(page->size(), 1U);
+        rows.emplace(page->front().settings.application_id, page->front());
+        after = page->back().settings.application_id;
+    }
+    EXPECT_FALSE(rows.contains(routed));
+    ASSERT_TRUE(rows.contains(owned));
+    const auto& row = rows.at(owned);
+    EXPECT_EQ(row.workspace_id, workspaces[0][0]);
+    EXPECT_EQ(row.customer_id, customers[0]);
+    EXPECT_EQ(row.settings.customer_id, customers[0]);
+    EXPECT_EQ(row.settings.name, "Legacy " + owned);
+    EXPECT_EQ(row.settings.allowed_origins,
+              std::vector<std::string>{"https://legacy.example.test"});
+    EXPECT_EQ(row.settings.redirect_uris,
+              std::vector<std::string>{"https://legacy.example.test/callback"});
+    EXPECT_EQ(row.settings.theme.at("accent_color"), "#123456");
+    EXPECT_EQ(row.settings.at_us, 1'788'256'800'000'000);
+    EXPECT_EQ(rows.at(gone).outcome, "workspace_deleted");
+    EXPECT_EQ(rows.at(ambiguous).workspace_id, workspaces[1][0]);
 }
 
 // Agent launches, their credential and cron schedules against the production

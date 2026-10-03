@@ -33,7 +33,10 @@ hold the application's lifecycle events (it never changes), and follows the appl
 page to pool users, application organizations, lifecycle events, and webhook registration. The
 event log reads the events and their delivery attempts from that workspace's Zetta (lake#356), and the
 users and organizations pages read theirs there too (lake#353, lake#354), and the webhook form
-registers the webhook, with its sealed secret, in the same workspace (lake#355). Those pages
+registers the webhook, with its sealed secret, in the same workspace (lake#355). The application's
+name, origins, redirect URIs and theme are read from that workspace too (lake#351): the
+applications list shows an application whose settings cannot be read by its id, and the hosted
+and custom-domain pages answer the error instead of rendering. Those pages
 call the application capabilities through the registry and use the application policy object for
 authorization. Protected application mutations are recorded by the same signed audit path.
 

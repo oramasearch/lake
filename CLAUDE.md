@@ -56,7 +56,10 @@ migration `0045`); application lifecycle events and webhook delivery attempts fo
 lake#357, migration `0049`, in the application's workspace), and its signing keys and webhooks with
 their secrets (lake#352, lake#355, migration `0056`: one key ring per application rotated by one
 conditional write; seeds and secrets stay secrets envelopes inside the seal; the anonymous JWKS
-finds the workspace by the application id). Each PostgreSQL table stays until a
+finds the workspace by the application id). Its settings follow (lake#351, migration `0059`): name,
+origins, redirect URIs and theme are one sealed record in the application's workspace, and
+`auth_applications` stays as the content-free routing row (id, space, pool, custom sign-in host,
+workspace). Each PostgreSQL table stays until a
 later migration drops it after the copy is verified on dev.
 Repository usage follows (lake#348, lake#349, migration `0053`): exact hourly transfer counters and
 one build record per result in the repository's workspace Zetta, written from a bounded in-process

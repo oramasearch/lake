@@ -1,5 +1,6 @@
 #pragma once
 
+#include <expected>
 #include <string>
 
 #include <liquid/runtime.hpp>
@@ -11,6 +12,18 @@
 namespace lake::api {
 
 void register_application_capabilities(Registry& registry);
+
+// The application a routing read found, with its settings (name, allowed origins, redirect URIs,
+// theme) read from the record in its workspace Zetta (lake#351). The store's routing error is
+// returned as it is; an application without a workspace is `workspace_not_ready`, and one whose
+// settings are not in its workspace (registered before migration 0059 and not yet copied) is
+// `not_found`. Nothing falls back to the control store. One get_record.
+liquid::runtime::task<std::expected<control::Application, ApiResult>>
+configured_application(control::Result<control::Application> routing, ApiContext& context);
+
+// The answer of a completed configured_application.
+std::expected<control::Application, ApiResult>
+configured(std::expected<std::expected<control::Application, ApiResult>, liquid::error> completed);
 
 // Completes a session the store issued. In the lake pool it is the session and its secret. In an
 // application's pool the session is returned only to an active user of the application, read in

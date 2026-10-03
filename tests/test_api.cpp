@@ -2106,11 +2106,7 @@ TEST(ApplicationHttp, HostedAndCustomDomainPagesUseTheApplicationPool) {
         store->create_application({.id = application_id,
                                    .customer_id = customer->id,
                                    .pool_id = "app:" + application_id,
-                                   .name = "Hosted product",
-                                   .allowed_origins = {"https://product.example.test"},
-                                   .redirect_uris = {"https://product.example.test/callback"},
                                    .custom_sign_in_domain = "login.product.example.test",
-                                   .theme = {{"accent_color", "#123456"}},
                                    .workspace_id = workspace_id});
     ASSERT_TRUE(application) << application.error().message;
 
@@ -2125,6 +2121,16 @@ TEST(ApplicationHttp, HostedAndCustomDomainPagesUseTheApplicationPool) {
     lake::test::seed_application_signing_key(*store, options.workspaces, customer->id,
                                               workspace_id, application_id,
                                               options.instance_kek);
+    // Its settings too (lake#351): the hosted pages render them from there.
+    lake::test::seed_application_settings(
+        options.workspaces, workspace_id,
+        {.application_id = application_id,
+         .customer_id = customer->id,
+         .name = "Hosted product",
+         .allowed_origins = {"https://product.example.test"},
+         .redirect_uris = {"https://product.example.test/callback"},
+         .theme = {{"accent_color", "#123456"}}},
+        options.instance_kek);
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
 

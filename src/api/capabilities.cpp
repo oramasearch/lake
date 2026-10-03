@@ -54,8 +54,13 @@ ApiResult no_repository_store() {
                               "no repository store is configured (LAKE_STORE_ROOT)");
 }
 
-std::expected<std::pair<std::string, std::string>, ApiResult>
-webauthn_relying_party(ApiContext& context, const std::string& pool_id) {
+// The relying party of a passkey ceremony in `pool_id`, and the origin it answers. An application's
+// pool accepts lake's own host, the application's custom sign-in host (both routing), and the
+// application's allowed origins, which are its settings in its workspace (lake#351): those are
+// read only when the origin is neither host.
+liquid::runtime::task<std::expected<std::pair<std::string, std::string>, ApiResult>>
+webauthn_relying_party(ApiContext& context, std::string pool_id) {
+    using Party = std::expected<std::pair<std::string, std::string>, ApiResult>;
     std::string origin =
         context.request_origin.empty() ? "https://" + context.public_host : context.request_origin;
     std::string host = context.public_host;
@@ -68,40 +73,57 @@ webauthn_relying_party(ApiContext& context, const std::string& pool_id) {
         host.resize(port);
     }
     if (pool_id == "lake") {
-        return std::pair{host, origin};
+        co_return Party(std::pair{host, origin});
     }
     auto application = context.store->get_application_by_pool(pool_id);
     if (!application) {
-        return std::unexpected(from_store_error(application.error()));
+        co_return Party(std::unexpected(from_store_error(application.error())));
     }
     const std::string custom_origin = application->custom_sign_in_domain.empty()
                                           ? std::string{}
                                           : "https://" + application->custom_sign_in_domain;
     const bool hosted_on_lake = host == context.public_host;
     const bool hosted_on_custom = !custom_origin.empty() && origin == custom_origin;
-    const bool configured_origin = std::ranges::find(application->allowed_origins, origin) !=
-                                   application->allowed_origins.end();
-    if (!hosted_on_lake && !hosted_on_custom && !configured_origin) {
-        return std::unexpected(
-            ApiResult::failure("unauthorized", "origin is not allowed for this application"));
+    if (!hosted_on_lake && !hosted_on_custom) {
+        auto configured_one =
+            configured(co_await configured_application(std::move(application), context));
+        if (!configured_one) {
+            co_return Party(std::unexpected(std::move(configured_one.error())));
+        }
+        if (std::ranges::find(configured_one->allowed_origins, origin) ==
+            configured_one->allowed_origins.end()) {
+            co_return Party(std::unexpected(
+                ApiResult::failure("unauthorized", "origin is not allowed for this application")));
+        }
     }
-    return std::pair{host, origin};
+    co_return Party(std::pair{host, origin});
 }
 
-ApiResult authorize_application_origin(ApiContext& context, const std::string& pool_id) {
+// Refuses a cross-origin caller of an application's pool whose origin is not one of the
+// application's allowed origins, read from its settings in its workspace (lake#351). A same-origin
+// or lake-pool call reads nothing.
+liquid::runtime::task<ApiResult> authorize_application_origin(ApiContext& context,
+                                                              std::string pool_id) {
     if (pool_id == "lake" || context.caller_origin.empty() ||
         context.caller_origin == context.request_origin) {
-        return ApiResult::success(nullptr);
+        co_return ApiResult::success(nullptr);
     }
-    auto application = context.store->get_application_by_pool(pool_id);
+    auto application = configured(co_await configured_application(
+        context.store->get_application_by_pool(pool_id), context));
     if (!application) {
-        return from_store_error(application.error());
+        co_return std::move(application.error());
     }
     if (std::ranges::find(application->allowed_origins, context.caller_origin) ==
         application->allowed_origins.end()) {
-        return ApiResult::failure("unauthorized", "origin is not allowed for this application");
+        co_return ApiResult::failure("unauthorized", "origin is not allowed for this application");
     }
-    return ApiResult::success(nullptr);
+    co_return ApiResult::success(nullptr);
+}
+
+// The answer of a completed authorize_application_origin.
+ApiResult origin_answer(std::expected<ApiResult, liquid::error> completed) {
+    return completed ? std::move(*completed)
+                     : ApiResult::failure("store_error", completed.error().message);
 }
 
 ApiResult from_sync_store_error(const SyncStoreError& error) {
@@ -2050,7 +2072,8 @@ void register_identity_capabilities(Registry& registry) {
             if (!context.store)
                 co_return no_store();
             const std::string pool_id = input.value("pool_id", "lake");
-            if (const ApiResult origin = authorize_application_origin(context, pool_id);
+            if (const ApiResult origin =
+                    origin_answer(co_await authorize_application_origin(context, pool_id));
                 !origin.ok) {
                 co_return origin;
             }
@@ -2087,7 +2110,8 @@ void register_identity_capabilities(Registry& registry) {
                        if (!context.store)
                            co_return no_store();
                        const std::string pool_id = input.value("pool_id", "lake");
-                       if (const ApiResult origin = authorize_application_origin(context, pool_id);
+                       if (const ApiResult origin = origin_answer(
+                               co_await authorize_application_origin(context, pool_id));
                            !origin.ok) {
                            co_return origin;
                        }
@@ -2126,7 +2150,8 @@ void register_identity_capabilities(Registry& registry) {
                 co_return no_store();
             }
             const std::string pool_id = input.value("pool_id", "lake");
-            if (const ApiResult origin = authorize_application_origin(context, pool_id);
+            if (const ApiResult origin =
+                    origin_answer(co_await authorize_application_origin(context, pool_id));
                 !origin.ok) {
                 co_return origin;
             }
@@ -2174,7 +2199,8 @@ void register_identity_capabilities(Registry& registry) {
                        if (!context.store)
                            co_return no_store();
                        const std::string pool_id = input.value("pool_id", "lake");
-                       if (const ApiResult origin = authorize_application_origin(context, pool_id);
+                       if (const ApiResult origin = origin_answer(
+                               co_await authorize_application_origin(context, pool_id));
                            !origin.ok) {
                            co_return origin;
                        }
@@ -2258,30 +2284,35 @@ void register_identity_capabilities(Registry& registry) {
         .object = "principal",
         .action = "write",
         .resolve_object = self_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return no_store();
+                co_return no_store();
             }
             if (context.public_host.empty()) {
-                return ApiResult::failure("store_unavailable",
+                co_return ApiResult::failure("store_unavailable",
                                           "LAKE_PUBLIC_HOST is required for passkey registration");
             }
             const std::string pool_id =
                 context.operator_credential ? input.value("pool_id", "lake") : context.pool_id;
             const auto user = context.store->get_user(context.acting_user_id);
             if (!user) {
-                return from_store_error(user.error());
+                co_return from_store_error(user.error());
             }
-            auto relying_party = webauthn_relying_party(context, pool_id);
+            auto completed_party = co_await webauthn_relying_party(context, pool_id);
+            if (!completed_party) {
+                co_return ApiResult::failure("store_error", completed_party.error().message);
+            }
+            auto& relying_party = *completed_party;
             if (!relying_party) {
-                return relying_party.error();
+                co_return relying_party.error();
             }
             const auto challenge = context.store->begin_passkey_registration(
                 context.acting_user_id, pool_id, relying_party->first, relying_party->second);
             if (!challenge) {
-                return from_store_error(challenge.error());
+                co_return from_store_error(challenge.error());
             }
-            return ApiResult::success(
+            co_return ApiResult::success(
                 {{"public_key",
                   {{"challenge", challenge->challenge},
                    {"rp", {{"id", challenge->rp_id}, {"name", "lake"}}},
@@ -2346,29 +2377,35 @@ void register_identity_capabilities(Registry& registry) {
         .object = "authentication",
         .action = "write",
         .resolve_object = global_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return no_store();
+                co_return no_store();
             }
             if (context.public_host.empty()) {
-                return ApiResult::failure("store_unavailable",
+                co_return ApiResult::failure("store_unavailable",
                                           "LAKE_PUBLIC_HOST is required for passkey sign-in");
             }
             const std::string pool_id = input.value("pool_id", "lake");
-            if (const ApiResult origin = authorize_application_origin(context, pool_id);
+            if (const ApiResult origin =
+                    origin_answer(co_await authorize_application_origin(context, pool_id));
                 !origin.ok) {
-                return origin;
+                co_return origin;
             }
-            auto relying_party = webauthn_relying_party(context, pool_id);
+            auto completed_party = co_await webauthn_relying_party(context, pool_id);
+            if (!completed_party) {
+                co_return ApiResult::failure("store_error", completed_party.error().message);
+            }
+            auto& relying_party = *completed_party;
             if (!relying_party) {
-                return relying_party.error();
+                co_return relying_party.error();
             }
             const auto challenge = context.store->begin_passkey_sign_in(
                 pool_id, relying_party->first, relying_party->second);
             if (!challenge) {
-                return from_store_error(challenge.error());
+                co_return from_store_error(challenge.error());
             }
-            return ApiResult::success({{"public_key",
+            co_return ApiResult::success({{"public_key",
                                         {{"challenge", challenge->challenge},
                                          {"rpId", challenge->rp_id},
                                          {"timeout", 300000},
@@ -2406,7 +2443,8 @@ void register_identity_capabilities(Registry& registry) {
                 co_return no_store();
             }
             const std::string pool_id = input.value("pool_id", "lake");
-            if (const ApiResult origin = authorize_application_origin(context, pool_id);
+            if (const ApiResult origin =
+                    origin_answer(co_await authorize_application_origin(context, pool_id));
                 !origin.ok) {
                 co_return origin;
             }
@@ -2475,26 +2513,28 @@ void register_identity_capabilities(Registry& registry) {
         .object = "authentication",
         .action = "write",
         .resolve_object = global_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store) {
-                return no_store();
+                co_return no_store();
             }
             if (context.public_host.empty()) {
-                return ApiResult::failure("store_unavailable",
+                co_return ApiResult::failure("store_unavailable",
                                           "LAKE_PUBLIC_HOST is required for OAuth sign-in");
             }
             const std::string pool_id = input.value("pool_id", "lake");
-            if (const ApiResult origin = authorize_application_origin(context, pool_id);
+            if (const ApiResult origin =
+                    origin_answer(co_await authorize_application_origin(context, pool_id));
                 !origin.ok) {
-                return origin;
+                co_return origin;
             }
             const std::string provider_name = input.value("provider", "");
             const auto provider = context.store->get_oauth_provider(pool_id, provider_name);
             if (!provider) {
-                return from_store_error(provider.error());
+                co_return from_store_error(provider.error());
             }
             if (!oauth_endpoints_allowed(oauth_endpoints(*provider))) {
-                return ApiResult::failure("invalid_input",
+                co_return ApiResult::failure("invalid_input",
                                           "OAuth endpoints must use HTTPS outside loopback tests");
             }
             control::OAuthFlow flow{pool_id,
@@ -2505,13 +2545,13 @@ void register_identity_capabilities(Registry& registry) {
                                     input.value("device_name", "browser"),
                                     input.value("identity_document", "")};
             if (flow.state.empty() || flow.code_verifier.empty() || flow.nonce.empty()) {
-                return ApiResult::failure("store_error", "could not generate OAuth flow material");
+                co_return ApiResult::failure("store_error", "could not generate OAuth flow material");
             }
             const auto started = context.store->begin_oauth(flow);
             if (!started) {
-                return from_store_error(started.error());
+                co_return from_store_error(started.error());
             }
-            return ApiResult::success(
+            co_return ApiResult::success(
                 {{"authorization_url",
                   oauth_authorization_url(*provider, flow, context.public_host)}});
         }});

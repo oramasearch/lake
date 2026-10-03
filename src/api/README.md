@@ -274,3 +274,13 @@ revocation rewrite it at the revision read), `MountSecrets::open_lease` finds th
 lease's route, and `expire_secret_leases` is one pass of the expiry loop: it claims due routes from
 the control store and settles each lease in its own workspace only. The server's tick runs it every
 `secret_lease_expiry_interval`; `copy_workspace_records` copies `secrets_dynamic_leases`.
+`app_capabilities.cpp` keeps an application's settings in its workspace (lake#351):
+`register_application` writes them there with the first key ring, `get_application` and
+`list_applications` are asynchronous and fill them from the workspace (`configured_application`,
+one `list_records` per workspace for a listing), and `update_application_theme` takes the
+application's `workspace_id` and writes conditionally. `capabilities.cpp` reads the allowed origins
+from there on the asynchronous path (`begin_passkey_registration`, `begin_passkey_sign_in` and
+`start_oauth` became asynchronous). `http_server.cpp` reads them for the hosted and custom-domain
+identity pages, the password and OAuth forms' redirects, and the application pages, which read the
+settings concurrently with their listing (`application_page_reads`). `copy_workspace_records` also
+copies `auth_applications`.

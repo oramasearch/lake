@@ -2923,3 +2923,65 @@ CREATE TABLE IF NOT EXISTS secret_lease_workspaces_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0058_secret_lease_workspaces')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0059_application_settings_workspaces: an application's settings (its name, allowed origins,
+-- redirect URIs and hosted-page theme) live in the workspace Zetta of the application's workspace
+-- (lake#351; auth_applications.workspace_id, 0049; docs/api/apps.md, docs/architecture/
+-- workspace-records.md), one sealed record per application in lake_auth_applications. Lake no
+-- longer writes or reads those four columns; the operator's one-shot copy
+-- (copy_workspace_records, collection auth_applications) moves each application's settings into
+-- its workspace and verifies them.
+--
+-- auth_applications stays as the content-free routing row that finds an application before its
+-- workspace is read: id, customer_id (its space), pool_id (the pool its sessions name),
+-- custom_sign_in_domain (the host a hosted page is requested on, unique across lake),
+-- workspace_id (0049), created_at and updated_at. New rows leave the four settings columns NULL:
+-- they lose NOT NULL and their defaults here, and a row without a name holds none of them. A row
+-- with a name is one whose settings the copy moves.
+--
+-- Each application that still holds settings has its owner recorded in workspace_assignments
+-- under object_table auth_application_settings (0049 already recorded the applications' routing
+-- under auth_applications): its application's workspace (application_workspace), needs_selection
+-- while it has none, or workspace_deleted when that workspace is gone (its records went with it).
+-- Nothing is dropped here; a later migration drops the four columns once the copy has been
+-- verified on every environment.
+-- ---------------------------------------------------------------------------------------------
+ALTER TABLE auth_applications ALTER COLUMN name DROP NOT NULL;
+ALTER TABLE auth_applications ALTER COLUMN allowed_origins DROP NOT NULL;
+ALTER TABLE auth_applications ALTER COLUMN redirect_uris DROP NOT NULL;
+ALTER TABLE auth_applications ALTER COLUMN redirect_uris DROP DEFAULT;
+ALTER TABLE auth_applications ALTER COLUMN theme DROP NOT NULL;
+ALTER TABLE auth_applications ALTER COLUMN theme DROP DEFAULT;
+ALTER TABLE auth_applications DROP CONSTRAINT IF EXISTS auth_applications_settings_check;
+ALTER TABLE auth_applications ADD CONSTRAINT auth_applications_settings_check CHECK (
+    name IS NOT NULL OR (allowed_origins IS NULL AND redirect_uris IS NULL AND theme IS NULL));
+
+DO $$
+DECLARE
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations
+                   WHERE version = '0059_application_settings_workspaces') THEN
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT 'auth_application_settings', a.id, a.customer_id,
+                   CASE WHEN w.desired = 'deleted' THEN NULL ELSE a.workspace_id END,
+                   CASE WHEN a.workspace_id IS NULL THEN 'needs_selection'
+                        WHEN w.desired = 'deleted' THEN 'workspace_deleted'
+                        ELSE 'application_workspace' END
+            FROM auth_applications a LEFT JOIN workspaces w ON w.id = a.workspace_id
+            WHERE a.name IS NOT NULL
+            ON CONFLICT DO NOTHING;
+        FOR unresolved IN SELECT * FROM workspace_assignments WHERE workspace_id IS NULL
+                           AND object_table = 'auth_application_settings' LOOP
+            RAISE WARNING 'application settings not copied (%): application=%, customer=%',
+                unresolved.outcome, unresolved.object_id, unresolved.customer_id;
+        END LOOP;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS application_settings_workspaces_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0059_application_settings_workspaces')
+    ON CONFLICT DO NOTHING;

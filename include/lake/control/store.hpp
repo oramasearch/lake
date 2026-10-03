@@ -978,6 +978,9 @@ public:
                 const std::optional<std::string>& principal_taap_id,
                 int limit) = 0;
 
+    // An application's routing row (lake#351): its id, space, pool, custom sign-in host and
+    // workspace, which find it before its workspace is read. The answers carry no settings; those
+    // are the application's record in its workspace (control/application_settings_records.hpp).
     virtual Result<Application> create_application(const NewApplication& value) = 0;
     virtual Result<std::vector<Application>> list_applications(const std::string& customer_id,
                                                                int limit) = 0;
@@ -985,8 +988,15 @@ public:
     virtual Result<Application> get_application_by_pool(const std::string& pool_id) = 0;
     virtual Result<Application>
     get_application_by_domain(const std::string& custom_sign_in_domain) = 0;
-    virtual Result<Application> update_application_theme(const std::string& id,
-                                                         const nlohmann::json& theme) = 0;
+    // The settings columns of the retired auth_applications rows (migration 0059), for the one-shot
+    // copy into workspace Zettas only. Assigning records each unassigned row's owner in
+    // workspace_assignments (object_table `auth_application_settings`), as the migration does, for
+    // rows written after it, and resolves needs_selection rows whose application has since been
+    // assigned a live workspace. Only rows that still hold settings are listed, by id, oldest id
+    // first.
+    virtual Result<void> assign_legacy_application_settings() = 0;
+    virtual Result<std::vector<LegacyApplicationSettings>>
+    legacy_application_settings(const std::string& after_id, int limit) = 0;
     // The secrets subsystem's envelope for an application credential (lake#352, lake#355): a data
     // key per purpose, wrapped by LAKE_INSTANCE_KEK, encrypts the value with AES-256-GCM. Only the
     // purposes `application.jwt.<application id>` and `application.webhook.<webhook id>` are

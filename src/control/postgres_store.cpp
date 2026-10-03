@@ -154,6 +154,24 @@ constexpr std::string_view legacy_application_directory_resolution_sql =
     "r.application_id JOIN workspaces w ON w.id = a.workspace_id AND w.desired <> 'deleted' WHERE "
     "s.object_table = r.object_table AND s.object_id = r.object_id AND s.workspace_id IS NULL AND "
     "s.outcome = 'needs_selection'";
+// Migration 0059's assignment of the settings the retired auth_applications columns hold
+// (db/schema.sql), rerun before each copy: each application that still holds settings has them
+// copied into its workspace, is needs_selection while it has none, and workspace_deleted when that
+// workspace is gone. The resolution statement assigns recorded needs_selection rows once their
+// application has a live workspace. The object table is `auth_application_settings`, since
+// migration 0049 recorded the applications' own routing under `auth_applications`.
+constexpr std::string_view legacy_application_settings_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'auth_application_settings', a.id, a.customer_id, CASE WHEN w.desired = "
+    "'deleted' THEN NULL ELSE a.workspace_id END, CASE WHEN a.workspace_id IS NULL THEN "
+    "'needs_selection' WHEN w.desired = 'deleted' THEN 'workspace_deleted' ELSE "
+    "'application_workspace' END FROM auth_applications a LEFT JOIN workspaces w ON w.id = "
+    "a.workspace_id WHERE a.name IS NOT NULL ON CONFLICT DO NOTHING";
+constexpr std::string_view legacy_application_settings_resolution_sql =
+    "UPDATE workspace_assignments s SET workspace_id = a.workspace_id, outcome = "
+    "'application_workspace' FROM auth_applications a JOIN workspaces w ON w.id = a.workspace_id "
+    "AND w.desired <> 'deleted' WHERE s.object_table = 'auth_application_settings' AND "
+    "s.object_id = a.id AND s.workspace_id IS NULL AND s.outcome = 'needs_selection'";
 // Migration 0056's assignment of the retired auth_app_signing_keys and auth_app_webhooks rows
 // (db/schema.sql), rerun before each copy: each application's key ring and each webhook belong to
 // the application's workspace, are needs_selection while it has none, and workspace_deleted when
@@ -1852,24 +1870,23 @@ constexpr const char* scim_group_columns =
 constexpr const char* provisioning_log_columns =
     "id::text, provider_id::text, resource, operation, external_id, outcome, details::text, "
     "created_at::text";
+// The routing columns of auth_applications (lake#351). The settings columns (name,
+// allowed_origins, redirect_uris, theme) are read only by the one-shot copy: an application's
+// settings are its record in its workspace.
 constexpr const char* application_columns =
-    "id::text, customer_id::text, pool_id, name, allowed_origins::text, redirect_uris::text, "
-    "coalesce(custom_sign_in_domain,''), theme::text, created_at::text, updated_at::text, "
-    "coalesce(workspace_id::text,'')";
+    "id::text, customer_id::text, pool_id, coalesce(custom_sign_in_domain,''), created_at::text, "
+    "updated_at::text, coalesce(workspace_id::text,'')";
 
 Application application_of(const pqxx::row& row) {
-    return Application{
-        row[0].as<std::string>(),
-        row[1].as<std::string>(),
-        row[2].as<std::string>(),
-        row[3].as<std::string>(),
-        nlohmann::json::parse(row[4].as<std::string>()).get<std::vector<std::string>>(),
-        nlohmann::json::parse(row[5].as<std::string>()).get<std::vector<std::string>>(),
-        row[6].as<std::string>(),
-        nlohmann::json::parse(row[7].as<std::string>()),
-        row[8].as<std::string>(),
-        row[9].as<std::string>(),
-        row[10].as<std::string>()};
+    Application application;
+    application.id = row[0].as<std::string>();
+    application.customer_id = row[1].as<std::string>();
+    application.pool_id = row[2].as<std::string>();
+    application.custom_sign_in_domain = row[3].as<std::string>();
+    application.created_at = row[4].as<std::string>();
+    application.updated_at = row[5].as<std::string>();
+    application.workspace_id = row[6].as<std::string>();
+    return application;
 }
 
 void remove_scim_user_access(pqxx::work& tx,
@@ -3399,21 +3416,17 @@ public:
                 return std::unexpected(
                     StoreError{"invalid_input", "application customer policy object is missing"});
             }
+            // The routing row only (migration 0059): the settings columns stay NULL, since the
+            // settings are written to the application's workspace.
             const pqxx::result rows = tx.exec_params(
-                std::string("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
-                            "allowed_origins, redirect_uris, custom_sign_in_domain, theme, "
-                            "workspace_id) VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, "
-                            "$6::jsonb, NULLIF($7, ''), $8::jsonb, NULLIF($9, '')::uuid) "
-                            "RETURNING ") +
+                std::string("INSERT INTO auth_applications (id, customer_id, pool_id, "
+                            "custom_sign_in_domain, workspace_id) VALUES ($1::uuid, $2::uuid, $3, "
+                            "NULLIF($4, ''), NULLIF($5, '')::uuid) RETURNING ") +
                     application_columns,
                 input.id,
                 input.customer_id,
                 input.pool_id,
-                input.name,
-                nlohmann::json(input.allowed_origins).dump(),
-                nlohmann::json(input.redirect_uris).dump(),
                 input.custom_sign_in_domain,
-                input.theme.dump(),
                 input.workspace_id);
             tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) VALUES "
                            "('application', $1, $2::uuid)",
@@ -3460,24 +3473,54 @@ public:
         return application_by("lower(custom_sign_in_domain) = lower($1)", custom_sign_in_domain);
     }
 
-    Result<Application> update_application_theme(const std::string& id,
-                                                 const nlohmann::json& theme) override {
-        return with_tx<Application>([&](pqxx::work& tx) -> Result<Application> {
-            if (!theme.is_object()) {
-                return std::unexpected(
-                    StoreError{"invalid_input", "application theme must be an object"});
-            }
-            const pqxx::result rows = tx.exec_params(
-                std::string("UPDATE auth_applications SET theme = $2::jsonb WHERE id = $1::uuid "
-                            "RETURNING ") +
-                    application_columns,
-                id,
-                theme.dump());
-            if (rows.empty()) {
-                return std::unexpected(StoreError{"not_found", "no application " + id});
-            }
-            return application_of(rows[0]);
+    Result<void> assign_legacy_application_settings() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec(std::string(legacy_application_settings_assignment_sql));
+            tx.exec(std::string(legacy_application_settings_resolution_sql));
+            return {};
         });
+    }
+
+    Result<std::vector<LegacyApplicationSettings>>
+    legacy_application_settings(const std::string& after_id, int limit) override {
+        return with_tx<std::vector<LegacyApplicationSettings>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyApplicationSettings>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT app.id::text, app.customer_id::text, app.name, "
+                    "COALESCE(app.allowed_origins, '[]'::jsonb)::text, "
+                    "COALESCE(app.redirect_uris, '[]'::jsonb)::text, "
+                    "COALESCE(app.theme, '{}'::jsonb)::text, "
+                    "(extract(epoch FROM app.created_at) * 1000000)::bigint, "
+                    "(extract(epoch FROM app.updated_at) * 1000000)::bigint, "
+                    "COALESCE(a.workspace_id::text, ''), COALESCE(a.outcome, 'needs_selection') "
+                    "FROM auth_applications app LEFT JOIN workspace_assignments a ON "
+                    "a.object_table = 'auth_application_settings' AND a.object_id = app.id "
+                    "WHERE app.name IS NOT NULL AND ($1 = '' OR app.id > NULLIF($1, '')::uuid) "
+                    "ORDER BY app.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyApplicationSettings> settings;
+                for (const pqxx::row& row : rows) {
+                    LegacyApplicationSettings legacy;
+                    legacy.settings.application_id = row[0].as<std::string>();
+                    legacy.settings.customer_id = row[1].as<std::string>();
+                    legacy.customer_id = legacy.settings.customer_id;
+                    legacy.settings.name = row[2].as<std::string>();
+                    legacy.settings.allowed_origins =
+                        nlohmann::json::parse(row[3].as<std::string>())
+                            .get<std::vector<std::string>>();
+                    legacy.settings.redirect_uris = nlohmann::json::parse(row[4].as<std::string>())
+                                                        .get<std::vector<std::string>>();
+                    legacy.settings.theme = nlohmann::json::parse(row[5].as<std::string>());
+                    legacy.settings.at_us = row[6].as<std::int64_t>();
+                    legacy.settings.created_at = record_instant(legacy.settings.at_us);
+                    legacy.settings.updated_at = record_instant(row[7].as<std::int64_t>());
+                    legacy.workspace_id = row[8].as<std::string>();
+                    legacy.outcome = row[9].as<std::string>();
+                    settings.push_back(std::move(legacy));
+                }
+                return settings;
+            });
     }
 
     Result<std::string> encrypt_application_credential(const std::string& purpose,

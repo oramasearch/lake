@@ -113,3 +113,10 @@ and the webhook codec (one record per webhook, written `if_absent`). `apps.hpp` 
 secrets envelopes kept inside the seal) and declares `ApplicationSigningKeyRing` and the
 `LegacyApplicationSigningKeyRing`/`LegacyApplicationWebhook` rows the copy reads; `store.hpp`
 declares `encrypt_application_credential`/`decrypt_application_credential`.
+`application_settings_records.hpp` holds an application's settings in its workspace (lake#351):
+the settings codec (one record per application, keyed by it and found by its space;
+`update_application_settings` writes with `if_revision` and rereads on a conflict). `apps.hpp`
+declares `ApplicationSettings`, `apply_settings` and the `LegacyApplicationSettings` rows the copy
+reads, and documents which `Application` fields are routing; `NewApplication` carries routing only.
+`store.hpp` drops `update_application_theme` and declares `assign_legacy_application_settings` and
+`legacy_application_settings`, which serve only the copy.
