@@ -251,16 +251,14 @@ public:
     delete_repository(const std::string& id, const control::RepositoryDeletion& deletion) override {
         return call("delete_repository", [&] { return store_->delete_repository(id, deletion); });
     }
-    control::Result<std::vector<control::RepositoryRef>>
-    list_repository_refs(const std::string& repository_id) override {
-        return call("list_repository_refs",
-                    [&] { return store_->list_repository_refs(repository_id); });
+    control::Result<void> assign_legacy_repository_descriptions() override {
+        return call("assign_legacy_repository_descriptions",
+                    [&] { return store_->assign_legacy_repository_descriptions(); });
     }
-    control::Result<control::RepositoryRef> set_repository_ref(const std::string& repository_id,
-                                                               const std::string& name,
-                                                               const std::string& head) override {
-        return call("set_repository_ref",
-                    [&] { return store_->set_repository_ref(repository_id, name, head); });
+    control::Result<std::vector<control::LegacyRepositoryDescription>>
+    legacy_repository_descriptions(const std::string& after_id, int limit) override {
+        return call("legacy_repository_descriptions",
+                    [&] { return store_->legacy_repository_descriptions(after_id, limit); });
     }
     control::Result<void>
     assign_legacy_audit_events(const std::vector<std::string>& workspace_actions) override {

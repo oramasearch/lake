@@ -107,8 +107,8 @@ the checklist each follow-up applies. Conditional writes (`if_absent`, `if_revis
 the engine, so mutable rows, one-use codes and claims use the same mechanism.
 
 The items records do not cover (the liquid stores, search indexes, registry and transparency log on
-lake's store volume, `repositories`, `repository_refs`, and lake's telemetry: lake#315 part 2,
-#319, #380–#384) are planned in [workspace storage plan](workspace-storage-plan.md), with the decisions Steve made
+lake's store volume, and lake's telemetry: #380–#384; `repositories` and `repository_refs`,
+lake#315 part 2 and #319, are done) are planned in [workspace storage plan](workspace-storage-plan.md), with the decisions Steve made
 (decision 54, [lake#512](https://github.com/oramasearch/lake/issues/512)) and the issues in order.
 
 ## Storage Audit
@@ -132,7 +132,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `users` | multitenancy/dispatch | Identity reference for customer membership. |
 | `organizations` | multitenancy/dispatch | Tenant identity and organization boundary. |
 | `customers` | multitenancy/dispatch | Space ownership and tenant routing. |
-| `repositories` | workspace | Repository metadata and lifecycle belong to its workspace. Routing done: `0051_repository_workspaces` gives each repository an immutable `workspace_id` (lake#315 part 1; unassigned rows are `needs_selection`). The metadata itself still lives here. [Follow-up](https://github.com/oramasearch/lake/issues/315) (part 2), forge records [lake#341](https://github.com/oramasearch/lake/issues/341). Part 2 is in the [plan](workspace-storage-plan.md#lake315-part-2-repository-metadata). |
+| `repositories` | split | The row stays as routing (decision 54, S10): id, space, immutable `workspace_id` (`0051`, lake#315 part 1; unassigned rows are `needs_selection`), name, visibility and tombstone, which lake needs before it reads any workspace. **Moved** (lake#315 part 2, migration `0064`): the description, and later settings, are the repository's sealed record in `lake_repositories` of its workspace Zetta ([repositories.md](../api/repositories.md#where-the-description-lives-lake315-part-2)). New rows leave `description` empty; a later migration drops the column once the copy is verified. Forge records moved with [lake#341](https://github.com/oramasearch/lake/issues/341). |
 | `objects` | multitenancy/dispatch | Policy object identities and ancestry for grants. |
 | `teams` | multitenancy/dispatch | Membership group identities. |
 | `memberships` | multitenancy/dispatch | Tenant and team membership. |
@@ -141,7 +141,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `lake_identity` | workspace | Signing credentials require explicit custody outside the control store. [Follow-up](https://github.com/oramasearch/lake/issues/316). |
 | `audit_events` | split (decision 52) | Control-plane and identity events stay in this central hash chain. Events about a workspace's data **moved** to `lake_audit_events` in that workspace's Zetta, a chain of its own written off the request path ([lake#317](https://github.com/oramasearch/lake/issues/317), migration `0063`, [audit.md](../api/audit.md#which-log)); the central events recorded before the split are copied there by the one-shot copy and stay here, append-only. |
 | `audit_retention` | multitenancy/dispatch | The space's retention of the central log, a policy row ([lake#318](https://github.com/oramasearch/lake/issues/318)). A workspace's audit is kept until the workspace is deleted (the collection's `retention_ms` is 0), never shorter ([audit.md](../api/audit.md#retention)). |
-| `repository_refs` | workspace | Repository reference state. [Follow-up](https://github.com/oramasearch/lake/issues/319). A write-only copy of liquid's refs that nothing reads (0 rows on dev); the [plan](workspace-storage-plan.md#lake319-repository_refs) drops it (decision 54). |
+| `repository_refs` | dropped | A write-only copy of liquid's refs that nothing read (0 rows on dev). **Dropped** by migration `0064` ([lake#319](https://github.com/oramasearch/lake/issues/319), decision 54 S11): the liquid repository is the only record of refs, and `refs` reads it. |
 | `identity_documents` | workspace | Identity document bodies and verification evidence. [Follow-up](https://github.com/oramasearch/lake/issues/320). |
 | `devices` | workspace | Device records and authentication state. [Follow-up](https://github.com/oramasearch/lake/issues/321). |
 | `credentials` | workspace | Password, passkey, token and MFA credential material. [Follow-up](https://github.com/oramasearch/lake/issues/322). |

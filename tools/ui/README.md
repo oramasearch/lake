@@ -16,6 +16,8 @@ the public transparency monitor without adding a fixture route to `lake`. Its ap
 one Ready workspace whose record store is the tests' `RecordTables` fake, so the event log page
 reads its event from the workspace as production does (lake#356). Its application user and
 organization are records in that workspace too (lake#353, lake#354).
+Its repositories are created without descriptions, since a description is a record in the
+repository's workspace (lake#315 part 2); their pages say "No description."
 reads its event from the workspace as production does (lake#356), and its signing key ring is in
 the same workspace (lake#352), as are its settings, which the hosted pages render (lake#351).
 reads its event from the workspace as production does (lake#356). Its secret mount is in the same

@@ -1052,6 +1052,19 @@ json response_json(std::string_view response) {
     return json::parse(response.substr(separator + 4), nullptr, false);
 }
 
+// The `refs` capability's items for one repository, read over REST. Liquid's repository is the
+// only record of refs; lake keeps no copy (lake#319).
+json served_refs(unsigned short port,
+                 const std::string& repository_id,
+                 std::string_view authorization) {
+    const json body =
+        response_json(http_get(port, "/v1/refs?repository_id=" + repository_id, authorization));
+    if (!body.is_object() || !body.contains("value")) {
+        return body;
+    }
+    return body.at("value").at("items");
+}
+
 std::string response_body(std::string_view response) {
     const std::size_t separator = response.find("\r\n\r\n");
     if (separator == std::string_view::npos) {
@@ -3027,7 +3040,8 @@ TEST(Repositories, OwnedByACustomerNamedWithinIt) {
                {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
     ASSERT_TRUE(customer.ok);
     const std::string cid = customer.value["id"];
-    const std::string workspace = lake::test::repository_workspace(s.store, cid);
+    // The description is the repository's record in its workspace (lake#315), so it is Ready.
+    const std::string workspace = s.workspace(cid);
 
     ApiResult repo = s.call("create_repository",
                             {{"customer_id", cid},
@@ -3035,6 +3049,9 @@ TEST(Repositories, OwnedByACustomerNamedWithinIt) {
                              {"name", "liquid"},
                              {"description", "the tool"}});
     ASSERT_TRUE(repo.ok) << repo.error.message;
+    EXPECT_EQ(repo.value["description"], "the tool");
+    EXPECT_EQ(s.call("get_repository", {{"id", repo.value["id"]}}).value["description"],
+              "the tool");
     EXPECT_EQ(repo.value["visibility"], "private");
     EXPECT_EQ(repo.value["customer_id"], cid);
     EXPECT_EQ(repo.value["workspace_id"], workspace);
@@ -4319,7 +4336,7 @@ TEST(HuggingFaceHttp, CommonModelAndDatasetCallsUseRepositoryCapabilities) {
     const auto customer = control->create_customer({"individual", user->id, "", "ada"});
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
-        control->create_repository({customer->id, "fixture-model", "Hub fixture", "public",
+        control->create_repository({customer->id, "fixture-model", "", "public",
                                     lake::test::repository_workspace(*control, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
 
@@ -4604,10 +4621,10 @@ TEST(ModelProvenance, SignedDatasetChainVerifiesAndTamperingIsRefused) {
     const auto customer = control->create_customer({"individual", user->id, "", "training"});
     ASSERT_TRUE(customer) << customer.error().message;
     const auto dataset =
-        control->create_repository({customer->id, "dataset", "Training data", "private",
+        control->create_repository({customer->id, "dataset", "", "private",
                                     lake::test::repository_workspace(*control, customer->id)});
     const auto model =
-        control->create_repository({customer->id, "model", "Trained model", "private",
+        control->create_repository({customer->id, "model", "", "private",
                                     lake::test::repository_workspace(*control, customer->id)});
     ASSERT_TRUE(dataset);
     ASSERT_TRUE(model);
@@ -4748,13 +4765,13 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     const auto customer = store->create_customer({"individual", user->id, "", "ada"});
     ASSERT_TRUE(customer);
     const auto public_repository =
-        store->create_repository({customer->id, "public-repository", "visible", "public",
+        store->create_repository({customer->id, "public-repository", "", "public",
                                   lake::test::repository_workspace(*store, customer->id)});
     const auto private_repository =
-        store->create_repository({customer->id, "private-repository", "hidden", "private",
+        store->create_repository({customer->id, "private-repository", "", "private",
                                   lake::test::repository_workspace(*store, customer->id)});
     const auto reformatting_repository =
-        store->create_repository({customer->id, "reformatting-repository", "empty diff", "public",
+        store->create_repository({customer->id, "reformatting-repository", "", "public",
                                   lake::test::repository_workspace(*store, customer->id)});
     ASSERT_TRUE(public_repository);
     ASSERT_TRUE(private_repository);
@@ -5048,7 +5065,7 @@ TEST(ModelSync, MultiGigabyteRevisionsDeduplicateAndResumePull) {
     const auto customer = control->create_customer({"individual", user->id, "", "models"});
     ASSERT_TRUE(customer);
     const auto repository =
-        control->create_repository({customer->id, "large-model", "Large model", "private",
+        control->create_repository({customer->id, "large-model", "", "private",
                                     lake::test::repository_workspace(*control, customer->id)});
     ASSERT_TRUE(repository);
 
@@ -5153,7 +5170,7 @@ TEST(SyncHttp, PushPullShareCustomerStoreAndTransferOnlyMissingChunks) {
     const auto customer = control->create_customer({"individual", user->id, "", "sync-owner"});
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
-        control->create_repository({customer->id, "project", "sync fixture", "private",
+        control->create_repository({customer->id, "project", "", "private",
                                     lake::test::repository_workspace(*control, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     const auto bad_repository =
@@ -5266,6 +5283,14 @@ TEST(SyncHttp, PushPullShareCustomerStoreAndTransferOnlyMissingChunks) {
     ASSERT_TRUE(rejected_tree) << rejected_tree.error().message;
     EXPECT_TRUE(rejected_tree->entries.empty());
     EXPECT_FALSE(liquid::runtime::block_on(rejected_destination->head()));
+    const json references = served_refs(server.port(), repository->id, "Bearer sync-admin");
+    ASSERT_TRUE(references.is_array()) << references.dump();
+    EXPECT_FALSE(references.empty());
+    for (const json& reference : references) {
+        EXPECT_EQ(reference.at("repository_id"), repository->id);
+        EXPECT_FALSE(reference.at("head").get<std::string>().empty());
+        EXPECT_FALSE(reference.contains("updated_at")) << "lake keeps no copy of refs (lake#319)";
+    }
     server.stop();
 
     EXPECT_TRUE(std::filesystem::exists(temporary.path() / "lake" / customer->id / "store"));
@@ -5273,9 +5298,6 @@ TEST(SyncHttp, PushPullShareCustomerStoreAndTransferOnlyMissingChunks) {
                                         "repositories"));
     EXPECT_FALSE(std::filesystem::exists(temporary.path() / "lake" / customer->id / "repositories" /
                                          repository->id / ".liquid-store"));
-    const auto references = control->list_repository_refs(repository->id);
-    ASSERT_TRUE(references) << references.error().message;
-    EXPECT_FALSE(references->empty());
     const auto events = lake::test::audit_events(*control, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
@@ -5485,11 +5507,11 @@ TEST(SyncHttp, PushWithoutWriteAccessIsRejectedAndAudited) {
     EXPECT_FALSE(pushed);
     ASSERT_FALSE(pushed.has_value());
     EXPECT_EQ(pushed.error().code, liquid::errc::unauthorized);
+    const json references =
+        served_refs(server.port(), repository->id, "Bearer " + reader->secret);
+    EXPECT_TRUE(references.is_array() && references.empty()) << references.dump();
     server.stop();
 
-    const auto references = control->list_repository_refs(repository->id);
-    ASSERT_TRUE(references) << references.error().message;
-    EXPECT_TRUE(references->empty());
     const auto events = lake::test::audit_events(*control, {.limit = 100});
     ASSERT_TRUE(events) << events.error().message;
     EXPECT_TRUE(std::ranges::any_of(*events, [](const auto& event) {
@@ -5600,6 +5622,11 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     EXPECT_EQ(written.at("value").at("items").back().at("transfer_in_bytes"), uploaded)
         << "flushed once, counted once";
     EXPECT_EQ(written.at("value").at("items").back().at("transfer_out_bytes"), downloaded);
+    // A push wrote no copy of the refs into PostgreSQL (lake#319): they come from liquid.
+    const json references =
+        served_refs(server.port(), repository->id, "Bearer postgres-sync-admin");
+    ASSERT_TRUE(references.is_array()) << references.dump();
+    EXPECT_FALSE(references.empty());
 
     // A second pull counted after the flush is written when the server stops (the drain).
     auto again =
@@ -5631,9 +5658,6 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     ASSERT_TRUE(contents) << contents.error().message;
     EXPECT_EQ(*contents, sync_bytes("postgres-backed sync"));
 
-    const auto references = control->list_repository_refs(repository->id);
-    ASSERT_TRUE(references) << references.error().message;
-    EXPECT_FALSE(references->empty());
     // Decision 52: a push and a pull are the repository's data, so their events are in the
     // audit of the repository's workspace, written by the server's flush (here, its stop), and
     // not in the central log.
@@ -5870,13 +5894,15 @@ TEST(SyncHttp, ProtectedRefusalDoesNotBlockAnUnprotectedReference) {
               "branch protection rejects main: an approved review is required");
     EXPECT_EQ(release_outcome->outcome, liquid::sync_ref_outcome_kind::applied);
     EXPECT_TRUE(release_outcome->reason.empty());
-    const auto references = control->list_repository_refs(repository->id);
-    ASSERT_TRUE(references) << references.error().message;
-    EXPECT_TRUE(std::ranges::any_of(*references, [&base](const auto& reference) {
-        return reference.name == "main" && reference.head == liquid::to_string(base->value);
+    const json references = served_refs(server.port(), repository->id, "Bearer mixed-admin");
+    ASSERT_TRUE(references.is_array()) << references.dump();
+    EXPECT_TRUE(std::ranges::any_of(references, [&base](const json& reference) {
+        return reference.at("name") == "main" &&
+               reference.at("head") == liquid::to_string(base->value);
     }));
-    EXPECT_TRUE(std::ranges::any_of(*references, [&candidate](const auto& reference) {
-        return reference.name == "release" && reference.head == liquid::to_string(candidate->value);
+    EXPECT_TRUE(std::ranges::any_of(references, [&candidate](const json& reference) {
+        return reference.at("name") == "release" &&
+               reference.at("head") == liquid::to_string(candidate->value);
     }));
 
     // When the repository's workspace cannot be read, its rules are unknown: every reference
@@ -5893,10 +5919,11 @@ TEST(SyncHttp, ProtectedRefusalDoesNotBlockAnUnprotectedReference) {
     EXPECT_EQ(release_refused->outcome, liquid::sync_ref_outcome_kind::refused);
     EXPECT_NE(release_refused->reason.find("branch protection is unavailable"), std::string::npos)
         << release_refused->reason;
-    const auto unchanged = control->list_repository_refs(repository->id);
-    ASSERT_TRUE(unchanged) << unchanged.error().message;
-    EXPECT_TRUE(std::ranges::any_of(*unchanged, [&candidate](const auto& reference) {
-        return reference.name == "release" && reference.head == liquid::to_string(candidate->value);
+    const json unchanged = served_refs(server.port(), repository->id, "Bearer mixed-admin");
+    ASSERT_TRUE(unchanged.is_array()) << unchanged.dump();
+    EXPECT_TRUE(std::ranges::any_of(unchanged, [&candidate](const json& reference) {
+        return reference.at("name") == "release" &&
+               reference.at("head") == liquid::to_string(candidate->value);
     }));
     server.stop();
 }
@@ -5955,11 +5982,11 @@ TEST(SyncHttp, AtomicProtectedRefusalReportsEveryReferenceAndLandsNothing) {
               "branch protection rejects main: an approved review is required");
     EXPECT_EQ(release_outcome->outcome, liquid::sync_ref_outcome_kind::refused);
     EXPECT_EQ(release_outcome->reason, "atomic push refused because another reference was refused");
-    const auto references = control->list_repository_refs(repository->id);
-    ASSERT_TRUE(references) << references.error().message;
-    ASSERT_EQ(references->size(), 1U);
-    EXPECT_EQ(references->front().name, "main");
-    EXPECT_EQ(references->front().head, liquid::to_string(base->value));
+    const json references = served_refs(server.port(), repository->id, "Bearer atomic-admin");
+    ASSERT_TRUE(references.is_array()) << references.dump();
+    ASSERT_EQ(references.size(), 1U);
+    EXPECT_EQ(references.front().at("name"), "main");
+    EXPECT_EQ(references.front().at("head"), liquid::to_string(base->value));
     server.stop();
 }
 

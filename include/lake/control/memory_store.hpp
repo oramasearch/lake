@@ -40,11 +40,12 @@ public:
                                                  const std::string& visibility) override;
     Result<Repository> delete_repository(const std::string& id,
                                          const RepositoryDeletion& deletion) override;
-    Result<std::vector<RepositoryRef>>
-    list_repository_refs(const std::string& repository_id) override;
-    Result<RepositoryRef> set_repository_ref(const std::string& repository_id,
-                                             const std::string& name,
-                                             const std::string& head) override;
+    Result<void> assign_legacy_repository_descriptions() override;
+    Result<std::vector<LegacyRepositoryDescription>>
+    legacy_repository_descriptions(const std::string& after_id, int limit) override;
+    // Test support: the description a repository row held before migration 0064.
+    void seed_legacy_repository_description(const std::string& repository_id,
+                                            std::string description, std::int64_t at_us);
     Result<void>
     assign_legacy_audit_events(const std::vector<std::string>& workspace_actions) override;
     Result<std::vector<LegacyAuditEvent>> legacy_audit_events(const std::string& after_id,
@@ -522,8 +523,12 @@ private:
     std::vector<User> users_;
     std::vector<Organization> organizations_;
     std::vector<Customer> customers_;
-    std::vector<Repository> repositories_;
-    std::vector<RepositoryRef> repository_refs_;
+    std::vector<Repository> repositories_; // routing rows: no description (lake#315 part 2)
+    // Descriptions the retired repositories.description column held (seeded by tests), with the
+    // row's creation instant, and their owners: repository id -> workspace, outcome (0064).
+    std::map<std::string, std::pair<std::string, std::int64_t>> legacy_repository_descriptions_;
+    std::map<std::string, std::pair<std::string, std::string>>
+        legacy_repository_description_assignments_;
     std::vector<ForgeRecord> legacy_forge_records_;
     // Legacy forge record id -> (workspace, outcome), as migration 0054 records them.
     std::map<std::string, std::pair<std::string, std::string>> legacy_forge_assignments_;

@@ -299,6 +299,16 @@ revocation rewrite it at the revision read), `MountSecrets::open_lease` finds th
 lease's route, and `expire_secret_leases` is one pass of the expiry loop: it claims due routes from
 the control store and settles each lease in its own workspace only. The server's tick runs it every
 `secret_lease_expiry_interval`; `copy_workspace_records` copies `secrets_dynamic_leases`.
+`repository_records_api.cpp` joins a repository's routing row with its settings record (lake#315
+part 2): `create_repository_with_settings` (the record first, then the row; a refused row removes
+the record), `fill_repository_settings` (one `get_record`, or one `list_records` per workspace,
+all started together) and `repository_json` (`description_unavailable` when it could not be read).
+`capabilities.cpp`'s `get_repository`, `list_repositories` and `create_repository` gain
+asynchronous handlers that use them; their synchronous handlers answer the routing row and refuse a
+description. `refs`, `push` and `replicate_repository` no longer copy refs into the control store
+(lake#319); `refs` answers `{repository_id, name, head}` from liquid. The imports in
+`export_capabilities.cpp` and `github_import_capabilities.cpp` write their description to the
+workspace, and `copy_workspace_records` gains `repositories`.
 `app_capabilities.cpp` keeps an application's settings in its workspace (lake#351):
 `register_application` writes them there with the first key ring, `get_application` and
 `list_applications` are asynchronous and fill them from the workspace (`configured_application`,

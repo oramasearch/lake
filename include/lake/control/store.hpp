@@ -44,15 +44,37 @@ struct Customer {
     std::string id, customer_type, user_id, organization_id, name, created_at, updated_at;
 };
 struct Repository {
+    // `description` is never read from the control store: it is the repository's settings record
+    // in its workspace (lake#315 part 2), filled in by get_repository and list_repositories.
     std::string id, customer_id, name, description, visibility, deleted_at, retention_until,
         created_at, updated_at;
     // The workspace the repository belongs to (migration 0051, lake#315): set on create and never
     // changed. Empty only for a repository the migration recorded as needs_selection.
     std::string workspace_id;
 };
-struct RepositoryRef {
-    std::string repository_id, name, head, updated_at;
+// A repository's settings record (lake#315 part 2, control/repository_records.hpp): its
+// description, and later settings, in the workspace Zetta of the repository's workspace.
+struct RepositorySettings {
+    std::string repository_id;
+    std::string customer_id;
+    std::string description;
+    std::string created_at;
+    std::string updated_at;
+    std::int64_t at_us = 0;
+    std::int64_t revision = 0;
+    std::int64_t lake_revision = 0;
 };
+
+// The description of a repository row from before migration 0064, with its recorded owner
+// (workspace_assignments, object_table `repository_descriptions`), for the one-shot copy.
+// `settings.at_us` is the row's creation instant.
+struct LegacyRepositoryDescription {
+    RepositorySettings settings;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
+};
+
 struct RepositoryDeletion {
     std::string deleted_at, retention_until;
 };
@@ -198,10 +220,16 @@ struct NewCustomer {
     std::string customer_type, user_id, organization_id, name;
 };
 struct NewRepository {
+    // `description` must be empty: a repository's description is its settings record in its
+    // workspace Zetta (lake#315 part 2, control/repository_records.hpp), and the store refuses one.
+    // The column it used to fill is dropped once the copy is verified.
     std::string customer_id, name, description,
         visibility; // visibility empty = private
     // Required: a live workspace of customer_id's space (migration 0051, lake#315).
     std::string workspace_id;
+    // The new repository's id; empty = a new UUID. create_repository writes the settings record
+    // under this id before the row exists, so a refused row leaves nothing behind.
+    std::string id;
 };
 struct NewTeam {
     std::string organization_id, name, display_name, acting_principal, request_id;
@@ -931,7 +959,6 @@ nlohmann::json to_json(const User&);
 nlohmann::json to_json(const Organization&);
 nlohmann::json to_json(const Customer&);
 nlohmann::json to_json(const Repository&);
-nlohmann::json to_json(const RepositoryRef&);
 nlohmann::json to_json(const ForgeRecord&);
 nlohmann::json to_json(const Team&);
 nlohmann::json to_json(const Membership&);
@@ -986,11 +1013,14 @@ public:
                                                          const std::string& visibility) = 0;
     virtual Result<Repository> delete_repository(const std::string& id,
                                                  const RepositoryDeletion& deletion) = 0;
-    virtual Result<std::vector<RepositoryRef>>
-    list_repository_refs(const std::string& repository_id) = 0;
-    virtual Result<RepositoryRef> set_repository_ref(const std::string& repository_id,
-                                                     const std::string& name,
-                                                     const std::string& head) = 0;
+    // The descriptions of the repository rows from before migration 0064 (lake#315 part 2), for
+    // the one-shot copy into workspace Zettas only. Assigning records each unassigned row's owner
+    // in workspace_assignments (object_table `repository_descriptions`), as the migration does,
+    // and resolves needs_selection rows whose repository has since been assigned a live workspace.
+    // Only rows that hold a description are listed, by id, oldest id first.
+    virtual Result<void> assign_legacy_repository_descriptions() = 0;
+    virtual Result<std::vector<LegacyRepositoryDescription>>
+    legacy_repository_descriptions(const std::string& after_id, int limit) = 0;
     // The retired forge_records table (lake#341), for the one-shot copy into workspace Zettas
     // only. Assigning records each unassigned row's owner in workspace_assignments, as migration
     // 0054 does, for rows written after it, and resolves needs_selection rows whose repository has

@@ -117,17 +117,26 @@ auto http_get(unsigned short port, std::string_view target, std::string_view bea
     return response;
 }
 
-auto ref_head(lake::control::Store& store, const std::string& repository_id, std::string_view name)
-    -> lake::control::Result<std::string> {
-    const auto references = store.list_repository_refs(repository_id);
-    if (!references) {
-        return std::unexpected(references.error());
+// The head of one ref, read through the `refs` capability: liquid's repository is the only record
+// of refs (lake#319).
+auto ref_head(unsigned short port,
+              std::string_view bearer,
+              const std::string& repository_id,
+              std::string_view name) -> lake::control::Result<std::string> {
+    const std::string response = http_get(port, "/v1/refs?repository_id=" + repository_id, bearer);
+    const auto separator = response.find("\r\n\r\n");
+    const auto body = separator == std::string::npos
+                          ? nlohmann::json()
+                          : nlohmann::json::parse(response.substr(separator + 4), nullptr, false);
+    if (!body.is_object() || !body.contains("value")) {
+        return std::unexpected(lake::control::StoreError{"store_error", response});
     }
-    const auto found = std::ranges::find(*references, name, &lake::control::RepositoryRef::name);
-    if (found == references->end()) {
-        return std::unexpected(lake::control::StoreError{"not_found", "reference not found"});
+    for (const auto& reference : body.at("value").at("items")) {
+        if (reference.at("name") == name) {
+            return reference.at("head").get<std::string>();
+        }
     }
-    return found->head;
+    return std::unexpected(lake::control::StoreError{"not_found", "reference not found"});
 }
 
 auto repository_has_yaml(liquid::repository& repository, liquid::change_id change)
@@ -314,7 +323,7 @@ TEST(PostgresForgeScenario, DripsReviewRebaseAndGraphEvidenceLandEndToEnd) {
     ASSERT_TRUE(liquid::runtime::block_on(author->set_ref("review/forge", *candidate)));
     ASSERT_TRUE(liquid::runtime::block_on(author->set_ref("main", *base)));
     ASSERT_TRUE(liquid::runtime::block_on(sync.push(*author)));
-    const auto unlanded_head = ref_head(*control, repository->id, "main");
+    const auto unlanded_head = ref_head(server->port(), options.admin_token, repository->id, "main");
     ASSERT_TRUE(unlanded_head) << unlanded_head.error().message;
     EXPECT_EQ(*unlanded_head, liquid::to_string(base->value));
 
@@ -387,7 +396,7 @@ TEST(PostgresForgeScenario, DripsReviewRebaseAndGraphEvidenceLandEndToEnd) {
     const auto* main_outcome = reference_outcome(*landed, "main");
     ASSERT_NE(main_outcome, nullptr);
     EXPECT_EQ(main_outcome->outcome, liquid::sync_ref_outcome_kind::applied);
-    const auto landed_head = ref_head(*control, repository->id, "main");
+    const auto landed_head = ref_head(server->port(), options.admin_token, repository->id, "main");
     ASSERT_TRUE(landed_head) << landed_head.error().message;
     EXPECT_EQ(*landed_head, liquid::to_string(rebased->value));
 

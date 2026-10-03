@@ -2638,6 +2638,186 @@ TEST(PostgresAskMessages, MigrationDropsTheTableAndKeepsItsAssignments) {
     EXPECT_FALSE(tx.exec("SELECT to_regclass('drop_ask_messages_guard')")[0][0].is_null());
 }
 
+// Migration 0064 (decision 54, S10 and S11): repository_refs, a copy of liquid's refs nothing read,
+// is dropped (lake#319) and never recreated by a rerun; each repository with a description has its
+// owner recorded for the copy of its description into its workspace (lake#315 part 2), and new
+// rows hold none.
+TEST(PostgresRepositories, MigrationDropsRefsAndRecordsEachDescriptionsOwner) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "repository-records-migration-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    std::vector<std::string> customers;
+    std::vector<std::vector<std::string>> workspaces(2);
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "repo-records-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+        for (int count = 0; count <= index; ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            workspaces[index].push_back(workspace->id);
+        }
+    }
+    pqxx::connection connection(uri);
+    const auto refs_exist = [&] {
+        pqxx::work tx(connection);
+        return !tx.exec("SELECT to_regclass('repository_refs')")[0][0].is_null();
+    };
+    EXPECT_FALSE(refs_exist()) << "a fresh database never has the table";
+
+    // A database from before 0064: repository_refs with a row, and repositories whose
+    // descriptions are in their rows: one owned, one with no workspace (0051 could not assign
+    // it), one whose workspace is deleted, and one with no description.
+    const auto repository = [&](const std::string& customer, const std::string& workspace,
+                                const std::string& name, const std::string& description) {
+        const auto created = store->create_repository({customer, name, "", "private", workspace});
+        EXPECT_TRUE(created) << created.error().message;
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE repositories SET description = $2, workspace_id = "
+                       "NULLIF($3, '')::uuid, created_at = '2026-09-01T10:00:00Z' "
+                       "WHERE id = $1::uuid",
+                       created->id, description, workspace.empty() ? "" : workspace);
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.commit();
+        return created->id;
+    };
+    const std::string owned = repository(customers[0], workspaces[0][0], "owned", "Owned");
+    const std::string ambiguous = repository(customers[1], workspaces[1][0], "ambiguous", "Two");
+    {
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE repositories SET workspace_id = NULL WHERE id = $1::uuid",
+                       ambiguous);
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.commit();
+    }
+    const std::string gone = repository(customers[1], workspaces[1][1], "gone", "Gone");
+    const std::string empty = repository(customers[0], workspaces[0][0], "empty", "");
+    ASSERT_TRUE(store->delete_repository(gone, {"2026-10-03T00:00:00Z", "2027-11-07T00:00:00Z"}));
+    ASSERT_TRUE(store->update_workspace(workspaces[1][1], {.desired = "deleted"}));
+    {
+        pqxx::work tx(connection);
+        tx.exec("CREATE TABLE IF NOT EXISTS repository_refs (repository_id uuid NOT NULL "
+                "REFERENCES repositories(id) ON DELETE CASCADE, name varchar(256) NOT NULL, head "
+                "text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY "
+                "(repository_id, name))");
+        tx.exec_params("INSERT INTO repository_refs (repository_id, name, head) VALUES "
+                       "($1::uuid, 'main', 'change-1')",
+                       owned);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0064_repository_records'");
+        tx.commit();
+    }
+    ASSERT_TRUE(refs_exist());
+
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0064_repository_records:");
+    ASSERT_NE(start, std::string::npos);
+    using Outcome = std::pair<std::string, std::string>;
+    const auto outcome = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = 'repository_descriptions' AND object_id = $1::uuid",
+            id);
+        return found.empty() ? Outcome{}
+                             : Outcome{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    // The schema section from 0064 on, twice: the second run changes nothing.
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_FALSE(refs_exist()) << "0064 drops the table and its rows";
+        EXPECT_EQ(outcome(owned), (Outcome{"repository_workspace", workspaces[0][0]}));
+        EXPECT_EQ(outcome(ambiguous), (Outcome{"needs_selection", ""}));
+        EXPECT_EQ(outcome(gone), (Outcome{"workspace_deleted", ""}));
+        EXPECT_EQ(outcome(empty), Outcome{}) << "no description, nothing to copy";
+    }
+    // The whole schema, twice: repository_refs is never recreated.
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema);
+        tx.commit();
+        EXPECT_FALSE(refs_exist()) << "a rerun of the whole schema does not recreate it";
+    }
+
+    // The routing row answers no description, and a new row holds none.
+    const auto routing = store->get_repository(owned);
+    ASSERT_TRUE(routing);
+    EXPECT_TRUE(routing->description.empty());
+    const auto fresh = store->create_repository({customers[0], "fresh", "", "private",
+                                                 workspaces[0][0]});
+    ASSERT_TRUE(fresh) << fresh.error().message;
+    {
+        pqxx::work tx(connection);
+        EXPECT_EQ(tx.exec_params("SELECT description FROM repositories WHERE id = $1::uuid",
+                                 fresh->id)[0][0]
+                      .as<std::string>(),
+                  "");
+    }
+    ASSERT_TRUE(store->assign_legacy_repository_descriptions());
+    EXPECT_EQ(outcome(fresh->id), Outcome{});
+    // A create under a chosen id keeps it (the settings record is written under it first).
+    const std::string chosen = lake::control::new_uuid_v4();
+    lake::control::NewRepository named{customers[0], "chosen", "", "private", workspaces[0][0]};
+    named.id = chosen;
+    const auto with_id = store->create_repository(named);
+    ASSERT_TRUE(with_id) << with_id.error().message;
+    EXPECT_EQ(with_id->id, chosen);
+
+    // A reviewed assignment of the unassigned repository (lake#513) resolves its description.
+    {
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE repositories SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       ambiguous, workspaces[1][0]);
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.commit();
+    }
+    ASSERT_TRUE(store->assign_legacy_repository_descriptions());
+    EXPECT_EQ(outcome(ambiguous), (Outcome{"repository_workspace", workspaces[1][0]}));
+    EXPECT_EQ(outcome(gone), (Outcome{"workspace_deleted", ""}));
+
+    // The descriptions page by repository id, with what the rows held.
+    std::map<std::string, lake::control::LegacyRepositoryDescription> rows;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_repository_descriptions(after, 1);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        ASSERT_EQ(page->size(), 1U);
+        rows.emplace(page->front().settings.repository_id, page->front());
+        after = page->back().settings.repository_id;
+    }
+    EXPECT_FALSE(rows.contains(empty));
+    EXPECT_FALSE(rows.contains(fresh->id));
+    ASSERT_TRUE(rows.contains(owned));
+    const auto& row = rows.at(owned);
+    EXPECT_EQ(row.workspace_id, workspaces[0][0]);
+    EXPECT_EQ(row.customer_id, customers[0]);
+    EXPECT_EQ(row.settings.customer_id, customers[0]);
+    EXPECT_EQ(row.settings.description, "Owned");
+    EXPECT_EQ(row.settings.at_us, 1'788'256'800'000'000);
+    EXPECT_EQ(rows.at(gone).outcome, "workspace_deleted");
+    EXPECT_EQ(rows.at(ambiguous).workspace_id, workspaces[1][0]);
+
+    pqxx::work tx(connection);
+    EXPECT_FALSE(tx.exec("SELECT to_regclass('repository_records_guard')")[0][0].is_null());
+}
+
 // Migration 0046 (lake#376): each Opportunity's owner is the workspace its scan ran in, else the
 // space's only live workspace; a deleted workspace's rows and ambiguous rows are only reported.
 TEST(PostgresOpportunities, MigrationRecordsEachRowsOwnerForTheCopy) {

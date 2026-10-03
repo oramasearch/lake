@@ -155,6 +155,14 @@ The stores write and read only the routing columns of `auth_applications` (`crea
 leaves the settings columns NULL, and `update_application_theme` is gone);
 `assign_legacy_application_settings` reruns migration `0059`'s owner assignment and
 `legacy_application_settings` pages the rows that still hold settings, for the copy only.
+`repository_records.cpp` keeps a repository's description in its workspace (lake#315 part 2): the
+codec, `get`/`create` (`if_absent`)/`update` (`if_revision`, reread on a conflict, `if_absent` for
+a first record) and one listing per space. The stores no longer read `repositories.description`
+(the Postgres columns answer `''`) and refuse one on create; `create_repository` takes an optional
+`NewRepository::id` so the record can be written first. `assign_legacy_repository_descriptions` reruns
+migration `0064`'s owner assignment and `legacy_repository_descriptions` pages the rows that still
+hold a description, for the copy only. `set_repository_ref` and `list_repository_refs` are gone
+with the `repository_refs` table (lake#319).
 `application_authorization_codes.cpp` keeps an application's authorization codes in its workspace
 (lake#363). The stores no longer write or read `auth_app_authorization_codes` except for the copy:
 `assign_legacy_application_authorization_codes` reruns migration `0061`'s owner assignment of live

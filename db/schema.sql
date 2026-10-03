@@ -301,8 +301,8 @@ INSERT INTO schema_migrations (version) VALUES ('0005_audit') ON CONFLICT DO NOT
 -- ---------------------------------------------------------------------------------------------
 -- Repository lifecycle (migration 0006): names and owners can change, deletion is a tombstone
 -- retained before collection, and organization visibility sits between private and public.
--- repository_refs is the migration guard for the operator. Lifecycle operations are recorded by
--- the signed audit stream above through the capability registry.
+-- Lifecycle operations are recorded by the signed audit stream above through the capability
+-- registry.
 -- ---------------------------------------------------------------------------------------------
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
 ALTER TABLE repositories ADD COLUMN IF NOT EXISTS retention_until timestamptz;
@@ -313,13 +313,8 @@ ALTER TABLE repositories ADD CONSTRAINT repository_visibility_check
 CREATE INDEX IF NOT EXISTS repositories_live_customer_id_idx
     ON repositories (customer_id) WHERE deleted_at IS NULL;
 
-CREATE TABLE IF NOT EXISTS repository_refs (
-    repository_id uuid         NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-    name          varchar(256) NOT NULL,
-    head          text         NOT NULL,
-    updated_at    timestamptz  NOT NULL DEFAULT now(),
-    PRIMARY KEY (repository_id, name)
-);
+-- 0006 also created repository_refs, a copy of each liquid ref that nothing read. 0064 drops it
+-- (lake#319), so it is no longer created: a rerun of this file must not bring it back.
 
 INSERT INTO schema_migrations (version) VALUES ('0006_repository_lifecycle') ON CONFLICT DO NOTHING;
 -- Identity core (migration 0007): credentials prove control of a user's durable TAAP identity;
@@ -3308,4 +3303,60 @@ CREATE TABLE IF NOT EXISTS audit_workspaces_guard (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO schema_migrations (version) VALUES ('0063_audit_workspaces')
+    ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0064_repository_records: the repository row is routing only (decision 54, S10 and S11).
+--
+-- repository_refs is dropped (lake#319). It was a copy of each liquid ref that lake wrote after a
+-- push, a replication and a `refs` read, and that nothing read: the `refs` and `repository_refs`
+-- capabilities read the liquid repository, which is the authority and moves with lake#380. It
+-- never removed a ref liquid deleted. Its CREATE (0006) is removed above, so a rerun of this file
+-- leaves it dropped. Nothing is copied.
+--
+-- A repository's description lives in the workspace Zetta of the repository's workspace
+-- (lake#315 part 2; repositories.workspace_id, 0051; docs/api/repositories.md, docs/architecture/
+-- workspace-records.md), in its settings record in lake_repositories, beside any later setting.
+-- Lake no longer writes or reads repositories.description; new rows leave it ''. The operator's
+-- one-shot copy (copy_workspace_records, collection repositories) moves each description into
+-- its workspace and verifies it. The row stays central as routing: id, customer_id (its space),
+-- workspace_id, name, visibility, deleted_at, retention_until and the timestamps, which lake needs
+-- for a lookup by name, an anonymous read of a public repository and the retention collector
+-- before it reads any workspace.
+--
+-- Each repository that holds a description has its owner recorded in workspace_assignments under
+-- object_table repository_descriptions (0051 recorded the repositories' routing under
+-- repositories): its repository's workspace (repository_workspace), needs_selection while it has
+-- none (reported, and resolved by the copy once the repository is assigned, lake#513), or
+-- workspace_deleted when that workspace is gone. A later migration drops the description column
+-- once the copy has been verified on every environment.
+-- ---------------------------------------------------------------------------------------------
+DROP TABLE IF EXISTS repository_refs;
+
+DO $$
+DECLARE
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = '0064_repository_records') THEN
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT 'repository_descriptions', r.id, r.customer_id,
+                   CASE WHEN w.desired = 'deleted' THEN NULL ELSE r.workspace_id END,
+                   CASE WHEN r.workspace_id IS NULL THEN 'needs_selection'
+                        WHEN w.desired = 'deleted' THEN 'workspace_deleted'
+                        ELSE 'repository_workspace' END
+            FROM repositories r LEFT JOIN workspaces w ON w.id = r.workspace_id
+            WHERE r.description <> ''
+            ON CONFLICT DO NOTHING;
+        FOR unresolved IN SELECT * FROM workspace_assignments WHERE workspace_id IS NULL
+                           AND object_table = 'repository_descriptions' LOOP
+            RAISE WARNING 'repository description not copied (%): repository=%, customer=%',
+                unresolved.outcome, unresolved.object_id, unresolved.customer_id;
+        END LOOP;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS repository_records_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0064_repository_records')
     ON CONFLICT DO NOTHING;

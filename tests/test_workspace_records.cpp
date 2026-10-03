@@ -45,6 +45,7 @@
 #include "lake/control/platform.hpp"
 #include "lake/control/platform_records.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/repository_records.hpp"
 #include "lake/control/secret_records.hpp"
 #include "lake/control/stream_owners.hpp"
 #include "lake/control/workspace_audit.hpp"
@@ -2186,6 +2187,435 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationSettings) {
     // not open there.
     auto& their_rows = t.zetta->records[their_url].rows("auth_applications");
     auto& lab_rows = t.zetta->records[lab_url].rows("auth_applications");
+    their_rows.begin()->second["value"] = lab_rows.begin()->second["value"];
+    const auto tampered = copy("verify");
+    EXPECT_EQ(tampered.value["missing"].size(), 1U) << "a row that no longer opens is missing";
+    EXPECT_FALSE(tampered.value["complete"]);
+
+    // Operator only.
+    operator_context.operator_credential = false;
+    EXPECT_EQ(copy("plan").error.code, "unauthorized");
+}
+
+// lake#315 part 2 (decision 54, S10): a repository's description is one sealed settings record in
+// the workspace Zetta of its workspace, keyed by the repository; the routing row holds none of it.
+TEST_P(WorkspaceRecordStores, RepositoryDescriptionsLiveInTheirWorkspace) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const auto url = [](const std::string& workspace) { return "http://" + workspace + ".test"; };
+    struct Placed {
+        const TwoSpaces::Space* space;
+        std::string workspace, repository, description;
+    };
+    std::vector<Placed> placed; // first/home, first/lab, second/home, second/lab
+    for (const auto& space : t.spaces) {
+        for (std::size_t index = 0; index < space.workspaces.size(); ++index) {
+            const std::string description = "About " + space.workspaces[index];
+            const auto created = t.call(space, "create_repository",
+                                        {{"customer_id", space.customer_id},
+                                         {"workspace_id", space.workspaces[index]},
+                                         {"name", "described-" + std::to_string(index)},
+                                         {"description", description}});
+            ASSERT_TRUE(created.ok) << created.error.message;
+            EXPECT_EQ(created.value["description"], description) << "the create answers it";
+            placed.push_back({&space, space.workspaces[index], created.value["id"], description});
+        }
+    }
+    const auto records_in = [&](const std::string& workspace) {
+        return t.zetta->records[url(workspace)].rows("repositories").size();
+    };
+
+    // One sealed record per repository, only at its own workspace's endpoint; the routing row
+    // holds no description.
+    for (const auto& where : placed) {
+        const auto& rows = t.zetta->records[url(where.workspace)].rows("repositories");
+        ASSERT_EQ(rows.size(), 1U) << where.workspace;
+        EXPECT_EQ(rows.begin()->first, where.repository);
+        EXPECT_EQ(rows.begin()->second.dump().find(where.description), std::string::npos)
+            << "the body is sealed";
+        const auto routing = t.store->get_repository(where.repository);
+        ASSERT_TRUE(routing);
+        EXPECT_TRUE(routing->description.empty());
+        if (GetParam()) {
+            pqxx::connection connection(database_uri_);
+            pqxx::work tx(connection);
+            EXPECT_EQ(tx.exec_params("SELECT description FROM repositories WHERE id = $1::uuid",
+                                     where.repository)[0][0]
+                          .as<std::string>(),
+                      "");
+        }
+    }
+    const auto legacy = t.store->legacy_repository_descriptions("", 5000);
+    ASSERT_TRUE(legacy);
+    for (const auto& row : *legacy) {
+        EXPECT_FALSE(std::ranges::any_of(placed, [&](const Placed& where) {
+            return where.repository == row.settings.repository_id;
+        })) << "nothing for the copy";
+    }
+    // The store refuses a description: it belongs to the workspace.
+    const auto refused_row = t.store->create_repository(
+        {first.customer_id, "column", "in the row", "private", first.workspaces[0]});
+    ASSERT_FALSE(refused_row);
+    EXPECT_EQ(refused_row.error().code, "invalid_input");
+
+    // Reads fill the description from the workspace; a listing reads each workspace once.
+    for (const auto& where : placed) {
+        const auto got = t.call(*where.space, "get_repository", {{"id", where.repository}});
+        ASSERT_TRUE(got.ok) << got.error.message;
+        EXPECT_EQ(got.value["description"], where.description);
+        EXPECT_FALSE(got.value.contains("description_unavailable"));
+        EXPECT_EQ(got.value["workspace_id"], where.workspace);
+    }
+    t.zetta->calls.clear();
+    const auto listed = t.call(first, "list_repositories", {{"customer_id", first.customer_id}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["items"].size(), 2U);
+    for (const json& item : listed.value["items"]) {
+        EXPECT_EQ(item["description"], "About " + item["workspace_id"].get<std::string>());
+        EXPECT_FALSE(item.contains("description_unavailable"));
+    }
+    EXPECT_EQ(std::ranges::count_if(t.zetta->calls,
+                                    [](const auto& call) { return call.first == "list_records"; }),
+              2)
+        << "one list_records per workspace";
+    EXPECT_EQ(t.zetta->calls.size(), 2U);
+    // The synchronous call (lake's own page routing) answers the routing row alone.
+    auto routing_context = t.context(first);
+    const auto routed = t.registry.call("get_repository", {{"id", placed[0].repository}},
+                                        routing_context);
+    ASSERT_TRUE(routed.ok) << routed.error.message;
+    EXPECT_EQ(routed.value["description"], "");
+
+    // A repository created without a description has no record and reads an empty one.
+    const auto plain = t.call(first, "create_repository",
+                              {{"customer_id", first.customer_id},
+                               {"workspace_id", first.workspaces[0]},
+                               {"name", "plain"}});
+    ASSERT_TRUE(plain.ok) << plain.error.message;
+    EXPECT_EQ(records_in(first.workspaces[0]), 1U);
+    const auto plain_read = t.call(first, "get_repository", {{"id", plain.value["id"]}});
+    EXPECT_EQ(plain_read.value["description"], "");
+    EXPECT_FALSE(plain_read.value.contains("description_unavailable"));
+
+    // Missing, malformed, unknown and foreign workspace ids are refused at /workspace_id before
+    // anything is written; a taken name leaves no record behind.
+    const auto create = [&](const TwoSpaces::Space& space, json workspace, std::string name) {
+        json input{{"customer_id", space.customer_id},
+                   {"name", std::move(name)},
+                   {"description", "Refused"}};
+        if (!workspace.is_null()) {
+            input["workspace_id"] = std::move(workspace);
+        }
+        return t.call(space, "create_repository", input);
+    };
+    for (const json& wrong : {json(nullptr), json("not-a-workspace"),
+                              json(lake::control::new_uuid_v4()), json(second.workspaces[0])}) {
+        const auto refused = create(first, wrong, "refused");
+        EXPECT_EQ(refused.error.code, "invalid_input") << wrong;
+        // The registry names an unknown workspace by the space it does not belong to.
+        EXPECT_TRUE(refused.error.path == "/workspace_id" || refused.error.path == "/customer_id")
+            << wrong << ' ' << refused.error.path;
+    }
+    const auto taken = create(first, first.workspaces[0], "described-0");
+    EXPECT_EQ(taken.error.code, "conflict");
+    EXPECT_EQ(taken.error.path, "/name");
+    for (const auto& where : placed) {
+        EXPECT_EQ(records_in(where.workspace), 1U) << "a refused create leaves nothing";
+    }
+    // The synchronous call cannot write a workspace, so it refuses a description.
+    auto sync_context = t.context(first);
+    const auto sync_created = t.registry.call("create_repository",
+                                              {{"customer_id", first.customer_id},
+                                               {"workspace_id", first.workspaces[0]},
+                                               {"name", "synchronous"},
+                                               {"description", "Refused"}},
+                                              sync_context);
+    EXPECT_EQ(sync_created.error.code, "invalid_input");
+    EXPECT_EQ(sync_created.error.path, "/description");
+
+    // Least privilege: another space reads neither the repository nor its description, and
+    // cannot create in this space.
+    EXPECT_EQ(t.call(second, "get_repository", {{"id", placed[0].repository}}).error.code,
+              "unauthorized");
+    const auto their_list =
+        t.call(second, "list_repositories", {{"customer_id", first.customer_id}});
+    EXPECT_TRUE(!their_list.ok || their_list.value["items"].empty()) << their_list.value;
+    auto trespass = t.context(second);
+    const auto trespassed = liquid::runtime::block_on(t.registry.call_async(
+        "create_repository",
+        {{"customer_id", first.customer_id},
+         {"workspace_id", first.workspaces[0]},
+         {"name", "trespass"},
+         {"description", "Refused"}},
+        trespass));
+    ASSERT_TRUE(trespassed);
+    EXPECT_EQ(trespassed->error.code, "unauthorized");
+
+    // A change is written at the revision read; a raced change is reread and neither is lost.
+    auto context = t.context(first);
+    auto records = lake::api::workspace_records(context, first.customer_id, first.workspaces[0]);
+    ASSERT_TRUE(records) << records.error().message;
+    int changes = 0;
+    const auto raced = run(lake::control::update_repository_settings(
+            *records, placed[0].repository, first.customer_id,
+            [&](lake::control::RepositorySettings& settings) {
+                if (++changes == 1) {
+                    // Another lake process changes it between this read and this write.
+                    const auto other = run(lake::control::update_repository_settings(
+                        *records, placed[0].repository, first.customer_id,
+                        [](lake::control::RepositorySettings& value) {
+                            value.description += " (edited)";
+                        }));
+                    EXPECT_TRUE(other);
+                }
+                settings.description += " again";
+            }));
+    ASSERT_TRUE(raced) << raced.error().message;
+    EXPECT_EQ(changes, 2) << "the conflicting write was reread";
+    EXPECT_EQ(raced->description, placed[0].description + " (edited) again");
+    EXPECT_EQ(raced->lake_revision, 3);
+    // A stale revision is refused.
+    const auto stored = run(records->get(lake::control::RepositorySettingsCodec::collection,
+                                         placed[0].repository));
+    ASSERT_TRUE(stored && *stored);
+    const auto stale = run(records->put(
+        lake::control::RepositorySettingsCodec::collection, placed[0].repository,
+        lake::control::repository_settings_lookup(first.customer_id), (*stored)->body,
+        lake::control::RecordCondition{.if_revision = (*stored)->revision - 1}, 4,
+        (*stored)->at_us));
+    ASSERT_FALSE(stale);
+    EXPECT_EQ(stale.error().code, "conflict");
+    // The plain repository gets its first record when one is set.
+    const auto first_set = run(lake::control::update_repository_settings(
+        *records, plain.value["id"], first.customer_id,
+        [](lake::control::RepositorySettings& value) { value.description = "Set later"; }));
+    ASSERT_TRUE(first_set) << first_set.error().message;
+    EXPECT_EQ(first_set->lake_revision, 1);
+    EXPECT_EQ(t.call(first, "get_repository", {{"id", plain.value["id"]}}).value["description"],
+              "Set later");
+
+    // A record copied under another repository's key, or into another workspace, does not open
+    // there: ownership cannot change.
+    auto& home_rows = t.zetta->records[url(first.workspaces[0])].rows("repositories");
+    auto& lab_rows = t.zetta->records[url(first.workspaces[1])].rows("repositories");
+    const json kept = lab_rows.at(placed[1].repository);
+    lab_rows[placed[1].repository]["value"] = home_rows.at(placed[0].repository)["value"];
+    EXPECT_EQ(t.call(first, "get_repository", {{"id", placed[1].repository}}).value["description"],
+              "");
+    lab_rows[placed[1].repository] = kept;
+
+    // A workspace that is not ready: reads name the reason instead of falling back, and a create
+    // with a description is refused with no row left behind.
+    const auto lab = t.store->get_workspace(first.workspaces[1]);
+    t.status(lab->zetta_service_id, "Provisioning", url(first.workspaces[1]));
+    const auto not_ready = t.call(first, "get_repository", {{"id", placed[1].repository}});
+    ASSERT_TRUE(not_ready.ok) << not_ready.error.message;
+    EXPECT_EQ(not_ready.value["description"], "");
+    EXPECT_NE(not_ready.value["description_unavailable"].get<std::string>().find(
+                  "workspace_not_ready"),
+              std::string::npos)
+        << not_ready.value;
+    const auto partial = t.call(first, "list_repositories", {{"customer_id", first.customer_id}});
+    ASSERT_TRUE(partial.ok) << partial.error.message;
+    for (const json& item : partial.value["items"]) {
+        EXPECT_EQ(item.contains("description_unavailable"),
+                  item["workspace_id"] == first.workspaces[1])
+            << item;
+    }
+    const auto waiting = create(first, first.workspaces[1], "waiting");
+    EXPECT_EQ(waiting.error.code, "workspace_not_ready");
+    const auto rows = t.store->list_repositories(first.customer_id, 100, "");
+    ASSERT_TRUE(rows);
+    EXPECT_FALSE(std::ranges::any_of(
+        *rows, [](const lake::control::Repository& row) { return row.name == "waiting"; }));
+    t.ready(first.workspaces[1]);
+    EXPECT_EQ(t.call(first, "get_repository", {{"id", placed[1].repository}}).value["description"],
+              placed[1].description);
+
+    // Workspace deletion: once the repository and its workspace are deleted, the description goes
+    // with the workspace, and the other workspaces keep theirs.
+    ASSERT_TRUE(t.call(first, "delete_repository", {{"id", placed[1].repository}}).ok);
+    ASSERT_TRUE(t.store->update_workspace(first.workspaces[1], {.desired = "deleted"}));
+    const auto gone = t.call(first, "get_repository", {{"id", placed[1].repository}});
+    EXPECT_TRUE(!gone.ok || gone.value.contains("description_unavailable")) << gone.value;
+    EXPECT_EQ(t.call(first, "get_repository", {{"id", placed[0].repository}}).value["description"],
+              placed[0].description + " (edited) again");
+    EXPECT_EQ(t.call(second, "get_repository", {{"id", placed[2].repository}}).value["description"],
+              placed[2].description);
+}
+
+// lake#315 part 2: the operator's one-shot copy moves each repository's description from the
+// retired column into its workspace's settings record, and reports the ones it cannot place.
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesRepositoryDescriptions) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    auto& first = t.spaces[0];
+    auto& second = t.spaces[1];
+    std::map<std::string, std::pair<std::string, std::int64_t>> legacy; // id -> description, at
+    std::int64_t at = 1'788'256'800'000'000;
+    const auto repository = [&](const TwoSpaces::Space& space, const std::string& workspace,
+                                const std::string& name) {
+        const auto created =
+            t.store->create_repository({space.customer_id, name, "", "private", workspace});
+        EXPECT_TRUE(created) << created.error().message;
+        legacy[created->id] = {"Legacy " + name, at += 1'000'000};
+        return created->id;
+    };
+    // The first space's repository is in its lab workspace, the second space's in its first; one
+    // more repository's workspace is deleted before the copy.
+    const std::string lab_repository = repository(first, first.workspaces[1], "lab");
+    const std::string their_repository = repository(second, second.workspaces[0], "theirs");
+    const std::string gone_repository = repository(first, first.workspaces[0], "gone");
+    std::string unassigned; // PostgreSQL only: a repository migration 0051 could not assign
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        for (const auto& [id, value] : legacy) {
+            tx.exec_params("UPDATE repositories SET description = $2, created_at = "
+                           "to_timestamp($3::double precision / 1000000) WHERE id = $1::uuid",
+                           id, value.first, value.second);
+        }
+        unassigned = repository(second, second.workspaces[0], "unassigned");
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE repositories SET workspace_id = NULL, description = $2, "
+                       "created_at = to_timestamp($3::double precision / 1000000) "
+                       "WHERE id = $1::uuid",
+                       unassigned, legacy.at(unassigned).first, legacy.at(unassigned).second);
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.commit();
+    } else {
+        auto& memory = static_cast<lake::control::InMemoryStore&>(*t.store);
+        for (const auto& [id, value] : legacy) {
+            memory.seed_legacy_repository_description(id, value.first, value.second);
+        }
+    }
+    ASSERT_TRUE(t.store->delete_repository(gone_repository, {"2026-10-03T00:00:00Z",
+                                                             "2027-11-07T00:00:00Z"}));
+    ASSERT_TRUE(t.store->update_workspace(first.workspaces[0], {.desired = "deleted"}));
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    const auto call = [&](const std::string& name, json input) {
+        operator_context.request_id = lake::control::new_uuid_v4();
+        const auto completed =
+            liquid::runtime::block_on(t.registry.call_async(name, input, operator_context));
+        EXPECT_TRUE(completed);
+        return completed ? *completed : lake::api::ApiResult::failure("store_error", "incomplete");
+    };
+    const auto copy = [&](std::string mode, std::string after = {}, int limit = 5000) {
+        json input{{"collection", "repositories"}, {"mode", mode}, {"limit", limit}};
+        if (!after.empty()) {
+            input["after"] = after;
+        }
+        return call("copy_workspace_records", input);
+    };
+    const std::string lab_url = "http://" + first.workspaces[1] + ".test";
+    const std::string their_url = "http://" + second.workspaces[0] + ".test";
+
+    // Before the copy the description is empty: nothing falls back to the column.
+    EXPECT_EQ(call("get_repository", {{"id", lab_repository}}).value["description"], "");
+
+    // The deleted workspace's row is reported and does not block; the unassigned one does.
+    const std::size_t rows = legacy.size();
+    const auto plan = copy("plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["collection"], "repositories");
+    EXPECT_EQ(plan.value["rows"], rows);
+    EXPECT_EQ(plan.value["unresolved"].size(), GetParam() ? 2U : 1U);
+    const auto before = copy("verify");
+    EXPECT_EQ(before.value["missing"].size(), 2U);
+    EXPECT_FALSE(before.value["complete"]);
+    // Paged: one row a page, following next_after.
+    std::size_t copied_total = 0;
+    std::string after;
+    for (int page = 0; page < 10; ++page) {
+        const auto copied = copy("copy", after, 1);
+        ASSERT_TRUE(copied.ok) << copied.error.message;
+        copied_total += copied.value["copied"].get<std::size_t>();
+        if (copied.value["next_after"].is_null()) {
+            break;
+        }
+        after = copied.value["next_after"];
+    }
+    EXPECT_EQ(copied_total, 2U);
+    const auto rerun = copy("copy");
+    EXPECT_EQ(rerun.value["copied"], 0) << "a rerun copies nothing twice";
+    EXPECT_EQ(rerun.value["already_present"], 2);
+    const auto verified = copy("verify");
+    EXPECT_EQ(verified.value["verified"], 2);
+    EXPECT_TRUE(verified.value["missing"].empty());
+    EXPECT_TRUE(verified.value["mismatched"].empty());
+    EXPECT_EQ(verified.value["complete"], !GetParam());
+
+    // Each description is only in its own workspace, keyed by its repository, and sealed.
+    ASSERT_EQ(t.zetta->records[lab_url].rows("repositories").size(), 1U);
+    EXPECT_EQ(t.zetta->records[lab_url].rows("repositories").begin()->first, lab_repository);
+    EXPECT_EQ(t.zetta->records[their_url].rows("repositories").size(), 1U);
+    EXPECT_TRUE(t.zetta->records["http://" + second.workspaces[1] + ".test"].collections.empty());
+    for (const auto& [key, record] : t.zetta->records[lab_url].rows("repositories")) {
+        EXPECT_EQ(record.dump().find("Legacy lab"), std::string::npos) << "sealed body";
+    }
+
+    // The repository reads the copied description, with the instant its row was created.
+    const auto read = call("get_repository", {{"id", lab_repository}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["description"], "Legacy lab");
+    const auto listed = call("list_repositories", {{"customer_id", second.customer_id}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    for (const json& item : listed.value["items"]) {
+        if (item["id"] == their_repository) {
+            EXPECT_EQ(item["description"], "Legacy theirs");
+        }
+    }
+    auto records =
+        lake::api::workspace_records(operator_context, first.customer_id, first.workspaces[1]);
+    ASSERT_TRUE(records) << records.error().message;
+    const auto stored = run(
+        lake::control::get_repository_settings(*records, lab_repository, first.customer_id));
+    ASSERT_TRUE(stored && *stored);
+    EXPECT_EQ((*stored)->at_us, legacy.at(lab_repository).second);
+
+    // A description changed after the copy (a later lake revision) is accepted by verify.
+    ASSERT_TRUE(run(lake::control::update_repository_settings(
+        *records, lab_repository, first.customer_id,
+        [](lake::control::RepositorySettings& value) { value.description = "Edited"; })));
+    const auto after_edit = copy("verify");
+    EXPECT_EQ(after_edit.value["verified"], 2);
+    EXPECT_TRUE(after_edit.value["mismatched"].empty());
+
+    if (GetParam()) {
+        // Assigning the unassigned repository its workspace (lake#513) resolves it on the next run.
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE repositories SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       unassigned, second.workspaces[1]);
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.commit();
+        const auto resolved = copy("copy");
+        EXPECT_EQ(resolved.value["copied"], 1);
+        EXPECT_EQ(resolved.value["unresolved"].size(), 1U) << "only the deleted workspace's";
+        EXPECT_TRUE(copy("verify").value["complete"]);
+        EXPECT_EQ(call("get_repository", {{"id", unassigned}}).value["description"],
+                  "Legacy unassigned");
+    }
+
+    // A changed copy is reported, never silently accepted: a value written under another key
+    // does not open there.
+    auto& their_rows = t.zetta->records[their_url].rows("repositories");
+    auto& lab_rows = t.zetta->records[lab_url].rows("repositories");
     their_rows.begin()->second["value"] = lab_rows.begin()->second["value"];
     const auto tampered = copy("verify");
     EXPECT_EQ(tampered.value["missing"].size(), 1U) << "a row that no longer opens is missing";

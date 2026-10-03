@@ -6,6 +6,7 @@
 #include <string_view>
 
 #include "forge_records_api.hpp"
+#include "repository_records_api.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/store.hpp"
 
@@ -13,10 +14,6 @@ namespace lake::api {
 namespace {
 
 using nlohmann::json;
-
-ApiResult store_error(const control::StoreError& error) {
-    return ApiResult::failure(error.code, error.message);
-}
 
 ApiResult sync_error(const SyncStoreError& error) {
     return ApiResult::failure(error.code, error.message);
@@ -77,13 +74,13 @@ liquid::runtime::task<ApiResult> import_github_repository(const json& input,
         co_return ApiResult::failure(
             workspace.error().code, workspace.error().message, workspace.error().path);
     }
-    const auto created = context.store->create_repository({input.at("customer_id"),
-                                                           input.at("name"),
-                                                           recording.value("description", ""),
-                                                           "private",
-                                                           workspace->id});
+    // The recorded description is the repository's settings record in its workspace (lake#315).
+    const auto created = settled_create(co_await create_repository_with_settings(
+        context,
+        {input.at("customer_id"), input.at("name"), "", "private", workspace->id},
+        recording.value("description", "")));
     if (!created) {
-        co_return store_error(created.error());
+        co_return created.error();
     }
     const auto history = context.sync_store->import_git(
         created->customer_id, created->id, input.at("git_directory"));

@@ -216,3 +216,14 @@ central) for `copy_workspace_records`; every other event stays central and is co
 dropped; `audit_events` stays append-only and `audit_retention` governs it. The latest guard is
 `audit_workspaces_guard`; the operator must vendor this schema and update its guard before rollout.
 See [audit.md](../docs/api/audit.md#moving-the-central-events-of-workspaces-migration-0063).
+Migration `0064_repository_records` makes the repository row routing only (decision 54). It drops
+`repository_refs` (lake#319), a copy of liquid's refs that nothing read; its `CREATE` (from `0006`)
+is removed from this file, so rerunning the file never recreates it. It also records, in
+`workspace_assignments` under `object_table = 'repository_descriptions'`, the owner of each
+repository whose row holds a description (lake#315 part 2): `repository_workspace`,
+`needs_selection` while the repository has no workspace, or `workspace_deleted`. The description
+lives in the repository's workspace Zetta (`lake_repositories`), lake no longer writes or reads the
+column, and `copy_workspace_records` (collection `repositories`) copies it; a later migration drops
+the column. The latest guard is `repository_records_guard`; the operator must vendor this schema,
+update its guard, and drop `repository_refs` from its vendored-schema test before rollout. See
+[repositories.md](../docs/api/repositories.md#where-the-description-lives-lake315-part-2).

@@ -1542,7 +1542,8 @@ std::string web_ui_customers(const std::vector<control::Customer>& customers, We
 std::string web_ui_repositories(const std::vector<control::Repository>& repositories,
                                 const std::map<std::string, control::Customer>& owners,
                                 WebUiViewer viewer,
-                                const std::vector<control::Workspace>& workspaces) {
+                                const std::vector<control::Workspace>& workspaces,
+                                const std::map<std::string, std::string>& descriptions_unavailable) {
     std::map<std::string, const control::Workspace*> workspace_by_id;
     for (const control::Workspace& workspace : workspaces) {
         workspace_by_id.emplace(workspace.id, &workspace);
@@ -1588,7 +1589,9 @@ std::string web_ui_repositories(const std::vector<control::Repository>& reposito
                                             yours ? owner_name + " (you)" : owner_name),
                                    workspace_cell(r),
                                    web_ui_escape(r.visibility),
-                                   web_ui_escape(r.description),
+                                   descriptions_unavailable.contains(r.id)
+                                       ? "<span class=\"muted\">Unavailable</span>"
+                                       : web_ui_escape(r.description),
                                    web_ui_escape(r.created_at));
         }
         content += "</tbody></table>";
@@ -1650,7 +1653,10 @@ std::string web_ui_repository(const control::Repository& repository,
         "<div class=\"repository-layout\"><div class=\"repository-main\">",
         web_ui_escape(owner_name),
         web_ui_escape(repository.name),
-        web_ui_escape(repository.description.empty() ? "No description." : repository.description),
+        web_ui_escape(!data.description_unavailable.empty()
+                          ? "Description unavailable: " + data.description_unavailable
+                      : repository.description.empty() ? "No description."
+                                                       : repository.description),
         web_ui_escape(repository.visibility),
         forge_tabs(repository, "code", viewer));
     // The owning workspace (lake#315). The page stays at its repository address; it names the

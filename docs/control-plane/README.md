@@ -35,3 +35,6 @@ workspace Zettas (lake#358, lake#359).
 [schema.md](schema.md#audit-workspaces-migration-0063_audit_workspaces) documents
 `0063_audit_workspaces`, which records the workspace of each central audit event about a
 workspace's data for the copy into that workspace's own audit chain (decision 52, lake#317).
+[schema.md](schema.md#repository-records-migration-0064_repository_records) documents
+`0064_repository_records`, which drops `repository_refs` (lake#319) and records each repository
+description's workspace for the copy into its `lake_repositories` record (lake#315 part 2).

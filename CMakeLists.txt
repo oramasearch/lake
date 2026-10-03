@@ -203,6 +203,7 @@ add_library(lake-core STATIC
   src/control/application_authorization_codes.cpp
   src/control/application_credential_records.cpp
   src/control/application_settings_records.cpp
+  src/control/repository_records.cpp
   src/control/agent_task_records.cpp
   src/control/metering.cpp
   src/control/workspace_audit.cpp
@@ -213,6 +214,7 @@ add_library(lake-core STATIC
   src/api/oauth.cpp
   src/api/clerk.cpp
   src/api/workspace_capabilities.cpp
+  src/api/repository_records_api.cpp
   src/api/workspace_record_capabilities.cpp
   src/api/datasets.cpp
   src/api/stream_capabilities.cpp

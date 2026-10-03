@@ -18,6 +18,11 @@ the central log (decision 52): one `list_records` walk per workspace, all starte
 their budget is one round and one call per workspace (one in the regression fixture). The
 repository branch protection page reads its repository's workspace audit, one call.
 
+**Updated 2026-10-03 (lake#315 part 2).** `/repositories` reads each listed repository's
+description from its workspace: one `list_records` per workspace, all started together, so its
+budget is one round and one call per workspace (one in the regression fixture). The repository home
+page reads its repository's description with one `get_record`.
+
 ## Reading `Server-Timing`
 
 The browser's Network panel shows these entries for a lake page:

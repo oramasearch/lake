@@ -826,7 +826,12 @@ protected:
         ASSERT_TRUE(requested && *requested);
         connection.workspace_id = (*requested)->workspace_id;
         selected_workspace_id_ = connection.workspace_id;
-        const auto service = store_->get_service((*requested)->service_id);
+        ready_service((*requested)->service_id);
+    }
+
+    // What the operator reports once a workspace's Zetta is up.
+    void ready_service(const std::string& service_id) {
+        const auto service = store_->get_service(service_id);
         ASSERT_TRUE(service);
         if (auto memory = std::dynamic_pointer_cast<lake::control::InMemoryStore>(store_)) {
             ASSERT_TRUE(memory->set_service_status(service->id, "Ready", "", "http://workspace.test"));
@@ -901,6 +906,8 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     EXPECT_FALSE(usage.at("value").at("over_quota"));
     const auto workspace = store_->create_workspace({customer_id, "notes", "dev", ""});
     ASSERT_TRUE(workspace) << workspace.error().message;
+    // The description is written to the workspace's Zetta (lake#315), so it must be Ready.
+    ready_service(workspace->zetta_service_id);
     const std::string form = client->request("GET", "/repositories", "", cookie);
     EXPECT_NE(form.find("action=\"/repository/create\""), std::string::npos);
     EXPECT_NE(form.find("<select name=\"workspace_id\" required>"), std::string::npos);
@@ -917,6 +924,7 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     const std::string repository = client->request("GET", destination, "", cookie);
     EXPECT_TRUE(repository.starts_with("HTTP/1.1 200")) << repository;
     EXPECT_NE(repository.find("/first-repository"), std::string::npos);
+    EXPECT_NE(repository.find("My files"), std::string::npos) << "the description, from the workspace";
     // The repository page names its workspace and links into it.
     EXPECT_NE(repository.find("href=\"/w/" + workspace->id + "/design/projects\">notes</a>"),
               std::string::npos);
@@ -4003,7 +4011,7 @@ void populate_metering_store(lake::control::Store& control_store,
     ASSERT_TRUE(objects) << objects.error().message;
     for (std::size_t index = 0; index < 4; ++index) {
         const auto row = control_store.create_repository(
-            {customer_id, "metering-" + std::to_string(index), "cold-start fixture", "private",
+            {customer_id, "metering-" + std::to_string(index), "", "private",
              lake::test::repository_workspace(control_store, customer_id)});
         ASSERT_TRUE(row);
         liquid::repository_options options;
@@ -4220,6 +4228,9 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         // Activity and Audit read the central log and each workspace's audit (decision 52,
         // lake#317): one list_records walk per workspace, all in one round. The fixture has one.
         {"/activity", {1, 1, Capabilities{"list_records"}}},
+        // Repository descriptions are settings records in each repository's workspace (lake#315):
+        // one list_records per workspace, all started together.
+        {"/repositories", {1, 1, Capabilities{"list_records"}}},
         {"/audit", {1, 1, Capabilities{"list_records"}}}};
     const auto workspace_call_budget = [&workspace_call_budgets](const std::string& pattern) {
         const auto found = workspace_call_budgets.find(pattern);

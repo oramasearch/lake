@@ -503,6 +503,15 @@ the server tick. `test_workspace_records.cpp`'s `DynamicLeasesLiveInTheirMountsW
 `TheOneShotCopyMovesDynamicLeasesIntoTheirMountsWorkspace` cover two spaces with two workspaces
 each and the copy in both stores (`seed_legacy_dynamic_secret_lease`);
 `PostgresSecrets.LeaseRoutesAreAContentFreeDueIndex` migration `0058_secret_lease_workspaces`.
+Repository descriptions and refs (lake#315 part 2, lake#319): `test_workspace_records.cpp`
+(`RepositoryDescriptionsLiveInTheirWorkspace`, `TheOneShotCopyMovesRepositoryDescriptions`) covers
+two spaces with two workspaces each, sealed records and empty routing rows, reads and one
+`list_records` per workspace, missing, malformed, unknown and foreign `workspace_id`, a refused
+create leaving nothing, least privilege, a raced change, a moved record, not ready, deletion and the
+copy in both stores; `PostgresRepositories.MigrationDropsRefsAndRecordsEachDescriptionsOwner`
+migration `0064_repository_records`. The sync tests in `test_api.cpp` and the forge scenario read
+refs through the `refs` capability (`served_refs`, `ref_head`), since lake keeps no copy, and
+`PagePerformance` holds `/repositories` at one `list_records`.
 Application settings (lake#351): `test_apps.cpp`
 (`SettingsLiveInTheApplicationsWorkspace`) covers two spaces with two workspaces each, sealed
 records and empty routing rows, reads and listings from the workspace, the theme with missing,

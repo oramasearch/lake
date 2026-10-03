@@ -75,8 +75,9 @@ their own rows, because `Registry::call` records every outcome.
 ## Repository lifecycle (migration `0006_repository_lifecycle`)
 
 `repositories` gains nullable `deleted_at` and `retention_until` timestamps. Its visibility
-constraint also accepts `organization`, between private and public. `repository_refs` holds the
-current repository heads. Lifecycle operations update
+constraint also accepts `organization`, between private and public. It also created
+`repository_refs`, a copy of each liquid ref; migration `0064` drops it (lake#319), and its
+`CREATE` is no longer in the schema. Lifecycle operations update
 the repository and its policy-object parent in one store transaction; the registry records each
 attempt in the signed audit stream.
 
@@ -325,6 +326,22 @@ about a workspace's data go to that workspace's own chain, `lake_audit_events` i
 
 Nothing is dropped and `audit_events` stays append-only; the one-shot copy puts each assigned event
 in its workspace as it is.
+
+## Repository records (migration `0064_repository_records`)
+
+Decision 54 (S10, S11). The `repositories` row stays as routing; what a person wrote about a
+repository moves to its workspace, and the unused copy of liquid's refs goes
+([repositories.md](../api/repositories.md#where-the-description-lives-lake315-part-2)).
+
+| Table or change | Purpose |
+|---|---|
+| `repository_refs` | **Dropped** (lake#319). A copy of each liquid ref, written after a push, a replication and a `refs` read, that nothing read; the liquid repository is the authority. Its `CREATE` (0006) is gone, so a rerun never recreates it. Nothing is copied. |
+| `repositories.description` | No longer written or read by lake (lake#315 part 2): the description is the repository's sealed record in `lake_repositories` of its workspace Zetta. New rows leave it `''`. Read only by the one-shot copy until a later migration drops the column. |
+| `workspace_assignments` (`repository_descriptions`) | The owner of each repository that holds a description, for the copy: `repository_workspace`, `needs_selection` while it has no workspace (resolved by the copy once it has one, lake#513), or `workspace_deleted`. Unassigned rows are reported with `RAISE WARNING`. |
+| `repository_records_guard` | Guard table for migration `0064_repository_records`. |
+
+The operator's vendored schema test lists `CREATE TABLE IF NOT EXISTS repository_refs` among the
+statements the schema must contain; that entry goes when the operator vendors this schema.
 
 ## Identity exit scenario (migration `0020_identity_exit`)
 
