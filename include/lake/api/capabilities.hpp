@@ -33,6 +33,11 @@ void register_web_app_capabilities(Registry& registry);
 void register_build_capabilities(Registry& registry);
 void register_stream_capabilities(Registry& registry);
 void register_experiment_capabilities(Registry& registry);
+// The live workspace a new repository is created in (lake#315): `input.workspace_id` must name a
+// workspace of `input.customer_id`'s space that is not deleted. Anything else, including a missing
+// id, is invalid_input at /workspace_id; there is no default workspace.
+std::expected<control::Workspace, ApiError> repository_workspace(ApiContext& context,
+                                                                 const nlohmann::json& input);
 // Customer Zetta workspaces: status, start, and allow-listed calls (docs/api/workspaces.md).
 void register_workspace_capabilities(Registry& registry);
 // The operator's one-shot copy of retired control-store tables into workspace Zettas

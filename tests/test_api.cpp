@@ -60,6 +60,7 @@
 #include "workspace_fixture.hpp"
 #include "api/workspace_records_api.hpp"
 #include "lake/control/drive_share_links.hpp"
+#include "repository_test_support.hpp"
 
 using nlohmann::json;
 using namespace lake::api;
@@ -360,7 +361,10 @@ TEST(Metering, CapabilityReportsExactStorageAndIdempotentBuildCompute) {
         {{"customer_type", "individual"}, {"user_id", user.value.at("id")}, {"name", "meter"}});
     ASSERT_TRUE(customer.ok) << customer.error.message;
     const ApiResult repository = surface.call(
-        "create_repository", {{"customer_id", customer.value.at("id")}, {"name", "usage"}});
+        "create_repository",
+        {{"customer_id", customer.value.at("id")},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value.at("id"))},
+         {"name", "usage"}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
 
     const json input{{"customer_id", customer.value.at("id")}};
@@ -466,7 +470,9 @@ TEST(Metering, UsageIncludesWorkspaceDataImagesAndComputeOutsideRepositories) {
     const auto stopped = surface.store.create_workspace({customer_id, "stopped", "dev", ""});
     ASSERT_TRUE(stopped);
 
-    const auto repository = surface.store.create_repository({customer_id, "app", "", "private"});
+    const auto repository = surface.store.create_repository({customer_id, "app", "", "private",
+                                                             lake::test::repository_workspace(
+                                                                 surface.store, customer_id)});
     ASSERT_TRUE(repository);
     const auto build = surface.store.create_build({.customer_id = customer_id,
                                                    .workspace_id = (*requested)->workspace_id,
@@ -1369,7 +1375,9 @@ TEST(RegistryProtocols, BuildPushCredentialIsLimitedToItsCustomerPrefix) {
     ASSERT_TRUE(user) << user.error().message;
     const auto customer = store->create_customer({"individual", user->id, "", "tenant-one"});
     ASSERT_TRUE(customer) << customer.error().message;
-    const auto repository = store->create_repository({customer->id, "source", "", "private"});
+    const auto repository = store->create_repository({customer->id, "source", "", "private",
+                                                      lake::test::repository_workspace(
+                                                          *store, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     const auto build_workspace = store->create_workspace({customer->id, "builds", "dev", ""});
     ASSERT_TRUE(build_workspace);
@@ -2712,7 +2720,9 @@ TEST(SyncRegistry, RevokedOfflineGrantRefusesPublicationWithChangeAndReason) {
     const auto customer = lake::test::personal_customer(surface.store, principal->user_id);
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
-        surface.store.create_repository({customer->id, "offline-sync", "", "private"});
+        surface.store.create_repository({customer->id, "offline-sync", "", "private",
+                                         lake::test::repository_workspace(
+                                             surface.store, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     const auto object = surface.store.find_policy_object("repository", repository->id);
     ASSERT_TRUE(object) << object.error().message;
@@ -2988,29 +2998,44 @@ TEST(Repositories, OwnedByACustomerNamedWithinIt) {
                {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
     ASSERT_TRUE(customer.ok);
     const std::string cid = customer.value["id"];
+    const std::string workspace = lake::test::repository_workspace(s.store, cid);
 
-    ApiResult repo =
-        s.call("create_repository",
-               {{"customer_id", cid}, {"name", "liquid"}, {"description", "the tool"}});
+    ApiResult repo = s.call("create_repository",
+                            {{"customer_id", cid},
+                             {"workspace_id", workspace},
+                             {"name", "liquid"},
+                             {"description", "the tool"}});
     ASSERT_TRUE(repo.ok) << repo.error.message;
     EXPECT_EQ(repo.value["visibility"], "private");
     EXPECT_EQ(repo.value["customer_id"], cid);
+    EXPECT_EQ(repo.value["workspace_id"], workspace);
 
-    const ApiResult duplicate =
-        s.call("create_repository", {{"customer_id", cid}, {"name", "liquid"}});
+    const ApiResult duplicate = s.call(
+        "create_repository",
+        {{"customer_id", cid}, {"workspace_id", workspace}, {"name", "liquid"}});
     EXPECT_EQ(duplicate.error.code, "conflict");
     EXPECT_EQ(duplicate.error.message, "a repository named 'liquid' already exists");
     EXPECT_EQ(duplicate.error.path, "/name");
-    EXPECT_EQ(s.call("create_repository", {{"customer_id", cid}, {"name", "Bad Name"}}).error.code,
+    EXPECT_EQ(s.call("create_repository",
+                     {{"customer_id", cid}, {"workspace_id", workspace}, {"name", "Bad Name"}})
+                  .error.code,
               "invalid_input");
-    EXPECT_EQ(s.call("create_repository", {{"customer_id", "nope"}, {"name", "x"}}).error.code,
+    EXPECT_EQ(s.call("create_repository",
+                     {{"customer_id", "nope"}, {"workspace_id", workspace}, {"name", "x"}})
+                  .error.code,
               "invalid_input");
-    EXPECT_EQ(
-        s.call("create_repository", {{"customer_id", cid}, {"name", "y"}, {"visibility", "secret"}})
-            .error.code,
-        "invalid_input");
+    EXPECT_EQ(s.call("create_repository",
+                     {{"customer_id", cid},
+                      {"workspace_id", workspace},
+                      {"name", "y"},
+                      {"visibility", "secret"}})
+                  .error.code,
+              "invalid_input");
     ASSERT_TRUE(s.call("create_repository",
-                       {{"customer_id", cid}, {"name", "lake"}, {"visibility", "public"}})
+                       {{"customer_id", cid},
+                        {"workspace_id", workspace},
+                        {"name", "lake"},
+                        {"visibility", "public"}})
                     .ok);
 
     const ApiResult all = s.call("list_repositories");
@@ -3026,11 +3051,125 @@ TEST(Repositories, OwnedByACustomerNamedWithinIt) {
 
     const ApiResult deleted = s.call("delete_repository", {{"id", repo.value["id"]}});
     ASSERT_TRUE(deleted.ok) << deleted.error.message;
-    const ApiResult recreated =
-        s.call("create_repository", {{"customer_id", cid}, {"name", "liquid"}});
+    const ApiResult recreated = s.call(
+        "create_repository",
+        {{"customer_id", cid}, {"workspace_id", workspace}, {"name", "liquid"}});
     ASSERT_TRUE(recreated.ok) << recreated.error.message;
     EXPECT_EQ(recreated.value["name"], "liquid");
     EXPECT_NE(recreated.value["id"], repo.value["id"]);
+}
+
+// lake#315: every repository belongs to one workspace of its space, named on create and never
+// changed. Two spaces, two workspaces in one space, and every way to name the wrong one.
+TEST(Repositories, BelongToOneWorkspaceOfTheirSpace) {
+    Surface s;
+    RepositoryFixtureStore repository_store;
+    s.ctx.sync_store = &repository_store;
+    const auto space = [&](const std::string& name) {
+        const ApiResult user = s.call("create_user", {{"display_name", name}});
+        const ApiResult customer = s.call(
+            "create_customer",
+            {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", name}});
+        return customer.value["id"].get<std::string>();
+    };
+    const std::string ada = space("ada");
+    const std::string grace = space("grace");
+    const auto research = s.store.create_workspace({ada, "research", "dev", ""});
+    const auto product = s.store.create_workspace({ada, "product", "prod", ""});
+    const auto foreign = s.store.create_workspace({grace, "elsewhere", "dev", ""});
+    const auto withdrawn = s.store.create_workspace({ada, "withdrawn", "dev", ""});
+    ASSERT_TRUE(research && product && foreign && withdrawn);
+    ASSERT_TRUE(s.store.update_workspace(withdrawn->id, {.desired = "deleted"}));
+
+    const auto create = [&](const json& workspace, const std::string& name) {
+        json input{{"customer_id", ada}, {"name", name}};
+        if (!workspace.is_null()) {
+            input["workspace_id"] = workspace;
+        }
+        return s.call("create_repository", input);
+    };
+    for (const json& wrong :
+         {json(), json(""), json("not-a-workspace"), json(withdrawn->id)}) {
+        const ApiResult refused = create(wrong, "refused");
+        EXPECT_EQ(refused.error.code, "invalid_input") << wrong;
+        EXPECT_EQ(refused.error.path, "/workspace_id") << wrong;
+    }
+    // Another space's workspace: the registry names the space beside it as the one at fault, as
+    // for every workspace-scoped capability (lake#450).
+    const ApiResult foreign_workspace = create(foreign->id, "refused");
+    EXPECT_EQ(foreign_workspace.error.code, "invalid_input");
+    EXPECT_EQ(foreign_workspace.error.path, "/customer_id");
+
+    const ApiResult in_research = create(research->id, "notes");
+    ASSERT_TRUE(in_research.ok) << in_research.error.message;
+    EXPECT_EQ(in_research.value["workspace_id"], research->id);
+    const ApiResult in_product = create(product->id, "service");
+    ASSERT_TRUE(in_product.ok) << in_product.error.message;
+    // Names stay unique per space, across its workspaces.
+    EXPECT_EQ(create(product->id, "notes").error.code, "conflict");
+
+    // Reads return the owning workspace, and a list can be narrowed to one workspace.
+    EXPECT_EQ(s.call("get_repository", {{"id", in_product.value["id"]}}).value["workspace_id"],
+              product->id);
+    const ApiResult research_only =
+        s.call("list_repositories", {{"customer_id", ada}, {"workspace_id", research->id}});
+    ASSERT_EQ(research_only.value["items"].size(), 1u);
+    EXPECT_EQ(research_only.value["items"][0]["name"], "notes");
+    EXPECT_EQ(s.call("list_repositories", {{"customer_id", ada}}).value["items"].size(), 2u);
+    EXPECT_EQ(s.call("list_repositories", {{"workspace_id", foreign->id}}).value["items"].size(),
+              0u);
+
+    // The space and the workspace never change: a transfer is refused.
+    const ApiResult transfer = s.call("transfer_repository",
+                                      {{"id", in_research.value["id"]}, {"customer_id", grace}});
+    EXPECT_EQ(transfer.error.code, "conflict");
+    EXPECT_EQ(transfer.error.path, "/customer_id");
+    EXPECT_EQ(s.call("get_repository", {{"id", in_research.value["id"]}}).value["customer_id"],
+              ada);
+
+    // The export import names its own target workspace; the archive's is not reused.
+    const ApiResult exported =
+        s.call("export_repository", {{"repository_id", in_research.value["id"]}});
+    ASSERT_TRUE(exported.ok) << exported.error.message;
+    const ApiResult no_workspace = s.call(
+        "import_repository",
+        {{"customer_id", grace}, {"name", "copy"}, {"archive", exported.value["archive"]}});
+    EXPECT_EQ(no_workspace.error.code, "invalid_input");
+    EXPECT_EQ(no_workspace.error.path, "/workspace_id");
+    const ApiResult archive_workspace = s.call("import_repository",
+                                               {{"customer_id", grace},
+                                                {"workspace_id", research->id},
+                                                {"name", "copy"},
+                                                {"archive", exported.value["archive"]}});
+    EXPECT_EQ(archive_workspace.error.code, "invalid_input");
+    const ApiResult imported = s.call("import_repository",
+                                      {{"customer_id", grace},
+                                       {"workspace_id", foreign->id},
+                                       {"name", "copy"},
+                                       {"archive", exported.value["archive"]}});
+    ASSERT_TRUE(imported.ok) << imported.error.message;
+    EXPECT_EQ(imported.value["workspace_id"], foreign->id);
+    const ApiResult github = s.call("import_github_repository",
+                                    {{"customer_id", ada},
+                                     {"workspace_id", foreign->id},
+                                     {"name", "example"},
+                                     {"git_directory", "/recorded/example.git"},
+                                     {"recording", json::object()}});
+    EXPECT_EQ(github.error.code, "invalid_input");
+    EXPECT_EQ(github.error.path, "/customer_id");
+
+    // A workspace that still holds a live repository is not deleted; once its repositories are
+    // deleted, it is.
+    const ApiResult kept = s.call(
+        "delete_workspace",
+        {{"customer_id", ada}, {"workspace_id", product->id}, {"confirm", "product"}});
+    EXPECT_EQ(kept.error.code, "conflict");
+    ASSERT_TRUE(s.call("delete_repository", {{"id", in_product.value["id"]}}).ok);
+    const ApiResult removed = s.call(
+        "delete_workspace",
+        {{"customer_id", ada}, {"workspace_id", product->id}, {"confirm", "product"}});
+    EXPECT_TRUE(removed.ok) << removed.error.message;
+    EXPECT_EQ(create(product->id, "after").error.path, "/workspace_id");
 }
 
 TEST(ApiErrors, DatabaseDiagnosticsStayOutOfErrorMessages) {
@@ -3055,7 +3194,10 @@ TEST(Forge, PersistsIssueLifecycleAndMapsReviewCommentAnchors) {
         {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
     ASSERT_TRUE(customer.ok) << customer.error.message;
     const ApiResult repository = surface.call(
-        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "forge"}});
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "forge"}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
     const std::string repository_id = repository.value["id"];
 
@@ -3122,7 +3264,10 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
         {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
     ASSERT_TRUE(customer.ok) << customer.error.message;
     const ApiResult repository = source.call(
-        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "portable"}});
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(source.store, customer.value["id"])},
+         {"name", "portable"}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
     ASSERT_TRUE(source
                     .call("create_issue",
@@ -3150,10 +3295,13 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
         "create_customer",
         {{"customer_type", "individual"}, {"user_id", target_user.value["id"]}, {"name", "grace"}});
     ASSERT_TRUE(target_customer.ok) << target_customer.error.message;
-    const ApiResult imported = destination.call("import_repository",
-                                                {{"customer_id", target_customer.value["id"]},
-                                                 {"name", "portable-copy"},
-                                                 {"archive", exported.value["archive"]}});
+    const ApiResult imported = destination.call(
+        "import_repository",
+        {{"customer_id", target_customer.value["id"]},
+         {"workspace_id",
+          lake::test::repository_workspace(destination.store, target_customer.value["id"])},
+         {"name", "portable-copy"},
+         {"archive", exported.value["archive"]}});
     ASSERT_TRUE(imported.ok) << imported.error.message;
     const auto portable =
         destination_store.imported.find(target_customer.value["id"].get<std::string>() + "/" +
@@ -3168,11 +3316,13 @@ TEST(Export, VerifiesAndRecreatesPortableRepositoryFacts) {
 
     json altered = exported.value["archive"];
     altered["payload"]["history"]["changes"][0]["message"] = "changed";
-    EXPECT_EQ(destination
-                  .call("import_repository",
-                        {{"customer_id", target_customer.value["id"]},
-                         {"name", "tampered"},
-                         {"archive", altered}})
+    EXPECT_EQ(destination.call(
+        "import_repository",
+        {{"customer_id", target_customer.value["id"]},
+         {"workspace_id",
+          lake::test::repository_workspace(destination.store, target_customer.value["id"])},
+         {"name", "tampered"},
+         {"archive", altered}})
                   .error.code,
               "invalid_digest");
 }
@@ -3191,11 +3341,13 @@ TEST(GitHubImport, MapsRecordedIssuesReviewsAndWorkflowReport) {
                         "github-import-recording.json");
     ASSERT_TRUE(input.good());
     const json recording = json::parse(input);
-    const ApiResult imported = surface.call("import_github_repository",
-                                            {{"customer_id", customer.value["id"]},
-                                             {"name", "example"},
-                                             {"git_directory", "/recorded/example.git"},
-                                             {"recording", recording}});
+    const ApiResult imported = surface.call(
+        "import_github_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "example"},
+         {"git_directory", "/recorded/example.git"},
+         {"recording", recording}});
     ASSERT_TRUE(imported.ok) << imported.error.message;
     EXPECT_EQ(imported.value["fidelity"]["format"], "github_import_fidelity/1");
     EXPECT_EQ(imported.value["fidelity"]["workflows"][0]["wrap_replacements"][0]["replacement"],
@@ -3221,7 +3373,10 @@ TEST(Forge, ReleaseRetainsVerifiedArtifactAttestations) {
         {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
     ASSERT_TRUE(customer.ok) << customer.error.message;
     const ApiResult repository = surface.call(
-        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "releases"}});
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "releases"}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
 
     const ApiResult release = surface.call("create_release",
@@ -3243,7 +3398,10 @@ TEST(Forge, WebhookDeliveryRetriesAndRetainsAnEventLog) {
         {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
     ASSERT_TRUE(customer.ok) << customer.error.message;
     const ApiResult repository = surface.call(
-        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "hooks"}});
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "hooks"}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
     const std::string repository_id = repository.value["id"];
     const ApiResult webhook = surface.call("create_webhook",
@@ -3291,7 +3449,10 @@ TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
         {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
     ASSERT_TRUE(customer.ok) << customer.error.message;
     const ApiResult repository = surface.call(
-        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "protected"}});
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "protected"}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
     const std::string repository_id = repository.value["id"];
     ASSERT_TRUE(surface
@@ -3304,8 +3465,12 @@ TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
 
     const BranchRefUpdate update{
         .name = "refs/heads/main", .new_head = "change-1", .fast_forward = true};
+    // The evaluation receives the repository with its workspace (lake#315).
+    const auto stored = surface.store.get_repository(repository_id);
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(stored->workspace_id, repository.value["workspace_id"].get<std::string>());
     const auto rejected = evaluate_branch_protection(
-        surface.store, "admin", surface.ctx.authorization_cache, repository_id, update);
+        surface.store, "admin", surface.ctx.authorization_cache, *stored, update);
     ASSERT_FALSE(rejected);
     EXPECT_EQ(rejected.error().code, "conflict");
 
@@ -3319,7 +3484,7 @@ TEST(Forge, BranchProtectionRequiresAnApprovedReview) {
                            {"state", "approved"}})
                     .ok);
     EXPECT_TRUE(evaluate_branch_protection(
-        surface.store, "admin", surface.ctx.authorization_cache, repository_id, update));
+        surface.store, "admin", surface.ctx.authorization_cache, *stored, update));
 }
 
 TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {
@@ -3331,12 +3496,17 @@ TEST(Repositories, AnonymousCallersOnlySeePublicRepositories) {
                {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
     ASSERT_TRUE(customer.ok);
     const ApiResult private_repository =
-        s.call("create_repository",
-               {{"customer_id", customer.value["id"]}, {"name", "private-repository"}});
-    const ApiResult public_repository = s.call("create_repository",
-                                               {{"customer_id", customer.value["id"]},
-                                                {"name", "public-repository"},
-                                                {"visibility", "public"}});
+        s.call(
+            "create_repository",
+            {{"customer_id", customer.value["id"]},
+             {"workspace_id", lake::test::repository_workspace(s.store, customer.value["id"])},
+             {"name", "private-repository"}});
+    const ApiResult public_repository = s.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(s.store, customer.value["id"])},
+         {"name", "public-repository"},
+         {"visibility", "public"}});
     ASSERT_TRUE(private_repository.ok);
     ASSERT_TRUE(public_repository.ok);
 
@@ -3367,9 +3537,13 @@ TEST(WebApps, SourceTokenReadsOnlyItsPrivateRepositoryRevision) {
     const auto customer =
         surface.store.create_customer({"individual", user->id, "", "app-source-owner"});
     ASSERT_TRUE(customer);
-    const auto repository = surface.store.create_repository({customer->id, "app", "", "private"});
+    const auto repository = surface.store.create_repository({customer->id, "app", "", "private",
+                                                             lake::test::repository_workspace(
+                                                                 surface.store, customer->id)});
     ASSERT_TRUE(repository);
-    const auto other = surface.store.create_repository({customer->id, "other", "", "public"});
+    const auto other = surface.store.create_repository({customer->id, "other", "", "public",
+                                                        lake::test::repository_workspace(
+                                                            surface.store, customer->id)});
     ASSERT_TRUE(other);
     lake::control::NewWebApp input;
     input.customer_id = customer->id;
@@ -3425,10 +3599,12 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
         s.call("create_customer",
                {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
     ASSERT_TRUE(customer.ok);
-    const ApiResult repository = s.call("create_repository",
-                                        {{"customer_id", customer.value["id"]},
-                                         {"name", "public-repository"},
-                                         {"visibility", "public"}});
+    const ApiResult repository = s.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(s.store, customer.value["id"])},
+         {"name", "public-repository"},
+         {"visibility", "public"}});
     ASSERT_TRUE(repository.ok);
     const std::string repository_id = repository.value["id"];
 
@@ -3488,7 +3664,10 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
         {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "owner"}});
     ASSERT_TRUE(customer.ok);
     const ApiResult repository = surface.call(
-        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "drive"}});
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "drive"}});
     ASSERT_TRUE(repository.ok);
     const auto repository_object =
         surface.store.find_policy_object("repository", repository.value["id"]);
@@ -3702,7 +3881,10 @@ TEST(Drive, ShareDownloadsEncodeAcrossBlockBoundaries) {
         {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "share-bytes"}});
     ASSERT_TRUE(customer.ok);
     const ApiResult repository = surface.call(
-        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "drive"}});
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "drive"}});
     ASSERT_TRUE(repository.ok);
     const std::string workspace = workspaces.create(customer.value["id"], "home");
     const ApiResult link = surface.call("create_drive_share_link",
@@ -3751,7 +3933,10 @@ TEST(Drive, ShareLinksLiveOnlyInTheWorkspaceThatHoldsThem) {
         ASSERT_TRUE(customer.ok) << customer.error.message;
         space.customer = customer.value["id"];
         const ApiResult repository = surface.call(
-            "create_repository", {{"customer_id", space.customer}, {"name", "drive"}});
+            "create_repository",
+            {{"customer_id", space.customer},
+             {"workspace_id", lake::test::repository_workspace(surface.store, space.customer)},
+             {"name", "drive"}});
         ASSERT_TRUE(repository.ok) << repository.error.message;
         space.repository = repository.value["id"];
         const auto object = surface.store.find_policy_object("repository", space.repository);
@@ -3922,7 +4107,10 @@ TEST(Drive, PathHistoryRestoresAsANewChange) {
         "create_customer",
         {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
     const ApiResult repository = surface.call(
-        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "history"}});
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "history"}});
     ASSERT_TRUE(repository.ok);
     const ApiResult history = surface.call(
         "drive_history",
@@ -3949,7 +4137,10 @@ TEST(Drive, BrowseMutationsDownloadsDiffsAndConflictsUseRepositoryCapabilities) 
         "create_customer",
         {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
     const ApiResult repository = surface.call(
-        "create_repository", {{"customer_id", customer.value["id"]}, {"name", "drive"}});
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "drive"}});
     ASSERT_TRUE(repository.ok);
 
     const ApiResult browse = surface.call("drive_browse",
@@ -4052,10 +4243,12 @@ TEST(Models, MetadataAndResolveUseRepositoryHistoryAndProvenance) {
     const ApiResult customer = surface.call(
         "create_customer",
         {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", "ada"}});
-    const ApiResult repository = surface.call("create_repository",
-                                              {{"customer_id", customer.value["id"]},
-                                               {"name", "fixture-model"},
-                                               {"visibility", "public"}});
+    const ApiResult repository = surface.call(
+        "create_repository",
+        {{"customer_id", customer.value["id"]},
+         {"workspace_id", lake::test::repository_workspace(surface.store, customer.value["id"])},
+         {"name", "fixture-model"},
+         {"visibility", "public"}});
     ASSERT_TRUE(repository.ok);
     surface.ctx.authorized = false;
     surface.ctx.acting_identity.clear();
@@ -4082,7 +4275,8 @@ TEST(HuggingFaceHttp, CommonModelAndDatasetCallsUseRepositoryCapabilities) {
     const auto customer = control->create_customer({"individual", user->id, "", "ada"});
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
-        control->create_repository({customer->id, "fixture-model", "Hub fixture", "public"});
+        control->create_repository({customer->id, "fixture-model", "Hub fixture", "public",
+                                    lake::test::repository_workspace(*control, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
 
     ServerOptions options;
@@ -4197,16 +4391,45 @@ TEST(HuggingFaceHttp, CommonModelAndDatasetCallsUseRepositoryCapabilities) {
     EXPECT_NE(model_page.find("Training Provenance"), std::string::npos) << model_page;
     EXPECT_NE(model_page.find("weights.bin"), std::string::npos) << model_page;
 
+    // A repository belongs to one workspace (lake#315): named in the body, or for a hub client
+    // that cannot add body fields, in the X-Lake-Workspace-Id header. There is no default.
+    const std::string missing_workspace = http_request(
+        server.port(),
+        "POST",
+        "/api/repos/create",
+        R"({"name":"no-workspace","organization":"ada","type":"dataset","private":false})",
+        "application/json",
+        {},
+        authorization);
+    EXPECT_EQ(missing_workspace.find(" 200 "), std::string::npos) << missing_workspace;
+    EXPECT_NE(missing_workspace.find("workspace_id must name"), std::string::npos)
+        << missing_workspace;
     const std::string created = http_request(
         server.port(),
         "POST",
         "/api/repos/create",
-        R"({"name":"new-dataset","organization":"ada","type":"dataset","private":false})",
+        json{{"name", "new-dataset"},
+             {"organization", "ada"},
+             {"type", "dataset"},
+             {"private", false},
+             {"workspace_id", repository->workspace_id}}
+            .dump(),
         "application/json",
         {},
         authorization);
     EXPECT_NE(created.find(" 200 "), std::string::npos) << created;
     EXPECT_EQ(response_json(created)["repo_id"], "ada/new-dataset");
+    const std::string from_header = http_request(
+        server.port(),
+        "POST",
+        "/api/repos/create",
+        R"({"name":"header-dataset","organization":"ada","type":"dataset","private":false})",
+        "application/json",
+        {},
+        authorization,
+        "localhost",
+        {{"X-Lake-Workspace-Id", repository->workspace_id}});
+    EXPECT_NE(from_header.find(" 200 "), std::string::npos) << from_header;
     const std::string yaml = http_request(server.port(),
                                           "POST",
                                           "/api/validate-yaml",
@@ -4230,6 +4453,7 @@ TEST(HuggingFaceClient, CommonFlowsRunWhenPythonClientIsInstalled) {
     ASSERT_TRUE(user);
     const auto customer = control->create_customer({"individual", user->id, "", "ada"});
     ASSERT_TRUE(customer);
+    const std::string workspace = lake::test::repository_workspace(*control, customer->id);
     ServerOptions options;
     options.port = 0;
     options.node_name = "huggingface-client-test";
@@ -4250,7 +4474,8 @@ from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
 endpoint = sys.argv[1]
 root = pathlib.Path(sys.argv[2])
-api = HfApi(endpoint=endpoint, token="hub-admin")
+# create_repo names the workspace the repository belongs to (lake#315) in a header.
+api = HfApi(endpoint=endpoint, token="hub-admin", headers={"X-Lake-Workspace-Id": sys.argv[3]})
 api.create_repo("ada/client-model", repo_type="model", private=False)
 api.upload_file(
     path_or_fileobj=b"model card",
@@ -4321,7 +4546,7 @@ assert (pathlib.Path(dataset_snapshot) / "data.jsonl").read_bytes() == b'{"row":
     const std::string command = "HF_HUB_DISABLE_XET=1 HF_HUB_DISABLE_TELEMETRY=1 "
                                 "python3 '" +
                                 script.string() + "' '" + endpoint + "' '" +
-                                temporary.path().string() + "'";
+                                temporary.path().string() + "' '" + workspace + "'";
     EXPECT_EQ(std::system(command.c_str()), 0);
     server.stop();
 }
@@ -4335,9 +4560,11 @@ TEST(ModelProvenance, SignedDatasetChainVerifiesAndTamperingIsRefused) {
     const auto customer = control->create_customer({"individual", user->id, "", "training"});
     ASSERT_TRUE(customer) << customer.error().message;
     const auto dataset =
-        control->create_repository({customer->id, "dataset", "Training data", "private"});
+        control->create_repository({customer->id, "dataset", "Training data", "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
     const auto model =
-        control->create_repository({customer->id, "model", "Trained model", "private"});
+        control->create_repository({customer->id, "model", "Trained model", "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
     ASSERT_TRUE(dataset);
     ASSERT_TRUE(model);
 
@@ -4477,11 +4704,14 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     const auto customer = store->create_customer({"individual", user->id, "", "ada"});
     ASSERT_TRUE(customer);
     const auto public_repository =
-        store->create_repository({customer->id, "public-repository", "visible", "public"});
+        store->create_repository({customer->id, "public-repository", "visible", "public",
+                                  lake::test::repository_workspace(*store, customer->id)});
     const auto private_repository =
-        store->create_repository({customer->id, "private-repository", "hidden", "private"});
+        store->create_repository({customer->id, "private-repository", "hidden", "private",
+                                  lake::test::repository_workspace(*store, customer->id)});
     const auto reformatting_repository =
-        store->create_repository({customer->id, "reformatting-repository", "empty diff", "public"});
+        store->create_repository({customer->id, "reformatting-repository", "empty diff", "public",
+                                  lake::test::repository_workspace(*store, customer->id)});
     ASSERT_TRUE(public_repository);
     ASSERT_TRUE(private_repository);
     ASSERT_TRUE(reformatting_repository);
@@ -4724,7 +4954,11 @@ TEST(Repositories, LifecycleUsesPolicyAndAuditRegistry) {
     ASSERT_TRUE(first_customer.ok);
     ASSERT_TRUE(second_customer.ok);
     const ApiResult created = surface.call(
-        "create_repository", {{"customer_id", first_customer.value["id"]}, {"name", "liquid"}});
+        "create_repository",
+        {{"customer_id", first_customer.value["id"]},
+         {"workspace_id",
+          lake::test::repository_workspace(surface.store, first_customer.value["id"])},
+         {"name", "liquid"}});
     ASSERT_TRUE(created.ok);
     const std::string repository_id = created.value["id"];
 
@@ -4734,11 +4968,11 @@ TEST(Repositories, LifecycleUsesPolicyAndAuditRegistry) {
                     .ok);
     ASSERT_TRUE(
         surface.call("rename_repository", {{"id", repository_id}, {"name", "liquid-next"}}).ok);
+    // A repository stays in its space and workspace (lake#315).
     const ApiResult transferred =
         surface.call("transfer_repository",
                      {{"id", repository_id}, {"customer_id", second_customer.value["id"]}});
-    ASSERT_TRUE(transferred.ok);
-    EXPECT_EQ(transferred.value["customer_id"], second_customer.value["id"]);
+    EXPECT_EQ(transferred.error.code, "conflict");
     const ApiResult deleted = surface.call("delete_repository", {{"id", repository_id}});
     const std::string deletion_request = surface.ctx.request_id;
     ASSERT_TRUE(deleted.ok);
@@ -4770,7 +5004,8 @@ TEST(ModelSync, MultiGigabyteRevisionsDeduplicateAndResumePull) {
     const auto customer = control->create_customer({"individual", user->id, "", "models"});
     ASSERT_TRUE(customer);
     const auto repository =
-        control->create_repository({customer->id, "large-model", "Large model", "private"});
+        control->create_repository({customer->id, "large-model", "Large model", "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
     ASSERT_TRUE(repository);
 
     const std::filesystem::path weights = temporary.path() / "weights.bin";
@@ -4874,10 +5109,12 @@ TEST(SyncHttp, PushPullShareCustomerStoreAndTransferOnlyMissingChunks) {
     const auto customer = control->create_customer({"individual", user->id, "", "sync-owner"});
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
-        control->create_repository({customer->id, "project", "sync fixture", "private"});
+        control->create_repository({customer->id, "project", "sync fixture", "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     const auto bad_repository =
-        control->create_repository({customer->id, "bad-signature", "", "private"});
+        control->create_repository({customer->id, "bad-signature", "", "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
     ASSERT_TRUE(bad_repository) << bad_repository.error().message;
 
     auto source =
@@ -5022,7 +5259,9 @@ TEST(SyncHttp, TwoLakeInstancesReplicateRepositoryAndResumeFromCursor) {
     const auto customer =
         control->create_customer({"individual", user->id, "", "replication-owner-" + unique});
     ASSERT_TRUE(customer) << customer.error().message;
-    const auto repository = control->create_repository({customer->id, "replicated", "", "private"});
+    const auto repository = control->create_repository({customer->id, "replicated", "", "private",
+                                                        lake::test::repository_workspace(
+                                                            *control, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     auto local_source =
         liquid::runtime::block_on(liquid::repository::create(temporary.path() / "local-source"));
@@ -5098,7 +5337,8 @@ TEST(SyncHttp, StorageQuotaThrottlesNewWritesAndKeepsExistingContentReadable) {
     const auto customer = control->create_customer({"individual", user->id, "", "quota-owner"});
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
-        control->create_repository({customer->id, "quota-project", "", "private"});
+        control->create_repository({customer->id, "quota-project", "", "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     auto source =
         liquid::runtime::block_on(liquid::repository::create(temporary.path() / "quota-source"));
@@ -5160,7 +5400,8 @@ TEST(SyncHttp, PushWithoutWriteAccessIsRejectedAndAudited) {
         control->create_customer({"individual", owner->id, "", "sync-denial-owner"});
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
-        control->create_repository({customer->id, "private-project", "", "private"});
+        control->create_repository({customer->id, "private-project", "", "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     const auto reader = control->sign_up_password(
         {"lake", "reader@example.test", "correct horse battery staple", "Reader", "test", "{}"});
@@ -5231,7 +5472,9 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     const auto customer =
         control->create_customer({"individual", user->id, "", "postgres-sync-" + suffix});
     ASSERT_TRUE(customer) << customer.error().message;
-    const auto repository = control->create_repository({customer->id, "project", "", "private"});
+    const auto repository = control->create_repository({customer->id, "project", "", "private",
+                                                        lake::test::repository_workspace(
+                                                            *control, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
 
     auto source =
@@ -5321,7 +5564,9 @@ TEST(PostgresSync, EnforcesBranchProtectionAtReferenceUpdates) {
     const auto customer =
         control->create_customer({"individual", owner->id, "", "branch-owner-" + suffix});
     ASSERT_TRUE(customer) << customer.error().message;
-    const auto repository = control->create_repository({customer->id, "protected", "", "private"});
+    const auto repository = control->create_repository({customer->id, "protected", "", "private",
+                                                        lake::test::repository_workspace(
+                                                            *control, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
 
     auto source = liquid::runtime::block_on(
@@ -5427,7 +5672,9 @@ TEST(SyncHttp, ProtectedRefusalDoesNotBlockAnUnprotectedReference) {
     ASSERT_TRUE(owner) << owner.error().message;
     const auto customer = control->create_customer({"individual", owner->id, "", "mixed-owner"});
     ASSERT_TRUE(customer) << customer.error().message;
-    const auto repository = control->create_repository({customer->id, "mixed", "", "private"});
+    const auto repository = control->create_repository({customer->id, "mixed", "", "private",
+                                                        lake::test::repository_workspace(
+                                                            *control, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     auto source =
         liquid::runtime::block_on(liquid::repository::create(temporary.path() / "mixed-source"));
@@ -5487,7 +5734,9 @@ TEST(SyncHttp, AtomicProtectedRefusalReportsEveryReferenceAndLandsNothing) {
     ASSERT_TRUE(owner) << owner.error().message;
     const auto customer = control->create_customer({"individual", owner->id, "", "atomic-owner"});
     ASSERT_TRUE(customer) << customer.error().message;
-    const auto repository = control->create_repository({customer->id, "atomic", "", "private"});
+    const auto repository = control->create_repository({customer->id, "atomic", "", "private",
+                                                        lake::test::repository_workspace(
+                                                            *control, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     auto source =
         liquid::runtime::block_on(liquid::repository::create(temporary.path() / "atomic-source"));

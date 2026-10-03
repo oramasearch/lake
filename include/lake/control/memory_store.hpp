@@ -41,11 +41,10 @@ public:
     Result<Customer> get_customer(const std::string& id) override;
     Result<Repository> create_repository(const NewRepository&) override;
     Result<std::vector<Repository>> list_repositories(const std::string& customer_id,
-                                                      int limit) override;
+                                                      int limit,
+                                                      const std::string& workspace_id = {}) override;
     Result<Repository> get_repository(const std::string& id) override;
     Result<Repository> rename_repository(const std::string& id, const std::string& name) override;
-    Result<Repository> transfer_repository(const std::string& id,
-                                           const std::string& customer_id) override;
     Result<Repository> set_repository_visibility(const std::string& id,
                                                  const std::string& visibility) override;
     Result<Repository> delete_repository(const std::string& id,

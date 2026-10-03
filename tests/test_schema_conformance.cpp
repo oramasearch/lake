@@ -23,6 +23,7 @@
 #include "temporary_directory.hpp"
 #include "stream_fixture.hpp"
 #include "experiment_fixture.hpp"
+#include "repository_test_support.hpp"
 
 extern char** environ;
 
@@ -266,7 +267,8 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     const auto customer =
         checked(store->create_customer({"individual", user.id, "", "schema-" + suffix}));
     const auto repository =
-        checked(store->create_repository({customer.id, "schema-fixture", "", "private"}));
+        checked(store->create_repository({customer.id, "schema-fixture", "", "private",
+                                          lake::test::repository_workspace(*store, customer.id)}));
     const auto conflict = prepare_conflict(root, customer.id, repository.id);
     lake::test::StreamWorkspace streams(store, customer.id);
     lake::test::ExperimentWorkspace experiments(store, customer.id);

@@ -16,3 +16,6 @@ the HTTP `Server-Timing` regression described in `docs/serving/http.md`.
 It also forwards the organization self-service store calls (`create_organization_space`,
 `convert_personal_space`, `list_user_memberships`, `list_invitee_invitations`) under their own
 operation labels.
+
+`list_repositories` forwards its optional workspace filter (lake#315); `transfer_repository` is no
+longer a store operation.

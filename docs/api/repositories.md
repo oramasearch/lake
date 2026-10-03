@@ -2,13 +2,21 @@
 
 A repository is owned by a customer (the tenant) and named within it: the address is
 `<customer handle>/<name>`. Schema: [`../control-plane/schema.md`](../control-plane/schema.md)
-(migrations `0002_repositories`, `0006_repository_lifecycle`, and
-`0040_active_repository_names`, which limits name uniqueness to live rows).
+(migrations `0002_repositories`, `0006_repository_lifecycle`,
+`0040_active_repository_names`, which limits name uniqueness to live rows, and
+`0051_repository_workspaces`, which gives every repository its workspace).
+
+Every repository belongs to one workspace of its space (lake#315, part 1: routing). The
+workspace is named on create and never changes; there is no default workspace. Part 1 adds only
+the routing pointer: the repository's metadata stays in lake's PostgreSQL and its content in the
+customer store until they move into that workspace's Zetta (lake#315 part 2, lake#341 for forge
+records, lake#380 for the store).
 
 | Field | |
 |---|---|
 | `id` | uuid v4 |
 | `customer_id` | the owning customer; deleting the customer deletes its repositories |
+| `workspace_id` | the workspace of that customer the repository belongs to; set on create and never changed. `null` only for a repository created before workspaces that migration `0051` could not assign (see below) |
 | `name` | slug, same format as the handle (lowercase, digits, inner hyphens, 1–256); unique among live repositories in the customer |
 | `description` | free text, default empty |
 | `visibility` | `private` (default), `organization`, or `public` |
@@ -17,11 +25,11 @@ A repository is owned by a customer (the tenant) and named within it: the addres
 
 | Capability | Kind | Input | Errors |
 |---|---|---|---|
-| `list_repositories` | read | `customer_id?` (narrows to one tenant), `limit?` | — |
+| `list_repositories` | read | `customer_id?` (narrows to one tenant), `workspace_id?` (narrows to one workspace), `limit?` | — |
 | `get_repository` | read | `id` | `404 not_found` |
-| `create_repository` | action | `customer_id`, `name`, `description?`, `visibility?` | `400 invalid_input` (unknown customer, bad name, bad visibility), `409 conflict` (name taken within the customer) |
+| `create_repository` | action | `customer_id`, `workspace_id`, `name`, `description?`, `visibility?` | `400 invalid_input` at `/workspace_id` (missing, unknown or deleted workspace), at `/customer_id` (another space's workspace, or an unknown customer), bad name, bad visibility; `409 conflict` (name taken within the customer) |
 | `rename_repository` | action | `id`, `name` | `404 not_found`, `409 conflict` (tombstoned or name taken) |
-| `transfer_repository` | action | `id`, `customer_id` | `400 invalid_input` (unknown destination), `404 not_found`, `409 conflict` (tombstoned or destination name taken) |
+| `transfer_repository` | action | `id`, `customer_id` | always `409 conflict` at `/customer_id`: a repository stays in its space and workspace; export it and import it into the other space's workspace. `404 not_found` |
 | `set_repository_visibility` | action | `id`, `visibility` | `400 invalid_input`, `404 not_found`, `409 conflict` (tombstoned) |
 | `delete_repository` | action | `id` | `404 not_found`, `409 conflict` (already tombstoned) |
 | `repository_refs` | read | `id` | `{items: [{name, change}]}` |
@@ -97,16 +105,17 @@ into a sign-in redirect. A signed-in caller continues through the repository pol
 
 ## Lifecycle
 
-Rename changes only the repository slug. Transfer moves the repository record to another customer
-after checking the destination's name namespace. liquid #160 and #165 publish the sync client,
+Rename changes only the repository slug. Transfer is refused since migration `0051`: the
+routing trigger keeps a repository's space and workspace fixed, so moving one to another space is an
+export and an import into a workspace of that space. liquid #160 and #165 publish the sync client,
 server, and wire contract. Lake exposes that contract at
 `/v1/repositories/<repository-id>/sync/*`; [`sync.md`](sync.md) records the routes, binary bodies,
 authorization, and atomic-rejection guarantees.
 
 Delete is a tombstone, not an immediate erase: `deleted_at` and `retention_until` are stored on the
 repository record. The collector may reclaim data after the documented 30-day retention period,
-but only when no remaining repository root leases it. A tombstoned repository cannot be renamed,
-transferred, or have visibility changed. Deletion releases the customer-scoped name immediately;
+but only when no remaining repository root leases it. A tombstoned repository cannot be renamed
+or have visibility changed. Deletion releases the customer-scoped name immediately;
 creating a new repository with that name creates a new identity and leaves the tombstone intact.
 
 Store diagnostics never enter the REST or MCP envelope. A duplicate live name returns
@@ -121,7 +130,7 @@ so REST, OpenAPI, and MCP expose the same operations.
 ```sh
 H='Authorization: Bearer <token>'
 curl -H "$H" -H 'content-type: application/json' \
-  -d '{"customer_id":"<customer id>","name":"liquid","description":"the tool","visibility":"public"}' \
+  -d '{"customer_id":"<customer id>","workspace_id":"<workspace id>","name":"liquid","description":"the tool","visibility":"public"}' \
   https://lake.oramadev.net/v1/create_repository
 curl -H "$H" 'https://lake.oramadev.net/v1/list_repositories?customer_id=<customer id>&limit=20'
 curl -H "$H" -H 'content-type: application/json' \
@@ -138,10 +147,43 @@ sync contract and lake adapter are documented in [`sync.md`](sync.md). Every rep
 with `repository_options.store` over the one caller-owned store at
 `LAKE_STORE_ROOT/<customer-id>/store`; it does not get a private `.liquid-store`.
 
+## The owning workspace
+
+`workspace_id` is a content-free routing pointer, like `stores.workspace_id` (migration `0044`) and
+`auth_applications.workspace_id` (migration `0049`). It names which workspace Zetta will hold the
+repository's metadata, forge records and content when they move.
+
+- **Create.** `create_repository`, `import_repository` and `import_github_repository` require it.
+  A missing, malformed, unknown or deleted workspace is `invalid_input` at `/workspace_id`; a
+  workspace of another space is `invalid_input` at `/customer_id`, as for every workspace-scoped
+  capability. An agent task's credential supplies its task's workspace, and a call under
+  `/w/<workspace id>/` (REST or MCP) supplies the path's. An import never reuses the archive's own
+  `workspace_id`: the caller names where the copy goes.
+- **Immutable.** The `repository_workspace_routing` trigger (`enforce_workspace_routing`) refuses a
+  new repository without a live workspace of its own space, and any later change of
+  `workspace_id` or `customer_id`, including assigning one to a repository that has none. That is
+  why `transfer_repository` is refused.
+- **Resolvable from the repository.** `get_repository`, `list_repositories`, the export archive and
+  every handler that loads the repository carry it. The push path resolves the repository once and
+  hands it, workspace included, to `sync_change_authorizer` and `evaluate_branch_protection`; each
+  branch protection audit record and the `push` audit record name the workspace.
+- **Workspace deletion.** `delete_workspace` is refused with `conflict` while the workspace holds a
+  live repository; tombstoned repositories do not hold it.
+- **Hub clients.** `POST /api/repos/create` takes `workspace_id` in its body or, because
+  `huggingface_hub`'s `create_repo` cannot add body fields, the `X-Lake-Workspace-Id` header
+  (`HfApi(headers={"X-Lake-Workspace-Id": ...})`).
+
+Migration `0051` assigns each earlier repository, tombstoned ones included, to its space's only live
+workspace (`sole_workspace`). A repository of a space with several live workspaces, or none, is
+recorded as `needs_selection` in `workspace_assignments` and reported with a `RAISE WARNING`; it
+keeps working, with `workspace_id: null`, until an explicitly reviewed migration assigns it. List
+them with `SELECT * FROM workspace_assignments WHERE object_table = 'repositories' AND
+outcome = 'needs_selection'`.
+
 ## Verify
 
 Run `ctest --test-dir build --output-on-failure`. The repository lifecycle tests create two
-customers, change visibility, rename, transfer, tombstone, verify policy denial, and verify the
+customers, change visibility, rename, refuse a transfer, tombstone, verify policy denial, and verify the
 signed audit stream contains the deletion outcome. Memory and PostgreSQL cases also create,
 delete, and recreate the same repository name, and assert duplicate errors contain no database
 diagnostics. For Postgres, apply `db/schema.sql` through

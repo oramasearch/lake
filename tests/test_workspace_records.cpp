@@ -34,6 +34,7 @@
 #include "record_fixture.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
+#include "repository_test_support.hpp"
 
 namespace {
 
@@ -1027,7 +1028,9 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesDriveShareLinksAndRoutesTheirTo
     std::int64_t at = 1'790'000'000'000'000;
     for (auto* space : {&first, &second}) {
         const auto repository =
-            t.store->create_repository({space->customer_id, "drive", "", "private"});
+            t.store->create_repository({space->customer_id, "drive", "", "private",
+                                        lake::test::repository_workspace(
+                                            *t.store, space->customer_id)});
         ASSERT_TRUE(repository) << repository.error().message;
         const auto parent = t.store->find_policy_object("repository", repository->id);
         ASSERT_TRUE(parent);

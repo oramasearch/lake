@@ -12,6 +12,7 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "stream_fixture.hpp"
+#include "repository_test_support.hpp"
 
 namespace {
 
@@ -56,7 +57,9 @@ struct Builds {
         customer_id = customers->front().id;
         customer_name = customers->front().name;
         workspace = std::make_unique<lake::test::StreamWorkspace>(store, customer_id);
-        const auto repository = store->create_repository({customer_id, "source", "", "private"});
+        const auto repository = store->create_repository({customer_id, "source", "", "private",
+                                                          lake::test::repository_workspace(
+                                                              *store, customer_id)});
         EXPECT_TRUE(repository);
         repository_id = repository->id;
         lake::api::register_core_capabilities(registry, "test");
@@ -329,7 +332,9 @@ TEST(Builds, InputsRefuseForeignRepositoriesUnsafePathsAndDisallowedArguments) {
     const auto foreign = builds.store->list_customers(2, builds.other.user_id);
     ASSERT_TRUE(foreign);
     const auto repository =
-        builds.store->create_repository({foreign->front().id, "foreign", "", "private"});
+        builds.store->create_repository({foreign->front().id, "foreign", "", "private",
+                                         lake::test::repository_workspace(
+                                             *builds.store, foreign->front().id)});
     ASSERT_TRUE(repository);
     EXPECT_EQ(
         builds

@@ -10,3 +10,6 @@ logs.
 
 Change runtime behavior, its configuration entry, the owning API page, and the focused and full
 native proof together.
+
+`POST /repository/create` and the hub's `POST /api/repos/create` take the repository's workspace
+(lake#315); see [http.md](http.md) and [../api/models.md](../api/models.md).

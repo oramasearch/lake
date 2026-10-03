@@ -37,3 +37,7 @@ The `shared-link` page includes `docs/nested/hello.txt` to exercise folder trave
 and download without a session. Its link lives in a workspace of the organization (lake#350); the
 fixture's workspace Zetta serves only lake's records, from the tests' `RecordTables`. Its links stay under `/share/<token>` and call the same recipient
 capabilities as REST and MCP. See [sharing](../../docs/ui/sharing.md) for the delivery checks.
+
+Each fixture repository belongs to a workspace of its space (lake#315): `lake-design` to the
+organization's `research` workspace (the one that holds the shared link) and `private-notes` to the
+individual's `personal` workspace.

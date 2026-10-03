@@ -1288,7 +1288,7 @@ constexpr const char* customer_columns = "id::text, customer_type, coalesce(user
 constexpr const char* repository_columns =
     "id::text, customer_id::text, name, description, visibility, "
     "coalesce(deleted_at::text,''), coalesce(retention_until::text,''), "
-    "created_at::text, updated_at::text";
+    "created_at::text, updated_at::text, coalesce(workspace_id::text,'')";
 constexpr const char* team_columns =
     "id::text, organization_id::text, name, display_name, created_at::text, "
     "updated_at::text";
@@ -1333,7 +1333,8 @@ Repository repository_of(const pqxx::row& r) {
                       r[5].as<std::string>(),
                       r[6].as<std::string>(),
                       r[7].as<std::string>(),
-                      r[8].as<std::string>()};
+                      r[8].as<std::string>(),
+                      r[9].as<std::string>()};
 }
 
 RepositoryRef repository_ref_of(const pqxx::row& row) {
@@ -2171,15 +2172,26 @@ public:
                 return std::unexpected(
                     StoreError{"invalid_input", "customer_id does not reference a policy object"});
             }
+            // Migration 0051's routing trigger refuses the same; this names the field.
+            const pqxx::result workspace = tx.exec_params(
+                "SELECT 1 FROM workspaces WHERE id::text = $1 AND customer_id = $2::uuid AND "
+                "desired <> 'deleted'",
+                in.workspace_id,
+                in.customer_id);
+            if (workspace.empty()) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "workspace_id must name a workspace in this space"});
+            }
             const pqxx::result rows =
                 tx.exec_params(std::string("INSERT INTO repositories (customer_id, name, "
-                                           "description, visibility) "
-                                           "VALUES ($1::uuid, $2, $3, $4) RETURNING ") +
+                                           "description, visibility, workspace_id) "
+                                           "VALUES ($1::uuid, $2, $3, $4, $5::uuid) RETURNING ") +
                                    repository_columns,
                                in.customer_id,
                                in.name,
                                in.description,
-                               in.visibility.empty() ? std::string("private") : in.visibility);
+                               in.visibility.empty() ? std::string("private") : in.visibility,
+                               in.workspace_id);
             Repository repository = repository_of(rows[0]);
             tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) "
                            "VALUES ('repository', $1, $2::uuid)",
@@ -2189,19 +2201,18 @@ public:
         });
     }
     Result<std::vector<Repository>> list_repositories(const std::string& customer_id,
-                                                      int limit) override {
+                                                      int limit,
+                                                      const std::string& workspace_id) override {
         return with_tx<std::vector<Repository>>(
             [&](pqxx::work& tx) -> Result<std::vector<Repository>> {
-                const pqxx::result rows =
-                    customer_id.empty()
-                        ? tx.exec_params(std::string("SELECT ") + repository_columns +
-                                             " FROM repositories ORDER BY created_at DESC LIMIT $1",
-                                         limit)
-                        : tx.exec_params(std::string("SELECT ") + repository_columns +
-                                             " FROM repositories WHERE customer_id = "
-                                             "$1::uuid ORDER BY created_at DESC LIMIT $2",
-                                         customer_id,
-                                         limit);
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + repository_columns +
+                        " FROM repositories WHERE ($1 = '' OR customer_id = NULLIF($1, '')::uuid) AND "
+                        "($2 = '' OR workspace_id = NULLIF($2, '')::uuid) "
+                        "ORDER BY created_at DESC LIMIT $3",
+                    customer_id,
+                    workspace_id,
+                    limit);
                 std::vector<Repository> out;
                 for (const auto& r : rows)
                     out.push_back(repository_of(r));
@@ -2230,42 +2241,6 @@ public:
                                    repository_columns,
                                id,
                                name);
-            return repository_of(rows[0]);
-        });
-    }
-
-    Result<Repository> transfer_repository(const std::string& id,
-                                           const std::string& customer_id) override {
-        return with_tx<Repository>([&](pqxx::work& tx) -> Result<Repository> {
-            if (const auto live = require_live_repository(tx, id); !live) {
-                return std::unexpected(live.error());
-            }
-            const pqxx::result customer =
-                tx.exec_params("SELECT id FROM customers WHERE id = $1::uuid", customer_id);
-            if (customer.empty()) {
-                return std::unexpected(
-                    StoreError{"invalid_input", "customer_id does not reference a customer"});
-            }
-            const pqxx::result parent =
-                tx.exec_params("SELECT id::text FROM objects WHERE object_type = "
-                               "'customer' AND external_id = $1",
-                               customer_id);
-            if (parent.empty()) {
-                return std::unexpected(
-                    StoreError{"store_error", "customer policy object is missing"});
-            }
-            const pqxx::result rows =
-                tx.exec_params(std::string("UPDATE repositories SET customer_id = "
-                                           "$2::uuid WHERE id = $1::uuid "
-                                           "RETURNING ") +
-                                   repository_columns,
-                               id,
-                               customer_id);
-            tx.exec_params("UPDATE objects SET parent_id = $1::uuid WHERE "
-                           "object_type = 'repository' "
-                           "AND external_id = $2",
-                           parent[0][0].as<std::string>(),
-                           id);
             return repository_of(rows[0]);
         });
     }

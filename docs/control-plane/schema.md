@@ -603,3 +603,19 @@ Job reapplies this file from the top, the table's original `CREATE` (from `0030`
 `0045`'s block runs only while the table exists, so a rerun never recreates it. Lake has no reader
 of the table left, and `copy_workspace_records` no longer accepts `ask_messages`. Idempotent; guard
 `drop_ask_messages_guard`. The operator vendors it and selects that guard.
+
+## Repository workspaces migration
+
+`0051_repository_workspaces` adds `repositories.workspace_id` (references `workspaces`, index
+`repositories_workspace_idx`), the workspace each repository belongs to (lake#315, part 1). It is a
+content-free routing pointer, like `stores.workspace_id` (`0044`): the repository's metadata stays
+here and its content in the customer store until they move into that workspace's Zetta. Each
+earlier repository, tombstoned ones included, is assigned its space's only live workspace
+(`sole_workspace`); a space with several live workspaces or none is recorded as `needs_selection`
+and reported by a warning. The `repository_workspace_routing` trigger runs
+`enforce_workspace_routing`: a new repository must name a live workspace of its own space, and
+neither `workspace_id` nor `customer_id` changes afterwards, so `transfer_repository` is refused and
+an unassigned repository is assigned only by a reviewed migration. Nothing is dropped. Idempotent;
+guard `repository_workspaces_guard`. The operator reads no repository table, but vendors the schema
+and selects that guard before the binary is deployed. See
+[`../api/repositories.md`](../api/repositories.md#the-owning-workspace).

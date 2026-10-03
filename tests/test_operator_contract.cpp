@@ -11,6 +11,7 @@
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/store.hpp"
 #include "postgres_fixture.hpp"
+#include "repository_test_support.hpp"
 
 #include <gtest/gtest.h>
 #include <pqxx/pqxx>
@@ -290,7 +291,9 @@ TEST(OperatorContract, RowsLakeWritesAppearInTheOperatorsPolls) {
     volume.workspace_id = workspace->id;
     const auto created_store = store->create_store(volume);
     ASSERT_TRUE(created_store) << created_store.error().message;
-    const auto repository = store->create_repository({customer->id, "source", "", "private"});
+    const auto repository = store->create_repository({customer->id, "source", "", "private",
+                                                      lake::test::repository_workspace(
+                                                          *store, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     const auto app = store->create_web_app({.customer_id = customer->id,
                                             .workspace_id = workspace->id,

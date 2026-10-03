@@ -83,8 +83,36 @@ attestation data is an explicit empty state.
 ## First repository
 
 Signed-in visitors with visible customers get the `POST /repository/create` form on
-`/repositories`. It collects the customer, repository name, and description; new repositories
-are private. The adapter calls `create_repository` through the registry and redirects to the
-repository home. Authorization checks the submitted customer even when a request bypasses the
-form. Password sign-up supplies the personal customer and inherited ownership before this page.
+`/repositories`. It collects the workspace, repository name, and description; new repositories
+are private. The workspace choice lists each live workspace of the viewer's spaces, grouped by
+space, with the remembered workspace preselected; the workspace names its space, so the form sends
+only `workspace_id`. A space without a workspace is sent to `/workspaces` first: a repository
+belongs to one workspace and there is no default (lake#315). The adapter calls `create_repository`
+through the registry and redirects to the repository home. Authorization checks the space even
+when a request bypasses the form, and a `customer_id` that is not the workspace's space is refused.
+Password sign-up supplies the personal customer and inherited ownership before this page.
 See [sign-up-walkthrough.md](sign-up-walkthrough.md).
+
+## The owning workspace
+
+Every repository belongs to one workspace (lake#315, [repositories.md](../api/repositories.md)).
+The repository pages show it; they do not move under `/w/<workspace id>/`.
+
+- The repository list has a **Workspace** column linking to `/w/<id>/design/projects` for a
+  workspace of the viewer's spaces, and "Needs a workspace" for a repository migration `0051` could
+  not assign.
+- The repository home names its workspace beside the heading, with the same link, for a signed-in
+  viewer who may read the space (`get_workspace`); an anonymous or outside reader of a public
+  repository is not told the space's workspace names. Its **Build image** form carries the
+  repository's `workspace_id`, which `build_image` requires.
+
+Why not `/w/<id>/`: the workspace navigation in
+[workspace-data-plane.md](../architecture/workspace-data-plane.md) makes the path authoritative for
+Design, Train and Ship pages, where the person chooses the workspace and the page lists that
+workspace's objects. A repository page is addressed by the repository itself, which already names
+its workspace and never changes it, so a workspace segment would only repeat it or contradict it.
+The same URLs are the public, anonymous addresses of public repositories, the clone and push
+addresses, and the links in webhooks, issues and releases; readers of those have no workspace
+selector, and a workspace in them would break each link if it were ever wrong. Workspace pages that
+list repositories (the Ship → Apps source choice) do sit under `/w/<id>/`, and REST and MCP calls
+under `/w/<id>/` narrow `list_repositories` to that workspace.

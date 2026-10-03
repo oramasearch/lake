@@ -192,10 +192,13 @@ std::string web_ui_tokens(const std::vector<control::Session>& sessions,
                           WebUiViewer viewer = true);
 std::string web_ui_customers(const std::vector<control::Customer>& customers,
                              WebUiViewer viewer = true);
-// owners: customer id → customer, for the owner column.
+// owners: customer id → customer, for the owner column. workspaces: the owners' live workspaces,
+// for the workspace column and the create form's workspace choice (lake#315); with none, the form
+// sends the person to create one.
 std::string web_ui_repositories(const std::vector<control::Repository>& repositories,
                                 const std::map<std::string, control::Customer>& owners,
-                                WebUiViewer viewer = true);
+                                WebUiViewer viewer = true,
+                                const std::vector<control::Workspace>& workspaces = {});
 
 struct RepositoryHomeData {
     std::vector<RepositoryContentRef> refs;
@@ -206,6 +209,8 @@ struct RepositoryHomeData {
     std::vector<control::ForgeRecord> releases;
     // Validated instance configuration, never inferred from a request header.
     std::string external_origin;
+    // The repository's workspace, when the viewer may read its space (lake#315).
+    std::optional<control::Workspace> workspace;
 };
 
 std::string web_ui_repository(const control::Repository& repository,

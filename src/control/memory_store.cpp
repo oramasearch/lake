@@ -122,6 +122,8 @@ nlohmann::json to_json(const Customer& c) {
 nlohmann::json to_json(const Repository& r) {
     return {{"id", r.id},
             {"customer_id", r.customer_id},
+            // null only for a repository migration 0051 recorded as needs_selection.
+            {"workspace_id", nullable(r.workspace_id)},
             {"name", r.name},
             {"description", r.description},
             {"visibility", r.visibility},
@@ -4005,6 +4007,14 @@ Result<Repository> InMemoryStore::create_repository(const NewRepository& in) {
     if (visibility != "private" && visibility != "organization" && visibility != "public") {
         return std::unexpected(StoreError{"invalid_input", "visibility must be private or public"});
     }
+    // As migration 0051's routing trigger: a live workspace of the repository's own space.
+    if (std::ranges::none_of(workspaces_, [&](const Workspace& workspace) {
+            return workspace.id == in.workspace_id && workspace.customer_id == in.customer_id &&
+                   workspace.desired != "deleted";
+        })) {
+        return std::unexpected(
+            StoreError{"invalid_input", "workspace_id must name a workspace in this space"});
+    }
     for (const auto& r : repositories_) {
         if (r.customer_id == in.customer_id && r.name == in.name && r.deleted_at.empty()) {
             return std::unexpected(
@@ -4012,8 +4022,16 @@ Result<Repository> InMemoryStore::create_repository(const NewRepository& in) {
         }
     }
     const std::string now = now_iso8601();
-    repositories_.push_back(Repository{
-        new_uuid_v4(), in.customer_id, in.name, in.description, visibility, "", "", now, now});
+    repositories_.push_back(Repository{new_uuid_v4(),
+                                       in.customer_id,
+                                       in.name,
+                                       in.description,
+                                       visibility,
+                                       "",
+                                       "",
+                                       now,
+                                       now,
+                                       in.workspace_id});
     const auto parent = std::ranges::find_if(policy_objects_, [&](const PolicyObject& object) {
         return object.object_type == "customer" && object.external_id == in.customer_id;
     });
@@ -4027,11 +4045,13 @@ Result<Repository> InMemoryStore::create_repository(const NewRepository& in) {
 }
 
 Result<std::vector<Repository>> InMemoryStore::list_repositories(const std::string& customer_id,
-                                                                 int limit) {
+                                                                 int limit,
+                                                                 const std::string& workspace_id) {
     std::lock_guard lock(mutex_);
     std::vector<Repository> out;
     for (auto it = repositories_.rbegin(); it != repositories_.rend(); ++it) {
-        if (customer_id.empty() || it->customer_id == customer_id)
+        if ((customer_id.empty() || it->customer_id == customer_id) &&
+            (workspace_id.empty() || it->workspace_id == workspace_id))
             out.push_back(*it);
     }
     if (limit > 0 && out.size() > static_cast<std::size_t>(limit))
@@ -4087,30 +4107,6 @@ Result<Repository> InMemoryStore::rename_repository(const std::string& id,
             StoreError{"conflict", "this customer already has a repository named " + name});
     }
     repository->name = name;
-    repository->updated_at = now_iso8601();
-    return *repository;
-}
-
-Result<Repository> InMemoryStore::transfer_repository(const std::string& id,
-                                                      const std::string& customer_id) {
-    std::lock_guard lock(mutex_);
-    if (std::ranges::none_of(
-            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
-        return std::unexpected(
-            StoreError{"invalid_input", "customer_id does not reference a customer"});
-    }
-    const auto repository = repository_by_id(repositories_, id);
-    if (repository == repositories_.end()) {
-        return std::unexpected(StoreError{"not_found", "no repository " + id});
-    }
-    if (!repository->deleted_at.empty()) {
-        return std::unexpected(StoreError{"conflict", "repository is tombstoned"});
-    }
-    if (repository_name_taken(repositories_, customer_id, repository->name, id)) {
-        return std::unexpected(
-            StoreError{"conflict", "destination customer already has that repository name"});
-    }
-    repository->customer_id = customer_id;
     repository->updated_at = now_iso8601();
     return *repository;
 }

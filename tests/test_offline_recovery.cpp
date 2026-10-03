@@ -12,6 +12,7 @@
 #include "lake/api/rest.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/memory_store.hpp"
+#include "repository_test_support.hpp"
 
 namespace {
 
@@ -73,7 +74,8 @@ TEST(OfflineGrant, CachedReadSurvivesRevocationUntilExplicitExpiry) {
     const auto customer = lake::test::personal_customer(store, account.principal.user_id);
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
-        store.create_repository({customer->id, "offline-project", "", "private"});
+        store.create_repository({customer->id, "offline-project", "", "private",
+                                 lake::test::repository_workspace(store, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     const auto object = store.find_policy_object("repository", repository->id);
     ASSERT_TRUE(object) << object.error().message;
@@ -224,7 +226,8 @@ TEST(RepositoryRecovery, MissingContactIsPlainAndWrappedKeyIsContactOnly) {
     const auto customer = lake::test::personal_customer(store, owner.principal.user_id);
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
-        store.create_repository({customer->id, "encrypted-project", "", "private"});
+        store.create_repository({customer->id, "encrypted-project", "", "private",
+                                 lake::test::repository_workspace(store, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
 
     ApiContext admin = operator_context(store);

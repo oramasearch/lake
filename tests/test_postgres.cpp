@@ -26,6 +26,7 @@
 #include "lake/control/stream_owners.hpp"
 #include "lake/search/index.hpp"
 #include "temporary_directory.hpp"
+#include "repository_test_support.hpp"
 
 namespace {
 
@@ -113,7 +114,9 @@ TEST(PostgresWorkspaces, MigrationRecordsAmbiguityAndMakesRoutingImmutable) {
     }
     ASSERT_TRUE(store->create_service({customers[1], "zetta", "second", ""}));
     ASSERT_TRUE(store->withdraw_service(workspaces[2]));
-    const auto repository = store->create_repository({customers[0], "source", "", "private"});
+    const auto repository = store->create_repository({customers[0], "source", "", "private",
+                                                      lake::test::repository_workspace(
+                                                          *store, customers[0])});
     ASSERT_TRUE(repository);
     const auto original_workspace = store->list_workspaces(customers[0])->front().id;
     const auto app = store->create_web_app({.customer_id = customers[0], .workspace_id = original_workspace,
@@ -133,6 +136,10 @@ TEST(PostgresWorkspaces, MigrationRecordsAmbiguityAndMakesRoutingImmutable) {
         tx.exec("UPDATE builds SET workspace_id = NULL");
         tx.exec("UPDATE services SET workspace_id = NULL");
         tx.exec("UPDATE services SET slug='ws-' || left(replace(customer_id::text,'-',''),12) WHERE is_default");
+        // Repositories name workspaces too (0051); before 0038 there were none to name.
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec("UPDATE repositories SET workspace_id = NULL WHERE workspace_id IS NOT NULL");
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
         tx.exec("DELETE FROM workspaces");
         for (const std::string table : {"agent_tasks", "apps", "builds"}) {
             tx.exec("ALTER TABLE " + table + " DROP CONSTRAINT " + table + "_workspace_id_fkey");
@@ -289,15 +296,25 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     ASSERT_TRUE(call("list_customers").ok);
     ASSERT_TRUE(call("get_customer", {{"id", customer.value.at("id")}}).ok);
 
-    const ApiResult repository =
+    const std::string workspace =
+        lake::test::repository_workspace(*store, customer.value.at("id"));
+    const ApiResult missing_workspace =
         call("create_repository",
              {{"customer_id", customer.value.at("id")}, {"name", "repo-" + suffix}});
+    EXPECT_EQ(missing_workspace.error.code, "invalid_input");
+    EXPECT_EQ(missing_workspace.error.path, "/workspace_id");
+    const ApiResult repository = call("create_repository",
+                                      {{"customer_id", customer.value.at("id")},
+                                       {"workspace_id", workspace},
+                                       {"name", "repo-" + suffix}});
     ASSERT_TRUE(repository.ok) << repository.error.message;
+    EXPECT_EQ(repository.value.at("workspace_id"), workspace);
     ASSERT_TRUE(call("list_repositories", {{"customer_id", customer.value.at("id")}}).ok);
     ASSERT_TRUE(call("get_repository", {{"id", repository.value.at("id")}}).ok);
-    const ApiResult duplicate =
-        call("create_repository",
-             {{"customer_id", customer.value.at("id")}, {"name", "repo-" + suffix}});
+    const ApiResult duplicate = call("create_repository",
+                                     {{"customer_id", customer.value.at("id")},
+                                      {"workspace_id", workspace},
+                                      {"name", "repo-" + suffix}});
     EXPECT_EQ(duplicate.error.code, "conflict");
     EXPECT_EQ(duplicate.error.message,
               "a repository named 'repo-" + suffix + "' already exists");
@@ -319,18 +336,19 @@ TEST(PostgresCapabilities, OrganizationAndPolicyRoundTrip) {
     ASSERT_TRUE(call("rename_repository",
                      {{"id", repository.value.at("id")}, {"name", "renamed-" + suffix}})
                     .ok);
+    // A repository stays in its space and workspace (lake#315).
     const ApiResult transferred =
         call("transfer_repository",
              {{"id", repository.value.at("id")}, {"customer_id", destination.value.at("id")}});
-    ASSERT_TRUE(transferred.ok) << transferred.error.message;
-    EXPECT_EQ(transferred.value.at("customer_id"), destination.value.at("id"));
+    EXPECT_EQ(transferred.error.code, "conflict");
     const ApiResult deleted = call("delete_repository", {{"id", repository.value.at("id")}});
     const std::string deletion_request = context.request_id;
     ASSERT_TRUE(deleted.ok) << deleted.error.message;
     EXPECT_FALSE(deleted.value.at("deleted_at").is_null());
-    const ApiResult recreated =
-        call("create_repository",
-             {{"customer_id", destination.value.at("id")}, {"name", "renamed-" + suffix}});
+    const ApiResult recreated = call("create_repository",
+                                     {{"customer_id", customer.value.at("id")},
+                                      {"workspace_id", workspace},
+                                      {"name", "renamed-" + suffix}});
     ASSERT_TRUE(recreated.ok) << recreated.error.message;
     EXPECT_NE(recreated.value.at("id"), repository.value.at("id"));
     EXPECT_EQ(recreated.value.at("name"), "renamed-" + suffix);
@@ -503,7 +521,21 @@ TEST(PostgresDriveShareLinks, MigrationRecordsOwnersAndContentFreeRoutes) {
         ASSERT_TRUE(user) << user.error().message;
         const auto customer = store->create_customer({"individual", user->id, "", name});
         ASSERT_TRUE(customer) << customer.error().message;
-        const auto repository = store->create_repository({customer->id, "drive", "", "private"});
+        // The second space has two workspaces, so its links cannot be assigned by themselves.
+        std::string first_workspace;
+        for (int count = 0; count <= index; ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            if (count == 0) {
+                first_workspace = workspace->id;
+            }
+            if (index == 0) {
+                workspaces.push_back(workspace->id);
+            }
+        }
+        const auto repository =
+            store->create_repository({customer->id, "drive", "", "private", first_workspace});
         ASSERT_TRUE(repository) << repository.error().message;
         const auto parent = store->find_policy_object("repository", repository->id);
         ASSERT_TRUE(parent);
@@ -513,15 +545,6 @@ TEST(PostgresDriveShareLinks, MigrationRecordsOwnersAndContentFreeRoutes) {
         ASSERT_TRUE(folder) << folder.error().message;
         repositories.push_back(repository->id);
         folders.push_back(folder->id);
-        // The second space has two workspaces, so its links cannot be assigned by themselves.
-        for (int count = 0; count <= index; ++count) {
-            const auto workspace =
-                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
-            ASSERT_TRUE(workspace) << workspace.error().message;
-            if (index == 0) {
-                workspaces.push_back(workspace->id);
-            }
-        }
     }
     pqxx::connection connection(uri);
     const auto insert = [&](int space, const std::string& token_hash) {
@@ -905,7 +928,8 @@ TEST(PostgresPlatform, EnvironmentBindingAndMirrorRoundTrip) {
         store->create_customer({"individual", user->id, "", "platform-" + suffix});
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
-        store->create_repository({customer->id, "platform-" + suffix, "", "private"});
+        store->create_repository({customer->id, "platform-" + suffix, "", "private",
+                                  lake::test::repository_workspace(*store, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     const auto environment =
         platform_store->ensure_platform_environment(repository->id, "production");
@@ -1044,7 +1068,9 @@ TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract)
     app.workspace_id = app_workspace->id;
     app.name = "reports";
     app.mode = "runtime";
-    const auto repository = store->create_repository({customer->id, "source", "", "private"});
+    const auto repository = store->create_repository({customer->id, "source", "", "private",
+                                                      lake::test::repository_workspace(
+                                                          *store, customer->id)});
     ASSERT_TRUE(repository);
     app.source_repository = repository->id;
     app.source_revision = "main";
@@ -1275,7 +1301,9 @@ TEST(PostgresBuilds, DesiredRowStatusTokensAndCancellationFollowTheContract) {
     ASSERT_TRUE(user) << user.error().message;
     const auto customer = store->create_customer({"individual", user->id, "", "build-" + suffix});
     ASSERT_TRUE(customer) << customer.error().message;
-    const auto repository = store->create_repository({customer->id, "source", "", "private"});
+    const auto repository = store->create_repository({customer->id, "source", "", "private",
+                                                      lake::test::repository_workspace(
+                                                          *store, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
 
     pqxx::connection listener(uri);
@@ -1509,6 +1537,134 @@ TEST(PostgresStores, MigrationAssignsTheSoleWorkspaceAndRecordsTheRest) {
         tx.exec_params("UPDATE stores SET workspace_id = NULL WHERE id = $1::uuid", stores[0]);
         tx.commit();
     })(), pqxx::check_violation);
+}
+
+// lake#315: migration 0051 gives each earlier repository, tombstoned ones included, its space's
+// only live workspace, records a space with several or none as needing a selection, and the
+// routing trigger keeps the workspace and the space fixed afterwards.
+TEST(PostgresRepositories, MigrationAssignsTheSoleWorkspaceAndRoutingStaysFixed) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "repository-workspace-migration-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    // Space 0 has one live workspace (and a deleted one), space 1 two, space 2 none by the time the
+    // migration runs.
+    std::vector<std::string> customers, repositories;
+    std::vector<std::vector<std::string>> workspaces;
+    for (int index = 0; index < 3; ++index) {
+        const std::string name = "repository-migration-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+        workspaces.emplace_back();
+        for (int count = 0; count < (index == 2 ? 1 : index + 1); ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            workspaces.back().push_back(workspace->id);
+        }
+        const auto repository = store->create_repository(
+            {customer->id, "source", "", "private", workspaces.back().front()});
+        ASSERT_TRUE(repository) << repository.error().message;
+        EXPECT_EQ(repository->workspace_id, workspaces.back().front());
+        repositories.push_back(repository->id);
+    }
+    const auto deleted_workspace = store->create_workspace({customers[0], "old", "dev", ""});
+    ASSERT_TRUE(deleted_workspace);
+    const auto tombstoned =
+        store->create_repository({customers[0], "retired", "", "private", workspaces[0].front()});
+    ASSERT_TRUE(tombstoned) << tombstoned.error().message;
+    ASSERT_TRUE(store->delete_repository(
+        tombstoned->id, {"2026-10-01T00:00:00Z", "2026-10-31T00:00:00Z"}));
+    repositories.push_back(tombstoned->id);
+    // The store names the field for each refusal the trigger would make.
+    for (const std::string& wrong :
+         {std::string(), std::string("not-a-uuid"), deleted_workspace->id, workspaces[1].front()}) {
+        if (wrong == deleted_workspace->id) {
+            ASSERT_TRUE(store->update_workspace(wrong, {.desired = "deleted"}));
+        }
+        const auto refused = store->create_repository({customers[0], "refused", "", "private", wrong});
+        ASSERT_FALSE(refused) << wrong;
+        EXPECT_EQ(refused.error().code, "invalid_input") << wrong;
+    }
+
+    pqxx::connection connection(uri);
+    const std::string mine = "ARRAY['" + repositories[0] + "','" + repositories[1] + "','" +
+                             repositories[2] + "','" + repositories[3] + "']::uuid[]";
+    {
+        // The state before 0051 for these repositories: no workspace; space 2's workspace is gone.
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec("UPDATE repositories SET workspace_id = NULL WHERE id = ANY(" + mine + ")");
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE workspaces SET desired = 'deleted' WHERE id = $1::uuid",
+                       workspaces[2].front());
+        tx.exec("DELETE FROM workspace_assignments WHERE object_table = 'repositories' AND "
+                "object_id = ANY(" + mine + ")");
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0051_repository_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0051_repository_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const auto rows = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = 'repositories' AND object_id = $1::uuid",
+            id);
+        return rows.empty() ? std::pair<std::string, std::string>{}
+                            : std::pair{rows[0][0].as<std::string>(), rows[0][1].as<std::string>()};
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        {
+            pqxx::work tx(connection);
+            tx.exec("SET LOCAL client_min_messages TO error");
+            tx.exec(schema.substr(start));
+            tx.commit();
+        }
+        EXPECT_EQ(outcome(repositories[0]),
+                  (std::pair<std::string, std::string>{"sole_workspace", workspaces[0].front()}));
+        EXPECT_EQ(outcome(repositories[1]),
+                  (std::pair<std::string, std::string>{"needs_selection", ""}));
+        EXPECT_EQ(outcome(repositories[2]),
+                  (std::pair<std::string, std::string>{"needs_selection", ""}));
+        EXPECT_EQ(outcome(repositories[3]),
+                  (std::pair<std::string, std::string>{"sole_workspace", workspaces[0].front()}));
+    }
+    EXPECT_EQ(store->get_repository(repositories[0])->workspace_id, workspaces[0].front());
+    EXPECT_EQ(store->get_repository(repositories[3])->workspace_id, workspaces[0].front());
+    EXPECT_TRUE(store->get_repository(repositories[1])->workspace_id.empty());
+    const auto listed = store->list_repositories(customers[0], 10, workspaces[0].front());
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(listed->size(), 2U);
+    // An unassigned repository keeps working; its routing is assigned only by a reviewed migration.
+    EXPECT_TRUE(store->rename_repository(repositories[1], "renamed"));
+    const auto refused = [&](const std::string& statement) {
+        EXPECT_THROW(([&] {
+                         pqxx::work tx(connection);
+                         tx.exec(statement);
+                         tx.commit();
+                     })(),
+                     pqxx::check_violation)
+            << statement;
+    };
+    refused("UPDATE repositories SET workspace_id = '" + workspaces[1].back() + "' WHERE id = '" +
+            repositories[0] + "'");
+    refused("UPDATE repositories SET workspace_id = NULL WHERE id = '" + repositories[0] + "'");
+    refused("UPDATE repositories SET workspace_id = '" + workspaces[1].front() + "' WHERE id = '" +
+            repositories[1] + "'");
+    refused("UPDATE repositories SET customer_id = '" + customers[1] + "' WHERE id = '" +
+            repositories[0] + "'");
+    refused("INSERT INTO repositories (customer_id, name) VALUES ('" + customers[0] +
+            "', 'no-workspace-" + suffix + "')");
+    refused("INSERT INTO repositories (customer_id, name, workspace_id) VALUES ('" +
+            customers[0] + "', 'foreign-" + suffix + "', '" + workspaces[1].front() + "')");
 }
 
 // lake#483: migration 0050 drops the retired ask_messages table and keeps the workspace

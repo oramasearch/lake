@@ -26,3 +26,6 @@ holds the links, redirects to the space's only workspace, and asks when there ar
 The drive scenario resolves the personal customer created by sign-up. Customer creation no longer
 requires a separate operator bootstrap; its existing synchronization and sharing assertions remain.
 See [`../../docs/api/provisioning.md`](../../docs/api/provisioning.md).
+
+The drive scenario creates its repository in a Ready workspace of the space (lake#315), and that is
+the workspace the sharing tests use.

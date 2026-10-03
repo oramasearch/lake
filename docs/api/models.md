@@ -75,7 +75,7 @@ is resolved to an immutable liquid change digest before response metadata is ret
 
 | Route | Supported behavior |
 |---|---|
-| `POST /api/repos/create` | Creates a model or dataset repository for the named Lake customer |
+| `POST /api/repos/create` | Creates a model or dataset repository for the named Lake customer, in the workspace named by the body's `workspace_id` or the `X-Lake-Workspace-Id` header (lake#315; `HfApi(headers={"X-Lake-Workspace-Id": ...})`, since `create_repo` cannot add body fields). Without one it is refused |
 | `POST /api/validate-yaml` | Accepts the client compatibility check; Lake does not interpret card YAML |
 | `GET /api/models/:namespace/:name[/revision/:revision]` | Model info, files, sizes, immutable revision, storage, and provenance |
 | `GET /api/datasets/:namespace/:name[/revision/:revision]` | Dataset info, files, sizes, immutable revision, and storage |

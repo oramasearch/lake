@@ -27,7 +27,9 @@ native Liquid binary supplied the documented identity export command.
    are all `0`. This run configured all four unit prices to `1000` and the storage quota to
    `1073741824` bytes, so zero cost cannot be explained by free prices. No customer quota
    override was present.
-6. In **Create a repository**, keep the personal customer, enter `my-first-repository`, and
+6. Since lake#315 a repository belongs to a workspace: a space without one is sent to
+   **Workspaces** first, and the form then chooses the workspace instead of the customer. The
+   recorded run below predates that. In **Create a repository**, keep the personal customer, enter `my-first-repository`, and
    optionally describe it. Select **Create repository**. The form calls the registry capability
    with private visibility and redirects to `/repository?id=<id>`. The repository home displays
    its generated customer handle, the repository name, private visibility, and inherited `admin`
