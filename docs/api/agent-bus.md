@@ -124,6 +124,10 @@ turn unaffected. Lake's own retry notices for the delegated task are not mirrore
 carries only task IDs; nothing new is stored in PostgreSQL beyond the task's existing message and
 body.
 
+A report that reaches the workspace publication used to end without a `co_return`, so the
+`agent_turn` that awaited it destroyed an unset result: a delegated turn whose asking task was still
+`Running` and whose workspace was reachable could abort the lake process (lake#476).
+
 ## What the bus loses, the store recovers
 
 Stage-1 pub/sub is in memory and survives a restart only on a best-effort basis

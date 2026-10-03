@@ -269,6 +269,13 @@ add_executable(lake-ui-fixture tools/ui/fixture_server.cpp)
 target_compile_features(lake-ui-fixture PRIVATE cxx_std_26)
 target_link_libraries(lake-ui-fixture PRIVATE lake-api lake-core lake-control-postgres OpenSSL::Crypto)
 
+# A coroutine returning liquid::runtime::task<T> (a result<T>) that flows off its end leaves the
+# result unset, and the awaiting coroutine then reads uninitialized memory (lake#476). The compiler
+# sees every such path, so it is an error rather than a warning.
+foreach(lake_target lake-core lake-control-postgres lake-api lake lake-ui-fixture)
+  target_compile_options(${lake_target} PRIVATE -Werror=return-type)
+endforeach()
+
 if(LAKE_BUILD_TESTS)
   find_program(LAKE_NODE_EXECUTABLE node REQUIRED)
   FetchContent_Declare(googletest

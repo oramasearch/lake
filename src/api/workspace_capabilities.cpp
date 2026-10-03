@@ -2261,6 +2261,10 @@ liquid::runtime::task<void> report_on_asking_turn(ApiContext& context,
     event.update(details);
     static_cast<void>(control::settled(
         co_await bus.publish(std::string(control::agent_events_topic), event, parent->id)));
+    // A task<void> carries a result<void>, so its promise has return_value and no return_void:
+    // flowing off the end leaves the result unset and the awaiting turn reads (and destroys)
+    // uninitialized memory (lake#476).
+    co_return {};
 }
 
 // A finished Discover scan's Opportunities become rows, once (lake#269): what Auto-Suggest
