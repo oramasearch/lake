@@ -447,31 +447,11 @@ protected:
         if (uri == nullptr || *uri == '\0') {
             return nullptr;
         }
-        std::string schema = "workspace_records_" + lake::control::new_uuid_v4();
-        std::erase(schema, '-');
-        pqxx::connection connection(uri);
-        pqxx::work tx(connection);
-        tx.exec("SET client_min_messages TO warning");
-        tx.exec("CREATE SCHEMA " + tx.quote_name(schema));
-        tx.exec("SET search_path TO " + tx.quote_name(schema));
-        std::ifstream file(std::filesystem::path(LAKE_TEST_SOURCE_DIR) / "db/schema.sql");
-        tx.exec(std::string((std::istreambuf_iterator<char>(file)), {}));
-        tx.commit();
-        database_uri_ = std::string(uri) + " options='-csearch_path=" + schema + "'";
-        uri_ = uri;
-        schema_ = schema;
+        // The runner's database is private to this test (tests/test_main.cpp).
+        database_uri_ = uri;
         return lake::control::make_postgres_store(database_uri_, std::string(kek));
     }
-    void TearDown() override {
-        if (schema_.empty()) {
-            return;
-        }
-        pqxx::connection connection(uri_);
-        pqxx::work tx(connection);
-        tx.exec("DROP SCHEMA IF EXISTS " + tx.quote_name(schema_) + " CASCADE");
-        tx.commit();
-    }
-    std::string database_uri_, uri_, schema_;
+    std::string database_uri_;
 };
 
 } // namespace

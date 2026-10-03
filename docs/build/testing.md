@@ -62,8 +62,9 @@ execution.
 
 Loading `db/schema.sql` takes a lock on every table, index, sequence and trigger it creates, in
 one transaction. Every Postgres-backed test used to do that for its own database, and
-`HttpResponseIsolation` and `TokenAttenuation` then loaded it a second time into a nested schema
-and dropped that schema with `CASCADE`, another transaction locking every object. With `ctest -j 6`
+`HttpResponseIsolation`, `TokenAttenuation` and `WorkspaceRecordStores` then loaded it a second
+time into a nested schema and dropped that schema with `CASCADE`, another transaction locking
+every object (about 1,080 locks to load the schema, about 2,100 to drop it). With `ctest -j 6`
 several of those ran at once against one server, whose shared lock table holds
 `max_locks_per_transaction × (max_connections + max_prepared_transactions)` entries (6,400 on a
 default local PostgreSQL), and the suite failed with `ERROR: out of shared memory` once the schema
@@ -73,7 +74,7 @@ Copying a template takes a handful of locks regardless of schema size, so the su
 longer grows with the schema, and no PostgreSQL configuration change is needed. The alternative,
 applying and dropping the schema in smaller transactions, would bound each transaction but still
 do the schema's full work per test and need the schema split by hand. The nested schemas were
-redundant once each test had a private database (lake#140), so both fixtures now use the
+redundant once each test had a private database (lake#140), so those fixtures now use the
 runner's database directly.
 
 ## Why
