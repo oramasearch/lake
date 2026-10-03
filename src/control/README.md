@@ -7,6 +7,7 @@ are checked even on hits; mutable datasets, connections, runs and usage remain u
 call takes a workspace ID; agent-task callers derive it in the API registry before reaching this
 service, so omission cannot select a default workspace.
 See [page performance](../../docs/ui/performance.md) for limits and correctness tests.
+A workspace refusal keeps Zetta's `error.path` in `ZettaControlError::path` (lake#463).
 
 Stream ownership is persisted by both stores and bound to customer/workspace/topic; agent-task
 enumeration is customer scoped and returns the task and agent data needed by shared Streams views

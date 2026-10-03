@@ -69,7 +69,7 @@
   const columns = new Map();
   const trialStates = new Map();
   let details = state.details;
-  let trialMetrics = [];
+  let trialMetrics = state.mode === 'study' ? [...state.details] : [];
   let trials = state.data.trials || [];
   let sortKey = 'number';
   let descending = false;
@@ -122,7 +122,9 @@
     });
     const result = await response.json();
     if (!response.ok || !result.ok) {
-      throw new Error(result.error?.message || 'The request failed.');
+      // Name the field at fault when the engine does (zetta#1217).
+      const path = result.error?.path;
+      throw new Error((path ? path + ': ' : '') + (result.error?.message || 'The request failed.'));
     }
     return result.value;
   }
@@ -468,6 +470,11 @@
     }
   }
 
+  function metricLabel(name) {
+    const key = String(name).toLowerCase().replace(/[ .-]/g, '_');
+    return (state.metric_names || {})[key] || name;
+  }
+
   function drawStudy() {
     const analysis = state.analysis;
     const history = analysis.optimization_history || [];
@@ -478,9 +485,9 @@
       ['Trial', 'Run', 'Objective', 'Best so far'],
       history.map(row => [row.number, row.run, row.value, row.best])));
     const rows = analysis.parallel_coordinates || [];
-    const parameters = [...new Set(rows.flatMap(row => Object.keys(row.params)))].sort();
+    const parameters = [...new Set(rows.flatMap(row => Object.keys(row.params || {})))].sort();
     const labels = [...parameters, 'Objective'];
-    const raw = rows.map(row => [...parameters.map(key => row.params[key]), row.value]);
+    const raw = rows.map(row => [...parameters.map(key => (row.params || {})[key]), row.value]);
     const normalized = labels.map((_, index) => {
       const values = raw.map(row => row[index]);
       const numeric = values.every(value => value === undefined || typeof value === 'number');
@@ -508,7 +515,7 @@
     document.getElementById('study-status').textContent = 'State: ' + state.data.status +
       ' · Trials: ' + state.data.trials.length + ' / ' + budgets.max_trials +
       ' · Cost: ' + state.data.spent_cost + ' / ' + budgets.cost_cap +
-      ' · Objective: ' + state.data.spec.objective.metric + ' (' +
+      ' · Objective: ' + metricLabel(state.data.spec.objective.metric) + ' (' +
       state.data.spec.objective.direction + ')' +
       (state.data.stop_reason ? ' · ' + state.data.stop_reason : '') +
       (state.data.promoted_model ? ' · Promoted model: ' + state.data.promoted_model : '');
@@ -621,13 +628,22 @@
     try {
       if (state.mode === 'study') {
         const filter = document.getElementById('trial-state').value;
+        // The study is required; an analysis or trial listing that cannot be read keeps the last
+        // one, so one failed read never leaves the page without its charts (lake#449).
         const responses = await Promise.all([
           call('get_experiment_study', {study: state.study}),
-          call('get_experiment_analysis', {study: state.study}),
+          call('get_experiment_analysis', {study: state.study}).catch(error => {
+            report(error);
+            return state.analysis;
+          }),
           call('list_experiment_trials', {study: state.study, ...(filter ? {state: filter} : {})})
+            .catch(error => {
+              report(error);
+              return {trials};
+            })
         ]);
         state.data = responses[0];
-        state.analysis = responses[1];
+        state.analysis = responses[1] || {};
         trials = responses[2].trials;
         const queue = [...state.data.trials];
         const refreshed = new Map();
@@ -636,12 +652,19 @@
             const trial = queue.shift();
             const cached = trialMetrics.find(run => run.run === trial.run);
             const unchanged = trial.state !== 'running' && trialStates.get(trial.run) === trial.state;
-            refreshed.set(trial.run, unchanged && cached ? cached :
-              await call('get_run_metrics', {run: trial.run}));
-            trialStates.set(trial.run, trial.state);
+            try {
+              refreshed.set(trial.run, unchanged && cached ? cached :
+                await call('get_run_metrics', {run: trial.run}));
+              trialStates.set(trial.run, trial.state);
+            } catch (error) {
+              // A trial whose curves cannot be read keeps its last curves, or has none.
+              if (cached) {
+                refreshed.set(trial.run, cached);
+              }
+            }
           }
         }));
-        trialMetrics = state.data.trials.map(trial => refreshed.get(trial.run));
+        trialMetrics = state.data.trials.map(trial => refreshed.get(trial.run)).filter(Boolean);
         details = trialMetrics.slice(-8);
         drawStudy();
       } else if (state.mode === 'compare') {
@@ -753,6 +776,13 @@
   });
   if (state.mode !== 'list') {
     drawMetrics();
+    if (state.mode === 'study' && state.data.spec) {
+      try {
+        drawStudy();
+      } catch (error) {
+        report(error);
+      }
+    }
     refresh().catch(report).then(follow);
   }
 })();

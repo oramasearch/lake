@@ -38,7 +38,9 @@ embedded, hashed chart assets call only registered capabilities. The page's Expe
 uses `agent_turn`; the HTTP adapter hashes the stored proposal and sends the edited study only in a
 confirmed turn. Questions and absent proposals get a reply form that reuses the task conversation;
 Apps and Design pipeline questions use the same follow-up contract. Workspace action aliases retain
-the same confirmation, scope and promotion checks.
+the same confirmation, scope and promotion checks. Their failures keep Zetta's `error.path`;
+`start_study` requires `objective` and `budgets` only without `from_defaults` (lake#463).
+The study page carries its latest trials' curves and readable analysis tables from the server.
 See [API](../../docs/api/experiments.md) and [UI](../../docs/ui/experiments.md) contracts.
 
 `stream_capabilities.cpp` registers the nine Streams REST/MCP operations, enforces space and
@@ -54,6 +56,11 @@ their URL. `web_ui.cpp` quotes each shell argument and escapes the resulting com
 missing configuration suppresses commands. Existing registry sync operations implement clone and
 push. See [forge.md](../../docs/ui/forge.md) and the native
 [private-install proof](../../docs/deployment/private-install.md).
+
+Train → Runs, a run page and Ship → Models also read `list_studies` (lake#449): a trial run is
+*Trial N of study <name>*, a study's model names its study, and a promoted model is marked. A run
+report leads with its held-out score and row count from `get_run_report.model`, with Zetta's
+caveat on that figure beside it.
 
 Copy-ready external calls on Ship → Models and the search index page name
 `WorkspacePage::workspace_id`, which `serve_workspace_page` sets from the `/w/<workspace_id>` path;

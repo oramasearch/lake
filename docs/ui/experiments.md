@@ -11,7 +11,12 @@ Runs and Run reports link to their metric charts.
 The sidebar reuses the existing chart icon; navigation tests check both its icon and current-page state.
 
 The list displays studies with state, objective, best complete-trial value, trial counts and
-trial/cost budgets, plus tracked runs outside studies. Project and state filters apply to the
+trial/cost budgets, plus tracked runs outside studies. Objectives are labelled by Zetta's
+canonical held-out metric names (`held_out_auc`, `held_out_log_loss`, `held_out_accuracy`,
+`held_out_rmse`, `held_out_mae`); a study recorded under an older spelling such as
+`validation.auc` is shown under its canonical name. The start form defaults the objective to
+`held_out_auc` and offers those names (lake#463). An error names the field at fault when Zetta
+does, for example `/objective: required; …`. Project and state filters apply to the
 selected space. Starting a study displays its parameters and budgets in a confirmation dialog.
 Study and trial stop buttons are available to writers; promotion requires space administration.
 No page exposes a credential or contacts Zetta directly.
@@ -51,7 +56,11 @@ A study displays objective history and its best-so-far line, normalized parallel
 parameter importance, trial states and a sortable leaderboard. The column picker includes trial
 parameters and recorded final metrics. Confidence bounds come from the engine analysis. Each trial
 links to its Run charts; two to eight selected trials can be compared. The latest eight trial
-curves are drawn on the study page. All trial metrics remain available through their Run links,
+curves are drawn on the study page; the server reads them with the study, so they show before the
+first live refresh, and a trial whose curves cannot be read is left out rather than failing the
+page. Optimization history, parallel coordinates and parameter importance are rendered as tables
+on the server, and the charts are drawn over them (lake#449). A promoted trial and the study's
+promoted model are marked **promoted**. All trial metrics remain available through their Run links,
 and leaderboard metric values are loaded for every trial with at most four concurrent requests.
 Transitioning out of running always refreshes final metrics before caching a terminal trial.
 

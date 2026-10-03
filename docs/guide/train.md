@@ -72,6 +72,13 @@ documented `start_study`, study/trial reads and confirmed promotion tools.
 
 ## Read the report
 
-The run page shows what the model learned from, what it leans on (a weight is reliance, not a
-cause), the rows most at risk and **what the run cannot tell you**. Train → Runs lists every run by
-pipeline and project.
+The run page leads with the score on rows the model did not see (for example *Held-out AUC 0.708 on
+412 rows the model did not see*), marked **do not quote** when Zetta attaches a caveat to it, such
+as a score measured on too few rows. A run without a holdout says it has no held-out score. Then
+come what the model learned from, what it leans on (a weight is reliance, not a cause), the rows
+most at risk and **what the run cannot tell you**. Train → Runs lists every run by pipeline and
+project; a study's trial runs are listed as *Trial N of study* and the study's name, linked to it.
+
+Study objectives use the run report's metric names: `held_out_auc`, `held_out_log_loss`,
+`held_out_accuracy`, `held_out_rmse` and `held_out_mae`. Zetta still accepts older spellings such
+as `validation.auc` and stores the canonical name.

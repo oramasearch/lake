@@ -87,7 +87,8 @@ lacks a scope or a grant is still 403 `unauthorized`.
 - **The handler**, which names the field it refused.
 - **Workspace engine refusals** (`workspace_failure` in `src/api/workspace_capabilities.cpp`), for
   `workspace_query`, `workspace_act`, `predict`, `search_index`, `get_model`, `get_dataset` and the
-  experiment capabilities: "required property 'x'" is about `x`; a message that leads with a
+  experiment capabilities: the engine's own `path` when it gives one (zetta#1217), in the caller's
+  name for the field; otherwise "required property 'x'" is about `x`; a message that leads with a
   pointer (`/format: instance not found in required enum`) has the pointer moved to `path` and the
   message becomes `format: instance not found in required enum`; a message that quotes a value
   the caller sent (`no model named 'm-1'`) is about the field that carried it. An `engine_error`

@@ -17,7 +17,7 @@ using ExperimentJson = nlohmann::json;
 inline ExperimentJson experiment_start_input() {
     return {{"name", "Retention Tuning"}, {"project", "retention"}, {"pipeline", "training"},
         {"dataset", "accounts"}, {"methodology", "M-1"}, {"from_defaults", true},
-        {"objective", {{"metric", "validation.auc"}, {"direction", "maximize"},
+        {"objective", {{"metric", "held_out_auc"}, {"direction", "maximize"},
             {"validation_split", "validation"}}},
         {"budgets", {{"max_trials", 4}, {"max_parallel_trials", 1},
             {"max_wall_time_ms", 60000}, {"cost_cap", 5}}}, {"confirm", true}};
@@ -221,6 +221,12 @@ public:
         }
         if (input.contains("study") && input.at("study") != study.at("id")) {
             co_return fail("not_found");
+        }
+        if (capability == "create_study" && input.value("name", "") == "Rejected By Zetta") {
+            // Zetta reports the field at fault on every create_study error (zetta#1217).
+            co_return control::ZettaControlResult<json>(std::unexpected(control::ZettaControlError{
+                "invalid_input", "required; set from_defaults: true to fill a missing objective",
+                "/objective"}));
         }
         if (capability == "create_study") {
             study = experiment_study();

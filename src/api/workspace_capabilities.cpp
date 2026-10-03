@@ -4159,18 +4159,23 @@ ApiResult workspace_failure(const control::ZettaControlError& error,
                             const std::map<std::string, std::string>& renamed) {
     std::string message = error.message;
     std::string field;
-    // "required property 'x' not found in object" is about x (lake#256).
-    if (const auto at = message.find("property '"); at != std::string::npos) {
-        const auto end = message.find('\'', at + 10);
-        if (end != std::string::npos) {
-            field = message.substr(at + 10, end - at - 10);
-        }
-    } else if (message.starts_with("/")) {
-        // The engine's schema check leads with a pointer: "/format: instance not found in
-        // required enum". The pointer belongs in `path`, the field's name in the message.
+    // The engine's schema check leads with a pointer: "/format: instance not found in required
+    // enum". The pointer belongs in `path`, the field's name in the message.
+    if (message.starts_with("/")) {
         if (const auto colon = message.find(": "); colon != std::string::npos) {
             field = message.substr(1, colon - 1);
             message = field + message.substr(colon);
+        }
+    }
+    if (error.path.starts_with("/") && error.path.size() > 1) {
+        // The engine's own pointer, when it names the field (zetta#1217), wins.
+        field = error.path.substr(1);
+    } else if (const auto at = message.find("property '");
+               field.empty() && at != std::string::npos) {
+        // "required property 'x' not found in object" is about x (lake#256).
+        const auto end = message.find('\'', at + 10);
+        if (end != std::string::npos) {
+            field = message.substr(at + 10, end - at - 10);
         }
     }
     // A refusal that quotes a value the caller sent ("no model named 'm-1'") is about that field.

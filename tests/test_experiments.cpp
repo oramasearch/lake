@@ -131,7 +131,7 @@ TEST(ExperimentsRenderer, RunBoxShowsAnEditableConfirmedAgentProposal) {
     EXPECT_NE(html.find("<h2>Run an Experiment</h2>"), std::string::npos);
     EXPECT_NE(html.find("Ask ExperimentsAgent"), std::string::npos);
     EXPECT_NE(html.find("Study proposal (JSON)"), std::string::npos);
-    EXPECT_NE(html.find("validation.auc"), std::string::npos);
+    EXPECT_NE(html.find("held_out_auc"), std::string::npos);
     EXPECT_NE(html.find("Confirm and start study"), std::string::npos);
     EXPECT_NE(html.find(std::string(64, 'a')), std::string::npos);
     EXPECT_EQ(html.find("ExperimentsAgent is not registered"), std::string::npos);
@@ -248,6 +248,100 @@ TEST_F(Experiments, ListsFilterTrackedRunsAndMetricsRespectPrivacyAndBounds) {
         closed_objects(registry.find(name)->input_schema);
         closed_objects(registry.find(name)->output_schema);
     }
+}
+
+// lake#463: from_defaults lets Zetta fill the objective and budgets, and Zetta's error path is
+// what the caller sees.
+TEST_F(Experiments, StartStudyLeavesDefaultsToZettaAndKeepsItsErrorPath) {
+    const json minimal = {{"name", "Defaults"}, {"methodology", "M-1"}, {"dataset", "accounts"},
+        {"from_defaults", true}, {"confirm", true}};
+    const auto started = call("start_study", minimal);
+    ASSERT_TRUE(started.ok) << started.error.message;
+    const auto upstream = workspace->caller->calls.back();
+    EXPECT_EQ(upstream.at("name"), "create_study");
+    EXPECT_FALSE(upstream.at("input").contains("objective"));
+    EXPECT_FALSE(upstream.at("input").contains("budgets"));
+    EXPECT_TRUE(upstream.at("input").at("from_defaults").get<bool>());
+
+    auto partial = minimal;
+    partial["objective"] = {{"metric", "held_out_log_loss"}};
+    EXPECT_TRUE(call("start_study", partial).ok);
+    EXPECT_EQ(workspace->caller->calls.back().at("input").at("objective"),
+              (json{{"metric", "held_out_log_loss"}}));
+
+    const auto count = workspace->caller->calls.size();
+    auto without = minimal;
+    without.erase("from_defaults");
+    const auto refused = call("start_study", without);
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_input");
+    EXPECT_EQ(refused.error.path, "/objective");
+    EXPECT_NE(refused.error.message.find("from_defaults"), std::string::npos);
+    without["objective"] = lake::test::experiment_start_input().at("objective");
+    EXPECT_EQ(call("start_study", without).error.path, "/budgets");
+    EXPECT_EQ(workspace->caller->calls.size(), count);
+
+    auto rejected = lake::test::experiment_start_input();
+    rejected["name"] = "Rejected By Zetta";
+    const auto failed = call("start_study", rejected);
+    EXPECT_FALSE(failed.ok);
+    EXPECT_EQ(failed.error.code, "invalid_input");
+    EXPECT_EQ(failed.error.path, "/objective");
+    EXPECT_NE(failed.error.message.find("from_defaults"), std::string::npos);
+}
+
+TEST(ExperimentsRenderer, ObjectivesUseTheRunReportsMetricNames) {
+    lake::api::ExperimentsPage page;
+    page.customer_id = "customer-one";
+    page.customers = {{"customer-one", "Personal", true}};
+    page.can_write = true;
+    auto study = lake::test::experiment_study();
+    study["spec"]["objective"]["metric"] = "validation.auc";
+    page.data = {{"studies", json::array({study})}, {"runs", json::array()}};
+    const std::string html = lake::api::web_ui_experiments(page, true);
+    EXPECT_NE(html.find("name=\"objective.metric\" value=\"held_out_auc\""), std::string::npos);
+    EXPECT_NE(html.find("<option value=\"held_out_log_loss\">"), std::string::npos);
+    EXPECT_NE(html.find("<td>held_out_auc</td>"), std::string::npos);
+    EXPECT_EQ(html.find(">validation.auc<"), std::string::npos);
+    EXPECT_NE(html.find("\"roc_auc\":\"held_out_auc\""), std::string::npos);
+}
+
+// lake#449: analysis panels are tables, promotion is marked, and the latest trials' curves are in
+// the page before any script runs.
+TEST(ExperimentsRenderer, StudyPanelsAreReadableAndCarryTrialCurves) {
+    lake::api::ExperimentsPage page;
+    page.customer_id = "customer-one";
+    page.customers = {{"customer-one", "Personal", true}};
+    page.mode = "study";
+    page.study = "study-one";
+    page.data = lake::test::experiment_study();
+    page.data["promoted_model"] = "model-one";
+    lake::test::ExperimentCaller caller;
+    page.analysis = caller.analysis();
+    page.trial_metrics = json::array({lake::test::experiment_metrics("trial-1")});
+    const std::string html = lake::api::web_ui_experiments(page, true);
+    const auto history = html.find("id=\"optimization-table\"");
+    ASSERT_NE(history, std::string::npos);
+    const auto panels = html.substr(history, html.find("Trial Leaderboard") - history);
+    EXPECT_EQ(panels.find("<pre>"), std::string::npos);
+    EXPECT_NE(panels.find("<td>trial-1</td>"), std::string::npos);
+    EXPECT_NE(panels.find("<th scope=\"col\">learning_rate</th>"), std::string::npos);
+    EXPECT_NE(panels.find("<td>learning_rate</td><td>1.0</td>"), std::string::npos);
+    EXPECT_NE(html.find("status-success\">promoted</span>"), std::string::npos);
+    EXPECT_NE(html.find("trial-1 · validation.auc — Data Table"), std::string::npos);
+    const auto data = html.find("id=\"experiment-data\"");
+    ASSERT_NE(data, std::string::npos);
+    EXPECT_NE(html.find("\"details\":[{", data), std::string::npos);
+}
+
+TEST_F(Experiments, StudyPageReadsTheLatestTrialCurves) {
+    lake::api::ApiServer server({.port = 0, .store = store,
+        .workspaces = workspace->service, .admin_token = "experiment-operator"});
+    ASSERT_TRUE(server.start()) << server.reason();
+    const auto html = request(server.port(), "GET", "/w/" + workspace->id +
+        "/train/experiment?study=study-one&customer_id=" + customer);
+    EXPECT_NE(html.find("trial-1 · validation.auc — Data Table"), std::string::npos);
+    EXPECT_NE(html.find("trial-2 · train.loss — Data Table"), std::string::npos);
 }
 
 TEST_F(Experiments, BoundedLiveReadsResolveOnlyTheSelectedSpacesStudyOrRun) {

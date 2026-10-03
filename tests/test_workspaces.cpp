@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -12,6 +13,7 @@
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
+#include <zetta/connect/http_transport.hpp>
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/datasets.hpp"
@@ -49,30 +51,49 @@ public:
     std::optional<lake::control::ZettaControlError> failure;
     std::function<void()> before_reply;
     lake::test::StreamCaller topics;
+    std::mutex mutex;
 
     liquid::runtime::task<ZettaControlResult<json>> call(std::string called_url,
                                                          std::string called_token,
                                                          std::string called_capability,
                                                          bool called_read,
                                                          json called_input) override {
-        url = std::move(called_url);
-        token = std::move(called_token);
-        capability = std::move(called_capability);
-        read = called_read;
-        input = std::move(called_input);
-        calls.emplace_back(capability, input);
-        if (before_reply) {
-            before_reply();
+        std::optional<ZettaControlResult<json>> answered;
+        std::string topic_url, topic_token, topic_capability;
+        bool topic_read = false;
+        json topic_input;
+        {
+            // Some capabilities call the workspace concurrently (compare_runs reads every run's
+            // metrics at once), so the recording is serialized.
+            std::lock_guard lock(mutex);
+            url = std::move(called_url);
+            token = std::move(called_token);
+            capability = std::move(called_capability);
+            read = called_read;
+            input = std::move(called_input);
+            calls.emplace_back(capability, input);
+            topic_url = url;
+            topic_token = token;
+            topic_capability = capability;
+            topic_read = read;
+            topic_input = input;
+            if (before_reply) {
+                before_reply();
+            }
+            if (failure) {
+                answered = ZettaControlResult<json>(std::unexpected(*failure));
+            } else if (capability != "create_topic" && capability != "update_topic" &&
+                       capability != "publish_event" && capability != "receive_events") {
+                const auto answer = answers.find(capability);
+                answered =
+                    ZettaControlResult<json>(answer == answers.end() ? value : answer->second);
+            }
         }
-        if (failure) {
-            co_return ZettaControlResult<json>(std::unexpected(*failure));
+        if (answered) {
+            co_return std::move(*answered);
         }
-        if (capability == "create_topic" || capability == "update_topic" ||
-            capability == "publish_event" || capability == "receive_events") {
-            co_return lake::control::settled(co_await topics.call(url, token, capability, read, input));
-        }
-        const auto answer = answers.find(capability);
-        co_return ZettaControlResult<json>(answer == answers.end() ? value : answer->second);
+        co_return lake::control::settled(co_await topics.call(
+            topic_url, topic_token, topic_capability, topic_read, topic_input));
     }
 };
 
@@ -1659,6 +1680,134 @@ TEST(Workspaces, RunsShowPipelinesByNameAndSayWhyAFailureFailed) {
     EXPECT_NE(html.find("a pipeline of a deleted project"), std::string::npos);
     EXPECT_NE(html.find(">Why it failed</a>"), std::string::npos);
     EXPECT_EQ(html.find(">r-1</a>"), std::string::npos) << "no raw run ids as the label";
+}
+
+// lake#463: a Zetta refusal keeps the field it names, so a caller repairs that field.
+TEST(Workspaces, ZettaCallerKeepsTheErrorPath) {
+    const zetta::connect::HttpTransport previous = zetta::connect::default_http_transport();
+    const zetta::connect::AsyncHttpTransport previous_async =
+        zetta::connect::default_async_http_transport();
+    std::string asked;
+    zetta::connect::set_default_http_transport(
+        {},
+        [&asked](const zetta::connect::HttpRequest& request)
+            -> boost::capy::io_task<zetta::connect::HttpResponse> {
+            asked = request.url;
+            co_return boost::capy::io_result<zetta::connect::HttpResponse>{
+                {},
+                {400,
+                 json{{"ok", false},
+                      {"error",
+                       {{"code", "invalid_input"},
+                        {"message", "required; set from_defaults: true"},
+                        {"path", "/objective"}}}}
+                     .dump(),
+                 {}}};
+        });
+    lake::control::ZettaWorkspaceCaller caller;
+    const auto called = liquid::runtime::block_on(
+        caller.call("http://ws:4800/", "t", "create_study", false, {{"name", "s"}}));
+    zetta::connect::set_default_http_transport(previous, previous_async);
+    ASSERT_TRUE(called);
+    ASSERT_FALSE(*called);
+    EXPECT_EQ(asked, "http://ws:4800/v1/create_study");
+    EXPECT_EQ(called->error().code, "invalid_input");
+    EXPECT_EQ(called->error().message, "required; set from_defaults: true");
+    EXPECT_EQ(called->error().path, "/objective");
+}
+
+// lake#449: a dataset-level study's runs and models carry no project or pipeline; they are named
+// by their study, and the model a study promoted says so.
+TEST(Workspaces, StudyTrialsAndModelsAreNamedByTheirStudy) {
+    const json studies = {
+        {"studies",
+         json::array({{{"id", "study-1"},
+                       {"name", "churn tuning"},
+                       {"spec", {{"name", "churn tuning"}, {"project", ""}}},
+                       {"promoted_model", "m-trial-2"},
+                       {"trials",
+                        json::array({{{"number", 1}, {"run", "r-trial-1"}, {"model", "m-trial-1"}},
+                                     {{"number", 2}, {"run", "r-trial-2"}, {"model", "m-trial-2"}}})}}})}};
+    lake::api::WorkspacePage page;
+    page.section = "runs";
+    page.customer_id = std::string(customer);
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    page.data["list_studies"] = studies;
+    page.data["list_runs"] = {
+        {"runs",
+         json::array({{{"id", "r-trial-1"}, {"graph", ""}, {"project", ""}, {"pipeline_name", ""},
+                       {"project_name", ""}, {"status", "succeeded"}},
+                      {{"id", "r-loose"}, {"graph", ""}, {"project", ""}, {"pipeline_name", ""},
+                       {"project_name", ""}, {"status", "succeeded"}}})}};
+    std::string html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("Trial 1 of study <a href=\"/train/experiment?customer_id="),
+              std::string::npos);
+    EXPECT_NE(html.find("study=study-1\">churn tuning</a>"), std::string::npos);
+    EXPECT_NE(html.find("a run outside any pipeline"), std::string::npos);
+    EXPECT_EQ(html.find("<span class=\"muted\">in</span> <a href=\"/design/project?customer_id="
+                        + std::string(customer) + "&amp;name=\"></a>"),
+              std::string::npos)
+        << "never a bare \"in\"";
+
+    page.section = "run";
+    page.subject = "r-trial-1";
+    page.data["get_run"] = {{"id", "r-trial-1"}, {"status", "succeeded"}, {"graph", ""}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("Trial 1 of study"), std::string::npos);
+
+    page.section = "models";
+    page.data["list_models"] = {
+        {"models",
+         json::array({{{"id", "m-trial-1"}, {"name", "churn"}, {"project", ""},
+                       {"project_name", ""}, {"run", "r-trial-1"}},
+                      {{"id", "m-trial-2"}, {"name", "churn"}, {"project", ""},
+                       {"project_name", ""}, {"run", "r-trial-2"}},
+                      {{"id", "m-loose"}, {"name", "loose"}, {"project", ""},
+                       {"project_name", ""}, {"run", "r-loose"}}})}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("Trial 2 of study"), std::string::npos);
+    EXPECT_EQ(html.find("a deleted project"), std::string::npos);
+    EXPECT_NE(html.find("no project"), std::string::npos) << "a model of no project";
+    const auto promoted = html.find("status-success\">promoted</span>");
+    ASSERT_NE(promoted, std::string::npos);
+    EXPECT_LT(html.find("m-trial-"), promoted);
+    EXPECT_EQ(html.find(">promoted</span>", promoted + 30), std::string::npos)
+        << "only the promoted model";
+}
+
+// lake#449: the report leads with the held-out score and its size, and Zetta's caveat on it.
+TEST(Workspaces, RunReportLeadsWithTheHeldOutScore) {
+    lake::api::WorkspacePage page;
+    page.section = "run";
+    page.subject = "r1";
+    page.customer_id = std::string(customer);
+    page.state = {{"requested", true}, {"phase", "Ready"}, {"ready", true}};
+    page.data["get_run"] = {{"id", "r1"}, {"status", "succeeded"}};
+    page.data["get_run_report"] = {
+        {"model",
+         {{"id", "m1"}, {"name", "churn"}, {"held_out_auc", 0.708}, {"held_out_log_loss", 0.52},
+          {"held_out_rows", 412}, {"in_sample_auc", 0.81}}},
+        {"missing", json::array({{{"field", "lineage"}, {"why", "no lineage"}}})}};
+    std::string html = lake::api::web_ui_workspace(page, true);
+    const auto score = html.find("Held-out AUC <strong>0.708</strong> on 412 rows the model did "
+                                 "not see");
+    ASSERT_NE(score, std::string::npos);
+    EXPECT_LT(score, html.find("What This Run Cannot Tell You"));
+    EXPECT_NE(html.find("Held-out log loss 0.520"), std::string::npos);
+    EXPECT_EQ(html.find("do not quote"), std::string::npos);
+
+    page.data["get_run_report"] = {
+        {"model", {{"held_out_auc", 1.0}, {"held_out_rows", 2}}},
+        {"caveats",
+         json::array({{{"field", "held_out_auc"},
+                       {"why", "measured on only 2 held-out rows. Do not quote it as a result"}}})}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("Held-out AUC <strong>1.000</strong> on 2 rows"), std::string::npos);
+    EXPECT_NE(html.find("do not quote</span> measured on only 2 held-out rows"), std::string::npos);
+
+    page.data["get_run_report"] = {{"model", {{"in_sample_auc", 0.9}}}};
+    html = lake::api::web_ui_workspace(page, true);
+    EXPECT_NE(html.find("No held-out score. In-sample AUC 0.900"), std::string::npos);
 }
 
 TEST(Workspaces, SolutionProjectShowsRunFeedbackAndReadableOperatingState) {
@@ -4610,6 +4759,13 @@ TEST(Workspaces, NamingEngineRefusalsCarryThePathAndLakeCodes) {
         r.call("workspace_act", {{"capability", "expose_model"}, {"input", {{"model_id", "m-9"}}}});
     EXPECT_EQ(missing.error.code, "not_found");
     EXPECT_EQ(missing.error.path, "/input/model_id") << "the field the caller sent";
+
+    // The engine's own pointer (zetta#1217) is reported in the caller's name for the field.
+    r.w.caller->failure =
+        lake::control::ZettaControlError{"invalid_input", "the model is not trained", "/model"};
+    const auto engine_path =
+        r.call("workspace_act", {{"capability", "expose_model"}, {"input", {{"model_id", "m-2"}}}});
+    EXPECT_EQ(engine_path.error.path, "/input/model_id");
 
     r.w.caller->failure = lake::control::ZettaControlError{
         "invalid_argument", "/format: instance not found in required enum"};

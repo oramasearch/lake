@@ -45,7 +45,11 @@ paste. Pages must fill in their own workspace; static Docs show `<workspace id>`
 
 `test_experiments.cpp` covers all eleven training operations, space permissions, confirmation,
 workspace alias checks, audit, REST/MCP parity and actual calls, hashed assets, navigation and
-control mappings, plus the editable ExperimentsAgent proposal. `experiment_fixture.hpp` supplies
+control mappings, plus the editable ExperimentsAgent proposal, `start_study` with `from_defaults`
+and Zetta's error `path`, canonical metric labels, and the study page's server-rendered analysis
+tables and trial curves (lake#449, lake#463). `test_workspaces.cpp` covers trial runs and study
+models named by their study, the promoted marker, the run report's held-out score lead, and
+`ZettaWorkspaceCaller` keeping `error.path` behind a fake Zetta HTTP transport. `experiment_fixture.hpp` supplies
 a stateful fake caller against the authorized engine contract and an opt-in browser fixture.
 `experiment_charts.cjs` tests chart transformations and cursors without a browser. Independent
 response validation also uses these fixtures. See

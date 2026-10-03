@@ -1,6 +1,8 @@
 #include "lake/api/web_ui.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <map>
 #include <set>
 
@@ -12,6 +14,51 @@ using nlohmann::json;
 
 std::string escape(const json& value) {
     return web_ui_escape(value.is_string() ? value.get<std::string>() : value.dump());
+}
+
+// Zetta's held-out metric names: the run report's keys, with the spellings Zetta still accepts
+// as aliases (zetta include/zetta/ml/metric_names.hpp, zetta#1217). Zetta normalizes what it is
+// given; this only labels a study recorded before then by the name it now has.
+constexpr std::array<std::pair<std::string_view, std::array<std::string_view, 5>>, 5> metric_names{{
+    {"held_out_auc", {"validation.auc", "ROC-AUC", "held-out ROC-AUC", "roc_auc", "auc"}},
+    {"held_out_log_loss", {"validation.log_loss", "log loss", "log_loss", "logloss", ""}},
+    {"held_out_accuracy", {"validation.accuracy", "accuracy", "", "", ""}},
+    {"held_out_rmse", {"validation.rmse", "RMSE", "rmse", "", ""}},
+    {"held_out_mae", {"validation.mae", "MAE", "mae", "", ""}},
+}};
+
+// Zetta's matching: case is ignored, and ' ', '-' and '.' read as '_'.
+std::string metric_key(std::string_view name) {
+    std::string key;
+    for (const char character : name) {
+        key += character == ' ' || character == '-' || character == '.'
+                   ? '_'
+                   : static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+    }
+    return key;
+}
+
+json metric_aliases() {
+    json aliases = json::object();
+    for (const auto& [canonical, spellings] : metric_names) {
+        aliases[metric_key(canonical)] = canonical;
+        for (const auto spelling : spellings) {
+            if (!spelling.empty()) {
+                aliases[metric_key(spelling)] = canonical;
+            }
+        }
+    }
+    return aliases;
+}
+
+std::string metric_label(const json& name) {
+    if (!name.is_string()) {
+        return escape(name);
+    }
+    static const json aliases = metric_aliases();
+    const auto found = aliases.find(metric_key(name.get<std::string>()));
+    return web_ui_escape(found == aliases.end() ? name.get<std::string>()
+                                                : found->get<std::string>());
 }
 
 std::string link(const ExperimentsPage& page, std::string_view path, std::string_view key,
@@ -48,7 +95,13 @@ std::string start_form() {
     html += input("Pipeline", "pipeline", "", "required");
     html += input("Dataset", "dataset", "", "required");
     html += input("Methodology", "methodology", "M-1", "required");
-    html += input("Objective metric", "objective.metric", "validation.auc", "required");
+    html += input("Objective metric", "objective.metric", "held_out_auc",
+                  "list=\"metric-names\" required");
+    html += "<datalist id=\"metric-names\">";
+    for (const auto& [canonical, spellings] : metric_names) {
+        html += "<option value=\"" + std::string(canonical) + "\"></option>";
+    }
+    html += "</datalist>";
     html += "<label>Direction<select name=\"objective.direction\"><option value=\"maximize\">"
         "Maximize</option><option value=\"minimize\">Minimize</option></select></label>";
     html += input("Validation split", "objective.validation_split", "validation", "required");
@@ -67,7 +120,9 @@ std::string start_form() {
         "<label><input type=\"checkbox\" name=\"differential_privacy\"> Differential privacy</label>"
         "<label>Released metrics for private studies (comma separated)"
         "<input name=\"released_metrics\"></label><p>Selection uses the validation split. "
-        "The final test split is never used for tuning.</p>"
+        "The final test split is never used for tuning. Metrics are named as the run report "
+        "names them: held_out_auc, held_out_log_loss, held_out_accuracy, held_out_rmse, "
+        "held_out_mae.</p>"
         "<button type=\"submit\" data-start disabled>Review and start study</button></form></details>";
     return html;
 }
@@ -188,7 +243,7 @@ std::string study_listing(const ExperimentsPage& page) {
         html += "<tr><td>" + link(page, "/train/experiment", "study", study.at("id"),
             spec.at("name").get<std::string>(), "get_experiment_study") + "</td><td>" + escape(spec.at("project")) +
             "</td><td>" + escape(study.at("status")) + "</td><td>" +
-            escape(spec.at("objective").at("metric")) + "</td><td>" +
+            metric_label(spec.at("objective").at("metric")) + "</td><td>" +
             (best.is_null() ? "—" : escape(best)) + "</td><td>" +
             std::to_string(counts["complete"]) + " / " + std::to_string(counts["pruned"]) +
             " / " + std::to_string(counts["failed"]) + "</td><td>" +
@@ -291,21 +346,70 @@ std::string study_page(const ExperimentsPage& page) {
     const auto& spec = page.data.at("spec");
     std::string html = "<section class=\"panel\"><h2>" + escape(spec.at("name")) +
         "</h2><p id=\"study-status\">State: " + escape(page.data.at("status")) +
-        " · Objective: " + escape(spec.at("objective").at("metric")) + " (" +
+        " · Objective: " + metric_label(spec.at("objective").at("metric")) + " (" +
         escape(spec.at("objective").at("direction")) + ")</p>";
     if (page.can_write && page.data.at("status") == "running") {
         html += action("stop_study", "Stop study", page.study);
     }
+    if (const std::string promoted = page.data.value("promoted_model", std::string());
+        !promoted.empty()) {
+        html += "<p><span class=\"badge status-success\">promoted</span> Model <code>" +
+                web_ui_escape(promoted) + "</code> is this study's promoted model.</p>";
+    }
+    // Readable without scripts (lake#449): each analysis is a table; the charts draw over them.
+    const auto value = [](const json& row, const char* key) {
+        return row.is_object() && row.contains(key) ? escape(row.at(key)) : std::string("—");
+    };
+    std::string history;
+    for (const auto& row : page.analysis.value("optimization_history", json::array())) {
+        history += "<tr><td>" + value(row, "number") + "</td><td>" + value(row, "run") +
+                   "</td><td>" + value(row, "value") + "</td><td>" + value(row, "best") +
+                   "</td></tr>";
+    }
+    std::vector<std::string> parameters;
+    for (const auto& row : page.analysis.value("parallel_coordinates", json::array())) {
+        for (const auto& [name, ignored] : row.value("params", json::object()).items()) {
+            if (std::ranges::find(parameters, name) == parameters.end()) {
+                parameters.push_back(name);
+            }
+        }
+    }
+    std::ranges::sort(parameters);
+    std::string parallel = "<tr><th scope=\"col\">Run</th>";
+    for (const auto& name : parameters) {
+        parallel += "<th scope=\"col\">" + web_ui_escape(name) + "</th>";
+    }
+    parallel += "<th scope=\"col\">Objective</th></tr></thead><tbody>";
+    for (const auto& row : page.analysis.value("parallel_coordinates", json::array())) {
+        const json params = row.value("params", json::object());
+        parallel += "<tr><td>" + value(row, "run") + "</td>";
+        for (const auto& name : parameters) {
+            parallel += "<td>" + value(params, name.c_str()) + "</td>";
+        }
+        parallel += "<td>" + value(row, "value") + "</td></tr>";
+    }
+    std::string importance;
+    for (const auto& row : page.analysis.value("parameter_importances", json::array())) {
+        importance += "<tr><td>" + value(row, "parameter") + "</td><td>" +
+                      value(row, "importance") + "</td></tr>";
+    }
+    const auto empty = [](const std::string& rows, std::string_view what) {
+        return rows.empty() ? "<p>" + std::string(what) + "</p>" : std::string();
+    };
     html += "</section><section class=\"panel\"><h2>Optimization History</h2>"
-        "<div id=\"optimization-chart\"></div><div id=\"optimization-table\"><pre>" +
-        escape(page.analysis.value("optimization_history", json::array()).dump(2)) +
-        "</pre></div></section><section class=\"panel\"><h2>Parallel Coordinates</h2>"
-        "<div id=\"parallel-chart\"></div><div id=\"parallel-table\"><pre>" +
-        escape(page.analysis.value("parallel_coordinates", json::array()).dump(2)) +
-        "</pre></div></section><section class=\"panel\"><h2>Parameter Importance</h2>"
-        "<div id=\"importance-chart\"></div><div id=\"importance-table\"><pre>" +
-        escape(page.analysis.value("parameter_importances", json::array()).dump(2)) +
-        "</pre></div></section><section class=\"panel\"><h2>Trial Leaderboard</h2>"
+        "<div id=\"optimization-chart\"></div><div id=\"optimization-table\">" +
+        empty(history, "No trial has completed yet.") +
+        "<div class=\"table-scroll\"><table><thead><tr><th scope=\"col\">Trial</th>"
+        "<th scope=\"col\">Run</th><th scope=\"col\">Objective</th><th scope=\"col\">Best "
+        "so far</th></tr></thead><tbody>" + history + "</tbody></table></div></div></section>"
+        "<section class=\"panel\"><h2>Parallel Coordinates</h2><div id=\"parallel-chart\"></div>"
+        "<div id=\"parallel-table\"><div class=\"table-scroll\"><table><thead>" + parallel +
+        "</tbody></table></div></div></section><section class=\"panel\"><h2>Parameter "
+        "Importance</h2><div id=\"importance-chart\"></div><div id=\"importance-table\">" +
+        empty(importance, "Parameter importance needs completed trials.") +
+        "<div class=\"table-scroll\"><table><thead><tr><th scope=\"col\">Parameter</th>"
+        "<th scope=\"col\">Importance</th></tr></thead><tbody>" + importance +
+        "</tbody></table></div></div></section><section class=\"panel\"><h2>Trial Leaderboard</h2>"
         "<label>Trial state<select id=\"trial-state\" data-capability=\"list_experiment_trials\">"
         "<option value=\"\">All states</option><option>running</option><option>complete</option>"
         "<option>pruned</option><option>failed</option></select></label>"
@@ -319,7 +423,12 @@ std::string study_page(const ExperimentsPage& page) {
             "\" aria-label=\"Compare trial " + escape(trial.at("number")) + "\"></td><td>" +
             link(page, "/train/experiment/run", "run", trial.at("run"),
                  "Trial " + trial.at("number").dump(), "get_run_metrics") + "</td><td>" +
-            escape(trial.at("state")) + "</td><td>" + escape(trial.value("objective", json("—"))) +
+            escape(trial.at("state")) +
+            (!page.data.value("promoted_model", std::string()).empty() &&
+                     trial.value("model", std::string()) == page.data.value("promoted_model", std::string())
+                 ? " <span class=\"badge status-success\">promoted</span>"
+                 : std::string()) +
+            "</td><td>" + escape(trial.value("objective", json("—"))) +
             "</td><td>" + escape(trial.at("params").dump()) + "</td><td>";
         if (page.can_promote && trial.at("state") == "complete" && trial.at("model") != "") {
             html += action("promote_trial", "Promote", page.study, trial.at("run"));
@@ -396,6 +505,10 @@ std::string web_ui_experiments(const ExperimentsPage& page, WebUiViewer viewer) 
         html += list_page(page);
     } else if (page.mode == "study") {
         html += study_page(page);
+        details = page.trial_metrics;
+        html += "<section class=\"panel\" id=\"initial-data\"><h2>Recorded Data</h2>" +
+            (details.empty() ? std::string("<p>No trial has recorded curves yet.</p>")
+                             : metric_tables(details)) + "</section>";
     } else {
         html += plot_controls(page.mode == "compare" ? "compare_runs" : "get_run_metrics");
         details = page.mode == "compare" ? page.data.value("details", json::array()) :
@@ -411,7 +524,8 @@ std::string web_ui_experiments(const ExperimentsPage& page, WebUiViewer viewer) 
     html += "<script type=\"application/json\" id=\"experiment-data\">" + safe_json({
         {"customer_id", page.customer_id}, {"mode", page.mode}, {"study", page.study},
         {"run", page.run}, {"runs", page.runs}, {"data", page.data}, {"analysis", page.analysis},
-        {"details", details}, {"can_write", page.can_write}, {"can_promote", page.can_promote}}) +
+        {"details", details}, {"can_write", page.can_write}, {"can_promote", page.can_promote},
+        {"metric_names", metric_aliases()}}) +
         "</script></section>";
     for (const std::string_view name : {"uPlot.iife.js", "experiments.js"}) {
         html += "<script defer src=\"" + std::string(web_ui_experiment_asset_url(name)) + "\"></script>";

@@ -2,7 +2,9 @@
 
 ## Call a model
 
-**Ship → Models** lists every model with its project, when it was trained and its score. Press
+**Ship → Models** lists every model with its project, when it was trained and its score. A model
+trained by a study names its study and trial, and the model a study promoted is marked
+**promoted**. Press
 **Publish**, then call it with a lake key. The page shows this call with your space, workspace and
 model filled in; `workspace_id` is required:
 
