@@ -451,7 +451,10 @@ contend with that copy for the replication mutex. The page no longer makes the r
   `/ship/indexes/datasets`, which reads the projected `system.datasets` list.
 - **A long Ask Orama turn** shows which agent is working, for how long, its latest message and
   retries, and the agent it brought in, through lake#451's report on the asking turn
-  ([ask-orama.md](../api/ask-orama.md)). That page read is lake's own `get_agent_task`, not Zetta.
+  ([ask-orama.md](../api/ask-orama.md)). That page read is lake's own `get_agent_task`; since
+  lake#375 it reads the task's record in its workspace (`get_record`, one call), because the
+  agent's message and answer live there. The Apps and Experiments working panels with `task=` read
+  the same record once.
 - **`Server-Timing` names each Zetta call** (`zetta_<capability>;dur=`), so the live walk after a
   deployment reads the slow engine call directly from the page and from each panel.
 

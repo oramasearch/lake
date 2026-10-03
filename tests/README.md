@@ -497,3 +497,16 @@ expiry, missing, malformed and unknown `application_id`, least privilege, not re
 stores (`seed_legacy_application_authorization_code`);
 `PostgresApplicationAuthorizationCodes.MigrationRecordsEachLiveCodesOwnerForTheCopy` migration
 `0061_application_authorization_code_workspaces`.
+Agent tasks (lake#374, lake#375): `test_workspace_records.cpp`'s
+`AnAgentTaskKeepsItsFirstAnswerAndRereadsARacedEvent` covers the record (sealed, written once, a raced
+write reread, the first answer kept, another key or space not opening, a request filled in), and
+`AgentTasksKeepWhatWasWrittenInTheirOwnWorkspace` and
+`TheOneShotCopyMovesAgentTaskContentIntoEachTasksWorkspace` cover two spaces with two workspaces
+each and the copy in both stores (`seed_legacy_agent_task`);
+`PostgresAgentTasks.MigrationRecordsEachTasksOwnerAndKeepsDispatchContentFree` migration
+`0062_agent_task_workspaces`. `stream_fixture.hpp`'s `seed_agent_task_request`,
+`seed_agent_task_answer` and `agent_task_content` write and read a task's record for tests that
+create or finish tasks directly in a store; `AgentRuns::task` and `HttpResponseIsolation`'s
+`assembled_task` read a task from both halves, and `test_instance_kek` gives memory-store tests a
+KEK. `Stores/AgentLeases.ReclaimedTaskUsesFirstTerminalWriteAndRejectsLaterEvents` also checks that
+the workspace keeps only the winning answer.

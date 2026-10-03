@@ -72,6 +72,9 @@ protected:
             store, dispatch, std::vector<std::string>{"agent-project"}, 0s);
         ASSERT_TRUE(lake::control::settled(liquid::runtime::block_on(bus->start())));
         lake::api::register_core_capabilities(registry, "test");
+        // The request is a record in the task's workspace, as agent_turn writes it (lake#374).
+        lake::test::seed_agent_task_request(workspaces, *task, {{"lake_token", "{{credential}}"}},
+                                            lake::test::test_instance_kek());
     }
 
     lake::api::ApiResult call(const std::string& name, json input) {
@@ -83,9 +86,7 @@ protected:
         context.acting_identity = "agent-service:agent-project";
         context.credential_kind = "agent_service";
         context.agent_service = "agent-project";
-        if (const char* key = std::getenv("LAKE_INSTANCE_KEK")) {
-            context.instance_kek = key;
-        }
+        context.instance_kek = lake::test::test_instance_kek();
         input["task_id"] = task_id;
         input["agent"] = "agent-project";
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
@@ -128,9 +129,7 @@ protected:
         context.agent_bus = bus.get();
         context.authorized = true;
         context.acting_identity = "admin";
-        if (const char* key = std::getenv("LAKE_INSTANCE_KEK")) {
-            context.instance_kek = key;
-        }
+        context.instance_kek = lake::test::test_instance_kek();
         const json input{
             {"customer_id", customer_id}, {"workspace_id", workspace_id}, {"task_id", task_id}};
         const auto completed =
@@ -252,9 +251,7 @@ TEST_P(AgentLeases, EventsAndTaskCapabilityCallsExtendTheLease) {
     context.credential_session_id = principal->session_id;
     context.credential_token_hash = principal->workload_token_hash;
     context.acting_identity = principal->taap_id;
-    if (const char* key = std::getenv("LAKE_INSTANCE_KEK")) {
-        context.instance_kek = key;
-    }
+    context.instance_kek = lake::test::test_instance_kek();
     ASSERT_TRUE(registry.call("server_info", json::object(), context).ok);
     age(11);
     pump();
@@ -262,8 +259,7 @@ TEST_P(AgentLeases, EventsAndTaskCapabilityCallsExtendTheLease) {
     // Even past the old running deadline, activity keeps the lease alive.
     for (int i = 0; i < 7; ++i) {
         age(50);
-        ASSERT_TRUE(store->record_agent_task_event(
-            task_id, "agent-project", "Running", "working", nullptr));
+        ASSERT_TRUE(store->record_agent_task_event(task_id, "agent-project", "Running"));
         pump();
     }
     EXPECT_EQ(store->get_agent_task(task_id)->attempts, 1);
@@ -299,6 +295,14 @@ TEST_P(AgentLeases, ReclaimedTaskUsesFirstTerminalWriteAndRejectsLaterEvents) {
     const auto stream = events();
     ASSERT_EQ(stream.size(), 4U) << "only the winning terminal event is published";
     EXPECT_EQ(stream.back()["type"], first.ok ? "result" : "failed");
+    // The workspace keeps the winner's answer and nothing of the loser's (lake#375).
+    const auto content = lake::test::agent_task_content(workspaces, *task,
+                                                        lake::test::test_instance_kek());
+    ASSERT_TRUE(content);
+    EXPECT_EQ(content->phase, task->phase);
+    const json winner = first.ok ? json{{"winner", "a"}} : json();
+    EXPECT_EQ(content->result, winner);
+    EXPECT_EQ(content->message, first.ok ? "" : "b");
     EXPECT_EQ(call("publish_agent_event", {{"type", "progress"}}).error.code, "conflict");
     EXPECT_EQ(call("publish_agent_event", {{"type", "result"}}).error.code, "conflict");
 }

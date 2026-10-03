@@ -83,6 +83,7 @@
 #include "lake/api/store_owner.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_ui.hpp"
+#include "agent_task_records_api.hpp"
 #include "route_guard.hpp"
 #include "secret_records_api.hpp"
 #include "workspace_records_api.hpp"
@@ -9467,8 +9468,10 @@ struct ApiServer::Impl {
                     "get_agent_task",
                     {{"customer_id", page.customer_id}, {"task_id", build->id}},
                     context));
-                page.data["build"] = {{"status", build->phase.empty() ? "pending" : build->phase},
-                                      {"message", build->message}};
+                page.data["build"] = {
+                    {"status", build->phase.empty() ? "pending" : build->phase},
+                    {"message", followed.ok ? followed.value.value("message", build->message)
+                                            : build->message}};
                 if (!followed.ok) {
                     page.error = "The Project Agent's design could not be read: " +
                                  followed.error.message;
@@ -11512,6 +11515,9 @@ struct ApiServer::Impl {
                 pending->agent == "agent-experiments" && pending->kind == "experiment" &&
                 (pending->phase.empty() || pending->phase == "Pending" ||
                  pending->phase == "Running")) {
+                // The agent's latest message is in the task's workspace (lake#375).
+                static_cast<void>(
+                    control::settled(co_await load_agent_task_content(context, *pending)));
                 page.agent_task = {{"task_id", pending->id},
                                    {"message", pending->message},
                                    {"attempts", pending->attempts},
@@ -11855,6 +11861,9 @@ struct ApiServer::Impl {
                     pending->agent == "agent-application" && pending->kind == "app" &&
                     (pending->phase.empty() || pending->phase == "Pending" ||
                      pending->phase == "Running")) {
+                    // The agent's latest message is in the task's workspace (lake#375).
+                    static_cast<void>(
+                        control::settled(co_await load_agent_task_content(context, *pending)));
                     page.agent_task = {
                         {"task_id", pending->id},
                         {"message", pending->message},

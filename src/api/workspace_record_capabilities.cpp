@@ -7,7 +7,8 @@
 // auth_app_organizations, lake#353 and lake#354; auth_app_signing_keys and auth_app_webhooks,
 // lake#352 and lake#355; the five secrets tables, lake#328-#332; dynamic leases, lake#362;
 // auth_applications, the settings of each application, lake#351; platform_environments and
-// platform_mirror, lake#358 and lake#359). A collection
+// platform_mirror, lake#358 and lake#359; agent_tasks, the content of each agent task, lake#374
+// and lake#375). A collection
 // leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
 // and verified on dev, dropped by migration 0050, lake#483).
 
@@ -20,6 +21,7 @@
 #include <vector>
 
 #include "lake/api/capabilities.hpp"
+#include "lake/control/agent_task_records.hpp"
 #include "lake/control/application_authorization_codes.hpp"
 #include "lake/control/application_user_records.hpp"
 #include "lake/control/application_credential_records.hpp"
@@ -41,7 +43,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 22> copy_collections = {"opportunities",
+constexpr std::array<std::string_view, 23> copy_collections = {"opportunities",
                                                                "stream_owners",
                                                                "drive_share_links",
                                                                "auth_app_webhook_events",
@@ -62,7 +64,8 @@ constexpr std::array<std::string_view, 22> copy_collections = {"opportunities",
                                                                "auth_applications",
                                                                "platform_environments",
                                                                "platform_mirror",
-                                                               "auth_app_authorization_codes"};
+                                                               "auth_app_authorization_codes",
+                                                               "agent_tasks"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -2017,6 +2020,117 @@ liquid::runtime::task<ApiResult> copy_secrets(ApiContext& context, const std::st
     co_return co_await copy_secret_rows(context, collection, mode, *rows, limit, DataKeyCopy{});
 }
 
+// The content of each agent task (lake#374, lake#375): one record per task in its own workspace,
+// keyed by the task, with the task's creation instant, holding the retired body, message, result
+// and finished phase. A task whose events were recorded after the deploy but before the copy has a
+// record without a request: the copy gives it the request and keeps what the events wrote, and
+// verify accepts any record changed since (a later lake revision) whose request matches.
+bool same_agent_task(const control::AgentTaskContent& stored, const control::LegacyAgentTask& row) {
+    const control::AgentTask& source = row.task;
+    const std::string phase =
+        source.phase == "Succeeded" || source.phase == "Failed" ? source.phase : std::string();
+    const bool changed = stored.lake_revision > 1;
+    return stored.customer_id == source.customer_id && stored.request == source.body &&
+           (changed || (stored.message == source.message && stored.result == source.result &&
+                        stored.phase == phase && stored.at_us == row.at_us));
+}
+
+liquid::runtime::task<ApiResult> copy_agent_tasks(ApiContext& context, const std::string& mode,
+                                                  const std::string& after, int limit) {
+    if (auto assigned = context.store->assign_legacy_agent_tasks(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_agent_tasks(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    json unresolved = json::array();
+    // A task whose workspace was deleted went with it and does not block completion.
+    bool blocking = false;
+    std::map<std::string, std::vector<const control::LegacyAgentTask*>> by_workspace;
+    for (const control::LegacyAgentTask& row : *rows) {
+        if (row.workspace_id.empty()) {
+            blocking = blocking || row.outcome != "workspace_deleted";
+            unresolved.push_back({{"id", row.task.id},
+                                  {"customer_id", row.task.customer_id},
+                                  {"outcome", row.outcome}});
+        } else {
+            by_workspace[row.workspace_id].push_back(&row);
+        }
+    }
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, owned] : by_workspace) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = owned.front()->task.customer_id;
+        tally.rows = owned.size();
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        for (const control::LegacyAgentTask* row : owned) {
+            const control::AgentTask& source = row->task;
+            // Any space's record under the task's key: verify compares the space.
+            auto present = control::settled(
+                co_await control::get_agent_task_content(*records, source.id, {}));
+            if (!present) {
+                tally.error = present.error().code + ": " + present.error().message;
+                break;
+            }
+            if (mode == "verify") {
+                if (!*present) {
+                    tally.missing.push_back(source.id);
+                } else if (!same_agent_task(**present, *row)) {
+                    tally.mismatched.push_back(source.id);
+                } else {
+                    ++tally.verified;
+                }
+                continue;
+            }
+            if (*present && !(*present)->request.is_null()) {
+                ++tally.already_present;
+                continue;
+            }
+            if (*present) {
+                // Events recorded before the copy: add the request, keep what they wrote.
+                auto filled = control::settled(co_await control::fill_agent_task_request(
+                    *records, source.id, source.customer_id, source.body));
+                if (!filled) {
+                    tally.error = filled.error().code + ": " + filled.error().message;
+                    break;
+                }
+                ++tally.copied;
+                continue;
+            }
+            const bool finished = source.phase == "Succeeded" || source.phase == "Failed";
+            auto written = control::settled(co_await control::create_agent_task_content(
+                *records, {.task_id = source.id,
+                           .customer_id = source.customer_id,
+                           .agent = source.agent,
+                           .request = source.body,
+                           .message = source.message,
+                           .result = source.result,
+                           .phase = finished ? source.phase : std::string(),
+                           .at_us = row->at_us}));
+            if (!written && written.error().code == "conflict") {
+                ++tally.already_present; // a concurrent copy or event; verify compares it
+                continue;
+            }
+            if (!written) {
+                tally.error = written.error().code + ": " + written.error().message;
+                break;
+            }
+            ++tally.copied;
+        }
+    }
+    co_return copy_result("agent_tasks", mode, rows->size(), limit,
+                          rows->empty() ? std::string() : rows->back().task.id,
+                          std::move(unresolved), tallies, blocking);
+}
+
 // Only the operator copies, and the operator bypasses policy; anyone else is refused here, before
 // a policy lookup on an object no grant can name.
 std::expected<std::string, ApiError> records_object(const json&, ApiContext&) {
@@ -2108,6 +2222,9 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "auth_applications") {
                 co_return co_await copy_application_settings(context, mode, after, limit);
+            }
+            if (input.at("collection") == "agent_tasks") {
+                co_return co_await copy_agent_tasks(context, mode, after, limit);
             }
             if (input.at("collection") == "auth_app_signing_keys") {
                 co_return co_await copy_application_signing_keys(context, mode, after, limit);

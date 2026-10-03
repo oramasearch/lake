@@ -140,3 +140,12 @@ adds the code's instants and revision and the `LegacyApplicationAuthorizationCod
 reads; `store.hpp` replaces `create_/consume_application_authorization_code` with
 `assign_legacy_application_authorization_codes`, `legacy_application_authorization_codes` and
 `record_legacy_application_authorization_code_copied`, which serve only the copy.
+`agent_task_records.hpp` holds what was written for an agent task in its workspace (lake#374,
+lake#375): the codec (one record per task, keyed by it and found by its space) with the request,
+the agent's latest message, its answer and the finished phase. `record_agent_task_content` writes
+an event with `if_revision`, rereads on a conflict and leaves a finished record as it is;
+`fill_agent_task_request` serves the copy. In `store.hpp`, `AgentTask` gains `parent_task_id`, and
+the store answers its dispatch half only (an empty `body`, a null `result`, and as `message` only
+lake's notice); `create_agent_task` keeps a caller-made `id`, `record_agent_task_event` takes no
+message or answer, and `assign_legacy_agent_tasks`/`legacy_agent_tasks` (`LegacyAgentTask`) serve
+only the copy.

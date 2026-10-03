@@ -1,6 +1,8 @@
 # The agent bus: agent traffic over Zetta pub/sub
 
-**Issue:** [lake#269](https://github.com/oramasearch/lake/issues/269) · **Code:**
+**Issue:** [lake#269](https://github.com/oramasearch/lake/issues/269); where a task lives:
+[lake#374](https://github.com/oramasearch/lake/issues/374),
+[lake#375](https://github.com/oramasearch/lake/issues/375) · **Code:**
 `include/lake/control/agent_bus.hpp`, `src/control/agent_bus.cpp`, the bus capabilities in
 `src/api/workspace_capabilities.cpp` · **Tests:** `AgentRuns.LibraryAgentsTakeTasksAndAnswerOverTheBus`,
 `HttpResponseIsolation.LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho`, the Ask Orama,
@@ -30,12 +32,15 @@ workspaces' events are stored on different Zettas.
 ## A turn, end to end
 
 1. `agent_turn` (or a page: Ask Orama, the Agent Factory, Design → Opportunities, the pipeline's
-   ask box, Ship → Apps or Train → Experiments) writes the task to `agent_tasks` (migration
-   `0032_agent_tasks`, immutable `workspace_id` added by `0038_workspace_data_plane`), publishes it on the agent's topic and answers
-   `{task_id, status: pending}` at once.
+   ask box, Ship → Apps or Train → Experiments) writes the task's request to its workspace Zetta
+   and then its dispatch row to `agent_tasks` (migration `0032_agent_tasks`, immutable
+   `workspace_id` added by `0038_workspace_data_plane`; see
+   [where a task lives](#where-a-task-lives-lake374-lake375)), publishes it on the agent's topic
+   and answers `{task_id, status: pending}` at once.
 2. The agent's service long-polls `receive_agent_tasks`, then calls `claim_agent_task`. **Exactly one
    claim per attempt succeeds.** Lake generates the task's credential, `lat.<task id>.<secret>`, stores only its
-   SHA-256 in `agent_task_status`, and answers the task's body with every `"{{credential}}"` in it
+   SHA-256 in `agent_task_status`, and answers the task's body (its request, read from the task's
+   workspace just before the claim) with every `"{{credential}}"` in it
    replaced (as `lake_token` and `zetta_token`). The credential acts as the person who asked,
    with the task's scopes, until the task finishes or is reclaimed. Claim also sets a renewable
    lease and returns `lease_seconds`, `lease_until`, and `attempts`. Neither call requires the agent to echo the
@@ -43,13 +48,12 @@ workspaces' events are stored on different Zettas.
 3. The agent does the work and reports with `publish_agent_event`: `progress` messages while it
    works, then its `result` (its whole answer, `{ok, result, …}`) or `failed`. The workspace ID is
    optional here too.
-4. Lake atomically applies the event to `agent_task_status`, then publishes it directly to that
-   workspace. Only a `Running` task accepts events. The first terminal write wins; a concurrent
-   losing result returns `conflict` and is never published as an accepted answer. If publication
-   fails after acceptance, the authoritative task state remains readable through `get_agent_task`.
-   A finished task stays finished. Moving remaining task bodies/results out of the control store
-   is tracked in the architecture audit; no new PostgreSQL event storage is introduced here.
-   `get_agent_task` and the pages read the task from there.
+4. Lake atomically applies the event to `agent_task_status`, records its message and answer in
+   the task's workspace record, then publishes it directly to that workspace. Only a `Running`
+   task accepts events. The first terminal write wins; a concurrent losing result returns
+   `conflict` and is never recorded or published as an accepted answer. If publication fails after
+   acceptance, the task state remains readable through `get_agent_task`. A finished task stays
+   finished. `get_agent_task` and the pages read the task from both halves.
 
 The dispatch recovery loop runs separately from HTTP requests. It republishes unclaimed tasks
 and reclaims expired claims; it never polls a Lake-bus event topic. Task credentials cannot select
@@ -117,16 +121,75 @@ agent is working without following a second task:
   *ExperimentsAgent did not finish: <message>*.
 
 Each report is applied to the asking task with `record_agent_task_event` (it stays `Running`; this
-renews its lease) and published on the workspace's `agent-events` as a `progress` event of the
-asking task, carrying `delegated_task_id` and `delegated_agent`. Reports are best effort: an
-asking turn that already finished, or a workspace publication that fails, leaves the delegated
-turn unaffected. Lake's own retry notices for the delegated task are not mirrored. The bus still
-carries only task IDs; nothing new is stored in PostgreSQL beyond the task's existing message and
-body.
+renews its lease), written as the asking task's message in its workspace record, and published on
+the workspace's `agent-events` as a `progress` event of the asking task, carrying
+`delegated_task_id` and `delegated_agent`. Reports are best effort: an asking turn that already
+finished, or a workspace write or publication that fails, leaves the delegated turn unaffected.
+Lake's own retry notices for the delegated task are not mirrored. The bus still carries only task
+IDs. The asking task's ID is the delegated task's `agent_tasks.parent_task_id` (migration `0062`),
+so routing a report reads no workspace; the delegated task's request still names it as
+`parent_task_id`, as before.
 
 A report that reaches the workspace publication used to end without a `co_return`, so the
 `agent_turn` that awaited it destroyed an unset result: a delegated turn whose asking task was still
 `Running` and whose workspace was reachable could abort the lake process (lake#476).
+
+## Where a task lives (lake#374, lake#375)
+
+A task has two halves ([workspace-records.md](../architecture/workspace-records.md)).
+
+**PostgreSQL keeps the dispatch half**, which the bus, the claim, the lease and the operator's
+schema need without reading a workspace:
+
+- `agent_tasks`: `id`, `customer_id`, `workspace_id`, `agent`, `kind`, `conversation_id`,
+  `parent_task_id` (0062), `scopes`, `deadline_seconds`, `desired`, `generation`,
+  `requested_by_user_id`, `requested_by_taap_id`, `published_at`, `created_at`, `updated_at`;
+- `agent_task_status`: `phase`, `credential_sha256`, `started_at`, `finished_at`,
+  `observed_generation`, `events_from`, `lease_until`, `lease_seconds`, `attempts`,
+  `retry_notice_pending`, and `notice` (0062).
+
+The credential hash stays because it is the claim. It is the SHA-256 of a credential that lives
+only until the task finishes or is reclaimed, and the claim writes it in the same statement as the
+phase and the lease. Every call made with a task credential checks it before any workspace is
+chosen. `notice` is lake's own text for a task it reclaimed or failed: a retry, the final failure
+after three expiries, or nobody picking the task up. It is never what a person or an agent wrote.
+It is shown in place of the agent's message until the agent's next event clears it.
+
+**The task's workspace Zetta keeps what was written for it**, as one sealed record per task in
+`lake_agent_tasks` (`AgentTaskContentCodec`, `include/lake/control/agent_task_records.hpp`):
+
+- the request body, with `"{{credential}}"` still in place, since the credential is never stored;
+- the agent's latest message;
+- its answer, and the finished phase.
+
+The record is keyed by the task id and found by its space, and it opens only in that workspace.
+Lake assembles the task callers see from both halves, so `get_agent_task`, `receive_agent_events`,
+the claim reply and the pages answer exactly as before.
+
+- **Create.** `agent_turn` writes the request record `if_absent` under a task id it makes, then
+  inserts the row. A row never names a missing request; a row that fails to insert leaves an
+  unreachable record. A workspace that is not ready refuses the turn (`workspace_not_ready`).
+- **Claim.** The claim and its lease are one PostgreSQL statement (`claim_agent_task`), with no
+  workspace call inside it, so exactly one claim per attempt still succeeds. The reply needs the
+  request, which lake reads with one `get_record` just before that statement, and only for a task
+  still waiting for that agent. A workspace that cannot answer refuses the claim and leaves the
+  task waiting. A task whose request is not in its workspace (one from before the move, not
+  copied yet) is refused with `not_found`, never handed out with an empty request.
+- **Events.** PostgreSQL decides first: `record_agent_task_event` moves the phase only for a
+  `Running` task, so the first terminal write wins there. Lake then writes the message (and, for
+  `result` or `failed`, the answer) to the record conditionally on the revision it read, rereading
+  on a conflict. A record that already holds a finished answer is never changed, so a late
+  progress write cannot erase the answer. If that write fails after the row accepted the event,
+  `publish_agent_event` still publishes the event and answers the workspace's error. The task stays
+  finished, and its answer is then only in the event stream.
+- **Reads.** `get_agent_task`, `receive_agent_events`, a conversation's next turn and the working
+  panels each read the record once. There is no fallback to PostgreSQL or to another workspace. A
+  workspace that is not ready answers `workspace_not_ready`, and a deleted workspace takes its
+  tasks' records with it.
+
+Migration `0062_agent_task_workspaces` adds the two columns, records each task's owner for the
+one-shot copy, and drops nothing. The copy and the cutover are in
+[workspace-records.md](../architecture/workspace-records.md#cutover-runbook-agent-tasks-dev-cluster).
 
 ## What the bus loses, the store recovers
 
@@ -145,7 +208,8 @@ So the truth is the store, and every 15 seconds lake's bus loop:
   event with `attempts: 3` and **the agent stopped responding**. There is no fourth claim.
 
 Migration `0042_agent_task_leases` adds the lease, duration, attempt count and pending-notice flag
-to `agent_task_status`. One indexed `UPDATE ... WHERE phase = 'Running' AND lease_until < now()
+to `agent_task_status`; since `0062` the retry and failure texts are written to its `notice`
+column. One indexed `UPDATE ... WHERE phase = 'Running' AND lease_until < now()
 RETURNING task_id` performs expiry transitions atomically across replicas. Retry notices remain
 pending until workspace publication succeeds, including across Lake restarts; claims wait for
 that publication. Publication is at least once, so concurrent sweepers or an interruption between
@@ -165,8 +229,9 @@ The registry renews before dispatch, checks the current credential hash and reje
 credential even if its principal was resolved before reclaim. Agents require no heartbeat changes.
 
 Experiments, Apps, Project foundation and pipeline working panels render the same persisted
-message that recovery publishes on `agent-events`; ordinary page refresh reads the existing task
-state without another workspace call. `receive_agent_events` exposes the retained retry notices
+message that recovery publishes on `agent-events`: lake's notice from the task's row, which
+outranks the agent's message. Since lake#375 the agent's own message is in the task's workspace
+record, so a working panel reads that record once (`get_record`) on each refresh. `receive_agent_events` exposes the retained retry notices
 and attempt numbers, and `get_agent_task` includes `attempts`, `lease_until` and `lease_seconds`.
 
 ### Re-delivery and the shared-credential limitation

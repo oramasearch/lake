@@ -96,6 +96,13 @@ the repository's workspace, written by the sync with conditional writes; each en
 object stays in PostgreSQL under the environment's derived id, so authorization reads no workspace.
 See `docs/api/platform.md`.
 
+Agent tasks follow (lake#374, lake#375, migration `0062`): each task's request, its agent's
+messages and its answer are one sealed record in the task's workspace Zetta, written before the
+dispatch row and changed only after PostgreSQL accepted an event, conditionally on the revision
+read. `agent_tasks` and `agent_task_status` stay as the content-free dispatch rows; the claim and
+its lease remain one PostgreSQL statement, and the claim reply reads the request just before it.
+See `docs/api/agent-bus.md#where-a-task-lives-lake374-lake375`.
+
 Every repository belongs to one workspace (lake#315 part 1, migration `0051`): an immutable
 `repositories.workspace_id` required on every create and import, returned on reads and carried
 through push authorization. It is routing only; repository metadata and content have not moved.

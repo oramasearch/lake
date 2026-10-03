@@ -197,3 +197,14 @@ dropped. `app_authorization_codes` (protected-app forward auth) is unrelated and
 latest guard is `application_authorization_code_workspaces_guard`; the operator must vendor this
 schema and update its guard before rollout. See
 [apps.md](../docs/api/apps.md#where-authorization-codes-live-lake363).
+Migration `0062_agent_task_workspaces` moves what was written for an agent task out of
+`agent_tasks` and `agent_task_status` (lake#374, lake#375): its request body, the agent's message
+and its answer are one sealed record in the workspace Zetta of the task's workspace. Both tables
+stay as the content-free dispatch rows the bus, the claim and its lease use; new rows leave `body`,
+`message` and `result` empty. It adds `agent_tasks.parent_task_id` (the asking task of a delegated
+turn) and `agent_task_status.notice` (lake's own retry and failure text), both filled from existing
+rows, and records the owner of each task with content in `workspace_assignments` under
+`object_table = 'agent_task_content'` for `copy_workspace_records`: `task_workspace`,
+`needs_selection` while the task names no workspace, or `workspace_deleted`. Nothing is dropped.
+The latest guard is `agent_task_workspaces_guard`; the operator must vendor this schema and update
+its guard before rollout. See [agent-bus.md](../docs/api/agent-bus.md#where-a-task-lives-lake374-lake375).

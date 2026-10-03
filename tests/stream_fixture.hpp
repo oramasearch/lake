@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <optional>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -11,6 +13,7 @@
 
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/application_credential_records.hpp"
+#include "lake/control/agent_task_records.hpp"
 #include "lake/control/application_settings_records.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/memory_store.hpp"
@@ -316,6 +319,81 @@ inline void seed_application_settings(const std::shared_ptr<control::WorkspaceSe
     if (!written) {
         throw std::runtime_error(written.error().message);
     }
+}
+
+// The instance KEK of tests that run without LAKE_INSTANCE_KEK: workspace records need one.
+inline std::string test_instance_kek() {
+    if (const char* configured = std::getenv("LAKE_INSTANCE_KEK"); configured && *configured) {
+        return configured;
+    }
+    return "6167656e742d7461736b2d7265636f7264732d746573742d6b656b2d30303031";
+}
+
+// The records of `workspace`, reached through `workspaces` as lake reaches them.
+inline control::WorkspaceRecords test_workspace_records(
+    const std::shared_ptr<control::WorkspaceService>& workspaces, const std::string& customer,
+    const std::string& workspace, std::string_view instance_kek) {
+    auto records = control::WorkspaceRecords::open(
+        [workspaces, customer, workspace](std::string capability, bool read, nlohmann::json input) {
+            return workspaces->call(customer, workspace, std::move(capability), read,
+                                    std::move(input));
+        },
+        workspace, instance_kek);
+    if (!records) {
+        throw std::runtime_error(records.error().message);
+    }
+    return std::move(*records);
+}
+
+// Writes the request of a task created directly in `store`, as agent_turn does (lake#374): one
+// record in the task's workspace Zetta.
+inline void seed_agent_task_request(const std::shared_ptr<control::WorkspaceService>& workspaces,
+                                    const control::AgentTask& task, nlohmann::json request,
+                                    std::string_view instance_kek) {
+    auto records =
+        test_workspace_records(workspaces, task.customer_id, task.workspace_id, instance_kek);
+    auto written = control::settled(liquid::runtime::block_on(control::create_agent_task_content(
+        records, {.task_id = task.id,
+                  .customer_id = task.customer_id,
+                  .agent = task.agent,
+                  .request = std::move(request)})));
+    if (!written) {
+        throw std::runtime_error(written.error().message);
+    }
+}
+
+// Records what the task's agent said, as publish_agent_event does once the store accepted the
+// event (lake#375): its message, and for Succeeded or Failed its answer.
+inline void seed_agent_task_answer(const std::shared_ptr<control::WorkspaceService>& workspaces,
+                                   const control::AgentTask& task, std::string phase,
+                                   std::string message, nlohmann::json result,
+                                   std::string_view instance_kek) {
+    auto records =
+        test_workspace_records(workspaces, task.customer_id, task.workspace_id, instance_kek);
+    auto written = control::settled(liquid::runtime::block_on(control::record_agent_task_content(
+        records, {.task_id = task.id,
+                  .customer_id = task.customer_id,
+                  .agent = task.agent,
+                  .message = std::move(message),
+                  .result = std::move(result),
+                  .phase = phase == "Running" ? std::string() : std::move(phase)})));
+    if (!written) {
+        throw std::runtime_error(written.error().message);
+    }
+}
+
+// A task's record in its workspace, or nullopt.
+inline std::optional<control::AgentTaskContent>
+agent_task_content(const std::shared_ptr<control::WorkspaceService>& workspaces,
+                   const control::AgentTask& task, std::string_view instance_kek) {
+    auto records =
+        test_workspace_records(workspaces, task.customer_id, task.workspace_id, instance_kek);
+    auto found = control::settled(liquid::runtime::block_on(
+        control::get_agent_task_content(records, task.id, task.customer_id)));
+    if (!found) {
+        throw std::runtime_error(found.error().message);
+    }
+    return *found;
 }
 
 } // namespace lake::test

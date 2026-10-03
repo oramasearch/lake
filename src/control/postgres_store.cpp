@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <climits>
@@ -72,6 +73,32 @@ constexpr std::string_view legacy_stream_owner_assignment_sql =
     "CASE WHEN w.id IS NULL THEN 'unknown_workspace' WHEN w.desired = 'deleted' THEN "
     "'workspace_deleted' ELSE 'recorded_workspace' END FROM stream_owners s LEFT JOIN workspaces "
     "w ON w.id::text = s.workspace_id AND w.customer_id = s.customer_id ON CONFLICT DO NOTHING";
+// Migration 0062's assignment of the retired agent task content (db/schema.sql), rerun before each
+// copy so a task an old replica wrote after the migration is recorded too. A task with content is
+// owned by its own workspace (agent_tasks.workspace_id, 0038) while that workspace is live; one
+// that names none needs a selection, and one whose workspace was deleted went with it.
+constexpr std::string_view legacy_agent_task_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'agent_task_content', t.id, t.customer_id, CASE WHEN w.desired <> "
+    "'deleted' THEN w.id END, CASE WHEN t.workspace_id IS NULL OR w.id IS NULL THEN "
+    "'needs_selection' WHEN w.desired = 'deleted' THEN 'workspace_deleted' ELSE "
+    "'task_workspace' END FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = t.id "
+    "LEFT JOIN workspaces w ON w.id = t.workspace_id AND w.customer_id = t.customer_id WHERE "
+    "t.body <> '{}'::jsonb OR COALESCE(ts.message, '') <> '' OR COALESCE(ts.result, "
+    "'null'::jsonb) <> 'null'::jsonb ON CONFLICT DO NOTHING";
+// A task id lake made, or a parent task id it names: canonical UUID text.
+bool agent_task_uuid(std::string_view value) {
+    if (value.size() != 36) {
+        return false;
+    }
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const bool dash = i == 8 || i == 13 || i == 18 || i == 23;
+        if (dash ? value[i] != '-' : !std::isxdigit(static_cast<unsigned char>(value[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
 // Migration 0053's hour text: an hour exactly as lake prints it ("YYYY-MM-DDTHH:00:00Z"), which
 // the legacy row ids hash.
 constexpr std::string_view metering_hour_text_sql =
@@ -5459,21 +5486,24 @@ public:
             });
     }
 
+    // The dispatch half of a task (lake#374, lake#375). The retired content columns (body,
+    // message, result) are read only by legacy_agent_tasks; `message` here is lake's own notice.
     static constexpr const char* task_columns =
         "t.id::text, t.customer_id::text, t.agent, t.kind, COALESCE(t.conversation_id::text, ''), "
-        "t.body::text, array_to_json(t.scopes)::text, t.deadline_seconds, t.desired, "
-        "COALESCE(t.requested_by_user_id::text, ''), t.requested_by_taap_id, "
+        "COALESCE(t.parent_task_id::text, ''), array_to_json(t.scopes)::text, t.deadline_seconds, "
+        "t.desired, COALESCE(t.requested_by_user_id::text, ''), t.requested_by_taap_id, "
         "to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
-        "COALESCE(ts.phase, ''), COALESCE(ts.message, ''), "
+        "COALESCE(ts.phase, ''), COALESCE(ts.notice, ''), "
         "COALESCE(to_char(ts.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "''), "
         "COALESCE(to_char(ts.finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
         "''), "
-        "COALESCE(ts.credential_sha256, ''), COALESCE(ts.result, 'null'::jsonb)::text, "
+        "COALESCE(ts.credential_sha256, ''), "
         "COALESCE(ts.events_from, 0), COALESCE(t.workspace_id::text, ''), "
         "COALESCE(ts.lease_seconds, 600), COALESCE(ts.attempts, 1), "
         "COALESCE(to_char(ts.lease_until AT TIME ZONE 'UTC', "
         "'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), ''), COALESCE(ts.retry_notice_pending, false)";
+    static constexpr int task_column_count = 23;
 
     static Result<AgentTask> one_task(pqxx::work& tx, const std::string& id) {
         const pqxx::result rows = tx.exec_params(
@@ -5494,7 +5524,7 @@ public:
         task.agent = row[2].as<std::string>();
         task.kind = row[3].as<std::string>();
         task.conversation_id = row[4].as<std::string>();
-        task.body = nlohmann::json::parse(row[5].as<std::string>(), nullptr, false);
+        task.parent_task_id = row[5].as<std::string>();
         task.scopes =
             nlohmann::json::parse(row[6].as<std::string>()).get<std::vector<std::string>>();
         task.deadline_seconds = row[7].as<int>();
@@ -5507,13 +5537,12 @@ public:
         task.started_at = row[14].as<std::string>();
         task.finished_at = row[15].as<std::string>();
         task.credential_sha256 = row[16].as<std::string>();
-        task.result = nlohmann::json::parse(row[17].as<std::string>(), nullptr, false);
-        task.events_from = row[18].as<std::uint64_t>();
-        task.workspace_id = row[19].as<std::string>();
-        task.lease_seconds = row[20].as<int>();
-        task.attempts = row[21].as<int>();
-        task.lease_until = row[22].as<std::string>();
-        task.retry_notice_pending = row[23].as<bool>();
+        task.events_from = row[17].as<std::uint64_t>();
+        task.workspace_id = row[18].as<std::string>();
+        task.lease_seconds = row[19].as<int>();
+        task.attempts = row[20].as<int>();
+        task.lease_until = row[21].as<std::string>();
+        task.retry_notice_pending = row[22].as<bool>();
         return task;
     }
 
@@ -5544,15 +5573,19 @@ public:
             workspace->desired == "deleted") {
             return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
         }
-        if (in.agent.empty() || in.scopes.empty()) {
+        if (in.agent.empty() || in.scopes.empty() || (!in.id.empty() && !agent_task_uuid(in.id)) ||
+            (!in.parent_task_id.empty() && !agent_task_uuid(in.parent_task_id))) {
             return std::unexpected(StoreError{"invalid_input", "agent task is invalid"});
         }
         return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
-            const std::string id = new_uuid_v4();
+            // The request, its message and answer go to the task's workspace (lake#374): the row
+            // keeps the default empty body.
+            const std::string id = in.id.empty() ? new_uuid_v4() : in.id;
             tx.exec_params(
-                "INSERT INTO agent_tasks (id, customer_id, agent, kind, conversation_id, body, "
-                "scopes, deadline_seconds, requested_by_user_id, requested_by_taap_id, workspace_id) VALUES "
-                "($1::uuid, $2::uuid, $3, $4, NULLIF($5, '')::uuid, $6::jsonb, "
+                "INSERT INTO agent_tasks (id, customer_id, agent, kind, conversation_id, "
+                "parent_task_id, scopes, deadline_seconds, requested_by_user_id, "
+                "requested_by_taap_id, workspace_id) VALUES "
+                "($1::uuid, $2::uuid, $3, $4, NULLIF($5, '')::uuid, NULLIF($6, '')::uuid, "
                 "ARRAY(SELECT jsonb_array_elements_text($7::jsonb)), $8, NULLIF($9, '')::uuid, "
                 "$10, $11::uuid)",
                 id,
@@ -5560,7 +5593,7 @@ public:
                 in.agent,
                 in.kind.empty() ? std::string("api") : in.kind,
                 in.conversation_id,
-                in.body.dump(),
+                in.parent_task_id,
                 nlohmann::json(in.scopes).dump(),
                 in.deadline_seconds,
                 in.requested_by_user_id,
@@ -5688,16 +5721,14 @@ public:
 
     Result<AgentTask> record_agent_task_event(const std::string& id,
                                               const std::string& agent,
-                                              const std::string& phase,
-                                              const std::string& message,
-                                              const nlohmann::json& result) override {
+                                              const std::string& phase) override {
         return with_tx<AgentTask>([&](pqxx::work& tx) -> Result<AgentTask> {
             const bool finishing = phase != "Running";
             const pqxx::result updated = tx.exec_params(
-                "UPDATE agent_task_status ts SET phase = $3, message = $4, result = CASE WHEN $5 "
-                "THEN $6::jsonb ELSE ts.result END, finished_at = CASE WHEN $5 THEN now() ELSE "
-                "NULL END, credential_sha256 = CASE WHEN $5 THEN '' ELSE ts.credential_sha256 END, "
-                "lease_until = CASE WHEN $5 THEN NULL ELSE now() + "
+                "UPDATE agent_task_status ts SET phase = $3, notice = '', "
+                "finished_at = CASE WHEN $4 THEN now() ELSE "
+                "NULL END, credential_sha256 = CASE WHEN $4 THEN '' ELSE ts.credential_sha256 END, "
+                "lease_until = CASE WHEN $4 THEN NULL ELSE now() + "
                 "make_interval(secs => ts.lease_seconds) END, "
                 "updated_at = now() FROM agent_tasks t WHERE ts.task_id = t.id AND "
                 "t.id = $1::uuid AND t.agent = $2 AND ts.phase = 'Running' AND ts.finished_at "
@@ -5705,9 +5736,7 @@ public:
                 id,
                 agent,
                 phase,
-                message,
-                finishing,
-                result.dump());
+                finishing);
             if (updated.empty()) {
                 return std::unexpected(
                     StoreError{"conflict", "the task is not running on " + agent});
@@ -5716,21 +5745,21 @@ public:
         });
     }
 
-    Result<void> fail_agent_task(const std::string& id, const std::string& message) override {
+    Result<void> fail_agent_task(const std::string& id, const std::string& notice) override {
         return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
             tx.exec_params(
-                "INSERT INTO agent_task_status (task_id, phase, message, finished_at) "
+                "INSERT INTO agent_task_status (task_id, phase, notice, finished_at) "
                 "SELECT id, 'Failed', $2, now() FROM agent_tasks WHERE id = $1::uuid "
                 "AND created_at + make_interval(secs => deadline_seconds) <= now() "
                 "ON CONFLICT (task_id) DO UPDATE SET phase = "
-                "'Failed', message = EXCLUDED.message, finished_at = now(), credential_sha256 = "
+                "'Failed', notice = EXCLUDED.notice, finished_at = now(), credential_sha256 = "
                 "'', lease_until = NULL, updated_at = now() "
                 "WHERE agent_task_status.phase = '' AND NOT agent_task_status.retry_notice_pending "
                 "AND agent_task_status.updated_at + (SELECT make_interval(secs => "
                 "deadline_seconds) "
                 "FROM agent_tasks WHERE id = $1::uuid) <= now()",
                 id,
-                message);
+                notice);
             return {};
         });
     }
@@ -5748,7 +5777,7 @@ public:
             tx.exec(
                 "UPDATE agent_task_status SET phase = CASE WHEN attempts < 3 THEN '' ELSE 'Failed' "
                 "END, "
-                "message = CASE WHEN attempts < 3 THEN 'the agent stopped responding; retrying "
+                "notice = CASE WHEN attempts < 3 THEN 'the agent stopped responding; retrying "
                 "(attempt ' "
                 "|| (attempts + 1)::text || ' of 3)' ELSE 'the agent stopped responding' END, "
                 "finished_at = CASE WHEN attempts >= 3 THEN now() ELSE NULL END, "
@@ -5771,11 +5800,64 @@ public:
                 if (task.retry_notice_pending) {
                     out.reclaimed.push_back(std::move(task));
                 } else {
-                    (row[24].as<bool>() ? out.unclaimed : out.overdue).push_back(std::move(task));
+                    (row[task_column_count].as<bool>() ? out.unclaimed : out.overdue)
+                        .push_back(std::move(task));
                 }
             }
             return out;
         });
+    }
+
+    Result<void> assign_legacy_agent_tasks() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec(std::string(legacy_agent_task_assignment_sql));
+            return {};
+        });
+    }
+
+    Result<std::vector<LegacyAgentTask>> legacy_agent_tasks(const std::string& after_id,
+                                                            int limit) override {
+        return with_tx<std::vector<LegacyAgentTask>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyAgentTask>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT t.id::text, t.customer_id::text, t.agent, t.body::text, "
+                    "COALESCE(ts.message, ''), COALESCE(ts.result, 'null'::jsonb)::text, "
+                    "COALESCE(ts.phase, ''), (extract(epoch FROM t.created_at) * 1000000)::bigint, "
+                    "COALESCE(a.workspace_id::text, ''), COALESCE(a.outcome, 'needs_selection') "
+                    "FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = t.id "
+                    "LEFT JOIN workspace_assignments a ON a.object_table = 'agent_task_content' "
+                    "AND a.object_id = t.id WHERE (t.body <> '{}'::jsonb OR "
+                    "COALESCE(ts.message, '') <> '' OR COALESCE(ts.result, 'null'::jsonb) <> "
+                    "'null'::jsonb) AND ($1 = '' OR t.id > NULLIF($1, '')::uuid) "
+                    "ORDER BY t.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyAgentTask> out;
+                for (const pqxx::row& row : rows) {
+                    LegacyAgentTask legacy;
+                    AgentTask& task = legacy.task;
+                    task.id = row[0].as<std::string>();
+                    task.customer_id = row[1].as<std::string>();
+                    task.agent = row[2].as<std::string>();
+                    task.body = nlohmann::json::parse(row[3].as<std::string>(), nullptr, false);
+                    if (task.body.is_discarded() || !task.body.is_object()) {
+                        task.body = nlohmann::json::object();
+                    }
+                    task.message = row[4].as<std::string>();
+                    task.result = nlohmann::json::parse(row[5].as<std::string>(), nullptr, false);
+                    if (task.result.is_discarded()) {
+                        task.result = nullptr;
+                    }
+                    task.phase = row[6].as<std::string>();
+                    legacy.at_us = row[7].as<std::int64_t>();
+                    task.created_at = record_instant(legacy.at_us);
+                    legacy.workspace_id = row[8].as<std::string>();
+                    legacy.outcome = row[9].as<std::string>();
+                    task.workspace_id = legacy.workspace_id;
+                    out.push_back(std::move(legacy));
+                }
+                return out;
+            });
     }
 
     Result<void> assign_legacy_opportunities() override {

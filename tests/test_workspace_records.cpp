@@ -32,6 +32,8 @@
 #include "lake/control/application_settings_records.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/apps.hpp"
+#include "lake/control/agent_runs.hpp"
+#include "lake/control/agent_task_records.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -408,9 +410,18 @@ struct TwoSpaces {
                                         {"methodology", "gbdt"},
                                         {"why_this_data_supports_it", "a label exists"}}})},
             {"declined", json::array({{{"intent", intent + " later"}, {"reason", "no timestamp"}}})}};
-        EXPECT_TRUE(store->record_agent_task_event(
-            task->id, "agent-autosuggest", "Succeeded", "",
-            {{"ok", true}, {"result", {{"project_profile", profile}}}}));
+        EXPECT_TRUE(store->record_agent_task_event(task->id, "agent-autosuggest", "Succeeded"));
+        // The scan's answer is a record in its workspace, as publish_agent_event keeps it
+        // (lake#375).
+        auto context = this->context(space);
+        auto records = lake::api::workspace_records(context, space.customer_id, workspace_id);
+        EXPECT_TRUE(records) << records.error().message;
+        EXPECT_TRUE(run(lake::control::record_agent_task_content(
+            *records, {.task_id = task->id,
+                       .customer_id = space.customer_id,
+                       .agent = "agent-autosuggest",
+                       .result = {{"ok", true}, {"result", {{"project_profile", profile}}}},
+                       .phase = "Succeeded"})));
         return task->id;
     }
 
@@ -4218,6 +4229,529 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesDynamicLeasesIntoTheirMountsWor
 
 INSTANTIATE_TEST_SUITE_P(Stores, WorkspaceRecordStores, testing::Values(false, true),
                          [](const auto& info) { return info.param ? "Postgres" : "Memory"; });
+
+// lake#374, lake#375: what was written for an agent task is one record in its workspace. The first
+// finished answer stays; a message or answer raced by another write is reread, never written over
+// blindly; a record under another task or space does not open; a record an event wrote before the
+// request was copied gets the request and keeps what the event wrote.
+TEST(WorkspaceRecords, AnAgentTaskKeepsItsFirstAnswerAndRereadsARacedEvent) {
+    DirectRecords direct;
+    auto records = direct.open();
+    const std::string task = lake::control::new_uuid_v4();
+    using lake::control::AgentTaskContent;
+    const auto event = [&](std::string phase, std::string message, json result) {
+        return AgentTaskContent{.task_id = task,
+                                .customer_id = "customer-1",
+                                .agent = "agent-project",
+                                .message = std::move(message),
+                                .result = std::move(result),
+                                .phase = std::move(phase)};
+    };
+    const auto created = run(lake::control::create_agent_task_content(
+        records, {.task_id = task,
+                  .customer_id = "customer-1",
+                  .agent = "agent-project",
+                  .request = {{"message", "Predict churn"}, {"lake_token", "{{credential}}"}}}));
+    ASSERT_TRUE(created) << created.error().message;
+    EXPECT_EQ(created->lake_revision, 1);
+    EXPECT_EQ(run(lake::control::create_agent_task_content(
+                      records, {.task_id = task, .customer_id = "customer-1", .request = json::object()}))
+                  .error()
+                  .code,
+              "conflict")
+        << "a request is written once";
+    for (const auto& [key, row] : direct.tables->rows("agent_tasks")) {
+        EXPECT_EQ(row.dump().find("Predict churn"), std::string::npos) << "sealed at rest";
+    }
+
+    // A progress message whose write is raced by another writer is reread and applied again.
+    bool raced = false;
+    auto racing = WorkspaceRecords::open(
+        [&, tables = direct.tables](std::string capability, bool, json input)
+            -> liquid::runtime::task<lake::control::ZettaControlResult<json>> {
+            if (capability == "put_record" && !raced) {
+                raced = true;
+                auto& live = tables->rows("agent_tasks").at(task);
+                live["revision"] = live["revision"].get<std::int64_t>() + 1000;
+            }
+            co_return tables->run(capability, input);
+        },
+        direct.workspace_id, kek);
+    ASSERT_TRUE(racing);
+    const auto progressed =
+        run(lake::control::record_agent_task_content(*racing, event("", "halfway", nullptr)));
+    ASSERT_TRUE(progressed) << progressed.error().message;
+    EXPECT_TRUE(raced);
+    EXPECT_EQ(progressed->message, "halfway");
+    EXPECT_EQ(progressed->request["message"], "Predict churn") << "the request is kept";
+    EXPECT_EQ(progressed->lake_revision, 2);
+
+    // The first answer stays: a later answer or message changes nothing.
+    const auto answered = run(lake::control::record_agent_task_content(
+        records, event("Succeeded", "", {{"reply", "first"}})));
+    ASSERT_TRUE(answered) << answered.error().message;
+    EXPECT_EQ(answered->phase, "Succeeded");
+    EXPECT_EQ(answered->result["reply"], "first");
+    for (const auto& later : {event("Failed", "too late", nullptr),
+                              event("", "a late progress message", nullptr),
+                              event("Succeeded", "", {{"reply", "second"}})}) {
+        const auto kept = run(lake::control::record_agent_task_content(records, later));
+        ASSERT_TRUE(kept) << kept.error().message;
+        EXPECT_EQ(kept->result["reply"], "first");
+        EXPECT_EQ(kept->phase, "Succeeded");
+        EXPECT_EQ(kept->message, "");
+    }
+    EXPECT_EQ(run(lake::control::get_agent_task_content(records, task, "customer-1")).value()->lake_revision,
+              3);
+
+    // Another space's or another key's reading finds nothing; another space cannot write it.
+    EXPECT_FALSE(*run(lake::control::get_agent_task_content(records, task, "customer-2")));
+    EXPECT_FALSE(*run(
+        lake::control::get_agent_task_content(records, lake::control::new_uuid_v4(), "customer-1")));
+    auto foreign = event("", "not theirs", nullptr);
+    foreign.customer_id = "customer-2";
+    EXPECT_EQ(run(lake::control::record_agent_task_content(records, foreign)).error().code,
+              "conflict");
+    auto& rows = direct.tables->rows("agent_tasks");
+    const std::string moved = lake::control::new_uuid_v4();
+    rows[moved] = rows.at(task);
+    rows[moved]["key"] = moved;
+    EXPECT_FALSE(*run(lake::control::get_agent_task_content(records, moved, "customer-1")))
+        << "a record copied under another key does not open";
+
+    // An event of a task whose request is not copied yet writes a record without one; the copy
+    // fills it in and keeps the answer.
+    const std::string early = lake::control::new_uuid_v4();
+    auto early_event = event("Succeeded", "", {{"reply", "done before the copy"}});
+    early_event.task_id = early;
+    const auto recorded = run(lake::control::record_agent_task_content(records, early_event));
+    ASSERT_TRUE(recorded) << recorded.error().message;
+    EXPECT_TRUE(recorded->request.is_null());
+    const auto filled = run(lake::control::fill_agent_task_request(records, early, "customer-1",
+                                                                   {{"message", "copied"}}));
+    ASSERT_TRUE(filled) << filled.error().message;
+    EXPECT_EQ(filled->request["message"], "copied");
+    EXPECT_EQ(filled->result["reply"], "done before the copy");
+    const auto again = run(lake::control::fill_agent_task_request(records, early, "customer-1",
+                                                                  {{"message", "other"}}));
+    ASSERT_TRUE(again);
+    EXPECT_EQ(again->request["message"], "copied") << "a request is never replaced";
+}
+
+namespace {
+
+class NoAgentCalls final : public lake::control::AgentCaller {
+public:
+    liquid::runtime::task<lake::control::ZettaControlResult<json>>
+    turn(std::string, std::string, json) override {
+        co_return lake::control::ZettaControlResult<json>(std::unexpected(
+            lake::control::ZettaControlError{"store_unavailable", "library agents use the bus"}));
+    }
+};
+
+// Two spaces with two workspaces each, as TwoSpaces makes them, with the Project Agent on lake's
+// agent bus (docs/api/agent-bus.md).
+struct AgentTaskSpaces {
+    TwoSpaces t;
+    std::shared_ptr<lake::control::WorkspaceService> service;
+    std::shared_ptr<lake::control::MemoryAgentBus> dispatch =
+        std::make_shared<lake::control::MemoryAgentBus>();
+    std::shared_ptr<lake::control::AgentTaskBus> bus;
+    NoAgentCalls agents;
+
+    AgentTaskSpaces(std::shared_ptr<lake::control::Store> store, std::string uri)
+        : t(std::move(store), std::move(uri)) {
+        lake::control::WorkspaceConfig config{t.dir.string(), 0};
+        config.agent_endpoints = {{"agent-project", "http://project:8080"},
+                                  {"agent-application", "http://application:8080"}};
+        config.internal_url = "http://lake.internal";
+        service = std::make_shared<lake::control::WorkspaceService>(config, t.store, t.zetta);
+        bus = std::make_shared<lake::control::AgentTaskBus>(
+            t.store, dispatch, std::vector<std::string>{"agent-project", "agent-application"},
+            std::chrono::seconds(0));
+        EXPECT_TRUE(lake::control::settled(liquid::runtime::block_on(bus->start())));
+    }
+
+    lake::api::ApiResult call(lake::api::ApiContext context, const std::string& name, json input) {
+        context.workspaces = service.get();
+        context.agent_bus = bus.get();
+        context.agent_caller = &agents;
+        context.instance_kek = std::string(kek);
+        const auto completed =
+            liquid::runtime::block_on(t.registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return completed ? *completed : lake::api::ApiResult::failure("store_error", "incomplete");
+    }
+    lake::api::ApiResult person(const TwoSpaces::Space& space, const std::string& name,
+                                json input) {
+        return call(t.context(space), name, std::move(input));
+    }
+    lake::api::ApiResult agent(const std::string& name, json input,
+                               const std::string& as = "agent-project") {
+        lake::api::ApiContext context;
+        context.store = t.store.get();
+        context.authorized = true;
+        context.acting_identity = "agent-service:" + as;
+        context.credential_kind = "agent_service";
+        context.agent_service = as;
+        context.request_id = lake::control::new_uuid_v4();
+        input["agent"] = as;
+        return call(context, name, std::move(input));
+    }
+    lake::api::ApiResult ask(const TwoSpaces::Space& space, const std::string& workspace,
+                             const std::string& message) {
+        return person(space, "agent_turn", {{"customer_id", space.customer_id},
+                                            {"workspace_id", workspace},
+                                            {"agent", "agent-project"},
+                                            {"message", message}});
+    }
+    lake::api::ApiResult follow(const TwoSpaces::Space& space, const std::string& workspace,
+                                const std::string& task) {
+        return person(space, "get_agent_task", {{"customer_id", space.customer_id},
+                                                {"workspace_id", workspace},
+                                                {"task_id", task}});
+    }
+    std::map<std::string, json>& rows(const std::string& workspace) {
+        return t.zetta->records["http://" + workspace + ".test"].rows("agent_tasks");
+    }
+};
+
+} // namespace
+
+TEST_P(WorkspaceRecordStores, AgentTasksKeepWhatWasWrittenInTheirOwnWorkspace) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    AgentTaskSpaces a(store, database_uri_);
+    const auto& first = a.t.spaces[0];
+    const auto& second = a.t.spaces[1];
+    // A turn in each workspace of each space; each request is a record of its own workspace only.
+    std::map<std::string, std::string> tasks; // workspace -> task
+    for (const auto* space : {&first, &second}) {
+        for (const std::string& workspace : space->workspaces) {
+            const auto asked = a.ask(*space, workspace, "private request in " + workspace);
+            ASSERT_TRUE(asked.ok) << asked.error.message;
+            EXPECT_EQ(asked.value["status"], "pending");
+            tasks[workspace] = asked.value["task_id"];
+            ASSERT_EQ(a.rows(workspace).size(), 1U) << workspace;
+            EXPECT_EQ(a.rows(workspace).begin()->first, tasks[workspace]);
+            EXPECT_EQ(a.rows(workspace).begin()->second.dump().find("private request"),
+                      std::string::npos)
+                << "sealed at rest";
+        }
+    }
+    const std::string home = first.workspaces[0], lab = first.workspaces[1];
+    // The control store keeps dispatch only: no request, message or answer.
+    for (const auto& [workspace, task] : tasks) {
+        const auto row = a.t.store->get_agent_task(task);
+        ASSERT_TRUE(row);
+        EXPECT_EQ(row->workspace_id, workspace);
+        EXPECT_EQ(row->body, json::object());
+        EXPECT_EQ(row->message, "");
+        EXPECT_TRUE(row->result.is_null());
+    }
+    // The bus carries the task id only.
+    for (const auto& event : a.dispatch->events("agent-tasks.agent-project")) {
+        EXPECT_EQ(event.payload.dump().find("private request"), std::string::npos);
+    }
+
+    // The claim answers the request from the task's workspace, with the credential in it.
+    const auto claimed = a.agent("claim_agent_task", {{"task_id", tasks[home]}});
+    ASSERT_TRUE(claimed.ok) << claimed.error.message;
+    EXPECT_EQ(claimed.value["body"]["message"], "private request in " + home);
+    EXPECT_EQ(claimed.value["body"]["workspace_id"], home);
+    EXPECT_TRUE(claimed.value["body"]["lake_token"].get<std::string>().starts_with("lat."));
+    EXPECT_EQ(a.agent("claim_agent_task", {{"task_id", tasks[home]}}).error.code, "conflict")
+        << "exactly one claim";
+    EXPECT_EQ(a.agent("claim_agent_task", {{"task_id", tasks[lab]}}, "agent-application").error.code,
+              "conflict")
+        << "another agent's bus credential cannot claim it";
+    EXPECT_EQ(a.person(first, "claim_agent_task", {{"task_id", tasks[lab]}, {"agent", "agent-project"}})
+                  .error.code,
+              "unauthorized")
+        << "a person is not the agent";
+
+    // Progress and the answer are written to the workspace; the control store keeps the phase.
+    ASSERT_TRUE(a.agent("publish_agent_event",
+                        {{"task_id", tasks[home]}, {"type", "progress"}, {"message", "halfway"}})
+                    .ok);
+    auto followed = a.follow(first, home, tasks[home]);
+    ASSERT_TRUE(followed.ok) << followed.error.message;
+    EXPECT_EQ(followed.value["status"], "running");
+    EXPECT_EQ(followed.value["message"], "halfway");
+    EXPECT_EQ(a.t.store->get_agent_task(tasks[home])->message, "");
+    const auto answered = a.agent("publish_agent_event",
+                                  {{"task_id", tasks[home]},
+                                   {"type", "result"},
+                                   {"result", {{"ok", true}, {"reply", "the private answer"}}}});
+    ASSERT_TRUE(answered.ok) << answered.error.message;
+    EXPECT_EQ(a.agent("publish_agent_event",
+                      {{"task_id", tasks[home]}, {"type", "result"}, {"result", {{"reply", "late"}}}})
+                  .error.code,
+              "conflict");
+    followed = a.follow(first, home, tasks[home]);
+    ASSERT_TRUE(followed.ok) << followed.error.message;
+    EXPECT_EQ(followed.value["status"], "succeeded");
+    EXPECT_EQ(followed.value["answer"]["reply"], "the private answer");
+    EXPECT_TRUE(a.t.store->get_agent_task(tasks[home])->result.is_null());
+    EXPECT_EQ(a.rows(home).begin()->second.dump().find("private answer"), std::string::npos);
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        const auto content = tx.exec(
+            "SELECT count(*) FROM agent_tasks t LEFT JOIN agent_task_status ts ON ts.task_id = "
+            "t.id WHERE t.body <> '{}'::jsonb OR COALESCE(ts.message, '') <> '' OR "
+            "COALESCE(ts.result, 'null'::jsonb) <> 'null'::jsonb");
+        EXPECT_EQ(content[0][0].as<int>(), 0) << "no content in PostgreSQL";
+    }
+
+    // Another workspace of the space, or another space, never reads it.
+    EXPECT_EQ(a.follow(first, lab, tasks[home]).error.code, "not_found");
+    EXPECT_EQ(a.follow(second, second.workspaces[0], tasks[home]).error.code, "not_found");
+    const auto trespass = a.person(second, "get_agent_task", {{"customer_id", first.customer_id},
+                                                              {"workspace_id", home},
+                                                              {"task_id", tasks[home]}});
+    EXPECT_EQ(trespass.error.code, "unauthorized");
+
+    // Missing, malformed and unknown workspace ids name the field, for asking and following.
+    for (const std::string capability : {"agent_turn", "get_agent_task"}) {
+        json input{{"customer_id", first.customer_id}};
+        if (capability == "agent_turn") {
+            input["agent"] = "agent-project";
+            input["message"] = "hello";
+        } else {
+            input["task_id"] = tasks[home];
+        }
+        const auto missing = a.person(first, capability, input);
+        EXPECT_EQ(missing.error.code, "invalid_input") << capability;
+        EXPECT_EQ(missing.error.path, "/workspace_id") << capability;
+        for (const std::string& bad :
+             std::vector<std::string>{"not-a-workspace", lake::control::new_uuid_v4()}) {
+            input["workspace_id"] = bad;
+            const auto refused = a.person(first, capability, input);
+            EXPECT_EQ(refused.error.code, "invalid_input") << capability << " " << bad;
+            EXPECT_EQ(refused.error.path, "/workspace_id") << capability << " " << bad;
+        }
+        // Another space's workspace is not this space's.
+        input["workspace_id"] = second.workspaces[0];
+        const auto foreign = a.person(first, capability, input);
+        EXPECT_EQ(foreign.error.code, "invalid_input") << capability;
+        EXPECT_EQ(foreign.error.path, "/customer_id") << capability;
+    }
+
+    // A workspace that is not ready refuses instead of falling back: a new turn is not
+    // recorded, the task is not read, and the claim leaves it waiting for a later claim.
+    const auto lab_workspace = a.t.store->get_workspace(lab);
+    a.t.status(lab_workspace->zetta_service_id, "Provisioning", "http://" + lab + ".test");
+    EXPECT_EQ(a.ask(first, lab, "not now").error.code, "workspace_not_ready");
+    EXPECT_EQ(a.follow(first, lab, tasks[lab]).error.code, "workspace_not_ready");
+    EXPECT_EQ(a.agent("claim_agent_task", {{"task_id", tasks[lab]}}).error.code,
+              "workspace_not_ready");
+    EXPECT_TRUE(a.t.store->get_agent_task(tasks[lab])->phase.empty()) << "still waiting";
+    a.t.ready(lab);
+    const auto later = a.agent("claim_agent_task", {{"task_id", tasks[lab]}});
+    ASSERT_TRUE(later.ok) << later.error.message;
+    EXPECT_EQ(later.value["body"]["message"], "private request in " + lab);
+    EXPECT_EQ(a.rows(lab).size(), 1U) << "the refused turn left nothing behind";
+
+    // A task whose request is not in its workspace is never claimed with an empty request.
+    auto& their_rows = a.rows(second.workspaces[1]);
+    their_rows.clear();
+    EXPECT_EQ(a.agent("claim_agent_task", {{"task_id", tasks[second.workspaces[1]]}}).error.code,
+              "not_found");
+
+    // Deleting a workspace takes its tasks' records with it; the other workspace keeps its own.
+    ASSERT_TRUE(a.t.store->update_workspace(second.workspaces[0], {.desired = "deleted"}));
+    const auto deleted = a.follow(second, second.workspaces[0], tasks[second.workspaces[0]]);
+    EXPECT_EQ(deleted.error.code, "invalid_input");
+    EXPECT_EQ(deleted.error.path, "/workspace_id");
+    followed = a.follow(first, home, tasks[home]);
+    ASSERT_TRUE(followed.ok) << followed.error.message;
+    EXPECT_EQ(followed.value["answer"]["reply"], "the private answer");
+}
+
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesAgentTaskContentIntoEachTasksWorkspace) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    AgentTaskSpaces a(store, database_uri_);
+    auto& first = a.t.spaces[0];
+    auto& second = a.t.spaces[1];
+    const std::int64_t at_us = 1'788'256'800'000'000;
+    struct Legacy {
+        std::string id, customer, workspace, phase, message;
+        json body, result;
+    };
+    std::vector<Legacy> legacy = {
+        // A finished turn in the first space's lab, a running one in the second space's home, and
+        // one in a workspace deleted before the copy.
+        {lake::control::new_uuid_v4(), first.customer_id, first.workspaces[1], "Succeeded", "",
+         {{"message", "lab request"}, {"lake_token", "{{credential}}"}},
+         {{"ok", true}, {"reply", "lab answer"}}},
+        {lake::control::new_uuid_v4(), second.customer_id, second.workspaces[0], "Running",
+         "still working", {{"message", "their request"}}, nullptr},
+        {lake::control::new_uuid_v4(), first.customer_id, first.workspaces[0], "Failed",
+         "gave up", {{"message", "gone request"}}, nullptr},
+    };
+    std::string unassigned; // PostgreSQL only: a task from before 0038, with no workspace
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE agent_tasks DISABLE TRIGGER agent_task_workspace_routing");
+        unassigned = lake::control::new_uuid_v4();
+        legacy.push_back({unassigned, second.customer_id, "", "", "", {{"message", "orphan"}},
+                          nullptr});
+        for (const Legacy& row : legacy) {
+            tx.exec_params("INSERT INTO agent_tasks (id, customer_id, agent, kind, body, scopes, "
+                           "workspace_id, created_at) VALUES ($1::uuid, $2::uuid, "
+                           "'agent-project', 'api', $3::jsonb, ARRAY['get_agent_task'], "
+                           "NULLIF($4, '')::uuid, to_timestamp($5::double precision / 1000000))",
+                           row.id, row.customer, row.body.dump(), row.workspace, at_us);
+            if (!row.phase.empty()) {
+                tx.exec_params("INSERT INTO agent_task_status (task_id, phase, message, result) "
+                               "VALUES ($1::uuid, $2, $3, $4::jsonb)",
+                               row.id, row.phase, row.message, row.result.dump());
+            }
+        }
+        tx.exec("ALTER TABLE agent_tasks ENABLE TRIGGER agent_task_workspace_routing");
+        tx.commit();
+    } else {
+        auto& memory = static_cast<lake::control::InMemoryStore&>(*a.t.store);
+        for (const Legacy& row : legacy) {
+            memory.seed_legacy_agent_task({.id = row.id,
+                                           .customer_id = row.customer,
+                                           .agent = "agent-project",
+                                           .kind = "api",
+                                           .workspace_id = row.workspace,
+                                           .body = row.body,
+                                           .scopes = {"get_agent_task"},
+                                           .phase = row.phase,
+                                           .message = row.message,
+                                           .result = row.result},
+                                          at_us);
+            ASSERT_TRUE(memory.set_agent_task_status(row.id, row.phase));
+        }
+    }
+    ASSERT_TRUE(a.t.store->update_workspace(first.workspaces[0], {.desired = "deleted"}));
+    lake::api::ApiContext operator_context;
+    operator_context.store = a.t.store.get();
+    operator_context.workspaces = a.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    const auto copy = [&](std::string mode) {
+        operator_context.request_id = lake::control::new_uuid_v4();
+        return a.call(operator_context, "copy_workspace_records",
+                      {{"collection", "agent_tasks"}, {"mode", mode}});
+    };
+    const auto follow = [&](const TwoSpaces::Space& space, const std::string& workspace,
+                             const std::string& task) {
+        operator_context.request_id = lake::control::new_uuid_v4();
+        return a.call(operator_context, "get_agent_task", {{"customer_id", space.customer_id},
+                                                           {"workspace_id", workspace},
+                                                           {"task_id", task}});
+    };
+    const Legacy& lab_task = legacy[0];
+    const Legacy& their_task = legacy[1];
+
+    // Before the copy, the content is not read from PostgreSQL.
+    const auto before_copy = follow(first, first.workspaces[1], lab_task.id);
+    ASSERT_TRUE(before_copy.ok) << before_copy.error.message;
+    EXPECT_TRUE(before_copy.value["answer"].is_null());
+
+    // The running task's agent reports before the copy: its record is written without a request,
+    // and the copy fills the request in and keeps the event.
+    ASSERT_EQ(a.t.store->get_agent_task(their_task.id)->phase, "Running");
+    ASSERT_TRUE(a.agent("publish_agent_event",
+                        {{"task_id", their_task.id}, {"type", "progress"}, {"message", "after the deploy"}})
+                    .ok);
+
+    const std::size_t rows = legacy.size();
+    const auto plan = copy("plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["rows"], rows);
+    EXPECT_EQ(plan.value["unresolved"].size(), GetParam() ? 2U : 1U)
+        << "the deleted workspace's task, and the task with no workspace";
+    const auto before = copy("verify");
+    EXPECT_EQ(before.value["missing"].size(), 1U);
+    EXPECT_EQ(before.value["mismatched"].size(), 1U) << "the record without its request";
+    EXPECT_FALSE(before.value["complete"]);
+    const auto copied = copy("copy");
+    ASSERT_TRUE(copied.ok) << copied.error.message;
+    EXPECT_EQ(copied.value["copied"], 2);
+    const auto rerun = copy("copy");
+    EXPECT_EQ(rerun.value["copied"], 0) << "a rerun copies nothing twice";
+    EXPECT_EQ(rerun.value["already_present"], 2);
+    const auto verified = copy("verify");
+    EXPECT_EQ(verified.value["verified"], 2);
+    EXPECT_TRUE(verified.value["missing"].empty());
+    EXPECT_TRUE(verified.value["mismatched"].empty());
+    EXPECT_EQ(verified.value["complete"], !GetParam()) << "the task with no workspace blocks";
+
+    // Each task's content is in its own workspace only, keyed by it, sealed, at its instant.
+    ASSERT_EQ(a.rows(first.workspaces[1]).size(), 1U);
+    EXPECT_EQ(a.rows(first.workspaces[1]).begin()->first, lab_task.id);
+    EXPECT_EQ(a.rows(first.workspaces[1]).begin()->second.dump().find("lab answer"),
+              std::string::npos);
+    EXPECT_EQ(a.rows(second.workspaces[0]).size(), 1U);
+    EXPECT_TRUE(a.rows(second.workspaces[1]).empty());
+    const auto read = follow(first, first.workspaces[1], lab_task.id);
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["status"], "succeeded");
+    EXPECT_EQ(read.value["answer"]["reply"], "lab answer");
+    const auto theirs = follow(second, second.workspaces[0], their_task.id);
+    ASSERT_TRUE(theirs.ok) << theirs.error.message;
+    EXPECT_EQ(theirs.value["message"], "after the deploy") << "the event is kept";
+    auto records =
+        lake::api::workspace_records(operator_context, first.customer_id, first.workspaces[1]);
+    ASSERT_TRUE(records) << records.error().message;
+    const auto stored = run(lake::control::get_agent_task_content(*records, lab_task.id, first.customer_id));
+    ASSERT_TRUE(stored && *stored);
+    EXPECT_EQ((*stored)->at_us, at_us);
+    EXPECT_EQ((*stored)->request, lab_task.body);
+    auto their_records =
+        lake::api::workspace_records(operator_context, second.customer_id, second.workspaces[0]);
+    ASSERT_TRUE(their_records) << their_records.error().message;
+    const auto their_stored = run(lake::control::get_agent_task_content(
+        *their_records, their_task.id, second.customer_id));
+    ASSERT_TRUE(their_stored && *their_stored);
+    EXPECT_EQ((*their_stored)->request, their_task.body);
+
+    if (GetParam()) {
+        // Giving the unassigned task a workspace, in a reviewed change, resolves it.
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE agent_tasks DISABLE TRIGGER agent_task_workspace_routing");
+        tx.exec_params("UPDATE agent_tasks SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       unassigned, second.workspaces[1]);
+        tx.exec_params("UPDATE workspace_assignments SET workspace_id = $2::uuid, outcome = "
+                       "'task_workspace' WHERE object_table = 'agent_task_content' AND object_id "
+                       "= $1::uuid",
+                       unassigned, second.workspaces[1]);
+        tx.exec("ALTER TABLE agent_tasks ENABLE TRIGGER agent_task_workspace_routing");
+        tx.commit();
+        const auto resolved = copy("copy");
+        EXPECT_EQ(resolved.value["copied"], 1);
+        EXPECT_EQ(resolved.value["unresolved"].size(), 1U) << "only the deleted workspace's";
+        EXPECT_TRUE(copy("verify").value["complete"]);
+    }
+
+    // A changed copy is reported, never silently accepted: a record under another key does not
+    // open there.
+    auto& lab_rows = a.rows(first.workspaces[1]);
+    auto& their_rows = a.rows(second.workspaces[0]);
+    their_rows.begin()->second["value"] = lab_rows.begin()->second["value"];
+    const auto tampered = copy("verify");
+    EXPECT_EQ(tampered.value["missing"].size(), 1U) << "a record that no longer opens is missing";
+    EXPECT_FALSE(tampered.value["complete"]);
+
+    // Operator only.
+    operator_context.operator_credential = false;
+    EXPECT_EQ(copy("plan").error.code, "unauthorized");
+}
 
 // Against a real Zetta when LAKE_TEST_ZETTA_URL and LAKE_TEST_ZETTA_TOKEN name one (for example a
 // local `zetta --headless` built from zetta dev with #1233): the record store's real contract.

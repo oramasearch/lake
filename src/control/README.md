@@ -160,3 +160,10 @@ leaves the settings columns NULL, and `update_application_theme` is gone);
 `assign_legacy_application_authorization_codes` reruns migration `0061`'s owner assignment of live
 codes, `legacy_application_authorization_codes` pages the live codes by hash, and
 `record_legacy_application_authorization_code_copied` marks a code `copied` before it is written.
+`agent_task_records.cpp` keeps what was written for an agent task in its workspace (lake#374,
+lake#375). The stores keep only the dispatch half: `create_agent_task` inserts no body (and takes
+the caller's `id` and `parent_task_id`), `record_agent_task_event` moves the phase and clears lake's
+notice, and `fail_agent_task` and the expiry update write lake's text to `agent_task_status.notice`.
+`assign_legacy_agent_tasks` reruns migration `0062`'s owner assignment and `legacy_agent_tasks`
+pages the tasks whose rows still hold content, for the copy only; the memory store's
+`seed_legacy_agent_task` writes such a task for the copy's tests.

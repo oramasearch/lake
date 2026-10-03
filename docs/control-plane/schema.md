@@ -496,7 +496,9 @@ background, with its body, scopes, deadline and when it was last published on th
 answer and the **SHA-256** of the task's credential, cleared when the task finishes) and `opportunities` (Design → Opportunities:
 what Auto-Suggest recommended, kept across scans, with what the person did with each; retired by
 `0046`, below, when Opportunities moved into workspace Zettas). Idempotent;
-guard `agent_tasks_guard`. Contract: [`../api/agent-bus.md`](../api/agent-bus.md).
+guard `agent_tasks_guard`. Contract: [`../api/agent-bus.md`](../api/agent-bus.md). Since `0062`
+(below) the body, message and answer live in the task's workspace Zetta, and both tables are
+content-free dispatch rows.
 
 ## Agent task events migration
 
@@ -765,3 +767,22 @@ writes it, and never writes a `copied` code again. Used and expired codes are no
 is dropped. Idempotent; guard `application_authorization_code_workspaces_guard`. Mechanism and
 cutover:
 [`../architecture/workspace-records.md`](../architecture/workspace-records.md#cutover-runbook-application-authorization-codes-dev-cluster).
+
+## Agent task workspaces migration
+
+`0062_agent_task_workspaces` (lake#374, lake#375) moves what was written for an agent task, its
+request `body`, the agent's `message` and its `result`, into one sealed record of the workspace
+Zetta of the task's workspace (`agent_tasks.workspace_id`, `0038`). `agent_tasks` and
+`agent_task_status` stay as the content-free dispatch rows the agent bus, the claim and its lease
+(`0042`) use without a workspace call. It adds `agent_tasks.parent_task_id` (uuid, the asking task
+of a delegated turn, taken from the body of existing rows) and `agent_task_status.notice` (text,
+default `''`: lake's own retry and failure text, taken from existing rows whose message is one, and
+never what a person or an agent wrote). Lake writes `body = '{}'`, `message = ''` and
+`result = null` on every new row and reads those three columns only through the operator-only
+`copy_workspace_records` (collection `agent_tasks`). The migration records the owner of each task
+that still holds content in `workspace_assignments` under `object_table = 'agent_task_content'`
+(`0038` already records the tasks' routing under `agent_tasks`): `task_workspace`,
+`needs_selection` while the task names no workspace (warned), or `workspace_deleted` (warned; it
+does not hold the copy back). The operator reads neither table. Nothing is dropped. Idempotent;
+guard `agent_task_workspaces_guard`. Mechanism and cutover:
+[`../architecture/workspace-records.md`](../architecture/workspace-records.md#cutover-runbook-agent-tasks-dev-cluster).
