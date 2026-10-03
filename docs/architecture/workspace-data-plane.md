@@ -106,6 +106,11 @@ Zetta primitive for each record shape, the C++ interface, the migration and cuto
 the checklist each follow-up applies. Conditional writes (`if_absent`, `if_revision`) are decided by
 the engine, so mutable rows, one-use codes and claims use the same mechanism.
 
+The items records do not cover (the liquid stores, search indexes, registry and transparency log on
+lake's store volume, `repositories`, `repository_refs`, and lake's telemetry: lake#315 part 2,
+#319, #380–#384) are planned in [workspace storage plan](workspace-storage-plan.md), which lists
+the decisions they need first.
+
 ## Storage Audit
 
 This is a source inventory of `db/schema.sql`, Lake's Zetta callers, and instance-local stores.
@@ -127,7 +132,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `users` | multitenancy/dispatch | Identity reference for customer membership. |
 | `organizations` | multitenancy/dispatch | Tenant identity and organization boundary. |
 | `customers` | multitenancy/dispatch | Space ownership and tenant routing. |
-| `repositories` | workspace | Repository metadata and lifecycle belong to its workspace. Routing done: `0051_repository_workspaces` gives each repository an immutable `workspace_id` (lake#315 part 1; unassigned rows are `needs_selection`). The metadata itself still lives here. [Follow-up](https://github.com/oramasearch/lake/issues/315) (part 2), forge records [lake#341](https://github.com/oramasearch/lake/issues/341). |
+| `repositories` | workspace | Repository metadata and lifecycle belong to its workspace. Routing done: `0051_repository_workspaces` gives each repository an immutable `workspace_id` (lake#315 part 1; unassigned rows are `needs_selection`). The metadata itself still lives here. [Follow-up](https://github.com/oramasearch/lake/issues/315) (part 2), forge records [lake#341](https://github.com/oramasearch/lake/issues/341). Part 2 is in the [plan](workspace-storage-plan.md#lake315-part-2-repository-metadata). |
 | `objects` | multitenancy/dispatch | Policy object identities and ancestry for grants. |
 | `teams` | multitenancy/dispatch | Membership group identities. |
 | `memberships` | multitenancy/dispatch | Tenant and team membership. |
@@ -136,7 +141,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `lake_identity` | workspace | Signing credentials require explicit custody outside the control store. [Follow-up](https://github.com/oramasearch/lake/issues/316). |
 | `audit_events` | split (decision 52) | Control-plane and identity events stay in this central hash chain. Events about a workspace's data **moved** to `lake_audit_events` in that workspace's Zetta, a chain of its own written off the request path ([lake#317](https://github.com/oramasearch/lake/issues/317), migration `0063`, [audit.md](../api/audit.md#which-log)); the central events recorded before the split are copied there by the one-shot copy and stay here, append-only. |
 | `audit_retention` | multitenancy/dispatch | The space's retention of the central log, a policy row ([lake#318](https://github.com/oramasearch/lake/issues/318)). A workspace's audit is kept until the workspace is deleted (the collection's `retention_ms` is 0), never shorter ([audit.md](../api/audit.md#retention)). |
-| `repository_refs` | workspace | Repository reference state. [Follow-up](https://github.com/oramasearch/lake/issues/319). |
+| `repository_refs` | workspace | Repository reference state. [Follow-up](https://github.com/oramasearch/lake/issues/319). A write-only copy of liquid's refs that nothing reads (0 rows on dev); the [plan](workspace-storage-plan.md#lake319-repository_refs) proposes dropping it. |
 | `identity_documents` | workspace | Identity document bodies and verification evidence. [Follow-up](https://github.com/oramasearch/lake/issues/320). |
 | `devices` | workspace | Device records and authentication state. [Follow-up](https://github.com/oramasearch/lake/issues/321). |
 | `credentials` | workspace | Password, passkey, token and MFA credential material. [Follow-up](https://github.com/oramasearch/lake/issues/322). |
@@ -223,12 +228,12 @@ only the three listed below; no names are invented for the four unobserved datas
 | Lake Zetta audit history | workspace | History of control calls is still event data. [Follow-up](https://github.com/oramasearch/zetta/issues/1173). |
 | Mounted service/store connections | workspace | Service passwords, tokens and storage credentials. [Follow-up](https://github.com/oramasearch/orama-operator/issues/213). |
 | Mounted agent bus/service credentials | workspace | Agent authentication secrets. [Follow-up](https://github.com/oramasearch/orama-operator/issues/214). |
-| `LAKE_STORE_ROOT/<customer>/store` | workspace | Liquid repository objects and history. [Follow-up](https://github.com/oramasearch/lake/issues/380). |
-| `LAKE_STORE_ROOT/<customer>/index` | workspace | Repository and artifact search indexes. [Follow-up](https://github.com/oramasearch/lake/issues/381). |
-| Instance registry storage | workspace | OCI, npm, Python and debug artifacts. [Follow-up](https://github.com/oramasearch/lake/issues/383). |
-| Instance transparency/TUF/timestamp storage | workspace | Signed audit history, trust objects and evidence. [Follow-up](https://github.com/oramasearch/lake/issues/382). |
+| `LAKE_STORE_ROOT/<customer>/store` | workspace | Liquid repository objects and history. [Follow-up](https://github.com/oramasearch/lake/issues/380); [plan](workspace-storage-plan.md#lake380-the-liquid-store). |
+| `LAKE_STORE_ROOT/<customer>/index` | workspace | Repository and artifact search indexes. [Follow-up](https://github.com/oramasearch/lake/issues/381); [plan](workspace-storage-plan.md#lake381-the-search-index). |
+| Instance registry storage | workspace | OCI, npm, Python and debug artifacts. [Follow-up](https://github.com/oramasearch/lake/issues/383); the [plan](workspace-storage-plan.md#lake383-registry-storage) splits tenant images (workspace) from the instance's public registry. |
+| Instance transparency/TUF/timestamp storage | workspace | Signed audit history, trust objects and evidence. [Follow-up](https://github.com/oramasearch/lake/issues/382); the [plan](workspace-storage-plan.md#lake382-transparency-log-tuf-and-timestamp-evidence) proposes keeping it with the instance. |
 | Loki application/build/platform logs | workspace | Application log history, despite external storage. [Follow-up](https://github.com/oramasearch/orama-operator/issues/215). |
-| Prometheus metrics and request logs | workspace | Operational metrics and usage need workspace routing. [Follow-up](https://github.com/oramasearch/lake/issues/384). |
+| Prometheus metrics and request logs | workspace | Operational metrics and usage need workspace routing. [Follow-up](https://github.com/oramasearch/lake/issues/384); the [plan](workspace-storage-plan.md#lake384-prometheus-metrics-and-request-logs) proposes instance telemetry plus a per-workspace request series. |
 
 Each workspace item outside the event move has an owning-repository follow-up linked above.
 Identity bootstrap, shared operational history, and billing need explicit designs;
