@@ -29,6 +29,13 @@ Every future deployment image receives OCI revision and creation labels. The bin
 same embedded revision through `GET /v1/server_info`; details are in
 [`docs/build/container-image.md`](docs/build/container-image.md).
 
+The source tree hands the store root over between processes (lake#479): a starting lake serves
+probes and reports Ready while a predecessor holds `.lake-owner.lock`, holds store-touching requests
+until it owns the root, and on SIGTERM drains, closes its stores (opened with liquid's
+`exclusive_owner`, liquid#322) and releases the lock. It needs liquid at or after `df2ae4d`. The
+operator's `spec.rollout.overlapOnSharedStore` can be turned on only once a deployed image contains
+it. See `docs/deployment/store-volume.md`.
+
 Agent tasks now have renewable claim leases, two retries and a terminal failure after three
 expiries. Retry notices reach workspace event streams and the working panels. Shared bus
 credentials retain first-terminal-write-wins behavior; task-scoped event authentication and

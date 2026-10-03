@@ -33,6 +33,12 @@ class FederationIssuerPolicy;
 // Threading: the server's io_context runs on its own thread. The owning loop
 // calls wait_for_work() to idle and drain() each tick. drain() runs scheduled
 // owner-loop work such as timestamp-evidence renewal.
+//
+// Store hand-off (lake#479): start() binds and serves at once. When a store root is configured,
+// a separate thread takes the root's owner lock (waiting, bounded, for a predecessor to release
+// it) and opens the customer stores; until then every request except probes, metrics and static
+// assets waits for that open. stop() stops taking new work, drains in-flight requests, closes
+// the stores and releases the owner lock. docs/deployment/store-volume.md has the contract.
 namespace lake::api {
 
 struct ServerOptions {
@@ -101,6 +107,14 @@ struct ServerOptions {
     // <root>/<customer id>/store and instance log objects at
     // <root>/<node name>/log. Empty disables data-plane storage.
     std::string store_root;
+    // How long a starting server waits for another process to release the store root, and how
+    // long each customer-store open waits for its liquid owner lock
+    // (LAKE_STORE_OWNER_WAIT_SECONDS). It must outlast the predecessor's drain: the Kubernetes
+    // preStop delay plus drain_timeout. See docs/deployment/store-volume.md (lake#479).
+    std::chrono::milliseconds store_owner_wait{std::chrono::seconds(90)};
+    // How long stop() waits for in-flight requests before it closes the listener and the stores
+    // (LAKE_DRAIN_SECONDS).
+    std::chrono::milliseconds drain_timeout{std::chrono::seconds(20)};
     // Transparency-log runtime configuration. The executable obtains this from
     // LAKE_LOG_* environment variables and defaults the deployed mode to
     // witnessed.
@@ -143,6 +157,11 @@ public:
     // The actual bound port (differs from options when port was 0).
     [[nodiscard]] unsigned short port() const;
     [[nodiscard]] const std::string& reason() const;
+    // Non-empty once the server cannot continue: the store root stayed held past
+    // store_owner_wait, or could not be opened. The owning loop exits non-zero with it.
+    [[nodiscard]] std::string fatal_error() const;
+    // True once this process owns the store root and has opened it (or has no store root).
+    [[nodiscard]] bool store_root_open() const;
     // The GET patterns installed in the live router. Performance coverage derives its page set
     // from this list, then classifies HTML responses by their Server-Timing header.
     [[nodiscard]] std::vector<std::string> get_route_patterns() const;

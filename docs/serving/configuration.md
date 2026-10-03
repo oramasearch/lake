@@ -33,6 +33,8 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | `LAKE_IDENTITY_SEED` | base64 32-byte seed of lake's TAAP signing identity; when absent lake generates one and stores it encrypted | [`../api/audit.md`](../api/audit.md) |
 | `LAKE_INSTANCE_KEK` | customer-independent key-encryption key for the generated identity and wrapped keys; required wherever a Postgres store runs | [`../api/audit.md`](../api/audit.md), [`../api/encryption.md`](../api/encryption.md) |
 | `LAKE_STORE_ROOT` | root of the per-customer liquid stores (`<customer>/store`), search segments (`<customer>/index/`) and the instance log (`<instance>/log/`) | [`../deployment/store-volume.md`](../deployment/store-volume.md), [`../api/search.md`](../api/search.md), [`../api/transparency.md`](../api/transparency.md) |
+| `LAKE_STORE_OWNER_WAIT_SECONDS` | how long a starting lake waits for another process to release the store root, and how long each customer-store open waits for its liquid owner lock; default 90; must outlast the predecessor's preStop delay plus `LAKE_DRAIN_SECONDS`. Past it lake exits 1 naming the holder | [`../deployment/store-volume.md`](../deployment/store-volume.md#the-hand-off) |
+| `LAKE_DRAIN_SECONDS` | how long SIGTERM waits for in-flight requests before lake closes its stores and releases the store root; default 20 | [`../deployment/store-volume.md`](../deployment/store-volume.md#the-hand-off) |
 | `LAKE_PUBLIC_HOST` | the Lake namespace value on every operator row; required when the operator Zetta client is enabled | [`../control-plane/platform.md`](../control-plane/platform.md) |
 | `LAKE_EXTERNAL_ORIGIN` | browser-facing scheme, host and optional non-default port; used by clone/push instructions, with no default hostname | [`../ui/forge.md`](../ui/forge.md), [`../deployment/private-install.md`](../deployment/private-install.md) |
 | `LAKE_INTERNAL_URL` | Lake's HTTP(S) in-cluster Service URL; its authority prefixes build image targets and the full URL is handed to agents | [`../api/builds.md`](../api/builds.md), [`../api/agent-launches.md`](../api/agent-launches.md) |
@@ -55,7 +57,8 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 Startup refuses to run when `LAKE_OPERATOR_ZETTA_URL` and `LAKE_OPERATOR_ZETTA_TOKEN` are not set
 together, when the operator client is enabled without `LAKE_PUBLIC_HOST`, when
 `LAKE_PLATFORM_SYNC_SECONDS` is zero, or when the transparency-log configuration is invalid; each
-case exits with status 2 and one line on stderr. The startup JSON event records `admin_token_set`
+case exits with status 2 and one line on stderr. A store root still held by another process after
+`LAKE_STORE_OWNER_WAIT_SECONDS` exits with status 1 and `lake: cannot start: ...` naming the holder. The startup JSON event records `admin_token_set`
 and `replication_token_set` as `yes` or `no`, never a token value
 ([`telemetry.md`](telemetry.md)).
 

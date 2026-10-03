@@ -1369,7 +1369,16 @@ TEST(TransparencyTimestamp, OwnerLoopRenewsDueEvidenceThroughRegistry) {
     options.tsa_trust_pem = tsa.trust_pem();
     options.timestamp_policy = policy;
     options.tsa_sender = sender;
+    options.port = 0;
     lake::api::ApiServer server(std::move(options));
+    // Renewal writes under the store root, so the owner loop renews only once this server owns
+    // the root (lake#479).
+    ASSERT_TRUE(server.start()) << server.reason();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!server.store_root_open() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(server.store_root_open());
 
     server.drain();
 

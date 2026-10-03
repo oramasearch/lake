@@ -99,6 +99,10 @@ int usage() {
     std::println("  LAKE_AGENT_MODEL is the frontier model Python agents run on (default gpt-4o)");
     std::println(
         "  LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false refuses never-expiring keys and tokens");
+    std::println("  LAKE_STORE_OWNER_WAIT_SECONDS bounds the wait for a predecessor to release "
+                 "the store root (default 90)");
+    std::println("  LAKE_DRAIN_SECONDS bounds the wait for in-flight requests on SIGTERM "
+                 "(default 20)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -116,6 +120,8 @@ int main(int argc, char** argv) {
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
+    opts.store_owner_wait = std::chrono::seconds{env_u64("LAKE_STORE_OWNER_WAIT_SECONDS", 90)};
+    opts.drain_timeout = std::chrono::seconds{env_u64("LAKE_DRAIN_SECONDS", 20)};
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
     opts.external_origin = env_or("LAKE_EXTERNAL_ORIGIN", "");
     opts.apps_wildcard = env_or("LAKE_APPS_WILDCARD", "");
@@ -367,6 +373,10 @@ int main(int argc, char** argv) {
             {"node", opts.node_name},
             {"store", store_kind},
             {"store_root_configured", opts.store_root.empty() ? "no" : "yes"},
+            {"store_owner_wait_seconds",
+             std::chrono::duration_cast<std::chrono::seconds>(opts.store_owner_wait).count()},
+            {"drain_seconds",
+             std::chrono::duration_cast<std::chrono::seconds>(opts.drain_timeout).count()},
             {"log_mode", lake::transparency::to_string(opts.log_configuration.mode)},
             {"tsa_configured", opts.tsa_endpoint.empty() ? "no" : "yes"},
             {"admin_token_set", opts.admin_token.empty() ? "no" : "yes"},
@@ -411,7 +421,15 @@ int main(int argc, char** argv) {
         });
     }
     auto next_app_cleanup = std::chrono::steady_clock::now();
+    int exit_code = 0;
     while (!stop_requested.load()) {
+        // The store root stayed held past LAKE_STORE_OWNER_WAIT_SECONDS, or did not open: exit
+        // so the kubelet restarts the container and the wait starts over (lake#479).
+        if (const std::string fatal = server.fatal_error(); !fatal.empty()) {
+            std::println(stderr, "lake: cannot start: {}", fatal);
+            exit_code = 1;
+            break;
+        }
         if (std::chrono::steady_clock::now() >= next_app_cleanup) {
             if (app_bus_configured) {
                 const auto purged = opts.store->purge_deleted_web_apps();
@@ -446,9 +464,11 @@ int main(int argc, char** argv) {
         bus_loop.request_stop();
         bus_loop.join();
     }
+    // SIGTERM: stop accepting, drain in-flight requests, close the stores and release the store
+    // root (ApiServer::stop, lake#479).
     server.stop();
     if (platform_transport_required || workspaces_configured) {
         lake::control::shutdown_zetta_control_transport();
     }
-    return 0;
+    return exit_code;
 }

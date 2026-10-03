@@ -72,7 +72,8 @@ stack. CI fetches only the pinned `oramasearch/zetta` commit (the one `zetta-bri
 its submodules, because only its client headers, transport and runtime implementation are compiled;
 the image workflow supplies the same directory as the `zetta_source` named build context. Bump the
 ref in both workflows when the bridge bumps Zetta, and the liquid ref when liquid-bridge bumps
-liquid.
+liquid. Both workflows pin liquid `df2ae4d` (liquid main after liquid#322, the store owner lock
+and `owner_wait` that lake#479 uses); lake does not compile against an older liquid.
 
 Lake's plain environment-value check compiles libliquid's existing private detector source into
 `lake-core`. The detector has no exported shared-library API, so this keeps static and shared builds
