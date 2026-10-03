@@ -69,8 +69,16 @@ ApiResult import_github_repository(const json& input, ApiContext& context) {
                                   "control and repository stores are required");
     }
     const json& recording = input.at("recording");
-    const auto created = context.store->create_repository(
-        {input.at("customer_id"), input.at("name"), recording.value("description", ""), "private"});
+    const auto workspace = repository_workspace(context, input);
+    if (!workspace) {
+        return ApiResult::failure(
+            workspace.error().code, workspace.error().message, workspace.error().path);
+    }
+    const auto created = context.store->create_repository({input.at("customer_id"),
+                                                           input.at("name"),
+                                                           recording.value("description", ""),
+                                                           "private",
+                                                           workspace->id});
     if (!created) {
         return store_error(created.error());
     }
@@ -207,15 +215,22 @@ void register_github_import_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "import_github_repository",
         .title = "Import GitHub repository",
-        .description = "Import Git history and recorded GitHub forge responses.",
+        .description = "Import Git history and recorded GitHub forge responses as a new "
+                       "repository in one workspace (`workspace_id`, required) of the "
+                       "customer's space.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"customer_id", {{"type", "string"}}},
+                           {"workspace_id", {{"type", "string"}}},
                            {"name", {{"type", "string"}}},
                            {"git_directory", {{"type", "string"}}},
                            {"recording", {{"type", "object"}}}}},
                          {"required",
-                          json::array({"customer_id", "name", "git_directory", "recording"})},
+                          json::array({"customer_id",
+                                       "workspace_id",
+                                       "name",
+                                       "git_directory",
+                                       "recording"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,

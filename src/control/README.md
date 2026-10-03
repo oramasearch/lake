@@ -107,3 +107,7 @@ delivery attempts in the application's workspace (lake#356, lake#357), each atte
 and the two `legacy_application_webhook_*` reads serve only the copy (migration
 `0049_application_webhook_workspaces`), and `create_application` stores the application's
 immutable `workspace_id`.
+Repositories carry the workspace they belong to (migration `0051_repository_workspaces`, lake#315).
+Both stores refuse `create_repository` without a live workspace of the repository's space and
+filter `list_repositories` by an optional workspace; `transfer_repository` is gone from the store
+interface because the routing trigger keeps a repository's space fixed.

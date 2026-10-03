@@ -252,16 +252,25 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    // Each repository belongs to one workspace of its space (lake#315).
+    const auto research_workspace = require(
+        store->create_workspace({organization_customer.id, "research", "dev", ""}),
+        "create workspace");
+    const auto personal_workspace = require(
+        store->create_workspace({individual_customer.id, "personal", "dev", ""}),
+        "create personal workspace");
     const auto repository =
         require(store->create_repository({organization_customer.id,
                                           "lake-design",
                                           "Design-system fixture with history and build evidence.",
-                                          "public"}),
+                                          "public",
+                                          research_workspace.id}),
                 "create public repository");
     require(store->create_repository({individual_customer.id,
                                       "private-notes",
                                       "A private repository for list density.",
-                                      "private"}),
+                                      "private",
+                                      personal_workspace.id}),
             "create private repository");
     const auto team = require(
         store->create_team({organization.id, "platform", "Platform", "admin", "ui-fixture-team"}),
@@ -468,9 +477,7 @@ int main(int argc, char** argv) {
                                  "ui-fixture-shared-recipient"}),
             "create shared recipient grant");
     // The folder's link lives in the organization's workspace Zetta; centrally only its grant.
-    const auto workspace = require(
-        store->create_workspace({organization_customer.id, "research", "dev", ""}),
-        "create workspace");
+    const auto& workspace = research_workspace;
     const auto workspace_zetta =
         require(store->get_service(workspace.zetta_service_id), "read workspace Zetta");
     if (const auto ready = store->set_service_status(

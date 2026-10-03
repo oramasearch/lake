@@ -46,6 +46,9 @@ struct Customer {
 struct Repository {
     std::string id, customer_id, name, description, visibility, deleted_at, retention_until,
         created_at, updated_at;
+    // The workspace the repository belongs to (migration 0051, lake#315): set on create and never
+    // changed. Empty only for a repository the migration recorded as needs_selection.
+    std::string workspace_id;
 };
 struct RepositoryRef {
     std::string repository_id, name, head, updated_at;
@@ -132,6 +135,8 @@ struct NewCustomer {
 struct NewRepository {
     std::string customer_id, name, description,
         visibility; // visibility empty = private
+    // Required: a live workspace of customer_id's space (migration 0051, lake#315).
+    std::string workspace_id;
 };
 struct NewTeam {
     std::string organization_id, name, display_name, acting_principal, request_id;
@@ -861,15 +866,16 @@ public:
                                                          const std::string& user_id = {}) = 0;
     virtual Result<Customer> get_customer(const std::string& id) = 0;
 
+    // Refuses a workspace_id that is not a live workspace of customer_id's space (invalid_input).
     virtual Result<Repository> create_repository(const NewRepository&) = 0;
-    // customer_id empty = every customer's repositories.
+    // customer_id empty = every customer's repositories; a non-empty workspace_id narrows the list
+    // to that workspace's repositories (lake#315).
     virtual Result<std::vector<Repository>> list_repositories(const std::string& customer_id,
-                                                              int limit) = 0;
+                                                              int limit,
+                                                              const std::string& workspace_id = {}) = 0;
     virtual Result<Repository> get_repository(const std::string& id) = 0;
     virtual Result<Repository> rename_repository(const std::string& id,
                                                  const std::string& name) = 0;
-    virtual Result<Repository> transfer_repository(const std::string& id,
-                                                   const std::string& customer_id) = 0;
     virtual Result<Repository> set_repository_visibility(const std::string& id,
                                                          const std::string& visibility) = 0;
     virtual Result<Repository> delete_repository(const std::string& id,

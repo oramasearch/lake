@@ -28,6 +28,7 @@
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "temporary_directory.hpp"
+#include "repository_test_support.hpp"
 
 namespace {
 
@@ -271,7 +272,8 @@ TEST(PostgresForgeScenario, DripsReviewRebaseAndGraphEvidenceLandEndToEnd) {
         control->create_customer({"individual", owner->id, "", "forge-author-" + suffix});
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
-        control->create_repository({customer->id, "forge-scenario", "", "private"});
+        control->create_repository({customer->id, "forge-scenario", "", "private",
+                                    lake::test::repository_workspace(*control, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
 
     auto author =

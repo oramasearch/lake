@@ -57,6 +57,7 @@
 #include "stream_fixture.hpp"
 #include "lake/api/web_ui.hpp"
 #include "api/route_guard.hpp"
+#include "repository_test_support.hpp"
 
 #include <boost/beast2/http_server.hpp>
 #include <boost/corosio/endpoint.hpp>
@@ -408,7 +409,8 @@ TEST(HttpServer, WorkspacePrefixServesRestOpenApiMcpAndAppSourceReads) {
     ASSERT_TRUE(workspace);
     ASSERT_TRUE(other_workspace);
     const auto repository =
-        store->create_repository({customer->id, "app-source", "", "private"});
+        store->create_repository({customer->id, "app-source", "", "private",
+                                  lake::test::repository_workspace(*store, customer->id)});
     ASSERT_TRUE(repository);
 
     const std::filesystem::path root =
@@ -878,8 +880,12 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     const std::string cookie = response_header(signup, "set-cookie")
                                    .substr(0, response_header(signup, "set-cookie").find(';'));
     ASSERT_FALSE(cookie.empty());
+    // A repository belongs to a workspace (lake#315): before the space has one, the page sends
+    // the person to create it.
     const std::string page = client->request("GET", "/repositories", "", cookie);
-    EXPECT_NE(page.find("action=\"/repository/create\""), std::string::npos);
+    EXPECT_EQ(page.find("action=\"/repository/create\""), std::string::npos);
+    EXPECT_NE(page.find("<a href=\"/workspaces\">Create a workspace</a> first"),
+              std::string::npos);
     const std::string customers_response = client->request("GET", "/v1/list_customers", "", cookie);
     const auto customers =
         nlohmann::json::parse(customers_response.substr(customers_response.find("\r\n\r\n") + 4));
@@ -896,9 +902,16 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     ASSERT_EQ(usage.at("value").at("items").size(), 1U);
     EXPECT_EQ(usage.at("value").at("items").at(0).at("stored_bytes"), 0);
     EXPECT_FALSE(usage.at("value").at("over_quota"));
+    const auto workspace = store_->create_workspace({customer_id, "notes", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const std::string form = client->request("GET", "/repositories", "", cookie);
+    EXPECT_NE(form.find("action=\"/repository/create\""), std::string::npos);
+    EXPECT_NE(form.find("<select name=\"workspace_id\" required>"), std::string::npos);
+    EXPECT_NE(form.find("value=\"" + workspace->id + "\""), std::string::npos);
+    // The workspace names its space, so the form sends only the workspace.
     const std::string created = client->request("POST",
                                                 "/repository/create",
-                                                "customer_id=" + customer_id +
+                                                "workspace_id=" + workspace->id +
                                                     "&name=first-repository&description=My+files",
                                                 cookie);
     ASSERT_TRUE(created.starts_with("HTTP/1.1 302")) << created;
@@ -907,10 +920,18 @@ TEST_P(HttpResponseIsolation, FreshSignUpOwnsFirstRepositoryWithZeroInitialMeter
     const std::string repository = client->request("GET", destination, "", cookie);
     EXPECT_TRUE(repository.starts_with("HTTP/1.1 200")) << repository;
     EXPECT_NE(repository.find("/first-repository"), std::string::npos);
+    // The repository page names its workspace and links into it.
+    EXPECT_NE(repository.find("href=\"/w/" + workspace->id + "/design/projects\">notes</a>"),
+              std::string::npos);
+    EXPECT_NE(repository.find("name=\"workspace_id\" value=\"" + workspace->id + "\""),
+              std::string::npos);
+    const std::string missing = client->request(
+        "POST", "/repository/create", "customer_id=" + customer_id + "&name=no-workspace", cookie);
+    EXPECT_FALSE(response_header(missing, "location").starts_with("/repository?id="));
     const std::string other_cookie = "lake_session=invalid";
     const std::string denied = client->request("POST",
                                                "/repository/create",
-                                               "customer_id=" + customer_id + "&name=forbidden",
+                                               "workspace_id=" + workspace->id + "&name=forbidden",
                                                other_cookie);
     EXPECT_FALSE(denied.starts_with("HTTP/1.1 200"));
     EXPECT_FALSE(response_header(denied, "location").starts_with("/repository?id="));
@@ -2507,7 +2528,9 @@ TEST_P(HttpResponseIsolation, ShipPackagesListsABuildThatHasNoDigestYet) {
     const nlohmann::json customers = nlohmann::json::parse(response_body(customers_response));
     const std::string customer_id = customers["value"]["items"][0]["id"];
     select_workspace(*connection, customer_id);
-    const auto repository = store_->create_repository({customer_id, "scoring", "", "private"});
+    const auto repository = store_->create_repository({customer_id, "scoring", "", "private",
+                                                       lake::test::repository_workspace(
+                                                           *store_, customer_id)});
     ASSERT_TRUE(repository) << repository.error().message;
     const auto queued = store_->create_build({.customer_id = customer_id,
                                               .workspace_id = connection->workspace_id,
@@ -2691,9 +2714,11 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     const std::string repository = connection->request(
         "POST",
         "/repository/create",
-        "customer_id=" + customer_id + "&name=apps-ui-source&description=App+source",
+        "customer_id=" + customer_id + "&workspace_id=" + connection->workspace_id +
+            "&name=apps-ui-source&description=App+source",
         cookie);
     const std::string repository_location = response_header(repository, "location");
+    ASSERT_TRUE(repository_location.starts_with("/repository?id=")) << repository;
     const std::string repository_id =
         repository_location.substr(repository_location.find("id=") + 3);
     const std::string created =
@@ -3968,7 +3993,8 @@ void populate_metering_store(lake::control::Store& control_store,
     ASSERT_TRUE(objects) << objects.error().message;
     for (std::size_t index = 0; index < 4; ++index) {
         const auto row = control_store.create_repository(
-            {customer_id, "metering-" + std::to_string(index), "cold-start fixture", "private"});
+            {customer_id, "metering-" + std::to_string(index), "cold-start fixture", "private",
+             lake::test::repository_workspace(control_store, customer_id)});
         ASSERT_TRUE(row);
         liquid::repository_options options;
         options.store = &*objects;

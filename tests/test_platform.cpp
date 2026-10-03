@@ -26,6 +26,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/zetta_control.hpp"
+#include "repository_test_support.hpp"
 
 namespace {
 
@@ -251,7 +252,9 @@ protected:
         ASSERT_TRUE(user);
         const auto customer = store->create_customer({"individual", user->id, "", "admin"});
         ASSERT_TRUE(customer);
-        const auto created = store->create_repository({customer->id, "platform", "", "private"});
+        const auto created = store->create_repository({customer->id, "platform", "", "private",
+                                                       lake::test::repository_workspace(
+                                                           *store, customer->id)});
         ASSERT_TRUE(created);
         repository = *created;
         platform = std::make_unique<lake::control::PlatformService>(

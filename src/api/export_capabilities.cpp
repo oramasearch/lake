@@ -192,10 +192,17 @@ ApiResult import_repository(const json& input, ApiContext& context) {
     }
     const json& payload = archive.at("payload");
     const json& source = payload.at("repository");
+    // The archive's own workspace_id is where it came from; the caller names where it goes.
+    const auto workspace = repository_workspace(context, input);
+    if (!workspace) {
+        return ApiResult::failure(
+            workspace.error().code, workspace.error().message, workspace.error().path);
+    }
     const auto created = context.store->create_repository({input.at("customer_id"),
                                                            input.at("name"),
                                                            source.value("description", ""),
-                                                           source.value("visibility", "private")});
+                                                           source.value("visibility", "private"),
+                                                           workspace->id});
     if (!created) {
         return store_error(created.error());
     }
@@ -294,13 +301,17 @@ void register_export_capabilities(Registry& registry) {
     registry.add(
         Capability{.name = "import_repository",
                    .title = "Import repository",
-                   .description = "Verify and recreate a signed portable repository archive.",
+                   .description = "Verify and recreate a signed portable repository archive "
+                                  "as a new repository in one workspace (`workspace_id`, "
+                                  "required) of the customer's space.",
                    .input_schema = {{"type", "object"},
                                     {"properties",
                                      {{"customer_id", {{"type", "string"}}},
+                                      {"workspace_id", {{"type", "string"}}},
                                       {"name", {{"type", "string"}}},
                                       {"archive", {{"type", "object"}}}}},
-                                    {"required", json::array({"customer_id", "name", "archive"})},
+                                    {"required",
+                                     json::array({"customer_id", "workspace_id", "name", "archive"})},
                                     {"additionalProperties", false}},
                    .output_schema = {{"type", "object"}},
                    .kind = CapabilityKind::Action,

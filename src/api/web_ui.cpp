@@ -1541,7 +1541,24 @@ std::string web_ui_customers(const std::vector<control::Customer>& customers, We
 
 std::string web_ui_repositories(const std::vector<control::Repository>& repositories,
                                 const std::map<std::string, control::Customer>& owners,
-                                WebUiViewer viewer) {
+                                WebUiViewer viewer,
+                                const std::vector<control::Workspace>& workspaces) {
+    std::map<std::string, const control::Workspace*> workspace_by_id;
+    for (const control::Workspace& workspace : workspaces) {
+        workspace_by_id.emplace(workspace.id, &workspace);
+    }
+    // A repository's workspace (lake#315): a link into that workspace for a viewer who can see
+    // it, otherwise nothing. Repository pages stay outside /w/<id>/ (docs/ui/repositories.md).
+    const auto workspace_cell = [&](const control::Repository& repository) -> std::string {
+        if (repository.workspace_id.empty()) {
+            return viewer.signed_in ? "<span class=\"muted\">Needs a workspace</span>" : "";
+        }
+        const auto found = workspace_by_id.find(repository.workspace_id);
+        if (found == workspace_by_id.end()) {
+            return "";
+        }
+        return row_link("/w/" + found->second->id + "/design/projects", found->second->name);
+    };
     std::string content =
         viewer.signed_in
             ? "<p class=\"eyebrow\">Your work</p><h1>Repositories</h1>"
@@ -1556,37 +1573,55 @@ std::string web_ui_repositories(const std::vector<control::Repository>& reposito
                 : "<div class=\"panel empty\">No public repositories yet. "
                   "<a href=\"/sign-up\">Create an account</a> to start your own.</div>";
     } else {
-        content += "<table><thead><tr><th>Repository</th><th>Owner</th><th>Visibility</"
-                   "th><th>Description</th><th>Created</th></tr></thead><tbody>";
+        content += "<table><thead><tr><th>Repository</th><th>Owner</th><th>Workspace</th>"
+                   "<th>Visibility</th><th>Description</th><th>Created</th></tr></thead><tbody>";
         for (const auto& r : repositories) {
             const auto owner = owners.find(r.customer_id);
             const std::string owner_name =
                 owner == owners.end() ? r.customer_id : owner->second.name;
             const bool yours = owner != owners.end() && !viewer.user_id.empty() &&
                                owner->second.user_id == viewer.user_id;
-            content += std::format("<tr><td>{}</td><td>{}</td><td><span "
+            content += std::format("<tr><td>{}</td><td>{}</td><td>{}</td><td><span "
                                    "class=\"badge\">{}</span></td><td>{}</td><td>{}</td></tr>",
                                    row_link("/repository?id=" + r.id, owner_name + "/" + r.name),
                                    row_link("/repositories?customer_id=" + r.customer_id,
                                             yours ? owner_name + " (you)" : owner_name),
+                                   workspace_cell(r),
                                    web_ui_escape(r.visibility),
                                    web_ui_escape(r.description),
                                    web_ui_escape(r.created_at));
         }
         content += "</tbody></table>";
     }
-    if (viewer.signed_in && !owners.empty()) {
+    if (viewer.signed_in && !owners.empty() && workspaces.empty()) {
+        content += "<section class=\"panel\"><h2>Create a Repository</h2>"
+                   "<p>A repository belongs to one workspace of a space. "
+                   "<a href=\"/workspaces\">Create a workspace</a> first.</p></section>";
+    } else if (viewer.signed_in && !owners.empty()) {
+        // One choice per workspace, grouped by space; the workspace names its space, so the form
+        // sends only workspace_id (lake#315). The current workspace is preselected.
         content +=
             "<section class=\"panel\"><h2>Create a Repository</h2>"
-            "<p>Your personal space owns your repositories. lake gave it a generated handle when "
-            "you first signed in; it is marked <em>your personal space</em> below.</p>"
+            "<p>A repository belongs to one workspace of a space, and stays there. Your personal "
+            "space is marked <em>your personal space</em> below.</p>"
             "<form class=\"stack\" method=\"post\" action=\"/repository/create\">"
-            "<label>Space<select name=\"customer_id\" required>";
+            "<label>Workspace<select name=\"workspace_id\" required>";
         for (const auto& [id, owner] : owners) {
             const bool yours = !viewer.user_id.empty() && owner.user_id == viewer.user_id;
-            content += "<option value=\"" + web_ui_escape(id) + "\"" + (yours ? " selected" : "") +
-                       ">" + web_ui_escape(owner.name) + (yours ? " (your personal space)" : "") +
-                       "</option>";
+            std::string options;
+            for (const control::Workspace& workspace : workspaces) {
+                if (workspace.customer_id != id) {
+                    continue;
+                }
+                options += "<option value=\"" + web_ui_escape(workspace.id) + "\"" +
+                           (workspace.id == viewer.workspace_id ? " selected" : "") + ">" +
+                           web_ui_escape(workspace.name) + "</option>";
+            }
+            if (!options.empty()) {
+                content += "<optgroup label=\"" +
+                           web_ui_escape(owner.name + (yours ? " (your personal space)" : "")) +
+                           "\">" + options + "</optgroup>";
+            }
         }
         content +=
             "</select></label><label>Repository name<input name=\"name\" required "
@@ -1618,6 +1653,17 @@ std::string web_ui_repository(const control::Repository& repository,
         web_ui_escape(repository.description.empty() ? "No description." : repository.description),
         web_ui_escape(repository.visibility),
         forge_tabs(repository, "code", viewer));
+    // The owning workspace (lake#315). The page stays at its repository address; it names the
+    // workspace and links into it rather than moving under /w/<id>/.
+    if (data.workspace) {
+        content += "<p class=\"muted repository-workspace\">Workspace " +
+                   row_link("/w/" + data.workspace->id + "/design/projects",
+                            data.workspace->name) +
+                   "</p>";
+    } else if (viewer.signed_in && repository.workspace_id.empty()) {
+        content += "<div class=\"notice\"><strong>No workspace yet.</strong> This repository "
+                   "was created before workspaces and has not been assigned one.</div>";
+    }
     if (!repository.deleted_at.empty()) {
         content += std::format("<div class=\"notice status-danger\"><strong>Tombstoned.</strong> "
                                "Deleted {}. Collection may reclaim unreferenced content after "
@@ -1631,11 +1677,13 @@ std::string web_ui_repository(const control::Repository& repository,
             "<p class=\"muted\">Queue an in-cluster build from this repository.</p></div>"
             "<form method=\"post\" action=\"/repository/build\">"
             "<input type=\"hidden\" name=\"customer_id\" value=\"{}\">"
+            "<input type=\"hidden\" name=\"workspace_id\" value=\"{}\">"
             "<input type=\"hidden\" name=\"repository\" value=\"{}\">"
             "<input type=\"hidden\" name=\"revision\" value=\"{}\">"
             "<input type=\"hidden\" name=\"target\" value=\"{}:latest\">"
             "<button class=\"primary\" type=\"submit\">Build image</button></form></div></section>",
             web_ui_escape(repository.customer_id),
+            web_ui_escape(repository.workspace_id),
             web_ui_escape(repository.id),
             web_ui_escape(default_ref),
             web_ui_escape(repository.name));

@@ -359,6 +359,14 @@ agreeing under Clerk.
 lacks (lake#442, lake#465) fails here. `PostgresStores.MigrationAssignsTheSoleWorkspaceAndRecordsTheRest`
 covers `0044_store_workspaces`. See [storage.md](../docs/control-plane/storage.md).
 
+Repository workspaces (lake#315): `Repositories.BelongToOneWorkspaceOfTheirSpace` covers two spaces
+and two workspaces in one, missing, empty, malformed, unknown, deleted and foreign `workspace_id`,
+reads and the workspace filter, the refused transfer, both imports, and workspace deletion.
+`PostgresRepositories.MigrationAssignsTheSoleWorkspaceAndRoutingStaysFixed` covers
+`0051_repository_workspaces` (sole, several, none, a tombstoned repository, a rerun) and the
+trigger's refusals. `repository_test_support.hpp` (`repository_workspace`) gives other tests the
+space's first live workspace for the repositories they create.
+
 `test_workspace_records.cpp` covers workspace records (lake#370,
 [workspace-records.md](../docs/architecture/workspace-records.md)): sealed records and blind
 indexes, paged listing, records that open only in their own workspace and lookup, conditional

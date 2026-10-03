@@ -29,6 +29,7 @@
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
 #include "webauthn_test_support.hpp"
+#include "repository_test_support.hpp"
 
 namespace {
 
@@ -152,7 +153,9 @@ TEST_F(PostgresProvisioning, OwnsOneCustomerAndCanCreateFirstRepository) {
     ASSERT_EQ(customers.value.at("items").size(), 1U);
     const auto repository =
         registry.call("create_repository",
-                      {{"customer_id", customer->id}, {"name", "first-repository"}},
+                      {{"customer_id", customer->id},
+                       {"workspace_id", lake::test::repository_workspace(*store, customer->id)},
+                       {"name", "first-repository"}},
                       context);
     ASSERT_TRUE(repository.ok) << repository.error.message;
     EXPECT_TRUE(registry.call("get_repository", {{"id", repository.value.at("id")}}, context).ok);
@@ -175,7 +178,10 @@ TEST_F(PostgresProvisioning, OwnsOneCustomerAndCanCreateFirstRepository) {
     ASSERT_TRUE(other_customer);
     EXPECT_FALSE(registry
                      .call("create_repository",
-                           {{"customer_id", other_customer->id}, {"name", "forbidden"}},
+                           {{"customer_id", other_customer->id},
+                            {"workspace_id",
+                             lake::test::repository_workspace(*store, other_customer->id)},
+                            {"name", "forbidden"}},
                            context)
                      .ok);
 }
@@ -762,7 +768,8 @@ TEST(PostgresOfflineRecovery, GrantsRecoveryPathsAndRepositoryKeyCustody) {
     const auto customer = lake::test::personal_customer(*store, target_principal->user_id);
     ASSERT_TRUE(customer) << customer.error().message;
     const auto repository =
-        store->create_repository({customer->id, "encrypted-" + suffix, "", "private"});
+        store->create_repository({customer->id, "encrypted-" + suffix, "", "private",
+                                  lake::test::repository_workspace(*store, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
     const auto object = store->find_policy_object("repository", repository->id);
     ASSERT_TRUE(object) << object.error().message;

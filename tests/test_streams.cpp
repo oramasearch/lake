@@ -19,6 +19,7 @@
 #include "lake/control/stream_owners.hpp"
 #include "postgres_fixture.hpp"
 #include "stream_fixture.hpp"
+#include "repository_test_support.hpp"
 
 namespace {
 using nlohmann::json;
@@ -223,7 +224,9 @@ TEST_F(Streams, DeletedAppsAndExpiredBuildsAreReapedWithoutTouchingLiveTopics) {
     lake::control::WebAppPatch patch;
     patch.desired = "deleted";
     ASSERT_TRUE(store->update_web_app(app->id, patch));
-    const auto repository = store->create_repository({customer, "source", "", "private"});
+    const auto repository = store->create_repository({customer, "source", "", "private",
+                                                      lake::test::repository_workspace(
+                                                          *store, customer)});
     ASSERT_TRUE(repository);
     const auto build = store->create_build({.customer_id = customer, .workspace_id = workspace->id,
         .repository = repository->id, .revision = "main", .target = "app:v1"});

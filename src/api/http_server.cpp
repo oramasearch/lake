@@ -2211,7 +2211,8 @@ control::Repository repository_from_json(const nlohmann::json& value) {
             json_string(value, "deleted_at"),
             json_string(value, "retention_until"),
             json_string(value, "created_at"),
-            json_string(value, "updated_at")};
+            json_string(value, "updated_at"),
+            json_string(value, "workspace_id")};
 }
 
 control::ForgeRecord forge_record_from_json(const nlohmann::json& value) {
@@ -8586,8 +8587,18 @@ struct ApiServer::Impl {
                 error_body("invalid_input", error), "application/json", "no-store");
         }
         ApiContext context = context_for(route);
+        // The form chooses a workspace, which names its space (lake#315). A customer_id the form
+        // also sends must be that space; create_repository refuses one that is not.
+        const std::string workspace_id = form_field(body, "workspace_id");
+        std::string customer_id = form_field(body, "customer_id");
+        if (customer_id.empty() && !workspace_id.empty() && options.store) {
+            if (const auto workspace = options.store->get_workspace(workspace_id)) {
+                customer_id = workspace->customer_id;
+            }
+        }
         const ApiResult result = registry.call("create_repository",
-                                               {{"customer_id", form_field(body, "customer_id")},
+                                               {{"customer_id", customer_id},
+                                                {"workspace_id", workspace_id},
                                                 {"name", form_field(body, "name")},
                                                 {"description", form_field(body, "description")},
                                                 {"visibility", "private"}},
@@ -8650,9 +8661,22 @@ struct ApiServer::Impl {
                 owners.emplace(customer.id, std::move(customer));
             }
         }
+        // The owners' live workspaces: the workspace column and the create form's choice.
+        std::vector<control::Workspace> workspaces;
+        if (options.store) {
+            for (const auto& [id, owner] : owners) {
+                if (const auto rows = options.store->list_workspaces(id)) {
+                    for (const control::Workspace& workspace : *rows) {
+                        if (workspace.desired != "deleted") {
+                            workspaces.push_back(workspace);
+                        }
+                    }
+                }
+            }
+        }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_repositories(repositories, owners, viewer_for(ctx)),
+                         web_ui_repositories(repositories, owners, viewer_for(ctx), workspaces),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -12329,6 +12353,21 @@ struct ApiServer::Impl {
         for (const nlohmann::json& value : releases_result.value.at("items")) {
             data.releases.push_back(forge_record_from_json(value));
         }
+        // The owning workspace (lake#315), for a viewer who may read the repository's space; a
+        // public reader from elsewhere is not told the space's workspace names.
+        if (ctx.authorized && !repository.workspace_id.empty()) {
+            const ApiResult workspace = registry.call(
+                "get_workspace",
+                {{"customer_id", repository.customer_id}, {"workspace_id", repository.workspace_id}},
+                ctx);
+            if (workspace.ok) {
+                data.workspace = control::Workspace{
+                    .id = json_string(workspace.value, "id"),
+                    .customer_id = json_string(workspace.value, "customer_id"),
+                    .name = json_string(workspace.value, "name"),
+                    .environment = json_string(workspace.value, "environment")};
+            }
+        }
         return send_text(
             route,
             boost::http::status::ok,
@@ -14541,8 +14580,19 @@ struct ApiServer::Impl {
                 "no-store");
         }
         const std::string visibility = request.value("private", true) ? "private" : "public";
+        // A repository belongs to one workspace (lake#315). Hub clients cannot add a field to
+        // create_repo's body, so the workspace may also come in the X-Lake-Workspace-Id header
+        // (huggingface_hub: HfApi(headers=...)). There is no default.
+        std::string workspace_id = request.contains("workspace_id") &&
+                                           request.at("workspace_id").is_string()
+                                       ? request.at("workspace_id").get<std::string>()
+                                       : std::string();
+        if (workspace_id.empty() && route.req.count("x-lake-workspace-id") != 0) {
+            workspace_id = std::string(route.req.at("x-lake-workspace-id"));
+        }
         const ApiResult result = registry.call("create_repository",
                                                {{"customer_id", owner->id},
+                                                {"workspace_id", workspace_id},
                                                 {"name", name},
                                                 {"description", ""},
                                                 {"visibility", visibility}},

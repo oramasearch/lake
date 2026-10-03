@@ -268,8 +268,10 @@ protected:
         if (!customer) {
             return {};
         }
-        const auto repository =
-            store_->create_repository({customer->id, "project", "Drive scenario", "private"});
+        // The repository belongs to the space's one Ready workspace (lake#315).
+        const std::string workspace = workspaces_->create(customer->id, "drive");
+        const auto repository = store_->create_repository(
+            {customer->id, "project", "Drive scenario", "private", workspace});
         EXPECT_TRUE(repository) << repository.error().message;
         if (!customer || !repository) {
             return {};
@@ -334,7 +336,7 @@ protected:
                                        {.bearer_token = fixture_.owner.secret, .durable = false}));
         ASSERT_TRUE(client) << client.error().message;
         ASSERT_TRUE(liquid::runtime::block_on(client->sync()));
-        workspace_ = workspaces_->create(fixture_.customer.id, "drive");
+        workspace_ = fixture_.repository.workspace_id;
         link_ = create_link("read");
         ASSERT_TRUE(link_.contains("token")) << link_.dump();
     }

@@ -36,3 +36,6 @@ new home page) is [cloud.md](cloud.md), with a static mock in [ui/mocks/cloud/](
 It is not implemented.
 
 - [`zetta-parity.md`](zetta-parity.md) — every Zetta capability reachable from lake; the pipeline as the central object (plan, 2026-09-26)
+
+[status.md](status.md) records repository workspaces (lake#315 part 1, migration `0051`) as
+implemented and not yet deployed.

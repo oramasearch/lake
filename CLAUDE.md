@@ -56,6 +56,11 @@ migration `0045`); application lifecycle events and webhook delivery attempts fo
 lake#357, migration `0049`, in the application's workspace). Each PostgreSQL table stays until a
 later migration drops it after the copy is verified on dev.
 
+Every repository belongs to one workspace (lake#315 part 1, migration `0051`): an immutable
+`repositories.workspace_id` required on every create and import, returned on reads and carried
+through push authorization. It is routing only; repository metadata and content have not moved.
+Repository pages keep their addresses and name the workspace. See `docs/api/repositories.md`.
+
 ## Historical status — superseded 2026-09-08
 
 The following was the prior source-tree status record. Its production claims are retained only as

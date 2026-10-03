@@ -383,10 +383,22 @@ Fixture provision(unsigned short port) {
                                 {"user_id", user.at("id")},
                                 {"name", "shared-store-" + suffix}});
     const std::string customer_id = customer.at("id");
-    const json pushed =
-        call(port, "create_repository", {{"customer_id", customer_id}, {"name", "pushed"}});
-    const json drive =
-        call(port, "create_repository", {{"customer_id", customer_id}, {"name", "drive"}});
+    // Each repository belongs to one workspace of its space (lake#315).
+    const json workspace = call(port,
+                                "create_workspace",
+                                {{"customer_id", customer_id},
+                                 {"name", "repositories"},
+                                 {"environment", "dev"}});
+    const json pushed = call(port,
+                             "create_repository",
+                             {{"customer_id", customer_id},
+                              {"workspace_id", workspace.at("id")},
+                              {"name", "pushed"}});
+    const json drive = call(port,
+                            "create_repository",
+                            {{"customer_id", customer_id},
+                             {"workspace_id", workspace.at("id")},
+                             {"name", "drive"}});
     return {customer_id, pushed.at("id"), drive.at("id")};
 }
 

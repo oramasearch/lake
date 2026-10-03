@@ -19,6 +19,7 @@
 #include "lake/control/zetta_workspace.hpp"
 #include "temporary_directory.hpp"
 #include "stream_fixture.hpp"
+#include "repository_test_support.hpp"
 
 namespace {
 
@@ -80,7 +81,8 @@ struct WebApps {
         EXPECT_TRUE(customers);
         customer_id = customers->front().id;
         const auto repository =
-            store->create_repository({customer_id, "app-source", "", "private"});
+            store->create_repository({customer_id, "app-source", "", "private",
+                                      lake::test::repository_workspace(*store, customer_id)});
         EXPECT_TRUE(repository);
         repository_id = repository->id;
         workspace = std::make_unique<lake::test::StreamWorkspace>(store, customer_id);
@@ -426,7 +428,9 @@ TEST(WebApps, OperatorHashesRestrictEveryPurposeAndRotationRevokesOldTokens) {
     const auto second = apps.create("second");
     ASSERT_TRUE(second.ok) << second.error.message;
     const auto foreign =
-        apps.store->create_repository({apps.customer_id, "other-source", "", "public"});
+        apps.store->create_repository({apps.customer_id, "other-source", "", "public",
+                                       lake::test::repository_workspace(
+                                           *apps.store, apps.customer_id)});
     ASSERT_TRUE(foreign);
     EXPECT_EQ(created.value["mode"], "runtime");
     EXPECT_FALSE(created.value.contains("token_hashes_json"));

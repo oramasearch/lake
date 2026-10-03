@@ -60,8 +60,11 @@ and [identity reference](https://github.com/oramasearch/liquid/blob/main/docs/re
 Malformed encoding, truncated CBOR, and invalid signatures remain refusals before user creation.
 Encoding and CBOR errors say what failed and tell the visitor to export the complete document again.
 
-After sign-up, `/repositories` offers a private repository form. `POST /repository/create`
-calls `create_repository` through the registry and redirects to the created repository. An
+After sign-up, `/repositories` offers a private repository form once the space has a workspace;
+before that it links to `/workspaces`, because every repository belongs to one workspace and there
+is no default (lake#315). The form chooses the workspace, which names its space.
+`POST /repository/create` calls `create_repository` through the registry and redirects to the
+created repository. An
 unauthenticated caller or a user naming another customer's ID cannot create a repository there.
 The homepage and navigation redesign remain [#135](https://github.com/oramasearch/lake/issues/135).
 
@@ -73,7 +76,7 @@ names, absence of a quota override, repeated/concurrent requests, cross-customer
 input, and complete rollback after a deliberately failed session insert followed by a successful
 retry. `HttpResponseIsolation.FreshSignUpOwnsFirstRepositoryWithZeroInitialMetering` runs with
 memory and PostgreSQL stores over real HTTP and the production repository store. It checks the
-redirect, first-repository form, zero hourly storage and cost with nonzero prices, configured quota
+redirect, the workspace prompt and then the first-repository form, zero hourly storage and cost with nonzero prices, configured quota
 inheritance, and first-repository access without an operator credential.
 
 Changing provisioning must preserve these checks and the application pool boundary. Any future

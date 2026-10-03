@@ -108,3 +108,11 @@ operator's copy into the workspace Zettas was verified on dev (15 of 15 rows, `c
 is removed from this file and 0045's block runs only while the table exists, so rerunning the file
 never recreates it. The latest guard is `drop_ask_messages_guard`; the operator must vendor this
 schema and update its guard before rollout.
+Migration `0051_repository_workspaces` adds `repositories.workspace_id`, the workspace a repository
+belongs to (lake#315, part 1: routing only). Earlier repositories, tombstoned ones included, get the
+space's only live workspace and are recorded in `workspace_assignments`; a space with several or
+none is recorded as `needs_selection` and reported. New repositories go through
+`enforce_workspace_routing` (trigger `repository_workspace_routing`), which also keeps the space
+fixed, so repositories are no longer transferred. The latest guard is `repository_workspaces_guard`;
+the operator must vendor this schema and update its guard before rollout. See
+[repositories.md](../docs/api/repositories.md#the-owning-workspace).

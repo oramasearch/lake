@@ -609,8 +609,9 @@ SyncStoreResult<BranchProtectionEvaluation>
 evaluate_branch_protection(control::Store& store,
                            const std::string& acting_identity,
                            control::AuthorizationCache& authorization_cache,
-                           const std::string& repository_id,
+                           const control::Repository& repository,
                            const BranchRefUpdate& update) {
+    const std::string& repository_id = repository.id;
     const auto rules = store.list_forge_records(repository_id, "branch_protection", 1000);
     if (!rules) {
         return std::unexpected(

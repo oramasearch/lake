@@ -1025,6 +1025,11 @@ json repository_schema() {
             {"properties",
              {{"id", {{"type", "string"}}},
               {"customer_id", {{"type", "string"}}},
+              {"workspace_id",
+               {{"type", json::array({"string", "null"})},
+                {"description",
+                 "The workspace the repository belongs to; it never changes. Null only for a "
+                 "repository created before workspaces that still needs one assigned."}}},
               {"name", {{"type", "string"}}},
               {"description", {{"type", "string"}}},
               {"visibility",
@@ -1326,14 +1331,14 @@ std::optional<ApiResult> record_transfer(ApiContext& context,
 }
 
 SyncStoreResult<void> record_branch_protection_event(ApiContext& context,
-                                                     const std::string& customer_id,
-                                                     const std::string& repository_id,
+                                                     const control::Repository& repository,
                                                      const BranchRefUpdate& update,
                                                      const std::string& rule,
                                                      bool allowed,
                                                      const std::string& reason) {
+    const std::string& repository_id = repository.id;
     const audit::EventDraft event{
-        .customer_id = customer_id,
+        .customer_id = repository.customer_id,
         .kind = allowed ? "forge.branch_protection.allowed" : "forge.branch_protection.refused",
         .principal = context.acting_identity.empty() ? "anonymous" : context.acting_identity,
         .object = "repository/" + repository_id + "/ref/" + update.name,
@@ -1343,6 +1348,7 @@ SyncStoreResult<void> record_branch_protection_event(ApiContext& context,
         .method = context.authentication_method,
         .device = context.device,
         .details = {{"repository", repository_id},
+                    {"workspace_id", repository.workspace_id},
                     {"reference", update.name},
                     {"caller",
                      context.acting_identity.empty() ? "anonymous" : context.acting_identity},
@@ -1374,11 +1380,15 @@ bool offline_grant_fields_match(const control::OfflineGrant& grant) {
            attributes.at("device_id").get<std::string>() == grant.device_id;
 }
 
+// The repository, with its workspace (lake#315), is resolved once by the caller; every branch
+// protection decision and its audit record carry that workspace.
 SyncPushAuthorizer sync_change_authorizer(ApiContext& context,
-                                          const std::string& customer_id,
-                                          const std::string& repository_id) {
-    return [&context, customer_id, repository_id](const SyncPushItem& item,
-                                                  std::span<const BranchRefUpdate> updates)
+                                          const control::Repository& repository) {
+    const std::string customer_id = repository.customer_id;
+    const std::string repository_id = repository.id;
+    return [&context, repository, customer_id, repository_id](
+               const SyncPushItem& item,
+               std::span<const BranchRefUpdate> updates)
                -> SyncStoreResult<std::vector<SyncRefVerdict>> {
         if (item.kind == SyncPushItemKind::Reference) {
             std::vector<SyncRefVerdict> verdicts;
@@ -1387,12 +1397,11 @@ SyncPushAuthorizer sync_change_authorizer(ApiContext& context,
                 const auto evaluated = evaluate_branch_protection(*context.store,
                                                                   context.acting_identity,
                                                                   context.authorization_cache,
-                                                                  repository_id,
+                                                                  repository,
                                                                   update);
                 if (!evaluated) {
                     const auto recorded = record_branch_protection_event(context,
-                                                                         customer_id,
-                                                                         repository_id,
+                                                                         repository,
                                                                          update,
                                                                          evaluated.error().rule,
                                                                          false,
@@ -1407,8 +1416,7 @@ SyncPushAuthorizer sync_change_authorizer(ApiContext& context,
                 for (const std::string& rule : evaluated->matched_rules) {
                     const auto recorded =
                         record_branch_protection_event(context,
-                                                       customer_id,
-                                                       repository_id,
+                                                       repository,
                                                        update,
                                                        rule,
                                                        true,
@@ -1715,6 +1723,33 @@ ApiResult authorized_object_list_result(control::Result<std::vector<control::Pol
 }
 
 } // namespace
+
+std::expected<control::Workspace, ApiError> repository_workspace(ApiContext& context,
+                                                                 const nlohmann::json& input) {
+    if (!context.store) {
+        return std::unexpected(
+            ApiError{"store_unavailable", "no control-plane store is configured", {}});
+    }
+    const std::string workspace_id =
+        input.contains("workspace_id") && input.at("workspace_id").is_string()
+            ? input.at("workspace_id").get<std::string>()
+            : std::string();
+    const std::string customer_id =
+        input.contains("customer_id") && input.at("customer_id").is_string()
+            ? input.at("customer_id").get<std::string>()
+            : std::string();
+    const auto workspace = workspace_id.empty()
+        ? control::Result<control::Workspace>(
+              std::unexpect, control::StoreError{"not_found", "no workspace"})
+        : context.store->get_workspace(workspace_id);
+    if (!workspace || workspace->desired == "deleted" || workspace->customer_id != customer_id) {
+        return std::unexpected(ApiError{"invalid_input",
+                                        "workspace_id must name a workspace of the repository's "
+                                        "space; a repository belongs to one workspace",
+                                        "/workspace_id"});
+    }
+    return *workspace;
+}
 
 namespace {
 
@@ -3315,10 +3350,12 @@ void register_repository_capabilities(Registry& registry) {
         Capability{.name = "list_repositories",
                    .title = "List repositories",
                    .description = "The most recent repositories, newest first; customer_id "
-                                  "narrows to one tenant.",
+                                  "narrows to one space and workspace_id to one of its "
+                                  "workspaces.",
                    .input_schema = {{"type", "object"},
                                     {"properties",
                                      {{"customer_id", {{"type", "string"}}},
+                                      {"workspace_id", {{"type", "string"}}},
                                       {"limit", {{"type", "integer"}}}}},
                                     {"additionalProperties", false}},
                    .output_schema = list_schema(repository_schema()),
@@ -3331,7 +3368,9 @@ void register_repository_capabilities(Registry& registry) {
                    .handler = [](const json& in, ApiContext& ctx) {
                        return ctx.store ? authorized_repository_list_result(
                                               ctx.store->list_repositories(
-                                                  in.value("customer_id", ""), limit_of(in)),
+                                                  in.value("customer_id", ""),
+                                                  limit_of(in),
+                                                  in.value("workspace_id", "")),
                                               ctx)
                                         : no_store();
                    }});
@@ -3358,19 +3397,21 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_repository",
         .title = "Create repository",
-        .description = "Create a repository owned by a customer: name is a slug "
+        .description = "Create a repository owned by a customer, in one of its workspaces "
+                       "(`workspace_id`, required, never changes): name is a slug "
                        "unique within that customer "
                        "(the address is <customer handle>/<name>); visibility "
                        "private (default), organization, or public.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"customer_id", {{"type", "string"}}},
+                           {"workspace_id", {{"type", "string"}}},
                            {"name", {{"type", "string"}}},
                            {"description", {{"type", "string"}}},
                            {"visibility",
                             {{"type", "string"},
                              {"enum", json::array({"private", "organization", "public"})}}}}},
-                         {"required", json::array({"customer_id", "name"})},
+                         {"required", json::array({"customer_id", "workspace_id", "name"})},
                          {"additionalProperties", false}},
         .output_schema = repository_schema(),
         .kind = CapabilityKind::Action,
@@ -3380,12 +3421,18 @@ void register_repository_capabilities(Registry& registry) {
         .handler = [](const json& in, ApiContext& ctx) {
             if (!ctx.store)
                 return no_store();
+            const auto workspace = repository_workspace(ctx, in);
+            if (!workspace) {
+                return ApiResult::failure(
+                    workspace.error().code, workspace.error().message, workspace.error().path);
+            }
             const std::string name = in.value("name", "");
             auto repository = ctx.store->create_repository(
                 control::NewRepository{in.value("customer_id", ""),
                                        name,
                                        in.value("description", ""),
-                                       in.value("visibility", "")});
+                                       in.value("visibility", ""),
+                                       workspace->id});
             if (!repository && repository.error().code == "conflict") {
                 ApiResult result = from_store_error(repository.error());
                 result.error.message = "a repository named '" + name + "' already exists";
@@ -3415,7 +3462,9 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "transfer_repository",
         .title = "Transfer repository",
-        .description = "Transfer a live repository to another customer.",
+        .description = "Refused: a repository stays in the space and workspace it was created "
+                       "in (lake#315). Export it and import it into the other space's workspace "
+                       "instead.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"id", {{"type", "string"}}}, {"customer_id", {{"type", "string"}}}}},
@@ -3427,9 +3476,19 @@ void register_repository_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = entity_object("repository", "id"),
         .handler = [](const json& in, ApiContext& ctx) {
-            return ctx.store ? one_result(ctx.store->transfer_repository(in.at("id"),
-                                                                         in.at("customer_id")))
-                             : no_store();
+            if (!ctx.store) {
+                return no_store();
+            }
+            const auto repository = ctx.store->get_repository(in.at("id"));
+            if (!repository) {
+                return from_store_error(repository.error());
+            }
+            // The routing trigger of migration 0051 holds the space and workspace fixed.
+            return ApiResult::failure("conflict",
+                                      "a repository stays in the space and workspace it was "
+                                      "created in; export it and import it into a workspace of "
+                                      "the other space",
+                                      "/customer_id");
         }});
     registry.add(Capability{
         .name = "set_repository_visibility",
@@ -3891,6 +3950,7 @@ void register_repository_capabilities(Registry& registry) {
             if (!repository) {
                 return repository.error();
             }
+            context.audit_details["workspace_id"] = repository->workspace_id;
             const auto quota = storage_quota_for(repository->customer_id, context);
             if (!quota) {
                 return quota.error();
@@ -3899,7 +3959,7 @@ void register_repository_capabilities(Registry& registry) {
                 repository->customer_id,
                 repository->id,
                 context.sync_request,
-                sync_change_authorizer(context, repository->customer_id, repository->id),
+                sync_change_authorizer(context, *repository),
                 *quota);
             if (!response) {
                 if (response.error().rule == "storage_quota") {

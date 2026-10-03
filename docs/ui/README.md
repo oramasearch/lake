@@ -147,3 +147,7 @@ shows authorized tenant images and the selected space's build rows (a build with
 has a null digest and shows an empty digest cell; lake#440), while `/ship/app` shows one
 App's build history and calls `build_app`. Both build tables long-poll the audited
 `receive_build_events` capability for live phase and retained log updates.
+
+Repository pages stay at their repository addresses and name the workspace the repository belongs
+to; the `/repositories` form chooses that workspace (lake#315). See
+[repositories.md](repositories.md#the-owning-workspace).

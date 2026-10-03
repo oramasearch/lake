@@ -19,3 +19,6 @@ contract in `docs/api/identity.md` updated with changes to token derivation.
 
 [schema.md](schema.md#session-lookup-migration) documents the indexed session selector, stored digest,
 legacy-session invalidation and required operator handoff for `0022_session_lookup`.
+
+[schema.md](schema.md#repository-workspaces-migration) documents `0051_repository_workspaces`, the
+immutable workspace of each repository (lake#315).

@@ -1,6 +1,7 @@
 #include "lake/api/capabilities.hpp"
 
 #include <algorithm>
+#include <format>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -734,7 +735,7 @@ std::string workspace_description(const std::string& operation) {
          "kept."},
         {"delete_workspace",
          "Delete a workspace and everything in its Zetta, which cannot be recovered; `confirm` "
-         "must be its name."},
+         "must be its name. Refused while it still holds a live repository."},
     };
     const auto found = descriptions.find(operation);
     return found == descriptions.end() ? std::string() : found->second;
@@ -3182,6 +3183,8 @@ void register_agent_flow_capabilities(Registry& registry) {
                         context,
                         "create_repository",
                         {{"customer_id", customer_id},
+                         // The agent's code belongs to the workspace that holds the agent.
+                         {"workspace_id", input.at("workspace_id")},
                          {"name", "agent-" + (slug.empty() ? std::string("agent") : slug) + "-" +
                                       control::new_uuid_v4().substr(0, 4)},
                          {"description",
@@ -4928,6 +4931,22 @@ void register_workspace_capabilities(Registry& registry) {
                 if (deleting) {
                     if (input.at("confirm") != row->name) {
                         return ApiResult::failure("invalid_input", "confirm must match the workspace name", "/confirm");
+                    }
+                    // A repository belongs to one workspace and never moves (lake#315): a
+                    // workspace that still holds a live repository is not deleted under it.
+                    const auto repositories =
+                        context.store->list_repositories(row->customer_id, 1'000, row->id);
+                    if (!repositories) {
+                        return store_failure(repositories.error());
+                    }
+                    const auto live = std::ranges::count_if(
+                        *repositories, [](const auto& repository) { return repository.deleted_at.empty(); });
+                    if (live > 0) {
+                        return ApiResult::failure(
+                            "conflict",
+                            std::format("workspace {} still holds {} repositor{}; delete {} first",
+                                        row->name, live, live == 1 ? "y" : "ies",
+                                        live == 1 ? "it" : "them"));
                     }
                     patch.desired = "deleted";
                 } else {

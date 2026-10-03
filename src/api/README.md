@@ -217,3 +217,12 @@ through `liquid::runtime::block_on`, and `list_application_webhook_events` and
 `retry_application_webhook` are asynchronous and take the application's `workspace_id`.
 `copy_workspace_records` also copies `auth_app_webhook_events` and `auth_app_webhook_deliveries`.
 The applications page registers into a chosen workspace, and the event log page reads it.
+Repositories belong to one workspace (lake#315, part 1). `create_repository`,
+`import_repository` (`export_capabilities.cpp`) and `import_github_repository` require
+`workspace_id`, checked by `repository_workspace` (declared in `capabilities.hpp`);
+`list_repositories` takes an optional `workspace_id`; `transfer_repository` is refused. The push
+path passes the repository itself to `sync_change_authorizer` and `evaluate_branch_protection`
+(`forge.hpp`), so each decision and its audit record carry the workspace. `delete_workspace`
+refuses a workspace that holds a live repository. `http_server.cpp`'s `/repository/create` form and
+hub `/api/repos/create` (body `workspace_id` or `X-Lake-Workspace-Id`) pass the workspace, and
+`web_ui.cpp` shows it on the repository list and home. See `docs/api/repositories.md`.

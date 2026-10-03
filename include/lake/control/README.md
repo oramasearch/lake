@@ -71,3 +71,7 @@ legacy reads of `drive_share_links` for the copy (`LegacyDriveShareLink`).
 event and delivery-attempt codecs and the claim/settle pair that sends each attempt once
 (lake#356, lake#357); `apps.hpp` gives `Application` its `workspace_id` and declares the
 `LegacyApplicationWebhook*` rows the copy reads.
+
+`Repository::workspace_id` and `NewRepository::workspace_id` carry the workspace a repository belongs
+to (migration `0051_repository_workspaces`, lake#315); `list_repositories` takes an optional
+workspace, and `transfer_repository` is no longer part of `Store`.

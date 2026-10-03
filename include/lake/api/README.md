@@ -72,3 +72,9 @@ engine-result classification shared by the capabilities and the pages. See
 page fills a slow panel from; `web_ui_your_agents` and `web_ui_new_index` render two of them, and
 `AskPage::defer_agents` marks the deferred agent picker. See
 [performance.md](../../../docs/ui/performance.md) (lake#446).
+
+`repository_workspace` (`capabilities.hpp`) checks the workspace a new repository is created in
+(lake#315). `evaluate_branch_protection` (`forge.hpp`) takes the repository, not its id, so the
+evaluation knows the repository's workspace. `RepositoryHomeData::workspace` and
+`web_ui_repositories`' workspaces let the repository pages name the owning workspace. See
+[repositories.md](../../../docs/ui/repositories.md#the-owning-workspace).

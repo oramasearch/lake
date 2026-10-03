@@ -47,6 +47,10 @@ Switching workspaces preserves the page path. Links, active navigation ownership
 and forms preserve this identity. Forms and capability calls send `workspace_id` explicitly.
 The path is authoritative; a contradictory form or customer ID is refused.
 
+Repository pages are the exception: they stay at their repository address and show the owning
+workspace, because a repository names its own workspace and never changes it (lake#315). See
+[the repository pages](../ui/repositories.md#the-owning-workspace).
+
 Old page URLs redirect to the last valid workspace remembered in a cookie, or the space's only
 workspace. Multiple choices without a valid remembered ID require selection. A remembered ID is
 validated against the current caller and customer. New workspace opens `/workspaces`, with
@@ -123,7 +127,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `users` | multitenancy/dispatch | Identity reference for customer membership. |
 | `organizations` | multitenancy/dispatch | Tenant identity and organization boundary. |
 | `customers` | multitenancy/dispatch | Space ownership and tenant routing. |
-| `repositories` | workspace | Repository metadata and lifecycle belong to its workspace. [Follow-up](https://github.com/oramasearch/lake/issues/315). |
+| `repositories` | workspace | Repository metadata and lifecycle belong to its workspace. Routing done: `0051_repository_workspaces` gives each repository an immutable `workspace_id` (lake#315 part 1; unassigned rows are `needs_selection`). The metadata itself still lives here. [Follow-up](https://github.com/oramasearch/lake/issues/315) (part 2), forge records [lake#341](https://github.com/oramasearch/lake/issues/341). |
 | `objects` | multitenancy/dispatch | Policy object identities and ancestry for grants. |
 | `teams` | multitenancy/dispatch | Membership group identities. |
 | `memberships` | multitenancy/dispatch | Tenant and team membership. |

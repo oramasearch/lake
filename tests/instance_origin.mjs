@@ -169,8 +169,13 @@ try {
     const customer = await request("/v1/create_customer", {
         customer_type: "individual", user_id: user.id,
     });
+    // A repository belongs to one workspace of its space (lake#315).
+    const workspace = await request("/v1/create_workspace", {
+        customer_id: customer.id, name: "origin", environment: "dev",
+    });
     const repository = await request("/v1/create_repository", {
-        customer_id: customer.id, name: "origin-proof", visibility: "private",
+        customer_id: customer.id, workspace_id: workspace.id, name: "origin-proof",
+        visibility: "private",
     });
     record(`Instance: ${origin}; store: PostgreSQL ${postgresVersion}; repository: ${repository.id}`);
     const expected = Buffer.from(Array.from({ length: 4096 }, (_, index) => index % 256));

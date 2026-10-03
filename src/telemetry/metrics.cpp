@@ -229,9 +229,11 @@ public:
         return call("create_repository", [&] { return store_->create_repository(value); });
     }
     control::Result<std::vector<control::Repository>>
-    list_repositories(const std::string& customer_id, int limit) override {
+    list_repositories(const std::string& customer_id,
+                      int limit,
+                      const std::string& workspace_id = {}) override {
         return call("list_repositories",
-                    [&] { return store_->list_repositories(customer_id, limit); });
+                    [&] { return store_->list_repositories(customer_id, limit, workspace_id); });
     }
     control::Result<control::Repository> get_repository(const std::string& id) override {
         return call("get_repository", [&] { return store_->get_repository(id); });
@@ -239,11 +241,6 @@ public:
     control::Result<control::Repository> rename_repository(const std::string& id,
                                                            const std::string& name) override {
         return call("rename_repository", [&] { return store_->rename_repository(id, name); });
-    }
-    control::Result<control::Repository>
-    transfer_repository(const std::string& id, const std::string& customer_id) override {
-        return call("transfer_repository",
-                    [&] { return store_->transfer_repository(id, customer_id); });
     }
     control::Result<control::Repository>
     set_repository_visibility(const std::string& id, const std::string& visibility) override {
