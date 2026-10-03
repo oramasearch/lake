@@ -27,6 +27,7 @@
 #include <liquid/transparency.hpp>
 
 #include "http1/client.hpp"
+#include "one_thread_io.hpp"
 #include "objects/records.hpp"
 
 #include "lake/api/capabilities.hpp"
@@ -1724,13 +1725,13 @@ TEST(PostgresTransparency, LiveCheckpointCarriesAuthenticatedMonotonicTime) {
             std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now())
                 .time_since_epoch()
                 .count();
-        const auto published_http = liquid::runtime::block_on(
-            liquid::http1::request({.url = "http://127.0.0.1:" + std::to_string(server.port()),
-                                    .method = "POST",
-                                    .suffix = "/v1/publish_transparency_checkpoint",
-                                    .headers = {{"Authorization", "Bearer issued-at-test-token"},
-                                                {"Content-Type", "application/json"}},
-                                    .body = {std::byte{'{'}, std::byte{'}'}}}));
+        const auto published_http =
+            lake::test::http_request({.url = "http://127.0.0.1:" + std::to_string(server.port()),
+                                      .method = "POST",
+                                      .suffix = "/v1/publish_transparency_checkpoint",
+                                      .headers = {{"Authorization", "Bearer issued-at-test-token"},
+                                                  {"Content-Type", "application/json"}},
+                                      .body = {std::byte{'{'}, std::byte{'}'}}});
         ASSERT_TRUE(published_http) << published_http.error().message;
         ASSERT_EQ(published_http->status, 200U);
         const auto after =

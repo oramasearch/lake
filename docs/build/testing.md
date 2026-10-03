@@ -160,6 +160,39 @@ a successful call for every advertised value schema with required fields. Add fi
 introducing new required output fields. The envelope decision is in
 [`../api/README.md`](../api/README.md).
 
+## Test clients run their sockets on one thread
+
+A test that talks to a server over a socket (`liquid::http1::request`, a liquid sync push or pull)
+runs it with `lake::test::block_on_one_thread` or `lake::test::http_request` from
+`tests/one_thread_io.hpp`, never with `liquid::runtime::block_on` (lake#510).
+
+`block_on` drives its io_context from several runner threads. corosio's reactor (kqueue on macOS,
+epoll on Linux) gives the runner that called `kevent()`/`epoll_wait()` the descriptor state of
+each event as a raw pointer. When another runner closes that socket in the meantime, the socket
+service frees the descriptor state at once, because it is not yet queued; the first runner then
+queues the freed state, and the runner that pops it locks a destroyed mutex:
+
+```text
+terminate: uncaught exception: mutex lock failed: Invalid argument
+  std::__throw_system_error
+  std::mutex::lock
+  boost::corosio::detail::reactor_descriptor_state::invoke_deferred_io()
+  boost::corosio::detail::reactor_scheduler::do_one(...)
+  boost::corosio::detail::reactor_scheduler::run()
+  liquid::runtime::context::run(...)::$_0   (a block_on runner thread)
+```
+
+It aborted `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` in about one run in 25
+when eight copies ran at once, mid-test and not at shutdown, and passed alone. The lake binary
+does not take this path: each of its io_contexts that owns sockets (the API server's io thread,
+the outbound HTTPS client, Zetta's native transport) is run by exactly one thread, and nothing in
+`src/` opens a socket inside `block_on`. SIGTERM does not reach it either: `ApiServer::stop()`
+stops and joins those threads before it flushes the metering and audit recorders. The race itself
+is corosio's and is to be fixed there.
+
+The runner's terminate handler (`tests/test_main.cpp`) prints the uncaught exception and the stack
+of the thread that threw, so an abort like this one is diagnosable from the CTest log.
+
 ## Issue #138 bounded-read sweep
 
 The sweep examined every `list_audit_events`, registry `audit`, customer lookup, recovery-delivery

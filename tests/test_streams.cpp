@@ -9,6 +9,7 @@
 #include "api/workspace_records_api.hpp"
 #include "audit_test_support.hpp"
 #include "http1/client.hpp"
+#include "one_thread_io.hpp"
 #include "lake/api/agent_docs.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/server.hpp"
@@ -494,10 +495,10 @@ TEST_F(Streams, RestMcpParityAndEveryControlUsesACapability) {
     const auto request = [&](const std::string& method, const std::string& path, const json& body = nullptr) {
         const auto data = body.is_null() ? std::string() : body.dump();
         const auto* bytes = reinterpret_cast<const std::byte*>(data.data());
-        const auto response = liquid::runtime::block_on(liquid::http1::request({
+        const auto response = lake::test::http_request({
             .url = "http://127.0.0.1:" + std::to_string(server.port()), .method = method, .suffix = path,
             .headers = {{"Authorization", "Bearer stream-operator"}, {"Content-Type", "application/json"}},
-            .body = std::vector<std::byte>(bytes, bytes + data.size())}));
+            .body = std::vector<std::byte>(bytes, bytes + data.size())});
         EXPECT_TRUE(response);
         if (!response) {
             return std::string();

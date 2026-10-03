@@ -44,6 +44,7 @@
 #include "lake/thread.hpp"
 #include "lake/transparency/log.hpp"
 #include "objects/records.hpp"
+#include "one_thread_io.hpp"
 #include "postgres_fixture.hpp"
 #include "temporary_directory.hpp"
 
@@ -565,7 +566,7 @@ private:
             liquid::sync_endpoint endpoint("http://127.0.0.1:" + std::to_string(port) +
                                                "/v1/repositories/" + fixture_.pushed_repository,
                                            liquid::sync_endpoint_options{.bearer_token = admin_token});
-            const auto pushed = liquid::runtime::block_on(endpoint.push(*source));
+            const auto pushed = lake::test::block_on_one_thread(endpoint.push(*source));
             if (!pushed) {
                 outcomes_.record(port, -1, "push: " + pushed.error().message);
                 std::this_thread::sleep_for(25ms);
@@ -724,7 +725,7 @@ void expect_acknowledged_writes_read_back(unsigned short port,
         liquid::sync_endpoint endpoint("http://127.0.0.1:" + std::to_string(port) +
                                            "/v1/repositories/" + repository,
                                        liquid::sync_endpoint_options{.bearer_token = admin_token});
-        const auto pulled = liquid::runtime::block_on(endpoint.pull(*destination));
+        const auto pulled = lake::test::block_on_one_thread(endpoint.pull(*destination));
         ASSERT_TRUE(pulled) << pulled.error().message;
         for (const auto& [path, contents] : *expected) {
             const auto read = liquid::runtime::block_on(destination->read(path));
