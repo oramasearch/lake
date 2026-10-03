@@ -78,6 +78,7 @@
 #include "lake/api/oauth.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
+#include "lake/api/store_owner.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_ui.hpp"
 #include "route_guard.hpp"
@@ -5079,6 +5080,8 @@ struct ApiServer::Impl {
     unsigned short bound_port = 0;
     std::string failure_reason;
     std::vector<std::string> get_routes;
+    // Exclusive ownership of options.store_root while the server runs (lake#467).
+    StoreOwnerLock store_owner;
     std::mutex work_mutex;
     std::condition_variable work_cv;
     std::chrono::steady_clock::time_point next_timestamp_renewal_check =
@@ -15260,6 +15263,18 @@ bool ApiServer::start() {
         }
     }
 
+    // One process owns the store root: the liquid customer stores hold their pack position,
+    // object map and index in memory, so a second writer loses objects (lake#467). The lock is
+    // taken before anything under the root is opened, and a held root refuses startup.
+    if (!impl.options.store_root.empty() && !impl.store_owner.held()) {
+        auto owner = StoreOwnerLock::acquire(impl.options.store_root, impl.options.node_name);
+        if (!owner) {
+            impl.failure_reason = owner.error();
+            return false;
+        }
+        impl.store_owner = std::move(*owner);
+    }
+
     // Open existing repository/result indexes before accepting traffic. Usage reads do not
     // create stores for empty customers or initialize these indexes on the first request.
     const auto warmed = impl.sync_store.warm_metering();
@@ -16735,6 +16750,7 @@ bool ApiServer::start() {
     if (bind_error) {
         impl.failure_reason = "bind failed: " + bind_error.message();
         impl.server.reset();
+        impl.store_owner.release();
         return false;
     }
     impl.bound_port = impl.server->local_endpoint().port();
@@ -16755,6 +16771,8 @@ void ApiServer::stop() {
     if (impl.io_thread.joinable())
         impl.io_thread.join();
     impl.work_cv.notify_all();
+    // In-flight requests have finished; the next owner may open the store.
+    impl.store_owner.release();
 }
 
 bool ApiServer::running() const {

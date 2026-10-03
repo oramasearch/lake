@@ -204,6 +204,7 @@ add_library(lake-core STATIC
   src/api/web_ui_experiments.cpp
   src/api/pipeline.cpp
   src/api/registry.cpp
+  src/api/store_owner.cpp
   src/api/rest.cpp
   src/api/mcp.cpp
   src/api/agent_docs.cpp

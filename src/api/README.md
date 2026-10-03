@@ -1,5 +1,10 @@
 # API implementation
 
+`store_owner.cpp` holds the exclusive owner lock on `LAKE_STORE_ROOT`. `ApiServer::start` takes it
+before anything under the root is opened and refuses to start when another process holds it;
+`stop` releases it after in-flight requests finish (lake#467,
+[store-volume.md](../../docs/deployment/store-volume.md#one-process-per-store-root)).
+
 Agent-task capability calls renew the current claim through the registry. Agent events are
 accepted atomically before workspace publication; only a Running task accepts them, and the
 first terminal write wins. Apps, Experiments and Project panels show the persisted retry notice
