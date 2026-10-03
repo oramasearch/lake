@@ -1375,12 +1375,16 @@ bool offline_grant_fields_match(const control::OfflineGrant& grant) {
 }
 
 // The repository, with its workspace (lake#315), is resolved once by the caller; every branch
-// protection decision and its audit record carry that workspace.
-SyncPushAuthorizer sync_change_authorizer(ApiContext& context,
-                                          const control::Repository& repository) {
+// protection decision and its audit record carry that workspace. `protection` is what the caller
+// read from that workspace before the push (load_branch_protection); when it could not be read,
+// every reference update is refused with its reason instead of being decided without its rules.
+SyncPushAuthorizer
+sync_change_authorizer(ApiContext& context, const control::Repository& repository,
+                       std::expected<BranchProtectionRecords, SyncStoreError> protection) {
     const std::string customer_id = repository.customer_id;
     const std::string repository_id = repository.id;
-    return [&context, repository, customer_id, repository_id](
+    return [&context, repository, customer_id, repository_id,
+            protection = std::move(protection)](
                const SyncPushItem& item,
                std::span<const BranchRefUpdate> updates)
                -> SyncStoreResult<std::vector<SyncRefVerdict>> {
@@ -1388,10 +1392,22 @@ SyncPushAuthorizer sync_change_authorizer(ApiContext& context,
             std::vector<SyncRefVerdict> verdicts;
             verdicts.reserve(updates.size());
             for (const BranchRefUpdate& update : updates) {
+                if (!protection) {
+                    // The rules could not be read: refuse rather than decide without them.
+                    const auto recorded = record_branch_protection_event(
+                        context, repository, update, "branch_protection_unavailable", false,
+                        protection.error().message);
+                    if (!recorded) {
+                        return std::unexpected(recorded.error());
+                    }
+                    verdicts.push_back(
+                        {update.name, SyncRefVerdictKind::Refused, protection.error().message});
+                    continue;
+                }
                 const auto evaluated = evaluate_branch_protection(*context.store,
                                                                   context.acting_identity,
                                                                   context.authorization_cache,
-                                                                  repository,
+                                                                  *protection,
                                                                   update);
                 if (!evaluated) {
                     const auto recorded = record_branch_protection_event(context,
@@ -3932,40 +3948,48 @@ void register_repository_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = entity_object("repository", "repository_id"),
         .authorizes_candidates = true,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (auto wire = require_sync_wire(context); !wire.ok) {
-                return wire;
+                co_return wire;
             }
             auto repository = live_sync_repository(input, context);
             if (!repository) {
-                return repository.error();
+                co_return repository.error();
             }
             context.audit_details["workspace_id"] = repository->workspace_id;
             const auto quota = storage_quota_for(repository->customer_id, context);
             if (!quota) {
-                return quota.error();
+                co_return quota.error();
             }
+            // Branch protection is read from the repository's workspace before the push, which
+            // runs synchronously inside the repository store (lake#341).
+            auto loaded = co_await load_branch_protection(context, *repository);
+            std::expected<BranchProtectionRecords, SyncStoreError> protection =
+                loaded ? std::move(*loaded)
+                       : std::unexpected(SyncStoreError{"store_error", loaded.error().message,
+                                                        "branch protection", {}});
             auto response = context.sync_store->push(
                 repository->customer_id,
                 repository->id,
                 context.sync_request,
-                sync_change_authorizer(context, *repository),
+                sync_change_authorizer(context, *repository, std::move(protection)),
                 *quota);
             if (!response) {
                 if (response.error().rule == "storage_quota") {
                     context.audit_details["quota"] = {{"status", "throttled"},
                                                       {"quota_bytes", *quota}};
                 }
-                return from_sync_error(context, response.error());
+                co_return from_sync_error(context, response.error());
             }
             auto references = context.sync_store->refs(repository->customer_id, repository->id);
             if (!references) {
-                return from_sync_error(context, references.error());
+                co_return from_sync_error(context, references.error());
             }
             for (const auto& [name, head] : *references) {
                 auto stored = context.store->set_repository_ref(repository->id, name, head);
                 if (!stored) {
-                    return from_store_error(stored.error());
+                    co_return from_store_error(stored.error());
                 }
             }
             if (context.search) {
@@ -3978,7 +4002,7 @@ void register_repository_capabilities(Registry& registry) {
             context.sync_response = std::move(*response);
             record_transfer(
                 context, *repository, context.sync_request.size(), context.sync_response.size());
-            return ApiResult::success({{"bytes", context.sync_response.size()}});
+            co_return ApiResult::success({{"bytes", context.sync_response.size()}});
         }});
     registry.add(
         Capability{.name = "pull",

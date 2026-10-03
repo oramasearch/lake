@@ -151,3 +151,7 @@ App's build history and calls `build_app`. Both build tables long-poll the audit
 Repository pages stay at their repository addresses and name the workspace the repository belongs
 to; the `/repositories` form chooses that workspace (lake#315). See
 [repositories.md](repositories.md#the-owning-workspace).
+
+Forge records live in the repository's workspace Zetta (lake#341): the repository pages read them
+through the same capabilities, and the home page and change view say when that workspace cannot be
+read instead of failing. See [repositories.md](repositories.md).

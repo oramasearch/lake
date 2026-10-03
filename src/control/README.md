@@ -99,7 +99,9 @@ status changes conditional on the revision read; `assign_legacy_opportunities` a
 `0047_stream_owner_workspaces`). `drive_share_links.cpp` is the drive share
 link collection (lake#350); the stores keep only `drive_share_link_route` (the content-free route
 of a pre-move token) and `assign_legacy_drive_share_links`/`legacy_drive_share_links` for the copy
-(migration `0048_drive_share_link_workspaces`).
+(migration `0048_drive_share_link_workspaces`). `forge_records.cpp` is the forge record collection
+(lake#341); the stores keep only `assign_legacy_forge_records`/`legacy_forge_records` for the copy
+(migration `0054_forge_record_workspaces`), and no longer write or read `forge_records`.
 `application_webhook_records.cpp` is the next: an application's lifecycle events and its webhook
 delivery attempts in the application's workspace (lake#356, lake#357), each attempt claimed with
 `if_absent` before it is sent and settled with `if_revision`. The stores no longer write or read

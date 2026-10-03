@@ -54,13 +54,11 @@ public:
     Result<RepositoryRef> set_repository_ref(const std::string& repository_id,
                                              const std::string& name,
                                              const std::string& head) override;
-    Result<ForgeRecord> create_forge_record(const NewForgeRecord&) override;
-    Result<ForgeRecord> get_forge_record(const std::string& id) override;
-    Result<std::vector<ForgeRecord>> list_forge_records(const std::string& repository_id,
-                                                        const std::string& kind,
-                                                        int limit) override;
-    Result<ForgeRecord> update_forge_record(const std::string& id,
-                                            const nlohmann::json& value) override;
+    Result<void> assign_legacy_forge_records() override;
+    Result<std::vector<LegacyForgeRecord>> legacy_forge_records(const std::string& after_id,
+                                                                int limit) override;
+    // A row of the retired forge_records table, as an earlier lake wrote it (tests of the copy).
+    void seed_legacy_forge_record(ForgeRecord record);
     Result<DriveShareLinkRoute> drive_share_link_route(const std::string& token_hash) override;
     Result<void> assign_legacy_drive_share_links() override;
     Result<std::vector<LegacyDriveShareLink>>
@@ -531,7 +529,9 @@ private:
     std::vector<Customer> customers_;
     std::vector<Repository> repositories_;
     std::vector<RepositoryRef> repository_refs_;
-    std::vector<ForgeRecord> forge_records_;
+    std::vector<ForgeRecord> legacy_forge_records_;
+    // Legacy forge record id -> (workspace, outcome), as migration 0054 records them.
+    std::map<std::string, std::pair<std::string, std::string>> legacy_forge_assignments_;
     std::vector<DriveShareLink> legacy_drive_share_links_;
     std::map<std::string, std::pair<std::string, std::string>> legacy_drive_share_assignments_; // workspace, outcome
     std::map<std::string, DriveShareLinkRoute> drive_share_link_routes_; // by token digest

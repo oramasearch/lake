@@ -29,6 +29,7 @@
 #include "lake/control/postgres_store.hpp"
 #include "temporary_directory.hpp"
 #include "repository_test_support.hpp"
+#include "workspace_fixture.hpp"
 
 namespace {
 
@@ -291,6 +292,10 @@ TEST(PostgresForgeScenario, DripsReviewRebaseAndGraphEvidenceLandEndToEnd) {
     options.instance_kek = instance_kek;
     options.store_root = (temporary.path() / "lake").string();
     options.store = control;
+    // Reviews and their comments are forge records in the repository's workspace Zetta (lake#341).
+    lake::test::RecordWorkspaces workspaces(control, database_uri);
+    workspaces.ready(repository->workspace_id);
+    options.workspaces = workspaces.service;
     auto server = std::make_unique<lake::api::ApiServer>(options);
     ASSERT_TRUE(server->start()) << server->reason();
     const std::string repository_url =

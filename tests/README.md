@@ -416,3 +416,15 @@ bound, build records once), and `TheOneShotCopyMovesMeteringIntoEachSpacesWorksp
 `PostgresMetering.MigrationRecordsEachRowsOwnerForTheCopy` covers `0053_metering_workspaces`, and
 `PostgresSync.PushAndPullUsePostgresControlPlane` a real push and pull flushed into the
 repository's workspace, nothing in PostgreSQL, and the flush on stop.
+
+Forge records in workspace Zettas (lake#341): `test_workspace_records.cpp`'s
+`ForgeRecordsLiveInTheirRepositorysWorkspace` covers two spaces with two workspaces each, records
+only at their own endpoint, other repositories' and workspaces' ids, a record copied elsewhere,
+conditional updates, least privilege, missing and unknown `repository_id`, a repository without a
+workspace, a workspace that is not ready and workspace deletion, for the capabilities and for
+`load_branch_protection`; `TheOneShotCopyMovesForgeRecordsIntoTheirRepositorysWorkspace` the copy
+in both stores; `PostgresForgeRecords.MigrationRecordsEachRowsOwnerForTheCopy` migration
+`0054_forge_record_workspaces`. The forge, export, GitHub import and branch protection tests in
+`test_api.cpp` give `Surface` a Ready workspace (`Surface::workspace`), and the sync and forge
+scenario servers a `RecordWorkspaces`; `RecordWorkspaces::forge` writes a forge record the way lake
+does. `Surface`'s KEK is hexadecimal, as `LAKE_INSTANCE_KEK` is.

@@ -9,7 +9,10 @@
 #include <nlohmann/json.hpp>
 #include <pqxx/pqxx>
 
+#include "lake/control/agent_bus.hpp"
+#include "lake/control/forge_records.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/workspace_records.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "record_fixture.hpp"
 #include "stream_fixture.hpp"
@@ -78,6 +81,34 @@ struct RecordWorkspaces {
         const auto zetta_service = store->get_service(workspace->zetta_service_id);
         std::ofstream(dir / (zetta_service->slug + ".json"))
             << nlohmann::json{{"kind", "zetta"}, {"token", "token-" + workspace_id}}.dump();
+    }
+
+    // A forge record of `repository`, written into its workspace's Zetta as lake writes it
+    // (lake#341). The workspace must be Ready; `kek` is the lake's LAKE_INSTANCE_KEK.
+    control::ForgeRecord forge(const control::Repository& repository, std::string kind,
+                               nlohmann::json value, std::string_view kek) {
+        auto records = control::WorkspaceRecords::open(
+            [service = service, customer = repository.customer_id,
+             workspace = repository.workspace_id](std::string capability, bool read,
+                                                  nlohmann::json input) {
+                return service->call(customer, workspace, std::move(capability), read,
+                                     std::move(input));
+            },
+            repository.workspace_id, kek);
+        if (!records) {
+            throw std::runtime_error("open workspace records: " + records.error().message);
+        }
+        control::ForgeRecord record;
+        record.repository_id = repository.id;
+        record.kind = std::move(kind);
+        record.value = std::move(value);
+        control::ForgeRecords set(*records);
+        auto written =
+            control::settled(liquid::runtime::block_on(set.append(std::move(record))));
+        if (!written) {
+            throw std::runtime_error("write forge record: " + written.error().message);
+        }
+        return *written;
     }
 
     // The record store of one workspace's Zetta.

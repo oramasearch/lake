@@ -3,7 +3,7 @@
 // collection that moves: each follow-up adds its collection to `copy_collections` and a copier
 // (opportunities, lake#376; stream_owners, lake#379; drive_share_links, lake#350;
 // auth_app_webhook_events and auth_app_webhook_deliveries, lake#356 and lake#357; metering_usage
-// and metering_build_records, lake#348 and lake#349). A collection
+// and metering_build_records, lake#348 and lake#349; forge_records, lake#341). A collection
 // leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
 // and verified on dev, dropped by migration 0050, lake#483).
 
@@ -18,6 +18,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/control/application_webhook_records.hpp"
 #include "lake/control/drive_share_links.hpp"
+#include "lake/control/forge_records.hpp"
 #include "lake/control/metering.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/store.hpp"
@@ -29,13 +30,14 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 7> copy_collections = {"opportunities",
+constexpr std::array<std::string_view, 8> copy_collections = {"opportunities",
                                                               "stream_owners",
                                                               "drive_share_links",
                                                               "auth_app_webhook_events",
                                                               "auth_app_webhook_deliveries",
                                                               "metering_usage",
-                                                              "metering_build_records"};
+                                                              "metering_build_records",
+                                                              "forge_records"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -798,6 +800,96 @@ liquid::runtime::task<ApiResult> copy_metering_build_records(ApiContext& context
                           blocking);
 }
 
+// A forge record in its workspace is the row it was copied from: same repository, kind and
+// creation instant, and the same value unless someone has changed it there since (lake revision
+// above 1), which the copy accepts.
+bool same_forge_record(const control::ForgeRecord& stored, const control::ForgeRecord& source) {
+    return stored.repository_id == source.repository_id && stored.kind == source.kind &&
+           stored.at_us == source.at_us &&
+           (stored.lake_revision > 1 || stored.value == source.value);
+}
+
+// One page of forge_records (lake#341): assignments first, then per workspace one keyed read per
+// row and the missing appends. Each copy keeps the row's id and creation instant, so references
+// between records (a comment's issue_id, a delivery's webhook_id) still hold.
+liquid::runtime::task<ApiResult> copy_forge_records(ApiContext& context, const std::string& mode,
+                                                    const std::string& after, int limit) {
+    if (auto assigned = context.store->assign_legacy_forge_records(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_forge_records(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    json unresolved = json::array();
+    bool blocking = false;
+    std::map<std::string, std::vector<const control::LegacyForgeRecord*>> by_workspace;
+    for (const control::LegacyForgeRecord& row : *rows) {
+        if (row.workspace_id.empty()) {
+            unresolved.push_back({{"id", row.record.id},
+                                  {"repository_id", row.record.repository_id},
+                                  {"customer_id", row.customer_id},
+                                  {"outcome", row.outcome}});
+            blocking = blocking || row.outcome != "workspace_deleted";
+        } else {
+            by_workspace[row.workspace_id].push_back(&row);
+        }
+    }
+    const auto collection = control::ForgeRecordCodec::collection;
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, owned] : by_workspace) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = owned.front()->customer_id;
+        tally.rows = owned.size();
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        control::ForgeRecords forge(*records);
+        for (const control::LegacyForgeRecord* row : owned) {
+            auto present = control::settled(co_await records->get(collection, row->record.id));
+            if (!present) {
+                tally.error = present.error().code + ": " + present.error().message;
+                break;
+            }
+            const auto stored =
+                *present ? control::ForgeRecordCodec::decode(**present) : std::nullopt;
+            if (mode == "verify") {
+                if (!stored) {
+                    tally.missing.push_back(row->record.id);
+                } else if (!same_forge_record(*stored, row->record)) {
+                    tally.mismatched.push_back(row->record.id);
+                } else {
+                    ++tally.verified;
+                }
+                continue;
+            }
+            if (*present) {
+                ++tally.already_present;
+                continue;
+            }
+            auto appended = control::settled(co_await forge.append(
+                row->record, control::RecordWrite{row->record.id, row->record.at_us}));
+            if (!appended && appended.error().code == "conflict") {
+                ++tally.already_present; // a concurrent copy; verify compares it
+                continue;
+            }
+            if (!appended) {
+                tally.error = appended.error().code + ": " + appended.error().message;
+                break;
+            }
+            ++tally.copied;
+        }
+    }
+    co_return copy_result("forge_records", mode, rows->size(), limit,
+                          rows->empty() ? std::string() : rows->back().record.id,
+                          std::move(unresolved), tallies, blocking);
+}
+
 // Only the operator copies, and the operator bypasses policy; anyone else is refused here, before
 // a policy lookup on an object no grant can name.
 std::expected<std::string, ApiError> records_object(const json&, ApiContext&) {
@@ -858,6 +950,9 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "drive_share_links") {
                 co_return co_await copy_drive_share_links(context, mode, after, limit);
+            }
+            if (input.at("collection") == "forge_records") {
+                co_return co_await copy_forge_records(context, mode, after, limit);
             }
             if (input.at("collection") == "auth_app_webhook_events") {
                 co_return co_await copy_application_webhook_events(context, mode, after, limit);

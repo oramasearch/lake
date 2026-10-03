@@ -4222,60 +4222,78 @@ Result<RepositoryRef> InMemoryStore::set_repository_ref(const std::string& repos
     return repository_refs_.back();
 }
 
-Result<ForgeRecord> InMemoryStore::create_forge_record(const NewForgeRecord& input) {
+void InMemoryStore::seed_legacy_forge_record(ForgeRecord record) {
     std::lock_guard lock(mutex_);
-    if (repository_by_id(repositories_, input.repository_id) == repositories_.end()) {
-        return std::unexpected(
-            StoreError{"invalid_input", "repository_id does not reference a repository"});
+    if (record.id.empty()) {
+        record.id = new_uuid_v4();
     }
-    if (input.kind.empty() || !input.value.is_object()) {
-        return std::unexpected(
-            StoreError{"invalid_input", "forge record kind and object value are required"});
+    if (record.created_at.empty()) {
+        record.created_at = now_iso8601();
     }
-    const std::string now = now_iso8601();
-    forge_records_.push_back(
-        ForgeRecord{new_uuid_v4(), input.repository_id, input.kind, now, now, input.value});
-    return forge_records_.back();
+    if (record.updated_at.empty()) {
+        record.updated_at = record.created_at;
+    }
+    legacy_forge_records_.push_back(std::move(record));
 }
 
-Result<ForgeRecord> InMemoryStore::get_forge_record(const std::string& id) {
+// Migration 0054's assignment: a row belongs to its repository's workspace. A row whose repository
+// has no workspace is needs_selection until it has one; a row whose workspace was deleted went
+// with it (workspace_deleted).
+Result<void> InMemoryStore::assign_legacy_forge_records() {
     std::lock_guard lock(mutex_);
-    const auto record = std::ranges::find(forge_records_, id, &ForgeRecord::id);
-    if (record == forge_records_.end()) {
-        return std::unexpected(StoreError{"not_found", "no forge record " + id});
-    }
-    return *record;
-}
-
-Result<std::vector<ForgeRecord>> InMemoryStore::list_forge_records(const std::string& repository_id,
-                                                                   const std::string& kind,
-                                                                   int limit) {
-    std::lock_guard lock(mutex_);
-    std::vector<ForgeRecord> result;
-    for (auto record = forge_records_.rbegin(); record != forge_records_.rend(); ++record) {
-        if (record->repository_id == repository_id && (kind.empty() || record->kind == kind)) {
-            result.push_back(*record);
+    for (const ForgeRecord& record : legacy_forge_records_) {
+        const auto repository = repository_by_id(repositories_, record.repository_id);
+        if (repository == repositories_.end()) {
+            continue;
         }
-        if (limit > 0 && result.size() >= static_cast<std::size_t>(limit)) {
+        const auto existing = legacy_forge_assignments_.find(record.id);
+        if (existing != legacy_forge_assignments_.end() && !existing->second.first.empty()) {
+            continue;
+        }
+        if (existing != legacy_forge_assignments_.end() &&
+            existing->second.second != "needs_selection") {
+            continue;
+        }
+        std::pair<std::string, std::string> owner{"", "needs_selection"};
+        if (!repository->workspace_id.empty()) {
+            const auto workspace = std::ranges::find(workspaces_, repository->workspace_id,
+                                                     &Workspace::id);
+            owner = workspace != workspaces_.end() && workspace->desired == "deleted"
+                        ? std::pair<std::string, std::string>{"", "workspace_deleted"}
+                        : std::pair<std::string, std::string>{repository->workspace_id,
+                                                              "repository_workspace"};
+        }
+        legacy_forge_assignments_[record.id] = owner;
+    }
+    return {};
+}
+
+Result<std::vector<LegacyForgeRecord>>
+InMemoryStore::legacy_forge_records(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<ForgeRecord> ordered = legacy_forge_records_;
+    std::ranges::sort(ordered, {}, &ForgeRecord::id);
+    std::vector<LegacyForgeRecord> rows;
+    for (const ForgeRecord& record : ordered) {
+        if (!after_id.empty() && record.id <= after_id) {
+            continue;
+        }
+        if (static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
             break;
         }
+        LegacyForgeRecord row{record, "", "", "needs_selection"};
+        if (const auto repository = repository_by_id(repositories_, record.repository_id);
+            repository != repositories_.end()) {
+            row.customer_id = repository->customer_id;
+        }
+        if (const auto found = legacy_forge_assignments_.find(record.id);
+            found != legacy_forge_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
     }
-    return result;
-}
-
-Result<ForgeRecord> InMemoryStore::update_forge_record(const std::string& id,
-                                                       const nlohmann::json& value) {
-    std::lock_guard lock(mutex_);
-    if (!value.is_object()) {
-        return std::unexpected(StoreError{"invalid_input", "forge record value must be an object"});
-    }
-    const auto record = std::ranges::find(forge_records_, id, &ForgeRecord::id);
-    if (record == forge_records_.end()) {
-        return std::unexpected(StoreError{"not_found", "no forge record " + id});
-    }
-    record->value = value;
-    record->updated_at = now_iso8601();
-    return *record;
+    return rows;
 }
 
 Result<DriveShareLinkRoute>

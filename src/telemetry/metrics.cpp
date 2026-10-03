@@ -262,21 +262,14 @@ public:
         return call("set_repository_ref",
                     [&] { return store_->set_repository_ref(repository_id, name, head); });
     }
-    control::Result<control::ForgeRecord>
-    create_forge_record(const control::NewForgeRecord& value) override {
-        return call("create_forge_record", [&] { return store_->create_forge_record(value); });
+    control::Result<void> assign_legacy_forge_records() override {
+        return call("assign_legacy_forge_records",
+                    [&] { return store_->assign_legacy_forge_records(); });
     }
-    control::Result<control::ForgeRecord> get_forge_record(const std::string& id) override {
-        return call("get_forge_record", [&] { return store_->get_forge_record(id); });
-    }
-    control::Result<std::vector<control::ForgeRecord>> list_forge_records(
-        const std::string& repository_id, const std::string& kind, int limit) override {
-        return call("list_forge_records",
-                    [&] { return store_->list_forge_records(repository_id, kind, limit); });
-    }
-    control::Result<control::ForgeRecord>
-    update_forge_record(const std::string& id, const nlohmann::json& value) override {
-        return call("update_forge_record", [&] { return store_->update_forge_record(id, value); });
+    control::Result<std::vector<control::LegacyForgeRecord>>
+    legacy_forge_records(const std::string& after_id, int limit) override {
+        return call("legacy_forge_records",
+                    [&] { return store_->legacy_forge_records(after_id, limit); });
     }
     control::Result<control::Team> create_team(const control::NewTeam& value) override {
         return call("create_team", [&] { return store_->create_team(value); });

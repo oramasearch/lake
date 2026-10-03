@@ -5,6 +5,8 @@
 #include <string>
 #include <string_view>
 
+#include "forge_records_api.hpp"
+#include "lake/control/agent_bus.hpp"
 #include "lake/control/store.hpp"
 
 namespace lake::api {
@@ -63,15 +65,16 @@ json wrap_replacements(const json& workflow) {
     return output;
 }
 
-ApiResult import_github_repository(const json& input, ApiContext& context) {
+liquid::runtime::task<ApiResult> import_github_repository(const json& input,
+                                                          ApiContext& context) {
     if (!context.store || !context.sync_store) {
-        return ApiResult::failure("store_unavailable",
+        co_return ApiResult::failure("store_unavailable",
                                   "control and repository stores are required");
     }
     const json& recording = input.at("recording");
     const auto workspace = repository_workspace(context, input);
     if (!workspace) {
-        return ApiResult::failure(
+        co_return ApiResult::failure(
             workspace.error().code, workspace.error().message, workspace.error().path);
     }
     const auto created = context.store->create_repository({input.at("customer_id"),
@@ -80,30 +83,35 @@ ApiResult import_github_repository(const json& input, ApiContext& context) {
                                                            "private",
                                                            workspace->id});
     if (!created) {
-        return store_error(created.error());
+        co_return store_error(created.error());
     }
     const auto history = context.sync_store->import_git(
         created->customer_id, created->id, input.at("git_directory"));
     if (!history) {
-        return sync_error(history.error());
+        co_return sync_error(history.error());
+    }
+    // The recorded forge responses go to the new repository's workspace (lake#341).
+    auto forge = RepositoryForge::open(context, *created);
+    if (!forge) {
+        co_return ApiResult::failure(forge.error().code, forge.error().message,
+                                     forge.error().path);
     }
     std::map<std::int64_t, std::string> issues;
     json mapped = json::array({"history"});
     json unsupported = json::array();
     for (const json& issue : recording.value("issues", json::array())) {
-        const auto record = context.store->create_forge_record(
-            {created->id,
-             "issue",
-             {{"source", "github"},
-              {"number", issue.value("number", 0)},
-              {"title", issue.value("title", "")},
-              {"body", issue.value("body", "")},
-              {"state", issue.value("state", "open")},
-              {"labels", names(issue.value("labels", json::array()), "name")},
-              {"assignees", names(issue.value("assignees", json::array()), "login")},
-              {"references", json::array()}}});
+        const auto record = control::settled(co_await forge->create(
+            "issue",
+            {{"source", "github"},
+             {"number", issue.value("number", 0)},
+             {"title", issue.value("title", "")},
+             {"body", issue.value("body", "")},
+             {"state", issue.value("state", "open")},
+             {"labels", names(issue.value("labels", json::array()), "name")},
+             {"assignees", names(issue.value("assignees", json::array()), "login")},
+             {"references", json::array()}}));
         if (!record) {
-            return store_error(record.error());
+            co_return forge_records_failure(record.error());
         }
         issues.emplace(issue.value("number", std::int64_t{}), record->id);
         mapped.push_back("issue");
@@ -114,15 +122,14 @@ ApiResult import_github_repository(const json& input, ApiContext& context) {
             unsupported.push_back("issue comment without recorded issue");
             continue;
         }
-        const auto record = context.store->create_forge_record(
-            {created->id,
-             "issue_comment",
-             {{"issue_id", parent->second},
-              {"body", comment.value("body", "")},
-              {"author", comment.value("user", json::object()).value("login", "")},
-              {"source", "github"}}});
+        const auto record = control::settled(co_await forge->create(
+            "issue_comment",
+            {{"issue_id", parent->second},
+             {"body", comment.value("body", "")},
+             {"author", comment.value("user", json::object()).value("login", "")},
+             {"source", "github"}}));
         if (!record) {
-            return store_error(record.error());
+            co_return forge_records_failure(record.error());
         }
         mapped.push_back("issue_comment");
     }
@@ -134,16 +141,15 @@ ApiResult import_github_repository(const json& input, ApiContext& context) {
             unsupported.push_back("pull request head is absent from imported Git history");
             continue;
         }
-        const auto record = context.store->create_forge_record(
-            {created->id,
-             "review",
-             {{"source", "github"},
-              {"number", pull.value("number", 0)},
-              {"change_id", change},
-              {"state", pull.value("state", "open") == "closed" ? "closed" : "open"},
-              {"reviewers", json::array()}}});
+        const auto record = control::settled(co_await forge->create(
+            "review",
+            {{"source", "github"},
+             {"number", pull.value("number", 0)},
+             {"change_id", change},
+             {"state", pull.value("state", "open") == "closed" ? "closed" : "open"},
+             {"reviewers", json::array()}}));
         if (!record) {
-            return store_error(record.error());
+            co_return forge_records_failure(record.error());
         }
         reviews.emplace(pull.value("number", std::int64_t{}), record->id);
         mapped.push_back("review");
@@ -160,20 +166,19 @@ ApiResult import_github_repository(const json& input, ApiContext& context) {
             unsupported.push_back("review comment commit is absent from imported Git history");
             continue;
         }
-        const auto record = context.store->create_forge_record(
-            {created->id,
-             "review_comment",
-             {{"review_id", parent->second},
-              {"body", comment.value("body", "")},
-              {"author", comment.value("user", json::object()).value("login", "")},
-              {"anchor",
-               {{"change", change},
-                {"path", comment.value("path", "")},
-                {"line", comment.value("line", 0)},
-                {"column", 0}}},
-              {"source", "github"}}});
+        const auto record = control::settled(co_await forge->create(
+            "review_comment",
+            {{"review_id", parent->second},
+             {"body", comment.value("body", "")},
+             {"author", comment.value("user", json::object()).value("login", "")},
+             {"anchor",
+              {{"change", change},
+               {"path", comment.value("path", "")},
+               {"line", comment.value("line", 0)},
+               {"column", 0}}},
+             {"source", "github"}}));
         if (!record) {
-            return store_error(record.error());
+            co_return forge_records_failure(record.error());
         }
         mapped.push_back("review_comment");
     }
@@ -197,14 +202,16 @@ ApiResult import_github_repository(const json& input, ApiContext& context) {
          json::array(
              {"GitHub reactions, checks, and Actions execution history are not imported."})}};
     const auto report =
-        context.store->create_forge_record({created->id, "github_import", fidelity});
+        control::settled(co_await forge->create("github_import", fidelity));
     if (!report) {
-        return store_error(report.error());
+        co_return forge_records_failure(report.error());
     }
     context.audit_customer_id = created->customer_id;
     context.audit_object = "repository/" + created->id;
-    context.audit_details = {{"forge_kind", "github_import"}, {"record_id", report->id}};
-    return ApiResult::success({{"repository", control::to_json(*created)},
+    context.audit_details = {{"forge_kind", "github_import"},
+                             {"record_id", report->id},
+                             {"workspace_id", created->workspace_id}};
+    co_return ApiResult::success({{"repository", control::to_json(*created)},
                                {"fidelity", fidelity},
                                {"record", control::to_json(*report)}});
 }
@@ -237,7 +244,7 @@ void register_github_import_capabilities(Registry& registry) {
         .object = "customer",
         .action = "write",
         .resolve_object = customer_object,
-        .handler = import_github_repository});
+        .async_handler = import_github_repository});
 }
 
 } // namespace lake::api

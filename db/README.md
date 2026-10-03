@@ -123,3 +123,10 @@ Zetta, and repository storage is measured live and not recorded. It records each
 `needs_selection`); usage rows without transfer are left out. Nothing is dropped. The latest guard
 is `metering_workspaces_guard`; the operator must vendor this schema and update its guard before
 rollout. See [metering.md](../docs/api/metering.md#cutover-lake348-lake349).
+Migration `0054_forge_record_workspaces` retires `forge_records` (lake#341): issues, reviews,
+comments, releases, webhooks, exports and branch protection rules live in the workspace Zetta of
+their repository's workspace. It records each row's owner in `workspace_assignments` for
+`copy_workspace_records`: `repository_workspace`, `needs_selection` while the repository has no
+workspace (resolved by the copy once it has one), or `workspace_deleted`. Nothing is dropped. The
+latest guard is `forge_record_workspaces_guard`; the operator must vendor this schema and update its
+guard before rollout. See [forge.md](../docs/api/forge.md#migration-and-cutover-lake341).

@@ -22,3 +22,6 @@ legacy-session invalidation and required operator handoff for `0022_session_look
 
 [schema.md](schema.md#repository-workspaces-migration) documents `0051_repository_workspaces`, the
 immutable workspace of each repository (lake#315).
+
+[schema.md](schema.md#forge-record-workspaces-migration) documents
+`0054_forge_record_workspaces`, which retires `forge_records` for the workspace Zettas (lake#341).

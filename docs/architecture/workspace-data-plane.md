@@ -162,7 +162,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `offline_recovery_deliveries` | workspace | Recovery delivery payloads. [Follow-up](https://github.com/oramasearch/lake/issues/338). |
 | `offline_recovery_notifications` | workspace | Device notification history. [Follow-up](https://github.com/oramasearch/lake/issues/339). |
 | `offline_recovery_contacts` | workspace | Recovery contact configuration. [Follow-up](https://github.com/oramasearch/lake/issues/340). |
-| `forge_records` | workspace | Reviews, issues, releases, comments and automation state. [Follow-up](https://github.com/oramasearch/lake/issues/341). |
+| `forge_records` | workspace | Reviews, issues, releases, comments and automation state. **Moved** (lake#341): each record lives in the workspace Zetta of its repository's workspace ([forge.md](../api/forge.md#where-forge-records-live)); migration `0054` records owners for the one-shot copy, and the table stays until a later migration drops it. |
 | `pki_authorities` | workspace | Private root and intermediate credentials. [Follow-up](https://github.com/oramasearch/lake/issues/342). |
 | `pki_certificates` | workspace | Issued certificate records. [Follow-up](https://github.com/oramasearch/lake/issues/343). |
 | `pki_acme_orders` | workspace | Certificate issuance workflow. [Follow-up](https://github.com/oramasearch/lake/issues/344). |

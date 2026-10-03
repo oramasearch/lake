@@ -176,10 +176,13 @@ bounded at 64 MiB and accepts fixed-length or HTTP chunked bodies before passing
 `sync_server`.
 
 Push additionally calls the policy engine with the repository object and `write` action once for
-each change through `sync_server_options::authorize`. On each reference callback, lake evaluates
-the server-derived update against branch protection with the authenticated caller. The callback
-records `forge.branch_protection.allowed` or `forge.branch_protection.refused` for protected refs;
-the audit detail has the repository, ref, caller, rule, and reason but never a credential. The
+each change through `sync_server_options::authorize`. Before the push, lake reads the
+repository's branch protection rules (and the reviews or releases they ask for) from the
+repository's workspace Zetta, where forge records live (lake#341); if they cannot be read, every
+reference update of the push is refused with that reason (rule `branch_protection_unavailable`).
+On each reference callback, lake evaluates the server-derived update against that branch protection
+with the authenticated caller. The callback records `forge.branch_protection.allowed` or
+`forge.branch_protection.refused` for protected refs; the audit detail has the repository, ref, caller, rule, and reason but never a credential. The
 registry rejects an anonymous or unauthorized request before callbacks run. Successful push
 refreshes the control plane's `repository_refs` rows from the live repository. Pull and chunk reads
 require `read`; push and chunk upload require `write`.

@@ -650,6 +650,127 @@ TEST(PostgresDriveShareLinks, MigrationRecordsOwnersAndContentFreeRoutes) {
     EXPECT_FALSE(listed.at(ambiguous).workspace_id.empty());
 }
 
+// lake#341: migration 0054 records each forge_records row's owner, its repository's workspace,
+// and the copy's rerun of it picks up late rows and repositories assigned after review.
+TEST(PostgresForgeRecords, MigrationRecordsEachRowsOwnerForTheCopy) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user({"taap:1:ed25519:forge-migration-" + suffix, "", "Forge"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer =
+        store->create_customer({"individual", user->id, "", "forge-migration-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto live = store->create_workspace({customer->id, "live", "dev", ""});
+    const auto doomed = store->create_workspace({customer->id, "doomed", "dev", ""});
+    ASSERT_TRUE(live && doomed);
+    const auto owned = store->create_repository({customer->id, "owned", "", "private", live->id});
+    const auto orphan = store->create_repository({customer->id, "orphan", "", "private", live->id});
+    const auto gone = store->create_repository({customer->id, "gone", "", "private", doomed->id});
+    ASSERT_TRUE(owned && orphan && gone);
+    pqxx::connection connection(uri);
+    {
+        // The orphan stands for a repository migration 0051 could not assign.
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE repositories SET workspace_id = NULL WHERE id = $1::uuid",
+                       orphan->id);
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.commit();
+    }
+    ASSERT_TRUE(
+        store->delete_repository(gone->id, {"2026-10-01T00:00:00Z", "2027-10-01T00:00:00Z"}));
+    ASSERT_TRUE(store->update_workspace(doomed->id, {.desired = "deleted"}));
+    const auto insert = [&](const std::string& repository_id, const std::string& kind) {
+        pqxx::work tx(connection);
+        const std::string id =
+            tx.exec_params("INSERT INTO forge_records (repository_id, kind, value) VALUES "
+                           "($1::uuid, $2, '{\"title\":\"Migrated\"}'::jsonb) RETURNING id::text",
+                           repository_id, kind)[0][0]
+                .as<std::string>();
+        tx.commit();
+        return id;
+    };
+    const std::string issue = insert(owned->id, "issue");
+    const std::string waiting = insert(orphan->id, "review");
+    const std::string released = insert(gone->id, "release");
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0054_forge_record_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0054_forge_record_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = 'forge_records' AND object_id = $1::uuid",
+            id);
+        return found.empty() ? std::pair<std::string, std::string>{}
+                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome(issue),
+                  (std::pair<std::string, std::string>{"repository_workspace", live->id}));
+        EXPECT_EQ(outcome(waiting), (std::pair<std::string, std::string>{"needs_selection", ""}));
+        EXPECT_EQ(outcome(released),
+                  (std::pair<std::string, std::string>{"workspace_deleted", ""}));
+    }
+
+    // A row written after the migration, and a repository assigned after review, are picked up by
+    // the assignment each copy reruns.
+    const std::string late = insert(owned->id, "issue_comment");
+    EXPECT_TRUE(outcome(late).first.empty());
+    {
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE repositories SET workspace_id = $2::uuid WHERE id = $1::uuid",
+                       orphan->id, live->id);
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.commit();
+    }
+    ASSERT_TRUE(store->assign_legacy_forge_records());
+    EXPECT_EQ(outcome(late),
+              (std::pair<std::string, std::string>{"repository_workspace", live->id}));
+    EXPECT_EQ(outcome(waiting),
+              (std::pair<std::string, std::string>{"repository_workspace", live->id}));
+    EXPECT_EQ(outcome(released).first, "workspace_deleted");
+
+    std::map<std::string, lake::control::LegacyForgeRecord> listed;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_forge_records(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            listed.emplace(row.record.id, row);
+        }
+        after = page->back().record.id;
+    }
+    ASSERT_TRUE(listed.contains(issue));
+    EXPECT_EQ(listed.at(issue).workspace_id, live->id);
+    EXPECT_EQ(listed.at(issue).customer_id, customer->id);
+    EXPECT_EQ(listed.at(issue).record.kind, "issue");
+    EXPECT_EQ(listed.at(issue).record.value["title"], "Migrated");
+    EXPECT_GT(listed.at(issue).record.at_us, 0);
+    EXPECT_EQ(listed.at(released).outcome, "workspace_deleted");
+    EXPECT_TRUE(listed.at(released).workspace_id.empty());
+}
+
 TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

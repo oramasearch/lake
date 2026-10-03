@@ -57,14 +57,24 @@ struct RepositoryDeletion {
     std::string deleted_at, retention_until;
 };
 // Forge records retain a versioned value because review anchors must be
-// replaceable by libliquid's map_anchor result without a schema migration.
+// replaceable by libliquid's map_anchor result without a schema migration. They live in the
+// workspace Zetta of their repository's workspace (lake#341, control/forge_records.hpp); the
+// control store keeps only the retired forge_records table for the one-shot copy.
 struct ForgeRecord {
     std::string id, repository_id, kind, created_at, updated_at;
     nlohmann::json value;
+    std::int64_t at_us = 0;         // created_at in microseconds since the Unix epoch
+    std::int64_t revision = 0;      // the workspace engine's revision (conditional writes)
+    std::int64_t lake_revision = 1; // lake's revision inside the seal
 };
-struct NewForgeRecord {
-    std::string repository_id, kind;
-    nlohmann::json value;
+// A row of the retired forge_records table with its recorded owner (migration 0054): its
+// repository's workspace, or empty with the reason it is not copied (`needs_selection` while the
+// repository has no workspace, `workspace_deleted` when that workspace is gone).
+struct LegacyForgeRecord {
+    ForgeRecord record;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
 };
 // A drive share link (docs/api/sharing.md). It lives in the workspace Zetta of the workspace that
 // holds it (lake#350, control/drive_share_links.hpp); the control store keeps only its synthetic
@@ -901,12 +911,13 @@ public:
     virtual Result<RepositoryRef> set_repository_ref(const std::string& repository_id,
                                                      const std::string& name,
                                                      const std::string& head) = 0;
-    virtual Result<ForgeRecord> create_forge_record(const NewForgeRecord&) = 0;
-    virtual Result<ForgeRecord> get_forge_record(const std::string& id) = 0;
-    virtual Result<std::vector<ForgeRecord>>
-    list_forge_records(const std::string& repository_id, const std::string& kind, int limit) = 0;
-    virtual Result<ForgeRecord> update_forge_record(const std::string& id,
-                                                    const nlohmann::json& value) = 0;
+    // The retired forge_records table (lake#341), for the one-shot copy into workspace Zettas
+    // only. Assigning records each unassigned row's owner in workspace_assignments, as migration
+    // 0054 does, for rows written after it, and resolves needs_selection rows whose repository has
+    // since been assigned a workspace. Listing pages by id, oldest id first.
+    virtual Result<void> assign_legacy_forge_records() = 0;
+    virtual Result<std::vector<LegacyForgeRecord>>
+    legacy_forge_records(const std::string& after_id, int limit) = 0;
     // Drive share links live in workspace Zettas (lake#350). The control store answers only the
     // route of a link made before the move, from its token digest; `not_found` otherwise.
     virtual Result<DriveShareLinkRoute> drive_share_link_route(const std::string& token_hash) = 0;

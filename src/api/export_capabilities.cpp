@@ -10,7 +10,9 @@
 
 #include <openssl/evp.h>
 
+#include "forge_records_api.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/agent_bus.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 
@@ -107,41 +109,43 @@ ApiResult verify_archive(const json& archive) {
     return ApiResult::success(nullptr);
 }
 
-json export_forge_records(control::Store& store, const std::string& repository_id) {
-    const auto records = store.list_forge_records(repository_id, "", 100'000);
-    if (!records) {
-        return json();
-    }
-    json output = json::array();
-    for (const control::ForgeRecord& record : *records) {
-        if (record.kind != "export" && record.kind != "github_import") {
-            output.push_back(control::to_json(record));
-        }
-    }
-    return output;
-}
-
-ApiResult export_repository(const json& input, ApiContext& context) {
+liquid::runtime::task<ApiResult> export_repository(const json& input, ApiContext& context) {
     if (!context.store || !context.sync_store) {
-        return ApiResult::failure("store_unavailable",
+        co_return ApiResult::failure("store_unavailable",
                                   "control and repository stores are required");
     }
     const auto repository = context.store->get_repository(input.at("repository_id"));
     if (!repository) {
-        return store_error(repository.error());
+        co_return store_error(repository.error());
+    }
+    // The forge records come from the repository's workspace (lake#341).
+    auto forge = RepositoryForge::open(context, *repository);
+    if (!forge) {
+        co_return ApiResult::failure(forge.error().code, forge.error().message,
+                                     forge.error().path);
+    }
+    const auto records = control::settled(co_await forge->list("", 0));
+    if (!records) {
+        co_return forge_records_failure(records.error());
+    }
+    json forge_values = json::array();
+    for (const control::ForgeRecord& record : *records) {
+        if (record.kind != "export" && record.kind != "github_import") {
+            forge_values.push_back(control::to_json(record));
+        }
     }
     const auto portable = context.sync_store->export_portable(
         repository->customer_id, repository->id, input.value("include_git", false));
     if (!portable) {
-        return sync_error(portable.error());
+        co_return sync_error(portable.error());
     }
     const auto object = context.store->find_policy_object("repository", repository->id);
     if (!object) {
-        return store_error(object.error());
+        co_return store_error(object.error());
     }
     const auto grants = context.store->list_grants({object->id}, std::nullopt, 100'000);
     if (!grants) {
-        return store_error(grants.error());
+        co_return store_error(grants.error());
     }
     json grant_values = json::array();
     for (const control::Grant& grant : *grants) {
@@ -150,52 +154,49 @@ ApiResult export_repository(const json& input, ApiContext& context) {
     const json payload = {{"repository", control::to_json(*repository)},
                           {"history", portable->history},
                           {"artifacts", portable->artifacts},
-                          {"forge", export_forge_records(*context.store, repository->id)},
+                          {"forge", std::move(forge_values)},
                           {"grants", std::move(grant_values)},
                           {"git", portable->git}};
-    if (payload.at("forge").is_null()) {
-        return ApiResult::failure("store_error", "could not enumerate forge records");
-    }
     const json manifest = manifest_for(payload);
     const auto signature = audit::sign_export_manifest(
         *context.store,
         manifest,
         {.configured_seed = context.identity_seed, .instance_kek = context.instance_kek});
     if (!signature) {
-        return ApiResult::failure(signature.error().code, signature.error().message);
+        co_return ApiResult::failure(signature.error().code, signature.error().message);
     }
     const json archive = {{"format", "lake_export/1"},
                           {"manifest", manifest},
                           {"signature", *signature},
                           {"payload", payload}};
-    const auto recorded = context.store->create_forge_record(
-        {repository->id,
-         "export",
-         {{"manifest", manifest}, {"include_git", input.value("include_git", false)}}});
+    const auto recorded = control::settled(co_await forge->create(
+        "export", {{"manifest", manifest}, {"include_git", input.value("include_git", false)}}));
     if (!recorded) {
-        return store_error(recorded.error());
+        co_return forge_records_failure(recorded.error());
     }
     context.audit_customer_id = repository->customer_id;
     context.audit_object = "repository/" + repository->id;
-    context.audit_details = {{"forge_kind", "export"}, {"record_id", recorded->id}};
-    return ApiResult::success({{"archive", archive}, {"record", control::to_json(*recorded)}});
+    context.audit_details = {{"forge_kind", "export"},
+                             {"record_id", recorded->id},
+                             {"workspace_id", repository->workspace_id}};
+    co_return ApiResult::success({{"archive", archive}, {"record", control::to_json(*recorded)}});
 }
 
-ApiResult import_repository(const json& input, ApiContext& context) {
+liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext& context) {
     if (!context.store || !context.sync_store) {
-        return ApiResult::failure("store_unavailable",
+        co_return ApiResult::failure("store_unavailable",
                                   "control and repository stores are required");
     }
     const json& archive = input.at("archive");
-    if (const ApiResult verified = verify_archive(archive); !verified.ok) {
-        return verified;
+    if (ApiResult verified = verify_archive(archive); !verified.ok) {
+        co_return verified;
     }
     const json& payload = archive.at("payload");
     const json& source = payload.at("repository");
     // The archive's own workspace_id is where it came from; the caller names where it goes.
     const auto workspace = repository_workspace(context, input);
     if (!workspace) {
-        return ApiResult::failure(
+        co_return ApiResult::failure(
             workspace.error().code, workspace.error().message, workspace.error().path);
     }
     const auto created = context.store->create_repository({input.at("customer_id"),
@@ -204,18 +205,18 @@ ApiResult import_repository(const json& input, ApiContext& context) {
                                                            source.value("visibility", "private"),
                                                            workspace->id});
     if (!created) {
-        return store_error(created.error());
+        co_return store_error(created.error());
     }
     const RepositoryPortableData portable{
         payload.at("history"), payload.at("artifacts"), payload.at("git")};
     const auto imported =
         context.sync_store->import_portable(created->customer_id, created->id, portable);
     if (!imported) {
-        return sync_error(imported.error());
+        co_return sync_error(imported.error());
     }
     const auto target_object = context.store->find_policy_object("repository", created->id);
     if (!target_object) {
-        return store_error(target_object.error());
+        co_return store_error(target_object.error());
     }
     for (const json& grant : payload.at("grants")) {
         const auto written = context.store->create_grant({grant.value("principal_taap_id", ""),
@@ -225,8 +226,14 @@ ApiResult import_repository(const json& input, ApiContext& context) {
                                                           grant.value("granted_by_taap_id", ""),
                                                           context.request_id});
         if (!written) {
-            return store_error(written.error());
+            co_return store_error(written.error());
         }
+    }
+    // The archive's forge records go to the new repository's workspace (lake#341).
+    auto forge = RepositoryForge::open(context, *created);
+    if (!forge) {
+        co_return ApiResult::failure(forge.error().code, forge.error().message,
+                                     forge.error().path);
     }
     std::map<std::string, std::string> ids;
     for (const json& record : payload.at("forge")) {
@@ -244,13 +251,13 @@ ApiResult import_repository(const json& input, ApiContext& context) {
                                                      context.request_id,
                                                      true});
             if (!policy) {
-                return store_error(policy.error());
+                co_return store_error(policy.error());
             }
             value["policy_object_id"] = policy->id;
         }
-        const auto written = context.store->create_forge_record({created->id, kind, value});
+        const auto written = control::settled(co_await forge->create(kind, std::move(value)));
         if (!written) {
-            return store_error(written.error());
+            co_return forge_records_failure(written.error());
         }
         ids.emplace(record.value("id", ""), written->id);
     }
@@ -266,16 +273,16 @@ ApiResult import_repository(const json& input, ApiContext& context) {
         if (const auto found = ids.find(value.value(key, "")); found != ids.end()) {
             value[key] = found->second;
         }
-        const auto written = context.store->create_forge_record({created->id, kind, value});
+        const auto written = control::settled(co_await forge->create(kind, std::move(value)));
         if (!written) {
-            return store_error(written.error());
+            co_return forge_records_failure(written.error());
         }
     }
     context.audit_customer_id = created->customer_id;
     context.audit_object = "repository/" + created->id;
     context.audit_details = {{"forge_kind", "import"},
                              {"source_signer", archive["signature"]["identity"]["taap_id"]}};
-    return ApiResult::success(control::to_json(*created));
+    co_return ApiResult::success(control::to_json(*created));
 }
 
 } // namespace
@@ -297,7 +304,7 @@ void register_export_capabilities(Registry& registry) {
         .object = "repository",
         .action = "read",
         .resolve_object = repository_object,
-        .handler = export_repository});
+        .async_handler = export_repository});
     registry.add(
         Capability{.name = "import_repository",
                    .title = "Import repository",
@@ -318,7 +325,7 @@ void register_export_capabilities(Registry& registry) {
                    .object = "customer",
                    .action = "write",
                    .resolve_object = customer_object,
-                   .handler = import_repository});
+                   .async_handler = import_repository});
 }
 
 } // namespace lake::api
