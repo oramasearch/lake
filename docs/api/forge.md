@@ -47,8 +47,8 @@ repository is one `list_records`.
   nowhere to keep forge records: every forge call on it is `conflict` at `/repository_id` until an
   operator assigns its workspace.
 - **A workspace that is not ready** refuses with `workspace_not_ready`; a deleted one with the
-  workspace service's refusal. A workspace is not deleted while it holds a live repository; once
-  its repositories are deleted, deleting the workspace deletes their forge records with its Zetta.
+  workspace service's refusal. Deleting a workspace deletes its repositories with it (lake#514,
+  [workspaces.md](workspaces.md#deletion)), and their forge records go with its Zetta.
 - **Immutable ownership.** The sealed value is bound to its workspace, collection, key and lookup,
   so a record copied into another workspace or repository does not open there.
 - **Updates** (`update_issue`, `update_review`, `set_branch_protection` on an existing rule,

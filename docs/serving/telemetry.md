@@ -38,6 +38,10 @@ The exported metric families are:
   `failed`) and `lake_secret_lease_sweep_errors_total`: the owner loop's dynamic-lease expiry pass,
   which reads the due index and settles each due lease in its workspace
   ([secrets](../api/secrets.md#where-leases-live-lake362), lake#362)
+- `lake_workspace_deletions_completed_total` and `lake_workspace_deletion_errors_total`: the owner
+  loop's pass, every minute, that finishes workspace deletions left pending (tenant image tags,
+  search segments, central audit events); an error also logs `lake: workspace deletion pending`
+  with the reason ([workspaces](../api/workspaces.md#deletion), lake#514)
 
 `route` is the registered route pattern, or `unmatched` for the trailing 404, never a caller's raw
 path. Store `result` is `ok` on success and the store error code on failure.

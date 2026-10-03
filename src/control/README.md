@@ -5,6 +5,12 @@ with the reason a service cannot progress on its own (unassigned, delete not yet
 stores leave a deleted workspace's primary Zetta out of `list_services` once the workspace is
 observed `Deleted` (lake#452, [services.md](../../docs/api/services.md)).
 
+Both stores implement `delete_workspace_cascade` (lake#514, migration `0065`): one transaction
+tombstones the workspace's repositories with their retention ended, deletes its apps, cancels its
+unfinished builds, sets the workspace `deleted` with its services absent, and records the deletion
+in `workspace_deletions`; repeating it answers the record. `pending_workspace_deletions` and
+`complete_workspace_deletion` drive the resume ([workspaces.md](../../docs/api/workspaces.md#deletion)).
+
 `WorkspaceService` caches deployment catalogues and project/pipeline definitions in memory for
 five seconds, scoped to the workspace and connection generation. Successful writes explicitly
 invalidate entries and prevent in-flight stale refills. Ownership, readiness and credentials

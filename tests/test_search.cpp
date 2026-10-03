@@ -267,6 +267,39 @@ TEST(Search, IndexesSharedBlobOnceAndReloadsTheManifest) {
     EXPECT_EQ(legacy_result->items.size(), 2U);
 }
 
+// A deleted workspace's repositories leave the index (lake#514): their segments and the blobs only
+// they used go, a blob another repository shares stays, and a repeat is harmless.
+TEST(Search, DroppingARepositoryRemovesItsSegmentsAndUnsharedBlobs) {
+    TemporaryStore store;
+    const auto root = store.path();
+    const std::string kept = create_change(root / "customer" / "repositories" / "kept",
+                                           {{"one.txt", "shared orbit token"}});
+    const std::string doomed = create_change(
+        root / "customer" / "repositories" / "doomed",
+        {{"two.txt", "shared orbit token"}, {"three.txt", "only comet token"}});
+    lake::control::InMemoryStore control;
+    lake::search::Service service(root);
+    ASSERT_TRUE(service.publish(publication("customer", "kept", kept)));
+    ASSERT_TRUE(service.publish(publication("customer", "doomed", doomed)));
+    ASSERT_EQ(service.query({"comet", "customer", "", "", 20}, "admin", control)->items.size(), 1U);
+
+    ASSERT_TRUE(service.drop_repository("customer", "doomed"));
+    EXPECT_TRUE(service.query({"comet", "customer", "", "", 20}, "admin", control)->items.empty());
+    const auto orbit = service.query({"orbit", "customer", "", "", 20}, "admin", control);
+    ASSERT_TRUE(orbit) << orbit.error().message;
+    ASSERT_EQ(orbit->items.size(), 1U);
+    std::ifstream input(root / "customer" / "index" / "blobs.json");
+    EXPECT_EQ(nlohmann::json::parse(input).size(), 1U);
+    std::ifstream manifest(root / "customer" / "index" / "manifest.json");
+    EXPECT_EQ(nlohmann::json::parse(manifest)["active"].size(), 1U);
+    EXPECT_TRUE(service.drop_repository("customer", "doomed"));
+    EXPECT_TRUE(service.drop_repository("customer", "never-indexed"));
+
+    lake::search::Service reopened(root);
+    EXPECT_TRUE(reopened.query({"comet", "customer", "", "", 20}, "admin", control)->items.empty());
+    EXPECT_EQ(reopened.query({"orbit", "customer", "", "", 20}, "admin", control)->items.size(), 1U);
+}
+
 TEST(Search, PublicationMakesEveryQueryObserveOneCompleteChange) {
     TemporaryStore store;
     const auto root = store.path();

@@ -389,8 +389,23 @@ TEST(WorkspaceNavigationHttp, SelectorRedirectsRememberedWorkspaceAndValidatesFo
     for (const std::string field : {"Environment", "Phase", "Namespace", "Created", "staging", "Pending"}) {
         EXPECT_NE(page.find(field), std::string::npos) << field;
     }
-    EXPECT_NE(page.find("name=\"workspace_id\" value=\"" + third.id + "\""), std::string::npos);
-    request("POST", "/workspaces/delete", query + "&workspace_id=" + third.id + "&confirm=wrong");
+    // Delete opens a confirmation that names what goes with the workspace, with counts (lake#514).
+    EXPECT_NE(page.find("delete=" + third.id + "#delete-workspace"), std::string::npos);
+    ASSERT_TRUE(store->create_repository({customer->id, "third-notes", "", "private", third.id}));
+    const auto confirmation = request("GET", "/workspaces?" + query + "&delete=" + third.id);
+    EXPECT_TRUE(confirmation.starts_with("HTTP/1.1 200")) << confirmation;
+    EXPECT_NE(confirmation.find("name=\"workspace_id\" value=\"" + third.id + "\""),
+              std::string::npos);
+    EXPECT_NE(confirmation.find("1 repository (1 live, 0 deleted and still retained)"),
+              std::string::npos)
+        << confirmation;
+    EXPECT_NE(confirmation.find("Repository <code>third-notes</code>"), std::string::npos);
+    EXPECT_NE(confirmation.find("cannot be undone"), std::string::npos);
+    EXPECT_EQ(store->get_workspace(third.id)->desired, "running");
+    const auto refused =
+        request("POST", "/workspaces/delete", query + "&workspace_id=" + third.id + "&confirm=wrong");
+    EXPECT_NE(response_header(refused, "location").find("delete=" + third.id), std::string::npos)
+        << "a wrong name returns to the confirmation";
     EXPECT_EQ(store->get_workspace(third.id)->desired, "running");
     request("POST", "/workspaces/delete", query + "&workspace_id=" + third.id + "&confirm=third");
     EXPECT_EQ(store->get_workspace(third.id)->desired, "deleted");

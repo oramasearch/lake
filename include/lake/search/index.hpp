@@ -94,6 +94,11 @@ public:
                      const std::string& version) const;
     [[nodiscard]] Result<QueryResult>
     query(const Query& query, const std::string& principal, control::Store& store) const;
+    // Drops one repository's search segments and artifact members, and the indexed blobs nothing
+    // else references (a workspace deletion, lake#514). Dropping a repository with none is a
+    // success, so a resumed deletion can repeat it.
+    [[nodiscard]] Result<void> drop_repository(const std::string& customer,
+                                               const std::string& repository);
 
 private:
     struct Impl;

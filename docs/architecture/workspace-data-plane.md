@@ -125,6 +125,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `workspace_assignments` | multitenancy/dispatch | Recorded legacy routing assignments and unresolved ownership; no event bodies. |
 | `workspace_data_plane_guard` | multitenancy/dispatch | Migration 0038 application marker. |
 | `workspaces` | multitenancy/dispatch | Customer workspace identity, desired lifecycle and operator routing/status contract. |
+| `workspace_deletions` | multitenancy/dispatch | One row per deleted workspace (`0065_workspace_deletions`, [lake#514](https://github.com/oramasearch/lake/issues/514)): who deleted it, when, the ids and names of the repositories, apps, builds and tenant image repositories it destroyed, and when lake finished removing what lives outside PostgreSQL. It outlives the workspace Zetta, so it cannot live there; it holds no content. [Deletion](../api/workspaces.md#deletion). |
 | `workspaces_guard` | multitenancy/dispatch | Migration 0039 application marker for the operator schema Job. |
 | `repository_names_guard` | multitenancy/dispatch | Migration 0040 application marker for active repository-name uniqueness. |
 | `app_authorization_codes` | multitenancy/dispatch | Hashed, short-lived, single-use protected-app browser handoff codes. |

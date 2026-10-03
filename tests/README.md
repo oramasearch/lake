@@ -544,3 +544,19 @@ create or finish tasks directly in a store; `AgentRuns::task` and `HttpResponseI
 `assembled_task` read a task from both halves, and `test_instance_kek` gives memory-store tests a
 KEK. `Stores/AgentLeases.ReclaimedTaskUsesFirstTerminalWriteAndRejectsLaterEvents` also checks that
 the workspace keeps only the winning answer.
+
+Workspace deletion (lake#514, decision 54 S12): `test_workspace_deletion.cpp` runs on the memory
+store and, with `LAKE_TEST_DB_URI`, on PostgreSQL. `CascadesToEverythingTheWorkspaceHoldsAndNothingElse`
+builds two spaces with two workspaces each, a workspace with a live, a retained and an expired
+tombstoned repository, an app, two builds and tagged images (one name shared with the other
+workspace), checks the dry run's counts, then that the deletion tombstones both repositories with
+their retention ended and frees the name, deletes the app, cancels the builds, untags only the
+workspace's images, leaves the other workspace and space alone, and records one central event per
+object plus the cascade, once. `AnInterruptedCascadeResumes` fails the registry after the
+transaction and checks the pending deletion, a failing owner-loop pass, and the pass that completes
+it without repeating an event. `OnlyAnAdministratorOfTheSpaceDeletes` refuses a writer, a stranger
+and another space's administrator, dry run included. `RegistryProtocols.DeletingAWorkspaceMakesItsImagesUnpullable`
+(`test_api.cpp`) pulls through a running lake before and after, and
+`Search.DroppingARepositoryRemovesItsSegmentsAndUnsharedBlobs` covers the index.
+`WorkspaceNavigationHttp.SelectorRedirectsRememberedWorkspaceAndValidatesForms` renders the
+confirmation with its counts.

@@ -218,6 +218,9 @@ the operator's deletion of the namespace and its volume destroys the bytes. Befo
 collector reclaims the deleted repositories from the space's store, since their retention has
 ended. The central audit log records one event per destroyed repository, because the workspace's
 own audit chain goes with its Zetta. Retained snapshots are the only copy left.
+**Shipped (before the switch):** migration `0065_workspace_deletions` and the cascade in
+[workspaces.md](../api/workspaces.md#deletion); closing the store is the
+`WorkspaceContent::close_workspace_store` extension point, unset until this item lands.
 
 **Migration and cutover.** No dual write; nothing on the store volume is deleted.
 
@@ -326,7 +329,10 @@ lock's protection.
   created by) is written `if_absent` at a build's first push, from the build row's workspace;
   pulls resolve it before any workspace is read. App images keep their addresses.
 - **Workspace deletion** (S12, cascade): a workspace's routes are deleted with it, and its images
-  go with its store and records.
+  go with its store and records. Until then lake#514 removes the tags and manifests of the
+  workspace's tenant repositories from the instance registry (`WorkspaceContent` in
+  `include/lake/api/workspace_deletion.hpp`); this item deletes the routes in the cascade
+  transaction instead.
 
 **Hot path: image pulls.** The kubelet pulls through lake, so pull latency is a workspace store
 read: lake streams the blob from the store with read-ahead and never holds a whole layer in
@@ -422,7 +428,7 @@ liquid; `updated_at` is gone.
 | 7 | [lake#513](https://github.com/oramasearch/lake/issues/513) | A workspace for the `liquid` repository's space, and its assignment (S14) | nothing |
 | 8 | [lake#319](https://github.com/oramasearch/lake/issues/319) | Drop `repository_refs` (S11). **Done** (migration `0064`) | nothing |
 | 9 | [lake#315](https://github.com/oramasearch/lake/issues/315) | Part 2: `description` to `lake_repositories` (S10). **Done** (migration `0064`); the copy of the one unassigned row waits | lake#513 for the one unassigned row |
-| 10 | [lake#514](https://github.com/oramasearch/lake/issues/514) | Cascade workspace deletion (S12) | nothing; its store step follows #380 |
+| 10 | [lake#514](https://github.com/oramasearch/lake/issues/514) | Cascade workspace deletion (S12). Shipped before #380 and #383 (migration `0065`); the store and route steps are extension points | nothing; its store step follows #380 |
 | 11 | [lake#384](https://github.com/oramasearch/lake/issues/384) | Route patterns in request logs; the per-workspace `lake_requests` series (S9) | nothing |
 | 12 | [lake#382](https://github.com/oramasearch/lake/issues/382) | Stays with the instance (S7): the audit row, and the dynamic-secret leaf check | nothing |
 | 13 | [lake#383](https://github.com/oramasearch/lake/issues/383) | Phase A: the route table, manifests and tags as records. Phase B: blobs in the workspace store | A: nothing; B: lake#380 |

@@ -4479,6 +4479,176 @@ public:
         });
     }
 
+    static constexpr const char* workspace_deletion_columns =
+        "workspace_id::text, customer_id::text, workspace_name, requested_by, "
+        "to_char(requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), "
+        "COALESCE(to_char(completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), ''), "
+        "repositories::text, apps::text, builds::text, images::text";
+
+    static std::vector<WorkspaceDeletionItem> deletion_items(const std::string& text) {
+        std::vector<WorkspaceDeletionItem> items;
+        const nlohmann::json values = nlohmann::json::parse(text, nullptr, false);
+        if (!values.is_array()) {
+            return items;
+        }
+        for (const nlohmann::json& value : values) {
+            if (value.is_object()) {
+                items.push_back({value.value("id", std::string()), value.value("name", std::string()),
+                                 value.value("state", std::string())});
+            }
+        }
+        return items;
+    }
+
+    static WorkspaceDeletion workspace_deletion_from(const pqxx::row& row) {
+        WorkspaceDeletion value;
+        value.workspace_id = row[0].as<std::string>();
+        value.customer_id = row[1].as<std::string>();
+        value.workspace_name = row[2].as<std::string>();
+        value.requested_by = row[3].as<std::string>();
+        value.requested_at = row[4].as<std::string>();
+        value.completed_at = row[5].as<std::string>();
+        value.repositories = deletion_items(row[6].as<std::string>());
+        value.apps = deletion_items(row[7].as<std::string>());
+        value.builds = deletion_items(row[8].as<std::string>());
+        value.images = deletion_items(row[9].as<std::string>());
+        return value;
+    }
+
+    Result<WorkspaceDeletion> delete_workspace_cascade(const WorkspaceDeletionRequest& request) override {
+        if (managed_service_slug("ws", request.workspace_id).empty()) {
+            return std::unexpected(StoreError{"invalid_input", "workspace_id must be a UUID"});
+        }
+        nlohmann::json images = nlohmann::json::array();
+        for (const std::string& image : request.images) {
+            images.push_back({{"id", ""}, {"name", image}, {"state", "tagged"}});
+        }
+        return with_tx<WorkspaceDeletion>([&](pqxx::work& tx) -> Result<WorkspaceDeletion> {
+            tx.exec_params("SELECT 1 FROM workspaces WHERE id = $1::uuid FOR UPDATE",
+                           request.workspace_id);
+            const auto row = one_workspace(tx, request.workspace_id);
+            if (!row) {
+                return std::unexpected(row.error());
+            }
+            if (row->desired == "deleted") {
+                const auto recorded = tx.exec_params(
+                    std::string("SELECT ") + workspace_deletion_columns +
+                        " FROM workspace_deletions WHERE workspace_id = $1::uuid",
+                    request.workspace_id);
+                if (recorded.empty()) {
+                    return std::unexpected(StoreError{"conflict", "the workspace is deleted"});
+                }
+                return workspace_deletion_from(recorded[0]);
+            }
+            // Repositories still live or inside their retention: tombstoned now with retention
+            // ended, which releases their names. Expired tombstones are already gone.
+            const auto repositories = tx.exec_params(
+                "WITH destroyed AS (SELECT id, name, deleted_at IS NULL AS live FROM repositories "
+                "WHERE workspace_id = $1::uuid AND (deleted_at IS NULL OR retention_until > now()) "
+                "FOR UPDATE), changed AS (UPDATE repositories r SET deleted_at = "
+                "COALESCE(r.deleted_at, now()), retention_until = now() FROM destroyed d "
+                "WHERE r.id = d.id RETURNING r.id) "
+                "SELECT COALESCE(jsonb_agg(jsonb_build_object('id', d.id::text, 'name', d.name, "
+                "'state', CASE WHEN d.live THEN 'live' ELSE 'tombstoned' END) ORDER BY d.name), "
+                "'[]'::jsonb)::text FROM destroyed d",
+                request.workspace_id);
+            const auto apps = tx.exec_params(
+                "WITH changed AS (UPDATE apps a SET desired = 'deleted', generation = generation + 1, "
+                "updated_at = now() FROM (SELECT id, desired FROM apps WHERE workspace_id = $1::uuid "
+                "AND desired <> 'deleted' FOR UPDATE) b WHERE a.id = b.id "
+                "RETURNING a.id, a.name, b.desired AS previous) "
+                "SELECT COALESCE(jsonb_agg(jsonb_build_object('id', id::text, 'name', name, "
+                "'state', previous) ORDER BY name), '[]'::jsonb)::text FROM changed",
+                request.workspace_id);
+            const auto builds = tx.exec_params(
+                "WITH changed AS (UPDATE builds SET desired = 'cancelled', updated_at = now() "
+                "WHERE workspace_id = $1::uuid AND desired = 'queued' AND phase NOT IN "
+                "('Succeeded', 'Failed', 'Cancelled') RETURNING id, target, phase) "
+                "SELECT COALESCE(jsonb_agg(jsonb_build_object('id', id::text, 'name', target, "
+                "'state', phase) ORDER BY id), '[]'::jsonb)::text FROM changed",
+                request.workspace_id);
+            // lake#383: the workspace's rows in oci_repository_routes are deleted here, in this
+            // transaction, once tenant images are routed through it.
+            tx.exec_params("UPDATE workspaces SET desired = 'deleted', generation = generation + 1, "
+                           "updated_at = now() WHERE id = $1::uuid",
+                           request.workspace_id);
+            tx.exec_params("UPDATE services SET desired = 'absent', generation = generation + 1, "
+                           "updated_at = now() WHERE workspace_id = $1::uuid AND desired <> 'absent'",
+                           request.workspace_id);
+            const auto inserted = tx.exec_params(
+                std::string("INSERT INTO workspace_deletions (workspace_id, customer_id, "
+                            "workspace_name, requested_by, repositories, apps, builds, images) "
+                            "VALUES ($1::uuid, $2::uuid, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, "
+                            "$8::jsonb) RETURNING ") +
+                    workspace_deletion_columns,
+                request.workspace_id, row->customer_id, row->name, request.requested_by,
+                repositories[0][0].as<std::string>(), apps[0][0].as<std::string>(),
+                builds[0][0].as<std::string>(), images.dump());
+            for (const char* channel : {"lake_apps", "lake_builds"}) {
+                const pqxx::result& changed = std::string_view(channel) == "lake_apps" ? apps : builds;
+                const auto ids = nlohmann::json::parse(changed[0][0].as<std::string>(), nullptr, false);
+                if (!ids.is_array()) {
+                    continue;
+                }
+                for (const nlohmann::json& id : ids) {
+                    tx.exec_params("SELECT pg_notify($1, $2)", channel,
+                                   id.value("id", std::string()));
+                }
+            }
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", request.workspace_id);
+            return workspace_deletion_from(inserted[0]);
+        });
+    }
+
+    Result<WorkspaceDeletion> get_workspace_deletion(const std::string& workspace_id) override {
+        if (managed_service_slug("ws", workspace_id).empty()) {
+            return std::unexpected(StoreError{"invalid_input", "workspace_id must be a UUID"});
+        }
+        return with_tx<WorkspaceDeletion>([&](pqxx::work& tx) -> Result<WorkspaceDeletion> {
+            const auto rows = tx.exec_params(std::string("SELECT ") + workspace_deletion_columns +
+                                                 " FROM workspace_deletions WHERE workspace_id = $1::uuid",
+                                             workspace_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no deletion of workspace " + workspace_id});
+            }
+            return workspace_deletion_from(rows[0]);
+        });
+    }
+
+    Result<std::vector<WorkspaceDeletion>> pending_workspace_deletions(int limit) override {
+        return with_tx<std::vector<WorkspaceDeletion>>(
+            [&](pqxx::work& tx) -> Result<std::vector<WorkspaceDeletion>> {
+                const auto rows = tx.exec_params(
+                    std::string("SELECT ") + workspace_deletion_columns +
+                        " FROM workspace_deletions WHERE completed_at IS NULL "
+                        "ORDER BY requested_at, workspace_id LIMIT $1",
+                    limit > 0 ? limit : 1000);
+                std::vector<WorkspaceDeletion> values;
+                for (const auto& row : rows) {
+                    values.push_back(workspace_deletion_from(row));
+                }
+                return values;
+            });
+    }
+
+    Result<void> complete_workspace_deletion(const std::string& workspace_id) override {
+        if (managed_service_slug("ws", workspace_id).empty()) {
+            return std::unexpected(StoreError{"invalid_input", "workspace_id must be a UUID"});
+        }
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const auto rows = tx.exec_params(
+                "UPDATE workspace_deletions SET completed_at = COALESCE(completed_at, now()) "
+                "WHERE workspace_id = $1::uuid RETURNING 1",
+                workspace_id);
+            if (rows.empty()) {
+                return std::unexpected(
+                    StoreError{"not_found", "no deletion of workspace " + workspace_id});
+            }
+            return {};
+        });
+    }
+
     Result<std::vector<ManagedService>> list_services(const std::string& customer_id) override {
         return with_tx<std::vector<ManagedService>>(
             [&](pqxx::work& tx) -> Result<std::vector<ManagedService>> {

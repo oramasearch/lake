@@ -4,6 +4,10 @@ lake#452: [services.md](services.md) documents `list_services`' shared `status` 
 `status_reason`; [web-apps.md](web-apps.md) the public acknowledgement `create_app` requires;
 [workspaces.md](workspaces.md) the two `create_project` name refusals.
 
+lake#514: [workspaces.md](workspaces.md#deletion) documents the cascading `delete_workspace`, its
+`dry_run` and its result; [repositories.md](repositories.md#the-owning-workspace),
+[registry.md](registry.md) and [forge.md](forge.md) what goes with a deleted workspace.
+
 [experiments.md](experiments.md) documents eleven training study, trial, run-metric, comparison
 and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed actions,
 plus the `agent_turn` contract used for ExperimentsAgent proposals. These names are distinct from

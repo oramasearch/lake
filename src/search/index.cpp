@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <regex>
+#include <set>
 #include <shared_mutex>
 #include <sstream>
 #include <unordered_map>
@@ -772,6 +773,81 @@ Result<void> Service::publish(const Publish& publication) {
         }
         state.active = std::move(next_active);
         impl_->rebuild(state);
+        return {};
+    } catch (const std::exception& error) {
+        return std::unexpected(Error{"store_error", error.what()});
+    }
+}
+
+Result<void> Service::drop_repository(const std::string& customer, const std::string& repository) {
+    try {
+        if (customer.empty() || repository.empty()) {
+            return std::unexpected(Error{"invalid_input", "customer and repository are required"});
+        }
+        std::unique_lock lock(impl_->mutex);
+        const auto loaded = impl_->load_customer(customer);
+        if (!loaded) {
+            return loaded;
+        }
+        auto& state = impl_->customers.at(customer);
+        auto next_active = state.active;
+        std::set<std::string> dropped_files;
+        std::erase_if(next_active, [&](const auto& item) {
+            if (item.second.repository != repository) {
+                return false;
+            }
+            dropped_files.insert(item.second.file);
+            return true;
+        });
+        auto next_artifacts = state.artifacts;
+        std::erase_if(next_artifacts,
+                      [&](const auto& item) { return item.second.repository == repository; });
+        if (next_active.size() == state.active.size() &&
+            next_artifacts.size() == state.artifacts.size()) {
+            return {};
+        }
+        const std::filesystem::path directory = impl_->index_path(customer);
+        json manifest{{"version", 2}, {"active", json::array()}};
+        for (const auto& [slot, active] : next_active) {
+            manifest["active"].push_back({{"repository", active.repository},
+                                          {"ref", active.ref},
+                                          {"change", active.change},
+                                          {"kind", publication_kind_name(active.kind)},
+                                          {"segment", active.file}});
+            dropped_files.erase(active.file);
+        }
+        const auto published = write_json_atomically(directory / "manifest.json", manifest);
+        if (!published) {
+            return published;
+        }
+        state.active = std::move(next_active);
+        state.artifacts = std::move(next_artifacts);
+        const auto saved_artifacts = impl_->save_artifacts(customer, state);
+        if (!saved_artifacts) {
+            return saved_artifacts;
+        }
+        std::set<std::string> referenced;
+        for (const auto& [slot, active] : state.active) {
+            for (const Occurrence& occurrence : active.occurrences) {
+                referenced.insert(occurrence.blob);
+            }
+        }
+        for (const auto& [key, artifact] : state.artifacts) {
+            for (const Occurrence& member : artifact.members) {
+                referenced.insert(member.blob);
+            }
+        }
+        std::erase_if(state.blobs,
+                      [&](const auto& item) { return !referenced.contains(item.first); });
+        const auto saved_blobs = impl_->save_blobs(customer, state);
+        if (!saved_blobs) {
+            return saved_blobs;
+        }
+        impl_->rebuild(state);
+        for (const std::string& file : dropped_files) {
+            std::error_code ignored;
+            std::filesystem::remove(directory / file, ignored);
+        }
         return {};
     } catch (const std::exception& error) {
         return std::unexpected(Error{"store_error", error.what()});

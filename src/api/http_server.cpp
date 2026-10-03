@@ -80,6 +80,7 @@
 #include "lake/api/mcp.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/api/workspace_deletion.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/store_owner.hpp"
 #include "lake/api/sync_store.hpp"
@@ -1333,6 +1334,60 @@ public:
             return std::unexpected(path.error());
         }
         return read(*path);
+    }
+
+    // The tags one OCI repository holds, sorted (a workspace deletion's confirmation, lake#514).
+    std::vector<std::string> tags(std::string_view repository) const {
+        std::vector<std::string> found;
+        if (!available() || !safe_oci_repository(repository)) {
+            return found;
+        }
+        std::error_code error;
+        for (const auto& entry : std::filesystem::directory_iterator(
+                 root_ / "manifests" / std::string(repository), error)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".json") {
+                found.push_back(entry.path().stem().string());
+            }
+        }
+        std::ranges::sort(found);
+        return found;
+    }
+
+    // Removes one OCI repository's tags and manifest pointers, so nothing can pull it (a workspace
+    // deletion, lake#514). Nested repositories below it (`<space>/cache/...` under `<space>/`) are
+    // other repositories and stay. Blobs stay too: other manifests may reference them, and the
+    // registry has no collection yet. Removing a repository that holds nothing is a success.
+    ArtifactResult<void> remove_repository(std::string_view repository) {
+        if (!available()) {
+            return std::unexpected("artifact storage is not configured (LAKE_STORE_ROOT)");
+        }
+        if (!safe_oci_repository(repository)) {
+            return std::unexpected("OCI repository name is invalid");
+        }
+        std::unique_lock lock(mutex_);
+        const std::filesystem::path directory = root_ / "manifests" / std::string(repository);
+        std::error_code error;
+        std::vector<std::filesystem::path> pointers;
+        for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".json") {
+                pointers.push_back(entry.path());
+            }
+        }
+        if (error && error != std::errc::no_such_file_or_directory) {
+            return std::unexpected("could not list OCI repository: " + error.message());
+        }
+        for (const std::filesystem::path& pointer : pointers) {
+            std::error_code removed;
+            std::filesystem::remove(pointer, removed);
+            if (removed) {
+                return std::unexpected("could not remove OCI tag: " + removed.message());
+            }
+        }
+        std::error_code ignored;
+        if (std::filesystem::is_empty(directory, ignored)) {
+            std::filesystem::remove(directory, ignored);
+        }
+        return {};
     }
 
 private:
@@ -5168,6 +5223,35 @@ struct ApiServer::Impl {
     AuditRecorder::Totals reported_audit;
     mutable LiquidCustomerStores sync_store;
     ArtifactRegistry artifacts;
+    // The instance registry's tenant images, for the workspace deletion cascade (lake#514).
+    WorkspaceContent workspace_content{
+        .image_tags = [this](const std::string& repository) { return artifacts.tags(repository); },
+        // Only the store root's owner changes the registry; a successor still waiting for it
+        // leaves the deletion pending, and its owner loop finishes it once it owns the root.
+        .remove_image_repository = [this](const std::string& repository)
+            -> std::expected<void, std::string> {
+            if (store_root_state.load() != StoreRootState::open) {
+                return std::unexpected("this lake does not own the store root yet");
+            }
+            return artifacts.remove_repository(repository);
+        },
+        .drop_repository_index = [this](const std::string& customer_id,
+                                        const std::string& repository_id)
+            -> std::expected<void, std::string> {
+            if (!options.search) {
+                return {};
+            }
+            if (!options.store_root.empty() && store_root_state.load() != StoreRootState::open) {
+                return std::unexpected("this lake does not own the store root yet");
+            }
+            const auto dropped = options.search->drop_repository(customer_id, repository_id);
+            if (!dropped) {
+                return std::unexpected(dropped.error().message);
+            }
+            return {};
+        },
+    };
+    std::chrono::steady_clock::time_point next_workspace_deletion_pass{};
     Registry registry;
     mutable control::pki::Service pki;
     mutable control::agents::Service agents;
@@ -5724,6 +5808,7 @@ struct ApiServer::Impl {
             ctx.registry_space_bytes = [this](const std::string& space) {
                 return artifacts.space_stored_bytes(space);
             };
+            ctx.workspace_content = &workspace_content;
         }
         ctx.public_host = options.public_host;
         ctx.request_origin = request_origin(route);
@@ -9353,6 +9438,18 @@ struct ApiServer::Impl {
             } else {
                 page.unavailable = listed.error.message;
             }
+            // The typed-name confirmation names what the deletion destroys (lake#514).
+            if (const std::string doomed = query_value(route, "delete"); listed.ok && !doomed.empty()) {
+                const ApiResult plan = unwrap(co_await workspace_call(
+                    "delete_workspace",
+                    {{"customer_id", page.customer_id}, {"workspace_id", doomed}, {"dry_run", true}},
+                    context));
+                if (plan.ok) {
+                    page.data["delete_workspace"] = plan.value;
+                } else {
+                    page.error = plan.error.message;
+                }
+            }
         } else if (!options.workspaces) {
             page.unavailable = section == "services"
                                    ? "Services are not available on this lake yet: the operator "
@@ -10685,6 +10782,10 @@ struct ApiServer::Impl {
             }
             result = unwrap(co_await workspace_call(
                 action == "workspace_create" ? "create_workspace" : "delete_workspace", input, context));
+            if (!result.ok && action == "workspace_delete") {
+                // Back to the confirmation, which lists what the deletion destroys.
+                back += "&delete=" + oauth_url_encode(form_field(body, "workspace_id"));
+            }
         } else if (action == "start") {
             const std::string requested = form_field(body, "return");
             back = requested == "/design/projects" || requested == "/train/data" ||
@@ -15418,6 +15519,27 @@ struct ApiServer::Impl {
         count("failed", sweep->failed);
     }
 
+    // Finishes the workspace deletions a crash or an unreachable dependency left incomplete
+    // (lake#514): their tenant image tags, search segments and central audit events.
+    void resume_workspace_deletions() {
+        ApiContext context;
+        context.store = options.store.get();
+        context.search = options.search.get();
+        context.identity_seed = options.identity_seed;
+        context.instance_kek = options.instance_kek;
+        if (artifacts.available()) {
+            context.workspace_content = &workspace_content;
+        }
+        const auto resumed = api::resume_workspace_deletions(context);
+        if (!resumed) {
+            metrics.increment_counter("lake_workspace_deletion_errors_total");
+            std::println(stderr, "lake: workspace deletion pending: {}", resumed.error());
+        } else if (*resumed > 0) {
+            metrics.increment_counter("lake_workspace_deletions_completed_total", {},
+                                      static_cast<double>(*resumed));
+        }
+    }
+
     // Writes the repository usage counted since the last flush to the workspace Zettas, off the
     // request path (lake#348), and reports what was written, kept or dropped as counters.
     void flush_metering() {
@@ -17715,6 +17837,14 @@ void ApiServer::drain() {
          impl_->audit_recorder->pending() * 2 >= impl_->options.audit_max_pending)) {
         impl_->next_audit_flush = now + impl_->options.audit_flush_interval;
         impl_->flush_audit();
+    }
+    // The registry and search segments live under the store root: only its owner removes them.
+    if (impl_->options.store &&
+        (impl_->options.store_root.empty() ||
+         impl_->store_root_state.load() == StoreRootState::open) &&
+        now >= impl_->next_workspace_deletion_pass) {
+        impl_->next_workspace_deletion_pass = now + std::chrono::minutes(1);
+        impl_->resume_workspace_deletions();
     }
     if (impl_->options.store && impl_->options.workspaces && !impl_->options.instance_kek.empty() &&
         now >= impl_->next_secret_lease_sweep) {

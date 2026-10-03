@@ -227,3 +227,12 @@ column, and `copy_workspace_records` (collection `repositories`) copies it; a la
 the column. The latest guard is `repository_records_guard`; the operator must vendor this schema,
 update its guard, and drop `repository_refs` from its vendored-schema test before rollout. See
 [repositories.md](../docs/api/repositories.md#where-the-description-lives-lake315-part-2).
+Migration `0065_workspace_deletions` makes deleting a workspace cascade (decision 54 S12,
+lake#514). The transaction that sets a workspace's desired state to `deleted` also tombstones its
+repositories still live or inside retention with their retention ended (which frees their names),
+deletes its apps, cancels its unfinished builds, and records what it destroyed in
+`workspace_deletions`. Lake then removes the tenant image tags and search segments and records the
+central audit events, and sets `completed_at`; its owner loop resumes a row without it. The
+operator reads only `workspaces.desired`, as before. The latest guard is
+`workspace_deletions_guard`; the operator must vendor this schema and update its guard before
+rollout. See [workspaces.md](../docs/api/workspaces.md#deletion).

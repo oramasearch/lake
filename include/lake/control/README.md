@@ -4,6 +4,12 @@
 its reason; `service_json` now includes `updated_at`. `InMemoryStore::set_workspace_status` writes
 the operator's workspace observation in tests (lake#452).
 
+`WorkspaceDeletion` (`store.hpp`, lake#514) is what one workspace deletion destroyed, recorded in
+`workspace_deletions` (migration `0065`): repositories, apps, builds and tenant image repositories
+as `WorkspaceDeletionItem`s, with `completed_at` once lake finished the steps outside PostgreSQL.
+`search::Service::drop_repository` removes a destroyed repository's segments and the blobs only it
+used.
+
 `StreamOwner` is a topic's creator; `stream_owners.hpp` keeps it as a sealed record in the
 topic's workspace Zetta (lake#379), and `Store` keeps only the legacy reads of the retired
 `stream_owners` table, for the copy (`LegacyStreamOwner`). `list_agent_task_stream_scopes` supplies one customer's compact durable task

@@ -188,6 +188,10 @@ public:
     Result<Workspace> get_workspace(const std::string& id) override;
     Result<Workspace> create_workspace(const NewWorkspace&) override;
     Result<Workspace> update_workspace(const std::string& id, const WorkspacePatch&) override;
+    Result<WorkspaceDeletion> delete_workspace_cascade(const WorkspaceDeletionRequest&) override;
+    Result<WorkspaceDeletion> get_workspace_deletion(const std::string& workspace_id) override;
+    Result<std::vector<WorkspaceDeletion>> pending_workspace_deletions(int limit) override;
+    Result<void> complete_workspace_deletion(const std::string& workspace_id) override;
     // The operator's workspace observation (phase, observed generation). Tests call this
     // directly; the production operator updates the same columns in Postgres.
     Result<void> set_workspace_status(const std::string& id, std::string phase);
@@ -584,6 +588,7 @@ private:
     std::map<std::string, std::uint64_t> storage_quotas_;
     std::vector<ManagedService> services_;
     std::vector<Workspace> workspaces_;
+    std::vector<WorkspaceDeletion> workspace_deletions_;
     std::vector<WebApp> web_apps_;
     struct WebAppAuthorizationCodeRecord {
         WebAppAuthorizationCode code;

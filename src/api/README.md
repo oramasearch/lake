@@ -261,7 +261,14 @@ Repositories belong to one workspace (lake#315, part 1). `create_repository`,
 `list_repositories` takes an optional `workspace_id`; `transfer_repository` is refused. The push
 path passes the repository itself to `sync_change_authorizer` and `evaluate_branch_protection`
 (`forge.hpp`), so each decision and its audit record carry the workspace. `delete_workspace`
-refuses a workspace that holds a live repository. `http_server.cpp`'s `/repository/create` form and
+cascades to the workspace's repositories, apps, unfinished builds and tenant images (lake#514):
+`workspace_deletion.cpp` computes the dry run (`workspace_deletion_plan`) and the workspace's image
+repositories, `Store::delete_workspace_cascade` is the one transaction, and
+`finish_workspace_deletion` removes what lives outside PostgreSQL through the injected
+`WorkspaceContent` (the instance registry's tags and the search segments, both gated on owning the
+store root in `http_server.cpp`) and records one central audit event per destroyed object, once
+each. `ApiServer::drain` resumes unfinished deletions every minute. See
+[workspaces.md](../../docs/api/workspaces.md#deletion). `http_server.cpp`'s `/repository/create` form and
 hub `/api/repos/create` (body `workspace_id` or `X-Lake-Workspace-Id`) pass the workspace, and
 `web_ui.cpp` shows it on the repository list and home. See `docs/api/repositories.md`.
 Forge records live in the workspace of their repository's workspace (lake#341):

@@ -53,6 +53,8 @@ class TiledLog;
 // binary liquid sync capabilities use repository-scoped streaming routes.
 namespace lake::api {
 
+struct WorkspaceContent;
+
 struct ApiError {
     std::string code;    // one of error_codes() (docs/api/errors.md)
     std::string message; // a product-facing reason; database diagnostics remain server-side
@@ -178,6 +180,10 @@ struct ApiContext {
     // digest counted once (docs/api/metering.md). Injected by the HTTP server, which owns the
     // registry storage; null when no registry is configured, so usage reports images unmeasured.
     std::function<std::optional<std::uint64_t>(const std::string& space)> registry_space_bytes;
+    // Where a workspace's content lives outside PostgreSQL (the instance registry's tenant images),
+    // for the workspace deletion cascade (lake#514, workspace_deletion.hpp). Injected by the HTTP
+    // server; null when it has no registry storage.
+    const WorkspaceContent* workspace_content = nullptr;
     bool sync_wire_request = false;
     std::span<const std::byte> sync_request;
     std::vector<std::byte> sync_response;

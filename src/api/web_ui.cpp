@@ -6035,9 +6035,79 @@ std::optional<std::string> web_ui_docs(std::string_view slug, WebUiViewer viewer
                         viewer);
 }
 
+// The typed-name confirmation for deleting one workspace (lake#514): everything the deletion
+// destroys, with counts, from delete_workspace's dry run.
+std::string workspace_deletion_confirmation(const WorkspacePage& page) {
+    const nlohmann::json plan = page.data.value("delete_workspace", nlohmann::json());
+    if (!plan.is_object() || !plan.contains("workspace_id")) {
+        return {};
+    }
+    const std::string customer = web_ui_escape(page.customer_id);
+    const std::string id = web_ui_escape(plan.value("workspace_id", ""));
+    const std::string name = web_ui_escape(plan.value("workspace_name", ""));
+    const nlohmann::json counts = plan.value("counts", nlohmann::json::object());
+    const auto count = [&](const char* key) { return counts.value(key, 0); };
+    const auto plural = [](int value, std::string_view one, std::string_view many) {
+        return std::format("{} {}", value, value == 1 ? one : many);
+    };
+    const auto listed = [](const nlohmann::json& items, const auto& describe) {
+        if (!items.is_array() || items.empty()) {
+            return std::string();
+        }
+        std::string out = "<ul>";
+        for (const nlohmann::json& item : items) {
+            out += "<li>" + describe(item) + "</li>";
+        }
+        return out + "</ul>";
+    };
+    std::string content =
+        "<section class=\"panel\" aria-labelledby=\"delete-workspace\"><h2 id=\"delete-workspace\">"
+        "Delete " + name + "</h2><p>Deleting this workspace destroys everything below. It cannot "
+        "be undone: retained volume snapshots are the only copy left.</p><ul>";
+    content += "<li>Its Zetta, with every record, dataset, topic and store in it, and its own "
+               "audit history.</li>";
+    content += "<li>" +
+               plural(count("repositories"), "repository", "repositories") + " (" +
+               plural(count("live_repositories"), "live", "live") + ", " +
+               plural(count("tombstoned_repositories"), "deleted and still retained",
+                      "deleted and still retained") +
+               "). Their retention ends now and their names become free.</li>";
+    content += "<li>" + plural(count("apps"), "app", "apps") + ".</li>";
+    content += "<li>" + plural(count("builds"), "unfinished build", "unfinished builds") +
+               ", cancelled.</li>";
+    content += "<li>" + plural(count("images"), "image repository", "image repositories") +
+               ", no longer pullable.</li></ul>";
+    content += listed(plan.value("repositories", nlohmann::json::array()),
+                      [](const nlohmann::json& item) {
+                          return "Repository <code>" + web_ui_escape(item.value("name", "")) +
+                                 "</code>" +
+                                 (item.value("state", "") == "tombstoned" ? " (deleted, retained)"
+                                                                          : "");
+                      });
+    content += listed(plan.value("apps", nlohmann::json::array()), [](const nlohmann::json& item) {
+        return "App <code>" + web_ui_escape(item.value("name", "")) + "</code>";
+    });
+    content += listed(plan.value("images", nlohmann::json::array()),
+                      [](const nlohmann::json& item) {
+                          const nlohmann::json tags = item.value("tags", nlohmann::json::array());
+                          return "Image <code>" + web_ui_escape(item.value("name", "")) +
+                                 "</code> (" + std::to_string(tags.size()) +
+                                 (tags.size() == 1 ? " tag)" : " tags)");
+                      });
+    content += "<form method=\"post\" action=\"/workspaces/delete\">"
+               "<input type=\"hidden\" name=\"customer_id\" value=\"" + customer + "\">"
+               "<input type=\"hidden\" name=\"workspace_id\" value=\"" + id + "\">"
+               "<label>Type <code>" + name + "</code> to confirm<input name=\"confirm\" required "
+               "autocomplete=\"off\"></label><button type=\"submit\">Delete workspace and "
+               "everything in it</button> <a href=\"/workspaces?customer_id=" + customer +
+               "\">Cancel</a></form></section>";
+    return content;
+}
+
 std::string workspaces_content(const WorkspacePage& page) {
     const std::string customer = web_ui_escape(page.customer_id);
-    std::string content = "<section class=\"panel\"><h2>New workspace</h2>"
+    std::string content = workspace_deletion_confirmation(page) +
+        "<section class=\"panel\"><h2>New workspace</h2>"
         "<form method=\"post\" action=\"/workspaces/create\">"
         "<input type=\"hidden\" name=\"customer_id\" value=\"" + customer + "\">"
         "<label>Name<input name=\"name\" required maxlength=\"128\"></label>"
@@ -6057,12 +6127,9 @@ std::string workspaces_content(const WorkspacePage& page) {
         }
         content += "<td>";
         if (row.value("desired", "") != "deleted") {
-            content += "<details><summary>Delete</summary><p>Deletes the workspace and its data. Type " +
-                name + " to confirm.</p><form method=\"post\" action=\"/workspaces/delete\">"
-                "<input type=\"hidden\" name=\"customer_id\" value=\"" + customer + "\">"
-                "<input type=\"hidden\" name=\"workspace_id\" value=\"" + id + "\">"
-                "<label>Workspace name<input name=\"confirm\" required autocomplete=\"off\"></label>"
-                "<button type=\"submit\">Delete workspace</button></form></details>";
+            // The confirmation lists what the deletion destroys before it asks for the name.
+            content += "<a href=\"/workspaces?customer_id=" + customer + "&amp;delete=" + id +
+                "#delete-workspace\">Delete</a>";
         } else {
             content += "Deletion requested";
         }

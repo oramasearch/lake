@@ -38,3 +38,8 @@ The wrapper forwards `assign_legacy_audit_events` and `legacy_audit_events` (lak
 reads of the central audit events about a workspace's data, each under its own operation label.
 The server reports the workspace audit's flushes as `lake_audit_workspace_*`
 ([telemetry](../../docs/serving/telemetry.md)).
+
+The wrapper forwards the workspace deletion operations (lake#514): `delete_workspace_cascade`,
+`get_workspace_deletion`, `pending_workspace_deletions` and `complete_workspace_deletion`. The
+owner loop's resume pass counts `lake_workspace_deletions_completed_total` and
+`lake_workspace_deletion_errors_total`.
