@@ -326,12 +326,6 @@ void register_replication_capabilities(Registry& registry) {
             if (!references) {
                 return from_sync_error(references.error());
             }
-            for (const auto& [name, head] : *references) {
-                const auto saved = context.store->set_repository_ref(repository->id, name, head);
-                if (!saved) {
-                    return from_store_error(saved.error());
-                }
-            }
             context.audit_customer_id = repository->customer_id;
             context.audit_object = "repository/" + repository->id;
             context.audit_details = {{"metadata_items", replicated->metadata_items},

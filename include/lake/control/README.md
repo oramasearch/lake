@@ -131,6 +131,11 @@ declares `ApplicationSettings`, `apply_settings` and the `LegacyApplicationSetti
 reads, and documents which `Application` fields are routing; `NewApplication` carries routing only.
 `store.hpp` drops `update_application_theme` and declares `assign_legacy_application_settings` and
 `legacy_application_settings`, which serve only the copy.
+`repository_records.hpp` holds a repository's settings (its description, lake#315 part 2) in its
+workspace: one record per repository, keyed by it and found by its space. `store.hpp` declares
+`RepositorySettings`, `LegacyRepositoryDescription`, `NewRepository::id`, and
+`assign_legacy_repository_descriptions`/`legacy_repository_descriptions` for the copy; it no longer
+declares `RepositoryRef`, `set_repository_ref` or `list_repository_refs` (lake#319).
 `application_authorization_codes.hpp` holds an application's one-use authorization codes in its
 workspace (lake#363): the codec (keyed by the blind index of the application and the code hash,
 found by the application, with the five-minute lifetime as the collection's retention),

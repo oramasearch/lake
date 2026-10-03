@@ -9,7 +9,9 @@ Refs [lake#311](https://github.com/oramasearch/lake/issues/311),
 [lake#383](https://github.com/oramasearch/lake/issues/383) and
 [lake#384](https://github.com/oramasearch/lake/issues/384).
 
-**Status: design, decided 2026-10-03 (decision 54); nothing here is implemented yet.** This page plans the moves that
+**Status: design, decided 2026-10-03 (decision 54).** Implemented: lake#319 (`repository_refs`
+dropped) and lake#315 part 2 (the description in `lake_repositories`), both in migration `0064`;
+everything else here is not implemented yet. This page plans the moves that
 [workspace records](workspace-records.md) does not cover: the bytes on lake's store volume
 (liquid stores, search indexes, the registry, the transparency log), the two repository tables
 that sit beside them, and lake's operational telemetry. It states what each item is today, what it
@@ -44,8 +46,8 @@ except S12, where Steve chose cascade over refusal.
 
 | Item | Holds today | Dev, 2026-10-03 | Classification | Target |
 |---|---|---|---|---|
-| #315 part 2 `repositories` | One row per repository | 10 rows (8 live and 1 tombstoned in one workspace, 1 unassigned) | split | Row stays as routing; `description` moves to `lake_repositories` |
-| #319 `repository_refs` | Copy of each liquid ref | 0 rows | workspace (unused) | Dropped |
+| #315 part 2 `repositories` | One row per repository | 10 rows (8 live and 1 tombstoned in one workspace, 1 unassigned) | split | Row stays as routing; `description` moves to `lake_repositories`. **Done** (migration `0064`); the column is dropped after the copy is verified |
+| #319 `repository_refs` | Copy of each liquid ref | 0 rows | workspace (unused) | **Dropped** (migration `0064`) |
 | #380 `<customer>/store` | Liquid objects and history of every repository, Drive, model and dataset | 18.3 MB in 2 customer stores, 10 repositories | workspace | One liquid store per workspace in the workspace Zetta's object capability |
 | #381 `<customer>/index` | Search catalogue, segments and manifest | none written | workspace | Sealed objects beside the workspace store; rebuilt |
 | #382 transparency, TUF, timestamps | The instance's log, trust metadata and evidence | none written | instance | Stays with the instance |
@@ -386,6 +388,11 @@ sequence: a migration records owners (dev: 9 assigned, 1 unassigned, S14), the r
 writes the record, `copy_workspace_records` copies and verifies, and a later migration drops the
 `description` column.
 
+**Done** in migration `0064_repository_records`: the record is keyed by the repository and found by
+its space (`customer:<id>`) rather than by the repository, so a listing reads one `list_records` per
+workspace. See [repositories.md](../api/repositories.md#where-the-description-lives-lake315-part-2)
+and the [cutover runbook](workspace-records.md#cutover-runbook-repository-descriptions-dev-cluster).
+
 ### lake#319: `repository_refs`
 
 **Today.** `(repository_id, name, head, updated_at)`. Lake writes it after a push, a replication
@@ -399,6 +406,9 @@ with #380.
 **Target (S11).** Drop it. One migration drops the table; lake removes `set_repository_ref` and
 `list_repository_refs` from the store interface and returns refs from liquid alone. No copy.
 
+**Done** in migration `0064_repository_records`. `refs` answers `{repository_id, name, head}` from
+liquid; `updated_at` is gone.
+
 ## Work, in dependency order
 
 | # | Issue | Change | Waits on |
@@ -410,8 +420,8 @@ with #380.
 | 5 | [orama-operator#259](https://github.com/oramasearch/orama-operator/issues/259) | Grow each workspace Zetta's volume from `workspaces.storage_gi` | nothing |
 | 6 | [orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260) | Scheduled CSI snapshots of workspace volumes and the store volume (dev has the snapshot CRDs but no `VolumeSnapshotClass`) | nothing |
 | 7 | [lake#513](https://github.com/oramasearch/lake/issues/513) | A workspace for the `liquid` repository's space, and its assignment (S14) | nothing |
-| 8 | [lake#319](https://github.com/oramasearch/lake/issues/319) | Drop `repository_refs` (S11) | nothing |
-| 9 | [lake#315](https://github.com/oramasearch/lake/issues/315) | Part 2: `description` to `lake_repositories` (S10) | lake#513 for the one unassigned row |
+| 8 | [lake#319](https://github.com/oramasearch/lake/issues/319) | Drop `repository_refs` (S11). **Done** (migration `0064`) | nothing |
+| 9 | [lake#315](https://github.com/oramasearch/lake/issues/315) | Part 2: `description` to `lake_repositories` (S10). **Done** (migration `0064`); the copy of the one unassigned row waits | lake#513 for the one unassigned row |
 | 10 | [lake#514](https://github.com/oramasearch/lake/issues/514) | Cascade workspace deletion (S12) | nothing; its store step follows #380 |
 | 11 | [lake#384](https://github.com/oramasearch/lake/issues/384) | Route patterns in request logs; the per-workspace `lake_requests` series (S9) | nothing |
 | 12 | [lake#382](https://github.com/oramasearch/lake/issues/382) | Stays with the instance (S7): the audit row, and the dynamic-secret leaf check | nothing |

@@ -45,7 +45,8 @@ The audit and lifecycle migrations (`0005_audit` and `0006_repository_lifecycle`
 the Phase 6 operator waiver: lake carries the source schema now, while the operator's vendored
 schema, guard table, and Secret projection land once per completed wave in a separate operator
 pull request. Until that PR is deployed, do not enable these features on an existing production
-Lake with a schema guard older than `repository_refs`.
+Lake with a schema guard older than `0006_repository_lifecycle` (its marker was the
+`repository_refs` table, dropped by `0064`).
 
 ## Repository store volume
 

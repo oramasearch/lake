@@ -8727,13 +8727,15 @@ struct ApiServer::Impl {
                 customer_id = workspace->customer_id;
             }
         }
-        const ApiResult result = registry.call("create_repository",
-                                               {{"customer_id", customer_id},
-                                                {"workspace_id", workspace_id},
-                                                {"name", form_field(body, "name")},
-                                                {"description", form_field(body, "description")},
-                                                {"visibility", "private"}},
-                                               context);
+        // The description is written to the repository's workspace (lake#315).
+        const ApiResult result =
+            unwrap(co_await registry.call_async("create_repository",
+                                                {{"customer_id", customer_id},
+                                                 {"workspace_id", workspace_id},
+                                                 {"name", form_field(body, "name")},
+                                                 {"description", form_field(body, "description")},
+                                                 {"visibility", "private"}},
+                                                context));
         if (!result.ok) {
             co_return co_await serve_page_error(route, result);
         }
@@ -8775,17 +8777,25 @@ struct ApiServer::Impl {
         if (!customer_id.empty()) {
             input["customer_id"] = customer_id;
         }
-        const ApiResult rows = registry.call("list_repositories", input, ctx);
+        // The descriptions come from each listed repository's workspace, one read per workspace
+        // (lake#315); a workspace that cannot be read marks its rows instead of failing the page.
+        const ApiResult rows =
+            unwrap(co_await registry.call_async("list_repositories", input, ctx));
         if (!rows.ok) {
-            return serve_page_error(route, rows);
+            co_return co_await serve_page_error(route, rows);
         }
+        std::map<std::string, std::string> descriptions_unavailable;
         for (const auto& value : rows.value.at("items")) {
             repositories.push_back(repository_from_json(value));
+            if (value.contains("description_unavailable")) {
+                descriptions_unavailable.emplace(json_string(value, "id"),
+                                                 json_string(value, "description_unavailable"));
+            }
         }
         if (ctx.authorized) {
             const ApiResult customers = registry.call("list_customers", {{"limit", 1000}}, ctx);
             if (!customers.ok) {
-                return serve_page_error(route, customers);
+                co_return co_await serve_page_error(route, customers);
             }
             for (const auto& value : customers.value.at("items")) {
                 control::Customer customer = customer_from_json(value);
@@ -8805,11 +8815,12 @@ struct ApiServer::Impl {
                 }
             }
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_repositories(repositories, owners, viewer_for(ctx), workspaces),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_repositories(repositories, owners, viewer_for(ctx),
+                                                         workspaces, descriptions_unavailable),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     // ---- Design, Train and Ship over the customer's Zetta workspace (docs/api/workspaces.md) ----
@@ -12431,7 +12442,9 @@ struct ApiServer::Impl {
         if (id.empty()) {
             co_return co_await redirect(route, "/repositories");
         }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
+        // The home page shows the description, from the repository's workspace (lake#315).
+        const ApiResult repository_result =
+            unwrap(co_await registry.call_async("get_repository", {{"id", id}}, ctx));
         if (!repository_result.ok) {
             co_return co_await serve_repository_page_error(route, ctx, repository_result);
         }
@@ -12450,6 +12463,8 @@ struct ApiServer::Impl {
         }
         RepositoryHomeData data;
         data.external_origin = options.external_origin;
+        data.description_unavailable = json_string(repository_result.value,
+                                                   "description_unavailable");
         for (const nlohmann::json& value : refs_result.value.at("items")) {
             data.refs.push_back(repository_content_ref_from_json(value));
         }

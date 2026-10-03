@@ -97,7 +97,11 @@ are private. The workspace choice lists each live workspace of the viewer's spac
 space, with the remembered workspace preselected; the workspace names its space, so the form sends
 only `workspace_id`. A space without a workspace is sent to `/workspaces` first: a repository
 belongs to one workspace and there is no default (lake#315). The adapter calls `create_repository`
-through the registry and redirects to the repository home. Authorization checks the space even
+through the registry and redirects to the repository home. The description is written to the
+chosen workspace's Zetta (lake#315 part 2), so the create waits for that workspace and is refused
+while it is not ready. `/repositories` and the repository home read descriptions there; a
+workspace that cannot be read shows "Unavailable" in the list and "Description unavailable: …" on
+the home page instead of failing the page. Authorization checks the space even
 when a request bypasses the form, and a `customer_id` that is not the workspace's space is refused.
 Password sign-up supplies the personal customer and inherited ownership before this page.
 See [sign-up-walkthrough.md](sign-up-walkthrough.md).

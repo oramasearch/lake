@@ -1,5 +1,6 @@
 #include "lake/api/capabilities.hpp"
 #include "audit_logs.hpp"
+#include "repository_records_api.hpp"
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/version.hpp"
@@ -479,19 +480,22 @@ ApiResult repository_content_list_result(SyncStoreResult<std::vector<T>> rows, T
     return ApiResult::success({{"items", std::move(items)}});
 }
 
-ApiResult authorized_repository_list_result(control::Result<std::vector<control::Repository>> rows,
-                                            ApiContext& context) {
+// The rows the caller may read: public ones for an anonymous caller, otherwise those its policy
+// allows, in order.
+std::expected<std::vector<control::Repository>, ApiResult>
+authorized_repositories(control::Result<std::vector<control::Repository>> rows,
+                        ApiContext& context) {
     if (!rows) {
-        return from_store_error(rows.error());
+        return std::unexpected(from_store_error(rows.error()));
     }
-    json items = json::array();
+    std::vector<control::Repository> readable;
     if (!context.authorized) {
-        for (const control::Repository& repository : *rows) {
+        for (control::Repository& repository : *rows) {
             if (repository.visibility == "public") {
-                items.push_back(control::to_json(repository));
+                readable.push_back(std::move(repository));
             }
         }
-        return ApiResult::success({{"items", std::move(items)}});
+        return readable;
     }
     std::vector<std::string> objects;
     objects.reserve(rows->size());
@@ -499,7 +503,7 @@ ApiResult authorized_repository_list_result(control::Result<std::vector<control:
     for (const control::Repository& repository : *rows) {
         const auto object = context.store->find_policy_object("repository", repository.id);
         if (!object) {
-            return from_store_error(object.error());
+            return std::unexpected(from_store_error(object.error()));
         }
         objects.push_back(object->id);
         objects_by_repository.emplace(repository.id, object->id);
@@ -507,12 +511,25 @@ ApiResult authorized_repository_list_result(control::Result<std::vector<control:
     const auto decisions = control::authorize_batch(
         *context.store, context.acting_identity, objects, "read", context.authorization_cache);
     if (!decisions) {
-        return from_store_error(decisions.error());
+        return std::unexpected(from_store_error(decisions.error()));
     }
-    for (const control::Repository& repository : *rows) {
+    for (control::Repository& repository : *rows) {
         if (decisions->at(objects_by_repository.at(repository.id)).allowed) {
-            items.push_back(control::to_json(repository));
+            readable.push_back(std::move(repository));
         }
+    }
+    return readable;
+}
+
+ApiResult authorized_repository_list_result(control::Result<std::vector<control::Repository>> rows,
+                                            ApiContext& context) {
+    auto readable = authorized_repositories(std::move(rows), context);
+    if (!readable) {
+        return readable.error();
+    }
+    json items = json::array();
+    for (const control::Repository& repository : *readable) {
+        items.push_back(control::to_json(repository));
     }
     return ApiResult::success({{"items", std::move(items)}});
 }
@@ -1056,7 +1073,17 @@ json repository_schema() {
                  "The workspace the repository belongs to; it never changes. Null only for a "
                  "repository created before workspaces that still needs one assigned."}}},
               {"name", {{"type", "string"}}},
-              {"description", {{"type", "string"}}},
+              {"description",
+               {{"type", "string"},
+                {"description",
+                 "From the repository's settings record in its workspace (lake#315); empty when "
+                 "it has none."}}},
+              {"description_unavailable",
+               {{"type", "string"},
+                {"description",
+                 "Present only when the description could not be read from the repository's "
+                 "workspace (no workspace yet, or the workspace refused): the reason. The "
+                 "description is then empty."}}},
               {"visibility",
                {{"type", "string"}, {"enum", json::array({"private", "organization", "public"})}}},
               {"deleted_at", {{"type", json::array({"string", "null"})}}},
@@ -1069,8 +1096,7 @@ json sync_ref_schema() {
             {"properties",
              {{"repository_id", {{"type", "string"}}},
               {"name", {{"type", "string"}}},
-              {"head", {{"type", "string"}}},
-              {"updated_at", {{"type", "string"}}}}}};
+              {"head", {{"type", "string"}}}}}};
 }
 
 std::string timestamp_after(std::chrono::seconds offset) {
@@ -3492,6 +3518,8 @@ void register_repository_capabilities(Registry& registry) {
                    .resolve_object = optional_entity_object("customer", "customer_id"),
                    .authorizes_candidates = true,
                    .allows_anonymous_public_read = true,
+                   // Registry::call answers the routing rows alone (lake's own page routing);
+                   // REST, MCP and call_async also read each workspace's descriptions.
                    .handler = [](const json& in, ApiContext& ctx) {
                        return ctx.store ? authorized_repository_list_result(
                                               ctx.store->list_repositories(
@@ -3500,11 +3528,34 @@ void register_repository_capabilities(Registry& registry) {
                                                   in.value("workspace_id", "")),
                                               ctx)
                                         : no_store();
+                   },
+                   .async_handler = [](const json& in,
+                                       ApiContext& ctx) -> liquid::runtime::task<ApiResult> {
+                       if (!ctx.store) {
+                           co_return no_store();
+                       }
+                       auto repositories = authorized_repositories(
+                           ctx.store->list_repositories(in.value("customer_id", ""),
+                                                        limit_of(in),
+                                                        in.value("workspace_id", "")),
+                           ctx);
+                       if (!repositories) {
+                           co_return repositories.error();
+                       }
+                       // One read per workspace, all started together (lake#315).
+                       const auto unavailable = settled_fill(
+                           co_await fill_repository_settings(ctx, *repositories), *repositories);
+                       json items = json::array();
+                       for (const control::Repository& repository : *repositories) {
+                           items.push_back(repository_json(repository, unavailable));
+                       }
+                       co_return ApiResult::success({{"items", std::move(items)}});
                    }});
     registry.add(Capability{.name = "get_repository",
                             .title = "Get repository",
-                            .description = "Read one repository: its name, space, visibility, "
-                                           "description and whether it is deleted.",
+                            .description = "Read one repository: its name, space, workspace, "
+                                           "visibility, description (from its workspace) and "
+                                           "whether it is deleted.",
                             .input_schema = id_input(),
                             .output_schema = repository_schema(),
                             .kind = CapabilityKind::Read,
@@ -3512,6 +3563,9 @@ void register_repository_capabilities(Registry& registry) {
                             .action = "read",
                             .resolve_object = entity_object("repository", "id"),
                             .allows_anonymous_public_read = true,
+                            // Registry::call answers the routing row alone (lake's own
+                            // page routing); REST, MCP and call_async also read the
+                            // description from the repository's workspace (lake#315).
                             .handler = [](const json& in, ApiContext& ctx) {
                                 const auto repository = readable_repository(in, ctx);
                                 if (!repository) {
@@ -3520,6 +3574,20 @@ void register_repository_capabilities(Registry& registry) {
                                                               repository.error().path);
                                 }
                                 return ApiResult::success(control::to_json(*repository));
+                            },
+                            .async_handler = [](const json& in, ApiContext& ctx)
+                                -> liquid::runtime::task<ApiResult> {
+                                const auto repository = readable_repository(in, ctx);
+                                if (!repository) {
+                                    co_return ApiResult::failure(repository.error().code,
+                                                                 repository.error().message,
+                                                                 repository.error().path);
+                                }
+                                std::vector<control::Repository> one{*repository};
+                                const auto unavailable = settled_fill(
+                                    co_await fill_repository_settings(ctx, one), one);
+                                co_return ApiResult::success(
+                                    repository_json(one.front(), unavailable));
                             }});
     registry.add(Capability{
         .name = "create_repository",
@@ -3545,21 +3613,25 @@ void register_repository_capabilities(Registry& registry) {
         .object = "customer",
         .action = "write",
         .resolve_object = entity_object("customer", "customer_id"),
+        // A description is the repository's settings record in its workspace (lake#315),
+        // written in the same request: only the asynchronous call (REST, MCP, call_async) can.
         .handler = [](const json& in, ApiContext& ctx) {
             if (!ctx.store)
                 return no_store();
+            if (!in.value("description", "").empty()) {
+                return ApiResult::failure("invalid_input",
+                                          "a description is written to the repository's "
+                                          "workspace; create it through the asynchronous call",
+                                          "/description");
+            }
             const auto workspace = repository_workspace(ctx, in);
             if (!workspace) {
                 return ApiResult::failure(
                     workspace.error().code, workspace.error().message, workspace.error().path);
             }
             const std::string name = in.value("name", "");
-            auto repository = ctx.store->create_repository(
-                control::NewRepository{in.value("customer_id", ""),
-                                       name,
-                                       in.value("description", ""),
-                                       in.value("visibility", ""),
-                                       workspace->id});
+            auto repository = ctx.store->create_repository(control::NewRepository{
+                in.value("customer_id", ""), name, "", in.value("visibility", ""), workspace->id});
             if (!repository && repository.error().code == "conflict") {
                 ApiResult result = from_store_error(repository.error());
                 result.error.message = "a repository named '" + name + "' already exists";
@@ -3567,6 +3639,32 @@ void register_repository_capabilities(Registry& registry) {
                 return result;
             }
             return one_result(std::move(repository));
+        },
+        .async_handler = [](const json& in, ApiContext& ctx) -> liquid::runtime::task<ApiResult> {
+            if (!ctx.store) {
+                co_return no_store();
+            }
+            const auto workspace = repository_workspace(ctx, in);
+            if (!workspace) {
+                co_return ApiResult::failure(
+                    workspace.error().code, workspace.error().message, workspace.error().path);
+            }
+            const std::string name = in.value("name", "");
+            auto created = settled_create(co_await create_repository_with_settings(
+                ctx,
+                control::NewRepository{
+                    in.value("customer_id", ""), name, "", in.value("visibility", ""),
+                    workspace->id},
+                in.value("description", "")));
+            if (!created) {
+                ApiResult result = created.error();
+                if (result.error.code == "conflict") {
+                    result.error.message = "a repository named '" + name + "' already exists";
+                    result.error.path = "/name";
+                }
+                co_return result;
+            }
+            co_return ApiResult::success(control::to_json(*created));
         }});
     registry.add(Capability{
         .name = "rename_repository",
@@ -3998,7 +4096,7 @@ void register_repository_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "refs",
         .title = "Repository refs",
-        .description = "List the liquid refs currently stored for one live repository.",
+        .description = "List the refs of one live repository, as its liquid repository holds them.",
         .input_schema = sync_repository_input,
         .output_schema = list_schema(sync_ref_schema()),
         .kind = CapabilityKind::Read,
@@ -4014,13 +4112,10 @@ void register_repository_capabilities(Registry& registry) {
             if (!references) {
                 return from_sync_error(context, references.error());
             }
+            // Liquid's repository is the authority for refs; lake keeps no copy (lake#319).
             json items = json::array();
             for (const auto& [name, head] : *references) {
-                auto stored = context.store->set_repository_ref(repository->id, name, head);
-                if (!stored) {
-                    return from_store_error(stored.error());
-                }
-                items.push_back(control::to_json(*stored));
+                items.push_back({{"repository_id", repository->id}, {"name", name}, {"head", head}});
             }
             return ApiResult::success({{"items", std::move(items)}});
         }});
@@ -4098,16 +4193,6 @@ void register_repository_capabilities(Registry& registry) {
                                                       {"quota_bytes", *quota}};
                 }
                 co_return from_sync_error(context, response.error());
-            }
-            auto references = context.sync_store->refs(repository->customer_id, repository->id);
-            if (!references) {
-                co_return from_sync_error(context, references.error());
-            }
-            for (const auto& [name, head] : *references) {
-                auto stored = context.store->set_repository_ref(repository->id, name, head);
-                if (!stored) {
-                    co_return from_store_error(stored.error());
-                }
             }
             if (context.search) {
                 const auto indexed =

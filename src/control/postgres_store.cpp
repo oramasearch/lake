@@ -180,6 +180,25 @@ constexpr std::string_view legacy_application_directory_resolution_sql =
     "r.application_id JOIN workspaces w ON w.id = a.workspace_id AND w.desired <> 'deleted' WHERE "
     "s.object_table = r.object_table AND s.object_id = r.object_id AND s.workspace_id IS NULL AND "
     "s.outcome = 'needs_selection'";
+// Migration 0064's assignment of the descriptions the retired repositories.description column
+// holds (db/schema.sql, lake#315 part 2), rerun before each copy: each repository with a
+// description has it copied into its workspace, is needs_selection while it has none, and
+// workspace_deleted when that workspace is gone. The resolution statement assigns recorded
+// needs_selection rows once their repository has a live workspace. The object table is
+// `repository_descriptions`, since migration 0051 recorded the repositories' own routing under
+// `repositories`.
+constexpr std::string_view legacy_repository_description_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'repository_descriptions', r.id, r.customer_id, CASE WHEN w.desired = "
+    "'deleted' THEN NULL ELSE r.workspace_id END, CASE WHEN r.workspace_id IS NULL THEN "
+    "'needs_selection' WHEN w.desired = 'deleted' THEN 'workspace_deleted' ELSE "
+    "'repository_workspace' END FROM repositories r LEFT JOIN workspaces w ON w.id = "
+    "r.workspace_id WHERE r.description <> '' ON CONFLICT DO NOTHING";
+constexpr std::string_view legacy_repository_description_resolution_sql =
+    "UPDATE workspace_assignments s SET workspace_id = r.workspace_id, outcome = "
+    "'repository_workspace' FROM repositories r JOIN workspaces w ON w.id = r.workspace_id "
+    "AND w.desired <> 'deleted' WHERE s.object_table = 'repository_descriptions' AND "
+    "s.object_id = r.id AND s.workspace_id IS NULL AND s.outcome = 'needs_selection'";
 // Migration 0059's assignment of the settings the retired auth_applications columns hold
 // (db/schema.sql), rerun before each copy: each application that still holds settings has them
 // copied into its workspace, is needs_selection while it has none, and workspace_deleted when that
@@ -1556,8 +1575,11 @@ constexpr const char* customer_columns = "id::text, customer_type, coalesce(user
                                          "coalesce(organization_id::text,''), name, "
                                          "created_at::text, updated_at::text";
 
+// The routing row only: the description column is never read here (lake#315 part 2). It is the
+// repository's settings record in its workspace, and the retired column is read only by
+// legacy_repository_descriptions for the one-shot copy.
 constexpr const char* repository_columns =
-    "id::text, customer_id::text, name, description, visibility, "
+    "id::text, customer_id::text, name, ''::text, visibility, "
     "coalesce(deleted_at::text,''), coalesce(retention_until::text,''), "
     "created_at::text, updated_at::text, coalesce(workspace_id::text,'')";
 constexpr const char* team_columns =
@@ -1606,13 +1628,6 @@ Repository repository_of(const pqxx::row& r) {
                       r[7].as<std::string>(),
                       r[8].as<std::string>(),
                       r[9].as<std::string>()};
-}
-
-RepositoryRef repository_ref_of(const pqxx::row& row) {
-    return RepositoryRef{row[0].as<std::string>(),
-                         row[1].as<std::string>(),
-                         row[2].as<std::string>(),
-                         row[3].as<std::string>()};
 }
 
 Result<void> require_live_repository(pqxx::work& tx, const std::string& repository_id) {
@@ -2209,6 +2224,11 @@ public:
     }
 
     Result<Repository> create_repository(const NewRepository& in) override {
+        if (!in.description.empty()) {
+            return std::unexpected(StoreError{
+                "invalid_input",
+                "a repository's description is its settings record in its workspace (lake#315)"});
+        }
         return with_tx<Repository>([&](pqxx::work& tx) -> Result<Repository> {
             const pqxx::result parents =
                 tx.exec_params("SELECT id::text FROM objects WHERE object_type = "
@@ -2229,13 +2249,14 @@ public:
                     "invalid_input", "workspace_id must name a workspace in this space"});
             }
             const pqxx::result rows =
-                tx.exec_params(std::string("INSERT INTO repositories (customer_id, name, "
-                                           "description, visibility, workspace_id) "
-                                           "VALUES ($1::uuid, $2, $3, $4, $5::uuid) RETURNING ") +
+                tx.exec_params(std::string("INSERT INTO repositories (id, customer_id, name, "
+                                           "visibility, workspace_id) VALUES "
+                                           "(COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), "
+                                           "$2::uuid, $3, $4, $5::uuid) RETURNING ") +
                                    repository_columns,
+                               in.id,
                                in.customer_id,
                                in.name,
-                               in.description,
                                in.visibility.empty() ? std::string("private") : in.visibility,
                                in.workspace_id);
             Repository repository = repository_of(rows[0]);
@@ -2329,38 +2350,44 @@ public:
         });
     }
 
-    Result<std::vector<RepositoryRef>>
-    list_repository_refs(const std::string& repository_id) override {
-        return with_tx<std::vector<RepositoryRef>>(
-            [&](pqxx::work& tx) -> Result<std::vector<RepositoryRef>> {
-                const pqxx::result rows =
-                    tx.exec_params("SELECT repository_id::text, name, head, "
-                                   "updated_at::text FROM repository_refs "
-                                   "WHERE repository_id = $1::uuid ORDER BY name",
-                                   repository_id);
-                std::vector<RepositoryRef> references;
-                for (const auto& row : rows) {
-                    references.push_back(repository_ref_of(row));
-                }
-                return references;
-            });
+    Result<void> assign_legacy_repository_descriptions() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec(std::string(legacy_repository_description_assignment_sql));
+            tx.exec(std::string(legacy_repository_description_resolution_sql));
+            return {};
+        });
     }
 
-    Result<RepositoryRef> set_repository_ref(const std::string& repository_id,
-                                             const std::string& name,
-                                             const std::string& head) override {
-        return with_tx<RepositoryRef>([&](pqxx::work& tx) -> Result<RepositoryRef> {
-            const pqxx::result rows =
-                tx.exec_params("INSERT INTO repository_refs (repository_id, name, head) VALUES "
-                               "($1::uuid, $2, $3) ON CONFLICT (repository_id, name) DO UPDATE SET "
-                               "head = EXCLUDED.head, updated_at = now() RETURNING "
-                               "repository_id::text, "
-                               "name, head, updated_at::text",
-                               repository_id,
-                               name,
-                               head);
-            return repository_ref_of(rows[0]);
-        });
+    Result<std::vector<LegacyRepositoryDescription>>
+    legacy_repository_descriptions(const std::string& after_id, int limit) override {
+        return with_tx<std::vector<LegacyRepositoryDescription>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyRepositoryDescription>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT r.id::text, r.customer_id::text, r.description, "
+                    "(extract(epoch FROM r.created_at) * 1000000)::bigint, "
+                    "COALESCE(a.workspace_id::text, ''), COALESCE(a.outcome, 'needs_selection') "
+                    "FROM repositories r LEFT JOIN workspace_assignments a ON "
+                    "a.object_table = 'repository_descriptions' AND a.object_id = r.id "
+                    "WHERE r.description <> '' AND ($1 = '' OR r.id > NULLIF($1, '')::uuid) "
+                    "ORDER BY r.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyRepositoryDescription> descriptions;
+                for (const pqxx::row& row : rows) {
+                    LegacyRepositoryDescription legacy;
+                    legacy.settings.repository_id = row[0].as<std::string>();
+                    legacy.settings.customer_id = row[1].as<std::string>();
+                    legacy.customer_id = legacy.settings.customer_id;
+                    legacy.settings.description = row[2].as<std::string>();
+                    legacy.settings.at_us = row[3].as<std::int64_t>();
+                    legacy.settings.created_at = record_instant(legacy.settings.at_us);
+                    legacy.settings.updated_at = legacy.settings.created_at;
+                    legacy.workspace_id = row[4].as<std::string>();
+                    legacy.outcome = row[5].as<std::string>();
+                    descriptions.push_back(std::move(legacy));
+                }
+                return descriptions;
+            });
     }
 
     Result<void> assign_legacy_forge_records() override {

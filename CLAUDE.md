@@ -117,6 +117,13 @@ Every repository belongs to one workspace (lake#315 part 1, migration `0051`): a
 through push authorization. It is routing only; repository metadata and content have not moved.
 Repository pages keep their addresses and name the workspace. See `docs/api/repositories.md`.
 
+The repository row is routing only (decision 54, lake#315 part 2, lake#319, migration `0064`): a
+repository's description is a sealed record in `lake_repositories` of its workspace Zetta, written
+`if_absent` before the row at create and read by `get_repository`, `list_repositories` (one read per
+workspace) and the repository pages; the synchronous `Registry::call` answers the routing row alone.
+`repository_refs` is dropped; `refs` answers from liquid alone. The `description` column stays until
+the copy is verified on dev. See `docs/api/repositories.md#where-the-description-lives-lake315-part-2`.
+
 ## Historical status — superseded 2026-09-08
 
 The following was the prior source-tree status record. Its production claims are retained only as

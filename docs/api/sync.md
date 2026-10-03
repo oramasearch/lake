@@ -183,8 +183,9 @@ reference update of the push is refused with that reason (rule `branch_protectio
 On each reference callback, lake evaluates the server-derived update against that branch protection
 with the authenticated caller. The callback records `forge.branch_protection.allowed` or
 `forge.branch_protection.refused` for protected refs; the audit detail has the repository, ref, caller, rule, and reason but never a credential. The
-registry rejects an anonymous or unauthorized request before callbacks run. Successful push
-refreshes the control plane's `repository_refs` rows from the live repository. Pull and chunk reads
+registry rejects an anonymous or unauthorized request before callbacks run. Lake keeps no copy of
+the refs a push lands: the liquid repository is their only record, and `refs` reads it (the
+`repository_refs` table was dropped by migration `0064`, lake#319). Pull and chunk reads
 require `read`; push and chunk upload require `write`.
 
 The five binary paths add accepted request and returned response byte counts to the customer's

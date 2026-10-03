@@ -198,11 +198,14 @@ std::string web_ui_customers(const std::vector<control::Customer>& customers,
                              WebUiViewer viewer = true);
 // owners: customer id → customer, for the owner column. workspaces: the owners' live workspaces,
 // for the workspace column and the create form's workspace choice (lake#315); with none, the form
-// sends the person to create one.
-std::string web_ui_repositories(const std::vector<control::Repository>& repositories,
-                                const std::map<std::string, control::Customer>& owners,
-                                WebUiViewer viewer = true,
-                                const std::vector<control::Workspace>& workspaces = {});
+// sends the person to create one. descriptions_unavailable: repository id → why its description
+// could not be read from its workspace (lake#315 part 2); the row says so instead.
+std::string web_ui_repositories(
+    const std::vector<control::Repository>& repositories,
+    const std::map<std::string, control::Customer>& owners,
+    WebUiViewer viewer = true,
+    const std::vector<control::Workspace>& workspaces = {},
+    const std::map<std::string, std::string>& descriptions_unavailable = {});
 
 struct RepositoryHomeData {
     std::vector<RepositoryContentRef> refs;
@@ -214,6 +217,8 @@ struct RepositoryHomeData {
     // Why the releases could not be read from the repository's workspace Zetta (lake#341), for
     // example while it is still starting; the rest of the page does not depend on it.
     std::string releases_unavailable;
+    // Why the description could not be read from the repository's workspace (lake#315 part 2).
+    std::string description_unavailable;
     // Validated instance configuration, never inferred from a request header.
     std::string external_origin;
     // The repository's workspace, when the viewer may read its space (lake#315).

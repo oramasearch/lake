@@ -135,13 +135,6 @@ nlohmann::json to_json(const Repository& r) {
             {"updated_at", r.updated_at}};
 }
 
-nlohmann::json to_json(const RepositoryRef& reference) {
-    return {{"repository_id", reference.repository_id},
-            {"name", reference.name},
-            {"head", reference.head},
-            {"updated_at", reference.updated_at}};
-}
-
 nlohmann::json to_json(const ForgeRecord& record) {
     return {{"id", record.id},
             {"repository_id", record.repository_id},
@@ -3988,6 +3981,16 @@ Result<Repository> InMemoryStore::create_repository(const NewRepository& in) {
     if (visibility != "private" && visibility != "organization" && visibility != "public") {
         return std::unexpected(StoreError{"invalid_input", "visibility must be private or public"});
     }
+    if (!in.description.empty()) {
+        return std::unexpected(StoreError{
+            "invalid_input",
+            "a repository's description is its settings record in its workspace (lake#315)"});
+    }
+    if (!in.id.empty() && std::ranges::any_of(repositories_, [&](const Repository& repository) {
+            return repository.id == in.id;
+        })) {
+        return std::unexpected(StoreError{"conflict", "repository id " + in.id + " is taken"});
+    }
     // As migration 0051's routing trigger: a live workspace of the repository's own space.
     if (std::ranges::none_of(workspaces_, [&](const Workspace& workspace) {
             return workspace.id == in.workspace_id && workspace.customer_id == in.customer_id &&
@@ -4003,10 +4006,10 @@ Result<Repository> InMemoryStore::create_repository(const NewRepository& in) {
         }
     }
     const std::string now = now_iso8601();
-    repositories_.push_back(Repository{new_uuid_v4(),
+    repositories_.push_back(Repository{in.id.empty() ? new_uuid_v4() : in.id,
                                        in.customer_id,
                                        in.name,
-                                       in.description,
+                                       "",
                                        visibility,
                                        "",
                                        "",
@@ -4127,37 +4130,72 @@ Result<Repository> InMemoryStore::delete_repository(const std::string& id,
     return *repository;
 }
 
-Result<std::vector<RepositoryRef>>
-InMemoryStore::list_repository_refs(const std::string& repository_id) {
+void InMemoryStore::seed_legacy_repository_description(const std::string& repository_id,
+                                                       std::string description,
+                                                       std::int64_t at_us) {
     std::lock_guard lock(mutex_);
-    if (repository_by_id(repositories_, repository_id) == repositories_.end()) {
-        return std::unexpected(StoreError{"not_found", "no repository " + repository_id});
-    }
-    std::vector<RepositoryRef> references;
-    for (const auto& reference : repository_refs_) {
-        if (reference.repository_id == repository_id) {
-            references.push_back(reference);
-        }
-    }
-    return references;
+    legacy_repository_descriptions_[repository_id] = {std::move(description), at_us};
 }
 
-Result<RepositoryRef> InMemoryStore::set_repository_ref(const std::string& repository_id,
-                                                        const std::string& name,
-                                                        const std::string& head) {
+// As migration 0064: each repository's description belongs to its workspace, is needs_selection
+// while it has none (and is resolved once it has a live one), and workspace_deleted when that
+// workspace is gone.
+Result<void> InMemoryStore::assign_legacy_repository_descriptions() {
     std::lock_guard lock(mutex_);
-    if (repository_by_id(repositories_, repository_id) == repositories_.end()) {
-        return std::unexpected(StoreError{"not_found", "no repository " + repository_id});
-    }
-    for (auto& reference : repository_refs_) {
-        if (reference.repository_id == repository_id && reference.name == name) {
-            reference.head = head;
-            reference.updated_at = now_iso8601();
-            return reference;
+    for (const auto& [repository_id, legacy] : legacy_repository_descriptions_) {
+        const auto repository = repository_by_id(repositories_, repository_id);
+        if (repository == repositories_.end() || legacy.first.empty()) {
+            continue;
+        }
+        auto& assigned = legacy_repository_description_assignments_[repository_id];
+        if (!assigned.first.empty() || assigned.second == "workspace_deleted") {
+            continue;
+        }
+        const auto workspace = std::ranges::find_if(workspaces_, [&](const Workspace& value) {
+            return value.id == repository->workspace_id;
+        });
+        if (repository->workspace_id.empty()) {
+            assigned = {"", "needs_selection"};
+        } else if (workspace != workspaces_.end() && workspace->desired == "deleted") {
+            assigned = {"", "workspace_deleted"};
+        } else {
+            assigned = {repository->workspace_id, "repository_workspace"};
         }
     }
-    repository_refs_.push_back(RepositoryRef{repository_id, name, head, now_iso8601()});
-    return repository_refs_.back();
+    return {};
+}
+
+Result<std::vector<LegacyRepositoryDescription>>
+InMemoryStore::legacy_repository_descriptions(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<LegacyRepositoryDescription> rows;
+    // The map is ordered by repository id, as the PostgreSQL listing is.
+    for (const auto& [repository_id, legacy] : legacy_repository_descriptions_) {
+        if ((!after_id.empty() && repository_id <= after_id) || legacy.first.empty() ||
+            static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            continue;
+        }
+        const auto repository = repository_by_id(repositories_, repository_id);
+        if (repository == repositories_.end()) {
+            continue; // deleted with its space: nothing to copy
+        }
+        LegacyRepositoryDescription row;
+        row.settings.repository_id = repository_id;
+        row.settings.customer_id = repository->customer_id;
+        row.settings.description = legacy.first;
+        row.settings.at_us = legacy.second;
+        row.settings.created_at = record_instant(legacy.second);
+        row.settings.updated_at = row.settings.created_at;
+        row.customer_id = repository->customer_id;
+        row.outcome = "needs_selection";
+        if (const auto found = legacy_repository_description_assignments_.find(repository_id);
+            found != legacy_repository_description_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
 }
 
 void InMemoryStore::seed_legacy_forge_record(ForgeRecord record) {

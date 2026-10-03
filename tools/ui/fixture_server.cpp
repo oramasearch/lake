@@ -337,13 +337,13 @@ int main(int argc, char** argv) {
     const auto repository =
         require(store->create_repository({organization_customer.id,
                                           "lake-design",
-                                          "Design-system fixture with history and build evidence.",
+                                          "",
                                           "public",
                                           research_workspace.id}),
                 "create public repository");
     require(store->create_repository({individual_customer.id,
                                       "private-notes",
-                                      "A private repository for list density.",
+                                      "",
                                       "private",
                                       personal_workspace.id}),
             "create private repository");

@@ -8,7 +8,8 @@
 // lake#352 and lake#355; the five secrets tables, lake#328-#332; dynamic leases, lake#362;
 // auth_applications, the settings of each application, lake#351; platform_environments and
 // platform_mirror, lake#358 and lake#359; agent_tasks, the content of each agent task, lake#374
-// and lake#375; audit_events, the central events about a workspace's data, lake#317). A collection
+// and lake#375; audit_events, the central events about a workspace's data, lake#317;
+// repositories, the description of each repository, lake#315 part 2). A collection
 // leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
 // and verified on dev, dropped by migration 0050, lake#483).
 
@@ -33,6 +34,7 @@
 #include "lake/control/metering.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/platform_records.hpp"
+#include "lake/control/repository_records.hpp"
 #include "lake/control/secret_records.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/stream_owners.hpp"
@@ -45,7 +47,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 24> copy_collections = {"opportunities",
+constexpr std::array<std::string_view, 25> copy_collections = {"opportunities",
                                                                "stream_owners",
                                                                "drive_share_links",
                                                                "auth_app_webhook_events",
@@ -68,7 +70,8 @@ constexpr std::array<std::string_view, 24> copy_collections = {"opportunities",
                                                                "platform_mirror",
                                                                "auth_app_authorization_codes",
                                                                "agent_tasks",
-                                                               "audit_events"};
+                                                               "audit_events",
+                                                               "repositories"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -993,6 +996,64 @@ liquid::runtime::task<ApiResult> copy_application_settings(ApiContext& context,
     }
     co_return co_await copy_application_rows(context, "auth_applications", mode, *rows, limit,
                                              SettingsCopy{});
+}
+
+// A repository's description (lake#315 part 2): one settings record per repository, keyed by it,
+// with the instant its row was created. A description changed since the copy (a later lake
+// revision) is accepted.
+struct RepositoryDescriptionCopy {
+    using Present = std::map<std::string, control::RepositorySettings>;
+    static std::string id(const control::LegacyRepositoryDescription& row) {
+        return row.settings.repository_id;
+    }
+    // copy_application_rows groups by this key: one read per repository.
+    static std::string application_id(const control::LegacyRepositoryDescription& row) {
+        return row.settings.repository_id;
+    }
+    // Any space's record under the repository's key; `same` compares the space.
+    static liquid::runtime::task<control::ZettaControlResult<Present>>
+    present(control::WorkspaceRecords& records, std::string repository_id) {
+        auto settings = control::settled(
+            co_await control::get_repository_settings(records, repository_id, {}));
+        if (!settings) {
+            co_return control::ZettaControlResult<Present>(std::unexpected(settings.error()));
+        }
+        Present present;
+        if (*settings) {
+            present.emplace(repository_id, std::move(**settings));
+        }
+        co_return control::ZettaControlResult<Present>(std::move(present));
+    }
+    static bool same(const control::RepositorySettings& stored,
+                     const control::LegacyRepositoryDescription& row) {
+        const auto& source = row.settings;
+        return stored.customer_id == source.customer_id && stored.at_us == source.at_us &&
+               (stored.lake_revision > 1 || stored.description == source.description);
+    }
+    static liquid::runtime::task<control::ZettaControlResult<void>>
+    write(control::WorkspaceRecords& records, const control::LegacyRepositoryDescription& row) {
+        auto created =
+            control::settled(co_await control::create_repository_settings(records, row.settings));
+        if (!created) {
+            co_return control::ZettaControlResult<void>(std::unexpected(created.error()));
+        }
+        co_return control::ZettaControlResult<void>();
+    }
+};
+
+liquid::runtime::task<ApiResult> copy_repository_descriptions(ApiContext& context,
+                                                              const std::string& mode,
+                                                              const std::string& after,
+                                                              int limit) {
+    if (auto assigned = context.store->assign_legacy_repository_descriptions(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_repository_descriptions(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    co_return co_await copy_application_rows(context, "repositories", mode, *rows, limit,
+                                             RepositoryDescriptionCopy{});
 }
 
 liquid::runtime::task<ApiResult> copy_application_signing_keys(ApiContext& context,
@@ -2304,6 +2365,9 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "auth_applications") {
                 co_return co_await copy_application_settings(context, mode, after, limit);
+            }
+            if (input.at("collection") == "repositories") {
+                co_return co_await copy_repository_descriptions(context, mode, after, limit);
             }
             if (input.at("collection") == "agent_tasks") {
                 co_return co_await copy_agent_tasks(context, mode, after, limit);

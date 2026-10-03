@@ -271,7 +271,7 @@ protected:
         // The repository belongs to the space's one Ready workspace (lake#315).
         const std::string workspace = workspaces_->create(customer->id, "drive");
         const auto repository = store_->create_repository(
-            {customer->id, "project", "Drive scenario", "private", workspace});
+            {customer->id, "project", "", "private", workspace});
         EXPECT_TRUE(repository) << repository.error().message;
         if (!customer || !repository) {
             return {};

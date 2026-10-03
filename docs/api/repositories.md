@@ -4,13 +4,17 @@ A repository is owned by a customer (the tenant) and named within it: the addres
 `<customer handle>/<name>`. Schema: [`../control-plane/schema.md`](../control-plane/schema.md)
 (migrations `0002_repositories`, `0006_repository_lifecycle`,
 `0040_active_repository_names`, which limits name uniqueness to live rows, and
-`0051_repository_workspaces`, which gives every repository its workspace).
+`0051_repository_workspaces`, which gives every repository its workspace, and
+`0064_repository_records`, which moves its description into that workspace and drops
+`repository_refs`).
 
 Every repository belongs to one workspace of its space (lake#315, part 1: routing). The
-workspace is named on create and never changes; there is no default workspace. Part 1 adds only
-the routing pointer: the repository's metadata stays in lake's PostgreSQL and its content in the
-customer store until they move into that workspace's Zetta (lake#315 part 2, lake#341 for forge
-records, lake#380 for the store).
+workspace is named on create and never changes; there is no default workspace. The repository row
+in lake's PostgreSQL is the routing row (decision 54, S10): id, space, workspace, name, visibility
+and tombstone, which lake needs to find a repository by name, serve an anonymous read of a public
+one and collect expired tombstones before it reads any workspace. Its description is a record in
+that workspace's Zetta ([below](#where-the-description-lives-lake315-part-2)); forge records moved
+with lake#341, and its content moves with lake#380.
 
 | Field | |
 |---|---|
@@ -18,21 +22,22 @@ records, lake#380 for the store).
 | `customer_id` | the owning customer; deleting the customer deletes its repositories |
 | `workspace_id` | the workspace of that customer the repository belongs to; set on create and never changed. `null` only for a repository created before workspaces that migration `0051` could not assign (see below) |
 | `name` | slug, same format as the handle (lowercase, digits, inner hyphens, 1–256); unique among live repositories in the customer |
-| `description` | free text, default empty |
+| `description` | free text, default empty; the repository's settings record in its workspace (lake#315 part 2) |
+| `description_unavailable` | only in answers whose description could not be read from the workspace (no workspace yet, or the workspace refused, for example while it starts): the reason; `description` is then empty |
 | `visibility` | `private` (default), `organization`, or `public` |
 | `deleted_at`, `retention_until` | null while live; deletion tombstones the repository for 30 days before its customer store may collect unreferenced data |
 | `created_at`, `updated_at` | timestamps |
 
 | Capability | Kind | Input | Errors |
 |---|---|---|---|
-| `list_repositories` | read | `customer_id?` (narrows to one tenant), `workspace_id?` (narrows to one workspace), `limit?` | — |
+| `list_repositories` | read | `customer_id?` (narrows to one tenant), `workspace_id?` (narrows to one workspace), `limit?` | — (a workspace that cannot be read marks its rows `description_unavailable`) |
 | `get_repository` | read | `id` | `404 not_found` |
-| `create_repository` | action | `customer_id`, `workspace_id`, `name`, `description?`, `visibility?` | `400 invalid_input` at `/workspace_id` (missing, unknown or deleted workspace), at `/customer_id` (another space's workspace, or an unknown customer), bad name, bad visibility; `409 conflict` (name taken within the customer) |
+| `create_repository` | action | `customer_id`, `workspace_id`, `name`, `description?`, `visibility?` | `400 invalid_input` at `/workspace_id` (missing, unknown or deleted workspace), at `/customer_id` (another space's workspace, or an unknown customer), bad name, bad visibility; `409 conflict` (name taken within the customer); with a description, `workspace_not_ready` while the workspace cannot be written, and nothing is created |
 | `rename_repository` | action | `id`, `name` | `404 not_found`, `409 conflict` (tombstoned or name taken) |
 | `transfer_repository` | action | `id`, `customer_id` | always `409 conflict` at `/customer_id`: a repository stays in its space and workspace; export it and import it into the other space's workspace. `404 not_found` |
 | `set_repository_visibility` | action | `id`, `visibility` | `400 invalid_input`, `404 not_found`, `409 conflict` (tombstoned) |
 | `delete_repository` | action | `id` | `404 not_found`, `409 conflict` (already tombstoned) |
-| `repository_refs` | read | `id` | `{items: [{name, change}]}` |
+| `repository_refs` | read | `id` | `{items: [{name, change}]}`, from the liquid repository |
 | `repository_tree` | read | `id`, `ref` | `{items: [{path, kind, blob, mode, node_id, size, stored_size}]}` |
 | `repository_file` | read | `id`, `ref`, `path` | `{path, blob, contents, size}` |
 | `list_changes` | read | `id` | `{items: [{id, parents, author, message, occurred_at}]}` |
@@ -42,7 +47,7 @@ records, lake#380 for the store).
 | `resolve_conflict` | action | `repository_id`, `ref`, `path`, `conflict_id`, `resolution`, `blob?` | `{conflict, value, change}` |
 | `list_artifacts` | read | `id`, `action?`, `output?`, `content?`, `cursor?`, `limit?` | `{items: [result], next_cursor, done}` |
 | `get_artifact` | read | `id`, `result_id` | one result with outputs, timings, cache/divergence state, attestations and trace |
-| `refs` | read | `repository_id` | `404 not_found`, `409 conflict` (tombstoned) |
+| `refs` | read | `repository_id` | `{items: [{repository_id, name, head}]}` from the liquid repository (no `updated_at`: lake keeps no copy of refs since `0064`, lake#319); `404 not_found`, `409 conflict` (tombstoned) |
 | repository sync routes | binary read/action | repository URL and liquid protocol body | liquid protocol errors; see [`sync.md`](sync.md) |
 | `audit` | read | audit filters | [`audit.md`](audit.md), including the lifecycle capability calls |
 
@@ -179,6 +184,46 @@ recorded as `needs_selection` in `workspace_assignments` and reported with a `RA
 keeps working, with `workspace_id: null`, until an explicitly reviewed migration assigns it. List
 them with `SELECT * FROM workspace_assignments WHERE object_table = 'repositories' AND
 outcome = 'needs_selection'`.
+
+## Where the description lives (lake#315 part 2)
+
+Decision 54 (S10) keeps the repository row central as routing and moves only what a person wrote
+about the repository. A repository's description, and any later setting (default branch, topics),
+is one sealed record of the `lake_repositories` collection in its workspace's Zetta
+([workspace records](../architecture/workspace-records.md)), keyed by the repository id and found by
+its space (`customer:<id>`): a workspace belongs to one space, so one `list_records` reads every
+repository record that workspace holds. The body names the repository and its space; a record
+under another key, in another workspace or of another space does not open.
+
+- **Create.** `create_repository`, `import_repository` and `import_github_repository` with a
+  description write the record `if_absent` under a new id first, then the routing row under that
+  id; if the row is refused (a taken name), the record is removed. A repository without a
+  description has no record. New rows leave the `description` column empty, and the control store
+  refuses one.
+- **Change.** A change (`update_repository_settings`) reads the record and writes it conditionally
+  on the revision read, rereading on a conflict, so concurrent changes are both kept. No capability
+  edits a description yet.
+- **Read.** `get_repository` reads the record (one `get_record`); `list_repositories` reads one
+  `list_records` per listed workspace, all started together. A workspace that cannot be read, or a
+  repository with no workspace yet, answers `description: ""` with `description_unavailable` and
+  the reason, rather than failing the read. The synchronous `Registry::call`, which lake's own pages
+  use to route, answers the routing row alone (no workspace call) and refuses a create with a
+  description; REST, MCP and `call_async` read and write the record. The repository page and
+  `/repositories` show the description, or say it is unavailable.
+- **Deletion.** A deleted workspace takes its records with it; lake#514 cascades workspace
+  deletion to its repositories.
+- **Copy.** Migration `0064_repository_records` records, in `workspace_assignments` under
+  `object_table = 'repository_descriptions'`, the owner of each repository whose row still holds a
+  description: `repository_workspace`, `needs_selection` while the repository has no workspace
+  (the dev `liquid` repository, until lake#513 assigns one), or `workspace_deleted`. The operator's
+  `copy_workspace_records` collection `repositories` copies each description with the row's
+  creation instant and verifies it; a description changed since (a later lake revision) is
+  accepted. A later migration drops the column once `verify` is complete on dev. Steps:
+  [cutover runbook](../architecture/workspace-records.md#cutover-runbook-repository-descriptions-dev-cluster).
+
+`repository_refs`, the table that copied each liquid ref after a push, a replication and a `refs`
+read, is dropped by the same migration (lake#319, decision 54 S11). Nothing read it; the liquid
+repository is the only record of a repository's refs.
 
 ## Verify
 

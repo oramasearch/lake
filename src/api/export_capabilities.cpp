@@ -11,6 +11,7 @@
 #include <openssl/evp.h>
 
 #include "forge_records_api.hpp"
+#include "repository_records_api.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/policy.hpp"
@@ -199,13 +200,14 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
         co_return ApiResult::failure(
             workspace.error().code, workspace.error().message, workspace.error().path);
     }
-    const auto created = context.store->create_repository({input.at("customer_id"),
-                                                           input.at("name"),
-                                                           source.value("description", ""),
-                                                           source.value("visibility", "private"),
-                                                           workspace->id});
+    // The archive's description is the repository's settings record in its workspace (lake#315).
+    const auto created = settled_create(co_await create_repository_with_settings(
+        context,
+        {input.at("customer_id"), input.at("name"), "", source.value("visibility", "private"),
+         workspace->id},
+        source.value("description", "")));
     if (!created) {
-        co_return store_error(created.error());
+        co_return created.error();
     }
     const RepositoryPortableData portable{
         payload.at("history"), payload.at("artifacts"), payload.at("git")};
