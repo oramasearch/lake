@@ -29,6 +29,14 @@ tools/ui/screenshot.sh --base-url http://127.0.0.1:4902 \
   --live-manifest .cache/ui-pages.tsv --output-dir docs/ui/screenshots/after
 ```
 
+The fixture also writes `<manifest>.routes`: every GET route the server registered, with its
+workspace parameter set to the `research` workspace and any other parameter set to `fixture`.
+`test-fixture-pages.sh PATH_TO_LAKE_UI_FIXTURE` (ctest `lake-ui-fixture-pages`, lake#497) starts
+the fixture on a free port, requires each manifest page to answer 200 with HTML and every
+registered route to answer below 500 signed in, as the operator, and signed out, and requires
+the fixture to still be running at the end. The individual customer is the one password sign-up
+provisions; creating a second one is refused, which is the startup failure lake#497 fixed.
+
 The optional port defaults to `4902`; select another when parallel fixture runs already use it and
 pass the same port in `--base-url`.
 

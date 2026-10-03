@@ -216,6 +216,15 @@ drive drive-grid drive-preview drive-history drive-version-diff drive-conflict d
 drive-share-link shared-with-me shared-link
 ```
 
+The fixture is in the test suite (lake#497). `lake-ui-fixture-pages` runs
+`tools/ui/test-fixture-pages.sh`, which starts the fixture on a free port and fails when the
+fixture does not start, when a manifest page does not answer 200 with HTML, or when any GET route
+the server registered answers 500 or above, or no answer at all, with the fixture user's session,
+the operator token, or no session. The fixture writes those routes beside the manifest as
+`<manifest>.routes`; route parameters are the `research` workspace or the literal `fixture`.
+Password sign-up provisions each user's personal customer, so the fixture reads that customer
+instead of creating one.
+
 The after set uses the same names under `docs/ui/screenshots/after/` and contains 124 PNG files;
 the four newest sharing captures use the closest prior list or detail page in the baseline slot.
 Every capture is 1440 by 900.

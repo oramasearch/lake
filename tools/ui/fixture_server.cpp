@@ -2,6 +2,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstddef>
+#include <cstdio>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -127,6 +128,27 @@ private:
     std::map<std::string, lake::test::RecordTables> records_;
 };
 
+// A registered route pattern as a requestable path: the workspace parameter names a fixture
+// workspace, and any other parameter or wildcard segment is the literal `fixture`.
+std::string concrete_route(std::string_view pattern, std::string_view workspace_id) {
+    std::string output;
+    for (const auto segment : std::views::split(pattern, '/')) {
+        const std::string_view part(segment.begin(), segment.end());
+        if (part.empty()) {
+            continue;
+        }
+        output += '/';
+        if (part == ":workspace_id") {
+            output += workspace_id;
+        } else if (part.starts_with(':') || part.starts_with('*')) {
+            output += "fixture";
+        } else {
+            output += part;
+        }
+    }
+    return output.empty() || pattern.ends_with('/') ? output + '/' : output;
+}
+
 void write_manifest(const std::filesystem::path& path,
                     const std::vector<std::tuple<std::string, std::string, std::string>>& pages) {
     std::filesystem::create_directories(path.parent_path());
@@ -173,9 +195,15 @@ int main(int argc, char** argv) {
                 "create shared recipient");
     const auto shared_recipient =
         require(store->context_for(shared_recipient_issued.secret), "read shared recipient");
-    const auto individual_customer =
-        require(store->create_customer({"individual", principal.user_id, "", "ui-fixture"}),
-                "create individual customer");
+    // Password sign-up provisions the user's personal customer (docs/api/provisioning.md); the
+    // fixture uses that one rather than creating a second, which the store refuses.
+    const auto personal_customers =
+        require(store->list_customers(1, principal.user_id), "read individual customer");
+    if (personal_customers.empty()) {
+        std::println(stderr, "lake-ui-fixture: sign-up provisioned no individual customer");
+        return 1;
+    }
+    const auto& individual_customer = personal_customers.front();
     const auto organization =
         require(store->create_organization(
                     {"taap:1:ed25519:ui-fixture-organization", "Orama Research", ""}),
@@ -820,7 +848,23 @@ int main(int argc, char** argv) {
         std::println(stderr, "lake-ui-fixture: cannot start: {}", server.reason());
         return 1;
     }
+    // Every GET route the server registered, made concrete in the research workspace, beside
+    // the manifest: tools/ui/test-fixture-pages.sh requests each one (lake#497).
+    {
+        const auto routes_path = std::filesystem::path(manifest.string() + ".routes");
+        std::ofstream routes(routes_path);
+        if (!routes) {
+            std::println(stderr, "lake-ui-fixture: cannot write {}", routes_path.string());
+            return 1;
+        }
+        for (const std::string& pattern : server.get_route_patterns()) {
+            routes << concrete_route(pattern, research_workspace.id) << '\n';
+        }
+    }
     std::println("{{\"event\":\"startup\",\"pages\":{},\"port\":{}}}", pages.size(), server.port());
+    // Callers read the port from this line through a pipe or file, where stdout is not
+    // line-buffered.
+    std::fflush(stdout);
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
     while (!stop_requested.load()) {
