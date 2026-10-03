@@ -158,8 +158,10 @@ public:
     liquid::runtime::task<ZettaControlResult<std::size_t>>
     pump(std::chrono::milliseconds wait, WorkspaceService* workspaces = nullptr);
 
-    // One agent event applied to the store: progress keeps the task running with its message,
-    // result and failed finish it. Refused for a task that agent did not claim or that finished.
+    // One agent event applied to the store's dispatch row: progress keeps the task running and
+    // renews its lease, result and failed finish it. Refused for a task that agent did not claim
+    // or that finished, so the first terminal event wins. The event's message and answer are the
+    // caller's to record in the task's workspace (lake#375, control/agent_task_records.hpp).
     static Result<AgentTask> apply(Store& store, const nlohmann::json& event);
 
 private:

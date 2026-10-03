@@ -803,16 +803,13 @@ public:
     control::Result<control::AgentTask>
     record_agent_task_event(const std::string& id,
                             const std::string& agent,
-                            const std::string& phase,
-                            const std::string& message,
-                            const nlohmann::json& result) override {
-        return call("record_agent_task_event", [&] {
-            return store_->record_agent_task_event(id, agent, phase, message, result);
-        });
+                            const std::string& phase) override {
+        return call("record_agent_task_event",
+                    [&] { return store_->record_agent_task_event(id, agent, phase); });
     }
     control::Result<void> fail_agent_task(const std::string& id,
-                                          const std::string& message) override {
-        return call("fail_agent_task", [&] { return store_->fail_agent_task(id, message); });
+                                          const std::string& notice) override {
+        return call("fail_agent_task", [&] { return store_->fail_agent_task(id, notice); });
     }
     control::Result<void> mark_agent_task_published(const std::string& id) override {
         return call("mark_agent_task_published",
@@ -822,6 +819,15 @@ public:
     stale_agent_tasks(std::chrono::seconds republish_after) override {
         return call("stale_agent_tasks",
                     [&] { return store_->stale_agent_tasks(republish_after); });
+    }
+    control::Result<void> assign_legacy_agent_tasks() override {
+        return call("assign_legacy_agent_tasks",
+                    [&] { return store_->assign_legacy_agent_tasks(); });
+    }
+    control::Result<std::vector<control::LegacyAgentTask>>
+    legacy_agent_tasks(const std::string& after_id, int limit) override {
+        return call("legacy_agent_tasks",
+                    [&] { return store_->legacy_agent_tasks(after_id, limit); });
     }
     control::Result<void> assign_legacy_opportunities() override {
         return call("assign_legacy_opportunities",

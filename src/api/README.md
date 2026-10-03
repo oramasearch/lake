@@ -17,13 +17,27 @@ ApplicationAgent turn) for a public app; `list_services` answers the page's `sta
 Agent-task capability calls renew the current claim through the registry. Agent events are
 accepted atomically before workspace publication; only a Running task accepts them, and the
 first terminal write wins. Apps, Experiments and Project panels show the persisted retry notice
-without extra workspace requests. See [agent leases](../../docs/api/agent-bus.md).
+(lake's `notice`, from the task's row); the agent's own message is one `get_record` of the task's
+workspace record (lake#375). See [agent leases](../../docs/api/agent-bus.md).
 
 A delegated `agent_turn` from a task credential names its asking task (`parent_task_id`), and
 `publish_agent_event` reports the delegated task's progress on that asking task (lake#451). The Ask
 page renders the running turn it already reads (agent, latest message, attempts, elapsed time) and
 builds *Talk to* with `control::talk_to_agents`, which leaves out internal library agents. See
 [ask-orama.md](../../docs/api/ask-orama.md) and [delegated turns](../../docs/api/agent-bus.md#delegated-turns).
+
+What was written for an agent task lives in its workspace (lake#374, lake#375,
+[agent-bus.md](../../docs/api/agent-bus.md#where-a-task-lives-lake374-lake375)).
+`agent_task_records_api.cpp` assembles a task from both halves (`load_agent_task_content`,
+`agent_task_with_content`) and writes a new task's request and each accepted event's message and
+answer (`write_agent_task_request`, `write_agent_task_event`). `agent_turn` writes the request
+before the row and routes a delegated turn by `parent_task_id`; `claim_agent_task` became
+asynchronous and reads the request just before its one-statement claim; `publish_agent_event`
+records the event after the store accepted it; `get_agent_task`, `receive_agent_events`, a
+conversation's next turn, the confined compile check, `settle_solution`, Opportunities' settle and
+`create_app`'s public acknowledgement read the record. The Apps and Experiments working panels read
+it for the running message, and the project page takes the build's message from `get_agent_task`.
+`copy_workspace_records` also copies `agent_tasks`.
 
 Page reads share authentication and customer selection within each GET, and batch independent
 workspace and local reads with `when_all`. Data uses a projected dataset/database list from `system.datasets`; dataset

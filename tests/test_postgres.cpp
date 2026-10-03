@@ -3776,3 +3776,197 @@ TEST(PostgresSessions, AnExpiredCredentialIsToldApartFromAnUnknownOne) {
     ASSERT_FALSE(unknown);
     EXPECT_NE(unknown.error().code, "expired") << "a wrong secret never learns of the session";
 }
+
+// lake#374, lake#375: migration 0062 keeps agent tasks' dispatch rows and records who owns each
+// task's content for the copy. The asking task and lake's own notices become columns; a task's
+// body, message and answer are left for the copy, and a new task's rows hold none.
+TEST(PostgresAgentTasks, MigrationRecordsEachTasksOwnerAndKeepsDispatchContentFree) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "agent-task-migration-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    std::vector<std::string> customers, users;
+    std::vector<std::vector<std::string>> workspaces(2);
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "agent-task-migration-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        customers.push_back(customer->id);
+        users.push_back(user->id);
+        for (int count = 0; count <= index; ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            workspaces[index].push_back(workspace->id);
+        }
+    }
+    pqxx::connection connection(uri);
+    // Tasks as lake wrote them before 0062, with the content in the rows.
+    const auto legacy = [&](const std::string& customer, const std::string& workspace,
+                            const nlohmann::json& body, const std::string& phase,
+                            const std::string& message, const std::string& result) {
+        const std::string id = lake::control::new_uuid_v4();
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE agent_tasks DISABLE TRIGGER agent_task_workspace_routing");
+        tx.exec_params("INSERT INTO agent_tasks (id, customer_id, agent, kind, body, scopes, "
+                       "workspace_id, created_at) VALUES ($1::uuid, $2::uuid, 'agent-project', "
+                       "'api', $3::jsonb, ARRAY['get_agent_task'], NULLIF($4, '')::uuid, "
+                       "'2026-09-01T10:00:00Z')",
+                       id, customer, body.dump(), workspace);
+        tx.exec("ALTER TABLE agent_tasks ENABLE TRIGGER agent_task_workspace_routing");
+        if (!phase.empty() || !message.empty()) {
+            tx.exec_params("INSERT INTO agent_task_status (task_id, phase, message, result) VALUES "
+                           "($1::uuid, $2, $3, $4::jsonb)",
+                           id, phase, message, result);
+        }
+        tx.commit();
+        return id;
+    };
+    const std::string asking = legacy(customers[0], workspaces[0][0],
+                                      {{"message", "plan it"}}, "Running", "Working on it", "null");
+    const std::string owned = legacy(customers[0], workspaces[0][0],
+                                     {{"message", "a private request"}, {"parent_task_id", asking}},
+                                     "Succeeded", "", "{\"reply\":\"a private answer\"}");
+    const std::string retried =
+        legacy(customers[1], workspaces[1][0], {{"message", "retry me"}}, "",
+               "the agent stopped responding; retrying (attempt 2 of 3)", "null");
+    const std::string unpicked = legacy(customers[1], workspaces[1][0], {{"message", "nobody"}},
+                                        "Failed", "No agent picked this up within 300 seconds.",
+                                        "null");
+    const std::string unassigned =
+        legacy(customers[1], "", {{"message", "from before workspaces"}}, "", "", "null");
+    const std::string gone = legacy(customers[1], workspaces[1][1], {{"message", "gone"}},
+                                    "Succeeded", "", "{\"reply\":\"gone\"}");
+    const std::string empty = legacy(customers[0], workspaces[0][0], nlohmann::json::object(), "",
+                                     "", "null");
+    ASSERT_TRUE(store->update_workspace(workspaces[1][1], {.desired = "deleted"}));
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0062_agent_task_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0062_agent_task_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    using Outcome = std::pair<std::string, std::string>;
+    const auto outcome = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = 'agent_task_content' AND object_id = $1::uuid",
+            id);
+        return found.empty() ? Outcome{} : Outcome{found[0][0].as<std::string>(),
+                                                   found[0][1].as<std::string>()};
+    };
+    const auto column = [&](const std::string& sql, const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(sql, id);
+        return found.empty() || found[0][0].is_null() ? std::string()
+                                                      : found[0][0].as<std::string>();
+    };
+    // The schema section from 0062 on, twice: the second run changes nothing.
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome(owned), (Outcome{"task_workspace", workspaces[0][0]}));
+        EXPECT_EQ(outcome(asking), (Outcome{"task_workspace", workspaces[0][0]}));
+        EXPECT_EQ(outcome(retried), (Outcome{"task_workspace", workspaces[1][0]}));
+        EXPECT_EQ(outcome(unassigned), (Outcome{"needs_selection", ""}));
+        EXPECT_EQ(outcome(gone), (Outcome{"workspace_deleted", ""}));
+        EXPECT_EQ(outcome(empty), Outcome{}) << "a task with nothing written has nothing to copy";
+        EXPECT_EQ(column("SELECT parent_task_id::text FROM agent_tasks WHERE id = $1::uuid", owned),
+                  asking);
+        EXPECT_EQ(column("SELECT notice FROM agent_task_status WHERE task_id = $1::uuid", retried),
+                  "the agent stopped responding; retrying (attempt 2 of 3)");
+        EXPECT_EQ(column("SELECT notice FROM agent_task_status WHERE task_id = $1::uuid", unpicked),
+                  "No agent picked this up within 300 seconds.");
+        EXPECT_EQ(column("SELECT notice FROM agent_task_status WHERE task_id = $1::uuid", asking),
+                  "")
+            << "what an agent wrote is never a notice";
+    }
+    // The control store answers the dispatch half only: the notice as its message, no content.
+    const auto read = store->get_agent_task(owned);
+    ASSERT_TRUE(read) << read.error().message;
+    EXPECT_EQ(read->parent_task_id, asking);
+    EXPECT_EQ(read->body, nlohmann::json::object());
+    EXPECT_TRUE(read->result.is_null());
+    EXPECT_EQ(read->message, "");
+    EXPECT_EQ(store->get_agent_task(retried)->message,
+              "the agent stopped responding; retrying (attempt 2 of 3)");
+
+    // A new task's rows hold nothing written, through its claim and answer, and are not copied.
+    const auto created = store->create_agent_task({.customer_id = customers[0],
+                                                   .agent = "agent-project",
+                                                   .kind = "api",
+                                                   .workspace_id = workspaces[0][0],
+                                                   .parent_task_id = asking,
+                                                   .body = {{"message", "never stored here"}},
+                                                   .scopes = {"get_agent_task"},
+                                                   .requested_by_user_id = users[0]});
+    ASSERT_TRUE(created) << created.error().message;
+    ASSERT_TRUE(store->claim_agent_task(created->id, "agent-project", "sha"));
+    ASSERT_TRUE(store->record_agent_task_event(created->id, "agent-project", "Succeeded"));
+    EXPECT_EQ(column("SELECT body::text FROM agent_tasks WHERE id = $1::uuid", created->id), "{}");
+    EXPECT_EQ(column("SELECT message || result::text FROM agent_task_status WHERE task_id = "
+                     "$1::uuid",
+                     created->id),
+              "null");
+    EXPECT_EQ(column("SELECT parent_task_id::text FROM agent_tasks WHERE id = $1::uuid",
+                     created->id),
+              asking);
+    ASSERT_TRUE(store->assign_legacy_agent_tasks());
+    EXPECT_EQ(outcome(created->id), Outcome{});
+    EXPECT_EQ(store->create_agent_task({.id = created->id,
+                                        .customer_id = customers[0],
+                                        .agent = "agent-project",
+                                        .workspace_id = workspaces[0][0],
+                                        .scopes = {"get_agent_task"}})
+                  .error()
+                  .code,
+              "conflict")
+        << "a task id is used once";
+    EXPECT_EQ(store->create_agent_task({.id = "not-a-uuid",
+                                        .customer_id = customers[0],
+                                        .agent = "agent-project",
+                                        .workspace_id = workspaces[0][0],
+                                        .scopes = {"get_agent_task"}})
+                  .error()
+                  .code,
+              "invalid_input");
+
+    // The content pages by task id, as the rows held it.
+    std::map<std::string, lake::control::LegacyAgentTask> rows;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_agent_tasks(after, 50);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            rows.emplace(row.task.id, row);
+        }
+        after = page->back().task.id;
+    }
+    EXPECT_FALSE(rows.contains(created->id));
+    EXPECT_FALSE(rows.contains(empty));
+    ASSERT_TRUE(rows.contains(owned));
+    const auto& row = rows.at(owned);
+    EXPECT_EQ(row.workspace_id, workspaces[0][0]);
+    EXPECT_EQ(row.outcome, "task_workspace");
+    EXPECT_EQ(row.task.customer_id, customers[0]);
+    EXPECT_EQ(row.task.body["message"], "a private request");
+    EXPECT_EQ(row.task.result["reply"], "a private answer");
+    EXPECT_EQ(row.task.phase, "Succeeded");
+    EXPECT_EQ(row.at_us, 1'788'256'800'000'000);
+    EXPECT_EQ(rows.at(asking).task.message, "Working on it");
+    EXPECT_EQ(rows.at(gone).outcome, "workspace_deleted");
+    EXPECT_EQ(rows.at(unassigned).outcome, "needs_selection");
+}

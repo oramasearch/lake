@@ -15,6 +15,7 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "scan/detectors.hpp"
+#include "agent_task_records_api.hpp"
 #include "workspace_bus.hpp"
 
 namespace lake::api {
@@ -95,23 +96,26 @@ bool valid_name(std::string_view name) {
 
 // Whether the calling ApplicationAgent turn was confirmed by a person who acknowledged that the
 // proposed app is public: lake's confirmation form sets context.confirm_public (lake#452).
-bool public_acknowledged_by_task(const ApiContext& context) {
+// The confirmation is in the turn's request, a record in its workspace (lake#374); a workspace
+// that cannot answer acknowledges nothing.
+liquid::runtime::task<bool> public_acknowledged_by_task(const ApiContext& context) {
     constexpr std::string_view prefix = "task:";
     if (context.credential_kind != "agent_task" || context.store == nullptr ||
         !context.credential_session_id.starts_with(prefix)) {
-        return false;
+        co_return false;
     }
-    const auto task =
-        context.store->get_agent_task(context.credential_session_id.substr(prefix.size()));
-    if (!task || task->agent != "agent-application") {
-        return false;
+    auto task = context.store->get_agent_task(context.credential_session_id.substr(prefix.size()));
+    if (!task || task->agent != "agent-application" ||
+        !control::settled(co_await load_agent_task_content(context, *task))) {
+        co_return false;
     }
     const auto task_context = task->body.find("context");
     if (task_context == task->body.end() || !task_context->is_object()) {
-        return false;
+        co_return false;
     }
     const auto confirmed = task_context->find("confirm_public");
-    return confirmed != task_context->end() && confirmed->is_boolean() && confirmed->get<bool>();
+    co_return confirmed != task_context->end() && confirmed->is_boolean() &&
+        confirmed->get<bool>();
 }
 
 bool reserved_name(std::string_view name, std::string_view configured) {
@@ -606,9 +610,15 @@ void register_web_app_capabilities(Registry& registry) {
             // caller's confirm_public, or, for an ApplicationAgent turn, by the person who
             // confirmed the proposal (its task context's confirm_public).
             const std::string requested_auth = input.value("auth", std::string("lake"));
-            if ((requested_auth == "none" || requested_auth == "public") &&
-                !(input.contains("confirm_public") && input.at("confirm_public") == true) &&
-                !public_acknowledged_by_task(context)) {
+            const bool public_auth = requested_auth == "none" || requested_auth == "public";
+            const bool caller_confirmed =
+                input.contains("confirm_public") && input.at("confirm_public") == true;
+            bool task_confirmed = false;
+            if (public_auth && !caller_confirmed) {
+                const auto acknowledged = co_await public_acknowledged_by_task(context);
+                task_confirmed = acknowledged && *acknowledged;
+            }
+            if (public_auth && !caller_confirmed && !task_confirmed) {
                 co_return ApiResult::failure(
                     "invalid_input",
                     "a public app can be opened by anyone with its address, without signing in; "

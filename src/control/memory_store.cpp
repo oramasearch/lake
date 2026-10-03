@@ -1664,8 +1664,19 @@ Result<AgentTask> InMemoryStore::create_agent_task(const AgentTask& in) {
     if (in.agent.empty() || in.scopes.empty()) {
         return std::unexpected(StoreError{"invalid_input", "agent task is invalid"});
     }
+    if (!in.id.empty() && std::ranges::any_of(agent_tasks_, [&](const AgentTask& existing) {
+            return existing.id == in.id;
+        })) {
+        return std::unexpected(StoreError{"conflict", "agent task " + in.id + " exists"});
+    }
     AgentTask task = in;
-    task.id = new_uuid_v4();
+    if (task.id.empty()) {
+        task.id = new_uuid_v4();
+    }
+    // The request, message and answer are records in the task's workspace (lake#374).
+    task.body = nlohmann::json::object();
+    task.message.clear();
+    task.result = nullptr;
     task.desired = "present";
     task.phase.clear();
     task.created_at = std::format(
@@ -1773,18 +1784,15 @@ Result<void> InMemoryStore::mark_agent_task_notice_published(const std::string& 
 
 Result<AgentTask> InMemoryStore::record_agent_task_event(const std::string& id,
                                                          const std::string& agent,
-                                                         const std::string& phase,
-                                                         const std::string& message,
-                                                         const nlohmann::json& result) {
+                                                         const std::string& phase) {
     std::lock_guard lock(mutex_);
     const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
     if (found == agent_tasks_.end() || found->agent != agent || found->phase != "Running") {
         return std::unexpected(StoreError{"conflict", "the task is not running on " + agent});
     }
     found->phase = phase;
-    found->message = message;
+    found->message.clear(); // lake's notice: the agent spoke since
     if (phase != "Running") {
-        found->result = result;
         found->finished_at = utc_now();
         found->credential_sha256.clear(); // a finished task's credential stops
         found->lease_until.clear();
@@ -1796,7 +1804,7 @@ Result<AgentTask> InMemoryStore::record_agent_task_event(const std::string& id,
     return *found;
 }
 
-Result<void> InMemoryStore::fail_agent_task(const std::string& id, const std::string& message) {
+Result<void> InMemoryStore::fail_agent_task(const std::string& id, const std::string& notice) {
     std::lock_guard lock(mutex_);
     const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
     if (found == agent_tasks_.end()) {
@@ -1806,7 +1814,7 @@ Result<void> InMemoryStore::fail_agent_task(const std::string& id, const std::st
     if (found->phase.empty() && !found->retry_notice_pending &&
         waiting >= std::chrono::seconds(found->deadline_seconds)) {
         found->phase = "Failed";
-        found->message = message;
+        found->message = notice;
         found->finished_at = utc_now();
         found->credential_sha256.clear();
         found->lease_until.clear();
@@ -1950,19 +1958,86 @@ InMemoryStore::legacy_opportunities(const std::string& after_id, int limit) {
 
 Result<void> InMemoryStore::set_agent_task_status(const std::string& id,
                                                   std::string phase,
-                                                  std::string message,
-                                                  std::string credential_sha256,
-                                                  nlohmann::json result) {
+                                                  std::string credential_sha256) {
     std::lock_guard lock(mutex_);
     const auto found = std::ranges::find(agent_tasks_, id, &AgentTask::id);
     if (found == agent_tasks_.end()) {
         return std::unexpected(StoreError{"not_found", "no agent task " + id});
     }
+    if (phase == "Succeeded" || phase == "Failed") {
+        found->finished_at = utc_now();
+    }
     found->phase = std::move(phase);
-    found->message = std::move(message);
     found->credential_sha256 = std::move(credential_sha256);
-    found->result = std::move(result);
     return {};
+}
+
+void InMemoryStore::seed_legacy_agent_task(AgentTask task, std::int64_t at_us) {
+    std::lock_guard lock(mutex_);
+    if (task.id.empty()) {
+        task.id = new_uuid_v4();
+    }
+    if (at_us <= 0) {
+        at_us = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count() *
+                1'000'000;
+    }
+    task.created_at = record_instant(at_us);
+    AgentTask routing = task;
+    routing.body = nlohmann::json::object();
+    routing.message.clear();
+    routing.result = nullptr;
+    agent_tasks_.push_back(routing);
+    const auto now = std::chrono::steady_clock::now();
+    agent_task_clocks_[task.id] = {now, now, {}};
+    legacy_agent_task_content_.push_back({std::move(task), at_us, "", ""});
+}
+
+Result<void> InMemoryStore::assign_legacy_agent_tasks() {
+    std::lock_guard lock(mutex_);
+    for (const LegacyAgentTask& legacy : legacy_agent_task_content_) {
+        const AgentTask& task = legacy.task;
+        if (legacy_agent_task_assignments_.contains(task.id)) {
+            continue;
+        }
+        // A task is owned by its own workspace, as migration 0062 assigns it.
+        const auto workspace = std::ranges::find(workspaces_, task.workspace_id, &Workspace::id);
+        legacy_agent_task_assignments_[task.id] =
+            task.workspace_id.empty() || workspace == workspaces_.end() ||
+                    workspace->customer_id != task.customer_id
+                ? std::pair<std::string, std::string>{"", "needs_selection"}
+            : workspace->desired == "deleted"
+                ? std::pair<std::string, std::string>{"", "workspace_deleted"}
+                : std::pair<std::string, std::string>{workspace->id, "task_workspace"};
+    }
+    return {};
+}
+
+Result<std::vector<LegacyAgentTask>> InMemoryStore::legacy_agent_tasks(const std::string& after_id,
+                                                                       int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<LegacyAgentTask> ordered = legacy_agent_task_content_;
+    std::ranges::sort(ordered, {}, [](const LegacyAgentTask& row) { return row.task.id; });
+    std::vector<LegacyAgentTask> rows;
+    for (LegacyAgentTask& row : ordered) {
+        if (!after_id.empty() && row.task.id <= after_id) {
+            continue;
+        }
+        if (static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            break;
+        }
+        row.workspace_id.clear();
+        row.outcome = "needs_selection";
+        if (const auto found = legacy_agent_task_assignments_.find(row.task.id);
+            found != legacy_agent_task_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        row.task.workspace_id = row.workspace_id;
+        rows.push_back(std::move(row));
+    }
+    return rows;
 }
 
 Result<void> InMemoryStore::set_store_status(const std::string& id,

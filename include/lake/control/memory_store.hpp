@@ -310,10 +310,8 @@ public:
                                                   const std::string& phase) override;
     Result<AgentTask> record_agent_task_event(const std::string& id,
                                               const std::string& agent,
-                                              const std::string& phase,
-                                              const std::string& message,
-                                              const nlohmann::json& result) override;
-    Result<void> fail_agent_task(const std::string& id, const std::string& message) override;
+                                              const std::string& phase) override;
+    Result<void> fail_agent_task(const std::string& id, const std::string& notice) override;
     Result<void> mark_agent_task_published(const std::string& id) override;
     Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) override;
     // Moves a task's clocks back, so tests reach a deadline without waiting for it.
@@ -323,12 +321,18 @@ public:
                                                                 int limit) override;
     // A row of the retired opportunities table, as an earlier lake wrote it (tests of the copy).
     void seed_legacy_opportunity(Opportunity opportunity);
-    // Sets a task's status directly; tests and local demos call it.
+    Result<void> assign_legacy_agent_tasks() override;
+    Result<std::vector<LegacyAgentTask>> legacy_agent_tasks(const std::string& after_id,
+                                                            int limit) override;
+    // A task as an earlier lake wrote it, with its body, message, result and phase in the retired
+    // content columns (tests of the copy, lake#374), created at `at_us` (0: now). Its dispatch
+    // half is a task like any other.
+    void seed_legacy_agent_task(AgentTask task, std::int64_t at_us = 0);
+    // Sets a task's dispatch status directly; tests and local demos call it. What the agent wrote
+    // is a record in the task's workspace (control/agent_task_records.hpp).
     Result<void> set_agent_task_status(const std::string& id,
                                        std::string phase,
-                                       std::string message,
-                                       std::string credential_sha256,
-                                       nlohmann::json result = nullptr);
+                                       std::string credential_sha256 = {});
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                             std::uint64_t quota_bytes) override;
     Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
@@ -593,6 +597,8 @@ private:
         std::chrono::steady_clock::time_point created, published, started, lease_until;
     };
     std::map<std::string, TaskClock> agent_task_clocks_;
+    std::vector<LegacyAgentTask> legacy_agent_task_content_; // body, message, result and phase
+    std::map<std::string, std::pair<std::string, std::string>> legacy_agent_task_assignments_;
     std::vector<Opportunity> legacy_opportunities_;
     std::map<std::string, std::pair<std::string, std::string>> legacy_opportunity_assignments_; // workspace, outcome
     std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;

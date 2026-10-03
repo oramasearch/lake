@@ -24,6 +24,7 @@
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/api/datasets.hpp"
+#include "agent_task_records_api.hpp"
 #include "workspace_bus.hpp"
 #include "workspace_records_api.hpp"
 #include "lake/control/ask_messages.hpp"
@@ -256,7 +257,11 @@ std::string project_agent_check_graph(const json& arguments) {
 // check graph back instead of compiling again.
 liquid::runtime::task<ApiResult> project_agent_compile_check(ApiContext& context,
                                                              const json& input,
-                                                             const control::AgentTask& task) {
+                                                             control::AgentTask task) {
+    // The turn's request is a record in its workspace (lake#374).
+    if (auto loaded = control::settled(co_await load_agent_task_content(context, task)); !loaded) {
+        co_return ApiResult::failure(loaded.error().code, loaded.error().message);
+    }
     const json handed = task.body.is_object() ? task.body.value("context", json::object())
                                               : json::object();
     // A change request names its project; a build turn ("build:<project>") designs one.
@@ -2248,11 +2253,13 @@ liquid::runtime::task<void> report_on_asking_turn(ApiContext& context,
     if (message.size() > 300) {
         message = message.substr(0, 297) + "...";
     }
-    const auto applied =
-        context.store->record_agent_task_event(parent->id, parent->agent, "Running", message, nullptr);
+    const auto applied = context.store->record_agent_task_event(parent->id, parent->agent, "Running");
     if (!applied || !context.workspaces) {
         co_return {};
     }
+    // The report is the asking turn's message, kept in its workspace with its request (lake#375).
+    static_cast<void>(control::settled(
+        co_await write_agent_task_event(context, *applied, "Running", message, nullptr)));
     WorkspaceApiBus bus(context, parent->customer_id, parent->workspace_id);
     if (!control::settled(co_await bus.create_topic(std::string(control::agent_events_topic)))) {
         co_return {};
@@ -3096,6 +3103,10 @@ void register_agent_flow_capabilities(Registry& registry) {
                           context.acting_identity != "admin")) {
                 co_return ApiResult::failure("not_found", "no such solution task");
             }
+            if (auto loaded = control::settled(co_await load_agent_task_content(context, *task));
+                !loaded) {
+                co_return ApiResult::failure(loaded.error().code, loaded.error().message);
+            }
             co_return co_await settle_solution(
                 context, *task, input.value("edits", json::object()));
         }});
@@ -3805,6 +3816,11 @@ void register_agent_run_capabilities(Registry& registry) {
                  context.acting_identity != "admin")) {
                 co_return ApiResult::failure("not_found", "no such task in this space");
             }
+            // Its request, message and answer are a record in its workspace (lake#374, #375).
+            if (auto loaded = control::settled(co_await load_agent_task_content(context, *task));
+                !loaded) {
+                co_return ApiResult::failure(loaded.error().code, loaded.error().message);
+            }
             // The scan's Opportunities are kept the first time it is read finished; a workspace
             // that cannot take them now is retried on the next read.
             static_cast<void>(called(co_await settle_discover(context, *task)));
@@ -3860,7 +3876,8 @@ void register_agent_run_capabilities(Registry& registry) {
                 })) {
                 if (auto task = context.store->get_agent_task(id);
                     task && task->customer_id == customer_id &&
-                    task->workspace_id == workspace_id) {
+                    task->workspace_id == workspace_id &&
+                    control::settled(co_await load_agent_task_content(context, *task))) {
                     const ApiResult settled = called(co_await settle_discover(context, *task));
                     if (settled.ok && settled.value.value("written", 0) > 0) {
                         rows = control::settled(
@@ -3976,9 +3993,15 @@ void register_agent_run_capabilities(Registry& registry) {
                     task_kind = "app";
                 }
                 std::string lake_url = config.internal_url;
-                const auto prior = context.store->latest_agent_conversation_task(
+                auto prior = context.store->latest_agent_conversation_task(
                     customer_id, conversation_id, agent, task_kind, input.at("workspace_id"));
                 if (prior) {
+                    // What the earlier turn asked and answered is in its workspace (lake#374).
+                    if (auto loaded =
+                            control::settled(co_await load_agent_task_content(context, *prior));
+                        !loaded) {
+                        co_return ApiResult::failure(loaded.error().code, loaded.error().message);
+                    }
                     if (!context.operator_credential &&
                         prior->requested_by_user_id != context.acting_user_id) {
                         co_return ApiResult::failure(
@@ -4187,19 +4210,31 @@ void register_agent_run_capabilities(Registry& registry) {
                 if (asking) {
                     body["parent_task_id"] = asking->id;
                 }
-                auto task = context.store->create_agent_task(
-                    control::AgentTask{.customer_id = customer_id,
-                                       .agent = agent,
-                                       .kind = std::move(task_kind),
-                                       .conversation_id = conversation_id,
-                                       .workspace_id = input.at("workspace_id"),
-                                       .body = std::move(body),
-                                       .scopes = std::move(scopes),
-                                       .requested_by_user_id = context.acting_user_id,
-                                       .requested_by_taap_id = context.acting_identity});
+                control::AgentTask asked{.id = control::new_uuid_v4(),
+                                         .customer_id = customer_id,
+                                         .agent = agent,
+                                         .kind = std::move(task_kind),
+                                         .conversation_id = conversation_id,
+                                         .workspace_id = input.at("workspace_id"),
+                                         .parent_task_id = asking ? asking->id : std::string(),
+                                         .body = std::move(body),
+                                         .scopes = std::move(scopes),
+                                         .requested_by_user_id = context.acting_user_id,
+                                         .requested_by_taap_id = context.acting_identity};
+                // The request goes to the task's workspace first (lake#374), so the dispatch row
+                // never names a task whose request is missing; a row that then fails leaves an
+                // unreachable record behind, never a task without its request.
+                if (auto written =
+                        control::settled(co_await write_agent_task_request(context, asked));
+                    !written) {
+                    co_return ApiResult::failure(written.error().code, written.error().message,
+                                                 "/workspace_id");
+                }
+                auto task = context.store->create_agent_task(asked);
                 if (!task) {
                     co_return ApiResult::failure(task.error().code, task.error().message);
                 }
+                task->body = std::move(asked.body);
                 // A publish that fails is not the caller's failure: the task is recorded, and
                 // lake's bus loop publishes an unclaimed task again.
                 static_cast<void>(co_await context.agent_bus->publish_task(*task));
@@ -4618,21 +4653,43 @@ void register_agent_bus_capabilities(Registry& registry) {
         .object = "agent_bus",
         .action = "write",
         .resolve_object = agent_bus_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!agent_service(context, input)) {
-                return not_agent_service();
+                co_return not_agent_service();
             }
             if (context.store == nullptr) {
-                return unavailable();
+                co_return unavailable();
             }
             const std::string task_id = input.at("task_id");
-            if (input.contains("workspace_id")) {
-                const auto current = context.store->get_agent_task(task_id);
-                if (current &&
-                    current->workspace_id != input.at("workspace_id").get<std::string>()) {
-                    return ApiResult::failure(
-                        "conflict", "workspace_id does not match the task", "/workspace_id");
+            const std::string agent = input.at("agent");
+            const auto current = context.store->get_agent_task(task_id);
+            if (current && input.contains("workspace_id") &&
+                current->workspace_id != input.at("workspace_id").get<std::string>()) {
+                co_return ApiResult::failure(
+                    "conflict", "workspace_id does not match the task", "/workspace_id");
+            }
+            // The request the agent receives is a record in the task's workspace (lake#374). It
+            // is read before the claim, so a workspace that cannot answer leaves the task
+            // waiting for another claim instead of claimed without its request. A task that is
+            // not waiting for this agent reads nothing: the claim below refuses it.
+            json request = json::object();
+            if (current && current->agent == agent && current->phase.empty() &&
+                current->desired == "present" && !current->retry_notice_pending) {
+                control::AgentTask content = *current;
+                auto loaded =
+                    control::settled(co_await load_agent_task_content(context, content));
+                if (!loaded) {
+                    co_return ApiResult::failure(loaded.error().code, loaded.error().message,
+                                                 "/task_id");
                 }
+                if (!*loaded || !content.body.is_object() || content.body.empty()) {
+                    // A task from before the move whose request is not copied yet: never hand
+                    // an agent an empty request.
+                    co_return ApiResult::failure(
+                        "not_found", "the task's request is not in its workspace", "/task_id");
+                }
+                request = std::move(content.body);
             }
             const std::string credential = std::string(control::agent_task_credential_prefix) +
                                            task_id + "." +
@@ -4642,35 +4699,37 @@ void register_agent_bus_capabilities(Registry& registry) {
             int lease_seconds = 600;
             if (context.workspaces) {
                 const auto& leases = context.workspaces->config().agent_lease_seconds;
-                const auto configured = leases.find(input.at("agent").get<std::string>());
+                const auto configured = leases.find(agent);
                 if (configured != leases.end()) {
                     lease_seconds = configured->second;
                 }
             }
+            // The claim and its lease are one control-store statement: exactly one claim per
+            // attempt succeeds, with no workspace call inside it.
             auto task =
                 context.store->claim_agent_task(task_id,
-                                                input.at("agent"),
+                                                agent,
                                                 control::identity_crypto::sha256_hex(credential),
                                                 1,
                                                 lease_seconds);
             if (!task) {
-                return ApiResult::failure(task.error().code, task.error().message, "/task_id");
+                co_return ApiResult::failure(task.error().code, task.error().message, "/task_id");
             }
-            json body = task->body;
+            json body = std::move(request);
             body["workspace_id"] = task->workspace_id;
             fill_credential(body, credential);
             context.audit_customer_id = task->customer_id;
             context.audit_object = "agent_task/" + task->id;
-            return ApiResult::success({{"task_id", task->id},
-                                       {"workspace_id", task->workspace_id},
-                                       {"customer_id", task->customer_id},
-                                       {"agent", task->agent},
-                                       {"kind", task->kind},
-                                       {"deadline_seconds", task->deadline_seconds},
-                                       {"lease_seconds", task->lease_seconds},
-                                       {"lease_until", task->lease_until},
-                                       {"attempts", task->attempts},
-                                       {"body", std::move(body)}});
+            co_return ApiResult::success({{"task_id", task->id},
+                                          {"workspace_id", task->workspace_id},
+                                          {"customer_id", task->customer_id},
+                                          {"agent", task->agent},
+                                          {"kind", task->kind},
+                                          {"deadline_seconds", task->deadline_seconds},
+                                          {"lease_seconds", task->lease_seconds},
+                                          {"lease_until", task->lease_until},
+                                          {"attempts", task->attempts},
+                                          {"body", std::move(body)}});
         }});
     registry.add(Capability{
         .name = "publish_agent_event",
@@ -4731,18 +4790,25 @@ void register_agent_bus_capabilities(Registry& registry) {
             if (!applied) {
                 co_return ApiResult::failure(applied.error().code, applied.error().message);
             }
+            // What the agent said is kept in the task's workspace (lake#375), written
+            // conditionally on the revision read; a finished answer there is never replaced.
+            const std::string type = input.at("type");
+            const auto recorded = control::settled(co_await write_agent_task_event(
+                context, *applied, applied->phase, input.value("message", std::string()),
+                type == "result" ? input.value("result", json()) : json()));
             event["attempts"] = applied->attempts;
             auto published = control::settled(co_await bus.publish("agent-events", event, task_id));
+            if (!recorded) {
+                co_return ApiResult::failure(recorded.error().code,
+                                             "the event was accepted, but its workspace could not "
+                                             "keep it: " + recorded.error().message);
+            }
             if (!published) {
                 co_return ApiResult::failure("store_unavailable", published.error().message);
             }
             // A delegated turn's progress is the asking turn's progress too (lake#451).
-            if (const std::string parent = task->body.is_object()
-                                               ? task->body.value("parent_task_id", std::string())
-                                               : std::string();
-                !parent.empty()) {
+            if (const std::string parent = task->parent_task_id; !parent.empty()) {
                 const std::string name = control::agent_display_name(task->agent);
-                const std::string type = input.at("type");
                 const std::string said = input.value("message", std::string());
                 std::string message =
                     type == "result"   ? name + " finished; writing the answer."
@@ -4840,7 +4906,7 @@ void register_agent_bus_capabilities(Registry& registry) {
                     break;
                 }
             }
-            auto task = context.store->get_agent_task(task_id);
+            auto task = control::settled(co_await agent_task_with_content(context, task_id));
             if (!task) {
                 co_return ApiResult::failure(task.error().code, task.error().message);
             }

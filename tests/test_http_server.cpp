@@ -711,7 +711,7 @@ protected:
     std::string run_agent_task(HttpConnection& connection,
                               const std::string& task_id,
                               bool verify_workspace_inference = false) {
-        const auto task = store_->get_agent_task(task_id);
+        const auto task = assembled_task(task_id);
         EXPECT_TRUE(task) << task_id;
         if (!task) {
             return {};
@@ -755,12 +755,14 @@ protected:
                   {"type", "progress"},
                   {"message", "Working on the task"}});
         EXPECT_EQ(progress["ok"], true) << progress.dump();
-        const auto running = store_->get_agent_task(task_id);
+        const auto running = assembled_task(task_id);
         EXPECT_TRUE(running);
         if (running) {
             EXPECT_EQ(running->phase, "Running");
             EXPECT_EQ(running->message, "Working on the task");
         }
+        // The control store keeps no word of it: the message is in the workspace (lake#375).
+        EXPECT_EQ(store_->get_agent_task(task_id)->message, "");
         const nlohmann::json published =
             call("POST",
                  "/v1/publish_agent_event",
@@ -769,13 +771,31 @@ protected:
                   {"type", "result"},
                   {"result", agents_->answer}});
         EXPECT_EQ(published["ok"], true) << published.dump();
-        const auto finished = store_->get_agent_task(task_id);
+        const auto finished = assembled_task(task_id);
         EXPECT_TRUE(finished);
         if (finished) {
             EXPECT_EQ(finished->phase, "Succeeded");
         }
         EXPECT_TRUE(liquid::runtime::block_on(agent_bus_->pump(std::chrono::milliseconds(0))));
         return credential;
+    }
+
+    // The task as lake assembles it: the control store's dispatch row with the request, message
+    // and answer read from its record in the workspace (lake#374, lake#375).
+    std::optional<lake::control::AgentTask> assembled_task(const std::string& id) {
+        auto found = store_->get_agent_task(id);
+        if (!found) {
+            return std::nullopt;
+        }
+        if (const auto content = lake::test::agent_task_content(workspaces_, *found, instance_kek_)) {
+            found->body = content->request.is_object() ? content->request
+                                                       : nlohmann::json::object();
+            found->result = content->result;
+            if (found->message.empty()) {
+                found->message = content->message;
+            }
+        }
+        return *found;
     }
 
     static std::string task_of(const std::string& response) {
@@ -1437,7 +1457,7 @@ TEST_P(HttpResponseIsolation, LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceE
             "application/json")));
         ASSERT_EQ(started["ok"], true) << started.dump();
         const std::string task_id = started["value"]["task_id"];
-        const auto task = store_->get_agent_task(task_id);
+        const auto task = assembled_task(task_id);
         ASSERT_TRUE(task);
         EXPECT_EQ(task->kind, kind);
         const auto dispatch = bus_->events("agent-tasks." + agent);
@@ -1455,7 +1475,7 @@ TEST_P(HttpResponseIsolation, LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceE
                            {"reply", "The turn finished."},
                            {"result", {{"kind", kind}}}};
         run_agent_task(*connection, task_id, true);
-        const auto finished = store_->get_agent_task(task_id);
+        const auto finished = assembled_task(task_id);
         ASSERT_TRUE(finished);
         EXPECT_EQ(finished->phase, "Succeeded");
         EXPECT_EQ(finished->result["reply"], "The turn finished.");
@@ -1707,8 +1727,10 @@ TEST_P(HttpResponseIsolation, AskOramaOffersPeoplesAgentsAndSaysWhoIsWorkingOnAL
     const std::string child =
         nlohmann::json::parse(response_body(delegated))["value"].value("task_id", std::string());
     ASSERT_FALSE(child.empty()) << delegated;
-    EXPECT_EQ(store_->get_agent_task(child)->body.value("parent_task_id", std::string()), task);
-    EXPECT_EQ(store_->get_agent_task(task)->message,
+    EXPECT_EQ(assembled_task(child)->body.value("parent_task_id", std::string()), task);
+    EXPECT_EQ(store_->get_agent_task(child)->parent_task_id, task) << "routing stays central";
+    EXPECT_EQ(store_->get_agent_task(task)->message, "") << "the report is in the workspace";
+    EXPECT_EQ(assembled_task(task)->message,
               "Ask Orama asked Auto-Suggest: What is worth building?");
     EXPECT_NE(page(conversation, task).find("Ask Orama asked Auto-Suggest: What is worth building?"),
               std::string::npos);
@@ -1988,8 +2010,11 @@ TEST_P(HttpResponseIsolation, DesignListsMethodologiesAndSolutionsAndStartsASolu
         cookie);
     ASSERT_TRUE(started.starts_with("HTTP/1.1 302")) << started.substr(0, 300);
     EXPECT_NE(response_header(started, "location").find("/design/project?"), std::string::npos);
-    const auto task = store_->latest_agent_task(customer_id, "solution:churn", connection->workspace_id);
-    ASSERT_TRUE(task) << "Start launches the Project Agent";
+    const auto latest =
+        store_->latest_agent_task(customer_id, "solution:churn", connection->workspace_id);
+    ASSERT_TRUE(latest) << "Start launches the Project Agent";
+    const auto task = assembled_task(latest->id);
+    ASSERT_TRUE(task);
     EXPECT_EQ(task->body["context"]["delivery"]["owner"], "retention-team");
     EXPECT_EQ(task->body["context"]["roi_model"]["investment"], 4000.0);
     EXPECT_TRUE(std::ranges::none_of(workspace_caller_->calls, [](const auto& call) {
@@ -2383,8 +2408,11 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
 
     // The Project Agent designs the new project's pipeline in the background, and the project's
     // page compiles the design once it is done (Steve, 2026-09-27).
-    const auto build = store_->latest_agent_task(customer_id, "build:" + project, connection->workspace_id);
-    ASSERT_TRUE(build) << "creating the project started the Project Agent";
+    const auto latest_build =
+        store_->latest_agent_task(customer_id, "build:" + project, connection->workspace_id);
+    ASSERT_TRUE(latest_build) << "creating the project started the Project Agent";
+    const auto build = assembled_task(latest_build->id);
+    ASSERT_TRUE(build);
     EXPECT_EQ(build->agent, "agent-project");
     EXPECT_NE(build->body["message"].get<std::string>().find("Predict which accounts will churn"),
               std::string::npos);
@@ -2453,6 +2481,8 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
         .requested_by_user_id = second->requested_by_user_id,
         .requested_by_taap_id = second->requested_by_taap_id});
     ASSERT_TRUE(rebuild);
+    lake::test::seed_agent_task_request(workspaces_, *rebuild, {{"message", "Design it"}},
+                                        instance_kek_);
     ASSERT_TRUE(liquid::runtime::block_on(agent_bus_->publish_task(*rebuild)).value());
     agents_->answer = {{"ok", true},
                        {"result",
@@ -2499,6 +2529,9 @@ TEST_P(HttpResponseIsolation, DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnCo
         .body = {{"message", "Design it"}}, .scopes = second->scopes,
         .requested_by_user_id = second->requested_by_user_id,
         .requested_by_taap_id = second->requested_by_taap_id});
+    ASSERT_TRUE(retrieval);
+    lake::test::seed_agent_task_request(workspaces_, *retrieval, {{"message", "Design it"}},
+                                        instance_kek_);
     ASSERT_TRUE(liquid::runtime::block_on(agent_bus_->publish_task(*retrieval)).value());
     agents_->answer = {{"ok", true},
                        {"result",
@@ -2583,7 +2616,7 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     ASSERT_TRUE(agent_started.starts_with("HTTP/1.1 302")) << agent_started.substr(0, 300);
     const std::string agent_task = task_of(agent_started);
     ASSERT_FALSE(agent_task.empty()) << response_header(agent_started, "location");
-    const auto first_task = store_->get_agent_task(agent_task);
+    const auto first_task = assembled_task(agent_task);
     ASSERT_TRUE(first_task);
     EXPECT_EQ(first_task->agent, "agent-application");
     EXPECT_EQ(first_task->kind, "app");
@@ -2618,7 +2651,7 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
         cookie);
     ASSERT_TRUE(replied.starts_with("HTTP/1.1 302")) << replied.substr(0, 300);
     const std::string proposal_task = task_of(replied);
-    const auto continued_task = store_->get_agent_task(proposal_task);
+    const auto continued_task = assembled_task(proposal_task);
     ASSERT_TRUE(continued_task);
     EXPECT_EQ(continued_task->conversation_id, first_task->conversation_id);
     EXPECT_EQ(continued_task->body["message"], "Use datasets/accounts");
@@ -2688,7 +2721,7 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
         cookie);
     ASSERT_TRUE(confirmed.starts_with("HTTP/1.1 302")) << confirmed.substr(0, 300);
     const std::string confirmed_task_id = task_of(confirmed);
-    const auto confirmed_task = store_->get_agent_task(confirmed_task_id);
+    const auto confirmed_task = assembled_task(confirmed_task_id);
     ASSERT_TRUE(confirmed_task);
     EXPECT_EQ(confirmed_task->body["context"]["confirmed_proposal"], proposal);
     EXPECT_EQ(confirmed_task->body["context"]["confirm_public"], true);
@@ -2846,7 +2879,7 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestMcpAndPageUseTheSameConfirmedT
     const nlohmann::json rest = body_of(connection->request(
         "POST", "/v1/agent_turn", turn.dump(), cookie, "HTTP/1.1", "", "application/json"));
     ASSERT_TRUE(rest["ok"].get<bool>()) << rest.dump();
-    EXPECT_EQ(store_->get_agent_task(rest["value"]["task_id"])->agent, "agent-experiments");
+    EXPECT_EQ(assembled_task(rest["value"]["task_id"])->agent, "agent-experiments");
     const nlohmann::json mcp = body_of(connection->request(
         "POST",
         "/mcp",
@@ -2860,8 +2893,8 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestMcpAndPageUseTheSameConfirmedT
         "",
         "application/json"));
     ASSERT_TRUE(mcp["result"]["structuredContent"]["ok"].get<bool>()) << mcp.dump();
-    const auto rest_task = store_->get_agent_task(rest["value"]["task_id"]);
-    const auto mcp_task = store_->get_agent_task(
+    const auto rest_task = assembled_task(rest["value"]["task_id"]);
+    const auto mcp_task = assembled_task(
         mcp["result"]["structuredContent"]["value"]["task_id"]);
     ASSERT_TRUE(rest_task);
     ASSERT_TRUE(mcp_task);
@@ -2885,7 +2918,7 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestMcpAndPageUseTheSameConfirmedT
         cookie);
     ASSERT_TRUE(started.starts_with("HTTP/1.1 302")) << started.substr(0, 300);
     const std::string task_id = task_of(started);
-    const auto first = store_->get_agent_task(task_id);
+    const auto first = assembled_task(task_id);
     ASSERT_TRUE(first);
     EXPECT_EQ(first->agent, "agent-experiments");
     EXPECT_EQ(first->kind, "experiment");
@@ -2910,7 +2943,7 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestMcpAndPageUseTheSameConfirmedT
         cookie);
     ASSERT_TRUE(replied.starts_with("HTTP/1.1 302")) << replied.substr(0, 300);
     const std::string proposal_task_id = task_of(replied);
-    const auto continued = store_->get_agent_task(proposal_task_id);
+    const auto continued = assembled_task(proposal_task_id);
     ASSERT_TRUE(continued);
     EXPECT_EQ(continued->conversation_id, first->conversation_id);
     EXPECT_EQ(continued->body["message"], "Use retention");
@@ -2953,7 +2986,7 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestMcpAndPageUseTheSameConfirmedT
             "&study=" + lake::api::oauth_url_encode(study.dump()),
         cookie);
     ASSERT_TRUE(confirmed.starts_with("HTTP/1.1 302")) << confirmed.substr(0, 300);
-    const auto confirmed_task = store_->get_agent_task(task_of(confirmed));
+    const auto confirmed_task = assembled_task(task_of(confirmed));
     ASSERT_TRUE(confirmed_task);
     EXPECT_EQ(confirmed_task->body["context"]["confirmed_proposal"]["study"]["name"],
               "Reviewed Retention Tuning");

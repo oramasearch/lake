@@ -203,6 +203,7 @@ add_library(lake-core STATIC
   src/control/application_authorization_codes.cpp
   src/control/application_credential_records.cpp
   src/control/application_settings_records.cpp
+  src/control/agent_task_records.cpp
   src/control/metering.cpp
   "${LAKE_LIQUID_SOURCE_DIR}/src/scan/detectors.cpp"
   src/version.cpp
@@ -244,6 +245,7 @@ add_library(lake-core STATIC
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
   src/api/secret_records_api.cpp
+  src/api/agent_task_records_api.cpp
   src/api/offline_recovery_capabilities.cpp
   src/control/handles.cpp
   src/control/policy.cpp

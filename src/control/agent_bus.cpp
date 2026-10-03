@@ -411,12 +411,9 @@ Result<AgentTask> AgentTaskBus::apply(Store& store, const nlohmann::json& event)
         return std::unexpected(
             StoreError{"invalid_input", "an agent event's type is progress, result or failed"});
     }
-    return store.record_agent_task_event(task_id,
-                                         agent,
-                                         phase,
-                                         event.value("message", std::string()),
-                                         type == "result" ? event.value("result", nlohmann::json())
-                                                          : nlohmann::json());
+    // The message and answer are not stored here: the caller records them in the task's
+    // workspace once the store accepted the event (lake#375).
+    return store.record_agent_task_event(task_id, agent, phase);
 }
 
 liquid::runtime::task<ZettaControlResult<void>>

@@ -3102,6 +3102,7 @@ struct AgentRuns {
         context.scopes = principal.scopes;
         context.pool_id = "lake";
         context.request_id = lake::control::new_uuid_v4();
+        context.instance_kek = lake::test::test_instance_kek();
         const auto capability = registry.find(name);
         if (capability != nullptr &&
             capability->input_schema.value("properties", json::object()).contains("customer_id")) {
@@ -3139,6 +3140,7 @@ struct AgentRuns {
         context.pool_id = caller.pool_id;
         context.scopes = caller.scopes;
         context.request_id = lake::control::new_uuid_v4();
+        context.instance_kek = lake::test::test_instance_kek();
         if (name != "get_dataset" &&
             registry.find(name)->input_schema["properties"].contains("customer_id") &&
             !input.contains("customer_id")) {
@@ -3165,9 +3167,55 @@ struct AgentRuns {
         context.credential_kind = service ? "agent_service" : "session";
         context.agent_service = service ? agent : "";
         context.request_id = lake::control::new_uuid_v4();
+        context.instance_kek = lake::test::test_instance_kek();
         auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
         EXPECT_TRUE(completed);
         return std::move(*completed);
+    }
+    // The task as lake assembles it: the control store's dispatch row with the request, message
+    // and answer read from its record in the workspace (lake#374, lake#375).
+    std::optional<lake::control::AgentTask> task(const std::string& id) {
+        auto found = store.get_agent_task(id);
+        if (!found) {
+            return std::nullopt;
+        }
+        if (const auto content =
+                lake::test::agent_task_content(w.service, *found, lake::test::test_instance_kek())) {
+            found->body = content->request.is_object() ? content->request : json::object();
+            found->result = content->result;
+            if (found->message.empty()) {
+                found->message = content->message;
+            }
+        }
+        return *found;
+    }
+    // Sets a task's status as its agent's events would: the dispatch row in the store, and the
+    // message and answer in the task's workspace.
+    lake::control::Result<void> set_task_status(const std::string& id, std::string phase,
+                                                std::string message,
+                                                std::string credential_sha256,
+                                                json result = nullptr) {
+        auto set = store.set_agent_task_status(id, phase, std::move(credential_sha256));
+        if (!set) {
+            return set;
+        }
+        lake::test::seed_agent_task_answer(w.service, *store.get_agent_task(id), std::move(phase),
+                                           std::move(message), std::move(result),
+                                           lake::test::test_instance_kek());
+        return {};
+    }
+    lake::control::Result<lake::control::AgentTask> record_event(const std::string& id,
+                                                                 const std::string& agent,
+                                                                 std::string phase,
+                                                                 std::string message,
+                                                                 json result) {
+        auto applied = store.record_agent_task_event(id, agent, phase);
+        if (applied) {
+            lake::test::seed_agent_task_answer(w.service, *applied, std::move(phase),
+                                               std::move(message), std::move(result),
+                                               lake::test::test_instance_kek());
+        }
+        return applied;
     }
     std::size_t pump() {
         auto pumped = liquid::runtime::block_on(
@@ -3630,7 +3678,7 @@ TEST(AgentRuns, APersonStartsAndConfirmsTheProjectAgentsSolutionFoundation) {
                  {{"value_per_outcome", 125.0}, {"investment", 4000.0}, {"currency", "USD"}}}});
     ASSERT_TRUE(started.ok) << started.error.message;
     const std::string task_id = started.value["task_id"];
-    const auto task = r.store.get_agent_task(task_id);
+    const auto task = r.task(task_id);
     ASSERT_TRUE(task);
     EXPECT_EQ(task->kind, "solution:retention");
     EXPECT_EQ(task->body["context"]["dataset"], "datasets.customers");
@@ -3641,7 +3689,7 @@ TEST(AgentRuns, APersonStartsAndConfirmsTheProjectAgentsSolutionFoundation) {
         return call.first == "create_solution";
     })) << "Start only asks for a proposal";
 
-    ASSERT_TRUE(r.store.set_agent_task_status(
+    ASSERT_TRUE(r.set_task_status(
         task_id,
         "Succeeded",
         "",
@@ -3707,7 +3755,7 @@ TEST(AgentRuns, APersonStartsAndConfirmsTheProjectAgentsSolutionFoundation) {
                  {{"value_per_outcome", 125.0}, {"investment", 4000.0}, {"currency", "USD"}}}});
     ASSERT_TRUE(guarded.ok) << guarded.error.message;
     const std::string guarded_task_id = guarded.value["task_id"];
-    ASSERT_TRUE(r.store.set_agent_task_status(
+    ASSERT_TRUE(r.set_task_status(
         guarded_task_id,
         "Succeeded",
         "",
@@ -3857,7 +3905,7 @@ TEST(AgentRuns, LibraryAgentsTakeTasksAndAnswerOverTheBus) {
     const std::string second_id = second.value["task_id"];
     ASSERT_TRUE(r.as_agent("claim_agent_task", {{"task_id", second_id}, {"agent", "agent-ask-orama"}})
                     .ok);
-    EXPECT_EQ(r.store.get_agent_task(second_id)->events_from, 1U)
+    EXPECT_EQ(r.task(second_id)->events_from, 1U)
         << "two events of the first task were read";
     ASSERT_TRUE(r.as_agent("publish_agent_event", {{"task_id", second_id},
                                                    {"agent", "agent-ask-orama"},
@@ -3905,7 +3953,7 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     ASSERT_TRUE(asked.ok) << asked.error.message;
     EXPECT_EQ(asked.value["status"], "pending");
     EXPECT_EQ(r.agents.turns.size(), called) << "the request never waits on the agent";
-    const auto ask_task = r.store.get_agent_task(asked.value["task_id"]);
+    const auto ask_task = r.task(asked.value["task_id"]);
     ASSERT_TRUE(ask_task);
     EXPECT_EQ(ask_task->body["lake_token"], "{{credential}}")
         << "the credential is made when an agent claims the task, and never stored";
@@ -3937,7 +3985,7 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
         "agent_turn",
         {{"agent", "agent-application"}, {"message", "Build a customer health app"}});
     ASSERT_TRUE(delegated.ok) << delegated.error.message;
-    const auto delegated_task = r.store.get_agent_task(delegated.value["task_id"]);
+    const auto delegated_task = r.task(delegated.value["task_id"]);
     ASSERT_TRUE(delegated_task);
     EXPECT_EQ(delegated_task->agent, "agent-application");
     EXPECT_EQ(delegated_task->kind, "app");
@@ -3948,11 +3996,11 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
         {{"agent", "agent-experiments"}, {"message", "Tune the churn pipeline"}});
     ASSERT_TRUE(delegated_experiment.ok) << delegated_experiment.error.message;
     const auto delegated_experiment_task =
-        r.store.get_agent_task(delegated_experiment.value["task_id"]);
+        r.task(delegated_experiment.value["task_id"]);
     ASSERT_TRUE(delegated_experiment_task);
     EXPECT_EQ(delegated_experiment_task->kind, "experiment");
     EXPECT_EQ(r.bus->events("agent-tasks.agent-experiments").size(), 1U);
-    ASSERT_TRUE(r.store.record_agent_task_event(
+    ASSERT_TRUE(r.record_event(
         ask_task->id, "agent-ask-orama", "Succeeded", "", {{"ok", true}, {"reply", "hello"}}));
     EXPECT_FALSE(r.store.context_for(credential)) << "a finished task's credential stops";
     const auto followed = r.call("get_agent_task", {{"task_id", ask_task->id}});
@@ -3962,7 +4010,7 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
 
     const auto built = r.call("agent_turn", {{"agent", "agent-project"}, {"message", "churn"}});
     ASSERT_TRUE(built.ok) << built.error.message;
-    const auto project_task = r.store.get_agent_task(built.value["task_id"]);
+    const auto project_task = r.task(built.value["task_id"]);
     ASSERT_TRUE(project_task);
     EXPECT_EQ(project_task->body["zetta_base_url"],
               "http://lake.internal:4900/w/" + r.w.workspace_id() + "/workspaces/" + r.w.customer_id + "/zetta");
@@ -3981,7 +4029,7 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
         "agent_turn",
         {{"agent", "agent-experiments"}, {"message", "Tune this project"}});
     ASSERT_TRUE(project_delegated.ok) << project_delegated.error.message;
-    EXPECT_EQ(r.store.get_agent_task(project_delegated.value["task_id"])->kind, "experiment");
+    EXPECT_EQ(r.task(project_delegated.value["task_id"])->kind, "experiment");
 
     // A change to an existing pipeline: the agent is handed the graph, and a finished proposal
     // names the pipeline page where it is reviewed (lake#249).
@@ -3995,9 +4043,9 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
                                   {"context", {{"project", "retention"}, {"graph", "churn"}}}});
     ASSERT_TRUE(proposed.ok) << proposed.error.message;
     const std::string proposal_task = proposed.value["task_id"];
-    EXPECT_EQ(r.store.get_agent_task(proposal_task)->body["context"]["pipeline"]["nodes"][0]["id"],
+    EXPECT_EQ(r.task(proposal_task)->body["context"]["pipeline"]["nodes"][0]["id"],
               "pull");
-    ASSERT_TRUE(r.store.set_agent_task_status(
+    ASSERT_TRUE(r.set_task_status(
         proposal_task, "Succeeded", "", "",
         {{"ok", true},
          {"result",
@@ -4015,7 +4063,7 @@ TEST(AgentRuns, AgentTurnReachesLibraryNativeAndPythonAgents) {
     // Auto-Suggest builds the workspace profile itself, with the task's read-only credential.
     const auto suggested = r.call("agent_turn", {{"agent", "agent-autosuggest"}, {"message", "?"}});
     ASSERT_TRUE(suggested.ok) << suggested.error.message;
-    const auto suggest_task = r.store.get_agent_task(suggested.value["task_id"]);
+    const auto suggest_task = r.task(suggested.value["task_id"]);
     EXPECT_FALSE(suggest_task->body.contains("profile")) << "lake reads nothing inside the request";
     EXPECT_EQ(suggest_task->body["zetta_token"], "{{credential}}");
     EXPECT_EQ(std::ranges::find(suggest_task->scopes, "workspace_act"), suggest_task->scopes.end());
@@ -4055,7 +4103,7 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     const auto started =
         r.call("agent_turn", {{"agent", "agent-application"}, {"message", "Build reports"}});
     ASSERT_TRUE(started.ok) << started.error.message;
-    const auto first = r.store.get_agent_task(started.value["task_id"]);
+    const auto first = r.task(started.value["task_id"]);
     ASSERT_TRUE(first);
     EXPECT_EQ(first->kind, "app");
     EXPECT_EQ(first->body["context"], json::object());
@@ -4110,7 +4158,7 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
          {"message", "Confirm and deploy the reviewed proposal."},
          {"context", {{"confirmed_proposal", proposal}}}});
     ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
-    const auto second = r.store.get_agent_task(confirmed.value["task_id"]);
+    const auto second = r.task(confirmed.value["task_id"]);
     ASSERT_TRUE(second);
     EXPECT_EQ(second->body["context"]["confirmed_proposal"], proposal);
     for (const std::string_view capability :
@@ -4141,7 +4189,7 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
          {"message", "Confirm and deploy the reviewed proposal."},
          {"context", {{"confirmed_proposal", proposal}, {"confirm_public", true}}}});
     ASSERT_TRUE(acknowledged.ok) << acknowledged.error.message;
-    const auto third = r.store.get_agent_task(acknowledged.value["task_id"]);
+    const auto third = r.task(acknowledged.value["task_id"]);
     ASSERT_TRUE(third);
     const std::string third_credential =
         "lat." + third->id + ".0011223344556677889900aabbccddee";
@@ -4172,14 +4220,14 @@ TEST(AgentRuns, AConversationFollowUpCarriesThePriorTurn) {
     const auto started =
         r.call("agent_turn", {{"agent", "agent-application"}, {"message", "Build reports"}});
     ASSERT_TRUE(started.ok) << started.error.message;
-    const auto first = r.store.get_agent_task(started.value["task_id"]);
+    const auto first = r.task(started.value["task_id"]);
     ASSERT_TRUE(first);
     ASSERT_FALSE(first->conversation_id.empty());
     const json question{{"ok", true},
                         {"conversation_id", first->conversation_id},
                         {"reply", "Which dataset should the report use?"},
                         {"result", {{"kind", "question"}, {"confirm", false}}}};
-    ASSERT_TRUE(r.store.set_agent_task_status(
+    ASSERT_TRUE(r.set_task_status(
         first->id, "Succeeded", "", "Which dataset should the report use?", question));
 
     const auto followed = r.call(
@@ -4189,7 +4237,7 @@ TEST(AgentRuns, AConversationFollowUpCarriesThePriorTurn) {
          {"message", "Use datasets/accounts."},
          {"conversation_id", first->conversation_id}});
     ASSERT_TRUE(followed.ok) << followed.error.message;
-    const auto second = r.store.get_agent_task(followed.value["task_id"]);
+    const auto second = r.task(followed.value["task_id"]);
     ASSERT_TRUE(second);
     EXPECT_EQ(second->conversation_id, first->conversation_id);
     EXPECT_EQ(second->body["message"], "Use datasets/accounts.");
@@ -4213,14 +4261,14 @@ TEST(AgentRuns, AProjectAgentReplyIncludesTheQuestionAndAnswer) {
          {"message", "Train a churn model"},
          {"context", context}});
     ASSERT_TRUE(started.ok) << started.error.message;
-    const auto first = r.store.get_agent_task(started.value["task_id"]);
+    const auto first = r.task(started.value["task_id"]);
     ASSERT_TRUE(first);
     const json question{{"ok", true},
                         {"result",
                          {{"kind", "question"},
                           {"proposal", nullptr},
                           {"reply", "Which dataset should I use?"}}}};
-    ASSERT_TRUE(r.store.set_agent_task_status(
+    ASSERT_TRUE(r.set_task_status(
         first->id, "Succeeded", "", "Which dataset should I use?", question));
 
     const auto followed = r.call(
@@ -4231,7 +4279,7 @@ TEST(AgentRuns, AProjectAgentReplyIncludesTheQuestionAndAnswer) {
          {"conversation_id", first->conversation_id},
          {"context", context}});
     ASSERT_TRUE(followed.ok) << followed.error.message;
-    const auto second = r.store.get_agent_task(followed.value["task_id"]);
+    const auto second = r.task(followed.value["task_id"]);
     ASSERT_TRUE(second);
     EXPECT_EQ(second->body["prior_turn"]["task_id"], first->id);
     EXPECT_NE(second->body["request"].get<std::string>().find("Which dataset should I use?"),
@@ -4250,7 +4298,7 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
         "agent_turn",
         {{"agent", "agent-experiments"}, {"message", "Tune retention"}});
     ASSERT_TRUE(started.ok) << started.error.message;
-    const auto first = r.store.get_agent_task(started.value["task_id"]);
+    const auto first = r.task(started.value["task_id"]);
     ASSERT_TRUE(first);
     EXPECT_EQ(first->kind, "experiment");
     EXPECT_EQ(first->body["kind"], "experiment");
@@ -4265,7 +4313,7 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
                         {"study", lake::test::experiment_study().at("spec")},
                         {"explanations", {{"objective", "Retention quality"}}},
                         {"confirm", true}};
-    ASSERT_TRUE(r.store.set_agent_task_status(
+    ASSERT_TRUE(r.set_task_status(
         first->id,
         "Succeeded",
         "",
@@ -4284,7 +4332,7 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
          {"message", "Confirm and start the reviewed study proposal."},
          {"context", {{"confirmed_proposal", proposal}}}});
     ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
-    const auto second = r.store.get_agent_task(confirmed.value["task_id"]);
+    const auto second = r.task(confirmed.value["task_id"]);
     ASSERT_TRUE(second);
     EXPECT_NE(std::ranges::find(second->scopes, "workspace_act"), second->scopes.end());
     EXPECT_NE(std::ranges::find(second->scopes, "create_study"), second->scopes.end());
@@ -4320,7 +4368,7 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
          {"message", "Watch study-one"},
          {"context", {{"study", "study-one"}}}});
     ASSERT_TRUE(status.ok) << status.error.message;
-    const auto status_task = r.store.get_agent_task(status.value["task_id"]);
+    const auto status_task = r.task(status.value["task_id"]);
     ASSERT_TRUE(status_task);
     EXPECT_NE(std::ranges::find(status_task->scopes, "stop_trial"),
               status_task->scopes.end());
@@ -4355,7 +4403,7 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
          {"message", "Promote the reviewed best trial."},
          {"context", {{"confirmed_promotion", promotion}}}});
     ASSERT_TRUE(explained.ok) << explained.error.message;
-    const auto explained_task = r.store.get_agent_task(explained.value["task_id"]);
+    const auto explained_task = r.task(explained.value["task_id"]);
     ASSERT_TRUE(explained_task);
     EXPECT_NE(std::ranges::find(explained_task->scopes, "promote_trial"),
               explained_task->scopes.end());
@@ -4414,7 +4462,7 @@ TEST(AgentRuns, AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun) {
                                {"message", "Use tenure_months and failed_payments as features"},
                                {"context", context}});
     ASSERT_TRUE(asked.ok) << asked.error.message;
-    const auto task = r.store.get_agent_task(asked.value["task_id"]);
+    const auto task = r.task(asked.value["task_id"]);
     ASSERT_TRUE(task);
     EXPECT_EQ(task->body["context"]["pipeline"]["name"], "churn");
     EXPECT_NE(std::ranges::find(task->scopes, "workspace_act"), task->scopes.end());
@@ -4428,7 +4476,7 @@ TEST(AgentRuns, AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun) {
     const auto design = r.call("agent_turn",
                                {{"agent", "agent-project"}, {"message", "Design a churn model"}});
     ASSERT_TRUE(design.ok) << design.error.message;
-    const auto design_task = r.store.get_agent_task(design.value["task_id"]);
+    const auto design_task = r.task(design.value["task_id"]);
     ASSERT_TRUE(design_task);
     EXPECT_EQ(std::ranges::find(design_task->scopes, "workspace_act"), design_task->scopes.end());
 
@@ -4516,7 +4564,7 @@ TEST(AgentRuns, AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun) {
                         {"edits", edits},
                         {"run", {{"dataset", "datasets.accounts"}, {"holdout", 0.2}}},
                         {"problems", json::array()}};
-    ASSERT_TRUE(r.store.set_agent_task_status(
+    ASSERT_TRUE(r.set_task_status(
         task->id,
         "Succeeded",
         "",
@@ -4602,7 +4650,7 @@ TEST(AgentRuns, AProjectAgentBuildChecksItsCompileAndThePickIgnoresTheCheckGraph
                                  {"message", "Design the pipeline for the project retention"},
                                  {"context", {{"opportunity", {{"methodology", "M-1"}}}}}});
     ASSERT_TRUE(started.ok) << started.error.message;
-    const auto task = r.store.get_agent_task(started.value["task_id"]);
+    const auto task = r.task(started.value["task_id"]);
     ASSERT_TRUE(task);
     EXPECT_NE(std::ranges::find(task->scopes, "workspace_act"), task->scopes.end());
     EXPECT_NE(std::ranges::find(task->scopes, "compile_intent"), task->scopes.end());
@@ -4650,7 +4698,7 @@ TEST(AgentRuns, AProjectAgentBuildChecksItsCompileAndThePickIgnoresTheCheckGraph
     r.w.caller->answers["get_graph"] = {{"name", "churn skeleton"},
                                         {"nodes", json::array()},
                                         {"edges", json::array()}};
-    ASSERT_TRUE(r.store.set_agent_task_status(
+    ASSERT_TRUE(r.set_task_status(
         task->id,
         "Succeeded",
         "",

@@ -498,9 +498,18 @@ struct NewAgentCronSchedule {
 // One agent turn run in the background (lake#269): lake writes it, publishes it on the agent bus
 // (docs/api/agent-bus.md) and answers the request at once. `phase` is empty until an agent claims
 // it, then Running. Expired leases return to waiting; the third expiry finishes it as Failed.
+// A background agent turn (lake#269, docs/api/agent-bus.md). The control store keeps only its
+// dispatch half: ids, space, workspace, agent, kind, the asking task, scopes, phase, claim, lease
+// and attempts. What a person or an agent wrote for it (the request `body`, the agent's `message`
+// and its `result`) lives in the task's workspace Zetta (lake#374, lake#375,
+// control/agent_task_records.hpp), and the API layer fills those fields in from there. A task the
+// control store answers has an empty `body`, a null `result`, and as `message` only lake's own
+// notice (a retry, or a task nobody picked up), which outranks the agent's message.
 struct AgentTask {
     std::string id, customer_id, agent, kind, conversation_id;
     std::string workspace_id;
+    // The task whose agent asked for this one (lake#451); empty for a person's turn.
+    std::string parent_task_id;
     nlohmann::json body = nlohmann::json::object();
     std::vector<std::string> scopes;
     int deadline_seconds = 300;
@@ -514,6 +523,17 @@ struct AgentTask {
     int attempts = 1;
     std::string lease_until;
     bool retry_notice_pending = false;
+};
+// A task of the retired content columns (agent_tasks.body, agent_task_status.message and
+// result), with its recorded owner (migration 0062): `task` carries its body, message, result and
+// phase as an earlier lake wrote them, and `at_us` its creation instant. `workspace_id` is the
+// live workspace it is copied into, or empty with the reason it is not: `needs_selection` (the
+// task names no workspace) or `workspace_deleted` (its record went with that workspace).
+struct LegacyAgentTask {
+    AgentTask task;
+    std::int64_t at_us = 0;
+    std::string workspace_id;
+    std::string outcome;
 };
 struct AgentTaskStreamScope {
     std::string id, agent, finished_at;
@@ -1220,7 +1240,10 @@ public:
                                                                   const std::string& agent_id,
                                                                   int limit,
                                                                   const std::string& workspace_id = {}) = 0;
-    // Background agent turns (lake#269, docs/api/agent-bus.md).
+    // Background agent turns (lake#269, docs/api/agent-bus.md): the dispatch half only. The
+    // request, messages and answer are records in the task's workspace (lake#374, lake#375).
+    // Creating keeps `id` when the caller made one (lake writes the request record under it
+    // first) and stores nothing of `body`, `message` or `result`.
     virtual Result<AgentTask> create_agent_task(const AgentTask&) = 0;
     virtual Result<AgentTask> get_agent_task(const std::string& id) = 0;
     // A space's newest task of one kind (a project's pipeline build is kind "build:<project>");
@@ -1249,17 +1272,25 @@ public:
     virtual Result<void> mark_agent_task_notice_published(const std::string& id,
                                                           int attempts,
                                                           const std::string& phase) = 0;
-    // What the claiming agent reported: Running with a message, or Succeeded / Failed with its
-    // answer. Refused for a task that agent has not claimed or that already finished.
+    // What the claiming agent reported: Running (renewing its lease), or Succeeded / Failed.
+    // Refused for a task that agent has not claimed or that already finished, so the first
+    // terminal event wins. Clears lake's notice. The message and answer are the caller's to
+    // record in the task's workspace once this accepted the event.
     virtual Result<AgentTask> record_agent_task_event(const std::string& id,
                                                       const std::string& agent,
-                                                      const std::string& phase,
-                                                      const std::string& message,
-                                                      const nlohmann::json& result) = 0;
+                                                      const std::string& phase) = 0;
     // Lake's waiting deadline: fail only an unclaimed task; a concurrent claim is left alone.
-    virtual Result<void> fail_agent_task(const std::string& id, const std::string& message) = 0;
+    // `notice` is lake's own text for it, never what a person or an agent wrote.
+    virtual Result<void> fail_agent_task(const std::string& id, const std::string& notice) = 0;
     virtual Result<void> mark_agent_task_published(const std::string& id) = 0;
     virtual Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) = 0;
+    // The retired content columns of agent_tasks and agent_task_status (lake#374, lake#375), for
+    // the one-shot copy into workspace Zettas only. Assigning records the owner of each task with
+    // content that has none yet in workspace_assignments, as migration 0062 does, for rows an
+    // earlier lake wrote after it; listing pages by task id, oldest id first.
+    virtual Result<void> assign_legacy_agent_tasks() = 0;
+    virtual Result<std::vector<LegacyAgentTask>> legacy_agent_tasks(const std::string& after_id,
+                                                                    int limit) = 0;
     // The retired opportunities table (lake#376), for the one-shot copy into workspace Zettas
     // only. Assigning records each unassigned row's owner in workspace_assignments, as migration
     // 0046 does, for rows written after it; listing pages by id, oldest id first.
