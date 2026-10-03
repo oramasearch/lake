@@ -118,7 +118,10 @@ authentication redirects use `/sign-in`. OpenAPI describes account tokens. The b
 verification are in [front-door.md](../../docs/ui/front-door.md).
 
 Audit query and export schemas accept exact `request_id` and append-order `after_id` filters.
-Their contract and regression coverage are in [audit.md](../../docs/api/audit.md).
+`audit` and `my_audit` return the newest events first, name each principal (`principal_name`) and
+a workspace call's inner `capability`; `my_audit` leaves out successful reads unless
+`include_reads` is set (lake#445). Their contract and regression coverage are in
+[audit.md](../../docs/api/audit.md).
 
 The common request context compares operator bearers in constant time before any session lookup.
 User bearers and cookies use the same indexed PostgreSQL resolver; see `docs/api/auth.md`.

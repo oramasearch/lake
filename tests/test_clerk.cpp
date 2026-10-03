@@ -452,15 +452,15 @@ TEST(Clerk, AccountsSeeTheirOrganizationSectionAndOnlyTheirOwnActivity) {
     auto a_context = as(*a);
     ASSERT_TRUE(registry.call("list_sessions", json::object(), a_context).ok);
     auto a_again = as(*a);
-    const auto mine = registry.call("my_audit", {{"limit", 100}}, a_again);
+    const auto mine = registry.call("my_audit", {{"limit", 100}, {"include_reads", true}}, a_again);
     ASSERT_TRUE(mine.ok) << mine.error.message;
     ASSERT_FALSE(mine.value["items"].empty());
     for (const json& event : mine.value["items"]) {
         EXPECT_EQ(event.value("principal", ""), a->taap_id);
     }
     auto b_context = as(*b);
-    const auto theirs =
-        registry.call("my_audit", {{"principal", a->taap_id}, {"limit", 100}}, b_context);
+    const auto theirs = registry.call(
+        "my_audit", {{"principal", a->taap_id}, {"limit", 100}, {"include_reads", true}}, b_context);
     ASSERT_TRUE(theirs.ok);
     for (const json& event : theirs.value["items"]) {
         EXPECT_EQ(event.value("principal", ""), b->taap_id) << "a principal filter cannot widen it";

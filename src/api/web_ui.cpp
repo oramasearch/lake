@@ -8647,10 +8647,27 @@ std::string web_ui_metering(const nlohmann::json& usage, WebUiViewer viewer) {
     return web_ui_shell("lake — usage", customer_id, content, viewer);
 }
 
+AuditPageView audit_page_view(const nlohmann::json& items, bool include_reads) {
+    AuditPageView view{.include_reads = include_reads};
+    for (const nlohmann::json& item : items) {
+        const std::string id = item.value("id", std::string());
+        if (const auto name = item.find("principal_name");
+            name != item.end() && name->is_string()) {
+            view.principal_names[id] = name->get<std::string>();
+        }
+        if (const auto capability = item.find("capability");
+            capability != item.end() && capability->is_string()) {
+            view.capabilities[id] = capability->get<std::string>();
+        }
+    }
+    return view;
+}
+
 std::string web_ui_audit(const std::vector<audit::Event>& events,
                          const audit::Filter& filter,
                          const nlohmann::json& log_configuration,
-                         WebUiViewer viewer) {
+                         WebUiViewer viewer,
+                         const AuditPageView& view) {
     // /activity is the same view limited to the signed-in person's own events (my_audit).
     const bool own = viewer.path == "/activity";
     std::string content =
@@ -8676,7 +8693,18 @@ std::string web_ui_audit(const std::vector<audit::Event>& events,
         "<label>To<input name=\"to\" value=\"" +
         web_ui_escape(filter.to) +
         "\"></label>"
+        "<label>Order<select name=\"order\"><option value=\"newest\"" +
+        (filter.newest_first ? " selected" : "") +
+        ">Newest first</option><option value=\"oldest\"" + (filter.newest_first ? "" : " selected") +
+        ">Oldest first</option></select></label>" +
+        (own ? std::string("<label><input type=\"checkbox\" name=\"reads\" value=\"all\"") +
+                   (view.include_reads ? " checked" : "") + "> Include reads</label>"
+             : std::string()) +
         "<button type=\"submit\">Filter</button></form>";
+    if (own && !view.include_reads) {
+        content += "<p class=\"sub\">Successful reads, such as the polling this page and the "
+                   "workspace views do, are hidden. Failed and denied reads are shown.</p>";
+    }
     if (!log_configuration.empty()) {
         content += std::format(
             "<div class=\"panel\"><h2>Transparency Log</h2><p class=\"sub\">Effective mode: "
@@ -8695,13 +8723,29 @@ std::string web_ui_audit(const std::vector<audit::Event>& events,
                    "th><th>Action</th>"
                    "<th>Outcome</th><th>Digest</th></tr></thead><tbody>";
         for (const audit::Event& event : events) {
-            content += std::format("<tr><td>{}</td><td><code>{}</code></td><td><code>{}</code></td>"
+            // The principal's name, with the recorded identity kept as its title; a workspace
+            // call shows the capability it called inside the workspace (lake#445).
+            const auto name = view.principal_names.find(event.id);
+            const std::string principal =
+                name != view.principal_names.end() && name->second != event.draft.principal
+                    ? std::format("<span title=\"{}\">{}</span>",
+                                  web_ui_escape(event.draft.principal),
+                                  web_ui_escape(name->second))
+                    : "<code>" + web_ui_escape(event.draft.principal) + "</code>";
+            const auto capability = view.capabilities.find(event.id);
+            const std::string action =
+                capability != view.capabilities.end()
+                    ? std::format("{} <code>{}</code>",
+                                  web_ui_escape(event.draft.action),
+                                  web_ui_escape(capability->second))
+                    : web_ui_escape(event.draft.action);
+            content += std::format("<tr><td>{}</td><td>{}</td><td><code>{}</code></td>"
                                    "<td>{}</td><td>{}</td>"
                                    "<td><code>{}</code></td></tr>",
                                    web_ui_escape(event.occurred_at),
-                                   web_ui_escape(event.draft.principal),
+                                   principal,
                                    web_ui_escape(event.draft.object),
-                                   web_ui_escape(event.draft.action),
+                                   action,
                                    badge_markup(event.draft.outcome),
                                    web_ui_escape(event.digest));
         }

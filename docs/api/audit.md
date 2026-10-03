@@ -99,3 +99,34 @@ principal is forced to the signed-in TAAP identity, and a `principal` filter can
 authorized on the caller's own principal object, so any signed-in account may call it; `audit`
 itself stays instance-wide and operator-only. The `/activity` page (Organization in the sidebar)
 renders it.
+
+## Reading the log as a person (lake#445)
+
+- **Order.** `audit` and `my_audit` return the newest matching events first. `order: "oldest"`
+  returns append order; a query with `after_id` continues in append order unless it names an
+  order. `export_audit`, `verify_audit` and `audit::Filter`'s default keep append order, the
+  order the chain verifies in. `audit::Filter::newest_first` selects the newest-first order in
+  both stores.
+- **Who acted.** Each returned event carries `principal_name`, beside the signed `principal`: the
+  person's display name (else email) or the organization's name for a TAAP identity, a library
+  agent's name for `agent-service:<agent>`, `Lake operator` for `admin`, and a plain description
+  for app, build, share-link and SSO-provider credentials. An identity lake cannot name keeps its
+  recorded form. Agent task, launch and schedule credentials act as the person who started the
+  agent, so the registry records the agent in the event's `details.acting_agent`, and the name
+  reads `Project Agent for Ada Lovelace`. `Store::principal_names` resolves the identities in one
+  query per page.
+- **What a workspace call did.** `workspace_query` and `workspace_act` record their inner
+  capability in `details.capability`, now before any refusal. The query capabilities return it as
+  a top-level `capability`, and the pages show it beside the action (`workspace_act create_agent`).
+- **Polling.** `my_audit` leaves out successful reads unless `include_reads` is true: a read is a
+  capability of kind `read` or one the policy checks as a read, such as `workspace_query`, and the
+  set comes from the registry at call time. Failed and denied reads always appear.
+  `audit::Filter::omit_successful_actions` carries the set to the store. `audit` keeps every event
+  by default; it takes the same `include_reads` input.
+
+`/activity` and `/audit` show the name (the recorded identity is the cell's title), the inner
+capability, and an order selector; `/activity` also has an **Include reads** checkbox
+(`?reads=all`). `tests/test_audit_isolation.cpp`
+(`ActivityIsNewestFirstNamedAndQuiet`, both stores), `tests/test_streams.cpp` (the acting agent of
+a task credential) and `tests/test_web_ui.cpp` (`ActivityPageNamesPrincipalsAndWorkspaceCapabilities`)
+cover it.

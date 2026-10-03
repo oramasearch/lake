@@ -490,6 +490,9 @@ void register_workspace_call(Registry& registry, bool read) {
                 co_return unavailable();
             }
             const std::string capability = input.at("capability");
+            // Name the inner capability in the audit event before any refusal, so a person's
+            // activity says what a refused workspace call tried to do (lake#445).
+            set_audit(context, read ? "workspace.query" : "workspace.act", input, capability);
             if (read ? !workspace_read_allowed(capability)
                      : !workspace_action_allowed(capability)) {
                 co_return ApiResult::failure("invalid_input",
@@ -509,7 +512,6 @@ void register_workspace_call(Registry& registry, bool read) {
                     "this " + (library ? std::string(library->name) : agent_task->agent) +
                         " turn does not grant " + capability);
             }
-            set_audit(context, read ? "workspace.query" : "workspace.act", input, capability);
             if (!read && agent_task && agent_task->agent == "agent-project" &&
                 capability == "compile_intent") {
                 co_return co_await project_agent_compile_check(context, input, *agent_task);

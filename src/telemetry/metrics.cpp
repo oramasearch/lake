@@ -200,6 +200,10 @@ public:
     control::Result<control::User> get_user(const std::string& id) override {
         return call("get_user", [&] { return store_->get_user(id); });
     }
+    control::Result<std::map<std::string, std::string>>
+    principal_names(const std::vector<std::string>& taap_ids) override {
+        return call("principal_names", [&] { return store_->principal_names(taap_ids); });
+    }
     control::Result<control::Organization>
     create_organization(const control::NewOrganization& value) override {
         return call("create_organization", [&] { return store_->create_organization(value); });
