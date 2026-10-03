@@ -38,7 +38,10 @@
 #include <liquid/vfs.hpp>
 
 #include "../temporary_directory.hpp"
+#include "../workspace_fixture.hpp"
+#include "api/workspace_records_api.hpp"
 #include "lake/api/server.hpp"
+#include "lake/control/drive_share_links.hpp"
 #include "lake/control/postgres_store.hpp"
 
 extern char** environ;
@@ -218,6 +221,9 @@ protected:
         options.instance_kek = instance_kek;
         options.store_root = (root_.path() / "lake").string();
         options.store = store_;
+        // Share links live in workspace Zettas (lake#350).
+        workspaces_ = std::make_unique<lake::test::RecordWorkspaces>(store_, database_uri_);
+        options.workspaces = workspaces_->service;
         server_ = std::make_unique<lake::api::ApiServer>(std::move(options));
         ASSERT_TRUE(server_->start()) << server_->reason();
     }
@@ -294,6 +300,7 @@ protected:
     ScenarioRoot root_;
     const char* database_uri_{};
     std::shared_ptr<lake::control::Store> store_;
+    std::unique_ptr<lake::test::RecordWorkspaces> workspaces_;
     std::unique_ptr<lake::api::ApiServer> server_;
 };
 
@@ -301,26 +308,6 @@ std::string response_body(std::string_view response) {
     const std::size_t separator = response.find("\r\n\r\n");
     return separator == std::string_view::npos ? std::string{}
                                                : std::string(response.substr(separator + 4));
-}
-
-std::string share_token_hash(std::string_view token) {
-    constexpr std::string_view key = "lake-drive-share-link/1";
-    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-    unsigned int size = 0;
-    HMAC(EVP_sha256(),
-         key.data(),
-         static_cast<int>(key.size()),
-         reinterpret_cast<const unsigned char*>(token.data()),
-         token.size(),
-         digest.data(),
-         &size);
-    constexpr std::string_view hex = "0123456789abcdef";
-    std::string output;
-    for (unsigned int index = 0; index < size; ++index) {
-        output += hex[digest[index] >> 4];
-        output += hex[digest[index] & 15];
-    }
-    return output;
 }
 
 class SharedLinkScenario : public DriveScenario {
@@ -347,12 +334,14 @@ protected:
                                        {.bearer_token = fixture_.owner.secret, .durable = false}));
         ASSERT_TRUE(client) << client.error().message;
         ASSERT_TRUE(liquid::runtime::block_on(client->sync()));
+        workspace_ = workspaces_->create(fixture_.customer.id, "drive");
         link_ = create_link("read");
         ASSERT_TRUE(link_.contains("token")) << link_.dump();
     }
 
     json create_link(std::string_view role) {
         const json input{{"repository_id", fixture_.repository.id},
+                         {"workspace_id", workspace_},
                          {"ref", "main"},
                          {"path", "shared"},
                          {"role", role},
@@ -397,7 +386,24 @@ protected:
         }
     }
 
+    // The link's folder object, from its synthetic grant (the policy that stays central).
+    std::string link_folder(const std::string& link_id) {
+        const auto grants = store_->list_grants({}, "share-link:" + link_id, 1);
+        EXPECT_TRUE(grants && grants->size() == 1U);
+        return grants && !grants->empty() ? grants->front().object_id : std::string();
+    }
+
+    // The workspace that holds this scenario's links, as lake reaches it.
+    lake::control::ZettaControlResult<lake::control::WorkspaceRecords> records() {
+        lake::api::ApiContext context;
+        context.store = store_.get();
+        context.workspaces = workspaces_->service.get();
+        context.instance_kek = std::string(instance_kek);
+        return lake::api::workspace_records(context, fixture_.customer.id, workspace_);
+    }
+
     ProvisionedRepository fixture_;
+    std::string workspace_;
     json link_;
     std::string binary_;
 };
@@ -467,6 +473,39 @@ TEST_F(SharedLinkScenario, SignedOutRecipientTraversesPreviewsAndDownloadsExactB
     EXPECT_NE(write_role_read.find(" 200 "), std::string::npos) << write_role_read;
 }
 
+TEST_F(SharedLinkScenario, SharingPagesNameTheWorkspaceThatHoldsTheLinks) {
+    const std::string folder =
+        "/drive/share?repository_id=" + fixture_.repository.id + "&ref=main&path=shared";
+    // The space's only workspace becomes an explicit choice in the URL, never a default.
+    const auto chosen = http_request(server_->port(), "GET", folder, {}, bearer(fixture_.owner));
+    ASSERT_NE(chosen.find(" 302 "), std::string::npos) << chosen;
+    EXPECT_NE(chosen.find("workspace_id=" + workspace_), std::string::npos) << chosen;
+    const auto page = http_request(server_->port(), "GET", folder + "&workspace_id=" + workspace_,
+                                   {}, bearer(fixture_.owner));
+    ASSERT_NE(page.find(" 200 "), std::string::npos) << page;
+    EXPECT_NE(page.find("name=\"link_id\" value=\"" + link_.at("id").get<std::string>()),
+              std::string::npos);
+    EXPECT_NE(page.find("name=\"workspace_id\" value=\"" + workspace_ + "\""), std::string::npos);
+    // A second workspace holds none of these links, and the page says which one it shows.
+    const std::string lab = workspaces_->create(fixture_.customer.id, "lab");
+    const auto other = http_request(server_->port(), "GET", folder + "&workspace_id=" + lab, {},
+                                    bearer(fixture_.owner));
+    ASSERT_NE(other.find(" 200 "), std::string::npos) << other;
+    // (Its grant still shows in the folder's access table: policy stays central.)
+    EXPECT_EQ(other.find("name=\"link_id\" value=\"" + link_.at("id").get<std::string>()),
+              std::string::npos);
+    EXPECT_NE(other.find("No links."), std::string::npos);
+    // With two workspaces and none remembered, the page asks.
+    const auto ask = http_request(server_->port(), "GET", folder, {}, bearer(fixture_.owner));
+    ASSERT_NE(ask.find(" 200 "), std::string::npos) << ask;
+    EXPECT_NE(ask.find("Choose the workspace"), std::string::npos);
+    // Someone who cannot share the folder learns nothing about the space's workspaces.
+    const SignedUpUser stranger = sign_up("stranger");
+    const auto refused = http_request(server_->port(), "GET", folder, {}, bearer(stranger));
+    EXPECT_EQ(refused.find("Choose the workspace"), std::string::npos) << refused;
+    EXPECT_EQ(refused.find(" 200 "), std::string::npos) << refused;
+}
+
 TEST_F(SharedLinkScenario, ScopeAndRevocationRefuseEveryRead) {
     for (const std::string path : {"shared-sibling/secret.txt",
                                    "shared-sibling",
@@ -482,7 +521,8 @@ TEST_F(SharedLinkScenario, ScopeAndRevocationRefuseEveryRead) {
     const auto revoked = http_request(server_->port(),
                                       "POST",
                                       "/v1/revoke_drive_share_link",
-                                      json{{"link_id", link_.at("id")}}.dump(),
+                                      json{{"workspace_id", workspace_},
+                                           {"link_id", link_.at("id")}}.dump(),
                                       bearer(fixture_.owner));
     ASSERT_NE(revoked.find(" 200 "), std::string::npos) << revoked;
     expect_refused("shared");
@@ -490,31 +530,38 @@ TEST_F(SharedLinkScenario, ScopeAndRevocationRefuseEveryRead) {
 }
 
 TEST_F(SharedLinkScenario, ExpiryAfterListingStopsPreviewAndDownload) {
-    const auto persisted = store_->get_drive_share_link(link_.at("id"));
-    ASSERT_TRUE(persisted);
-    const std::string expiring_token = lake::control::new_uuid_v4();
     const auto expiry = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()) +
                         std::chrono::hours(1);
-    const auto expiring =
-        store_->create_drive_share_link({fixture_.repository.id,
-                                         persisted->object_id,
-                                         persisted->node_id,
-                                         persisted->path,
-                                         "read",
-                                         share_token_hash(expiring_token),
-                                         std::format("{:%Y-%m-%dT%H:%M:%SZ}", expiry),
-                                         fixture_.owner.taap_id,
-                                         "expiring-link-proof"});
-    ASSERT_TRUE(expiring) << expiring.error().message;
+    const json input{{"repository_id", fixture_.repository.id},
+                     {"workspace_id", workspace_},
+                     {"ref", "main"},
+                     {"path", "shared"},
+                     {"role", "read"},
+                     {"expires_at", std::format("{:%Y-%m-%dT%H:%M:%SZ}", expiry)}};
+    const auto created = http_request(server_->port(), "POST", "/v1/create_drive_share_link",
+                                      input.dump(), bearer(fixture_.owner));
+    ASSERT_NE(created.find(" 200 "), std::string::npos) << created;
+    const json expiring = response_json(created)["value"];
+    const std::string expiring_token = expiring.at("token");
     const auto listing = shared_request("", "shared", expiring_token);
     ASSERT_NE(listing.find(" 200 "), std::string::npos) << listing;
-    // Age only this fixture's row after a successful listing, without a timing race on busy hosts.
-    pqxx::connection connection(database_uri_);
-    pqxx::work transaction(connection);
-    transaction.exec_params("UPDATE drive_share_links SET created_at = now() - interval '2 hours', "
-                            "expires_at = now() - interval '1 hour' WHERE id = $1::uuid",
-                            expiring->id);
-    transaction.commit();
+    // Age only this link's record after a successful listing, without a timing race on busy
+    // hosts: a conditional write in the workspace that holds it.
+    auto held = records();
+    ASSERT_TRUE(held) << held.error().message;
+    const auto aged = lake::control::settled(liquid::runtime::block_on(held->update(
+        lake::control::DriveShareLinkCodec::collection, expiring.at("id"),
+        lake::control::drive_share_link_lookup(fixture_.repository.id,
+                                               link_folder(expiring.at("id"))),
+        [](const std::optional<lake::control::StoredRecord>& current) -> std::optional<json> {
+            if (!current) {
+                return std::nullopt;
+            }
+            json body = current->body;
+            body["expires_at"] = "2020-01-01T00:00:00Z";
+            return body;
+        })));
+    ASSERT_TRUE(aged && *aged) << (aged ? "the link is missing" : aged.error().message);
     expect_refused("shared", expiring_token);
     expect_refused("shared/hello.txt", expiring_token);
 }
@@ -533,11 +580,11 @@ TEST_F(SharedLinkScenario, DescendantPolicyCanRefuseTheLinkWithoutChangingItsRoo
         }
     }
     ASSERT_FALSE(node.empty());
-    const auto root_link = store_->get_drive_share_link(link_.at("id"));
-    ASSERT_TRUE(root_link);
+    const std::string root_object = link_folder(link_.at("id"));
+    ASSERT_FALSE(root_object.empty());
     ASSERT_TRUE(store_->create_policy_object({"path",
                                               fixture_.repository.id + ":" + node,
-                                              root_link->object_id,
+                                              root_object,
                                               fixture_.owner.taap_id,
                                               "restricted-child-proof",
                                               false}));

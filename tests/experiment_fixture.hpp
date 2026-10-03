@@ -199,8 +199,8 @@ public:
 
     liquid::runtime::task<control::ZettaControlResult<json>> call(std::string url,
         std::string token, std::string capability, bool read, json input) override {
-        // Streams, and the workspace records that hold their creators (lake#379), go to the
-        // fallback caller.
+        // Streams, and the workspace records that hold their creators (lake#379) and drive share
+        // links (lake#350), go to the fallback caller.
         if (fallback && (capability.find("topic") != std::string::npos ||
             capability == "publish_event" || capability == "update_event" || capability == "delete_events" ||
             RecordTables::handles(capability, input))) {

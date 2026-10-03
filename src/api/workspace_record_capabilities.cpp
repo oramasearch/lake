@@ -1,7 +1,8 @@
 // The one-shot copy of a retired control-store table into the owning workspace Zettas
 // (docs/architecture/workspace-records.md, lake#370). One operator capability serves every
 // collection that moves: each follow-up adds its collection to `copy_collections` and a copier
-// (ask_messages, lake#370; opportunities, lake#376; stream_owners, lake#379).
+// (ask_messages, lake#370; opportunities, lake#376; stream_owners, lake#379;
+// drive_share_links, lake#350).
 
 #include <algorithm>
 #include <array>
@@ -12,6 +13,7 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/control/ask_messages.hpp"
+#include "lake/control/drive_share_links.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/stream_owners.hpp"
@@ -22,8 +24,8 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 3> copy_collections = {"ask_messages", "opportunities",
-                                                             "stream_owners"};
+constexpr std::array<std::string_view, 4> copy_collections = {"ask_messages", "opportunities",
+                                                             "stream_owners", "drive_share_links"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -413,6 +415,93 @@ liquid::runtime::task<ApiResult> copy_stream_owners(ApiContext& context, const s
     co_return ApiResult::success(std::move(value));
 }
 
+bool same_link(const control::DriveShareLink& stored, const control::DriveShareLink& source) {
+    return stored.repository_id == source.repository_id && stored.object_id == source.object_id &&
+           stored.node_id == source.node_id && stored.path == source.path &&
+           stored.role == source.role && stored.token_hash == source.token_hash &&
+           stored.expires_at == source.expires_at && stored.revoked_at == source.revoked_at &&
+           stored.created_by_taap_id == source.created_by_taap_id && stored.at_us == source.at_us;
+}
+
+// One page of drive_share_links (lake#350): assignments and routes first, then per workspace one
+// keyed read per link and the missing appends. Each copy keeps the row's id, so the link's
+// `share-link:<id>` grant and its route keep naming it.
+liquid::runtime::task<ApiResult> copy_drive_share_links(ApiContext& context,
+                                                        const std::string& mode,
+                                                        const std::string& after, int limit) {
+    if (auto assigned = context.store->assign_legacy_drive_share_links(); !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_drive_share_links(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    json unresolved = json::array();
+    std::map<std::string, std::vector<const control::LegacyDriveShareLink*>> by_workspace;
+    for (const control::LegacyDriveShareLink& row : *rows) {
+        if (row.workspace_id.empty()) {
+            unresolved.push_back({{"id", row.link.id},
+                                  {"customer_id", row.customer_id},
+                                  {"outcome", row.outcome}});
+        } else {
+            by_workspace[row.workspace_id].push_back(&row);
+        }
+    }
+    const auto collection = control::DriveShareLinkCodec::collection;
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, owned] : by_workspace) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = owned.front()->customer_id;
+        tally.rows = owned.size();
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        control::DriveShareLinks links(*records);
+        for (const control::LegacyDriveShareLink* row : owned) {
+            auto present = control::settled(co_await records->get(collection, row->link.id));
+            if (!present) {
+                tally.error = present.error().code + ": " + present.error().message;
+                break;
+            }
+            const auto stored =
+                *present ? control::DriveShareLinkCodec::decode(**present) : std::nullopt;
+            if (mode == "verify") {
+                if (!stored) {
+                    tally.missing.push_back(row->link.id);
+                } else if (!same_link(*stored, row->link)) {
+                    tally.mismatched.push_back(row->link.id);
+                } else {
+                    ++tally.verified;
+                }
+                continue;
+            }
+            if (*present) {
+                ++tally.already_present;
+                continue;
+            }
+            auto appended = control::settled(co_await links.append(
+                row->link, control::RecordWrite{row->link.id, row->link.at_us}));
+            if (!appended && appended.error().code == "conflict") {
+                ++tally.already_present; // a concurrent copy; verify compares it
+                continue;
+            }
+            if (!appended) {
+                tally.error = appended.error().code + ": " + appended.error().message;
+                break;
+            }
+            ++tally.copied;
+        }
+    }
+    co_return copy_result("drive_share_links", mode, rows->size(), limit,
+                          rows->empty() ? std::string() : rows->back().link.id,
+                          std::move(unresolved), tallies);
+}
+
 // Only the operator copies, and the operator bypasses policy; anyone else is refused here, before
 // a policy lookup on an object no grant can name.
 std::expected<std::string, ApiError> records_object(const json&, ApiContext&) {
@@ -470,6 +559,9 @@ void register_workspace_record_capabilities(Registry& registry) {
             const int limit = input.value("limit", 1000);
             if (input.at("collection") == "opportunities") {
                 co_return co_await copy_opportunities(context, mode, after, limit);
+            }
+            if (input.at("collection") == "drive_share_links") {
+                co_return co_await copy_drive_share_links(context, mode, after, limit);
             }
             if (input.at("collection") == "stream_owners") {
                 co_return co_await copy_stream_owners(context, mode, after, limit);

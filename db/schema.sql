@@ -2377,3 +2377,56 @@ CREATE TABLE IF NOT EXISTS stream_owner_workspaces_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0047_stream_owner_workspaces')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0048_drive_share_link_workspaces: drive share links live in the workspace Zetta that holds them
+-- (lake#350, docs/api/sharing.md, docs/architecture/workspace-records.md). A new link's token
+-- names its workspace and record, so resolving it needs no central lookup. Lake no longer writes
+-- or reads drive_share_links; the operator's one-shot copy (copy_workspace_records) moves each row
+-- into its workspace and verifies it. This migration records each row's owner (the only live
+-- workspace of the repository's space; otherwise needs_selection) and, for each assigned row, a
+-- content-free route from the token digest a pre-move token presents to the workspace and record
+-- key. The route holds no path, role, expiry or creator, and outlives the later migration that
+-- drops drive_share_links. Nothing is dropped here.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS drive_share_link_routes (
+    token_hash   text        PRIMARY KEY,
+    link_id      uuid        NOT NULL UNIQUE,
+    workspace_id uuid        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    recorded_at  timestamptz NOT NULL DEFAULT now()
+);
+
+DO $$
+DECLARE
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations
+                   WHERE version = '0048_drive_share_link_workspaces') THEN
+        INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, outcome)
+            SELECT 'drive_share_links', l.id, r.customer_id, w.id,
+                   CASE WHEN w.id IS NULL THEN 'needs_selection' ELSE 'sole_workspace' END
+            FROM drive_share_links l JOIN repositories r ON r.id = l.repository_id
+                 LEFT JOIN workspaces w ON w.customer_id = r.customer_id
+                 AND w.desired <> 'deleted'
+                 AND (SELECT count(*) FROM workspaces w2 WHERE w2.customer_id = r.customer_id
+                      AND w2.desired <> 'deleted') = 1
+            ON CONFLICT DO NOTHING;
+        INSERT INTO drive_share_link_routes (token_hash, link_id, workspace_id)
+            SELECT l.token_hash, l.id, a.workspace_id
+            FROM drive_share_links l JOIN workspace_assignments a
+                 ON a.object_table = 'drive_share_links' AND a.object_id = l.id
+            WHERE a.workspace_id IS NOT NULL
+            ON CONFLICT (token_hash) DO UPDATE SET workspace_id = EXCLUDED.workspace_id;
+        FOR unresolved IN SELECT * FROM workspace_assignments
+                           WHERE workspace_id IS NULL AND object_table = 'drive_share_links' LOOP
+            RAISE WARNING 'workspace_id requires selection: table=%, object=%, customer=%',
+                unresolved.object_table, unresolved.object_id, unresolved.customer_id;
+        END LOOP;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS drive_share_link_workspaces_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0048_drive_share_link_workspaces')
+    ON CONFLICT DO NOTHING;

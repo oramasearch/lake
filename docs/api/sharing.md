@@ -18,11 +18,47 @@ that result directly, so its answers match `authorize` rather than duplicating r
 
 ## Links
 
-`create_drive_share_link` requires a folder, `read` or `write` role, and future RFC 3339 expiry.
-Lake returns the bearer token once and persists only its HMAC-SHA-256 digest. The durable
-`drive_share_links` row identifies the repository, folder object, stable node id, path, role,
-expiry, creator, and revocation. A synthetic `share-link:<id>` grant makes the policy engine the
-authority for link scope and role.
+`create_drive_share_link` requires a folder, `workspace_id`, `read` or `write` role, and future
+RFC 3339 expiry. Lake returns the bearer token once and keeps only its HMAC-SHA-256 digest. A
+synthetic `share-link:<id>` grant makes the policy engine the authority for link scope and role.
+
+### Where links live
+
+A link lives in the workspace Zetta of the workspace that holds it (lake#350), as one sealed record
+of that Zetta's `lake_drive_share_links` collection
+([workspace records](../architecture/workspace-records.md)). The record holds the repository,
+folder object, stable node id, path, role, token digest, expiry, creator and revocation. The
+workspace is chosen by the caller and never by default: `workspace_id` must name a live workspace
+of the repository's space, or the call is `invalid_input` at `/workspace_id`. Ownership is
+immutable. The record is sealed to its workspace and key, so a copy in another workspace does not
+open, and a link can only be revoked or listed through the workspace that holds it.
+
+| Capability | Workspace |
+|---|---|
+| `create_drive_share_link` | `workspace_id` (required) |
+| `drive_effective_access` | `workspace_id` (required): lists that workspace's links on the folder |
+| `revoke_drive_share_link` | `workspace_id` and `link_id` (both required); `not_found` at `/link_id` in any other workspace |
+| `resolve_drive_share_link`, `preview_drive_share_link`, `download_drive_share_link` | The bearer token's |
+
+A recipient may not be signed in and may hold only the token, so the token routes itself: it is
+`<workspace id>.<link id>.<secret>`. Resolving it reads the workspace's row in the multitenancy
+tables (which space owns it, and whether it is live), then reads the one record by key from that
+workspace's Zetta, and compares the token's digest with the sealed one in constant time. No central
+lookup is needed, and none holds link content. A token that names another workspace or link, or
+has another secret, is `not_found` at `/token` without saying which.
+
+Lake's PostgreSQL keeps only:
+
+- the `share-link:<id>` grant (policy, which stays central);
+- `drive_share_link_routes`, the dispatch entry of a token issued before lake#350. Those tokens do
+  not name their workspace. Each route holds the token digest, link id and workspace id, and no
+  path, role, expiry or creator. Migration `0048_drive_share_link_workspaces` and the copy write
+  it for each link whose workspace is known. A route is removed with its workspace;
+- the retired `drive_share_links` table, read only by the operator's one-shot copy until a later
+  migration drops it.
+
+A workspace that is not ready answers `workspace_not_ready` instead of falling back anywhere.
+Deleting a workspace deletes its Zetta and the links in it; their tokens then answer `not_found`.
 
 All recipient reads are public registry capabilities. They accept the bearer `token` and a `ref`;
 they require no session and create no repository or personal grant. An existing signed-in or
@@ -40,9 +76,9 @@ Decoding the download's base64 produces byte-identical content, including empty 
 and non-UTF-8 bytes. Browser routes render these results and offer an attachment download; they
 never obtain an independent repository credential.
 
-Drive-link rows render expiry in canonical UTC with microseconds, independent of the Postgres
-server timezone; active-link comparisons normalize optional fractions to the same precision.
-Every read looks up the durable link, checks expiry and revocation, requires a `read` or `write`
+Expiry is kept as given at creation (a copied link keeps PostgreSQL's canonical UTC with
+microseconds); active-link comparisons normalize optional fractions to the same precision.
+Every read looks up the link in its workspace, checks expiry and revocation, requires a `read` or `write`
 link role, and authorizes the synthetic principal with the policy engine. It resolves the shared
 root from its stable node at the requested ref, then requires the requested path to be that root
 or a descendant separated by `/`. It authorizes the nearest path policy object within the shared
@@ -78,8 +114,13 @@ effective-access agreement with `authorize`, a recipient's shared-with-me result
 resolution after a stable-node move, registry previews/downloads, OpenAPI/MCP discovery, MCP byte
 delivery, scope refusals even with an operator context, revocation, and expiry.
 `Drive.ShareDownloadsEncodeAcrossBlockBoundaries` checks binary bytes and padding across the
-base64 encoder block boundary. `PostgresCapabilities.DriveShareLinksRoundTrip` covers durable
-create, UTC expiry, lookup, list, and revoke.
+base64 encoder block boundary. `Drive.ShareLinksLiveOnlyInTheWorkspaceThatHoldsThem` covers two
+spaces with two workspaces each: the record only at its workspace's endpoint and sealed, missing,
+malformed, unknown and foreign `workspace_id`, least-privilege callers, forged tokens and a sealed
+record moved to another workspace, a workspace that is not ready, revocation and its conflict, and
+workspace deletion. `PostgresDriveShareLinks.MigrationRecordsOwnersAndContentFreeRoutes` covers
+migration `0048`, and `Stores/WorkspaceRecordStores.TheOneShotCopyMovesDriveShareLinksAndRoutesTheirTokens`
+the copy over both stores.
 
 `SharedLinkScenario.*` runs the real Postgres-backed customer path: a regular user's private
 repository, signed-out descendant traversal and preview, exact text/binary/empty downloads,

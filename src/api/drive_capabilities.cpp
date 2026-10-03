@@ -11,12 +11,16 @@
 #include <string_view>
 #include <vector>
 
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 
 #include "lake/api/drive.hpp"
+#include "lake/control/drive_share_links.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
+#include "lake/control/workspace_records.hpp"
+#include "workspace_records_api.hpp"
 
 namespace lake::api {
 namespace {
@@ -182,29 +186,78 @@ std::expected<std::string, ApiError> drive_history_object(const json& input, Api
     return location->object.id;
 }
 
-std::expected<std::string, ApiError> link_object(const json& input, ApiContext& context) {
+// A link's folder, from its synthetic `share-link:<id>` grant: the policy that stays central
+// (lake#350). The link's own record lives in its workspace Zetta.
+std::expected<std::string, ApiError>
+share_link_grant_object(const std::string& link_id, ApiContext& context, std::string field) {
     if (!context.store) {
         return std::unexpected(
             ApiError{"store_unavailable", "no control-plane store is configured", {}});
     }
-    const auto link = context.store->get_drive_share_link(input.at("link_id"));
-    if (!link) {
-        return std::unexpected(ApiError{link.error().code, link.error().message, "/link_id"});
+    const auto grants = context.store->list_grants({}, "share-link:" + link_id, 1);
+    if (!grants) {
+        return std::unexpected(ApiError{grants.error().code, grants.error().message, {}});
     }
-    return link->object_id;
+    if (grants->empty()) {
+        return std::unexpected(
+            ApiError{"not_found", "no drive share link " + link_id, std::move(field)});
+    }
+    return grants->front().object_id;
+}
+
+std::expected<std::string, ApiError> link_object(const json& input, ApiContext& context) {
+    return share_link_grant_object(input.at("link_id"), context, "/link_id");
+}
+
+// Where a bearer token's link lives. A token made since lake#350 names its workspace and record;
+// an earlier token is routed by its digest through the content-free drive_share_link_routes.
+std::expected<control::DriveShareToken, ApiError> share_token_route(const std::string& token,
+                                                                    ApiContext& context) {
+    if (auto routed = control::parse_drive_share_token(token)) {
+        return *routed;
+    }
+    if (!context.store) {
+        return std::unexpected(
+            ApiError{"store_unavailable", "no control-plane store is configured", {}});
+    }
+    const auto route = context.store->drive_share_link_route(token_hash(token));
+    if (!route) {
+        return std::unexpected(ApiError{route.error().code, route.error().message, "/token"});
+    }
+    return control::DriveShareToken{route->workspace_id, route->link_id};
 }
 
 std::expected<std::string, ApiError> share_token_object(const json& input, ApiContext& context) {
+    const auto route = share_token_route(input.at("token"), context);
+    if (!route) {
+        return std::unexpected(route.error());
+    }
+    return share_link_grant_object(route->link_id, context, "/token");
+}
+
+ApiError records_error(const control::ZettaControlError& error, std::string path = {}) {
+    return ApiError{error.code, error.message, error.path.empty() ? std::move(path) : error.path};
+}
+
+// The live workspace that holds links, in `customer_id`'s space when one is given. Never a
+// default: the caller names it, or the bearer token does.
+std::expected<control::Workspace, ApiError> share_link_workspace(ApiContext& context,
+                                                                 const std::string& workspace_id,
+                                                                 const std::string& customer_id,
+                                                                 std::string field) {
     if (!context.store) {
         return std::unexpected(
             ApiError{"store_unavailable", "no control-plane store is configured", {}});
     }
-    const auto link = context.store->get_drive_share_link_by_token_hash(
-        token_hash(input.at("token").get<std::string>()));
-    if (!link) {
-        return std::unexpected(ApiError{link.error().code, link.error().message, "/token"});
+    const auto workspace = context.store->get_workspace(workspace_id);
+    if (!workspace || workspace->desired == "deleted" ||
+        (!customer_id.empty() && workspace->customer_id != customer_id)) {
+        return std::unexpected(ApiError{
+            "invalid_input",
+            "workspace_id must name a workspace Zetta in the repository's space",
+            std::move(field)});
     }
-    return link->object_id;
+    return *workspace;
 }
 
 std::vector<RepositoryTreeEntry> folder_children(const std::vector<RepositoryTreeEntry>& entries,
@@ -454,8 +507,11 @@ std::string token_hash(std::string_view token) {
     return output;
 }
 
-std::string new_link_token() {
-    return control::new_uuid_v4() + control::new_uuid_v4();
+// 244 random bits, as before lake#350; the token wraps it with the workspace and link ids.
+std::string new_link_secret() {
+    std::string secret = control::new_uuid_v4() + control::new_uuid_v4();
+    std::erase(secret, '-');
+    return secret;
 }
 
 bool link_is_active(const control::DriveShareLink& link) {
@@ -521,25 +577,65 @@ struct SharedDriveTarget {
     std::vector<RepositoryTreeEntry> entries;
 };
 
-std::expected<control::DriveShareLink, ApiError> active_share_link(const json& input,
-                                                                   ApiContext& context) {
+bool same_digest(std::string_view left, std::string_view right) {
+    return left.size() == right.size() &&
+           CRYPTO_memcmp(left.data(), right.data(), left.size()) == 0;
+}
+
+template <class T> using DriveTask = liquid::runtime::task<std::expected<T, ApiError>>;
+
+// Flattens a finished drive task: a runtime failure is a store error.
+template <class T>
+std::expected<T, ApiError> drive_settled(std::expected<std::expected<T, ApiError>, liquid::error> completed) {
+    if (!completed) {
+        return std::unexpected(ApiError{"store_error", completed.error().message, {}});
+    }
+    return std::move(*completed);
+}
+
+// The link a bearer token opens, read from the workspace Zetta that holds it (lake#350). The
+// token routes to the workspace and record; its digest must match the one sealed in the record.
+// Any token that does not open a record is `not_found` without saying why.
+DriveTask<control::DriveShareLink> active_share_link(const json& input, ApiContext& context) {
+    using Result = std::expected<control::DriveShareLink, ApiError>;
     context.sync_response.clear();
     if (!context.store || !context.sync_store) {
-        return std::unexpected(
-            ApiError{"store_unavailable", "drive stores are not configured", {}});
+        co_return Result(std::unexpected(
+            ApiError{"store_unavailable", "drive stores are not configured", {}}));
     }
-    const auto link = context.store->get_drive_share_link_by_token_hash(
-        token_hash(input.at("token").get<std::string>()));
-    if (!link) {
-        return std::unexpected(ApiError{link.error().code, link.error().message, "/token"});
+    const std::string token = input.at("token");
+    const ApiError unknown{"not_found", "share link is not recognized", "/token"};
+    const auto route = share_token_route(token, context);
+    if (!route) {
+        co_return Result(std::unexpected(route.error().code == "not_found" ? unknown
+                                                                            : route.error()));
+    }
+    const auto workspace = context.store->get_workspace(route->workspace_id);
+    if (!workspace || workspace->desired == "deleted") {
+        co_return Result(std::unexpected(unknown));
+    }
+    auto records = workspace_records(context, workspace->customer_id, workspace->id);
+    if (!records) {
+        co_return Result(std::unexpected(records_error(records.error())));
+    }
+    auto stored = control::settled(
+        co_await records->get(control::DriveShareLinkCodec::collection, route->link_id));
+    if (!stored) {
+        co_return Result(std::unexpected(records_error(stored.error())));
+    }
+    const auto link = *stored ? control::DriveShareLinkCodec::decode(**stored) : std::nullopt;
+    if (!link || !same_digest(link->token_hash, token_hash(token))) {
+        co_return Result(std::unexpected(unknown));
     }
     context.acting_identity = "share-link:" + link->id;
-    context.audit_details = {{"link_id", link->id}};
+    context.audit_details = {{"link_id", link->id}, {"workspace_id", workspace->id}};
     if (!link_is_active(*link)) {
-        return std::unexpected(ApiError{"unauthorized", "share link is expired or revoked", {}});
+        co_return Result(std::unexpected(
+            ApiError{"unauthorized", "share link is expired or revoked", {}}));
     }
     if (link->role != "read" && link->role != "write") {
-        return std::unexpected(ApiError{"unauthorized", "share link does not allow reads", {}});
+        co_return Result(std::unexpected(
+            ApiError{"unauthorized", "share link does not allow reads", {}}));
     }
     // A reused caller context must not retain policy from a previous link operation.
     context.authorization_cache = {};
@@ -549,12 +645,14 @@ std::expected<control::DriveShareLink, ApiError> active_share_link(const json& i
                                              "read",
                                              context.authorization_cache);
     if (!decision) {
-        return std::unexpected(ApiError{decision.error().code, decision.error().message, {}});
+        co_return Result(std::unexpected(
+            ApiError{decision.error().code, decision.error().message, {}}));
     }
     if (!decision->allowed) {
-        return std::unexpected(ApiError{"unauthorized", "share link does not allow reads", {}});
+        co_return Result(std::unexpected(
+            ApiError{"unauthorized", "share link does not allow reads", {}}));
     }
-    return *link;
+    co_return Result(*link);
 }
 
 std::expected<control::PolicyObject, ApiError>
@@ -596,12 +694,8 @@ shared_path_object(const control::DriveShareLink& link,
     return std::unexpected(ApiError{"unauthorized", "share link scope is unavailable", "/path"});
 }
 
-std::expected<SharedDriveTarget, ApiError> shared_drive_target(const json& input,
-                                                               ApiContext& context) {
-    const auto link = active_share_link(input, context);
-    if (!link) {
-        return std::unexpected(link.error());
-    }
+std::expected<SharedDriveTarget, ApiError>
+shared_drive_target(const json& input, ApiContext& context, const control::DriveShareLink* link) {
     control::Repository repository;
     auto entries = repository_tree(
         {{"repository_id", link->repository_id}, {"ref", input.at("ref")}}, context, repository);
@@ -632,8 +726,23 @@ std::expected<SharedDriveTarget, ApiError> shared_drive_target(const json& input
         {repository, *object, entry->node_id, path}, root_path, *entry, std::move(*entries)};
 }
 
-ApiResult shared_file_result(const json& input, ApiContext& context, bool download) {
-    const auto shared = shared_drive_target(input, context);
+// The folder a bearer token opens at the requested ref and path, after the link's checks.
+liquid::runtime::task<ApiResult> shared_target(const json& input, ApiContext& context,
+                                               std::expected<SharedDriveTarget, ApiError>& out) {
+    const auto link = drive_settled(co_await active_share_link(input, context));
+    if (!link) {
+        out = std::unexpected(link.error());
+        co_return ApiResult::failure(link.error().code, link.error().message, link.error().path);
+    }
+    out = shared_drive_target(input, context, &*link);
+    if (!out) {
+        co_return ApiResult::failure(out.error().code, out.error().message, out.error().path);
+    }
+    co_return ApiResult::success(nullptr);
+}
+
+ApiResult shared_file_result(const json& input, ApiContext& context, bool download,
+                             const std::expected<SharedDriveTarget, ApiError>& shared) {
     if (!shared) {
         return ApiResult::failure(shared.error().code, shared.error().message, shared.error().path);
     }
@@ -721,6 +830,18 @@ json shared_file_output_schema(bool download) {
     return {{"type", "object"},
             {"properties", std::move(properties)},
             {"required", std::move(required)},
+            {"additionalProperties", false}};
+}
+
+// A folder and the workspace that holds its links.
+json share_links_input_schema() {
+    return {{"type", "object"},
+            {"properties",
+             {{"repository_id", {{"type", "string"}}},
+              {"workspace_id", {{"type", "string"}}},
+              {"ref", {{"type", "string"}}},
+              {"path", {{"type", "string"}}}}},
+            {"required", json::array({"repository_id", "workspace_id", "ref", "path"})},
             {"additionalProperties", false}};
 }
 
@@ -1414,44 +1535,62 @@ void register_drive_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "drive_effective_access",
         .title = "Drive effective access",
-        .description = "Show every direct and inherited role plus active and expired share links.",
-        .input_schema = drive_input_schema(true),
+        .description = "Show every direct and inherited role plus the folder's active and expired "
+                       "share links held in one workspace (`workspace_id`, a workspace of the "
+                       "repository's space).",
+        .input_schema = share_links_input_schema(),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
         .object = "drive folder",
         .action = "share",
         .resolve_object = drive_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             const auto location = nearest_drive_location(input, context);
             if (!location) {
-                return ApiResult::failure(
+                co_return ApiResult::failure(
                     location.error().code, location.error().message, location.error().path);
+            }
+            const auto workspace = share_link_workspace(
+                context, input.at("workspace_id"), location->repository.customer_id,
+                "/workspace_id");
+            if (!workspace) {
+                co_return ApiResult::failure(
+                    workspace.error().code, workspace.error().message, workspace.error().path);
             }
             const auto access = control::effective_access(
                 *context.store, location->object.id, context.authorization_cache);
             if (!access) {
-                return store_error(access.error());
+                co_return store_error(access.error());
             }
-            const auto links = context.store->list_drive_share_links(
-                location->repository.id, location->object.id, 1000);
+            auto records = workspace_records(context, workspace->customer_id, workspace->id);
+            if (!records) {
+                co_return ApiResult::failure(records.error().code, records.error().message);
+            }
+            control::DriveShareLinks held(*records);
+            const auto links = control::settled(co_await held.list(
+                control::drive_share_link_lookup(location->repository.id, location->object.id),
+                1000));
             if (!links) {
-                return store_error(links.error());
+                co_return ApiResult::failure(links.error().code, links.error().message);
             }
             json access_items = json::array();
             for (const control::EffectiveAccessEntry& entry : *access) {
                 access_items.push_back(control::to_json(entry));
             }
             json link_items = json::array();
-            for (const control::DriveShareLink& link : *links) {
-                json value = control::to_json(link);
-                value["active"] = link_is_active(link);
+            for (auto link = links->rbegin(); link != links->rend(); ++link) {
+                json value = control::to_json(*link);
+                value["workspace_id"] = workspace->id;
+                value["active"] = link_is_active(*link);
                 value["delivery"] = "link";
                 link_items.push_back(std::move(value));
             }
-            return ApiResult::success(
+            co_return ApiResult::success(
                 {{"repository", control::to_json(location->repository)},
                  {"object", control::to_json(location->object)},
                  {"path", location->path},
+                 {"workspace_id", workspace->id},
                  {"items", std::move(access_items)},
                  {"links", std::move(link_items)},
                  {"delivery_choices",
@@ -1547,61 +1686,94 @@ void register_drive_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_drive_share_link",
         .title = "Create drive share link",
-        .description = "Create a folder-scoped link with an explicit role and expiry.",
+        .description = "Create a folder-scoped link with an explicit role and expiry. The link is "
+                       "held in the workspace Zetta of `workspace_id`, a workspace of the "
+                       "repository's space; its bearer token names that workspace.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"repository_id", {{"type", "string"}}},
+                           {"workspace_id", {{"type", "string"}}},
                            {"ref", {{"type", "string"}}},
                            {"path", {{"type", "string"}}},
                            {"role", {{"type", "string"}, {"enum", json::array({"read", "write"})}}},
                            {"expires_at", {{"type", "string"}}}}},
                          {"required",
-                          json::array({"repository_id", "ref", "path", "role", "expires_at"})},
+                          json::array({"repository_id", "workspace_id", "ref", "path", "role",
+                                       "expires_at"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "drive folder",
         .action = "share",
         .resolve_object = drive_object,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             const std::string expires_at = input.at("expires_at");
             if (expires_at <= control::now_iso8601()) {
-                return ApiResult::failure(
+                co_return ApiResult::failure(
                     "invalid_input", "expires_at must be in the future", "/expires_at");
             }
             const auto location = ensure_folder_location(input, context);
             if (!location) {
-                return ApiResult::failure(
+                co_return ApiResult::failure(
                     location.error().code, location.error().message, location.error().path);
             }
-            const std::string token = new_link_token();
-            const auto link = context.store->create_drive_share_link(
-                control::NewDriveShareLink{location->repository.id,
-                                           location->object.id,
-                                           location->node_id,
-                                           location->path,
-                                           input.at("role"),
-                                           token_hash(token),
-                                           expires_at,
-                                           context.acting_identity,
-                                           context.request_id});
-            if (!link) {
-                return store_error(link.error());
+            const auto workspace = share_link_workspace(
+                context, input.at("workspace_id"), location->repository.customer_id,
+                "/workspace_id");
+            if (!workspace) {
+                co_return ApiResult::failure(
+                    workspace.error().code, workspace.error().message, workspace.error().path);
+            }
+            auto records = workspace_records(context, workspace->customer_id, workspace->id);
+            if (!records) {
+                co_return ApiResult::failure(records.error().code, records.error().message);
+            }
+            const std::string id = control::new_uuid_v4();
+            const std::string token = control::drive_share_token(workspace->id, id, new_link_secret());
+            control::DriveShareLink link;
+            link.id = id;
+            link.repository_id = location->repository.id;
+            link.object_id = location->object.id;
+            link.node_id = location->node_id;
+            link.path = location->path;
+            link.role = input.at("role");
+            link.token_hash = token_hash(token);
+            link.expires_at = expires_at;
+            link.created_by_taap_id = context.acting_identity;
+            control::DriveShareLinks held(*records);
+            const auto stored =
+                control::settled(co_await held.append(link, control::RecordWrite{id, 0}));
+            if (!stored) {
+                co_return ApiResult::failure(stored.error().code, stored.error().message);
+            }
+            // The policy engine stays the authority for the link's scope and role.
+            const auto grant = context.store->create_grant({"share-link:" + id,
+                                                            link.object_id,
+                                                            link.role,
+                                                            "drive_share_link/" + id,
+                                                            context.acting_identity,
+                                                            context.request_id});
+            if (!grant) {
+                co_await records->remove(control::DriveShareLinkCodec::collection, id);
+                co_return store_error(grant.error());
             }
             context.audit_customer_id = location->repository.customer_id;
             context.audit_kind = "drive.share_link.created";
             context.audit_object =
                 "repository/" + location->repository.id + "/path/" + location->path;
-            context.audit_details = {{"link_id", link->id},
-                                     {"node_id", link->node_id},
-                                     {"path", link->path},
-                                     {"role", link->role},
-                                     {"expires_at", link->expires_at}};
-            json output = control::to_json(*link);
+            context.audit_details = {{"link_id", stored->id},
+                                     {"workspace_id", workspace->id},
+                                     {"node_id", stored->node_id},
+                                     {"path", stored->path},
+                                     {"role", stored->role},
+                                     {"expires_at", stored->expires_at}};
+            json output = control::to_json(*stored);
+            output["workspace_id"] = workspace->id;
             output["delivery"] = "link";
             output["url"] = "/share/" + token;
             output["token"] = token;
-            return ApiResult::success(std::move(output));
+            co_return ApiResult::success(std::move(output));
         }});
 
     registry.add(Capability{
@@ -1615,76 +1787,143 @@ void register_drive_capabilities(Registry& registry) {
         .object = "drive share link",
         .action = "read",
         .resolve_object = share_token_object,
-        .handler = [](const json& input, ApiContext& context) {
-            const auto shared = shared_drive_target(input, context);
-            if (!shared) {
-                return ApiResult::failure(
-                    shared.error().code, shared.error().message, shared.error().path);
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            std::expected<SharedDriveTarget, ApiError> shared;
+            if (auto opened = co_await shared_target(input, context, shared); !opened) {
+                co_return ApiResult::failure("store_error", opened.error().message);
+            } else if (!opened->ok) {
+                co_return std::move(*opened);
             }
             if (shared->target.kind != "tree") {
-                return ApiResult::failure("invalid_input", "path must name a folder", "/path");
+                co_return ApiResult::failure("invalid_input", "path must name a folder", "/path");
             }
             auto result =
                 browse_result(shared->location, shared->entries, context, context.acting_identity);
             if (result.ok) {
                 result.value["root_path"] = shared->root_path;
             }
-            return result;
+            co_return result;
         }});
 
-    registry.add(Capability{.name = "preview_drive_share_link",
-                            .title = "Preview shared drive file",
-                            .description =
-                                "Preview a file using only an active link's scoped read authority.",
-                            .input_schema = share_read_input_schema(true),
-                            .output_schema = shared_file_output_schema(false),
-                            .kind = CapabilityKind::Read,
-                            .requires_auth = false,
-                            .object = "drive share link",
-                            .action = "read",
-                            .resolve_object = share_token_object,
-                            .handler = [](const json& input, ApiContext& context) {
-                                return shared_file_result(input, context, false);
-                            }});
-
-    registry.add(Capability{
-        .name = "download_drive_share_link",
-        .title = "Download shared drive file",
-        .description =
-            "Read exact file bytes as base64 using only an active link's scoped authority.",
-        .input_schema = share_read_input_schema(true),
-        .output_schema = shared_file_output_schema(true),
-        .kind = CapabilityKind::Read,
-        .requires_auth = false,
-        .object = "drive share link",
-        .action = "read",
-        .resolve_object = share_token_object,
-        .handler = [](const json& input, ApiContext& context) {
-            return shared_file_result(input, context, true);
-        }});
+    for (const bool download : {false, true}) {
+        registry.add(Capability{
+            .name = download ? "download_drive_share_link" : "preview_drive_share_link",
+            .title = download ? "Download shared drive file" : "Preview shared drive file",
+            .description =
+                download
+                    ? "Read exact file bytes as base64 using only an active link's scoped authority."
+                    : "Preview a file using only an active link's scoped read authority.",
+            .input_schema = share_read_input_schema(true),
+            .output_schema = shared_file_output_schema(download),
+            .kind = CapabilityKind::Read,
+            .requires_auth = false,
+            .object = "drive share link",
+            .action = "read",
+            .resolve_object = share_token_object,
+            .async_handler = [download](const json& input,
+                                        ApiContext& context) -> liquid::runtime::task<ApiResult> {
+                std::expected<SharedDriveTarget, ApiError> shared;
+                if (auto opened = co_await shared_target(input, context, shared); !opened) {
+                    co_return ApiResult::failure("store_error", opened.error().message);
+                } else if (!opened->ok) {
+                    co_return std::move(*opened);
+                }
+                co_return shared_file_result(input, context, download, shared);
+            }});
+    }
 
     registry.add(Capability{
         .name = "revoke_drive_share_link",
         .title = "Revoke drive share link",
-        .description = "Revoke a continuing share capability immediately.",
+        .description = "Revoke a continuing share capability immediately. The link is revoked in "
+                       "the workspace Zetta of `workspace_id` that holds it.",
         .input_schema = {{"type", "object"},
-                         {"properties", {{"link_id", {{"type", "string"}}}}},
-                         {"required", json::array({"link_id"})},
+                         {"properties",
+                          {{"workspace_id", {{"type", "string"}}},
+                           {"link_id", {{"type", "string"}}}}},
+                         {"required", json::array({"workspace_id", "link_id"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
         .object = "drive share link",
         .action = "share",
         .resolve_object = link_object,
-        .handler = [](const json& input, ApiContext& context) {
-            const auto link = context.store->revoke_drive_share_link(input.at("link_id"));
-            if (!link) {
-                return store_error(link.error());
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            const std::string link_id = input.at("link_id");
+            const auto folder = share_link_grant_object(link_id, context, "/link_id");
+            if (!folder) {
+                co_return ApiResult::failure(
+                    folder.error().code, folder.error().message, folder.error().path);
             }
-            context.audit_kind = "drive.share_link.revoked";
-            context.audit_object = "repository/" + link->repository_id + "/path/" + link->path;
-            context.audit_details = {{"link_id", link->id}, {"path", link->path}};
-            return ApiResult::success(control::to_json(*link));
+            // The folder's path object is `<repository>:<node>`; its repository's space is the
+            // only one whose workspaces can hold the link.
+            const auto folder_object = context.store->get_policy_object(*folder);
+            if (!folder_object) {
+                co_return store_error(folder_object.error());
+            }
+            const auto repository = context.store->get_repository(
+                folder_object->external_id.substr(0, folder_object->external_id.find(':')));
+            if (!repository) {
+                co_return store_error(repository.error());
+            }
+            const auto workspace = share_link_workspace(
+                context, input.at("workspace_id"), repository->customer_id, "/workspace_id");
+            if (!workspace) {
+                co_return ApiResult::failure(
+                    workspace.error().code, workspace.error().message, workspace.error().path);
+            }
+            auto records = workspace_records(context, workspace->customer_id, workspace->id);
+            if (!records) {
+                co_return ApiResult::failure(records.error().code, records.error().message);
+            }
+            const auto collection = control::DriveShareLinkCodec::collection;
+            // Read, then write on the revision read; a concurrent write rereads (one revocation
+            // wins, a second is `conflict`).
+            for (int attempt = 0; attempt < 5; ++attempt) {
+                const auto stored = control::settled(co_await records->get(collection, link_id));
+                if (!stored) {
+                    co_return ApiResult::failure(stored.error().code, stored.error().message);
+                }
+                const auto link =
+                    *stored ? control::DriveShareLinkCodec::decode(**stored) : std::nullopt;
+                if (!link || link->object_id != *folder) {
+                    co_return ApiResult::failure(
+                        "not_found", "no drive share link " + link_id + " in this workspace",
+                        "/link_id");
+                }
+                if (!link->revoked_at.empty()) {
+                    co_return ApiResult::failure("conflict", "drive share link is already revoked");
+                }
+                control::DriveShareLink revoked = *link;
+                revoked.revoked_at = control::now_iso8601();
+                const auto written = control::settled(co_await records->put(
+                    collection, link_id, control::DriveShareLinkCodec::lookup(revoked),
+                    control::DriveShareLinkCodec::encode(revoked),
+                    control::RecordCondition{.if_revision = (*stored)->revision},
+                    (*stored)->lake_revision + 1, (*stored)->at_us));
+                if (!written && written.error().code == "conflict") {
+                    continue;
+                }
+                if (!written) {
+                    co_return ApiResult::failure(written.error().code, written.error().message);
+                }
+                const auto saved = control::DriveShareLinkCodec::decode(*written);
+                if (!saved) {
+                    co_return ApiResult::failure("store_error", "the stored link did not decode");
+                }
+                context.audit_customer_id = repository->customer_id;
+                context.audit_kind = "drive.share_link.revoked";
+                context.audit_object =
+                    "repository/" + saved->repository_id + "/path/" + saved->path;
+                context.audit_details = {
+                    {"link_id", saved->id}, {"workspace_id", workspace->id}, {"path", saved->path}};
+                json output = control::to_json(*saved);
+                output["workspace_id"] = workspace->id;
+                co_return ApiResult::success(std::move(output));
+            }
+            co_return ApiResult::failure("conflict", "the link changed while it was being revoked");
         }});
 }
 

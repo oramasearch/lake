@@ -62,14 +62,12 @@ public:
                                                         int limit) override;
     Result<ForgeRecord> update_forge_record(const std::string& id,
                                             const nlohmann::json& value) override;
-    Result<DriveShareLink> create_drive_share_link(const NewDriveShareLink&) override;
-    Result<DriveShareLink> get_drive_share_link(const std::string& id) override;
-    Result<DriveShareLink>
-    get_drive_share_link_by_token_hash(const std::string& token_hash) override;
-    Result<std::vector<DriveShareLink>> list_drive_share_links(const std::string& repository_id,
-                                                               const std::string& object_id,
-                                                               int limit) override;
-    Result<DriveShareLink> revoke_drive_share_link(const std::string& id) override;
+    Result<DriveShareLinkRoute> drive_share_link_route(const std::string& token_hash) override;
+    Result<void> assign_legacy_drive_share_links() override;
+    Result<std::vector<LegacyDriveShareLink>>
+    legacy_drive_share_links(const std::string& after_id, int limit) override;
+    // A row of the retired drive_share_links table, as an earlier lake wrote it (tests of the copy).
+    void seed_legacy_drive_share_link(DriveShareLink link);
     Result<Team> create_team(const NewTeam&) override;
     Result<std::vector<Team>> list_teams(const std::string& organization_id, int limit) override;
     Result<Team> get_team(const std::string& id) override;
@@ -541,7 +539,9 @@ private:
     std::vector<Repository> repositories_;
     std::vector<RepositoryRef> repository_refs_;
     std::vector<ForgeRecord> forge_records_;
-    std::vector<DriveShareLink> drive_share_links_;
+    std::vector<DriveShareLink> legacy_drive_share_links_;
+    std::map<std::string, std::pair<std::string, std::string>> legacy_drive_share_assignments_; // workspace, outcome
+    std::map<std::string, DriveShareLinkRoute> drive_share_link_routes_; // by token digest
     std::vector<Team> teams_;
     std::vector<Membership> memberships_;
     std::vector<Invitation> invitations_;

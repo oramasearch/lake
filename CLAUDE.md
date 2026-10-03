@@ -49,6 +49,9 @@ migration `0045`); Design → Opportunities are the first mutable one (lake#376,
 Each PostgreSQL table stays until a later migration drops it after the copy is verified on dev.
 migration `0045`) and topic creators the second (lake#379, migration `0047`); each PostgreSQL
 table stays until a later migration drops it after the copy is verified on dev.
+migration `0045`); the PostgreSQL table stays until a later migration drops it after the copy is
+verified on dev. Drive share links are the first mutable collection (lake#350, migration `0048`): their bearer
+token names its workspace, and only a content-free route for pre-move tokens stays central.
 
 ## Historical status — superseded 2026-09-08
 

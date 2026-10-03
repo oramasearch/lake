@@ -56,6 +56,9 @@
 #include "lake/telemetry/metrics.hpp"
 #include "lake/version.hpp"
 #include "temporary_directory.hpp"
+#include "workspace_fixture.hpp"
+#include "api/workspace_records_api.hpp"
+#include "lake/control/drive_share_links.hpp"
 
 using nlohmann::json;
 using namespace lake::api;
@@ -652,6 +655,19 @@ liquid::attestation sign_attestation(liquid::attestation value) {
     value.signature = std::move(*signature);
     return value;
 }
+
+constexpr std::string_view drive_kek =
+    "6472697665207368617265206c696e6b7320696e20776f726b73706163657321";
+
+// Drive links live in workspace Zettas (lake#350): the surface's store with Ready workspaces.
+struct DriveWorkspaces : lake::test::RecordWorkspaces {
+    explicit DriveWorkspaces(Surface& surface)
+        : RecordWorkspaces(std::shared_ptr<lake::control::Store>(&surface.store,
+                                                                  [](lake::control::Store*) {})) {
+        surface.ctx.workspaces = service.get();
+        surface.ctx.instance_kek = std::string(drive_kek);
+    }
+};
 
 std::string share_token_hash(std::string_view token) {
     static constexpr std::string_view key = "lake-drive-share-link/1";
@@ -3444,6 +3460,7 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
 
 TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
     Surface surface;
+    DriveWorkspaces workspaces(surface);
     RepositoryFixtureStore repository_store;
     surface.ctx.sync_store = &repository_store;
     const ApiResult owner = surface.call(
@@ -3471,6 +3488,7 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
                                             "attestation-owner",
                                             "admin",
                                             "request-owner"}));
+    const std::string workspace = workspaces.create(customer.value["id"], "home");
 
     surface.ctx.operator_credential = false;
     surface.ctx.acting_identity = "taap:1:ed25519:owner";
@@ -3508,9 +3526,11 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
     EXPECT_TRUE(surface.call("drive_shared_with_me").value["items"].empty());
 
     surface.ctx.acting_identity = "taap:1:ed25519:owner";
-    const ApiResult effective = surface.call(
-        "drive_effective_access",
-        {{"repository_id", repository.value["id"]}, {"ref", "main"}, {"path", "shared"}});
+    const ApiResult effective = surface.call("drive_effective_access",
+                                             {{"repository_id", repository.value["id"]},
+                                              {"workspace_id", workspace},
+                                              {"ref", "main"},
+                                              {"path", "shared"}});
     ASSERT_TRUE(effective.ok) << effective.error.message;
     for (const json& entry : effective.value["items"]) {
         for (const std::string action : {"read", "write", "share"}) {
@@ -3525,6 +3545,7 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
 
     const ApiResult active_link = surface.call("create_drive_share_link",
                                                {{"repository_id", repository.value["id"]},
+                                                {"workspace_id", workspace},
                                                 {"ref", "main"},
                                                 {"path", "shared"},
                                                 {"role", "read"},
@@ -3586,21 +3607,24 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
     }
     surface.ctx.authorized = false;
     surface.ctx.acting_identity.clear();
-    const auto mcp_download = mcp_dispatch(
-        surface.registry,
-        {{"jsonrpc", "2.0"},
-         {"id", 2},
-         {"method", "tools/call"},
-         {"params", {{"name", "download_drive_share_link"}, {"arguments", file_input}}}},
-        surface.ctx,
-        "0.0.1");
+    // The share capabilities read the workspace that holds the link, so MCP runs them as the
+    // server does, through the asynchronous dispatcher.
+    const json mcp_call{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params", {{"name", "download_drive_share_link"}, {"arguments", file_input}}}};
+    const auto mcp_completed = liquid::runtime::block_on(
+        mcp_dispatch_async(surface.registry, mcp_call, surface.ctx, "0.0.1"));
+    ASSERT_TRUE(mcp_completed);
+    const auto& mcp_download = *mcp_completed;
     ASSERT_TRUE(mcp_download);
     EXPECT_EQ(json::parse(*mcp_download)["result"]["structuredContent"]["value"]["content_base64"],
               downloaded.value["content_base64"]);
     surface.ctx.authorized = true;
     surface.ctx.acting_identity = "taap:1:ed25519:owner";
-    const ApiResult revoked =
-        surface.call("revoke_drive_share_link", {{"link_id", active_link.value["id"]}});
+    const ApiResult revoked = surface.call(
+        "revoke_drive_share_link", {{"workspace_id", workspace}, {"link_id", active_link.value["id"]}});
     ASSERT_TRUE(revoked.ok) << revoked.error.message;
     surface.ctx.authorized = false;
     surface.ctx.acting_identity.clear();
@@ -3615,16 +3639,32 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
         EXPECT_TRUE(surface.ctx.sync_response.empty());
     }
 
-    const std::string expired_token = "expired-token";
-    ASSERT_TRUE(surface.store.create_drive_share_link({repository.value["id"],
-                                                       folder_object,
-                                                       "22222222222222222222222222222222",
-                                                       "shared",
-                                                       "read",
-                                                       share_token_hash(expired_token),
-                                                       "2020-01-01T00:00:00Z",
-                                                       "taap:1:ed25519:owner",
-                                                       "request-expired"}));
+    // An expired link, written as an earlier create would have: its record in the workspace and
+    // its grant in the policy store.
+    const std::string expired_id = lake::control::new_uuid_v4();
+    const std::string expired_token =
+        lake::control::drive_share_token(workspace, expired_id, "expired-secret");
+    {
+        auto records =
+            lake::api::workspace_records(surface.ctx, customer.value["id"], workspace);
+        ASSERT_TRUE(records) << records.error().message;
+        lake::control::DriveShareLink expired;
+        expired.id = expired_id;
+        expired.repository_id = repository.value["id"];
+        expired.object_id = folder_object;
+        expired.node_id = "22222222222222222222222222222222";
+        expired.path = "shared";
+        expired.role = "read";
+        expired.token_hash = share_token_hash(expired_token);
+        expired.expires_at = "2020-01-01T00:00:00Z";
+        expired.created_by_taap_id = "taap:1:ed25519:owner";
+        lake::control::DriveShareLinks links(*records);
+        ASSERT_TRUE(lake::control::settled(liquid::runtime::block_on(
+            links.append(expired, lake::control::RecordWrite{expired_id, 0}))));
+        ASSERT_TRUE(surface.store.create_grant({"share-link:" + expired_id, folder_object, "read",
+                                                "drive_share_link/" + expired_id,
+                                                "taap:1:ed25519:owner", "request-expired"}));
+    }
     const ApiResult expired =
         surface.call("resolve_drive_share_link", {{"token", expired_token}, {"ref", "main"}});
     EXPECT_EQ(expired.error.code, "unauthorized");
@@ -3641,6 +3681,7 @@ TEST(Drive, FolderSharingMatchesAuthorizeAndLinksExpire) {
 
 TEST(Drive, ShareDownloadsEncodeAcrossBlockBoundaries) {
     Surface surface;
+    DriveWorkspaces workspaces(surface);
     RepositoryFixtureStore repository_store;
     surface.ctx.sync_store = &repository_store;
     const ApiResult owner = surface.call("create_user", {{"display_name", "Owner"}});
@@ -3652,8 +3693,10 @@ TEST(Drive, ShareDownloadsEncodeAcrossBlockBoundaries) {
     const ApiResult repository = surface.call(
         "create_repository", {{"customer_id", customer.value["id"]}, {"name", "drive"}});
     ASSERT_TRUE(repository.ok);
+    const std::string workspace = workspaces.create(customer.value["id"], "home");
     const ApiResult link = surface.call("create_drive_share_link",
                                         {{"repository_id", repository.value["id"]},
+                                         {"workspace_id", workspace},
                                          {"ref", "main"},
                                          {"path", "shared"},
                                          {"role", "read"},
@@ -3671,6 +3714,192 @@ TEST(Drive, ShareDownloadsEncodeAcrossBlockBoundaries) {
     EXPECT_EQ(downloaded.value["size"], content.size());
     EXPECT_EQ(downloaded.value["content_base64"], base64_bytes(bytes(content)));
     EXPECT_EQ(surface.ctx.sync_response, bytes(content));
+}
+
+// lake#350: a link lives only in the workspace Zetta that holds it. Two spaces with two
+// workspaces each; the token routes a signed-out recipient to that workspace and nowhere else.
+TEST(Drive, ShareLinksLiveOnlyInTheWorkspaceThatHoldsThem) {
+    Surface surface;
+    RepositoryFixtureStore repository_store;
+    surface.ctx.sync_store = &repository_store;
+    DriveWorkspaces workspaces(surface);
+    struct Space {
+        std::string owner, customer, repository;
+        std::vector<std::string> workspaces;
+    };
+    std::vector<Space> spaces;
+    for (const std::string name : {"first", "second"}) {
+        Space space;
+        space.owner = "taap:1:ed25519:" + name;
+        const ApiResult user =
+            surface.call("create_user", {{"taap_id", space.owner}, {"display_name", name}});
+        ASSERT_TRUE(user.ok) << user.error.message;
+        const ApiResult customer = surface.call(
+            "create_customer",
+            {{"customer_type", "individual"}, {"user_id", user.value["id"]}, {"name", name}});
+        ASSERT_TRUE(customer.ok) << customer.error.message;
+        space.customer = customer.value["id"];
+        const ApiResult repository = surface.call(
+            "create_repository", {{"customer_id", space.customer}, {"name", "drive"}});
+        ASSERT_TRUE(repository.ok) << repository.error.message;
+        space.repository = repository.value["id"];
+        const auto object = surface.store.find_policy_object("repository", space.repository);
+        ASSERT_TRUE(object);
+        ASSERT_TRUE(surface.store.create_grant(
+            {space.owner, object->id, "admin", "attestation-" + name, "admin", "request-" + name}));
+        space.workspaces = {workspaces.create(space.customer, "home"),
+                            workspaces.create(space.customer, "lab")};
+        spaces.push_back(std::move(space));
+    }
+    const Space& first = spaces[0];
+    const Space& second = spaces[1];
+    surface.ctx.operator_credential = false;
+    const auto as = [&](const Space& space) {
+        surface.ctx.authorized = true;
+        surface.ctx.acting_identity = space.owner;
+    };
+    const auto anonymous = [&] {
+        surface.ctx.authorized = false;
+        surface.ctx.acting_identity.clear();
+    };
+    const auto link_input = [](const Space& space, json workspace) {
+        json input{{"repository_id", space.repository},
+                   {"ref", "main"},
+                   {"path", "shared"},
+                   {"role", "read"},
+                   {"expires_at", "2999-01-01T00:00:00Z"}};
+        if (!workspace.is_null()) {
+            input["workspace_id"] = workspace;
+        }
+        return input;
+    };
+
+    as(first);
+    const ApiResult link = surface.call("create_drive_share_link", link_input(first, first.workspaces[0]));
+    ASSERT_TRUE(link.ok) << link.error.message;
+    EXPECT_EQ(link.value["workspace_id"], first.workspaces[0]);
+    const std::string token = link.value["token"];
+    const std::string link_id = link.value["id"];
+    EXPECT_TRUE(token.starts_with(first.workspaces[0] + "." + link_id + "."))
+        << "the token names the workspace and record that hold the link";
+    // Stored only at its own workspace's endpoint, as a sealed record.
+    for (const Space& space : spaces) {
+        for (const std::string& id : space.workspaces) {
+            EXPECT_EQ(workspaces.records(id).rows("drive_share_links").size(),
+                      id == first.workspaces[0] ? 1U : 0U)
+                << id;
+        }
+    }
+    const std::string sealed =
+        workspaces.records(first.workspaces[0]).rows("drive_share_links").at(link_id).dump();
+    EXPECT_EQ(sealed.find(share_token_hash(token)), std::string::npos);
+    EXPECT_EQ(sealed.find("shared"), std::string::npos);
+    // Centrally only the synthetic grant names it.
+    const auto grants = surface.store.list_grants({}, "share-link:" + link_id, 10);
+    ASSERT_TRUE(grants);
+    EXPECT_EQ(grants->size(), 1U);
+
+    const auto listed = [&](const std::string& workspace) {
+        return surface.call("drive_effective_access", {{"repository_id", first.repository},
+                                                       {"workspace_id", workspace},
+                                                       {"ref", "main"},
+                                                       {"path", "shared"}});
+    };
+    ASSERT_EQ(listed(first.workspaces[0]).value["links"].size(), 1U);
+    EXPECT_EQ(listed(first.workspaces[0]).value["links"][0]["id"], link_id);
+    EXPECT_TRUE(listed(first.workspaces[1]).value["links"].empty())
+        << "another workspace of the same space holds its own links";
+
+    // Missing, malformed, unknown and foreign workspace ids name the field.
+    for (const json& bad : {json(nullptr), json("not-a-workspace"),
+                            json(lake::control::new_uuid_v4()), json(second.workspaces[0])}) {
+        const ApiResult refused = surface.call("create_drive_share_link", link_input(first, bad));
+        EXPECT_EQ(refused.error.code, "invalid_input") << bad;
+        EXPECT_EQ(refused.error.path, "/workspace_id") << bad;
+        if (!bad.is_null()) {
+            const ApiResult listing = listed(bad.get<std::string>());
+            EXPECT_EQ(listing.error.code, "invalid_input") << bad;
+            EXPECT_EQ(listing.error.path, "/workspace_id") << bad;
+        }
+    }
+    EXPECT_EQ(surface.call("revoke_drive_share_link", {{"link_id", link_id}}).error.path,
+              "/workspace_id");
+
+    // Least privilege: the other space's owner can neither make, list nor revoke this folder's
+    // links, whichever workspace it names.
+    as(second);
+    EXPECT_EQ(surface.call("create_drive_share_link", link_input(first, second.workspaces[0]))
+                  .error.code,
+              "unauthorized");
+    EXPECT_EQ(listed(first.workspaces[0]).error.code, "unauthorized");
+    for (const std::string& workspace : {first.workspaces[0], second.workspaces[0]}) {
+        EXPECT_EQ(surface
+                      .call("revoke_drive_share_link",
+                            {{"workspace_id", workspace}, {"link_id", link_id}})
+                      .error.code,
+                  "unauthorized");
+    }
+
+    // A signed-out recipient with only the token reaches the link; the same link id under another
+    // workspace, a wrong secret, or a sealed copy moved to another workspace does not open.
+    anonymous();
+    const auto resolve = [&](const std::string& presented) {
+        return surface.call("resolve_drive_share_link", {{"token", presented}, {"ref", "main"}});
+    };
+    ASSERT_TRUE(resolve(token).ok) << resolve(token).error.message;
+    const std::string secret = token.substr(token.rfind('.') + 1);
+    for (const std::string& forged :
+         {lake::control::drive_share_token(first.workspaces[1], link_id, secret),
+          lake::control::drive_share_token(second.workspaces[0], link_id, secret),
+          lake::control::drive_share_token(first.workspaces[0], link_id, "wrong"),
+          lake::control::drive_share_token(first.workspaces[0], lake::control::new_uuid_v4(), secret),
+          std::string("no-such-legacy-token")}) {
+        const ApiResult refused = resolve(forged);
+        EXPECT_EQ(refused.error.code, "not_found") << forged;
+        EXPECT_EQ(refused.error.path, "/token") << forged;
+    }
+    workspaces.records(first.workspaces[1]).collections["lake_drive_share_links"] =
+        workspaces.records(first.workspaces[0]).collections["lake_drive_share_links"];
+    EXPECT_EQ(resolve(lake::control::drive_share_token(first.workspaces[1], link_id, secret))
+                  .error.code,
+              "not_found")
+        << "a sealed record copied to another workspace does not open there";
+
+    // Revocation is immutable ownership too: only the holding workspace revokes it.
+    as(first);
+    const ApiResult elsewhere = surface.call(
+        "revoke_drive_share_link", {{"workspace_id", first.workspaces[1]}, {"link_id", link_id}});
+    EXPECT_EQ(elsewhere.error.code, "not_found");
+    EXPECT_EQ(elsewhere.error.path, "/link_id");
+    anonymous();
+    EXPECT_TRUE(resolve(token).ok);
+
+    // A workspace that is not ready refuses instead of falling back anywhere.
+    workspaces.status(first.workspaces[0], "Provisioning");
+    EXPECT_EQ(resolve(token).error.code, "workspace_not_ready");
+    workspaces.ready(first.workspaces[0]);
+    ASSERT_TRUE(resolve(token).ok);
+
+    as(first);
+    const ApiResult revoked = surface.call(
+        "revoke_drive_share_link", {{"workspace_id", first.workspaces[0]}, {"link_id", link_id}});
+    ASSERT_TRUE(revoked.ok) << revoked.error.message;
+    EXPECT_FALSE(revoked.value["revoked_at"].is_null());
+    const ApiResult again = surface.call(
+        "revoke_drive_share_link", {{"workspace_id", first.workspaces[0]}, {"link_id", link_id}});
+    EXPECT_EQ(again.error.code, "conflict");
+    EXPECT_EQ(listed(first.workspaces[0]).value["links"][0]["active"], false);
+    anonymous();
+    EXPECT_EQ(resolve(token).error.code, "unauthorized");
+
+    // Deleting the workspace takes its links with it.
+    as(first);
+    const ApiResult live = surface.call("create_drive_share_link", link_input(first, first.workspaces[0]));
+    ASSERT_TRUE(live.ok) << live.error.message;
+    ASSERT_TRUE(surface.store.update_workspace(first.workspaces[0], {.desired = "deleted"}));
+    EXPECT_EQ(listed(first.workspaces[0]).error.path, "/workspace_id");
+    anonymous();
+    EXPECT_EQ(resolve(live.value["token"]).error.code, "not_found");
 }
 
 TEST(Drive, PathHistoryRestoresAsANewChange) {

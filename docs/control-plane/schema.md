@@ -218,7 +218,7 @@ deferred to the wave-level operator migration pull request.
 
 | Table | Purpose |
 |---|---|
-| `drive_share_links` | Folder object, stable liquid node id, path, role, HMAC token digest, expiry, creator, and optional revocation for a bearer link. |
+| `drive_share_links` | Retired by `0048_drive_share_link_workspaces` (lake#350): links live in the workspace Zetta that holds them, and this table is read only by the one-shot copy until a later migration drops it. It held the folder object, stable liquid node id, path, role, HMAC token digest, expiry, creator, and optional revocation for a bearer link. |
 | `drive_guard` | Guard table for this migration. |
 
 Direct recipient shares remain ordinary `grants`; the link row adds expiry and revocation to a
@@ -559,3 +559,18 @@ table except through the operator-only `copy_workspace_records`, which reapplies
 assignment before each run. No column is added and nothing is dropped. Idempotent; guard
 `opportunity_workspaces_guard`. The operator vendors it and selects that guard before the binary is
 deployed. Mechanism and cutover: [`../architecture/workspace-records.md`](../architecture/workspace-records.md).
+
+## Drive share link workspaces migration
+
+`0048_drive_share_link_workspaces` records, in `workspace_assignments`, the workspace that owns
+each retired `drive_share_links` row: the only live workspace of its repository's space
+(`sole_workspace`), or `needs_selection`. It creates `drive_share_link_routes` (`token_hash`,
+`link_id`, `workspace_id`, `recorded_at`) and fills it for every assigned row. That table is
+dispatch: it lets a bearer token issued before lake#350, which does not name its workspace, find the
+workspace Zetta that holds its record, and holds no path, role, expiry or creator. A route is
+removed with its workspace (`ON DELETE CASCADE`). Links now live in the workspace Zetta's
+`lake_drive_share_links` collection (lake#350); a new token is `<workspace id>.<link id>.<secret>`
+and needs no route. Lake no longer writes or reads `drive_share_links` except through the
+operator-only `copy_workspace_records`, which reapplies the assignment and routes before each run.
+Nothing is dropped. Idempotent; guard `drive_share_link_workspaces_guard`. See
+[`../api/sharing.md`](../api/sharing.md#where-links-live).

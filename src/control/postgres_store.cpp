@@ -79,6 +79,20 @@ constexpr std::string_view legacy_stream_owner_assignment_sql =
     "CASE WHEN w.id IS NULL THEN 'unknown_workspace' WHEN w.desired = 'deleted' THEN "
     "'workspace_deleted' ELSE 'recorded_workspace' END FROM stream_owners s LEFT JOIN workspaces "
     "w ON w.id::text = s.workspace_id AND w.customer_id = s.customer_id ON CONFLICT DO NOTHING";
+// Migration 0048's assignment and route, rerun before each copy for rows written after it: a
+// link's space is its repository's, and a space with exactly one live workspace owns its links.
+constexpr std::string_view legacy_drive_share_link_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'drive_share_links', l.id, r.customer_id, w.id, CASE WHEN w.id IS NULL THEN "
+    "'needs_selection' ELSE 'sole_workspace' END FROM drive_share_links l JOIN repositories r ON "
+    "r.id = l.repository_id LEFT JOIN workspaces w ON w.customer_id = r.customer_id AND "
+    "w.desired <> 'deleted' AND (SELECT count(*) FROM workspaces w2 WHERE w2.customer_id = "
+    "r.customer_id AND w2.desired <> 'deleted') = 1 ON CONFLICT DO NOTHING";
+constexpr std::string_view legacy_drive_share_link_route_sql =
+    "INSERT INTO drive_share_link_routes (token_hash, link_id, workspace_id) SELECT l.token_hash, "
+    "l.id, a.workspace_id FROM drive_share_links l JOIN workspace_assignments a ON "
+    "a.object_table = 'drive_share_links' AND a.object_id = l.id WHERE a.workspace_id IS NOT NULL "
+    "ON CONFLICT (token_hash) DO UPDATE SET workspace_id = EXCLUDED.workspace_id";
 
 } // namespace
 
@@ -1696,10 +1710,6 @@ constexpr const char* provisioning_log_columns =
     "created_at::text";
 constexpr const char* forge_record_columns =
     "id::text, repository_id::text, kind, value::text, created_at::text, updated_at::text";
-constexpr const char* drive_share_link_columns =
-    "id::text, repository_id::text, object_id::text, node_id, path, role, token_hash, "
-    "to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), "
-    "coalesce(revoked_at::text,''), created_by_taap_id, created_at::text";
 constexpr const char* application_columns =
     "id::text, customer_id::text, pool_id, name, allowed_origins::text, redirect_uris::text, "
     "coalesce(custom_sign_in_domain,''), theme::text, created_at::text, updated_at::text";
@@ -1792,20 +1802,6 @@ ForgeRecord forge_record_of(const pqxx::row& row) {
                        row[4].as<std::string>(),
                        row[5].as<std::string>(),
                        nlohmann::json::parse(row[3].as<std::string>())};
-}
-
-DriveShareLink drive_share_link_of(const pqxx::row& row) {
-    return DriveShareLink{row[0].as<std::string>(),
-                          row[1].as<std::string>(),
-                          row[2].as<std::string>(),
-                          row[3].as<std::string>(),
-                          row[4].as<std::string>(),
-                          row[5].as<std::string>(),
-                          row[6].as<std::string>(),
-                          row[7].as<std::string>(),
-                          row[8].as<std::string>(),
-                          row[9].as<std::string>(),
-                          row[10].as<std::string>()};
 }
 
 void remove_scim_user_access(pqxx::work& tx,
@@ -2433,119 +2429,69 @@ public:
         });
     }
 
-    Result<DriveShareLink> create_drive_share_link(const NewDriveShareLink& input) override {
-        return with_tx<DriveShareLink>([&](pqxx::work& tx) -> Result<DriveShareLink> {
-            const pqxx::result object = tx.exec_params(
-                "SELECT object_type FROM objects WHERE id = $1::uuid", input.object_id);
-            if (object.empty() || object[0][0].as<std::string>() != "path") {
-                return std::unexpected(
-                    StoreError{"invalid_input", "object_id does not reference a drive folder"});
-            }
-            if (input.role != "read" && input.role != "write") {
-                return std::unexpected(
-                    StoreError{"invalid_input", "share link role must be read or write"});
-            }
-            const pqxx::result rows = tx.exec_params(
-                std::string("INSERT INTO drive_share_links (repository_id, object_id, node_id, "
-                            "path, role, token_hash, expires_at, created_by_taap_id) VALUES "
-                            "($1::uuid, $2::uuid, $3, $4, $5, $6, $7::timestamptz, $8) "
-                            "RETURNING ") +
-                    drive_share_link_columns,
-                input.repository_id,
-                input.object_id,
-                input.node_id,
-                input.path,
-                input.role,
-                input.token_hash,
-                input.expires_at,
-                input.created_by_taap_id);
-            const DriveShareLink link = drive_share_link_of(rows[0]);
-            tx.exec_params("INSERT INTO grants (principal_taap_id, object_id, role, "
-                           "attestation_digest, granted_by_taap_id) VALUES ($1, $2::uuid, $3, $4, "
-                           "$5)",
-                           "share-link:" + link.id,
-                           link.object_id,
-                           link.role,
-                           "drive_share_link/" + link.id,
-                           input.created_by_taap_id);
-            return link;
-        });
-    }
-
-    Result<DriveShareLink> get_drive_share_link(const std::string& id) override {
-        return with_tx<DriveShareLink>([&](pqxx::work& tx) -> Result<DriveShareLink> {
+    Result<DriveShareLinkRoute> drive_share_link_route(const std::string& token_hash) override {
+        return with_tx<DriveShareLinkRoute>([&](pqxx::work& tx) -> Result<DriveShareLinkRoute> {
             const pqxx::result rows =
-                tx.exec_params(std::string("SELECT ") + drive_share_link_columns +
-                                   " FROM drive_share_links WHERE id = $1::uuid",
-                               id);
-            if (rows.empty()) {
-                return std::unexpected(StoreError{"not_found", "no drive share link " + id});
-            }
-            return drive_share_link_of(rows[0]);
-        });
-    }
-
-    Result<DriveShareLink>
-    get_drive_share_link_by_token_hash(const std::string& token_hash) override {
-        return with_tx<DriveShareLink>([&](pqxx::work& tx) -> Result<DriveShareLink> {
-            const pqxx::result rows =
-                tx.exec_params(std::string("SELECT ") + drive_share_link_columns +
-                                   " FROM drive_share_links WHERE token_hash = $1",
+                tx.exec_params("SELECT link_id::text, workspace_id::text FROM "
+                               "drive_share_link_routes WHERE token_hash = $1",
                                token_hash);
             if (rows.empty()) {
                 return std::unexpected(StoreError{"not_found", "share link is not recognized"});
             }
-            return drive_share_link_of(rows[0]);
+            return DriveShareLinkRoute{rows[0][0].as<std::string>(), rows[0][1].as<std::string>()};
         });
     }
 
-    Result<std::vector<DriveShareLink>> list_drive_share_links(const std::string& repository_id,
-                                                               const std::string& object_id,
-                                                               int limit) override {
-        return with_tx<std::vector<DriveShareLink>>(
-            [&](pqxx::work& tx) -> Result<std::vector<DriveShareLink>> {
-                const pqxx::result rows =
-                    object_id.empty()
-                        ? tx.exec_params(std::string("SELECT ") + drive_share_link_columns +
-                                             " FROM drive_share_links WHERE repository_id = "
-                                             "$1::uuid ORDER BY created_at DESC LIMIT $2",
-                                         repository_id,
-                                         limit)
-                        : tx.exec_params(std::string("SELECT ") + drive_share_link_columns +
-                                             " FROM drive_share_links WHERE repository_id = "
-                                             "$1::uuid AND object_id = $2::uuid ORDER BY "
-                                             "created_at DESC LIMIT $3",
-                                         repository_id,
-                                         object_id,
-                                         limit);
-                std::vector<DriveShareLink> output;
-                for (const auto& row : rows) {
-                    output.push_back(drive_share_link_of(row));
+    Result<void> assign_legacy_drive_share_links() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec(std::string(legacy_drive_share_link_assignment_sql));
+            tx.exec(std::string(legacy_drive_share_link_route_sql));
+            return {};
+        });
+    }
+
+    Result<std::vector<LegacyDriveShareLink>>
+    legacy_drive_share_links(const std::string& after_id, int limit) override {
+        return with_tx<std::vector<LegacyDriveShareLink>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyDriveShareLink>> {
+                const pqxx::result rows = tx.exec_params(
+                    "SELECT l.id::text, l.repository_id::text, l.object_id::text, l.node_id, "
+                    "l.path, l.role, l.token_hash, "
+                    "to_char(l.expires_at AT TIME ZONE 'UTC', "
+                    "'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), "
+                    "coalesce(to_char(l.revoked_at AT TIME ZONE 'UTC', "
+                    "'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), ''), l.created_by_taap_id, "
+                    "(extract(epoch FROM l.created_at) * 1000000)::bigint, "
+                    "COALESCE(r.customer_id::text, ''), COALESCE(a.workspace_id::text, ''), "
+                    "COALESCE(a.outcome, 'needs_selection') "
+                    "FROM drive_share_links l LEFT JOIN repositories r ON r.id = l.repository_id "
+                    "LEFT JOIN workspace_assignments a ON a.object_table = 'drive_share_links' "
+                    "AND a.object_id = l.id "
+                    "WHERE ($1 = '' OR l.id > NULLIF($1, '')::uuid) ORDER BY l.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyDriveShareLink> links;
+                for (const pqxx::row& row : rows) {
+                    LegacyDriveShareLink legacy;
+                    legacy.link.id = row[0].as<std::string>();
+                    legacy.link.repository_id = row[1].as<std::string>();
+                    legacy.link.object_id = row[2].as<std::string>();
+                    legacy.link.node_id = row[3].as<std::string>();
+                    legacy.link.path = row[4].as<std::string>();
+                    legacy.link.role = row[5].as<std::string>();
+                    legacy.link.token_hash = row[6].as<std::string>();
+                    legacy.link.expires_at = row[7].as<std::string>();
+                    legacy.link.revoked_at = row[8].as<std::string>();
+                    legacy.link.created_by_taap_id = row[9].as<std::string>();
+                    legacy.link.at_us = row[10].as<std::int64_t>();
+                    legacy.link.created_at = record_instant(legacy.link.at_us);
+                    legacy.customer_id = row[11].as<std::string>();
+                    legacy.workspace_id = row[12].as<std::string>();
+                    legacy.outcome = row[13].as<std::string>();
+                    links.push_back(std::move(legacy));
                 }
-                return output;
+                return links;
             });
-    }
-
-    Result<DriveShareLink> revoke_drive_share_link(const std::string& id) override {
-        return with_tx<DriveShareLink>([&](pqxx::work& tx) -> Result<DriveShareLink> {
-            const pqxx::result current =
-                tx.exec_params(std::string("SELECT ") + drive_share_link_columns +
-                                   " FROM drive_share_links WHERE id = $1::uuid FOR UPDATE",
-                               id);
-            if (current.empty()) {
-                return std::unexpected(StoreError{"not_found", "no drive share link " + id});
-            }
-            if (!drive_share_link_of(current[0]).revoked_at.empty()) {
-                return std::unexpected(
-                    StoreError{"conflict", "drive share link is already revoked"});
-            }
-            const pqxx::result rows = tx.exec_params(
-                std::string("UPDATE drive_share_links SET revoked_at = now() WHERE id = $1::uuid "
-                            "RETURNING ") +
-                    drive_share_link_columns,
-                id);
-            return drive_share_link_of(rows[0]);
-        });
     }
 
     Result<Team> create_team(const NewTeam& in) override {

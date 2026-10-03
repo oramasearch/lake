@@ -20,6 +20,7 @@
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/ask_messages.hpp"
+#include "lake/control/drive_share_links.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/postgres_store.hpp"
@@ -1113,6 +1114,134 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesEachTopicCreatorIntoItsWorkspac
             "copy_workspace_records", {{"collection", "stream_owners"}, {"mode", "plan"}}, context));
     }();
     EXPECT_FALSE(refused.ok) << "only the operator copies";
+}
+
+// lake#350: the retired drive_share_links rows move into the workspace that owns each one, keep
+// their ids (so the `share-link:<id>` grant still names them) and become reachable from a
+// pre-move token through the content-free route.
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesDriveShareLinksAndRoutesTheirTokens) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    auto& first = t.spaces[0];
+    auto& second = t.spaces[1];
+    ASSERT_TRUE(t.store->update_workspace(first.workspaces[1], {.desired = "deleted"}));
+    std::vector<lake::control::DriveShareLink> legacy;
+    std::int64_t at = 1'790'000'000'000'000;
+    for (auto* space : {&first, &second}) {
+        const auto repository =
+            t.store->create_repository({space->customer_id, "drive", "", "private"});
+        ASSERT_TRUE(repository) << repository.error().message;
+        const auto parent = t.store->find_policy_object("repository", repository->id);
+        ASSERT_TRUE(parent);
+        const std::string node = "22222222222222222222222222222222";
+        const auto folder = t.store->create_policy_object({"path", repository->id + ":" + node,
+                                                           parent->id, space->principal.taap_id,
+                                                           lake::control::new_uuid_v4(), true});
+        ASSERT_TRUE(folder) << folder.error().message;
+        lake::control::DriveShareLink link;
+        link.id = lake::control::new_uuid_v4();
+        link.repository_id = repository->id;
+        link.object_id = folder->id;
+        link.node_id = node;
+        link.path = "shared";
+        link.role = "read";
+        link.token_hash = "digest-" + link.id;
+        link.expires_at = "2999-01-01T00:00:00.000000Z";
+        link.created_by_taap_id = space->principal.taap_id;
+        link.at_us = at += 1'000'000;
+        legacy.push_back(link);
+    }
+    legacy[1].revoked_at = "2026-09-01T00:00:00.000000Z";
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        for (const auto& row : legacy) {
+            tx.exec_params("INSERT INTO drive_share_links (id, repository_id, object_id, node_id, "
+                           "path, role, token_hash, expires_at, revoked_at, created_by_taap_id, "
+                           "created_at) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, "
+                           "$8::timestamptz, NULLIF($9, '')::timestamptz, $10, "
+                           "to_timestamp($11::double precision / 1000000))",
+                           row.id, row.repository_id, row.object_id, row.node_id, row.path,
+                           row.role, row.token_hash, row.expires_at, row.revoked_at,
+                           row.created_by_taap_id, row.at_us);
+        }
+        tx.commit();
+    } else {
+        for (const auto& row : legacy) {
+            static_cast<lake::control::InMemoryStore&>(*t.store).seed_legacy_drive_share_link(row);
+        }
+    }
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    operator_context.request_id = lake::control::new_uuid_v4();
+    const auto copy = [&](std::string mode) {
+        const auto completed = liquid::runtime::block_on(t.registry.call_async(
+            "copy_workspace_records", {{"collection", "drive_share_links"}, {"mode", mode}},
+            operator_context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+    const auto plan = copy("plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["collection"], "drive_share_links");
+    EXPECT_EQ(plan.value["rows"], 2);
+    EXPECT_EQ(plan.value["assigned"], 1);
+    ASSERT_EQ(plan.value["unresolved"].size(), 1U);
+    EXPECT_EQ(plan.value["unresolved"][0]["id"], legacy[1].id);
+    EXPECT_EQ(plan.value["unresolved"][0]["outcome"], "needs_selection");
+    const std::string home = first.workspaces[0];
+    EXPECT_TRUE(t.zetta->records["http://" + home + ".test"].collections.empty())
+        << "a plan writes nothing";
+    // The assigned link's pre-move token is routed; the unassigned one is not.
+    const auto route = t.store->drive_share_link_route(legacy[0].token_hash);
+    ASSERT_TRUE(route) << route.error().message;
+    EXPECT_EQ(route->workspace_id, home);
+    EXPECT_EQ(route->link_id, legacy[0].id);
+    EXPECT_FALSE(t.store->drive_share_link_route(legacy[1].token_hash));
+
+    EXPECT_EQ(copy("verify").value["missing"].size(), 1U);
+    const auto copied = copy("copy");
+    ASSERT_TRUE(copied.ok) << copied.error.message;
+    EXPECT_EQ(copied.value["copied"], 1);
+    EXPECT_EQ(copy("copy").value["already_present"], 1) << "a rerun copies nothing twice";
+    const auto verified = copy("verify");
+    EXPECT_EQ(verified.value["verified"], 1);
+    EXPECT_TRUE(verified.value["mismatched"].empty());
+    EXPECT_FALSE(verified.value["complete"]) << "the unresolved link keeps the table";
+
+    // The copy is the same link, under its own id, in its own workspace only.
+    auto context = t.context(first);
+    auto records = lake::api::workspace_records(context, first.customer_id, home);
+    ASSERT_TRUE(records);
+    const auto stored = lake::control::settled(liquid::runtime::block_on(
+        records->get(lake::control::DriveShareLinkCodec::collection, legacy[0].id)));
+    ASSERT_TRUE(stored && *stored);
+    const auto link = lake::control::DriveShareLinkCodec::decode(**stored);
+    ASSERT_TRUE(link);
+    EXPECT_EQ(link->token_hash, legacy[0].token_hash);
+    EXPECT_EQ(link->path, "shared");
+    EXPECT_EQ(link->at_us, legacy[0].at_us);
+    for (const auto& space : t.spaces) {
+        for (const auto& workspace : space.workspaces) {
+            EXPECT_EQ(t.zetta->records["http://" + workspace + ".test"]
+                          .rows("drive_share_links")
+                          .size(),
+                      workspace == home ? 1U : 0U)
+                << workspace;
+        }
+    }
+    // A record whose sealed value was swapped is reported, never accepted.
+    auto& rows = t.zetta->records["http://" + home + ".test"].rows("drive_share_links");
+    rows.at(legacy[0].id)["value"] = "AAAA";
+    EXPECT_EQ(copy("verify").value["missing"].size(), 1U);
 }
 
 TEST(WorkspaceRecords, NoWorkspaceSurfaceReachesTheRecordStore) {

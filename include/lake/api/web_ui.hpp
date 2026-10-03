@@ -564,9 +564,23 @@ std::string web_ui_drive_conflict(const control::Repository& repository,
                                   const std::vector<RepositoryFile>& versions,
                                   const std::optional<DriveVersionDiff>& difference,
                                   WebUiViewer viewer);
+// The workspaces of the repository's space that can hold a folder's share links (id, name), and
+// the one whose links a sharing page shows (lake#350). Links live in that workspace's Zetta.
+struct DriveShareWorkspaces {
+    std::string selected;
+    std::vector<std::pair<std::string, std::string>> choices;
+};
+// Asks which workspace's links to show, when neither the URL nor the person's remembered
+// workspace names one.
+std::string web_ui_drive_share_workspaces(const control::Repository& repository,
+                                          std::string_view ref,
+                                          std::string_view path,
+                                          const DriveShareWorkspaces& workspaces,
+                                          WebUiViewer viewer = true);
 std::string web_ui_drive_share(const control::Repository& repository,
                                std::string_view ref,
                                std::string_view path,
+                               const DriveShareWorkspaces& workspaces,
                                const std::vector<control::EffectiveAccessEntry>& access,
                                const std::vector<nlohmann::json>& links,
                                std::string_view created_link,
@@ -575,6 +589,7 @@ std::string web_ui_drive_share(const control::Repository& repository,
 std::string web_ui_drive_share_link(const control::Repository& repository,
                                     std::string_view ref,
                                     std::string_view path,
+                                    std::string_view workspace_id,
                                     const nlohmann::json& link,
                                     std::string_view error,
                                     WebUiViewer viewer = true);

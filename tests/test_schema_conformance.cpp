@@ -256,7 +256,7 @@ void validate_evidence(const json& document) {
 }
 
 TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
-    // 32 bytes of hex, as LAKE_INSTANCE_KEK is: workspace records (Streams ownership) derive from it.
+    // 32 bytes of hex, as LAKE_INSTANCE_KEK is: workspace records (Streams ownership, drive links) derive from it.
     constexpr const char* kek = "736368656d612d636f6e666f726d616e63652d696e7374616e63652d6b656b31";
     const auto root = lake::test::fixture_path("schema-server");
     const auto store = std::make_shared<lake::control::InMemoryStore>();
@@ -329,6 +329,7 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     check_uploads(http, repository.id);
     const auto link = http.call("create_drive_share_link",
                                 {{"repository_id", repository.id},
+                                 {"workspace_id", experiments.id},
                                  {"ref", "main"},
                                  {"path", "shared"},
                                  {"role", "read"},

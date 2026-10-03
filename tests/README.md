@@ -380,3 +380,11 @@ and `PostgresOpportunities.MigrationRecordsEachRowsOwnerForTheCopy` (`0046_oppor
 `Stores/WorkspaceRecordStores.TheOneShotCopyMovesEachTopicCreatorIntoItsWorkspace` copies the
 retired `stream_owners` rows (lake#379), and `PostgresStreamOwners.MigrationRecordsEachRowsWorkspaceForTheCopy`
 covers `0047_stream_owner_workspaces`.
+`Stores/WorkspaceRecordStores.TheOneShotCopyMovesDriveShareLinksAndRoutesTheirTokens` copies retired
+drive share links and checks their routes (lake#350), and
+`PostgresDriveShareLinks.MigrationRecordsOwnersAndContentFreeRoutes` covers
+`0048_drive_share_link_workspaces`. `Drive.ShareLinksLiveOnlyInTheWorkspaceThatHoldsThem` covers
+two spaces with two workspaces each, missing/unknown/foreign `workspace_id`, least-privilege
+callers, forged and moved tokens, a workspace that is not ready, revocation and workspace deletion.
+`workspace_fixture.hpp` (`RecordWorkspaces`) gives a test store Ready workspaces whose records live
+in `RecordTables`, over the memory or PostgreSQL store.

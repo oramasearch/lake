@@ -19,7 +19,9 @@ the shared test fixture loads the schema and removes only its own database after
 It opens the share without a session, traverses a child folder, previews supported text, checks
 unsupported-format fallback, compares text/binary/empty downloads, verifies REST byte delivery,
 and refuses broad drive access. It covers both link roles, guessed sibling/parent and malformed
-paths, a descendant with inheritance disabled, expired links, and revocation after listing.
+paths, a descendant with inheritance disabled, expired links, and revocation after listing. Links
+live in a workspace Zetta (lake#350, `RecordWorkspaces`); the sharing page names the workspace that
+holds the links, redirects to the space's only workspace, and asks when there are several.
 
 The drive scenario resolves the personal customer created by sign-up. Customer creation no longer
 requires a separate operator bootstrap; its existing synchronization and sharing assertions remain.
