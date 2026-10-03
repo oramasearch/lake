@@ -834,6 +834,75 @@ record(control::Store& store, const EventDraft& draft, const IdentityOptions& op
         Error{"conflict", "could not append audit event after concurrent updates"});
 }
 
+PendingEvent pending(const EventDraft& draft) {
+    return PendingEvent{.id = control::new_uuid_v4(), .occurred_at = timestamp(), .draft = draft};
+}
+
+Result<Event> sign_pending(control::Store& store,
+                           const Identity& signer,
+                           const PendingEvent& pending_event,
+                           const std::string& previous_digest,
+                           const IdentityOptions& options) {
+    auto seed = seed_for(signer, options_for_store(store, options));
+    if (!seed) {
+        return std::unexpected(seed.error());
+    }
+    auto key = pkey_from_seed(*seed);
+    if (!key) {
+        return std::unexpected(key.error());
+    }
+    Event event{
+        .id = pending_event.id,
+        .occurred_at = pending_event.occurred_at,
+        .draft = pending_event.draft,
+        .previous_digest = previous_digest,
+        .signer = signer.taap_id,
+    };
+    auto bytes = signed_bytes(event);
+    if (!bytes) {
+        return std::unexpected(bytes.error());
+    }
+    auto signature = sign(key->get(), *bytes);
+    if (!signature) {
+        return std::unexpected(signature.error());
+    }
+    event.signature = *signature;
+    auto digest = digest_hex(cbor(stored(event)));
+    if (!digest) {
+        return std::unexpected(digest.error());
+    }
+    event.digest = *digest;
+    return event;
+}
+
+Result<void> verify_event(control::Store& store, const Event& event) {
+    auto identity_row = store.lake_identity_by_taap_id(event.signer);
+    if (!identity_row) {
+        return std::unexpected(Error{identity_row.error().code, identity_row.error().message});
+    }
+    auto public_key = base64_decode(identity_row->public_key);
+    if (!public_key) {
+        return std::unexpected(public_key.error());
+    }
+    auto bytes = signed_bytes(event);
+    if (!bytes) {
+        return std::unexpected(bytes.error());
+    }
+    auto signature = verify_signature(*public_key, *bytes, event.signature);
+    if (!signature) {
+        return std::unexpected(signature.error());
+    }
+    auto digest = digest_hex(cbor(stored(event)));
+    if (!digest) {
+        return std::unexpected(digest.error());
+    }
+    if (*digest != event.digest) {
+        return std::unexpected(
+            Error{"invalid_digest", "audit event digest does not match its contents"});
+    }
+    return {};
+}
+
 Result<void> verify(control::Store& store, const std::vector<Event>& events) {
     std::string previous_digest;
     for (const Event& event : events) {

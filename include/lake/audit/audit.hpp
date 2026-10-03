@@ -87,6 +87,31 @@ Event event_from_json(const nlohmann::json& value);
 nlohmann::json identity_document(const Identity& identity);
 std::string json_lines(const std::vector<Event>& events);
 
+// An event whose id and instant are fixed when its call finishes, and whose predecessor and
+// signature are added when it is written: a workspace's audit, which lake writes off the request
+// path (docs/api/audit.md#workspace-audit, decision 52).
+struct PendingEvent {
+    std::string id;
+    std::string occurred_at;
+    EventDraft draft;
+};
+
+// Gives `draft` its id and instant now.
+PendingEvent pending(const EventDraft& draft);
+
+// Signs a pending event after `previous_digest` with `signer` (the current identity, from
+// `identity`). The event keeps the id and instant it was given when its call finished.
+Result<Event> sign_pending(control::Store& store,
+                           const Identity& signer,
+                           const PendingEvent& event,
+                           const std::string& previous_digest,
+                           const IdentityOptions& options);
+
+// Checks one event alone: its signature against lake's identity history and its digest, but not
+// its predecessor. A workspace's copy of an event recorded centrally before decision 52 is
+// checked this way; the central chain holds its place.
+Result<void> verify_event(control::Store& store, const Event& event);
+
 // Appends one signed event. The store enforces the predecessor supplied by this
 // function.
 Result<Event>

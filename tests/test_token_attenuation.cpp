@@ -27,6 +27,7 @@
 #include <openssl/evp.h>
 #include <pqxx/pqxx>
 
+#include "lake/api/audit_routing.hpp"
 #include "lake/api/server.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -230,6 +231,27 @@ protected:
         std::ranges::copy_if(*events, std::back_inserter(matches), [&](const auto& event) {
             return event.draft.request_id == id;
         });
+        // Decision 52: an application's events belong to its workspace's audit, queued there by
+        // the server's AuditRecorder; the operator's `audit` reads both logs.
+        bool workspace_event = false;
+        if (matches.empty() &&
+            lake::api::audit_log_of(name) == lake::api::AuditLog::Workspace) {
+            const auto wire = request(server_->port(), "/v1/audit?request_id=" + id + "&limit=5",
+                                      json::object(), operator_secret_,
+                                      lake::control::new_uuid_v4(), "GET");
+            const auto body = wire.find("\r\n\r\n");
+            ASSERT_NE(body, std::string::npos);
+            const json read = json::parse(wire.substr(body + 4));
+            for (const json& item : read.at("value").at("items")) {
+                if (item.value("request_id", "") == id) {
+                    EXPECT_EQ(item.value("log", ""), "workspace") << name;
+                    EXPECT_TRUE(item.value("pending", false) ||
+                                !item.value("signature", "").empty());
+                    matches.push_back(lake::audit::event_from_json(item));
+                    workspace_event = true;
+                }
+            }
+        }
         ASSERT_EQ(matches.size(), 1u) << name;
         EXPECT_EQ(matches[0].draft.action, name);
         EXPECT_EQ(matches[0].draft.outcome,
@@ -238,7 +260,7 @@ protected:
                           result.at("error").at("code") == "unauthenticated"
                       ? "denied"
                       : "failure");
-        EXPECT_FALSE(matches[0].signature.empty());
+        EXPECT_TRUE(workspace_event || !matches[0].signature.empty());
     }
 
     json issue(const json& issuer, const json& scopes, int lifetime = 0) {

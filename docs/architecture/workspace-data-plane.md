@@ -134,8 +134,8 @@ only the three listed below; no names are invented for the four unobserved datas
 | `grants` | multitenancy/dispatch | Authorization grants. |
 | `invitations` | multitenancy/dispatch | Pending tenant membership. |
 | `lake_identity` | workspace | Signing credentials require explicit custody outside the control store. [Follow-up](https://github.com/oramasearch/lake/issues/316). |
-| `audit_events` | workspace | Signed call history and details are event data. [Follow-up](https://github.com/oramasearch/lake/issues/317). |
-| `audit_retention` | workspace | Audit-history storage policy follows its history. [Follow-up](https://github.com/oramasearch/lake/issues/318). |
+| `audit_events` | split (decision 52) | Control-plane and identity events stay in this central hash chain. Events about a workspace's data **moved** to `lake_audit_events` in that workspace's Zetta, a chain of its own written off the request path ([lake#317](https://github.com/oramasearch/lake/issues/317), migration `0063`, [audit.md](../api/audit.md#which-log)); the central events recorded before the split are copied there by the one-shot copy and stay here, append-only. |
+| `audit_retention` | multitenancy/dispatch | The space's retention of the central log, a policy row ([lake#318](https://github.com/oramasearch/lake/issues/318)). A workspace's audit is kept until the workspace is deleted (the collection's `retention_ms` is 0), never shorter ([audit.md](../api/audit.md#retention)). |
 | `repository_refs` | workspace | Repository reference state. [Follow-up](https://github.com/oramasearch/lake/issues/319). |
 | `identity_documents` | workspace | Identity document bodies and verification evidence. [Follow-up](https://github.com/oramasearch/lake/issues/320). |
 | `devices` | workspace | Device records and authentication state. [Follow-up](https://github.com/oramasearch/lake/issues/321). |

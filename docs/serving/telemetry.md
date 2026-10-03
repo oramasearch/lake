@@ -28,6 +28,12 @@ The exported metric families are:
   `lake_metering_dropped_builds_total` and the gauge `lake_metering_pending`: repository usage on
   its way to the workspace Zettas, written by the owner loop
   ([metering](../api/metering.md#transfer-off-the-request-path), lake#348)
+- `lake_audit_workspace_events_written_total`, `lake_audit_workspace_flush_errors_total`,
+  `lake_audit_workspace_conflicts_total` (a place another replica took first),
+  `lake_audit_workspace_dropped_total{reason}` (`bound`, `workspace_deleted`) and the gauge
+  `lake_audit_workspace_pending`: audit events about a workspace's data on their way to that
+  workspace's chain, written by the owner loop every second
+  ([audit](../api/audit.md#workspace-audit), lake#317)
 - `lake_secret_leases_settled_total{outcome}` (`expired`, `settled`, `rescheduled`, `removed`,
   `failed`) and `lake_secret_lease_sweep_errors_total`: the owner loop's dynamic-lease expiry pass,
   which reads the due index and settles each due lease in its workspace

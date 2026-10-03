@@ -13,6 +13,11 @@ The regression test now also holds the exact Zetta capabilities of those pages a
 refuses any page that waits for a capability measured slow on the dev site, except the pages named
 in [Live budget follow-up](#live-budget-follow-up-lake446).
 
+**Updated 2026-10-03 (lake#317).** `/activity` and `/audit` read each workspace's own audit beside
+the central log (decision 52): one `list_records` walk per workspace, all started together, so
+their budget is one round and one call per workspace (one in the regression fixture). The
+repository branch protection page reads its repository's workspace audit, one call.
+
 ## Reading `Server-Timing`
 
 The browser's Network panel shows these entries for a lake page:

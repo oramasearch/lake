@@ -89,10 +89,13 @@ public:
     // Every record found by `lookup`, oldest first (by instant, then id), at most the newest
     // `newest` of them (0: all, following next_after), and none older than `since_us` (0: no
     // bound; the walk stops at the first older record). A missing collection is no records;
-    // records that do not open with this workspace's key are skipped.
+    // records that do not open with this workspace's key are skipped. With `keep`, only the
+    // records it accepts are returned and counted toward `newest`, so a filtered read walks on
+    // until it has `newest` matches (the workspace audit's filters, lake#317).
+    using Keep = std::function<bool(const StoredRecord&)>;
     liquid::runtime::task<ZettaControlResult<std::vector<StoredRecord>>>
     list(RecordCollection collection, std::string lookup, std::size_t newest = 0,
-         std::int64_t since_us = 0);
+         std::int64_t since_us = 0, Keep keep = {});
 
     // One record by key; nullopt when it does not exist (or does not open here).
     liquid::runtime::task<ZettaControlResult<std::optional<StoredRecord>>>

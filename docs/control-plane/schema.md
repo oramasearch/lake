@@ -64,7 +64,7 @@ case-sensitivity and unvalidated handle format.
 |---|---|
 | `lake_identity` | Every historical lake TAAP/1 identity: UUID, TAAP ID, public key, wrapped generated Ed25519 seed (AES-256-GCM under `LAKE_INSTANCE_KEK`), creation timestamp, optional dual-signed rotation document, and a partial-unique `current` row. An operator-supplied seed (`LAKE_IDENTITY_SEED`) is used in place of a generated one. |
 | `audit_events` | Ordered `sequence`, UUID, timestamp, optional customer, kind, principal, object, action, outcome (`success`, `failure`, `denied`, `revoked`), the request id as text (clients may send `x-request-id`), optional method and device, JSON details, predecessor digest, signer, signature and digest. UPDATE and DELETE are rejected by triggers. |
-| `audit_retention` | One retention setting per customer, constrained to at least 400 days, timestamped on update; the application refuses to lower it. |
+| `audit_retention` | One retention setting per customer, constrained to at least 400 days, timestamped on update; the application refuses to lower it. It governs the central log; a workspace's audit is kept until the workspace is deleted (migration `0063`, lake#318). |
 
 Every capability call, sign-in and session event is one row, written by `audit::record` under a
 transaction advisory lock that reads the latest digest and appends the next event; the signature
@@ -311,6 +311,20 @@ local policy binding only.
 Nothing is dropped. Lake reads and writes environments and mirrored rows only in the repository's
 workspace records ([platform.md](../api/platform.md#where-environments-live-lake358-lake359)); the
 one-shot copy moves the retired rows.
+
+## Audit workspaces (migration `0063_audit_workspaces`)
+
+Decision 52 (lake#317, lake#318): `audit_events` keeps control-plane and identity events; events
+about a workspace's data go to that workspace's own chain, `lake_audit_events` in its Zetta
+([audit.md](../api/audit.md#which-log)). `audit_retention` stays and governs the central log.
+
+| Table or change | Purpose |
+|---|---|
+| `workspace_assignments` (`audit_events`) | The workspace of each central event about a workspace's data, for the copy: an event of a workspace action that was not refused for want of authority, whose workspace its details or object name and that belongs to its space. `event_workspace`, or `workspace_deleted` (it stays central). Every other event stays central, without a row; the migration reports the counts. |
+| `audit_workspaces_guard` | Guard table for migration `0063_audit_workspaces`. |
+
+Nothing is dropped and `audit_events` stays append-only; the one-shot copy puts each assigned event
+in its workspace as it is.
 
 ## Identity exit scenario (migration `0020_identity_exit`)
 

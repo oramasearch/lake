@@ -45,6 +45,15 @@ storage exists: it returns the unique bytes the OCI registry holds below `<space
 transfer and build records on their way to the workspace Zettas (lake#348, lake#349).
 `ApiContext::metering_recorder` points at the server's; `ServerOptions::metering_flush_interval`
 and `metering_max_pending` configure it. A null recorder (no workspaces) records nothing.
+`audit_routing.hpp` declares the audit classification (decision 52, lake#317): `audit_log_of` for
+every registered capability, `audit_route` for one call and `workspace_audit_route` for an event
+recorded outside the registry, and `record_audit`. `audit_recorder.hpp` declares `AuditRecorder`,
+the bounded queue of workspace audit events on their way to each workspace's chain;
+`ApiContext::audit_recorder` points at the server's (null: no workspaces, every event central),
+`ApiContext::audit_workspace_id` carries the workspace a call acted on, and
+`ServerOptions::audit_flush_interval` (one second) and `audit_max_pending` (65,536) configure it.
+`web_ui.hpp`'s `AuditPageView` carries each event's workspace, the queued events and the workspaces
+that could not be read.
 `ServerOptions::secret_lease_expiry_interval` (ten seconds; zero: every tick) paces the owner
 loop's dynamic-lease expiry pass (lake#362), which runs only with a store, workspaces and an
 instance KEK.

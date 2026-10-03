@@ -45,3 +45,6 @@ implemented and not yet deployed.
 
 [status.md](status.md) records repository environments and the platform mirror in the repository's
 workspace Zetta (lake#358, lake#359, migration `0060`) as implemented and not yet deployed.
+
+[status.md](status.md) records the audit split by subject (decision 52, lake#317, lake#318,
+migration `0063`) as implemented and not yet deployed.

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <map>
+#include <set>
 #include <optional>
 #include <span>
 #include <string>
@@ -540,9 +541,18 @@ struct AuditPageView {
     std::map<std::string, std::string> capabilities;
     // Whether successful reads are in the list; /activity leaves them out by default.
     bool include_reads = true;
+    // By event id: the workspace whose audit holds it (decision 52); absent for the central log.
+    std::map<std::string, std::string> workspaces;
+    // Event ids still queued for their workspace's audit, not yet signed.
+    std::set<std::string> pending;
+    // The workspaces whose audit could not be read, with why.
+    std::vector<std::pair<std::string, std::string>> unread;
 };
 // The page's view of `audit` / `my_audit` items: the events plus their names and capabilities.
 AuditPageView audit_page_view(const nlohmann::json& items, bool include_reads = true);
+// The same, with the workspaces the answer could not read (`unread_workspaces`).
+AuditPageView audit_page_view(const nlohmann::json& answer, const nlohmann::json& items,
+                              bool include_reads);
 std::string web_ui_audit(const std::vector<audit::Event>& events,
                          const audit::Filter& filter,
                          const nlohmann::json& log_configuration = nlohmann::json::object(),

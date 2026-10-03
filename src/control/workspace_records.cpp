@@ -339,7 +339,7 @@ std::optional<StoredRecord> WorkspaceRecords::opened(RecordCollection collection
 
 liquid::runtime::task<ZettaControlResult<std::vector<StoredRecord>>>
 WorkspaceRecords::list(RecordCollection collection, std::string lookup, std::size_t newest,
-                       std::int64_t since_us) {
+                       std::int64_t since_us, Keep keep) {
     using Records = std::vector<StoredRecord>;
     if (!collection_name(collection.name)) {
         co_return records_failure<Records>("store_error", "the collection name is invalid");
@@ -353,7 +353,8 @@ WorkspaceRecords::list(RecordCollection collection, std::string lookup, std::siz
     // Newest first, a page at a time, until `newest` records opened or the listing ends.
     for (;;) {
         const std::size_t want =
-            newest == 0 ? 1000 : std::min<std::size_t>(1000, newest - opened_records.size());
+            newest == 0 || keep ? 1000
+                                : std::min<std::size_t>(1000, newest - opened_records.size());
         nlohmann::json input{{"collection", zetta_collection(collection)},
                              {"index", lookup_index},
                              {"value", key},
@@ -383,6 +384,9 @@ WorkspaceRecords::list(RecordCollection collection, std::string lookup, std::siz
                 if (since_us > 0 && record->at_us < since_us) {
                     older = true;
                     break;
+                }
+                if (keep && !keep(*record)) {
+                    continue;
                 }
                 opened_records.push_back(std::move(*record));
             }

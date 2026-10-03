@@ -23,6 +23,7 @@
 #include "api/workspace_records_api.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
+#include "lake/api/audit_recorder.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
@@ -46,6 +47,7 @@
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/secret_records.hpp"
 #include "lake/control/stream_owners.hpp"
+#include "lake/control/workspace_audit.hpp"
 #include "lake/control/workspace_records.hpp"
 #include "lake/control/zetta_control.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -2194,6 +2196,401 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesApplicationSettings) {
     EXPECT_EQ(copy("plan").error.code, "unauthorized");
 }
 
+// lake#317, decision 52: an event about a workspace's data goes to that workspace's own audit,
+// the chained, sealed collection lake_audit_events of its Zetta, queued on the request path and
+// written by the AuditRecorder's flush; control-plane events, refusals for want of authority and
+// calls that name no workspace stay in the central log. The readers show both.
+TEST_P(WorkspaceRecordStores, AuditEventsAboutAWorkspaceLiveInItsOwnChain) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const std::string& home = first.workspaces[0];
+    const std::string& lab = first.workspaces[1];
+    lake::api::AuditRecorder recorder(t.store.get(), t.service.get(), std::string(kek), "");
+    const auto url = [](const std::string& workspace) { return "http://" + workspace + ".test"; };
+    const auto rows = [&](const std::string& workspace) -> auto& {
+        return t.zetta->records[url(workspace)].rows("audit_events");
+    };
+    const auto call_with = [&](lake::api::ApiContext context, lake::api::AuditRecorder* writer,
+                               const std::string& capability, const json& input,
+                               const std::string& request_id) {
+        context.audit_recorder = writer;
+        context.request_id = request_id;
+        const auto completed =
+            liquid::runtime::block_on(t.registry.call_async(capability, input, context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+    const auto call = [&](const TwoSpaces::Space& space, const std::string& capability,
+                          const json& input, const std::string& request_id) {
+        return call_with(t.context(space), &recorder, capability, input, request_id);
+    };
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    const auto as_operator = [&](const std::string& capability, const json& input) {
+        return call_with(operator_context, &recorder, capability, input,
+                         lake::control::new_uuid_v4());
+    };
+    const auto central = [&](const std::string& request_id) {
+        const auto events = lake::test::audit_events(*t.store, {.request_id = request_id});
+        EXPECT_TRUE(events);
+        return events ? *events : std::vector<lake::audit::Event>{};
+    };
+    const auto ask = [&](const TwoSpaces::Space& space, const std::string& customer_id,
+                         const json& workspace_id) {
+        const std::string request_id = lake::control::new_uuid_v4();
+        call(space, "get_ask_conversation",
+             {{"customer_id", customer_id},
+              {"workspace_id", workspace_id},
+              {"conversation_id", lake::control::new_uuid_v4()}},
+             request_id);
+        return request_id;
+    };
+
+    // A call about a workspace's data only queues its event: nothing central, nothing written.
+    const std::string home_read = ask(first, first.customer_id, home);
+    EXPECT_TRUE(central(home_read).empty());
+    EXPECT_EQ(recorder.pending(), 1U);
+    EXPECT_TRUE(rows(home).empty()) << "no workspace round trip on the request path";
+    // The person sees it at once, as queued, and the operator too.
+    auto mine = call(first, "my_audit", {{"include_reads", true}}, lake::control::new_uuid_v4());
+    ASSERT_TRUE(mine.ok) << mine.error.message;
+    const auto find = [](const json& items, const std::string& request_id) {
+        for (const json& item : items) {
+            if (item.value("request_id", "") == request_id) {
+                return item;
+            }
+        }
+        return json();
+    };
+    json queued = find(mine.value["items"], home_read);
+    ASSERT_FALSE(queued.is_null());
+    EXPECT_EQ(queued["log"], "workspace");
+    EXPECT_EQ(queued["workspace_id"], home);
+    EXPECT_TRUE(queued.value("pending", false));
+
+    // Control-plane calls, refusals for want of authority and calls naming no workspace stay
+    // central.
+    const std::string listing = lake::control::new_uuid_v4();
+    call(first, "list_workspaces", {{"customer_id", first.customer_id}}, listing);
+    ASSERT_EQ(central(listing).size(), 1U);
+    const std::string foreign = ask(first, second.customer_id, second.workspaces[0]);
+    ASSERT_EQ(central(foreign).size(), 1U);
+    EXPECT_EQ(central(foreign)[0].draft.outcome, "denied");
+    const std::string malformed = ask(first, first.customer_id, "not-a-workspace");
+    ASSERT_EQ(central(malformed).size(), 1U);
+    EXPECT_EQ(central(malformed)[0].draft.details["error_code"], "invalid_input");
+    const std::string unknown = ask(first, first.customer_id, lake::control::new_uuid_v4());
+    ASSERT_EQ(central(unknown).size(), 1U);
+    const std::string missing = lake::control::new_uuid_v4();
+    call(first, "get_ask_conversation", {{"customer_id", first.customer_id}}, missing);
+    ASSERT_EQ(central(missing).size(), 1U);
+    EXPECT_EQ(recorder.pending(), 1U);
+
+    // The flush writes the chain, sealed, in that workspace only.
+    liquid::runtime::block_on(recorder.flush());
+    EXPECT_EQ(recorder.pending(), 0U);
+    EXPECT_EQ(recorder.totals().written, 1U);
+    ASSERT_EQ(rows(home).size(), 1U);
+    EXPECT_TRUE(rows(lab).empty());
+    EXPECT_TRUE(rows(second.workspaces[0]).empty());
+    for (const auto& [key, row] : rows(home)) {
+        EXPECT_EQ(row.dump().find(first.principal.taap_id), std::string::npos);
+        EXPECT_EQ(row.dump().find("get_ask_conversation"), std::string::npos);
+    }
+
+    // More events in both of the first space's workspaces, and a second lake replica appending
+    // to the same chain: it never forks.
+    lake::api::AuditRecorder replica(t.store.get(), t.service.get(), std::string(kek), "");
+    std::vector<std::string> home_reads{home_read};
+    for (int index = 0; index < 3; ++index) {
+        home_reads.push_back(ask(first, first.customer_id, home));
+    }
+    const std::string lab_read = ask(first, first.customer_id, lab);
+    const std::string replica_read = lake::control::new_uuid_v4();
+    call_with(t.context(first), &replica, "get_ask_conversation",
+              {{"customer_id", first.customer_id},
+               {"workspace_id", home},
+               {"conversation_id", lake::control::new_uuid_v4()}},
+              replica_read);
+    home_reads.push_back(replica_read);
+    liquid::runtime::block_on(replica.flush());
+    liquid::runtime::block_on(recorder.flush());
+    EXPECT_GT(recorder.totals().conflicts, 0U) << "the replica took the place this one knew";
+    EXPECT_EQ(rows(home).size(), home_reads.size());
+    EXPECT_EQ(rows(lab).size(), 1U);
+    auto verified = as_operator("verify_audit", {{"workspace_id", home}});
+    ASSERT_TRUE(verified.ok) << verified.error.message;
+    EXPECT_EQ(verified.value["log"], "workspace");
+    EXPECT_EQ(verified.value["chained"], home_reads.size());
+    EXPECT_EQ(verified.value["last_sequence"], home_reads.size());
+    EXPECT_TRUE(as_operator("verify_audit", json::object()).ok)
+        << "the central chain still verifies";
+
+    // The readers: the operator's audit shows both logs; one workspace's alone; each person's
+    // activity reads only their own spaces' workspaces.
+    auto everything = as_operator("audit", {{"limit", 1000}, {"include_reads", true}});
+    ASSERT_TRUE(everything.ok) << everything.error.message;
+    for (const std::string& request_id : home_reads) {
+        const json item = find(everything.value["items"], request_id);
+        ASSERT_FALSE(item.is_null()) << request_id;
+        EXPECT_EQ(item["log"], "workspace");
+        EXPECT_GT(item.value("sequence", 0), 0);
+        EXPECT_FALSE(item.value("signature", "").empty());
+    }
+    EXPECT_EQ(find(everything.value["items"], listing)["log"], "central");
+    auto lab_only = as_operator("audit", {{"workspace_id", lab}, {"include_reads", true}});
+    ASSERT_TRUE(lab_only.ok) << lab_only.error.message;
+    ASSERT_EQ(lab_only.value["items"].size(), 1U);
+    EXPECT_EQ(lab_only.value["items"][0]["request_id"], lab_read);
+    auto central_only = as_operator("audit", {{"log", "central"}, {"limit", 1000}});
+    EXPECT_TRUE(find(central_only.value["items"], lab_read).is_null());
+    mine = call(first, "my_audit", {{"include_reads", true}, {"limit", 1000}},
+                lake::control::new_uuid_v4());
+    ASSERT_TRUE(mine.ok);
+    EXPECT_FALSE(find(mine.value["items"], lab_read).is_null());
+    EXPECT_FALSE(find(mine.value["items"], listing).is_null());
+    const auto theirs = call(second, "my_audit", {{"include_reads", true}, {"limit", 1000}},
+                             lake::control::new_uuid_v4());
+    ASSERT_TRUE(theirs.ok);
+    EXPECT_TRUE(find(theirs.value["items"], lab_read).is_null());
+    EXPECT_EQ(call(second, "my_audit", {{"workspace_id", lab}}, lake::control::new_uuid_v4())
+                  .error.code,
+              "unauthorized")
+        << "another space's workspace";
+    // Reads are left out of a person's activity by default, wherever they are recorded.
+    mine = call(first, "my_audit", {{"limit", 1000}}, lake::control::new_uuid_v4());
+    EXPECT_TRUE(find(mine.value["items"], lab_read).is_null());
+
+    // Export: one workspace's whole chain.
+    const auto exported = as_operator("export_audit", {{"workspace_id", home}});
+    ASSERT_TRUE(exported.ok) << exported.error.message;
+    const std::string jsonl = exported.value["jsonl"];
+    EXPECT_EQ(std::ranges::count(jsonl, '\n'), static_cast<long>(home_reads.size()));
+    EXPECT_NE(jsonl.find("\"log\":\"workspace\""), std::string::npos);
+
+    // Retention: the central setting stays; a workspace's audit is kept with the workspace.
+    const auto retention =
+        as_operator("set_audit_retention", {{"customer_id", first.customer_id}, {"days", 500}});
+    ASSERT_TRUE(retention.ok) << retention.error.message;
+    EXPECT_EQ(retention.value["workspace_audit_retention"], "kept until the workspace is deleted");
+
+    // A workspace that is not ready keeps its events for the next flush.
+    const auto lab_row = t.store->get_workspace(lab);
+    ASSERT_TRUE(lab_row);
+    t.status(lab_row->zetta_service_id, "Pending", url(lab));
+    ask(first, first.customer_id, lab);
+    liquid::runtime::block_on(recorder.flush());
+    EXPECT_EQ(recorder.pending(), 1U);
+    EXPECT_GT(recorder.totals().flush_errors, 0U);
+    auto unread = as_operator("audit", {{"customer_id", first.customer_id}});
+    ASSERT_TRUE(unread.ok);
+    ASSERT_EQ(unread.value["unread_workspaces"].size(), 1U);
+    EXPECT_EQ(unread.value["unread_workspaces"][0]["workspace_id"], lab);
+    t.ready(lab);
+    liquid::runtime::block_on(recorder.flush());
+    EXPECT_EQ(recorder.pending(), 0U);
+    EXPECT_EQ(rows(lab).size(), 2U);
+
+    // Tampering is found: a removed event breaks the chain, and a value moved from another
+    // workspace does not open there.
+    auto context = t.context(first);
+    auto home_records = lake::api::workspace_records(context, first.customer_id, home);
+    ASSERT_TRUE(home_records);
+    const auto collection = lake::control::WorkspaceAuditCodec::collection;
+    const std::string second_place = home_records->index_of(collection, "sequence:2");
+    const json removed = rows(home).at(second_place);
+    rows(home).erase(second_place);
+    auto broken = as_operator("verify_audit", {{"workspace_id", home}});
+    EXPECT_FALSE(broken.ok);
+    EXPECT_EQ(broken.error.code, "invalid_chain");
+    rows(home)[second_place] = removed;
+    EXPECT_TRUE(as_operator("verify_audit", {{"workspace_id", home}}).ok);
+    rows(home)[second_place]["value"] = rows(lab).begin()->second["value"];
+    EXPECT_EQ(as_operator("verify_audit", {{"workspace_id", home}}).error.code, "invalid_chain");
+    rows(home)[second_place] = removed;
+
+    // A deleted workspace's queued events go with it.
+    const std::string doomed = second.workspaces[1];
+    ask(second, second.customer_id, doomed);
+    EXPECT_EQ(recorder.pending(), 1U);
+    ASSERT_TRUE(t.store->update_workspace(doomed, {.desired = "deleted"}));
+    const auto doomed_row = t.store->get_workspace(doomed);
+    t.status(doomed_row->zetta_service_id, "Deleted", url(doomed));
+    liquid::runtime::block_on(recorder.flush());
+    EXPECT_EQ(recorder.pending(), 0U);
+    EXPECT_EQ(recorder.totals().dropped_gone, 1U);
+    const std::string after_delete = ask(second, second.customer_id, doomed);
+    EXPECT_EQ(recorder.pending(), 0U) << "a call naming a deleted workspace is refused centrally";
+    EXPECT_EQ(central(after_delete).size(), 1U);
+
+    // Bounded: an event beyond the bound is dropped and counted, never written centrally.
+    lake::api::AuditRecorder bounded(t.store.get(), t.service.get(), std::string(kek), "", 1);
+    const std::string kept = lake::control::new_uuid_v4();
+    const std::string dropped = lake::control::new_uuid_v4();
+    for (const auto& request_id : {kept, dropped}) {
+        call_with(t.context(first), &bounded, "get_ask_conversation",
+                  {{"customer_id", first.customer_id},
+                   {"workspace_id", home},
+                   {"conversation_id", lake::control::new_uuid_v4()}},
+                  request_id);
+    }
+    EXPECT_EQ(bounded.pending(), 1U);
+    EXPECT_EQ(bounded.totals().dropped, 1U);
+    EXPECT_TRUE(central(dropped).empty());
+
+    // Without a workspace audit (no AuditRecorder: a lake with no workspace Zettas), every
+    // event is central.
+    const std::string single_store = lake::control::new_uuid_v4();
+    call_with(t.context(first), nullptr, "get_ask_conversation",
+              {{"customer_id", first.customer_id},
+               {"workspace_id", home},
+               {"conversation_id", lake::control::new_uuid_v4()}},
+              single_store);
+    EXPECT_EQ(central(single_store).size(), 1U);
+}
+
+// lake#317, migration 0063: the central events recorded before the split that are about a
+// workspace's data are copied to that workspace's audit as they are; events of a deleted
+// workspace, refusals and control-plane events stay central.
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesWorkspaceAuditEvents) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const auto repository = t.store->create_repository(
+        {first.customer_id, "audited", "", "private", first.workspaces[0]});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const auto doomed = t.store->create_repository(
+        {second.customer_id, "doomed", "", "private", second.workspaces[1]});
+    ASSERT_TRUE(doomed) << doomed.error().message;
+    const lake::audit::IdentityOptions options{.instance_kek = std::string(kek)};
+    // What an earlier lake recorded centrally.
+    const auto legacy = [&](lake::audit::EventDraft draft) {
+        draft.request_id = lake::control::new_uuid_v4();
+        if (draft.kind.empty()) {
+            draft.kind = "capability";
+        }
+        if (draft.principal.empty()) {
+            draft.principal = first.principal.taap_id;
+        }
+        const auto recorded = lake::audit::record(*t.store, draft, options);
+        EXPECT_TRUE(recorded) << recorded.error().message;
+        return recorded->id;
+    };
+    const std::string renamed = legacy({.object = "repository/" + repository->id,
+                                        .action = "rename_repository",
+                                        .outcome = "success"});
+    const std::string queried = legacy({.customer_id = first.customer_id,
+                                        .object = "capability/workspace_query",
+                                        .action = "workspace_query",
+                                        .outcome = "success",
+                                        .details = {{"workspace_id", first.workspaces[1]}}});
+    const std::string refused = legacy({.object = "repository/" + repository->id,
+                                        .action = "rename_repository",
+                                        .outcome = "denied"});
+    const std::string token = legacy({.object = "capability/create_token",
+                                      .action = "create_token",
+                                      .outcome = "success"});
+    const std::string unnamed = legacy({.object = "capability/workspace_act",
+                                        .action = "workspace_act",
+                                        .outcome = "success"});
+    const std::string gone = legacy({.object = "repository/" + doomed->id,
+                                     .action = "get_repository",
+                                     .outcome = "success"});
+    ASSERT_TRUE(t.store->update_workspace(second.workspaces[1], {.desired = "deleted"}));
+
+    lake::api::ApiContext operator_context;
+    operator_context.store = t.store.get();
+    operator_context.workspaces = t.service.get();
+    operator_context.instance_kek = std::string(kek);
+    operator_context.authorized = true;
+    operator_context.operator_credential = true;
+    operator_context.acting_identity = "admin";
+    const auto run_capability = [&](const std::string& capability, const json& input) {
+        operator_context.request_id = lake::control::new_uuid_v4();
+        const auto completed =
+            liquid::runtime::block_on(t.registry.call_async(capability, input, operator_context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+    const auto copy = [&](const std::string& mode) {
+        return run_capability("copy_workspace_records",
+                              {{"collection", "audit_events"}, {"mode", mode}});
+    };
+    const auto plan = copy("plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["rows"], 3) << plan.value.dump();
+    EXPECT_EQ(plan.value["assigned"], 2);
+    ASSERT_EQ(plan.value["unresolved"].size(), 1U);
+    EXPECT_EQ(plan.value["unresolved"][0]["id"], gone);
+    EXPECT_EQ(plan.value["unresolved"][0]["outcome"], "workspace_deleted");
+    EXPECT_FALSE(copy("verify").value["complete"]);
+    const auto copied = copy("copy");
+    ASSERT_TRUE(copied.ok) << copied.error.message;
+    EXPECT_EQ(copied.value["copied"], 2);
+    EXPECT_EQ(copy("copy").value["already_present"], 2) << "a rerun copies nothing twice";
+    const auto verified = copy("verify");
+    EXPECT_EQ(verified.value["verified"], 2);
+    EXPECT_TRUE(verified.value["complete"]) << verified.value.dump();
+
+    // Each copy is in its workspace, as it was, and the readers show it once.
+    auto audit = run_capability("audit", {{"workspace_id", first.workspaces[0]}});
+    ASSERT_TRUE(audit.ok) << audit.error.message;
+    ASSERT_EQ(audit.value["items"].size(), 1U);
+    EXPECT_EQ(audit.value["items"][0]["id"], renamed);
+    EXPECT_FALSE(audit.value["items"][0].contains("sequence")) << "a copy has no place";
+    audit = run_capability("audit", {{"workspace_id", first.workspaces[1]}});
+    ASSERT_EQ(audit.value["items"].size(), 1U);
+    EXPECT_EQ(audit.value["items"][0]["id"], queried);
+    const auto both = run_capability("audit", {{"limit", 1000}});
+    ASSERT_TRUE(both.ok);
+    EXPECT_EQ(std::ranges::count_if(both.value["items"],
+                                    [&](const json& item) { return item["id"] == renamed; }),
+              1);
+    for (const std::string& id : {refused, token, unnamed, gone}) {
+        EXPECT_EQ(std::ranges::count_if(both.value["items"],
+                                        [&](const json& item) {
+                                            return item["id"] == id && item["log"] == "central";
+                                        }),
+                  1)
+            << id;
+    }
+    const auto workspace_verified =
+        run_capability("verify_audit", {{"workspace_id", first.workspaces[0]}});
+    ASSERT_TRUE(workspace_verified.ok) << workspace_verified.error.message;
+    EXPECT_EQ(workspace_verified.value["copied"], 1);
+    const auto central_verified = run_capability("verify_audit", json::object());
+    EXPECT_TRUE(central_verified.ok)
+        << central_verified.error.code << ": " << central_verified.error.message;
+
+    // A changed copy is reported, never accepted.
+    auto& home_rows =
+        t.zetta->records["http://" + first.workspaces[0] + ".test"].rows("audit_events");
+    auto& lab_rows =
+        t.zetta->records["http://" + first.workspaces[1] + ".test"].rows("audit_events");
+    home_rows.begin()->second["value"] = lab_rows.begin()->second["value"];
+    const auto tampered = copy("verify");
+    EXPECT_EQ(tampered.value["missing"].size(), 1U);
+    EXPECT_FALSE(tampered.value["complete"]);
+
+    // Operator only.
+    operator_context.operator_credential = false;
+    EXPECT_EQ(copy("plan").error.code, "unauthorized");
+}
+
 // lake#348, lake#349: repository transfer and build records live in the workspace Zetta of the
 // repository's workspace. A sync request only counts in memory; the recorder's flush writes each
 // workspace's hourly record and each build record there, and nowhere else.
@@ -2985,7 +3382,8 @@ TEST_P(WorkspaceRecordStores, PlatformEnvironmentsLiveInTheirRepositorysWorkspac
     control->deployments.push_back(
         platform_deployment(placed[0].repository, "production", "ready", "2026-10-01T00:02:00Z"));
     ASSERT_TRUE(sync());
-    EXPECT_EQ(writes(placed[0].workspace), before + 1);
+    // The newer row, and its phase appended to the workspace's audit (decision 52).
+    EXPECT_EQ(writes(placed[0].workspace), before + 2);
     EXPECT_EQ(call(first, "get_environment",
                    {{"repository_id", placed[0].repository}, {"environment", "production"}})
                   .value["deployment"]["phase"],
@@ -3351,12 +3749,18 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesPlatformEnvironmentsAndTheMirro
                    {{"repository_id", home.id}, {"environment", "production"}})
                   .value["deployment"]["phase"],
               "healthy");
-    const auto events = lake::test::audit_events(*t.store, {});
-    ASSERT_TRUE(events);
+    // The phase goes to the repository's workspace audit (decision 52).
+    auto home_context = t.context(first);
+    auto home_records =
+        lake::api::workspace_records(home_context, first.customer_id, first.workspaces[0]);
+    ASSERT_TRUE(home_records);
+    const auto events =
+        run(lake::control::list_workspace_audit(*home_records, {}, 0));
+    ASSERT_TRUE(events) << events.error().message;
     std::vector<std::string> phases;
-    for (const auto& event : *events) {
-        if (event.draft.kind == "platform.deployment.phase") {
-            phases.push_back(event.draft.details.at("phase"));
+    for (const auto& found : *events) {
+        if (found.event.draft.kind == "platform.deployment.phase") {
+            phases.push_back(found.event.draft.details.at("phase"));
         }
     }
     EXPECT_EQ(phases, (std::vector<std::string>{"healthy"}))
@@ -4796,4 +5200,44 @@ TEST(WorkspaceRecordsZetta, TheEngineStoresAndReturnsSealedRecords) {
               "conflict");
     ASSERT_TRUE(run(opened->remove(counters, "c-1", (**counted).revision)));
     EXPECT_FALSE(*run(opened->get(counters, "c-1")));
+
+    // A workspace audit chain (lake#317): places claimed if_absent by the engine, found again
+    // by the tail search, and verified.
+    lake::control::InMemoryStore identity_store;
+    const lake::audit::IdentityOptions options{.instance_kek = std::string(kek)};
+    const auto signer = lake::audit::identity(identity_store, options);
+    ASSERT_TRUE(signer) << signer.error().message;
+    std::optional<lake::control::WorkspaceAuditTail> tail;
+    for (int index = 0; index < 3; ++index) {
+        const auto appended = run(lake::control::append_workspace_audit_event(
+            *opened, identity_store, *signer,
+            lake::audit::pending({.kind = "capability",
+                                  .principal = "admin",
+                                  .object = "capability/workspace_query",
+                                  .action = "workspace_query",
+                                  .outcome = "success",
+                                  .request_id = lake::control::new_uuid_v4()}),
+            options, index == 0 ? std::nullopt : tail));
+        ASSERT_TRUE(appended) << appended.error().message;
+        tail = *appended;
+    }
+    EXPECT_EQ(tail->sequence, 3);
+    const auto found = run(lake::control::find_workspace_audit_tail(*opened));
+    ASSERT_TRUE(found) << found.error().message;
+    EXPECT_EQ(found->sequence, 3);
+    const auto stale = run(lake::control::append_workspace_audit_event(
+        *opened, identity_store, *signer,
+        lake::audit::pending({.kind = "capability",
+                              .principal = "admin",
+                              .object = "capability/workspace_sql",
+                              .action = "workspace_sql",
+                              .outcome = "success",
+                              .request_id = lake::control::new_uuid_v4()}),
+        options, lake::control::WorkspaceAuditTail{1, ""}));
+    ASSERT_TRUE(stale) << stale.error().message;
+    EXPECT_EQ(stale->sequence, 4) << "a taken place is found and passed";
+    const auto verified = run(lake::control::verify_workspace_audit(*opened, identity_store));
+    ASSERT_TRUE(verified) << verified.error().message;
+    EXPECT_TRUE(verified->verified) << verified->error_message;
+    EXPECT_EQ(verified->chained, 4U);
 }

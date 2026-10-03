@@ -70,6 +70,14 @@ struct ForgeRecord {
 // A row of the retired forge_records table with its recorded owner (migration 0054): its
 // repository's workspace, or empty with the reason it is not copied (`needs_selection` while the
 // repository has no workspace, `workspace_deleted` when that workspace is gone).
+// A central audit event about a workspace's data, recorded before decision 52, with the
+// workspace its copy goes to (lake#317, migration 0063). An empty workspace_id stays central.
+struct LegacyAuditEvent {
+    audit::Event event;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome; // event_workspace | workspace_deleted
+};
 struct LegacyForgeRecord {
     ForgeRecord record;
     std::string customer_id;
@@ -987,6 +995,15 @@ public:
     // only. Assigning records each unassigned row's owner in workspace_assignments, as migration
     // 0054 does, for rows written after it, and resolves needs_selection rows whose repository has
     // since been assigned a workspace. Listing pages by id, oldest id first.
+    // The central audit events about a workspace's data (decision 52, lake#317), for the
+    // one-shot copy into workspace Zettas only. Assigning records the workspace of each event
+    // whose action is one of `workspace_actions` and that was not refused for want of authority,
+    // as migration 0063 does, for events an earlier lake wrote after it. Listing pages the
+    // assigned events in append order after the event `after_id`.
+    virtual Result<void>
+    assign_legacy_audit_events(const std::vector<std::string>& workspace_actions) = 0;
+    virtual Result<std::vector<LegacyAuditEvent>> legacy_audit_events(const std::string& after_id,
+                                                                      int limit) = 0;
     virtual Result<void> assign_legacy_forge_records() = 0;
     virtual Result<std::vector<LegacyForgeRecord>>
     legacy_forge_records(const std::string& after_id, int limit) = 0;

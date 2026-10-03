@@ -8,7 +8,7 @@
 // lake#352 and lake#355; the five secrets tables, lake#328-#332; dynamic leases, lake#362;
 // auth_applications, the settings of each application, lake#351; platform_environments and
 // platform_mirror, lake#358 and lake#359; agent_tasks, the content of each agent task, lake#374
-// and lake#375). A collection
+// and lake#375; audit_events, the central events about a workspace's data, lake#317). A collection
 // leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
 // and verified on dev, dropped by migration 0050, lake#483).
 
@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "lake/api/audit_routing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/control/agent_task_records.hpp"
 #include "lake/control/application_authorization_codes.hpp"
@@ -35,6 +36,7 @@
 #include "lake/control/secret_records.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/stream_owners.hpp"
+#include "lake/control/workspace_audit.hpp"
 #include "secret_records_api.hpp"
 #include "workspace_records_api.hpp"
 
@@ -43,7 +45,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 23> copy_collections = {"opportunities",
+constexpr std::array<std::string_view, 24> copy_collections = {"opportunities",
                                                                "stream_owners",
                                                                "drive_share_links",
                                                                "auth_app_webhook_events",
@@ -65,7 +67,8 @@ constexpr std::array<std::string_view, 23> copy_collections = {"opportunities",
                                                                "platform_environments",
                                                                "platform_mirror",
                                                                "auth_app_authorization_codes",
-                                                               "agent_tasks"};
+                                                               "agent_tasks",
+                                                               "audit_events"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -2131,6 +2134,82 @@ liquid::runtime::task<ApiResult> copy_agent_tasks(ApiContext& context, const std
                           std::move(unresolved), tallies, blocking);
 }
 
+// The central audit events about a workspace's data, recorded before decision 52 (lake#317,
+// migration 0063): each goes to its workspace's audit as it is, under its id, keeping its
+// signature and central predecessor, so the central chain still holds its place. An event whose
+// workspace was deleted stays central and does not hold the copy back; nothing needs selecting,
+// since an event no workspace can be found for is not assigned at all. Verify compares the copy
+// with the central row and checks its signature.
+liquid::runtime::task<ApiResult> copy_audit_events(ApiContext& context, const std::string& mode,
+                                                   const std::string& after, int limit) {
+    if (auto assigned = context.store->assign_legacy_audit_events(workspace_audit_actions());
+        !assigned) {
+        co_return ApiResult::failure(assigned.error().code, assigned.error().message);
+    }
+    auto rows = context.store->legacy_audit_events(after, limit);
+    if (!rows) {
+        co_return ApiResult::failure(rows.error().code, rows.error().message);
+    }
+    json unresolved = json::array();
+    std::map<std::string, std::vector<const control::LegacyAuditEvent*>> by_workspace;
+    for (const control::LegacyAuditEvent& row : *rows) {
+        if (row.workspace_id.empty()) {
+            unresolved.push_back({{"id", row.event.id},
+                                  {"customer_id", row.customer_id},
+                                  {"outcome", row.outcome}});
+        } else {
+            by_workspace[row.workspace_id].push_back(&row);
+        }
+    }
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, owned] : by_workspace) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = owned.front()->customer_id;
+        tally.rows = owned.size();
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        for (const control::LegacyAuditEvent* row : owned) {
+            auto present =
+                control::settled(co_await control::get_copied_audit_event(*records, row->event.id));
+            if (!present) {
+                tally.error = present.error().code + ": " + present.error().message;
+                break;
+            }
+            if (mode == "verify") {
+                if (!*present) {
+                    tally.missing.push_back(row->event.id);
+                } else if (audit::to_json((*present)->event) != audit::to_json(row->event) ||
+                           !audit::verify_event(*context.store, (*present)->event)) {
+                    tally.mismatched.push_back(row->event.id);
+                } else {
+                    ++tally.verified;
+                }
+                continue;
+            }
+            if (*present) {
+                ++tally.already_present;
+                continue;
+            }
+            auto copied =
+                control::settled(co_await control::copy_central_audit_event(*records, row->event));
+            if (!copied) {
+                tally.error = copied.error().code + ": " + copied.error().message;
+                break;
+            }
+            ++(*copied ? tally.copied : tally.already_present);
+        }
+    }
+    co_return copy_result("audit_events", mode, rows->size(), limit,
+                          rows->empty() ? std::string() : rows->back().event.id,
+                          std::move(unresolved), tallies, false);
+}
+
 // Only the operator copies, and the operator bypasses policy; anyone else is refused here, before
 // a policy lookup on an object no grant can name.
 std::expected<std::string, ApiError> records_object(const json&, ApiContext&) {
@@ -2194,6 +2273,9 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "forge_records") {
                 co_return co_await copy_forge_records(context, mode, after, limit);
+            }
+            if (input.at("collection") == "audit_events") {
+                co_return co_await copy_audit_events(context, mode, after, limit);
             }
             if (input.at("collection") == "platform_mirror") {
                 co_return co_await copy_platform_mirror(context, mode, after, limit);

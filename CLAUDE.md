@@ -103,6 +103,15 @@ read. `agent_tasks` and `agent_task_status` stay as the content-free dispatch ro
 its lease remain one PostgreSQL statement, and the claim reply reads the request just before it.
 See `docs/api/agent-bus.md#where-a-task-lives-lake374-lake375`.
 
+Lake's audit splits by subject (decision 52, lake#317, lake#318, migration `0063`): control-plane
+and identity events stay in the central hash-chained `audit_events`; events about a workspace's
+data go to that workspace's own chain, `lake_audit_events` in its Zetta, queued on the request path
+and flushed by the owner loop every second (`AuditRecorder`). `audit_route`
+(`src/api/audit_routing.cpp`) classifies every registered capability; `audit`, `my_audit`,
+`/activity` and `/audit` read both logs, and `verify_audit`/`export_audit` take `workspace_id`.
+`audit_retention` stays central; a workspace's audit is kept with the workspace. See
+`docs/api/audit.md#which-log`.
+
 Every repository belongs to one workspace (lake#315 part 1, migration `0051`): an immutable
 `repositories.workspace_id` required on every create and import, returned on reads and carried
 through push authorization. It is routing only; repository metadata and content have not moved.

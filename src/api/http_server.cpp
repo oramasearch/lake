@@ -5,6 +5,7 @@
 // OpenAPI document and MCP (POST /mcp). Every capability call goes through
 // Registry::call so authorization, validation and audit remain centralized.
 
+#include "lake/api/audit_recorder.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/server.hpp"
 #include "lake/thread.hpp"
@@ -5160,6 +5161,11 @@ struct ApiServer::Impl {
     std::unique_ptr<MeteringRecorder> metering_recorder;
     std::chrono::steady_clock::time_point next_metering_flush{};
     MeteringRecorder::Totals reported_metering;
+    // Events about a workspace's data on their way to its audit (decision 52); null without
+    // workspaces, when every event is central.
+    std::unique_ptr<AuditRecorder> audit_recorder;
+    std::chrono::steady_clock::time_point next_audit_flush{};
+    AuditRecorder::Totals reported_audit;
     mutable LiquidCustomerStores sync_store;
     ArtifactRegistry artifacts;
     Registry registry;
@@ -5713,6 +5719,7 @@ struct ApiServer::Impl {
         ctx.sync_store = &sync_store;
         ctx.metering = options.metering;
         ctx.metering_recorder = metering_recorder.get();
+        ctx.audit_recorder = audit_recorder.get();
         if (artifacts.available()) {
             ctx.registry_space_bytes = [this](const std::string& space) {
                 return artifacts.space_stored_bytes(space);
@@ -6803,8 +6810,11 @@ struct ApiServer::Impl {
                 break;
             }
         }
+        // Organization events are control-plane events: the central log alone (decision 52).
         const ApiResult audit_result = registry.call(
-            "audit", {{"object", "organization/" + organization_id}, {"limit", 100}}, context);
+            "audit",
+            {{"object", "organization/" + organization_id}, {"limit", 100}, {"log", "central"}},
+            context);
         if (audit_result.ok) {
             for (const nlohmann::json& item :
                  audit_result.value.value("items", nlohmann::json::array())) {
@@ -12970,7 +12980,18 @@ struct ApiServer::Impl {
         if (!rules_result.ok) {
             co_return co_await serve_repository_page_error(route, ctx, rules_result);
         }
-        const ApiResult audit_result = registry.call("audit", {{"limit", 500}}, ctx);
+        // Branch protection decisions are the repository's data: its workspace's audit
+        // (decision 52), or the central log for a repository without a workspace.
+        const std::string repository_workspace =
+            repository_result.value.value("workspace_id", std::string());
+        nlohmann::json audit_input = {{"limit", 500}};
+        if (repository_workspace.empty()) {
+            audit_input["log"] = "central";
+        } else {
+            audit_input["workspace_id"] = repository_workspace;
+        }
+        const ApiResult audit_result =
+            unwrap(co_await registry.call_async("audit", audit_input, ctx));
         if (!audit_result.ok) {
             co_return co_await serve_repository_page_error(route, ctx, audit_result);
         }
@@ -15012,7 +15033,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_activity_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         // Newest first, and without the successful reads a browser polls, unless asked
         // (lake#445).
         const bool include_reads = query_value(route, "reads") == "all";
@@ -15035,30 +15056,32 @@ struct ApiServer::Impl {
             if (!value.empty())
                 input[key] = value;
         }
-        const ApiResult result = registry.call("my_audit", input, ctx);
+        // The central log and the person's workspaces' audits, in one round (decision 52).
+        const ApiResult result = unwrap(co_await registry.call_async("my_audit", input, ctx));
         if (!result.ok) {
-            return serve_page_error(route, result);
+            co_return co_await serve_page_error(route, result);
         }
         const nlohmann::json items = result.value.value("items", nlohmann::json::array());
         std::vector<audit::Event> events;
         for (const nlohmann::json& item : items) {
             events.push_back(audit::event_from_json(item));
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_audit(events,
-                                      filter,
-                                      nlohmann::json::object(),
-                                      viewer_for(ctx),
-                                      audit_page_view(items, include_reads)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_audit(events,
+                                                  filter,
+                                                  nlohmann::json::object(),
+                                                  viewer_for(ctx),
+                                                  audit_page_view(
+                                                      result.value, items, include_reads)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_audit_page(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
         if (!ctx.authorized)
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         const audit::Filter filter{
             .principal = query_value(route, "principal"),
             .object = query_value(route, "object"),
@@ -15080,9 +15103,10 @@ struct ApiServer::Impl {
             input["from"] = filter.from;
         if (!filter.to.empty())
             input["to"] = filter.to;
-        const ApiResult result = registry.call("audit", input, ctx);
+        // The central log and every workspace's audit, in one round (decision 52).
+        const ApiResult result = unwrap(co_await registry.call_async("audit", input, ctx));
         if (!result.ok) {
-            return serve_page_error(route, result);
+            co_return co_await serve_page_error(route, result);
         }
         const nlohmann::json items = result.value.value("items", nlohmann::json::array());
         std::vector<audit::Event> events;
@@ -15094,19 +15118,19 @@ struct ApiServer::Impl {
             const ApiResult configuration =
                 registry.call("transparency_log_configuration", nlohmann::json::object(), ctx);
             if (!configuration.ok) {
-                return serve_page_error(route, configuration);
+                co_return co_await serve_page_error(route, configuration);
             }
             log_configuration = configuration.value;
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_audit(events,
-                                      filter,
-                                      log_configuration,
-                                      viewer_for(ctx),
-                                      audit_page_view(items)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_audit(events,
+                                                  filter,
+                                                  log_configuration,
+                                                  viewer_for(ctx),
+                                                  audit_page_view(result.value, items, true)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_transparency_page(boost::http::route_params& route) {
@@ -15422,6 +15446,37 @@ struct ApiServer::Impl {
                reported_metering.dropped_builds);
         metrics.set_gauge(
             "lake_metering_pending", {}, static_cast<double>(metering_recorder->pending()));
+    }
+
+    // Appends the queued workspace events to their workspaces' audits, off the request path
+    // (decision 52), and reports what was written, kept or dropped as counters.
+    void flush_audit() {
+        if (!audit_recorder) {
+            return;
+        }
+        static_cast<void>(liquid::runtime::block_on(audit_recorder->flush()));
+        const AuditRecorder::Totals now = audit_recorder->totals();
+        const auto report = [this](const char* name,
+                                   const telemetry::Labels& labels,
+                                   std::uint64_t current,
+                                   std::uint64_t& reported) {
+            if (current > reported) {
+                metrics.increment_counter(name, labels, static_cast<double>(current - reported));
+                reported = current;
+            }
+        };
+        report("lake_audit_workspace_events_written_total", {}, now.written,
+               reported_audit.written);
+        report("lake_audit_workspace_flush_errors_total", {}, now.flush_errors,
+               reported_audit.flush_errors);
+        report("lake_audit_workspace_conflicts_total", {}, now.conflicts,
+               reported_audit.conflicts);
+        report("lake_audit_workspace_dropped_total", {{"reason", "bound"}}, now.dropped,
+               reported_audit.dropped);
+        report("lake_audit_workspace_dropped_total", {{"reason", "workspace_deleted"}},
+               now.dropped_gone, reported_audit.dropped_gone);
+        metrics.set_gauge(
+            "lake_audit_workspace_pending", {}, static_cast<double>(audit_recorder->pending()));
     }
 
     void log_store_owner(nlohmann::json event) const {
@@ -17532,6 +17587,13 @@ bool ApiServer::start() {
                                                impl.options.metering_max_pending);
         impl.next_metering_flush =
             std::chrono::steady_clock::now() + impl.options.metering_flush_interval;
+        impl.audit_recorder = std::make_unique<AuditRecorder>(impl.options.store.get(),
+                                                              impl.options.workspaces.get(),
+                                                              impl.options.instance_kek,
+                                                              impl.options.identity_seed,
+                                                              impl.options.audit_max_pending);
+        impl.next_audit_flush =
+            std::chrono::steady_clock::now() + impl.options.audit_flush_interval;
     }
     impl.server->start();
     impl.io_thread = lake::Thread([&impl] { impl.io_context.run(); });
@@ -17571,8 +17633,10 @@ void ApiServer::stop() {
     if (impl.owner_thread.joinable())
         impl.owner_thread.join();
     impl.work_cv.notify_all();
-    // In-flight requests have finished: write the repository usage they counted (lake#348).
+    // In-flight requests have finished: write the repository usage they counted (lake#348) and
+    // the workspace audit events they queued (decision 52).
     impl.flush_metering();
+    impl.flush_audit();
     // In-flight requests have finished: close every store (releasing liquid's per-store owner
     // locks), then the root lock, so the next owner opens a store nobody is writing.
     const bool owned = impl.store_owner.held();
@@ -17630,6 +17694,12 @@ void ApiServer::drain() {
          impl_->metering_recorder->pending() * 2 >= impl_->options.metering_max_pending)) {
         impl_->next_metering_flush = now + impl_->options.metering_flush_interval;
         impl_->flush_metering();
+    }
+    if (impl_->audit_recorder &&
+        (now >= impl_->next_audit_flush ||
+         impl_->audit_recorder->pending() * 2 >= impl_->options.audit_max_pending)) {
+        impl_->next_audit_flush = now + impl_->options.audit_flush_interval;
+        impl_->flush_audit();
     }
     if (impl_->options.store && impl_->options.workspaces && !impl_->options.instance_kek.empty() &&
         now >= impl_->next_secret_lease_sweep) {

@@ -167,3 +167,12 @@ notice, and `fail_agent_task` and the expiry update write lake's text to `agent_
 `assign_legacy_agent_tasks` reruns migration `0062`'s owner assignment and `legacy_agent_tasks`
 pages the tasks whose rows still hold content, for the copy only; the memory store's
 `seed_legacy_agent_task` writes such a task for the copy's tests.
+`workspace_audit.cpp` keeps a workspace's audit (decision 52, lake#317): its chain in
+`lake_audit_events`, the n-th event at the blind key of `sequence:<n>` written `if_absent`
+(`append_workspace_audit_event` signs it after the chain's end and passes a place another writer
+took), the tail search, copied central events under their id, the filtered newest-first listing,
+and `verify_workspace_audit`. `workspace_records.cpp`'s `list` takes a `keep` predicate for that
+filtered walk. `platform.cpp` appends each deployment phase to the repository's workspace audit.
+The stores' `assign_legacy_audit_events` reruns migration `0063`'s assignment with the current
+workspace actions and `legacy_audit_events` pages the assigned central events in append order, for
+the copy only.

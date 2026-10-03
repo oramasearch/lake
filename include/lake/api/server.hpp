@@ -133,6 +133,12 @@ struct ServerOptions {
     // on every drain() tick. At most `metering_max_pending` counters are held.
     std::chrono::milliseconds metering_flush_interval{std::chrono::seconds(5)};
     std::size_t metering_max_pending = 4096;
+    // Events about a workspace's data are queued in memory and appended to that workspace's audit
+    // by the owner loop at this interval, at once when half of `audit_max_pending` is held, and
+    // once more on stop (docs/api/audit.md#workspace-audit, decision 52). Zero writes on every
+    // drain() tick.
+    std::chrono::milliseconds audit_flush_interval{std::chrono::seconds(1)};
+    std::size_t audit_max_pending = 65536;
     // Dynamic-secret leases that are due (expired, or revoked and not yet settled) are settled in
     // their workspaces by the owner loop at this interval (docs/api/secrets.md, lake#362). It
     // reads the control store's due index, never every workspace. Zero settles on every drain().

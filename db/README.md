@@ -208,3 +208,11 @@ rows, and records the owner of each task with content in `workspace_assignments`
 `needs_selection` while the task names no workspace, or `workspace_deleted`. Nothing is dropped.
 The latest guard is `agent_task_workspaces_guard`; the operator must vendor this schema and update
 its guard before rollout. See [agent-bus.md](../docs/api/agent-bus.md#where-a-task-lives-lake374-lake375).
+Migration `0063_audit_workspaces` splits the audit by subject (decision 52, lake#317, lake#318):
+`audit_events` keeps control-plane and identity events, and events about a workspace's data go to
+that workspace's own chain in its Zetta. It records, in `workspace_assignments`, the workspace of
+each central event about a workspace's data (`event_workspace`, or `workspace_deleted`, which stays
+central) for `copy_workspace_records`; every other event stays central and is counted. Nothing is
+dropped; `audit_events` stays append-only and `audit_retention` governs it. The latest guard is
+`audit_workspaces_guard`; the operator must vendor this schema and update its guard before rollout.
+See [audit.md](../docs/api/audit.md#moving-the-central-events-of-workspaces-migration-0063).
