@@ -4,6 +4,13 @@
 before anything under the root is opened and refuses to start when another process holds it;
 `stop` releases it after in-flight requests finish (lake#467,
 [store-volume.md](../../docs/deployment/store-volume.md#one-process-per-store-root)).
+lake#452: `/w/<workspace>` and `/w/<workspace>/` redirect to the workspace's home; the selectors
+label the viewer's personal space *Personal space* and workspaces by name, and wrap onto their own
+row at phone width; `workspace_act create_project` says whether a name is missing or taken;
+`create_app` requires `confirm_public` (or a person's acknowledgement on the confirmed
+ApplicationAgent turn) for a public app; `list_services` answers the page's `status` and
+`status_reason`. See [workspace selection](../../docs/ui/workspace-selection.md),
+[web apps](../../docs/api/web-apps.md) and [services](../../docs/api/services.md).
 
 Agent-task capability calls renew the current claim through the registry. Agent events are
 accepted atomically before workspace publication; only a Running task accepts them, and the

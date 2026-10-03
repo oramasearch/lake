@@ -44,6 +44,30 @@ writes the connection (orama-operator#183), so this lasts seconds, not the minut
 - **Delete:** type the service's name. When a Train → Data connection uses the service, the form says so. The operator deletes the cluster and its data, which cannot
   be recovered; the row shows *Deleting* until it is gone.
 
+### Status, and why a service is stuck (lake#452)
+
+`list_services` answers `status`, the same word the page shows, so the two never disagree; `phase`
+stays the operator's raw report. `control::service_condition` derives it:
+
+| `status` | When | `status_reason` |
+|---|---|---|
+| *Unassigned* | the service has no `workspace_id` | Migration 0039 leaves a non-Zetta service unassigned when its space had several workspaces. The operator reconciles services through their workspace, so it no longer sees this one: lake cannot connect to it and a delete would never finish. An administrator of the lake must assign or remove it. The page does not keep refreshing for it |
+| *Deleting* | `desired` is `absent` (and the phase is not `Failed`) | *Waiting for the operator to start deleting it.* while `observed_generation` is behind `generation` |
+| *Failed* | `desired` is `absent` and the operator reports `Failed` | the operator's message |
+| *Connecting* | the operator reports `Ready` but the connection is not yet in lake's mount | lake is waiting for the connection |
+| *Waiting for the operator* | no status row yet | — |
+| the operator's `phase` | otherwise | — |
+
+The page shows `status_reason` under the status and, for a delete requested more than 15 minutes
+before (`updated_at`), how long it has been waiting. It hides the operator's earlier *service
+ready* message under any other status.
+
+A deleted workspace's primary Zetta leaves the list as soon as the operator reports the workspace
+`Deleted` (`workspaces.phase`), whether or not the operator also wrote `Deleted` into that
+service's `service_status`. The operator skips a primary workspace Zetta in its services pass and
+mirrors the workspace's phase into it only while the workspace row is still listed, so a workspace
+that reached `Deleted` first left its Zetta *Deleting* forever (dev, `test-zetta-2/3`, 2026-10-01).
+
 ## Capabilities
 
 All are in lake's registry (REST, OpenAPI, MCP) and authorized on the customer's policy object.
@@ -51,7 +75,7 @@ All are in lake's registry (REST, OpenAPI, MCP) and authorized on the customer's
 | Capability | Kind | Action on the customer | What it does |
 |---|---|---|---|
 | `list_service_kinds` | read | the caller | The catalog, Zetta first: each kind's key, label and `ready_seconds` |
-| `list_services` | read | `read` (checked by the handler, as every `list_` capability) | `{services: [...], limit}`; each service carries `id, kind, name, slug, default, instances, storage_gi, desired, generation, phase, message, endpoint, observed_generation, created_at` and never a credential |
+| `list_services` | read | `read` (checked by the handler, as every `list_` capability) | `{services: [...], limit}`; each service carries `id, kind, name, slug, default, instances, storage_gi, desired, generation, phase, message, endpoint, observed_generation, created_at, updated_at, connected, status` and, when it cannot progress on its own, `status_reason`; never a credential |
 | `create_service` | action | `write` | `{kind, name, instances?, storage_gi?}`, `kind` one of `postgres, zetta, kafka, clickhouse, tidb, cassandra, valkey, sqlite` (a SQLite service has exactly one instance); `conflict` for a live name, `quota_exceeded` at `LAKE_SERVICES_PER_CUSTOMER` |
 | `delete_service` | action | `admin` | `{service_id, confirm}`, `confirm` equal to the service name; marks it absent |
 | `service_connection` | action | `admin` | A Ready service's connection: every field the operator delivered for its kind except `kind` (the catalog table lists them). A Zetta service's admin token is never returned: lake calls Zetta for the customer through `workspace_query` / `workspace_act`, whose allow-lists keep Zetta's administrative surface out of reach |
@@ -73,6 +97,10 @@ service id, kind and name. `start_workspace` and `delete_workspace`
 ctest --test-dir build -R 'Workspaces|PostgresServices'
 ```
 
+`Workspaces.ServiceStatusIsTheSameInListServicesAndOnThePage` and
+`Workspaces.ADeletedWorkspacesZettaLeavesTheListWithItsWorkspace` cover the shared status, the
+unassigned and waiting-delete explanations, and the deleted workspace's Zetta (also against
+PostgreSQL in `PostgresServices.CreateListAndWithdrawFollowTheContract`).
 `Workspaces.ServicesAreNamedPerCustomerAndCapped`, `…CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer`
 and `…ServicesPageListsEveryServiceWithoutCredentials` cover naming, the per-customer cap,
 another customer being refused, the connection being Postgres-only and absent from lists, and the

@@ -18,7 +18,7 @@ REST and MCP expose the same registry, customer policy and signed audit records.
 | Capability | Input beyond `customer_id` | Effect |
 |---|---|---|
 | `list_apps`, `get_app` | `app_id` for get | desired and observed state |
-| `create_app` | name, mode, source or image, framework, port; optional replicas/host/auth/bindings/env | generation 1 and create event |
+| `create_app` | name, mode, source or image, framework, port; optional replicas/host/auth/bindings/env; public also requires `confirm_public` | generation 1 and create event |
 | `deploy_app`, `rollback_app` | `app_id` (ApplicationAgent may use `app` for deploy), source or image | new desired deployment and generation |
 | `delete_app` | `app_id`, `confirm` equal to name | `desired = deleted` |
 | `set_app_env`, `unset_app_env` | `app_id`, key; set takes value or secret_ref | scanned environment update |
@@ -74,7 +74,11 @@ that already has a DNS record it does not own and report the conflict through Ap
 behavior belongs to the [`LakeApp` controller](https://github.com/oramasearch/orama-operator/issues/193);
 Lake does not probe or replace DNS records.
 
-Changing `auth` to `none` requires `confirm_public: true`. Attaching Zetta grants only its fixed
+Changing `auth` to `none` requires `confirm_public: true`, and so does creating an app with `auth`
+`none` or `public` (lake#452): otherwise `invalid_input` at `/confirm_public`. An ApplicationAgent
+turn has no `confirm_public` of its own; its `create_app` is accepted when the person who
+confirmed the proposal acknowledged that it is public, which lake records as the turn's
+`context.confirm_public: true`. Attaching Zetta grants only its fixed
 read scope. Detaching it clears the operator token hash immediately; service detach removes only
 that service from the normalized binding list. Deploy and rollback events retain their exact
 source or image input so the UI can offer history-bound rollback.

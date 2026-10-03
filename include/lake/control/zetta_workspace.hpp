@@ -60,6 +60,13 @@ std::string workspace_slug(std::string_view customer_id);
 
 // A service as the API and the pages show it: never its credential.
 nlohmann::json service_json(const ManagedService& service);
+// The one status a person is told about a service, shared by list_services and the Services page
+// so the two never disagree (lake#452), and, when the service cannot progress on its own, why.
+// `connected` is whether lake has the service's connection in its mount.
+struct ServiceCondition {
+    std::string status, reason;
+};
+ServiceCondition service_condition(const ManagedService& service, bool connected);
 nlohmann::json workspace_json(const Workspace& workspace);
 // A store as the API and the pages show it (docs/control-plane/storage.md): never its credential.
 nlohmann::json store_json(const ManagedStore& store);

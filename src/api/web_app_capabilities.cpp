@@ -93,6 +93,27 @@ bool valid_name(std::string_view name) {
     });
 }
 
+// Whether the calling ApplicationAgent turn was confirmed by a person who acknowledged that the
+// proposed app is public: lake's confirmation form sets context.confirm_public (lake#452).
+bool public_acknowledged_by_task(const ApiContext& context) {
+    constexpr std::string_view prefix = "task:";
+    if (context.credential_kind != "agent_task" || context.store == nullptr ||
+        !context.credential_session_id.starts_with(prefix)) {
+        return false;
+    }
+    const auto task =
+        context.store->get_agent_task(context.credential_session_id.substr(prefix.size()));
+    if (!task || task->agent != "agent-application") {
+        return false;
+    }
+    const auto task_context = task->body.find("context");
+    if (task_context == task->body.end() || !task_context->is_object()) {
+        return false;
+    }
+    const auto confirmed = task_context->find("confirm_public");
+    return confirmed != task_context->end() && confirmed->is_boolean() && confirmed->get<bool>();
+}
+
 bool reserved_name(std::string_view name, std::string_view configured) {
     static constexpr std::array<std::string_view, 27> built_in{
         "lake",   "www",      "api",    "app",    "apps",    "admin",    "mcp",
@@ -555,6 +576,7 @@ void register_web_app_capabilities(Registry& registry) {
              {"host", {{"type", json::array({"string", "null"})}}},
              {"auth",
               {{"type", "string"}, {"enum", json::array({"lake", "none", "public"})}}},
+             {"confirm_public", {{"type", "boolean"}}},
              {"bindings", {{"type", "object"}}},
              {"env", {{"type", "object"}}}},
             json::array({"name", "mode", "framework", "port"})),
@@ -579,6 +601,19 @@ void register_web_app_capabilities(Registry& registry) {
             }
             if (reserved_name(name, context.apps_reserved_names)) {
                 co_return ApiResult::failure("invalid_input", name + " is reserved", "/name");
+            }
+            // A public app is acknowledged as public, as set_app_auth requires (lake#452): by the
+            // caller's confirm_public, or, for an ApplicationAgent turn, by the person who
+            // confirmed the proposal (its task context's confirm_public).
+            const std::string requested_auth = input.value("auth", std::string("lake"));
+            if ((requested_auth == "none" || requested_auth == "public") &&
+                !(input.contains("confirm_public") && input.at("confirm_public") == true) &&
+                !public_acknowledged_by_task(context)) {
+                co_return ApiResult::failure(
+                    "invalid_input",
+                    "a public app can be opened by anyone with its address, without signing in; "
+                    "confirm that with confirm_public: true",
+                    "/confirm_public");
             }
             json deployment = input;
             const auto workspace = co_await context.workspaces->state(input.at("customer_id"), input.at("workspace_id"));

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <expected>
@@ -597,6 +598,21 @@ void register_workspace_call(Registry& registry, bool read) {
             }
             json arguments = input.value("input", json::object());
             const json sent = arguments;
+            // The engine refuses an empty name and a name in use with one message that names
+            // neither (lake#452); lake says which.
+            std::string project_name;
+            if (!read && capability == "create_project") {
+                const auto name = arguments.find("name");
+                project_name = name != arguments.end() && name->is_string()
+                                   ? name->get<std::string>()
+                                   : std::string();
+                if (std::ranges::all_of(project_name, [](unsigned char character) {
+                        return std::isspace(character) != 0;
+                    })) {
+                    co_return ApiResult::failure(
+                        "invalid_input", "a project needs a name", "/input/name");
+                }
+            }
             // One name per concept (lake#450): `run` or `run_id`, `model` or `model_id`, as the
             // engine capability takes it.
             const auto renamed = canonical_workspace_input(capability, arguments);
@@ -636,6 +652,15 @@ void register_workspace_call(Registry& registry, bool read) {
                 co_return ApiResult::failure("store_unavailable", called.error().message);
             }
             if (!*called) {
+                if (capability == "create_project" &&
+                    called->error().message.starts_with("create_project rejected")) {
+                    // The name is not empty (checked above), so it is in use.
+                    co_return ApiResult::failure(
+                        "conflict",
+                        "a project named '" + project_name +
+                            "' already exists in this workspace; choose another name",
+                        "/input/name");
+                }
                 // Point at the field the workspace names (lake#256, lake#450), in lake's codes.
                 co_return workspace_failure(called->error(), sent, "/input", renamed);
             }
@@ -759,7 +784,15 @@ void register_service_capabilities(Registry& registry) {
                 json value = control::service_json(service);
                 // The operator reports Ready once it has written the Secret; the kubelet copies
                 // it into lake's mount up to a minute later. Until then lake cannot connect.
-                value["connected"] = context.workspaces->connection(service).has_value();
+                const bool connected = context.workspaces->connection(service).has_value();
+                value["connected"] = connected;
+                // The same status the Services page shows (lake#452).
+                const control::ServiceCondition condition =
+                    control::service_condition(service, connected);
+                value["status"] = condition.status;
+                if (!condition.reason.empty()) {
+                    value["status_reason"] = condition.reason;
+                }
                 services.push_back(std::move(value));
             }
             co_return ApiResult::success(

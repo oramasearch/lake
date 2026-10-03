@@ -1,5 +1,10 @@
 # Control stores
 
+`control::service_condition` derives the one status `list_services` and the Services page show,
+with the reason a service cannot progress on its own (unassigned, delete not yet observed). Both
+stores leave a deleted workspace's primary Zetta out of `list_services` once the workspace is
+observed `Deleted` (lake#452, [services.md](../../docs/api/services.md)).
+
 `WorkspaceService` caches deployment catalogues and project/pipeline definitions in memory for
 five seconds, scoped to the workspace and connection generation. Successful writes explicitly
 invalidate entries and prevent in-flight stale refills. Ownership, readiness and credentials

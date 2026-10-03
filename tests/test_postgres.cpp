@@ -891,6 +891,35 @@ TEST(PostgresServices, CreateListAndWithdrawFollowTheContract) {
     EXPECT_EQ(listed->size(), 3U)
         << "a withdrawn service stays listed until the operator deletes it";
     EXPECT_EQ(store->get_service(lake::control::new_uuid_v4()).error().code, "not_found");
+
+    // A deleted workspace's primary Zetta leaves the list once the operator reports the workspace
+    // Deleted, even though its service_status still says Ready (lake#452).
+    const auto doomed = store->create_workspace({customer->id, "doomed", "prod", ""});
+    ASSERT_TRUE(doomed) << doomed.error().message;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO service_status (service_id, phase, message) "
+                       "VALUES ($1::uuid, 'Ready', 'service ready')",
+                       doomed->zetta_service_id);
+        tx.commit();
+    }
+    ASSERT_TRUE(store->update_workspace(doomed->id, {.desired = "deleted"}));
+    const auto listed_with = [&](const std::string& id) {
+        const auto rows = store->list_services(customer->id);
+        return std::ranges::any_of(*rows, [&](const auto& row) { return row.id == id; });
+    };
+    EXPECT_TRUE(listed_with(doomed->zetta_service_id)) << "listed while the workspace is deleting";
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE workspaces SET phase = 'Deleted', observed_generation = generation "
+                       "WHERE id = $1::uuid",
+                       doomed->id);
+        tx.commit();
+    }
+    EXPECT_FALSE(listed_with(doomed->zetta_service_id));
+    EXPECT_TRUE(listed_with(crm->id)) << "other services are unaffected";
 }
 
 TEST(PostgresWebApps, DesiredStateQuotaNotifyAndOperatorStatusFollowTheContract) {

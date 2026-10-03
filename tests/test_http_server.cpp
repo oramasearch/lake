@@ -347,7 +347,19 @@ TEST(WorkspaceNavigationHttp, SelectorRedirectsRememberedWorkspaceAndValidatesFo
     EXPECT_EQ(response_header(remembered, "location"), "/w/" + second + "/train/streams?" + query);
     const auto selected = request("GET", response_header(remembered, "location"));
     EXPECT_NE(selected.find("href=\"/w/" + second + "/train/streams\" aria-current=\"page\""), std::string::npos);
-    EXPECT_NE(selected.find("value=\"" + second + "\" selected>second"), std::string::npos);
+    // The selector names a workspace, not "name (environment)" (lake#452); names are unique.
+    EXPECT_NE(selected.find("value=\"" + second + "\" selected>second</option>"),
+              std::string::npos);
+    EXPECT_EQ(selected.find("(prod)"), std::string::npos);
+    EXPECT_NE(selected.find("class=\"filters workspace-picker\""), std::string::npos);
+    // `/w/<workspace>/` is the workspace's home, not an unknown route (lake#452).
+    for (const std::string root : {"/w/" + second + "/", "/w/" + second}) {
+        const auto home = request("GET", root + "?" + query);
+        ASSERT_TRUE(home.starts_with("HTTP/1.1 302")) << root << "\n" << home;
+        EXPECT_EQ(response_header(home, "location"),
+                  "/w/" + second + "/design/projects?" + query);
+    }
+    EXPECT_TRUE(request("GET", "/w/not-a-workspace/").starts_with("HTTP/1.1 404"));
     const auto unknown = request("GET", "/w/" + lake::control::new_uuid_v4() + "/train/streams?" + query);
     EXPECT_TRUE(unknown.starts_with("HTTP/1.1 400"));
     EXPECT_NE(unknown.find("workspace_id"), std::string::npos);
@@ -2490,6 +2502,11 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
     ASSERT_TRUE(empty.starts_with("HTTP/1.1 200")) << empty.substr(0, 300);
     EXPECT_NE(empty.find("No apps yet"), std::string::npos);
     EXPECT_EQ(empty.find("ApplicationAgent is not registered"), std::string::npos);
+    // The viewer's own space is named as theirs, not by its generated handle (lake#452).
+    EXPECT_NE(empty.find(">Personal space</option>"), std::string::npos);
+    EXPECT_EQ(empty.find(">" + customers["value"]["items"][0]["name"].get<std::string>() +
+                         "</option>"),
+              std::string::npos);
     EXPECT_NE(empty.find("name=\"description\""), std::string::npos);
     EXPECT_EQ(empty.find("name=\"description\" placeholder=\"What should the app do?\" disabled"),
               std::string::npos);
@@ -2556,7 +2573,7 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
           {"path", "."},
           {"framework", "fastapi"},
           {"port", 8080},
-          {"auth", "lake"}}}};
+          {"auth", "none"}}}};
     agents_->answer = {{"ok", true},
                        {"reply", "Review the customer health app."},
                        {"result", proposal}};
@@ -2569,10 +2586,25 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
         "GET", response_header(replied, "location"), "", cookie);
     EXPECT_NE(review.find("Proposed App: customer-health"), std::string::npos);
     EXPECT_NE(review.find("app.py"), std::string::npos);
+    // A public app says so and asks for its own acknowledgement (lake#452).
+    EXPECT_NE(review.find("<dd>Public — no sign-in</dd>"), std::string::npos);
+    EXPECT_NE(review.find("This app will be public"), std::string::npos);
+    EXPECT_NE(review.find("name=\"confirm_public\" value=\"1\" required"), std::string::npos);
     const std::string sha_marker = "name=\"proposal_sha256\" value=\"";
     const auto sha_at = review.find(sha_marker);
     ASSERT_NE(sha_at, std::string::npos);
     const std::string proposal_sha = review.substr(sha_at + sha_marker.size(), 64);
+    const std::string unacknowledged = connection->request(
+        "POST",
+        "/ship/apps/agent/confirm",
+        "customer_id=" + customer_id + "&task_id=" + proposal_task +
+            "&proposal_sha256=" + proposal_sha,
+        cookie);
+    ASSERT_TRUE(unacknowledged.starts_with("HTTP/1.1 302")) << unacknowledged.substr(0, 300);
+    EXPECT_NE(response_header(unacknowledged, "location").find("will%20be%20public"),
+              std::string::npos)
+        << response_header(unacknowledged, "location");
+    EXPECT_TRUE(task_of(unacknowledged).empty()) << "no turn starts without the acknowledgement";
 
     const std::string stale = connection->request(
         "POST",
@@ -2588,13 +2620,14 @@ TEST_P(HttpResponseIsolation, ShipAppsCreatesOperatesAndFollowsAnApp) {
         "POST",
         "/ship/apps/agent/confirm",
         "customer_id=" + customer_id + "&task_id=" + proposal_task +
-            "&proposal_sha256=" + proposal_sha,
+            "&proposal_sha256=" + proposal_sha + "&confirm_public=1",
         cookie);
     ASSERT_TRUE(confirmed.starts_with("HTTP/1.1 302")) << confirmed.substr(0, 300);
     const std::string confirmed_task_id = task_of(confirmed);
     const auto confirmed_task = store_->get_agent_task(confirmed_task_id);
     ASSERT_TRUE(confirmed_task);
     EXPECT_EQ(confirmed_task->body["context"]["confirmed_proposal"], proposal);
+    EXPECT_EQ(confirmed_task->body["context"]["confirm_public"], true);
     EXPECT_NE(std::ranges::find(confirmed_task->scopes, "create_app"),
               confirmed_task->scopes.end());
     EXPECT_NE(std::ranges::find(confirmed_task->scopes, "deploy_app"),

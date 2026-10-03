@@ -4391,8 +4391,14 @@ public:
                 const pqxx::result rows = tx.exec_params(
                     std::string("SELECT ") + service_columns +
                         " FROM services s LEFT JOIN service_status st ON st.service_id = s.id "
+                        // A deleted workspace's primary Zetta is gone once the operator reports
+                        // the workspace Deleted, whether or not it mirrored that into
+                        // service_status (lake#452).
+                        "LEFT JOIN workspaces w ON w.id = s.workspace_id "
                         "WHERE s.customer_id = $1::uuid AND NOT (s.desired = 'absent' AND "
-                        "COALESCE(st.phase, '') = 'Deleted') ORDER BY s.created_at, s.id",
+                        "COALESCE(st.phase, '') = 'Deleted') AND NOT (s.desired = 'absent' AND "
+                        "w.zetta_service_id = s.id AND w.desired = 'deleted' AND "
+                        "COALESCE(w.phase, '') = 'Deleted') ORDER BY s.created_at, s.id",
                     customer_id);
                 std::vector<ManagedService> services;
                 for (const pqxx::row& row : rows) {

@@ -1,5 +1,9 @@
 # The `/v1` API and MCP
 
+lake#452: [services.md](services.md) documents `list_services`' shared `status` and
+`status_reason`; [web-apps.md](web-apps.md) the public acknowledgement `create_app` requires;
+[workspaces.md](workspaces.md) the two `create_project` name refusals.
+
 [experiments.md](experiments.md) documents eleven training study, trial, run-metric, comparison
 and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed actions,
 plus the `agent_turn` contract used for ExperimentsAgent proposals. These names are distinct from

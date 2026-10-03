@@ -1,5 +1,9 @@
 # Public control types
 
+`ServiceCondition` / `service_condition` (`zetta_workspace.hpp`) are the shared service status and
+its reason; `service_json` now includes `updated_at`. `InMemoryStore::set_workspace_status` writes
+the operator's workspace observation in tests (lake#452).
+
 `StreamOwner` and its Store methods bind topic management to the creator, customer and actual
 workspace service ID. `list_agent_task_stream_scopes` supplies one customer's compact durable task
 and agent scope for the shared Agent events and Agent tasks views.
