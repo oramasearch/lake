@@ -987,12 +987,15 @@ public:
     get_application_by_domain(const std::string& custom_sign_in_domain) = 0;
     virtual Result<Application> update_application_theme(const std::string& id,
                                                          const nlohmann::json& theme) = 0;
-    virtual Result<ApplicationSigningKey>
-    rotate_application_signing_key(const ApplicationSigningKey& value) = 0;
-    virtual Result<ApplicationSigningKey>
-    current_application_signing_key(const std::string& application_id) = 0;
-    virtual Result<std::vector<ApplicationSigningKey>>
-    list_application_signing_keys(const std::string& application_id) = 0;
+    // The secrets subsystem's envelope for an application credential (lake#352, lake#355): a data
+    // key per purpose, wrapped by LAKE_INSTANCE_KEK, encrypts the value with AES-256-GCM. Only the
+    // purposes `application.jwt.<application id>` and `application.webhook.<webhook id>` are
+    // accepted. The envelope is kept only inside the sealed record of the application's
+    // workspace; neither the value nor the envelope is stored here.
+    virtual Result<std::string> encrypt_application_credential(const std::string& purpose,
+                                                               const std::string& plaintext) = 0;
+    virtual Result<std::string> decrypt_application_credential(const std::string& purpose,
+                                                               const std::string& envelope) = 0;
     // An application's users and organizations live in the workspace Zetta of the application's
     // workspace (lake#353, lake#354, control/application_user_records.hpp). The store keeps only
     // what is lake's own: the pool's sessions and credentials of a user, which a suspension revokes
@@ -1011,11 +1014,16 @@ public:
     legacy_application_users(const std::string& after_id, int limit) = 0;
     virtual Result<std::vector<LegacyApplicationOrganization>>
     legacy_application_organizations(const std::string& after_id, int limit) = 0;
-    virtual Result<ApplicationWebhook>
-    create_application_webhook(const NewApplicationWebhook& value) = 0;
-    virtual Result<ApplicationWebhook> get_application_webhook(const std::string& id) = 0;
-    virtual Result<std::vector<ApplicationWebhook>>
-    list_application_webhooks(const std::string& application_id, int limit) = 0;
+    // The retired auth_app_signing_keys and auth_app_webhooks tables (lake#352, lake#355), for the
+    // one-shot copy into workspace Zettas only. Assigning records each unassigned key ring's (one
+    // per application) and webhook's owner in workspace_assignments, as migration 0056 does, for
+    // rows written after it, and resolves needs_selection rows whose application has since been
+    // assigned a workspace. Key rings page by application id, webhooks by id, oldest id first.
+    virtual Result<void> assign_legacy_application_credentials() = 0;
+    virtual Result<std::vector<LegacyApplicationSigningKeyRing>>
+    legacy_application_signing_keys(const std::string& after_application_id, int limit) = 0;
+    virtual Result<std::vector<LegacyApplicationWebhook>>
+    legacy_application_webhooks(const std::string& after_id, int limit) = 0;
     // The retired auth_app_webhook_events and auth_app_webhook_deliveries tables (lake#356,
     // lake#357), for the one-shot copy into workspace Zettas only. Assigning records each
     // unassigned event's owner in workspace_assignments, as migration 0049 does, for rows written

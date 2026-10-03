@@ -250,3 +250,12 @@ store; a snapshot that could not be read refuses every reference update. `serve_
 repository pages call the registry asynchronously; the home page and change view render without
 releases or reviews, saying why, when the workspace cannot be read. `copy_workspace_records` also
 copies `forge_records`.
+`app_capabilities.cpp` keeps an application's signing keys and webhooks in its workspace (lake#352,
+lake#355): `register_application` is asynchronous and writes the first key ring there before the
+application row, `rotate_application_signing_key`, `create_application_webhook` and
+`list_application_webhooks` are asynchronous and take the application's `workspace_id`,
+`application_jwks` is asynchronous and finds the workspace from the application id alone, and the
+token issuers read the current key with `application_signing_key` on their asynchronous path, with
+no `block_on`. The `POST /applications` and `POST /application/webhooks` page actions and the raw
+JWKS route call the capabilities asynchronously. `copy_workspace_records` also
+copies `auth_app_signing_keys` and `auth_app_webhooks`.

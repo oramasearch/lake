@@ -397,20 +397,17 @@ public:
         return call("update_application_theme",
                     [&] { return store_->update_application_theme(id, theme); });
     }
-    control::Result<control::ApplicationSigningKey>
-    rotate_application_signing_key(const control::ApplicationSigningKey& value) override {
-        return call("rotate_application_signing_key",
-                    [&] { return store_->rotate_application_signing_key(value); });
+    control::Result<std::string>
+    encrypt_application_credential(const std::string& purpose,
+                                   const std::string& plaintext) override {
+        return call("encrypt_application_credential",
+                    [&] { return store_->encrypt_application_credential(purpose, plaintext); });
     }
-    control::Result<control::ApplicationSigningKey>
-    current_application_signing_key(const std::string& application_id) override {
-        return call("current_application_signing_key",
-                    [&] { return store_->current_application_signing_key(application_id); });
-    }
-    control::Result<std::vector<control::ApplicationSigningKey>>
-    list_application_signing_keys(const std::string& application_id) override {
-        return call("list_application_signing_keys",
-                    [&] { return store_->list_application_signing_keys(application_id); });
+    control::Result<std::string>
+    decrypt_application_credential(const std::string& purpose,
+                                   const std::string& envelope) override {
+        return call("decrypt_application_credential",
+                    [&] { return store_->decrypt_application_credential(purpose, envelope); });
     }
     control::Result<int> revoke_application_user_sessions(const std::string& application_id,
                                                           const std::string& user_id) override {
@@ -438,19 +435,20 @@ public:
         return call("legacy_application_organizations",
                     [&] { return store_->legacy_application_organizations(after_id, limit); });
     }
-    control::Result<control::ApplicationWebhook>
-    create_application_webhook(const control::NewApplicationWebhook& value) override {
-        return call("create_application_webhook",
-                    [&] { return store_->create_application_webhook(value); });
+    control::Result<void> assign_legacy_application_credentials() override {
+        return call("assign_legacy_application_credentials",
+                    [&] { return store_->assign_legacy_application_credentials(); });
     }
-    control::Result<control::ApplicationWebhook>
-    get_application_webhook(const std::string& id) override {
-        return call("get_application_webhook", [&] { return store_->get_application_webhook(id); });
+    control::Result<std::vector<control::LegacyApplicationSigningKeyRing>>
+    legacy_application_signing_keys(const std::string& after_application_id, int limit) override {
+        return call("legacy_application_signing_keys", [&] {
+            return store_->legacy_application_signing_keys(after_application_id, limit);
+        });
     }
-    control::Result<std::vector<control::ApplicationWebhook>>
-    list_application_webhooks(const std::string& application_id, int limit) override {
-        return call("list_application_webhooks",
-                    [&] { return store_->list_application_webhooks(application_id, limit); });
+    control::Result<std::vector<control::LegacyApplicationWebhook>>
+    legacy_application_webhooks(const std::string& after_id, int limit) override {
+        return call("legacy_application_webhooks",
+                    [&] { return store_->legacy_application_webhooks(after_id, limit); });
     }
     control::Result<void> assign_legacy_application_webhook_events() override {
         return call("assign_legacy_application_webhook_events",

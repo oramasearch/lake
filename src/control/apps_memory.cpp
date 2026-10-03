@@ -1,13 +1,20 @@
 #include "lake/control/memory_store.hpp"
 
 #include "lake/control/application_user_records.hpp"
+#include "secrets_crypto.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <ranges>
 
 namespace lake::control {
 namespace {
+
+// The credential purposes the envelope serves (Store::encrypt_application_credential).
+bool application_credential_purpose(std::string_view purpose) {
+    return purpose.starts_with("application.jwt.") || purpose.starts_with("application.webhook.");
+}
 
 std::string lowercase(std::string value) {
     std::ranges::transform(value, value.begin(), [](unsigned char character) {
@@ -27,7 +34,7 @@ template <class T> void limit_rows(std::vector<T>& rows, int limit) {
 Result<Application> InMemoryStore::create_application(const NewApplication& input) {
     std::lock_guard lock(mutex_);
     if (input.id.empty() || input.pool_id.empty() || input.customer_id.empty() ||
-        input.name.empty() || input.allowed_origins.empty() || input.signing_key.seed.empty()) {
+        input.name.empty() || input.allowed_origins.empty()) {
         return std::unexpected(StoreError{"invalid_input", "application fields are incomplete"});
     }
     const auto customer = std::ranges::find_if(
@@ -69,11 +76,6 @@ Result<Application> InMemoryStore::create_application(const NewApplication& inpu
                                         now,
                                         now,
                                         input.workspace_id});
-    ApplicationSigningKey key = input.signing_key;
-    key.application_id = input.id;
-    key.current = true;
-    key.created_at = now;
-    application_signing_keys_.push_back(std::move(key));
     policy_objects_.push_back(
         PolicyObject{new_uuid_v4(), "application", input.id, parent->id, now, now, true});
     return applications_.back();
@@ -142,50 +144,40 @@ Result<Application> InMemoryStore::update_application_theme(const std::string& i
     return *value;
 }
 
-Result<ApplicationSigningKey>
-InMemoryStore::rotate_application_signing_key(const ApplicationSigningKey& input) {
+Result<std::string> InMemoryStore::encrypt_application_credential(const std::string& purpose,
+                                                                  const std::string& plaintext) {
     std::lock_guard lock(mutex_);
-    if (std::ranges::none_of(applications_, [&](const Application& value) {
-            return value.id == input.application_id;
-        })) {
-        return std::unexpected(StoreError{"not_found", "application does not exist"});
+    if (!application_credential_purpose(purpose) || plaintext.empty()) {
+        return std::unexpected(StoreError{"invalid_input", "not an application credential"});
     }
-    const std::string now = now_iso8601();
-    for (ApplicationSigningKey& value : application_signing_keys_) {
-        if (value.application_id == input.application_id && value.current) {
-            value.current = false;
-            value.retired_at = now;
+    auto& data_key = application_credential_keys_[purpose];
+    if (data_key.empty()) {
+        auto generated = secrets_crypto::random_key();
+        if (!generated) {
+            return std::unexpected(generated.error());
         }
+        data_key.assign(reinterpret_cast<const char*>(generated->data()), generated->size());
+        secrets_crypto::cleanse(*generated);
     }
-    ApplicationSigningKey value = input;
-    value.current = true;
-    value.created_at = now;
-    application_signing_keys_.push_back(std::move(value));
-    return application_signing_keys_.back();
+    secrets_crypto::Key key{};
+    std::copy(data_key.begin(), data_key.end(), key.begin());
+    auto sealed = secrets_crypto::seal(key, plaintext, purpose);
+    secrets_crypto::cleanse(key);
+    return sealed;
 }
 
-Result<ApplicationSigningKey>
-InMemoryStore::current_application_signing_key(const std::string& application_id) {
+Result<std::string> InMemoryStore::decrypt_application_credential(const std::string& purpose,
+                                                                  const std::string& envelope) {
     std::lock_guard lock(mutex_);
-    const auto value = std::ranges::find_if(application_signing_keys_, [&](const auto& item) {
-        return item.application_id == application_id && item.current;
-    });
-    if (value == application_signing_keys_.end()) {
-        return std::unexpected(StoreError{"not_found", "application has no current signing key"});
+    const auto data_key = application_credential_keys_.find(purpose);
+    if (!application_credential_purpose(purpose) || data_key == application_credential_keys_.end()) {
+        return std::unexpected(StoreError{"store_error", "encrypted credential cannot be opened"});
     }
-    return *value;
-}
-
-Result<std::vector<ApplicationSigningKey>>
-InMemoryStore::list_application_signing_keys(const std::string& application_id) {
-    std::lock_guard lock(mutex_);
-    std::vector<ApplicationSigningKey> output;
-    for (const ApplicationSigningKey& value : application_signing_keys_) {
-        if (value.application_id == application_id) {
-            output.push_back(value);
-        }
-    }
-    return output;
+    secrets_crypto::Key key{};
+    std::copy(data_key->second.begin(), data_key->second.end(), key.begin());
+    auto opened = secrets_crypto::open(key, envelope, purpose);
+    secrets_crypto::cleanse(key);
+    return opened;
 }
 
 Result<int> InMemoryStore::revoke_application_user_sessions(const std::string& application_id,
@@ -331,51 +323,125 @@ InMemoryStore::legacy_application_organizations(const std::string& after_id, int
     return rows;
 }
 
-Result<ApplicationWebhook>
-InMemoryStore::create_application_webhook(const NewApplicationWebhook& input) {
+void InMemoryStore::seed_legacy_application_signing_key(ApplicationSigningKey key) {
+    auto envelope = encrypt_application_credential("application.jwt." + key.application_id, key.seed);
     std::lock_guard lock(mutex_);
-    if (input.application_id.empty() || input.url.empty() || input.events.empty() ||
-        input.secret.empty()) {
-        return std::unexpected(StoreError{"invalid_input", "webhook fields are incomplete"});
-    }
-    if (std::ranges::none_of(applications_,
-                             [&](const auto& value) { return value.id == input.application_id; })) {
-        return std::unexpected(StoreError{"not_found", "application does not exist"});
-    }
-    const std::string now = now_iso8601();
-    application_webhooks_.push_back(ApplicationWebhook{new_uuid_v4(),
-                                                       input.application_id,
-                                                       input.url,
-                                                       input.events,
-                                                       input.secret,
-                                                       true,
-                                                       now,
-                                                       now});
-    return application_webhooks_.back();
+    key.encrypted_seed = envelope ? *envelope : std::string();
+    key.seed.clear();
+    application_signing_keys_.push_back(std::move(key));
 }
 
-Result<ApplicationWebhook> InMemoryStore::get_application_webhook(const std::string& id) {
-    std::lock_guard lock(mutex_);
-    const auto value = std::ranges::find_if(application_webhooks_,
-                                            [&](const auto& item) { return item.id == id; });
-    if (value == application_webhooks_.end()) {
-        return std::unexpected(StoreError{"not_found", "application webhook does not exist"});
+void InMemoryStore::seed_legacy_application_webhook(ApplicationWebhook webhook) {
+    if (webhook.id.empty()) {
+        webhook.id = new_uuid_v4();
     }
-    return *value;
+    if (webhook.at_us == 0) {
+        webhook.at_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+    }
+    auto envelope = encrypt_application_credential("application.webhook." + webhook.id, webhook.secret);
+    std::lock_guard lock(mutex_);
+    webhook.encrypted_secret = envelope ? *envelope : std::string();
+    webhook.secret.clear();
+    application_webhooks_.push_back(std::move(webhook));
 }
 
-Result<std::vector<ApplicationWebhook>>
-InMemoryStore::list_application_webhooks(const std::string& application_id, int limit) {
+// As migration 0056: each key ring and webhook belongs to its application's workspace, or is
+// needs_selection while the application has none (and is resolved once it has one).
+Result<void> InMemoryStore::assign_legacy_application_credentials() {
     std::lock_guard lock(mutex_);
-    std::vector<ApplicationWebhook> output;
-    for (auto value = application_webhooks_.rbegin(); value != application_webhooks_.rend();
-         ++value) {
-        if (value->application_id == application_id) {
-            output.push_back(*value);
+    const auto assign = [&](const std::string& table, const std::string& id,
+                            const std::string& application_id) {
+        const auto application = std::ranges::find_if(
+            applications_, [&](const Application& value) { return value.id == application_id; });
+        if (application == applications_.end()) {
+            return;
         }
+        auto& assigned = legacy_application_credential_assignments_[table + "\n" + id];
+        if (!assigned.first.empty() || assigned.second == "workspace_deleted") {
+            return;
+        }
+        const bool deleted = std::ranges::any_of(workspaces_, [&](const Workspace& value) {
+            return value.id == application->workspace_id && value.desired == "deleted";
+        });
+        if (application->workspace_id.empty()) {
+            assigned = {"", "needs_selection"};
+        } else if (deleted) {
+            assigned = {"", assigned.second.empty() ? "workspace_deleted" : assigned.second};
+        } else {
+            assigned = {application->workspace_id, "application_workspace"};
+        }
+    };
+    for (const ApplicationSigningKey& key : application_signing_keys_) {
+        assign("auth_app_signing_keys", key.application_id, key.application_id);
     }
-    limit_rows(output, limit);
-    return output;
+    for (const ApplicationWebhook& webhook : application_webhooks_) {
+        assign("auth_app_webhooks", webhook.id, webhook.application_id);
+    }
+    return {};
+}
+
+Result<std::vector<LegacyApplicationSigningKeyRing>>
+InMemoryStore::legacy_application_signing_keys(const std::string& after_application_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::map<std::string, ApplicationSigningKeyRing> rings;
+    for (const ApplicationSigningKey& key : application_signing_keys_) {
+        auto& ring = rings[key.application_id];
+        ring.application_id = key.application_id;
+        ring.keys.push_back(key);
+    }
+    std::vector<LegacyApplicationSigningKeyRing> rows;
+    for (auto& [application_id, ring] : rings) {
+        if ((!after_application_id.empty() && application_id <= after_application_id) ||
+            static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            continue;
+        }
+        std::ranges::sort(ring.keys, {}, &ApplicationSigningKey::version);
+        LegacyApplicationSigningKeyRing row{std::move(ring), "", "", "needs_selection"};
+        const auto application = std::ranges::find_if(
+            applications_, [&](const Application& value) { return value.id == application_id; });
+        if (application != applications_.end()) {
+            row.customer_id = application->customer_id;
+        }
+        if (const auto found = legacy_application_credential_assignments_.find(
+                "auth_app_signing_keys\n" + application_id);
+            found != legacy_application_credential_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+Result<std::vector<LegacyApplicationWebhook>>
+InMemoryStore::legacy_application_webhooks(const std::string& after_id, int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<ApplicationWebhook> ordered = application_webhooks_;
+    std::ranges::sort(ordered, {}, &ApplicationWebhook::id);
+    std::vector<LegacyApplicationWebhook> rows;
+    for (const ApplicationWebhook& webhook : ordered) {
+        if ((!after_id.empty() && webhook.id <= after_id) ||
+            static_cast<int>(rows.size()) >= std::clamp(limit, 1, 5000)) {
+            continue;
+        }
+        LegacyApplicationWebhook row{webhook, "", "", "needs_selection"};
+        const auto application = std::ranges::find_if(applications_, [&](const Application& value) {
+            return value.id == webhook.application_id;
+        });
+        if (application != applications_.end()) {
+            row.customer_id = application->customer_id;
+        }
+        if (const auto found =
+                legacy_application_credential_assignments_.find("auth_app_webhooks\n" + webhook.id);
+            found != legacy_application_credential_assignments_.end()) {
+            row.workspace_id = found->second.first;
+            row.outcome = found->second.second;
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
 }
 
 void InMemoryStore::seed_legacy_application_webhook_event(ApplicationWebhookEvent event) {

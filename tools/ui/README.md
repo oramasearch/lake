@@ -16,6 +16,8 @@ the public transparency monitor without adding a fixture route to `lake`. Its ap
 one Ready workspace whose record store is the tests' `RecordTables` fake, so the event log page
 reads its event from the workspace as production does (lake#356). Its application user and
 organization are records in that workspace too (lake#353, lake#354).
+reads its event from the workspace as production does (lake#356), and its signing key ring is in
+the same workspace (lake#352).
 
 ```sh
 cmake --build build --target lake-ui-fixture

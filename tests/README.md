@@ -438,3 +438,11 @@ in both stores; `PostgresForgeRecords.MigrationRecordsEachRowsOwnerForTheCopy` m
 `test_api.cpp` give `Surface` a Ready workspace (`Surface::workspace`), and the sync and forge
 scenario servers a `RecordWorkspaces`; `RecordWorkspaces::forge` writes a forge record the way lake
 does. `Surface`'s KEK is hexadecimal, as `LAKE_INSTANCE_KEK` is.
+Application signing keys and webhooks (lake#352, lake#355): `test_apps.cpp`
+(`KeysAndWebhooksLiveInTheApplicationsWorkspace`, `AConcurrentRotationIsRereadNotLost`) covers two
+spaces with two workspaces each, the anonymous JWKS, missing, malformed, unknown and foreign
+`workspace_id`, least privilege, rotation and a raced rotation, not ready and deletion;
+`WorkspaceRecordStores.TheOneShotCopyMovesApplicationKeysAndWebhooks` the copy in both stores;
+`PostgresApplicationCredentials.MigrationRecordsEachRowsOwnerForTheCopy` migration
+`0056_application_credential_workspaces`. `stream_fixture.hpp`'s `seed_application_signing_key`
+writes the first key ring of an application a test creates directly in a store.

@@ -352,7 +352,9 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
     EXPECT_TRUE(call("update_application_theme",
                      {{"application_id", application_id}, {"theme", {{"accent_color", "#778899"}}}})
                     .ok);
-    EXPECT_TRUE(call("rotate_application_signing_key", {{"application_id", application_id}}).ok);
+    EXPECT_TRUE(call("rotate_application_signing_key",
+                     {{"application_id", application_id}, {"workspace_id", workspace_id}})
+                    .ok);
     const auto jwks = call("application_jwks", {{"application_id", application_id}});
     ASSERT_TRUE(jwks.ok) << jwks.error.message;
     EXPECT_EQ(jwks.value.at("keys").size(), 2);
@@ -360,10 +362,15 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
     const auto webhook =
         call("create_application_webhook",
              {{"application_id", application_id},
+              {"workspace_id", workspace_id},
               {"url", "https://hooks.example.test/postgres"},
               {"events", nlohmann::json::array({"session.started", "organization.created"})}});
     ASSERT_TRUE(webhook.ok) << webhook.error.message;
-    EXPECT_TRUE(call("list_application_webhooks", {{"application_id", application_id}}).ok);
+    const auto webhooks = call("list_application_webhooks",
+                               {{"application_id", application_id}, {"workspace_id", workspace_id}});
+    ASSERT_TRUE(webhooks.ok) << webhooks.error.message;
+    ASSERT_EQ(webhooks.value.at("items").size(), 1U);
+    EXPECT_FALSE(webhooks.value.at("items").at(0).contains("secret"));
 
     const auto sign_up =
         call("sign_up_password",
@@ -437,13 +444,27 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
                      pqxx::check_violation);
     }
     {
+        // Nothing of its events, keys or webhooks is written to the retired tables (lake#352,
+        // lake#355): they are in its workspace Zetta, sealed.
         pqxx::connection connection(uri);
         pqxx::work tx(connection);
-        EXPECT_EQ(tx.exec_params("SELECT count(*) FROM auth_app_webhook_events WHERE "
-                                 "application_id = $1::uuid",
-                                 application_id)[0][0]
-                      .as<int>(),
-                  0);
+        for (const std::string table :
+             {"auth_app_webhook_events", "auth_app_signing_keys", "auth_app_webhooks"}) {
+            EXPECT_EQ(tx.exec_params("SELECT count(*) FROM " + table +
+                                         " WHERE application_id = $1::uuid",
+                                     application_id)[0][0]
+                          .as<int>(),
+                      0)
+                << table;
+        }
+        EXPECT_EQ(zetta->records["http://postgres-app-" + suffix + ".test"]
+                      .rows("auth_app_signing_keys")
+                      .size(),
+                  1U);
+        EXPECT_EQ(zetta->records["http://postgres-app-" + suffix + ".test"]
+                      .rows("auth_app_webhooks")
+                      .size(),
+                  1U);
     }
     EXPECT_TRUE(call("delete_application_organization",
                      {{"application_id", application_id},

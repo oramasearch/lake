@@ -146,7 +146,10 @@ workspace observed for it.
 the implicit `0`. With an application that has events it reads its workspace twice, in two rounds:
 the newest events, then their delivery attempts back to the oldest of them (lake#356). `/application/users` and `/application/organizations` are not workspace routes either; each
 reads its workspace once, one `list_records` of the application's users or organizations
-(lake#353, lake#354).
+(lake#353, lake#354). The raw
+JWKS route (`/v1/apps/<id>/.well-known/jwks.json`) reads one record, the application's key ring
+(lake#352), and a hosted sign-in also reads the key ring and lists the application's webhooks once
+each before it records its event.
 
 The deferred panels are JSON routes, not pages, and are held to their own budgets:
 

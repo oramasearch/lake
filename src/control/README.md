@@ -124,3 +124,10 @@ Repository usage lives in workspace Zettas (lake#348, lake#349, `metering.cpp`).
 writes or reads metering rows any more; `assign_legacy_metering` reruns migration `0053`'s owner
 assignment and `legacy_metering_usage`/`legacy_metering_build_records` page the retired rows for
 the copy (usage rows without transfer are left out).
+`application_credential_records.cpp` keeps an application's signing keys and webhooks in its
+workspace (lake#352, lake#355). The stores no longer write or read `auth_app_signing_keys` or
+`auth_app_webhooks`: they envelope and open the credentials with the keystore
+(`encrypt_application_credential`/`decrypt_application_credential`, accepted only for the
+`application.jwt.*` and `application.webhook.*` purposes), and `assign_legacy_application_credentials`
+with the two `legacy_application_*` reads serve only the copy (migration
+`0056_application_credential_workspaces`). `create_application` no longer writes a key.
