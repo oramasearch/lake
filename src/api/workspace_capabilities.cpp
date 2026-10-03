@@ -2028,6 +2028,60 @@ json task_json(const control::AgentTask& task) {
     return out;
 }
 
+// The running turn whose task credential is calling, or nullopt (lake#451). When Ask Orama (or
+// any library agent) delegates with agent_turn, this is the turn that asked.
+std::optional<control::AgentTask> calling_turn(const ApiContext& context,
+                                               const std::string& customer_id,
+                                               const std::string& workspace_id) {
+    if (context.store == nullptr || context.credential_kind != "agent_task" ||
+        !context.credential_session_id.starts_with("task:")) {
+        return std::nullopt;
+    }
+    auto task = context.store->get_agent_task(context.credential_session_id.substr(5));
+    if (!task || task->phase != "Running" || task->customer_id != customer_id ||
+        task->workspace_id != workspace_id) {
+        return std::nullopt;
+    }
+    return std::move(*task);
+}
+
+// A delegated turn reported on the turn that asked for it (lake#451): the asking task's message
+// becomes `message`, and the same progress event goes to the workspace's agent-events, so a page
+// following the asking turn says which agent is working and what it last reported. Best effort:
+// a parent that already finished, or an unavailable workspace, leaves the delegated turn as it is.
+liquid::runtime::task<void> report_on_asking_turn(ApiContext& context,
+                                                  const std::string& parent_id,
+                                                  std::string message,
+                                                  json details) {
+    if (context.store == nullptr || parent_id.empty()) {
+        co_return {};
+    }
+    const auto parent = context.store->get_agent_task(parent_id);
+    if (!parent || parent->phase != "Running") {
+        co_return {};
+    }
+    if (message.size() > 300) {
+        message = message.substr(0, 297) + "...";
+    }
+    const auto applied =
+        context.store->record_agent_task_event(parent->id, parent->agent, "Running", message, nullptr);
+    if (!applied || !context.workspaces) {
+        co_return {};
+    }
+    WorkspaceApiBus bus(context, parent->customer_id, parent->workspace_id);
+    if (!control::settled(co_await bus.create_topic(std::string(control::agent_events_topic)))) {
+        co_return {};
+    }
+    json event{{"task_id", parent->id},
+               {"agent", parent->agent},
+               {"type", "progress"},
+               {"message", message},
+               {"attempts", applied->attempts}};
+    event.update(details);
+    static_cast<void>(control::settled(
+        co_await bus.publish(std::string(control::agent_events_topic), event, parent->id)));
+}
+
 // A finished Discover scan's Opportunities become rows, once (lake#269): what Auto-Suggest
 // suggested (new) and what it declined (not_yet), in its order.
 void settle_discover(ApiContext& context, const control::AgentTask& task) {
@@ -3860,6 +3914,12 @@ void register_agent_run_capabilities(Registry& registry) {
                         ready ? "workspace_id needs a Ready workspace Zetta" : ready.error().message,
                         "/workspace_id");
                 }
+                // A turn another agent asked for names the asking turn (lake#451), so its
+                // progress is reported there too.
+                const auto asking = calling_turn(context, customer_id, input.at("workspace_id"));
+                if (asking) {
+                    body["parent_task_id"] = asking->id;
+                }
                 auto task = context.store->create_agent_task(
                     control::AgentTask{.customer_id = customer_id,
                                        .agent = agent,
@@ -3876,6 +3936,14 @@ void register_agent_run_capabilities(Registry& registry) {
                 // A publish that fails is not the caller's failure: the task is recorded, and
                 // lake's bus loop publishes an unclaimed task again.
                 static_cast<void>(co_await context.agent_bus->publish_task(*task));
+                if (asking) {
+                    co_await report_on_asking_turn(
+                        context,
+                        asking->id,
+                        control::agent_display_name(asking->agent) + " asked " +
+                            std::string(library->name) + ": " + message,
+                        {{"delegated_task_id", task->id}, {"delegated_agent", agent}});
+                }
                 co_return ApiResult::success(task_json(*task));
             }
 
@@ -4314,6 +4382,25 @@ void register_agent_bus_capabilities(Registry& registry) {
             auto published = control::settled(co_await bus.publish("agent-events", event, task_id));
             if (!published) {
                 co_return ApiResult::failure("store_unavailable", published.error().message);
+            }
+            // A delegated turn's progress is the asking turn's progress too (lake#451).
+            if (const std::string parent = task->body.is_object()
+                                               ? task->body.value("parent_task_id", std::string())
+                                               : std::string();
+                !parent.empty()) {
+                const std::string name = control::agent_display_name(task->agent);
+                const std::string type = input.at("type");
+                const std::string said = input.value("message", std::string());
+                std::string message =
+                    type == "result"   ? name + " finished; writing the answer."
+                    : type == "failed" ? name + " did not finish" + (said.empty() ? "." : ": " + said)
+                    : said.empty() || said == "Working on it" ? name + " is working."
+                                                              : name + ": " + said;
+                co_await report_on_asking_turn(
+                    context,
+                    parent,
+                    std::move(message),
+                    {{"delegated_task_id", task_id}, {"delegated_agent", task->agent}});
             }
             co_return ApiResult::success({{"event_id", *published}});
         }});
