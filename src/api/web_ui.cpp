@@ -38,6 +38,10 @@ bool workspace_page_path(std::string_view path) {
     return false;
 }
 
+bool web_ui_deferred_panel_path(std::string_view path) {
+    return std::ranges::find(web_ui_deferred_panels, path) != web_ui_deferred_panels.end();
+}
+
 std::string workspace_path_id(std::string_view path) {
     if (!path.starts_with("/w/")) {
         return {};
@@ -3545,11 +3549,47 @@ std::string agent_create_form(const WorkspacePage& page) {
         skills);
 }
 
+// A panel the page fills after it has rendered (docs/ui/performance.md, lake#446): the panel
+// route answers {"html": ...} or {"error": ...}. Without JavaScript the link opens the page with
+// the panel rendered in place.
+std::string deferred_panel_script(std::string_view element_id, std::string_view url) {
+    return std::format(
+        "<script>(async()=>{{const e=document.getElementById('{0}');if(!e)return;"
+        "const s=e.querySelector('[data-loading]');try{{const r=await fetch('{1}',"
+        "{{credentials:'same-origin'}});const b=await r.json();if(typeof b.html==='string')"
+        "{{e.outerHTML=b.html;return;}}throw new Error(b.error||'no answer');}}catch(x){{"
+        "if(s){{s.textContent='This could not be loaded: '+x.message+'. Reload the page to try "
+        "again.';s.setAttribute('role','alert');}}}}}})();</script>",
+        element_id,
+        url);
+}
+
 std::string agents_content(const WorkspacePage& page) {
+    if (!page.data.value("defer_agents", false)) {
+        return web_ui_your_agents(page) + agent_create_form(page);
+    }
+    // Zetta's list_agents takes hundreds of milliseconds (lake#446): the page renders without
+    // waiting for it, and the panel fills in from /train/agents/list.
+    const std::string query = customer_query(page.customer_id);
+    return std::format("<section class=\"panel\" id=\"your-agents\" aria-busy=\"true\"><h2>Your "
+                       "Agents</h2><p class=\"muted\" data-loading role=\"status\">Loading your "
+                       "agents from the workspace…</p><noscript><p><a href=\"/train/agents?{}"
+                       "&amp;inline=1\">Show your agents</a></p></noscript></section>{}",
+                       query,
+                       deferred_panel_script("your-agents", "/train/agents/list?" + query)) +
+           agent_create_form(page);
+}
+
+} // namespace
+
+std::string web_ui_your_agents(const WorkspacePage& page) {
     const std::string query = customer_query(page.customer_id);
     const nlohmann::json listed = page.data.value("list_agents", nlohmann::json::object())
                                       .value("agents", nlohmann::json::array());
     std::string out = "<section class=\"panel\" id=\"your-agents\"><h2>Your Agents</h2>";
+    if (!page.error.empty()) {
+        out += std::format("<p class=\"error\" role=\"alert\">{}</p>", web_ui_escape(page.error));
+    }
     std::size_t shown = 0;
     std::string rows;
     for (const nlohmann::json& agent : listed) {
@@ -3572,14 +3612,16 @@ std::string agents_content(const WorkspacePage& page) {
             web_ui_escape(status.empty() ? "idle" : status));
     }
     if (shown == 0) {
-        out += "<p>No agents yet. Create one below.</p>";
+        out += page.error.empty() ? "<p>No agents yet. Create one below.</p>" : "";
     } else {
         out += "<table><thead><tr><th>Agent</th><th>Engagement</th><th>Skills</th><th>Model</th>"
                "<th>Status</th></tr></thead><tbody>" +
                rows + "</tbody></table>";
     }
-    return out + "</section>" + agent_create_form(page);
+    return out + "</section>";
 }
+
+namespace {
 
 std::string agent_content(const WorkspacePage& page) {
     const std::string query = customer_query(page.customer_id);
@@ -5747,33 +5789,58 @@ std::string workspace_content(const WorkspacePage& page) {
             out += "</tbody></table><p class=\"muted\">Open an index to search it, publish it, "
                    "and call it from your own code.</p>";
         }
-        std::string tables;
-        std::string result_tables;
-        for (const nlohmann::json& dataset : data.value("list_datasets", nlohmann::json::object())
-                                                 .value("datasets", nlohmann::json::array())) {
-            (result_dataset(dataset) ? result_tables : tables) +=
-                std::format("<option>{}</option>", web_ui_escape(json_text(dataset, "name")));
+        if (data.value("defer_index_datasets", false)) {
+            // Zetta lists datasets slowly (lake#446): the form's dataset choices load after the
+            // page, from /ship/indexes/datasets.
+            out += std::format(
+                "<section class=\"panel\" id=\"new-index\" aria-busy=\"true\"><h2>New Index</h2>"
+                "<p class=\"muted\" data-loading role=\"status\">Loading your datasets…</p>"
+                "<noscript><p><a href=\"/ship/indexes?{}&amp;inline=1\">Make an index</a></p>"
+                "</noscript></section>{}",
+                query,
+                deferred_panel_script("new-index", "/ship/indexes/datasets?" + query));
+        } else {
+            out += web_ui_new_index(page);
         }
-        if (!result_tables.empty()) {
-            // A run's output can be worth searching, but it is not data a person loaded.
-            tables += "<optgroup label=\"Results\">" + result_tables + "</optgroup>";
-        }
-        out += tables.empty()
-                   ? std::string("<p class=\"muted\">To make an index, first add a dataset on "
-                                 "<a href=\"/train/data\">Data</a>.</p>")
-                   : std::format(
-                         "<section class=\"panel\"><h2>New Index</h2><form class=\"stack\" "
-                         "method=\"post\" action=\"/ship/indexes/create\">{}<label>Dataset"
-                         "<select name=\"table\">{}</select></label><label>Fields to search, "
-                         "comma separated<input name=\"fields\" placeholder=\"all columns\">"
-                         "</label><p class=\"muted\">A full-text (BM25F) index over the dataset."
-                         "</p><button class=\"button button-primary\" type=\"submit\">Create "
-                         "index</button></form></section>",
-                         hidden("customer_id", page.customer_id),
-                         tables);
     }
     return out;
 }
+
+} // namespace
+
+std::string web_ui_new_index(const WorkspacePage& page) {
+    std::string tables;
+    std::string result_tables;
+    for (const nlohmann::json& dataset : page.data.value("list_datasets", nlohmann::json::object())
+                                             .value("datasets", nlohmann::json::array())) {
+        (result_dataset(dataset) ? result_tables : tables) +=
+            std::format("<option>{}</option>", web_ui_escape(json_text(dataset, "name")));
+    }
+    if (!result_tables.empty()) {
+        // A run's output can be worth searching, but it is not data a person loaded.
+        tables += "<optgroup label=\"Results\">" + result_tables + "</optgroup>";
+    }
+    if (!page.error.empty()) {
+        return std::format("<section class=\"panel\" id=\"new-index\"><h2>New Index</h2><p "
+                           "class=\"error\" role=\"alert\">{}</p></section>",
+                           web_ui_escape(page.error));
+    }
+    return tables.empty()
+               ? std::string("<p class=\"muted\" id=\"new-index\">To make an index, first add a "
+                             "dataset on <a href=\"/train/data\">Data</a>.</p>")
+               : std::format(
+                     "<section class=\"panel\" id=\"new-index\"><h2>New Index</h2><form "
+                     "class=\"stack\" method=\"post\" action=\"/ship/indexes/create\">{}<label>"
+                     "Dataset<select name=\"table\">{}</select></label><label>Fields to search, "
+                     "comma separated<input name=\"fields\" placeholder=\"all columns\">"
+                     "</label><p class=\"muted\">A full-text (BM25F) index over the dataset."
+                     "</p><button class=\"button button-primary\" type=\"submit\">Create "
+                     "index</button></form></section>",
+                     hidden("customer_id", page.customer_id),
+                     tables);
+}
+
+namespace {
 
 // The Design, Train and Ship breadcrumb (docs/ui/breadcrumb.md): the stage, the list a page belongs
 // to, then the entities in the URL — a project and its pipeline, a dataset, a run, an index — by
@@ -10167,6 +10234,21 @@ std::string web_ui_mcp(const McpPage& page, WebUiViewer viewer) {
     return web_ui_shell("lake — MCP", "", content, viewer);
 }
 
+namespace {
+
+// The workspace's own chat agents join the picker once Zetta's list_agents answers (lake#446).
+std::string ask_agents_script(std::string_view customer_id) {
+    return std::format(
+        "<script>(async()=>{{const s=document.querySelector('select[data-workspace-agents]');"
+        "if(!s)return;try{{const r=await fetch('/ask/agents?{}',{{credentials:'same-origin'}});"
+        "const b=await r.json();for(const a of (b.agents||[])){{let o=[...s.options].find("
+        "x=>x.value===a.id);if(!o){{o=document.createElement('option');o.value=a.id;"
+        "s.append(o);}}o.textContent=a.name||a.id;}}}}catch(x){{}}}})();</script>",
+        customer_query(customer_id));
+}
+
+} // namespace
+
 std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
     std::string content =
         page.embed ? std::string("<p class=\"sub\">Ask about anything in your lake. Changes are "
@@ -10303,7 +10385,7 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
     }
     content += std::format(
         "<section class=\"panel\"><form class=\"stack\" method=\"post\" action=\"/ask/send\">{}{}{}{}"
-        "<label>Talk to<select name=\"agent\">{}</select></label><label>Message<textarea "
+        "<label>Talk to<select name=\"agent\"{}>{}</select></label><label>Message<textarea "
         "name=\"message\" rows=\"3\" required placeholder=\"What should I look at first?\">"
         "</textarea></label><button class=\"button button-primary\" type=\"submit\">Send</button>"
         "</form><p class=\"sub\"><a href=\"/ask?{}&from={}{}\">Start a new "
@@ -10312,10 +10394,14 @@ std::string web_ui_ask(const AskPage& page, WebUiViewer viewer) {
         hidden("conversation", page.conversation_id),
         hidden("from", page.from),
         stay,
+        page.defer_agents ? " data-workspace-agents" : "",
         options,
         customer_query(page.customer_id),
         url_component(page.from),
         page.embed ? "&embed=1" : "");
+    if (page.defer_agents) {
+        content += ask_agents_script(page.customer_id);
+    }
     if (page.embed) {
         // The panel beside a page: the conversation alone, in lake's styles.
         return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta "

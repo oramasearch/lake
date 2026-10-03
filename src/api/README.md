@@ -14,7 +14,11 @@ builds *Talk to* with `control::talk_to_agents`, which leaves out internal libra
 Page reads share authentication and customer selection within each GET, and batch independent
 workspace and local reads with `when_all`. Data uses a projected dataset/database list from `system.datasets`; dataset
 details own metadata and the bounded sample. `Server-Timing` reports actual outbound calls and
-their sequential rounds. Startup warms existing repository indexes for Metering without
+their sequential rounds, and names each call by its Zetta capability (`zetta_<capability>`). Ask
+Orama, Train → Agents and Search Indexes defer the panels that wait for slow Zetta reads to JSON
+panel routes (`/ask/agents`, `/train/agents/list`, `/ship/indexes/datasets`, lake#446); the page
+script fills them in, and `?inline=1` renders Agents and Indexes in place without JavaScript.
+Startup warms existing repository indexes for Metering without
 caching usage. `metering_capabilities.cpp` is asynchronous: its summary reads every workspace's
 datasets and runs concurrently, and `http_server.cpp` injects `registry_space_bytes` so registry
 image bytes are counted where the registry storage lives. Contracts and regression proof: [page performance](../../docs/ui/performance.md)

@@ -59,7 +59,8 @@ cross-repository plan and decisions are in `oramasearch/liquid-bridge` `docs/`.
 
 [`ui/performance.md`](ui/performance.md) documents the live 100 ms p95 rule, exact per-route
 workspace call budgets, the loose 500 ms regression guard, the `Server-Timing` response fields,
-and the router-derived delayed-workspace regression test.
+the router-derived delayed-workspace regression test, the deferred panels, and the dev-site
+measurements of slow Zetta reads (lake#446).
 cross-repo plan and decisions are in `oramasearch/liquid-bridge` `docs/`.
 
 [api/provisioning.md](api/provisioning.md) specifies personal customer sign-up;

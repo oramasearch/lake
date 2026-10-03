@@ -1,8 +1,9 @@
 # The web UI
 
 The live 100 ms p95 page rule, deterministic per-route workspace call budgets, loose 500 ms
-regression guard, `Server-Timing` fields, route-derived coverage, registry invalidation and
-populated cold-start fixtures are in
+regression guard, `Server-Timing` fields (including one `zetta_<capability>` entry per call),
+route-derived coverage, registry invalidation, populated cold-start fixtures, the deferred panels
+and the dev-site measurements of slow Zetta reads (lake#446) are in
 [performance.md](performance.md).
 
 Train → Experiments' ExperimentsAgent questions, conversation replies, proposals, studies, run

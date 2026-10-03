@@ -6,9 +6,16 @@ route that the live router identifies as an HTML page. A p95 below 500 ms over 2
 renders remains only as a guard against pathological stalls. The live budget remains 100 ms and is
 checked from access logs after deployment.
 
+**Updated 2026-10-02 (lake#446).** `Server-Timing` names every workspace call by its Zetta
+capability. Ask Orama, Train → Agents and Search Indexes no longer wait for the Zetta reads that
+made them slow on the dev site: those panels load after the page from three deferred panel routes.
+The regression test now also holds the exact Zetta capabilities of those pages and the panels, and
+refuses any page that waits for a capability measured slow on the dev site, except the pages named
+in [Live budget follow-up](#live-budget-follow-up-lake446).
+
 ## Reading `Server-Timing`
 
-The browser's Network panel shows three entries for a lake page:
+The browser's Network panel shows these entries for a lake page:
 
 - `total` is lake's server time from the first request middleware until the HTML response is
   ready, including workspace selection, authentication, and synchronous rendering.
@@ -20,10 +27,14 @@ The browser's Network panel shows three entries for a lake page:
 Workspace event-bus reads for apps, builds, and agent tasks use the same timing path as ordinary
 workspace capabilities, including the app-detail page's event section.
 
+- `zetta_<capability>` is one workspace call, named by the Zetta capability it called
+  (`zetta_list_models`, `zetta_sql` for a `workspace_sql` read), with its own duration. There is one
+  entry per call, in completion order, so a slow page names the engine read it waited on.
+
 An example header is:
 
 ```text
-Server-Timing: total;dur=47.418, workspace;dur=30.731;desc="1 calls", workspace_rounds;desc="1 rounds"
+Server-Timing: total;dur=47.418, workspace;dur=30.731;desc="1 calls", workspace_rounds;desc="1 rounds", zetta_list_models;dur=30.731
 ```
 
 Concurrent workspace calls contribute their individual durations to `workspace`, so that value
@@ -88,7 +99,7 @@ workspace work without an explicit review of this table and the test map.
 
 | Route | Calls | Rounds |
 |---|---:|---:|
-| `/w/:workspace_id/ask` | 1 | 1 |
+| `/w/:workspace_id/ask` | 0 | 0 |
 | `/w/:workspace_id/design/discover` | 1 | 1 |
 | `/w/:workspace_id/design/methodologies` | 1 | 1 |
 | `/w/:workspace_id/design/methodology` | 2 | 1 |
@@ -100,10 +111,10 @@ workspace work without an explicit review of this table and the test map.
 | `/w/:workspace_id/design/solutions` | 1 | 1 |
 | `/w/:workspace_id/ship/app` | 1 | 1 |
 | `/w/:workspace_id/ship/index` | 1 | 1 |
-| `/w/:workspace_id/ship/indexes` | 2 | 1 |
+| `/w/:workspace_id/ship/indexes` | 1 | 1 |
 | `/w/:workspace_id/ship/models` | 2 | 1 |
 | `/w/:workspace_id/train/agent` | 3 | 1 |
-| `/w/:workspace_id/train/agents` | 1 | 1 |
+| `/w/:workspace_id/train/agents` | 0 | 0 |
 | `/w/:workspace_id/train/data` | 3 | 1 |
 | `/w/:workspace_id/train/dataset` | 3 | 1 |
 | `/w/:workspace_id/train/experiment` | 2 | 1 |
@@ -119,6 +130,29 @@ Train → Runs, a run page and Ship → Models each add a concurrent `list_studi
 trial runs and models are named by their study (lake#449). A study page with trials reads up to
 eight trials' `get_run_metrics` in a second round, after the study names them; the fixture's study
 has none, so its budget stays at one round.
+
+Five pages also have their exact Zetta capabilities fixed, one entry per call: Ask Orama and
+Agents none, Search Indexes `list_indexes`, Models `list_models` and `list_studies` (lake#449),
+Experiments `list_runs` and `list_studies`. Every response's `zetta_<capability>` entries must equal the capabilities the fake
+workspace observed for it.
+
+The deferred panels are JSON routes, not pages, and are held to their own budgets:
+
+| Panel | Calls | Rounds | Capabilities | Filled into |
+|---|---:|---:|---|---|
+| `/w/:workspace_id/ask/agents` | 1 | 1 | `list_agents` | Ask Orama's *Talk to* selector |
+| `/w/:workspace_id/train/agents/list` | 1 | 1 | `list_agents` | Train → Agents' *Your Agents* |
+| `/w/:workspace_id/ship/indexes/datasets` | 1 | 1 | `sql` (projected `system.datasets`) | Search Indexes' *New Index* form |
+
+`web_ui_deferred_panels` lists them; the test requires each to answer 200 JSON without an error for
+the signed-in user. Without JavaScript, Agents and Search Indexes link to `?inline=1`, which renders
+the panel in place and waits for it; Ask Orama's selector keeps Ask Orama and the library agents.
+
+No page may wait for a Zetta capability measured slow on the dev site: `list_agents`, `get_agent`,
+`agent_training_status` (the agent store copies Zetta's whole replicated catalogue) and the full
+`list_datasets` (it scans every table). The exceptions, all over the live budget until Zetta is
+fixed, are the agent page (`get_agent`, `agent_training_status`), Pipeline, Project and Solution
+(`list_datasets` for their dataset pickers) and Usage (`list_datasets`, for byte totals).
 
 An intentional page-read change updates this table and the test map together. A higher round count
 also requires showing why the reads cannot start concurrently. An extra call or round fails on the
@@ -323,3 +357,105 @@ running `lake-tests` with the filter
 `PagePerformance.EveryRegisteredGetPageKeepsItsWorkspaceCallBudget`; repeat that command twenty
 times for the acceptance proof. A deliberate mutation should use break-on-first-failure so the
 route budget failure remains the relevant output.
+
+## Live budget follow-up (lake#446)
+
+The UX review of 2026-10-01 measured, as `Server-Timing` total on the second request: Ask Orama
+417 ms empty and 1.5–3.9 s with a conversation, Train → Agents 684 ms, Search Indexes 286 ms,
+Models 143 ms, Experiments 108 ms; an Ask Orama turn that delegated to ExperimentsAgent took 180 s,
+and the first `predict` 5.6 s.
+
+### Before: the dev site, 2026-10-02
+
+Read-only GETs against `lake.oramadev.net` (`oramasearch/lake:20261002b`) as the test user, five
+requests per page, signed in through a Clerk ticket ([browser-testing.md](../deployment/browser-testing.md)).
+Every page made the workspace calls its budget says, in one round, so the time is in the calls
+themselves:
+
+| Page | Total ms | Workspace ms | Calls |
+|---|---|---|---|
+| Ask Orama, empty | 413–721 | 383–688 | 1 (`list_agents`) |
+| Train → Agents | 406–689 | 382–663 | 1 (`list_agents`; the library is lake's) |
+| Train → Agent (one agent) | 865–1,025 | 1,999–2,575 summed | 3 (`get_agent`, `agent_training_status`, `list_projects`) |
+| Search Indexes (no indexes) | 107–288 | 81–455 summed | 2 (`list_indexes`, `list_datasets`) |
+| Models (15 models) | 91–186 | 43–142 | 1 (`list_models`) |
+| Experiments | 59–107 | 46–113 summed | 2 (`list_studies`, `list_runs`) |
+| Data | 83–129 | 89–199 summed | 2–3 (`system.datasets`, `list_connections`, generators) |
+| Pipeline | 128–290 | 97–420 summed | 2 (`list_runs`, `list_datasets`; the graph was cached) |
+| Project | 104–295 | 65–366 summed | 2–4 |
+| Runs | 31–140 | 8–115 | 1 (`list_runs`) |
+| Projects | 44–68 | 13–40 | 1 (`list_projects`) |
+
+The same transport answers `list_runs` in 8–34 ms and `list_projects` in 13–40 ms, so lake's own
+part of a workspace call is small. The workspace has one agent, so `list_agents` costs 380–690 ms
+whatever it returns, and the agent page's two agent-store reads cost far more together than either
+alone. Lake's own work on a page with one call was 20–45 ms (Runs 23 ms, Models about 45 ms); a
+lake-local registry read such as `server_info` or `workspace_status` took 12–19 ms end to end.
+
+### Where the time goes, in Zetta
+
+These are Zetta capabilities that are slow themselves, read from the reference checkout
+(`modules/zetta-bridge/modules/zetta`, `a1d74b21`); lake cannot make them faster:
+
+- **`list_agents`, `get_agent`, `agent_training_status`.** `zetta::agent::AgentStore::list()` and
+  `get()` (`src/core/agent/agent_store.cpp`) call `ReplicationManager::snapshot()`, which copies the
+  whole replicated catalogue JSON under the replication mutex on every call
+  (`src/core/cluster/replication.cpp`), then scan every key for the agent prefix. Cost grows with
+  everything replicated (projects, graphs, runs), not with the number of agents, and concurrent
+  reads serialize on the mutex: the agent page's two reads took 2.0–2.6 s together. A fix is to
+  read `shared_snapshot()` (no copy) and look up `agent_key(id)` directly; the same full copy is in
+  `decision_policy.cpp`, `roi_readout.cpp` and `replicated_blob_store.cpp`.
+- **`list_datasets` and `system.datasets`.** Both come from `Node::datasets()`, which scans every
+  table's rows and directories to summarize it ([zetta#1195](https://github.com/oramasearch/zetta/issues/1195)).
+  Lake's projected SQL only shrinks the answer. The Pipeline, Project and Solution dataset pickers
+  and Usage still wait for it.
+- **`list_models`** took 43–142 ms for 15 models. With lake's 20–45 ms Models stays near the
+  100 ms budget until that read is faster.
+
+The conversation case of the review (1.5–3.9 s) could not be reproduced with read-only requests.
+Its only Zetta read was the same `list_agents`; while a turn runs, the agent's own workspace reads
+contend with that copy for the replication mutex. The page no longer makes the read.
+
+### What changed in lake
+
+- **Ask Orama renders with no workspace call.** The *Talk to* selector starts with Ask Orama and the
+  library's chat agents (lake's own `list_agent_library`), keeps the conversation's agent selected,
+  and adds the space's own agents from `/ask/agents` after the page loads.
+- **Train → Agents renders with no workspace call.** *Your Agents* fills in from
+  `/train/agents/list`, which lake renders with the same code as before (`web_ui_your_agents`).
+- **Search Indexes makes one call** (`list_indexes`). The *New Index* form loads from
+  `/ship/indexes/datasets`, which reads the projected `system.datasets` list.
+- **A long Ask Orama turn** shows which agent is working, for how long, its latest message and
+  retries, and the agent it brought in, through lake#451's report on the asking turn
+  ([ask-orama.md](../api/ask-orama.md)). That page read is lake's own `get_agent_task`, not Zetta.
+- **`Server-Timing` names each Zetta call** (`zetta_<capability>;dur=`), so the live walk after a
+  deployment reads the slow engine call directly from the page and from each panel.
+
+Models and Experiments keep their single round: their lists are the page. Since lake#449 Models
+also reads `list_studies` alongside `list_models`, in the same round. Their time is the Zetta
+read plus lake's 20–45 ms.
+
+### After
+
+Native macOS Release, `PagePerformance.EveryRegisteredGetPageKeepsItsWorkspaceCallBudget` at 30 ms
+per workspace call, 20 renders per page (p95, ms). The host was shared with other builds:
+
+| Page | Before: calls, rounds | Before p95 | After: calls, rounds | After p95 |
+|---|---|---:|---|---:|
+| Ask Orama | 1, 1 | 56.8 | 0, 0 | 3.0 |
+| Train → Agents | 1, 1 | 52.9 | 0, 0 | 23.8 |
+| Search Indexes | 2, 1 | 60.8 | 1, 1 | 77.4 |
+| Models | 1, 1 | 58.0 | 1, 1 | 84.7 |
+| Experiments | 2, 1 | 57.5 | 2, 1 | 84.6 |
+| Runs (unchanged, for scale) | 1, 1 | 56.3 | 1, 1 | 76.1 |
+
+The after run was on a busier host (Runs, which did not change, went from 56 to 76 ms); the
+call and round counts are the controlled result. Ask Orama and Agents no longer wait for any
+workspace call. Later full-suite runs on the same host, at one-minute load 27–102 from other
+builds, failed only the 500 ms wall guard on unchanged routes; every call, round and capability
+budget held.
+
+These are regression measurements, not live figures. The live walk after the next deployment
+records the per-page totals and the `zetta_<capability>` entries; until Zetta's agent store and
+dataset listing are fixed, Train → Agent, Pipeline, Project, Solution, Usage and the three deferred
+panels will report the Zetta times above, and Models stays close to the budget.

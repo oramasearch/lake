@@ -11,7 +11,7 @@ ones did.** Keeping the two apart stops autonomous work being dressed up as a ch
 
 | Part | What it is |
 |---|---|
-| **Your Agents** | The agents people built in this workspace, from the workspace's `list_agents` (records with `kind: orama` are left out). Columns follow Studio: Agent (name and purpose), Engagement (*Conversation*, or *Conversation and unattended* when it has a trigger), Skills, Model, Status. Each links to its page. Needs a ready workspace |
+| **Your Agents** | The agents people built in this workspace, from the workspace's `list_agents` (records with `kind: orama` are left out). Columns follow Studio: Agent (name and purpose), Engagement (*Conversation*, or *Conversation and unattended* when it has a trigger), Skills, Model, Status. Each links to its page. Needs a ready workspace. Zetta's `list_agents` took 380–690 ms on the dev site, so the page renders without it and fills this panel from the deferred `GET /train/agents/list` (`{html}` rendered by lake); without JavaScript, *Show your agents* opens `?inline=1`, which waits for it (lake#446) |
 | **Create an Agent** | Studio's boxes: name, purpose, **work area** (this workspace, a single project, specific data, plus which), **manifesto**, **goal**, **skills** (*Search data*, *Generate a dataset*, *Train a Model*, *Summarize and explain*, *Call the API*; granted, never assumed), **model**, and **trigger or schedule** (empty means conversation only). Posts to `/train/agents/create` |
 | **Agent Library** | Every specialized agent Orama ships, from `list_agent_library`: what it does, where a person meets it, how it runs, and whether this lake runs it. Shown even before the workspace is ready, because the library is lake's, not the workspace's |
 

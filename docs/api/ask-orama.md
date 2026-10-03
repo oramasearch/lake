@@ -13,7 +13,12 @@ shows it and keeps it honest.
   chat agents a person uses, then the space's own chat-capable agents), and a message box. The
   library's internal tooling (Eval Generator and the two corpus generators, `internal: true` in
   `list_agent_library`) is never offered, even where it runs (lake#451); `control::talk_to_agents`
-  builds the list. *Start a new
+  builds the list. The page renders
+  without any workspace call: the space's own agents come from Zetta's `list_agents`, which took
+  380–690 ms on the dev site, so the selector adds them after the page loads from the deferred
+  panel `GET /ask/agents` (JSON `{agents: [{id, name}]}`, never a library key), and the agent a
+  conversation talks to stays selected meanwhile (lake#446, [performance.md](../ui/performance.md)).
+  *Start a new
   conversation* begins another. An agent's reply is rendered as markdown (tables, lists, code) through
   lake's one renderer, which escapes every character first, so a reply cannot inject HTML; what the
   person typed is shown as typed.

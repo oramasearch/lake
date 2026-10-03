@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <map>
 #include <optional>
 #include <span>
@@ -71,6 +72,11 @@ bool workspace_page_path(std::string_view path);
 std::string workspace_path_id(std::string_view path);
 std::string workspace_local_path(std::string_view path);
 std::string web_ui_workspace_document(std::string html, std::string_view workspace_id);
+// The deferred panels (docs/ui/performance.md, lake#446): JSON routes a page fills a slow panel
+// from after it has rendered. They are not pages; each still carries Server-Timing.
+inline constexpr std::array<std::string_view, 3> web_ui_deferred_panels{
+    "/ask/agents", "/train/agents/list", "/ship/indexes/datasets"};
+bool web_ui_deferred_panel_path(std::string_view path);
 
 // A self-hosted IBM Plex WOFF2 face embedded in the binary. Unknown names return an empty view.
 std::string_view web_ui_font(std::string_view name);
@@ -245,6 +251,12 @@ struct WorkspacePage {
     std::string workspace_id;
 };
 std::string web_ui_workspace(const WorkspacePage& page, WebUiViewer viewer = true);
+// Train > Agents' "Your Agents" panel from page.data["list_agents"], served by the deferred
+// /train/agents/list panel (lake#446).
+std::string web_ui_your_agents(const WorkspacePage& page);
+// Ship > Search Indexes' "New Index" form from page.data["list_datasets"], served by the deferred
+// /ship/indexes/datasets panel (lake#446).
+std::string web_ui_new_index(const WorkspacePage& page);
 
 struct StreamsPage {
     std::vector<WorkspaceCustomer> customers;
@@ -290,7 +302,11 @@ struct AskPage {
     // progress message, its attempts and when it started.
     nlohmann::json turn = nlohmann::json::object();
     nlohmann::json messages = nlohmann::json::array();
+    // Ask Orama and the Agent Library's chat agents. The workspace's own agents come from the
+    // deferred /ask/agents panel when `defer_agents` is set: Zetta's list_agents is too slow to
+    // wait for (lake#446).
     nlohmann::json agents = nlohmann::json::array();
+    bool defer_agents = false;
 };
 std::string web_ui_ask(const AskPage& page, WebUiViewer viewer = true);
 

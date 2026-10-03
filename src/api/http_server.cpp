@@ -414,13 +414,27 @@ boost::http::route_task send_text(boost::http::route_params& route,
         timing ? timing->workspace_calls->count.load(std::memory_order_relaxed) : 0;
     const std::size_t workspace_rounds =
         timing ? timing->workspace_calls->completed_rounds.load(std::memory_order_relaxed) : 0;
-    route.res.set("Server-Timing",
-                  std::format("total;dur={:.3f}, workspace;dur={:.3f};desc=\"{} calls\", "
-                              "workspace_rounds;desc=\"{} rounds\"",
-                              total_ms,
-                              workspace_ms,
-                              workspace_count,
-                              workspace_rounds));
+    std::string server_timing =
+        std::format("total;dur={:.3f}, workspace;dur={:.3f};desc=\"{} calls\", "
+                    "workspace_rounds;desc=\"{} rounds\"",
+                    total_ms,
+                    workspace_ms,
+                    workspace_count,
+                    workspace_rounds);
+    if (timing) {
+        // One entry per workspace call, named by its Zetta capability, so a slow page names the
+        // engine read it waited on (docs/ui/performance.md).
+        for (const auto& call : timing->workspace_calls->recorded()) {
+            std::string name = "zetta_";
+            for (const char c : call.capability) {
+                name += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
+            }
+            server_timing += std::format(", {};dur={:.3f}",
+                                         name,
+                                         static_cast<double>(call.nanoseconds) / 1'000'000.0);
+        }
+    }
+    route.res.set("Server-Timing", server_timing);
     stamp_response_headers(route, body);
     auto [send_error] = co_await route.send(body);
     if (send_error)
@@ -8801,13 +8815,18 @@ struct ApiServer::Impl {
         std::vector<ApiResult> graphs;
     };
 
-    static std::vector<WorkspaceRead> initial_workspace_reads(const WorkspacePage& page) {
+    static std::vector<WorkspaceRead> initial_workspace_reads(const WorkspacePage& page,
+                                                              bool defer_agents) {
         if (page.section == "runs") {
             // Studies name their trial runs (lake#449).
             return {{"list_runs", nlohmann::json::object()},
                     {"list_studies", nlohmann::json::object()}};
         }
         if (page.section == "agents") {
+            // Zetta's list_agents is deferred to /train/agents/list (lake#446).
+            if (defer_agents) {
+                return {{"list_agent_library", nlohmann::json::object()}};
+            }
             return {{"list_agents", nlohmann::json::object()},
                     {"list_agent_library", nlohmann::json::object()}};
         }
@@ -9000,6 +9019,9 @@ struct ApiServer::Impl {
         WorkspacePage page;
         page.section = section;
         page.error = query_value(route, "error");
+        // Train > Agents renders before Zetta's list_agents answers; ?inline=1 (the no-script
+        // link) waits for it instead (lake#446).
+        const bool defer_agents = section == "agents" && query_value(route, "inline") != "1";
         auto selection = workspace_selection(
             context, customer_id.empty() ? query_value(route, "customer_id") : customer_id);
         page.customers = std::move(selection.customers);
@@ -9055,7 +9077,7 @@ struct ApiServer::Impl {
                 page.unavailable = listed.error.message;
             }
         } else {
-            auto reads = initial_workspace_reads(page);
+            auto reads = initial_workspace_reads(page, defer_agents);
             reads.push_back({"workspace_status", nlohmann::json::object()});
             const auto results = co_await workspace_reads(
                 context, page.customer_id, reads, section == "data");
@@ -9065,6 +9087,9 @@ struct ApiServer::Impl {
                 page.unavailable = status.error.message;
             } else {
                 page.state = status.value;
+                if (defer_agents && page.state.value("ready", false)) {
+                    page.data["defer_agents"] = true;
+                }
                 if (page.state.value("ready", false)) {
                     for (std::size_t index = 0; index + 1 < reads.size(); ++index) {
                         const auto& result = results->at(index);
@@ -9327,8 +9352,14 @@ struct ApiServer::Impl {
                     }
                 }
             } else if (section == "indexes") {
-                reads = {{"list_indexes", nlohmann::json::object()},
-                         {"list_datasets", nlohmann::json::object()}};
+                // The New Index form's dataset choices load after the page (lake#446): Zetta's
+                // dataset listing scans every table. ?inline=1 (the no-script link) waits.
+                reads = {{"list_indexes", nlohmann::json::object()}};
+                if (query_value(route, "inline") == "1") {
+                    reads.push_back({"list_datasets", nlohmann::json::object()});
+                } else {
+                    page.data["defer_index_datasets"] = true;
+                }
             } else if (section == "index") {
                 reads = {{"get_index", {{"index_id", page.subject}}}};
                 if (const std::string asked = query_value(route, "q"); !asked.empty()) {
@@ -9347,8 +9378,10 @@ struct ApiServer::Impl {
                 }
             }
             bool needs_run_report = false;
+            // Indexes needs only dataset names for its picker: the projected system.datasets
+            // read, not Zetta's full list_datasets scan (lake#446).
             auto completed_reads = co_await workspace_reads(
-                context, page.customer_id, reads, section == "data");
+                context, page.customer_id, reads, section == "data" || section == "indexes");
             if (!completed_reads) {
                 page.error = completed_reads.error().message;
             } else {
@@ -9625,29 +9658,38 @@ struct ApiServer::Impl {
         return out;
     }
 
-    // Ask Orama first, then every other agent that takes a conversation: the library's running
-    // chat agents a person uses (never its internal tooling, lake#451) and the space's own
-    // chat-capable agents.
-    liquid::runtime::task<nlohmann::json> ask_agents(ApiContext& context, std::string customer_id) {
-        const ApiResult library = unwrap(
-            co_await workspace_call("list_agent_library", nlohmann::json::object(), context));
-        nlohmann::json agents =
-            control::talk_to_agents(library.ok ? library.value : nlohmann::json::object());
+    // Ask Orama first, then the library's running chat agents a person uses (never its internal
+    // tooling, lake#451). lake answers these itself; the space's own chat-capable agents come from
+    // Zetta's list_agents, which the page defers to /ask/agents because it takes hundreds of
+    // milliseconds (lake#446).
+    nlohmann::json ask_library_agents(ApiContext& context) {
+        const ApiResult library =
+            registry.call("list_agent_library", nlohmann::json::object(), context);
+        return control::talk_to_agents(library.ok ? library.value : nlohmann::json::object());
+    }
+
+    // The space's own agents that take a conversation (the deferred /ask/agents panel).
+    liquid::runtime::task<ApiResult> ask_workspace_agents(ApiContext& context,
+                                                          std::string customer_id) {
         const ApiResult own = unwrap(co_await workspace_call("workspace_query",
                                                              {{"customer_id", customer_id},
                                                               {"capability", "list_agents"},
                                                               {"input", nlohmann::json::object()}},
                                                              context));
-        if (own.ok) {
-            for (const nlohmann::json& agent : own.value.value("agents", nlohmann::json::array())) {
-                if (agent.value("kind", std::string("custom")) != "orama" &&
-                    agent.value("chat_capable", true)) {
-                    agents.push_back({{"id", agent.value("id", std::string())},
-                                      {"name", agent.value("name", std::string())}});
-                }
+        if (!own.ok) {
+            co_return own;
+        }
+        nlohmann::json agents = nlohmann::json::array();
+        for (const nlohmann::json& agent : own.value.value("agents", nlohmann::json::array())) {
+            // Never a library key (its internal tooling included, lake#451): only the space's own.
+            if (agent.value("kind", std::string("custom")) != "orama" &&
+                agent.value("chat_capable", true) &&
+                control::library_agent(agent.value("id", std::string())) == nullptr) {
+                agents.push_back({{"id", agent.value("id", std::string())},
+                                  {"name", agent.value("name", std::string())}});
             }
         }
-        co_return agents;
+        co_return ApiResult::success({{"agents", std::move(agents)}});
     }
 
     // A background turn of a conversation (lake#269). While it runs, the task as get_agent_task
@@ -9712,6 +9754,102 @@ struct ApiServer::Impl {
         co_return nullptr;
     }
 
+    // A deferred panel's answer (docs/ui/performance.md, lake#446): JSON, never cached, with the
+    // same Server-Timing as a page so the slow workspace call it waited on is named.
+    boost::http::route_task send_panel(boost::http::route_params& route,
+                                       boost::http::status status,
+                                       const nlohmann::json& body) {
+        co_return co_await send_text(
+            route, status, body.dump(), "application/json; charset=utf-8", "no-store");
+    }
+
+    // GET /ask/agents: the space's own chat agents for Ask Orama's picker.
+    boost::http::route_task serve_ask_agents_panel(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized || context.acting_user_id.empty()) {
+            co_return co_await send_panel(
+                route, boost::http::status::unauthorized, {{"error", "Sign in again."}});
+        }
+        const std::string customer_id =
+            workspace_selection(context, query_value(route, "customer_id")).customer_id;
+        if (customer_id.empty() || !options.workspaces) {
+            co_return co_await send_panel(
+                route, boost::http::status::ok, {{"agents", nlohmann::json::array()}});
+        }
+        auto listed = co_await ask_workspace_agents(context, customer_id);
+        const ApiResult result =
+            listed ? std::move(*listed)
+                   : ApiResult::failure("store_unavailable", listed.error().message);
+        co_return co_await send_panel(route,
+                                      boost::http::status::ok,
+                                      result.ok ? result.value
+                                                : nlohmann::json{{"error", result.error.message}});
+    }
+
+    // GET /train/agents/list: Train > Agents' "Your Agents" panel, rendered by lake.
+    boost::http::route_task serve_agents_panel(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await send_panel(
+                route, boost::http::status::unauthorized, {{"error", "Sign in again."}});
+        }
+        WorkspacePage page;
+        page.section = "agents";
+        page.workspace_id = context.path_workspace_id;
+        page.customer_id =
+            workspace_selection(context, query_value(route, "customer_id")).customer_id;
+        if (page.customer_id.empty() || !options.workspaces) {
+            co_return co_await send_panel(route,
+                                          boost::http::status::ok,
+                                          {{"error", "You have no workspace to read agents from."}});
+        }
+        const auto results = co_await workspace_reads(
+            context, page.customer_id, {{"list_agents", nlohmann::json::object()}});
+        if (!results) {
+            page.error = results.error().message;
+        } else if (results->front().ok) {
+            page.data["list_agents"] = results->front().value;
+        } else {
+            page.error = results->front().error.message;
+        }
+        co_return co_await send_panel(
+            route,
+            boost::http::status::ok,
+            {{"html", web_ui_workspace_document(web_ui_your_agents(page), page.workspace_id)}});
+    }
+
+    // GET /ship/indexes/datasets: the New Index form with the space's dataset choices.
+    boost::http::route_task serve_index_datasets_panel(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        if (!context.authorized) {
+            co_return co_await send_panel(
+                route, boost::http::status::unauthorized, {{"error", "Sign in again."}});
+        }
+        WorkspacePage page;
+        page.section = "indexes";
+        page.workspace_id = context.path_workspace_id;
+        page.customer_id =
+            workspace_selection(context, query_value(route, "customer_id")).customer_id;
+        if (page.customer_id.empty() || !options.workspaces) {
+            co_return co_await send_panel(route,
+                                          boost::http::status::ok,
+                                          {{"error", "You have no workspace to index."}});
+        }
+        const auto results = co_await workspace_reads(
+            context, page.customer_id, {{"list_datasets", nlohmann::json::object()}}, true);
+        if (!results) {
+            page.error = results.error().message;
+        } else if (results->front().ok) {
+            page.data["list_datasets"] = results->front().value;
+        } else {
+            page.error = results->front().error.message;
+        }
+        co_return co_await send_panel(
+            route,
+            boost::http::status::ok,
+            {{"html", web_ui_workspace_document(web_ui_new_index(page), page.workspace_id)}});
+    }
+
     boost::http::route_task serve_ask_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized || context.acting_user_id.empty()) {
@@ -9743,14 +9881,19 @@ struct ApiServer::Impl {
             }
         }
         if (!page.customer_id.empty() && options.workspaces) {
-            auto agents = co_await ask_agents(context, page.customer_id);
-            if (agents) {
-                page.agents = std::move(*agents);
-            }
+            page.agents = ask_library_agents(context);
+            page.defer_agents = true;
         }
         if (page.agents.empty()) {
             page.agents =
                 nlohmann::json::array({{{"id", "agent-ask-orama"}, {"name", "Ask Orama"}}});
+        }
+        // The agent this conversation talks to stays selected while the workspace's agents load.
+        if (!page.agent.empty() &&
+            std::ranges::none_of(page.agents, [&](const nlohmann::json& agent) {
+                return agent.value("id", std::string()) == page.agent;
+            })) {
+            page.agents.push_back({{"id", page.agent}, {"name", page.agent}});
         }
         co_return co_await send_text(route,
                                      boost::http::status::ok,
@@ -15777,6 +15920,23 @@ bool ApiServer::start() {
     add_route(http::method::get, "/ask", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/ask", impl.serve_ask_page(route));
     });
+    // The deferred panels (web_ui_deferred_panels, lake#446).
+    add_route(
+        http::method::get, "/ask/agents", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(route, "/ask/agents", impl.serve_ask_agents_panel(route));
+        });
+    add_route(http::method::get,
+               "/ship/indexes/datasets",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/ship/indexes/datasets", impl.serve_index_datasets_panel(route));
+               });
+    add_route(http::method::get,
+               "/train/agents/list",
+               [&impl](http::route_params& route) -> http::route_task {
+                   return impl.observe_request(
+                       route, "/train/agents/list", impl.serve_agents_panel(route));
+               });
     add_route(
         http::method::post, "/ask/send", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/ask/send", impl.serve_ask_form(route, false));

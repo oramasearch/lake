@@ -5,6 +5,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -116,6 +117,23 @@ struct WorkspaceCallTiming {
     std::atomic<std::size_t> count{0};
     std::atomic<std::int64_t> nanoseconds{0};
     std::atomic<std::size_t> completed_rounds{0};
+    // Each workspace call by its Zetta capability, in completion order, so Server-Timing names
+    // the slow call (docs/ui/performance.md).
+    struct Call {
+        std::string capability;
+        std::int64_t nanoseconds = 0;
+    };
+    mutable std::mutex calls_mutex;
+    std::vector<Call> calls;
+
+    void record(std::string capability, std::int64_t elapsed) {
+        std::lock_guard lock(calls_mutex);
+        calls.push_back({std::move(capability), elapsed});
+    }
+    std::vector<Call> recorded() const {
+        std::lock_guard lock(calls_mutex);
+        return calls;
+    }
 };
 
 struct ApiContext {

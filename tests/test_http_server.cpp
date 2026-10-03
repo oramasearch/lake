@@ -20,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <print>
 #include <ranges>
 #include <set>
@@ -1704,6 +1705,94 @@ TEST_P(HttpResponseIsolation, AskOramaOffersPeoplesAgentsAndSaysWhoIsWorkingOnAL
     const std::string answered = page(conversation, task);
     EXPECT_NE(answered.find("Build churn."), std::string::npos);
     EXPECT_EQ(answered.find("is working…"), std::string::npos);
+}
+
+// lake#446: Ask Orama, Train > Agents and Search Indexes render without waiting for Zetta's slow
+// reads; the deferred panels fill them in afterwards.
+TEST_P(HttpResponseIsolation, SlowZettaPanelsLoadAfterTheirPage) {
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302"));
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const std::string customers_response =
+        connection->request("GET", "/v1/list_customers", "", cookie);
+    const std::string customer_id =
+        nlohmann::json::parse(customers_response.substr(customers_response.find("\r\n\r\n") + 4))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    select_workspace(*connection, customer_id);
+    workspace_caller_->answers["list_agents"] = {
+        {"agents",
+         nlohmann::json::array({{{"id", "a-1"}, {"name", "Renewal watcher"}, {"kind", "custom"},
+                                 {"chat_capable", true}},
+                                {{"id", "a-2"}, {"name", "Batch scorer"}, {"kind", "custom"},
+                                 {"chat_capable", false}}})}};
+
+    const auto list_agents_calls = [&] {
+        return std::ranges::count_if(workspace_caller_->calls, [](const auto& call) {
+            return std::get<0>(call) == "list_agents";
+        });
+    };
+    const auto before = list_agents_calls();
+    const std::string empty = connection->request(
+        "GET", "/ask?customer_id=" + customer_id + "&agent=a-1", "", cookie);
+    ASSERT_TRUE(empty.starts_with("HTTP/1.1 200")) << empty.substr(0, 300);
+    EXPECT_EQ(list_agents_calls(), before) << "the page never waits for Zetta's list_agents";
+    EXPECT_NE(empty.find("data-workspace-agents"), std::string::npos);
+    EXPECT_NE(empty.find("fetch('/w/" + connection->workspace_id + "/ask/agents?customer_id="),
+              std::string::npos)
+        << "the picker loads the space's agents from the deferred panel";
+    EXPECT_NE(empty.find("<option value=\"a-1\" selected>"), std::string::npos)
+        << "the conversation's agent stays selected while the list loads";
+
+    const std::string panel =
+        connection->request("GET", "/ask/agents?customer_id=" + customer_id, "", cookie);
+    ASSERT_TRUE(panel.starts_with("HTTP/1.1 200")) << panel.substr(0, 300);
+    EXPECT_TRUE(response_header(panel, "content-type").starts_with("application/json"));
+    EXPECT_NE(response_header(panel, "server-timing").find("zetta_list_agents;dur="),
+              std::string::npos)
+        << "the panel names the Zetta read it waited on";
+    const auto agents = nlohmann::json::parse(panel.substr(panel.find("\r\n\r\n") + 4));
+    EXPECT_EQ(agents["agents"],
+              nlohmann::json::array({{{"id", "a-1"}, {"name", "Renewal watcher"}}}))
+        << "only the space's own agents that hold a conversation";
+
+    // Train > Agents and Search Indexes defer their slow panels the same way.
+    const auto before_agents_page = list_agents_calls();
+    const std::string agents_page = connection->request(
+        "GET", "/train/agents?customer_id=" + customer_id, "", cookie);
+    ASSERT_TRUE(agents_page.starts_with("HTTP/1.1 200")) << agents_page.substr(0, 300);
+    EXPECT_EQ(list_agents_calls(), before_agents_page);
+    EXPECT_NE(agents_page.find("Loading your agents"), std::string::npos);
+    EXPECT_NE(agents_page.find("fetch('/w/" + connection->workspace_id + "/train/agents/list?"),
+              std::string::npos);
+    const std::string agents_panel = connection->request(
+        "GET", "/train/agents/list?customer_id=" + customer_id, "", cookie);
+    const auto rendered =
+        nlohmann::json::parse(agents_panel.substr(agents_panel.find("\r\n\r\n") + 4));
+    const std::string agents_html = rendered.value("html", std::string());
+    EXPECT_NE(agents_html.find("Renewal watcher"), std::string::npos) << rendered.dump();
+    EXPECT_NE(agents_html.find("href=\"/w/" + connection->workspace_id + "/train/agent?"),
+              std::string::npos)
+        << "the panel's links keep the workspace";
+    const std::string inline_agents = connection->request(
+        "GET", "/train/agents?customer_id=" + customer_id + "&inline=1", "", cookie);
+    EXPECT_NE(inline_agents.find("Renewal watcher"), std::string::npos)
+        << "without JavaScript the page can wait for the list";
+    const std::string indexes_page = connection->request(
+        "GET", "/ship/indexes?customer_id=" + customer_id, "", cookie);
+    EXPECT_NE(indexes_page.find("Loading your datasets"), std::string::npos);
+    const std::string indexes_panel = connection->request(
+        "GET", "/ship/indexes/datasets?customer_id=" + customer_id, "", cookie);
+    EXPECT_NE(indexes_panel.find("\"html\""), std::string::npos) << indexes_panel;
+    EXPECT_NE(response_header(indexes_panel, "server-timing").find("zetta_sql;dur="),
+              std::string::npos)
+        << "the dataset choices come from the projected system.datasets read";
+
 }
 
 TEST_P(HttpResponseIsolation, GrantingAPipelineWritesTheWholeListBackToZetta) {
@@ -3452,6 +3541,11 @@ public:
         datasets_.store(count, std::memory_order_relaxed);
     }
 
+    std::map<std::string, std::size_t> capability_counts() const {
+        std::lock_guard lock(mutex_);
+        return capability_calls_;
+    }
+
 private:
     std::atomic<std::size_t> calls_{0};
     std::atomic<std::size_t> datasets_{50};
@@ -3723,6 +3817,36 @@ std::string concrete_route(std::string pattern, const std::string& workspace_id)
     return pattern;
 }
 
+// The Zetta capabilities one response called: the fake's per-capability counts after it, less
+// those before it, one entry per call, sorted.
+std::vector<std::string> called_capabilities(const std::map<std::string, std::size_t>& before,
+                                             const std::map<std::string, std::size_t>& after) {
+    std::vector<std::string> called;
+    for (const auto& [capability, count] : after) {
+        const auto earlier = before.find(capability);
+        const std::size_t previous = earlier == before.end() ? 0 : earlier->second;
+        for (std::size_t index = previous; index < count; ++index) {
+            called.push_back(capability);
+        }
+    }
+    std::ranges::sort(called);
+    return called;
+}
+
+// The capabilities a response's Server-Timing names (zetta_<capability>;dur=...), sorted.
+std::vector<std::string> server_timing_capabilities(const std::string& response) {
+    const std::string timing = response_header(response, "server-timing");
+    std::vector<std::string> named;
+    std::size_t at = 0;
+    while ((at = timing.find("zetta_", at)) != std::string::npos) {
+        const std::size_t end = timing.find(';', at);
+        named.push_back(timing.substr(at + 6, end - at - 6));
+        at = end;
+    }
+    std::ranges::sort(named);
+    return named;
+}
+
 double total_server_milliseconds(const std::string& response) {
     const std::string timing = response_header(response, "server-timing");
     constexpr std::string_view prefix = "total;dur=";
@@ -3915,9 +4039,31 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
     struct WorkspaceCallBudget {
         std::size_t calls = 0;
         std::size_t rounds = 0;
+        // When set, exactly these Zetta capabilities, sorted, one entry per call (lake#446).
+        std::optional<std::vector<std::string>> capabilities;
     };
+    using Capabilities = std::vector<std::string>;
+    // Measured slow on the dev site (docs/ui/performance.md, lake#446): Zetta's agent store reads
+    // copy its whole replicated catalogue, and its dataset listing scans every table. No page may
+    // wait for one except the pages named here, which are over the live budget until Zetta is
+    // fixed. Deferred panels may.
+    const std::set<std::string> slow_capabilities{
+        "list_agents", "get_agent", "agent_training_status", "list_datasets"};
+    const std::map<std::string, std::set<std::string>> slow_capability_exceptions{
+        {"/w/:workspace_id/train/agent", {"get_agent", "agent_training_status"}},
+        {"/w/:workspace_id/design/pipeline", {"list_datasets"}},
+        {"/w/:workspace_id/design/project", {"list_datasets"}},
+        {"/w/:workspace_id/design/solution", {"list_datasets"}},
+        // Usage needs every dataset's byte total (lake#444).
+        {"/metering", {"list_datasets"}}};
+    // The deferred panels: JSON, filled in after their page renders. Each is held to its budget.
+    const std::map<std::string, WorkspaceCallBudget> panel_call_budgets{
+        {"/w/:workspace_id/ask/agents", {1, 1, Capabilities{"list_agents"}}},
+        {"/w/:workspace_id/train/agents/list", {1, 1, Capabilities{"list_agents"}}},
+        {"/w/:workspace_id/ship/indexes/datasets", {1, 1, Capabilities{"sql"}}}};
     const std::map<std::string, WorkspaceCallBudget> workspace_call_budgets{
-        {"/w/:workspace_id/ask", {1, 1}},
+        // Ask Orama, Agents, Search Indexes, Models and Experiments: lake#446.
+        {"/w/:workspace_id/ask", {0, 0, Capabilities{}}},
         {"/w/:workspace_id/design/discover", {1, 1}},
         {"/w/:workspace_id/design/methodologies", {1, 1}},
         {"/w/:workspace_id/design/methodology", {2, 1}},
@@ -3929,15 +4075,16 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         {"/w/:workspace_id/design/solutions", {1, 1}},
         {"/w/:workspace_id/ship/app", {1, 1}},
         {"/w/:workspace_id/ship/index", {1, 1}},
-        {"/w/:workspace_id/ship/indexes", {2, 1}},
-        {"/w/:workspace_id/ship/models", {2, 1}},
+        {"/w/:workspace_id/ship/indexes", {1, 1, Capabilities{"list_indexes"}}},
+        {"/w/:workspace_id/ship/models", {2, 1, Capabilities{"list_models", "list_studies"}}},
         {"/w/:workspace_id/train/agent", {3, 1}},
-        {"/w/:workspace_id/train/agents", {1, 1}},
+        {"/w/:workspace_id/train/agents", {0, 0, Capabilities{}}},
         {"/w/:workspace_id/train/data", {3, 1}},
         {"/w/:workspace_id/train/dataset", {3, 1}},
         {"/w/:workspace_id/train/experiment", {2, 1}},
         {"/w/:workspace_id/train/experiment/run", {1, 1}},
-        {"/w/:workspace_id/train/experiments", {2, 1}},
+        {"/w/:workspace_id/train/experiments",
+         {2, 1, Capabilities{"list_runs", "list_studies"}}},
         {"/w/:workspace_id/train/experiments/compare", {2, 1}},
         {"/w/:workspace_id/train/run", {3, 1}},
         {"/w/:workspace_id/train/runs", {2, 1}},
@@ -3949,23 +4096,72 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
         const auto found = workspace_call_budgets.find(pattern);
         return found == workspace_call_budgets.end() ? WorkspaceCallBudget{} : found->second;
     };
+    // Every response names each Zetta call it made, and the page waits for no slow capability
+    // it is not allowed to.
+    const auto check_capabilities = [&](const std::string& pattern,
+                                        const std::string& response,
+                                        const Capabilities& called,
+                                        const WorkspaceCallBudget& budget,
+                                        bool panel) {
+        EXPECT_EQ(server_timing_capabilities(response), called) << pattern;
+        if (budget.capabilities) {
+            EXPECT_EQ(called, *budget.capabilities) << pattern;
+        }
+        if (panel) {
+            return;
+        }
+        const auto allowed = slow_capability_exceptions.find(pattern);
+        for (const std::string& capability : called) {
+            EXPECT_TRUE(!slow_capabilities.contains(capability) ||
+                        (allowed != slow_capability_exceptions.end() &&
+                         allowed->second.contains(capability)))
+                << pattern << " waits for the slow Zetta capability " << capability;
+        }
+    };
     std::set<std::string> observed_workspace_pages;
+    std::set<std::string> observed_panels;
     const auto routes = server.get_route_patterns();
     ASSERT_FALSE(routes.empty());
     for (const std::string& pattern : routes) {
         workspaces->invalidate_registry(customer_id, workspace_id);
         const std::string path = concrete_route(pattern, workspace_id) + query;
         constexpr std::string_view workspace_prefix = "/w/:workspace_id";
+        const bool panel = pattern.starts_with(workspace_prefix) &&
+                           lake::api::web_ui_deferred_panel_path(
+                               pattern.substr(workspace_prefix.size()));
         const bool workspace_page = pattern.starts_with(workspace_prefix) &&
                                     !pattern.starts_with(
                                         "/w/:workspace_id/workspaces/") &&
                                     lake::api::workspace_page_path(
-                                        pattern.substr(workspace_prefix.size()));
+                                        pattern.substr(workspace_prefix.size())) &&
+                                    !panel;
         std::string page_cookie = cookie;
         HttpConnection connection(server.port());
         std::size_t calls_before = caller->call_count();
+        auto capabilities_before = caller->capability_counts();
         std::string response = connection.request("GET", path, {}, page_cookie);
         std::string content_type = response_header(response, "content-type");
+        if (panel) {
+            // A deferred panel answers JSON for the signed-in user, within its own budget.
+            ASSERT_TRUE(response.starts_with("HTTP/1.1 200")) << pattern << '\n' << response;
+            ASSERT_TRUE(content_type.starts_with("application/json")) << pattern;
+            const auto body = json::parse(response.substr(response.find("\r\n\r\n") + 4));
+            EXPECT_FALSE(body.contains("error")) << pattern << ' ' << body;
+            const auto found = panel_call_budgets.find(pattern);
+            ASSERT_NE(found, panel_call_budgets.end()) << pattern;
+            EXPECT_EQ(workspace_call_count(response), caller->call_count() - calls_before)
+                << pattern;
+            EXPECT_EQ(workspace_call_count(response), found->second.calls) << pattern;
+            EXPECT_EQ(workspace_round_count(response), found->second.rounds) << pattern;
+            check_capabilities(pattern,
+                               response,
+                               called_capabilities(capabilities_before,
+                                                   caller->capability_counts()),
+                               found->second,
+                               true);
+            observed_panels.insert(pattern);
+            continue;
+        }
         if (!workspace_page && pattern != "/workspaces") {
             for (const std::string alternate : {"lake_session=page-performance-operator", ""}) {
                 if (content_type.starts_with("text/html")) {
@@ -3974,6 +4170,7 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
                 HttpConnection alternate_connection(server.port());
                 page_cookie = alternate;
                 calls_before = caller->call_count();
+                capabilities_before = caller->capability_counts();
                 response = alternate_connection.request("GET", path, {}, page_cookie);
                 content_type = response_header(response, "content-type");
             }
@@ -3996,6 +4193,12 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
             const WorkspaceCallBudget budget = workspace_call_budget(pattern);
             EXPECT_EQ(workspace_call_count(response), budget.calls) << pattern;
             EXPECT_EQ(workspace_round_count(response), budget.rounds) << pattern;
+            check_capabilities(pattern,
+                               response,
+                               called_capabilities(capabilities_before,
+                                                   caller->capability_counts()),
+                               budget,
+                               false);
             if (workspace_call_budgets.contains(pattern)) {
                 observed_workspace_pages.insert(pattern);
             }
@@ -4006,6 +4209,7 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
     ASSERT_FALSE(pages.empty());
     std::println("PAGE_COVERAGE routes={} latency_ms=30 renders=20 budget_ms=500", pages.size());
     EXPECT_EQ(observed_workspace_pages.size(), workspace_call_budgets.size());
+    EXPECT_EQ(observed_panels.size(), panel_call_budgets.size());
     for (const auto& [pattern, path, page_cookie] : pages) {
         std::vector<std::pair<double, std::string>> samples;
         std::size_t calls = 0;
@@ -4015,6 +4219,7 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
             workspaces->invalidate_registry(customer_id, workspace_id);
             HttpConnection connection(server.port());
             const std::size_t calls_before = caller->call_count();
+            const auto capabilities_before = caller->capability_counts();
             const std::string response = connection.request("GET", path, {}, page_cookie);
             if (pattern.starts_with("/w/:workspace_id/") || pattern == "/workspaces") {
                 ASSERT_TRUE(response.starts_with("HTTP/1.1 200")) << pattern << '\n' << response;
@@ -4030,6 +4235,12 @@ TEST(PagePerformance, EveryRegisteredGetPageKeepsItsWorkspaceCallBudget) {
             const WorkspaceCallBudget budget = workspace_call_budget(pattern);
             EXPECT_EQ(workspace_call_count(response), budget.calls) << pattern;
             EXPECT_EQ(workspace_round_count(response), budget.rounds) << pattern;
+            check_capabilities(pattern,
+                               response,
+                               called_capabilities(capabilities_before,
+                                                   caller->capability_counts()),
+                               budget,
+                               false);
             samples.emplace_back(elapsed, response_header(response, "server-timing"));
         }
         std::ranges::sort(samples);
