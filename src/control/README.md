@@ -87,21 +87,19 @@ stores record it on `create_store` and filter `list_stores` by it; `WorkspaceSer
 [workspace-records.md](../../docs/architecture/workspace-records.md)): sealed, blind-indexed
 records in `lake_*` collections of the workspace's keyed record store (zetta#1231) through the
 workspace caller, with engine-decided conditional writes, `busy` retries and a read-modify-write
-`update`. `ask_messages.cpp` is its first collection. The stores no longer write or read Ask Orama
-conversations; `assign_legacy_ask_messages` and `legacy_ask_messages` serve only the operator's
-one-shot copy (migration `0045_ask_message_workspaces`). `opportunities.cpp` is the first mutable
+`update`. `ask_messages.cpp` is its first collection. The stores hold no Ask Orama conversations:
+the retired `ask_messages` table was copied and then dropped by migration `0050_drop_ask_messages`
+(lake#483), and its legacy reads went with it. `opportunities.cpp` is the first mutable
 collection (lake#376): a scan's Opportunities keyed by scan and rank and written only if absent,
 status changes conditional on the revision read; `assign_legacy_opportunities` and
 `legacy_opportunities` serve only the copy (migration `0046_opportunity_workspaces`).
-one-shot copy (migration `0045_ask_message_workspaces`). `stream_owners.cpp` is the second
+`stream_owners.cpp` is the second
 (lake#379): one `if_absent` record per topic, keyed by the topic's blind index; the stores keep only
 `assign_legacy_stream_owners` and `legacy_stream_owners` for the copy (migration
-`0047_stream_owner_workspaces`).
-one-shot copy (migration `0045_ask_message_workspaces`). `drive_share_links.cpp` is the drive share
+`0047_stream_owner_workspaces`). `drive_share_links.cpp` is the drive share
 link collection (lake#350); the stores keep only `drive_share_link_route` (the content-free route
 of a pre-move token) and `assign_legacy_drive_share_links`/`legacy_drive_share_links` for the copy
 (migration `0048_drive_share_link_workspaces`).
-one-shot copy (migration `0045_ask_message_workspaces`).
 `application_webhook_records.cpp` is the next: an application's lifecycle events and its webhook
 delivery attempts in the application's workspace (lake#356, lake#357), each attempt claimed with
 `if_absent` before it is sent and settled with `if_revision`. The stores no longer write or read

@@ -1511,106 +1511,84 @@ TEST(PostgresStores, MigrationAssignsTheSoleWorkspaceAndRecordsTheRest) {
     })(), pqxx::check_violation);
 }
 
-// lake#370: migration 0045 records the owner of each retired ask_messages row (a space's only live
-// workspace), records the rest as needing a selection, reports a row without a space, and the
-// store's rerun of the same assignment picks up a row an old replica wrote afterwards. Listing for
-// the copy returns each row with its owner, paged by id.
-TEST(PostgresAskMessages, MigrationRecordsEachRowsOwnerForTheCopy) {
+// lake#483: migration 0050 drops the retired ask_messages table and keeps the workspace
+// assignments 0045 recorded for it. A rerun of the whole schema (as every schema Job does) leaves
+// it dropped, and the 0050 section drops a table an older schema still has, with its rows.
+TEST(PostgresAskMessages, MigrationDropsTheTableAndKeepsItsAssignments) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
-    auto store = lake::control::make_postgres_store(uri, "ask-message-migration-test");
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    std::vector<std::string> users, customers, workspaces;
-    for (int index = 0; index < 2; ++index) {
-        const std::string name = "ask-migration-" + suffix + "-" + std::to_string(index);
-        const auto user = store->create_user({"taap:" + name, "", "Migration"});
-        ASSERT_TRUE(user) << user.error().message;
-        const auto customer = store->create_customer({"individual", user->id, "", name});
-        ASSERT_TRUE(customer) << customer.error().message;
-        users.push_back(user->id);
-        customers.push_back(customer->id);
-        // The second space has two workspaces, so its rows cannot be assigned by themselves.
-        for (int count = 0; count <= index; ++count) {
-            const auto workspace =
-                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
-            ASSERT_TRUE(workspace) << workspace.error().message;
-            if (index == 0) {
-                workspaces.push_back(workspace->id);
-            }
-        }
-    }
+    auto store = lake::control::make_postgres_store(uri, "ask-message-drop-test");
+    const std::string name = "ask-drop-" + lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user({"taap:" + name, "", "Migration"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", name});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto workspace = store->create_workspace({customer->id, "ws-0", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+
     pqxx::connection connection(uri);
-    std::vector<std::string> rows;
-    const auto insert = [&](const std::string& customer, const std::string& user) {
+    const auto table_exists = [&] {
         pqxx::work tx(connection);
-        const std::string id = tx.exec_params(
-            "INSERT INTO ask_messages (conversation_id, customer_id, user_id, role, content) "
-            "VALUES (gen_random_uuid(), NULLIF($1, '')::uuid, $2::uuid, 'user', 'hello') "
-            "RETURNING id::text",
-            customer, user)[0][0].as<std::string>();
-        tx.commit();
-        rows.push_back(id);
-        return id;
+        return !tx.exec("SELECT to_regclass('ask_messages')")[0][0].is_null();
     };
-    const std::string owned = insert(customers[0], users[0]);
-    const std::string ambiguous = insert(customers[1], users[1]);
-    const std::string spaceless = insert("", users[0]);
+    const auto assignments = [&] {
+        pqxx::work tx(connection);
+        return tx.exec_params("SELECT count(*) FROM workspace_assignments "
+                              "WHERE object_table = 'ask_messages' AND customer_id = $1::uuid",
+                              customer->id)[0][0]
+            .as<int>();
+    };
+    EXPECT_FALSE(table_exists()) << "a fresh database never has the table";
+
+    // A database from before 0050: the table with a row, and 0045's assignment of it.
     {
         pqxx::work tx(connection);
-        tx.exec("DELETE FROM schema_migrations WHERE version = '0045_ask_message_workspaces'");
+        tx.exec("CREATE TABLE IF NOT EXISTS ask_messages (id uuid PRIMARY KEY DEFAULT "
+                "gen_random_uuid(), conversation_id uuid NOT NULL, customer_id uuid, user_id uuid "
+                "NOT NULL, role text NOT NULL, content text NOT NULL DEFAULT '', payload jsonb NOT "
+                "NULL DEFAULT 'null'::jsonb, created_at timestamptz NOT NULL DEFAULT now())");
+        const std::string id = tx.exec_params(
+            "INSERT INTO ask_messages (conversation_id, customer_id, user_id, role, content) "
+            "VALUES (gen_random_uuid(), $1::uuid, $2::uuid, 'user', 'hello') RETURNING id::text",
+            customer->id, user->id)[0][0].as<std::string>();
+        tx.exec_params("INSERT INTO workspace_assignments (object_table, object_id, customer_id, "
+                       "workspace_id, outcome) VALUES ('ask_messages', $1::uuid, $2::uuid, "
+                       "$3::uuid, 'sole_workspace')",
+                       id, customer->id, workspace->id);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0050_drop_ask_messages'");
         tx.commit();
     }
+    ASSERT_TRUE(table_exists());
+
     std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
     const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0045_ask_message_workspaces:");
+    const auto start = schema.find("-- 0050_drop_ask_messages:");
     ASSERT_NE(start, std::string::npos);
-    const auto outcome = [&](const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = 'ask_messages' AND object_id = $1::uuid",
-            id);
-        return found.empty() ? std::pair<std::string, std::string>{}
-                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    for (int pass = 0; pass < 2; ++pass) {
+    {
         pqxx::work tx(connection);
         tx.exec("SET LOCAL client_min_messages TO error");
         tx.exec(schema.substr(start));
         tx.commit();
-        EXPECT_EQ(outcome(owned), (std::pair<std::string, std::string>{"sole_workspace",
-                                                                       workspaces[0]}));
-        EXPECT_EQ(outcome(ambiguous).first, "needs_selection");
-        EXPECT_TRUE(outcome(ambiguous).second.empty());
-        EXPECT_TRUE(outcome(spaceless).first.empty()) << "a row without a space is only reported";
     }
-    const std::string late = insert(customers[0], users[0]);
-    EXPECT_TRUE(outcome(late).first.empty());
-    ASSERT_TRUE(store->assign_legacy_ask_messages());
-    EXPECT_EQ(outcome(late).first, "sole_workspace") << "a row written after the migration";
+    EXPECT_FALSE(table_exists()) << "0050 drops the table and its rows";
+    EXPECT_EQ(assignments(), 1) << "the assignment records where the row went";
 
-    std::map<std::string, lake::control::LegacyAskMessage> listed;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_ask_messages(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            listed.emplace(row.message.id, row);
-        }
-        after = page->back().message.id;
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema);
+        tx.commit();
+        EXPECT_FALSE(table_exists()) << "a rerun of the whole schema does not recreate it";
+        EXPECT_EQ(assignments(), 1);
     }
-    ASSERT_TRUE(listed.contains(owned));
-    EXPECT_EQ(listed.at(owned).workspace_id, workspaces[0]);
-    EXPECT_EQ(listed.at(owned).message.content, "hello");
-    EXPECT_GT(listed.at(owned).message.at_us, 0);
-    EXPECT_EQ(listed.at(ambiguous).outcome, "needs_selection");
-    EXPECT_EQ(listed.at(spaceless).outcome, "no_customer");
-    EXPECT_TRUE(listed.at(spaceless).workspace_id.empty());
+    pqxx::work tx(connection);
+    EXPECT_EQ(tx.exec("SELECT count(*) FROM schema_migrations "
+                      "WHERE version = '0050_drop_ask_messages'")[0][0]
+                  .as<int>(),
+              1);
+    EXPECT_FALSE(tx.exec("SELECT to_regclass('drop_ask_messages_guard')")[0][0].is_null());
 }
 
 // Migration 0046 (lake#376): each Opportunity's owner is the workspace its scan ran in, else the

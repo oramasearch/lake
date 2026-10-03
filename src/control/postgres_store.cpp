@@ -45,17 +45,6 @@ namespace lake::control {
 
 namespace {
 
-// Migration 0045's assignment of the retired ask_messages rows (db/schema.sql), rerun before each
-// copy so a row an old replica wrote after the migration is recorded too. A space with exactly one
-// live workspace owns its rows; every other row is recorded as needs_selection for the operator.
-constexpr std::string_view legacy_ask_message_assignment_sql =
-    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
-    "outcome) SELECT 'ask_messages', m.id, m.customer_id, w.id, CASE WHEN w.id IS NULL THEN "
-    "'needs_selection' ELSE 'sole_workspace' END FROM ask_messages m LEFT JOIN workspaces w ON "
-    "w.customer_id = m.customer_id AND w.desired <> 'deleted' AND (SELECT count(*) FROM "
-    "workspaces w2 WHERE w2.customer_id = m.customer_id AND w2.desired <> 'deleted') = 1 WHERE "
-    "m.customer_id IS NOT NULL ON CONFLICT DO NOTHING";
-
 // Migration 0046's assignment of the retired opportunities rows (db/schema.sql), rerun before each
 // copy. The workspace the scan's task ran in owns its Opportunities; a task that named none falls
 // back to its space's only live workspace; every other row is recorded without a workspace.
@@ -5876,53 +5865,6 @@ public:
                 "",
                 rows[0][0].as<std::string>()};
         });
-    }
-
-    Result<void> assign_legacy_ask_messages() override {
-        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
-            tx.exec(std::string(legacy_ask_message_assignment_sql));
-            return {};
-        });
-    }
-
-    Result<std::vector<LegacyAskMessage>> legacy_ask_messages(const std::string& after_id,
-                                                              int limit) override {
-        return with_tx<std::vector<LegacyAskMessage>>(
-            [&](pqxx::work& tx) -> Result<std::vector<LegacyAskMessage>> {
-                const pqxx::result rows = tx.exec_params(
-                    "SELECT m.id::text, m.conversation_id::text, COALESCE(m.customer_id::text, ''), "
-                    "m.user_id::text, m.role, m.content, m.payload::text, "
-                    "(extract(epoch FROM m.created_at) * 1000000)::bigint, "
-                    "COALESCE(a.workspace_id::text, ''), "
-                    "CASE WHEN m.customer_id IS NULL THEN 'no_customer' "
-                    "ELSE COALESCE(a.outcome, 'needs_selection') END "
-                    "FROM ask_messages m LEFT JOIN workspace_assignments a "
-                    "ON a.object_table = 'ask_messages' AND a.object_id = m.id "
-                    "WHERE ($1 = '' OR m.id > NULLIF($1, '')::uuid) ORDER BY m.id LIMIT $2",
-                    after_id,
-                    std::clamp(limit, 1, 5000));
-                std::vector<LegacyAskMessage> messages;
-                for (const pqxx::row& row : rows) {
-                    LegacyAskMessage legacy;
-                    legacy.message.id = row[0].as<std::string>();
-                    legacy.message.conversation_id = row[1].as<std::string>();
-                    legacy.message.customer_id = row[2].as<std::string>();
-                    legacy.message.user_id = row[3].as<std::string>();
-                    legacy.message.role = row[4].as<std::string>();
-                    legacy.message.content = row[5].as<std::string>();
-                    legacy.message.payload =
-                        nlohmann::json::parse(row[6].as<std::string>(), nullptr, false);
-                    if (legacy.message.payload.is_discarded()) {
-                        legacy.message.payload = nullptr;
-                    }
-                    legacy.message.at_us = row[7].as<std::int64_t>();
-                    legacy.message.created_at = record_instant(legacy.message.at_us);
-                    legacy.workspace_id = row[8].as<std::string>();
-                    legacy.outcome = row[9].as<std::string>();
-                    messages.push_back(std::move(legacy));
-                }
-                return messages;
-            });
     }
 
     Result<void> assign_legacy_stream_owners() override {

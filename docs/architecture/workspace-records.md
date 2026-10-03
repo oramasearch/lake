@@ -19,10 +19,10 @@ still open.
 | Part | State |
 |---|---|
 | `WorkspaceRecords`, `RecordSet<Codec>` | Implemented on Zetta's keyed record store ([zetta#1231](https://github.com/oramasearch/zetta/issues/1231), merged in zetta PR #1233 to `dev`, `82f617e`). Unit tests run against an engine fake; an opt-in test runs against a real Zetta node built from that commit. |
-| Append-only collections | Implemented. `ask_messages` and `auth_app_webhook_events` have moved. |
+| Append-only collections | Implemented. `ask_messages` and `auth_app_webhook_events` have moved; the `ask_messages` table is dropped (migration `0050`, lake#483). |
 | Mutable records and claims (`get`, conditional `put`, `remove`, `update`) | Implemented and tested. `opportunities` (lake#376) has moved: derived keys written `if_absent`, status changes conditional on the revision read. `stream_owners` (lake#379) claims a topic name with `if_absent` and releases it with `remove(id, if_revision)`. `drive_share_links` (lake#350) has moved: revocation is a conditional `put` on the revision read. `auth_app_webhook_deliveries` (lake#357) claims each attempt with `if_absent` and settles it with `if_revision`. |
-| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `ask_messages`, `opportunities`, `stream_owners`, `drive_share_links`, `auth_app_webhook_events` and `auth_app_webhook_deliveries`. |
-| Dropping the moved tables from PostgreSQL | Not part of these changes. A later migration drops each once its copy is verified on the dev cluster. |
+| `copy_workspace_records` (the operator's one-shot copy and verify) | Implemented for `opportunities`, `stream_owners`, `drive_share_links`, `auth_app_webhook_events` and `auth_app_webhook_deliveries`. `ask_messages` left the list with its table: a request for it is `invalid_input`. |
+| Dropping the moved tables from PostgreSQL | `ask_messages` is dropped by migration `0050_drop_ask_messages` (lake#483), after its copy was verified on dev; its `workspace_assignments` rows stay. Each other table is dropped by a later migration once its copy is verified on the dev cluster. |
 
 **Zetta dependency.** A workspace Zetta must run Zetta `dev` at or after zetta PR #1233
 (`82f617e`). An older engine has no record store and answers `put_record` as an unknown
@@ -228,8 +228,7 @@ copy is verified.
 |---|---|
 | `WorkspaceRecords.*` | Sealed values and blind indexes; one `put_record` per append; a duplicate id is `conflict` with `details.revision`; collection created once on first write; paged listing (1,205 records) and newest-N; a 40 KB body as one record; records that do not open in another workspace or lookup; conditional `put`, `update` retrying a raced write, `busy` retries, conditional `remove`; record capabilities outside the workspace allow-lists |
 | `Stores/WorkspaceRecordStores.ConversationsStayInTheirWorkspaceAndSpace/{Memory,Postgres}` | Two spaces with two workspaces each, one conversation id in each, stored only at its own endpoint; a foreign space or workspace refused; missing, malformed and unknown `workspace_id` refused at `/workspace_id`; a workspace that is not ready; workspace deletion |
-| `Stores/WorkspaceRecordStores.TheOneShotCopyMovesEachOwnedRowOnceAndVerifiesIt/{Memory,Postgres}` | Plan, verify before copy, copy, idempotent rerun, verify, read back in order with original ids, tamper detection, operator only |
-| `PostgresAskMessages.MigrationRecordsEachRowsOwnerForTheCopy` | Migration 0045 outcomes on a rerun, late rows, paged legacy listing |
+| `PostgresAskMessages.MigrationDropsTheTableAndKeepsItsAssignments` | Migration 0050 drops a pre-0050 `ask_messages` table with its rows, keeps its `workspace_assignments` row, and two reruns of the whole schema leave it dropped (the `ask_messages` copy and its 0045 test went with the table, lake#483) |
 | `Stores/WorkspaceRecordStores.OpportunitiesStayInTheWorkspaceTheirScanRanIn/{Memory,Postgres}` | Two spaces with two workspaces each, a scan saved only in its own workspace and only once, newest scan first, dismissal in the owning workspace only, foreign spaces and workspaces, missing, malformed and unknown `workspace_id` for reads and writes, a workspace that is not ready, workspace deletion |
 | `WorkspaceRecords.AnOpportunityStatusChangeRereadsAfterAConcurrentWrite` | Derived keys, a second settle writing nothing, a raced conditional status write reread and retried, another space's id never opening |
 | `Stores/WorkspaceRecordStores.TheOneShotCopyMovesEachOpportunityToItsScansWorkspace/{Memory,Postgres}` | The scan's workspace owning rows in a space with two workspaces, a deleted workspace's rows reported, idempotent copy, verify accepting a later status change and reporting tampering, operator only |
@@ -331,8 +330,13 @@ Migration `0049_application_webhook_workspaces` (lake#356, lake#357). Steps 1 an
 
 ## Cutover runbook: `ask_messages`, dev cluster
 
-The cluster is development (`orama-production-cluster-01`). These steps are for the coordinator and
-are not run by this change.
+**Done.** On dev (lake `20261003c`, revision `5858129`; workspace Zetta `dev-82f617ea`), the copy
+for `ask_messages` gave: plan 15 assigned, 0 unresolved, one workspace; copy 15 copied, 0 already
+present, 0 failed; verify `complete: true`, 15 verified, 0 missing, 0 mismatched. Steve approved the
+drop on 2026-10-03, and migration `0050_drop_ask_messages` (guard `drop_ask_messages_guard`,
+lake#483) drops the table; `copy_workspace_records` no longer accepts the collection. Steps 1 to 7
+below are kept as the pattern the later runbooks refer to. Applying `0050` on dev is the
+coordinator's: the operator vendors `db/schema.sql` and selects `drop_ask_messages_guard`.
 
 1. Roll the workspace Zettas to an image built from Zetta `dev` at or after `82f617e` (zetta PR
    #1233). Check with `GET /w/<id>/v1/openapi.json`, or a `workspace_openapi` read, that
@@ -349,7 +353,7 @@ are not run by this change.
 6. For each `needs_selection` row, choose the workspace in a reviewed change to
    `workspace_assignments`, or accept its loss (dev data may be deleted). Then repeat step 5.
 7. Once `verify` answers `complete: true` on every page, file the migration that drops
-   `ask_messages`, with the copy output attached.
+   `ask_messages`, with the copy output attached. (Done: lake#483, migration `0050`.)
 
 ## Cutover runbook: `opportunities`, dev cluster
 

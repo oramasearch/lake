@@ -190,7 +190,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `agent_launches` | workspace | Agent inputs/configuration; split content-free dispatch. [Follow-up](https://github.com/oramasearch/lake/issues/367). |
 | `agent_launch_status` | workspace | Agent results, messages and credential digests. [Follow-up](https://github.com/oramasearch/lake/issues/368). |
 | `agent_schedules` | workspace | Retired but retained application schedule records. [Follow-up](https://github.com/oramasearch/lake/issues/369). |
-| `ask_messages` | workspace | Conversation bodies and answers. **Moved** to each workspace Zetta's `lake_ask_messages` record collection by [lake#370](https://github.com/oramasearch/lake/issues/370) ([workspace-records.md](workspace-records.md)); the table is read only by the one-shot copy until a later migration drops it. |
+| `ask_messages` | workspace | Conversation bodies and answers. **Moved** to each workspace Zetta's `lake_ask_messages` record collection by [lake#370](https://github.com/oramasearch/lake/issues/370) ([workspace-records.md](workspace-records.md)); the copy was verified on dev (15 of 15 rows, `complete: true`) and migration `0050_drop_ask_messages` drops the table ([lake#483](https://github.com/oramasearch/lake/issues/483)). |
 | `agent_cron_schedules` | workspace | Scheduled agent inputs and application settings. [Follow-up](https://github.com/oramasearch/lake/issues/371). |
 | `agent_cron_schedule_status` | workspace | Schedule credentials and application status. [Follow-up](https://github.com/oramasearch/lake/issues/373). |
 | `agent_cron_runs` | workspace | Run history and results. [Follow-up](https://github.com/oramasearch/lake/issues/372). |

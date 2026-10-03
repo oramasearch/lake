@@ -324,11 +324,6 @@ public:
                                        std::string message,
                                        std::string credential_sha256,
                                        nlohmann::json result = nullptr);
-    Result<void> assign_legacy_ask_messages() override;
-    Result<std::vector<LegacyAskMessage>> legacy_ask_messages(const std::string& after_id,
-                                                              int limit) override;
-    // A row of the retired ask_messages table, as an earlier lake wrote it (tests of the copy).
-    void seed_legacy_ask_message(AskMessage message);
     Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                             std::uint64_t quota_bytes) override;
     Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
@@ -586,8 +581,6 @@ private:
     std::vector<AgentLaunch> agent_launches_;
     std::vector<AgentCronSchedule> agent_cron_schedules_;
     std::vector<std::pair<std::string, AgentLaunch>> agent_cron_runs_; // schedule id, run
-    std::vector<AskMessage> legacy_ask_messages_;
-    std::map<std::string, std::pair<std::string, std::string>> legacy_ask_assignments_; // workspace, outcome
     std::vector<AgentTask> agent_tasks_;
     struct TaskClock {
         std::chrono::steady_clock::time_point created, published, started, lease_until;

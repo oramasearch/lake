@@ -61,8 +61,8 @@ Migration `0045_ask_message_workspaces` records the owner of each retired `ask_m
 `workspace_assignments` (a space's only live workspace; otherwise `needs_selection`; rows without a
 space are reported). Ask Orama conversations now live in the owning workspace Zetta (lake#370), so
 lake no longer writes or reads the table except through the operator's `copy_workspace_records`.
-It adds no column and drops nothing; a later migration drops the table once the copy is verified.
-The guard is `ask_message_workspaces_guard`. See
+It adds no column and drops nothing; `0050_drop_ask_messages` drops the table. The guard is
+`ask_message_workspaces_guard`. See
 [workspace-records.md](../docs/architecture/workspace-records.md).
 
 Migration `0046_opportunity_workspaces` records the owner of each retired `opportunities` row in
@@ -101,3 +101,10 @@ and delivery attempts now live in the application's workspace Zetta (lake#356, l
 reads the two tables only through `copy_workspace_records`. Nothing is dropped. The latest guard is
 `application_webhook_workspaces_guard`; the operator must vendor this schema and update its guard
 before rollout.
+
+Migration `0050_drop_ask_messages` drops the retired `ask_messages` table (lake#483), after the
+operator's copy into the workspace Zettas was verified on dev (15 of 15 rows, `complete: true`). The
+`workspace_assignments` rows 0045 recorded for it stay. The table's original `CREATE` (from `0030`)
+is removed from this file and 0045's block runs only while the table exists, so rerunning the file
+never recreates it. The latest guard is `drop_ask_messages_guard`; the operator must vendor this
+schema and update its guard before rollout.
