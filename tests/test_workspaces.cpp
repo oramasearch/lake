@@ -2552,7 +2552,8 @@ TEST(Workspaces, DatasetWritesAreCheckedAndIdsAgree) {
     EXPECT_EQ(renamed.value["renamed_from"], "accounts");
     EXPECT_EQ(renamed.value["id"], "datasets/accounts_2");
     EXPECT_EQ(w.caller->capability, "upload_dataset");
-    EXPECT_FALSE(w.caller->input.contains("if_exists")) << "a lake field, not sent to Zetta";
+    // Zetta's upload_dataset refuses a taken name as well and takes the same opt-in (zetta#1221).
+    EXPECT_EQ(w.caller->input.value("if_exists", std::string()), "rename");
     EXPECT_FALSE(upload({{"table_name", "accounts"}, {"if_exists", "replace"}}).ok);
 
     // A free name loads as asked, with nothing renamed.

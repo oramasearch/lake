@@ -346,8 +346,10 @@ struct DatasetWriteCheck {
 
 // Before a dataset lands (lake#447): the table and database names must be ones SQL can query, a
 // CSV upload must parse into rows that match its header, and a name already taken is refused
-// unless the caller asked for the next free name with `if_exists: "rename"` (a lake field, removed
-// before the call). The workspace itself renames silently; lake reports it as `renamed_from`.
+// unless the caller asked for the next free name with `if_exists: "rename"`. Zetta's
+// upload_dataset refuses a taken name too and takes the same `if_exists` (zetta#1221), so a
+// rename is forwarded on upload_dataset; create_dataset_from_query takes no such field and never
+// sees it. Lake reports a rename as `renamed_from`.
 liquid::runtime::task<DatasetWriteCheck> check_dataset_write(ApiContext& context,
                                                              std::string customer_id,
                                                              std::string capability,
@@ -365,7 +367,9 @@ liquid::runtime::task<DatasetWriteCheck> check_dataset_write(ApiContext& context
             co_return check;
         }
         if_exists = arguments["if_exists"];
-        arguments.erase("if_exists");
+        if (capability != "upload_dataset" || if_exists != "rename") {
+            arguments.erase("if_exists");
+        }
     }
     for (const char* field : {"table_name", "database"}) {
         if (!arguments.contains(field)) {
