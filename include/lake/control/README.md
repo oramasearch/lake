@@ -53,3 +53,9 @@ See [the lease contract](../../../docs/api/agent-bus.md).
 `store.hpp` declares `NewOrganizationSpace`, `ConvertPersonalSpace` and their `OrganizationSpace`
 result for organizations a person runs, plus `list_user_memberships` and
 `list_invitee_invitations`. See [organizations.md](../../../docs/api/organizations.md).
+
+`workspace_records.hpp` declares `WorkspaceRecords` (append and list sealed records in one
+workspace Zetta) and `RecordSet<Codec>`, the typed collection every table that moves into a
+workspace uses; `ask_messages.hpp` is the reference codec. `Store` keeps only the legacy reads of
+the retired `ask_messages` table, for the copy (`LegacyAskMessage`). See
+`docs/architecture/workspace-records.md`.

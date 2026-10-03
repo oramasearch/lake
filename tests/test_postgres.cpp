@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1416,7 +1417,109 @@ TEST(PostgresStores, MigrationAssignsTheSoleWorkspaceAndRecordsTheRest) {
     })(), pqxx::check_violation);
 }
 
-// Agent launches, their credential, cron schedules and Ask Orama messages against the production
+// lake#370: migration 0045 records the owner of each retired ask_messages row (a space's only live
+// workspace), records the rest as needing a selection, reports a row without a space, and the
+// store's rerun of the same assignment picks up a row an old replica wrote afterwards. Listing for
+// the copy returns each row with its owner, paged by id.
+TEST(PostgresAskMessages, MigrationRecordsEachRowsOwnerForTheCopy) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "ask-message-migration-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    std::vector<std::string> users, customers, workspaces;
+    for (int index = 0; index < 2; ++index) {
+        const std::string name = "ask-migration-" + suffix + "-" + std::to_string(index);
+        const auto user = store->create_user({"taap:" + name, "", "Migration"});
+        ASSERT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", name});
+        ASSERT_TRUE(customer) << customer.error().message;
+        users.push_back(user->id);
+        customers.push_back(customer->id);
+        // The second space has two workspaces, so its rows cannot be assigned by themselves.
+        for (int count = 0; count <= index; ++count) {
+            const auto workspace =
+                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
+            ASSERT_TRUE(workspace) << workspace.error().message;
+            if (index == 0) {
+                workspaces.push_back(workspace->id);
+            }
+        }
+    }
+    pqxx::connection connection(uri);
+    std::vector<std::string> rows;
+    const auto insert = [&](const std::string& customer, const std::string& user) {
+        pqxx::work tx(connection);
+        const std::string id = tx.exec_params(
+            "INSERT INTO ask_messages (conversation_id, customer_id, user_id, role, content) "
+            "VALUES (gen_random_uuid(), NULLIF($1, '')::uuid, $2::uuid, 'user', 'hello') "
+            "RETURNING id::text",
+            customer, user)[0][0].as<std::string>();
+        tx.commit();
+        rows.push_back(id);
+        return id;
+    };
+    const std::string owned = insert(customers[0], users[0]);
+    const std::string ambiguous = insert(customers[1], users[1]);
+    const std::string spaceless = insert("", users[0]);
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0045_ask_message_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0045_ask_message_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    const auto outcome = [&](const std::string& id) {
+        pqxx::work tx(connection);
+        const auto found = tx.exec_params(
+            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
+            "WHERE object_table = 'ask_messages' AND object_id = $1::uuid",
+            id);
+        return found.empty() ? std::pair<std::string, std::string>{}
+                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(outcome(owned), (std::pair<std::string, std::string>{"sole_workspace",
+                                                                       workspaces[0]}));
+        EXPECT_EQ(outcome(ambiguous).first, "needs_selection");
+        EXPECT_TRUE(outcome(ambiguous).second.empty());
+        EXPECT_TRUE(outcome(spaceless).first.empty()) << "a row without a space is only reported";
+    }
+    const std::string late = insert(customers[0], users[0]);
+    EXPECT_TRUE(outcome(late).first.empty());
+    ASSERT_TRUE(store->assign_legacy_ask_messages());
+    EXPECT_EQ(outcome(late).first, "sole_workspace") << "a row written after the migration";
+
+    std::map<std::string, lake::control::LegacyAskMessage> listed;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_ask_messages(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            listed.emplace(row.message.id, row);
+        }
+        after = page->back().message.id;
+    }
+    ASSERT_TRUE(listed.contains(owned));
+    EXPECT_EQ(listed.at(owned).workspace_id, workspaces[0]);
+    EXPECT_EQ(listed.at(owned).message.content, "hello");
+    EXPECT_GT(listed.at(owned).message.at_us, 0);
+    EXPECT_EQ(listed.at(ambiguous).outcome, "needs_selection");
+    EXPECT_EQ(listed.at(spaceless).outcome, "no_customer");
+    EXPECT_TRUE(listed.at(spaceless).workspace_id.empty());
+}
+
+// Agent launches, their credential and cron schedules against the production
 // store (docs/api/agent-launches.md, lake#231).
 TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
@@ -1605,23 +1708,6 @@ TEST(PostgresAgentLaunches, LaunchesCredentialsSchedulesAndConversationsFollowTh
     schedules = store->list_agent_cron_schedules(customer->id, "a-1");
     ASSERT_TRUE(schedules && schedules->size() == 1U);
 
-    const std::string conversation = lake::control::new_uuid_v4();
-    ASSERT_TRUE(store->append_ask_message(
-        {"", conversation, customer->id, user->id, "user", "what runs?", nullptr, ""}));
-    ASSERT_TRUE(store->append_ask_message({"",
-                                           conversation,
-                                           customer->id,
-                                           user->id,
-                                           "assistant",
-                                           "two runs",
-                                           json{{"reads", json::array()}},
-                                           ""}));
-    const auto messages = store->ask_conversation(conversation, user->id, 50);
-    ASSERT_TRUE(messages && messages->size() == 2U);
-    EXPECT_EQ(messages->at(0).role, "user");
-    EXPECT_EQ(messages->at(1).payload["reads"], json::array());
-    EXPECT_TRUE(store->ask_conversation(conversation, lake::control::new_uuid_v4(), 50)->empty())
-        << "only the person who had the conversation reads it back";
 }
 
 TEST(PostgresSessions, AnExpiredCredentialIsToldApartFromAnUnknownOne) {

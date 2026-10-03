@@ -24,6 +24,8 @@
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/api/datasets.hpp"
 #include "workspace_bus.hpp"
+#include "workspace_records_api.hpp"
+#include "lake/control/ask_messages.hpp"
 
 namespace lake::api {
 
@@ -53,7 +55,33 @@ call_workspace(ApiContext& context,
     if (!completed) {
         co_return std::unexpected(completed.error());
     }
+    if (*completed) {
+        hide_workspace_records(**completed);
+    }
     co_return std::move(*completed);
+}
+
+void hide_workspace_records(nlohmann::json& value) {
+    // list_datasets answers {datasets: [{database, ...}]}; a system.datasets or system.tables
+    // query answers {rows: [{database, ...}]}. Lake's reserved database is in neither as lake shows
+    // them (docs/architecture/workspace-records.md).
+    if (!value.is_object()) {
+        return;
+    }
+    for (const char* key : {"datasets", "rows"}) {
+        const auto found = value.find(key);
+        if (found == value.end() || !found->is_array()) {
+            continue;
+        }
+        auto& items = *found;
+        items.erase(std::remove_if(items.begin(), items.end(),
+                                   [](const nlohmann::json& item) {
+                                       return item.is_object() &&
+                                              item.value("database", std::string()) ==
+                                                  control::workspace_records_database;
+                                   }),
+                    items.end());
+    }
 }
 
 namespace {
@@ -559,6 +587,14 @@ void register_workspace_call(Registry& registry, bool read) {
                                              capability + " is not a workspace " +
                                                  (read ? "read" : "action"),
                                              "/capability");
+            }
+            // Lake's own records (docs/architecture/workspace-records.md) are not workspace data
+            // a caller reads or changes through the engine.
+            if (control::names_workspace_records(input.value("input", json::object()).dump())) {
+                co_return ApiResult::failure("invalid_input",
+                                             std::string(control::workspace_records_database) +
+                                                 " is reserved for lake's records",
+                                             "/input");
             }
             const auto agent_task = calling_agent_task(context);
             // An agent turn acts only through the workspace actions its credential names
@@ -2034,6 +2070,18 @@ void register_sql_capability(Registry& registry) {
                 !problem.empty()) {
                 co_return ApiResult::failure("invalid_input", problem, "/statement");
             }
+            if (control::names_workspace_records(statement)) {
+                co_return ApiResult::failure("invalid_input",
+                                             std::string(control::workspace_records_database) +
+                                                 " is reserved for lake's records",
+                                             "/statement");
+            }
+            if (control::names_workspace_records(input.value("database", std::string()))) {
+                co_return ApiResult::failure("invalid_input",
+                                             std::string(control::workspace_records_database) +
+                                                 " is reserved for lake's records",
+                                             "/database");
+            }
             set_audit(context, "workspace.sql", input, "sql");
             json query{{"statement", statement}};
             if (const std::string database = input.value("database", std::string());
@@ -3406,30 +3454,38 @@ void register_agent_flow_capabilities(Registry& registry) {
         .name = "get_ask_conversation",
         .title = "Read an Ask Orama conversation",
         .description = "The messages of one of your conversations with Ask Orama or the Agent "
-                       "Factory, oldest first, with each answer's reads, proposals and "
-                       "delegations. Only the person who had the conversation can read it.",
-        .input_schema = {{"type", "object"},
-                         {"properties",
-                          {{"conversation_id", {{"type", "string"}}},
-                           {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 500}}}}},
-                         {"required", json::array({"conversation_id"})},
-                         {"additionalProperties", false}},
+                       "Factory in one workspace, oldest first, with each answer's reads, "
+                       "proposals and delegations. A conversation lives in the workspace Zetta of "
+                       "the workspace it was held in; only the person who had it can read it, and "
+                       "another workspace of the same space never shows it.",
+        .input_schema = customer_input_schema(
+            {{"conversation_id", {{"type", "string"}}},
+             {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 500}}}},
+            json::array({"conversation_id"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
-        .object = "principal",
+        .object = "customer",
         .action = "read",
-        .resolve_object = [](const json&,
-                             ApiContext& context) -> std::expected<std::string, ApiError> {
-            return "principal/" + context.acting_identity;
-        },
-        .handler = [](const json& input, ApiContext& context) {
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.store || context.acting_user_id.empty()) {
-                return ApiResult::failure("unauthorized", "reading a conversation needs a person");
+                co_return ApiResult::failure("unauthorized", "reading a conversation needs a person");
             }
-            auto messages = context.store->ask_conversation(
-                input.at("conversation_id"), context.acting_user_id, input.value("limit", 200));
+            auto records = workspace_records(context, input.at("customer_id"),
+                                             input.at("workspace_id"));
+            if (!records) {
+                co_return ApiResult::failure(records.error().code, records.error().message,
+                                             records.error().path);
+            }
+            control::AskMessages conversation(*records);
+            auto messages = control::settled(co_await conversation.list(
+                control::ask_conversation_lookup(input.at("conversation_id"),
+                                                 context.acting_user_id),
+                static_cast<std::size_t>(input.value("limit", 200))));
             if (!messages) {
-                return ApiResult::failure(messages.error().code, messages.error().message);
+                co_return ApiResult::failure(messages.error().code, messages.error().message,
+                                             messages.error().path);
             }
             json out = json::array();
             for (const control::AskMessage& message : *messages) {
@@ -3439,7 +3495,7 @@ void register_agent_flow_capabilities(Registry& registry) {
                                {"payload", message.payload},
                                {"created_at", message.created_at}});
             }
-            return ApiResult::success({{"messages", std::move(out)}});
+            co_return ApiResult::success({{"messages", std::move(out)}});
         }});
 }
 

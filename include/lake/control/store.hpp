@@ -454,12 +454,21 @@ struct Opportunity {
     std::string status = "new", project, created_at;
 };
 
-// One message of an Ask Orama conversation (docs/api/ask-orama.md, lake#236). Kept in lake because
-// the panel renders from any replica.
+// One message of an Ask Orama conversation (docs/api/ask-orama.md, lake#236). It lives in the
+// workspace Zetta of the workspace it was written in (lake#370, control/ask_messages.hpp); the
+// control store only reads the retired ask_messages table for the one-shot copy.
 struct AskMessage {
     std::string id, conversation_id, customer_id, user_id, role, content;
     nlohmann::json payload = nullptr; // proposals, reads and delegations of an assistant message
     std::string created_at;
+    std::int64_t at_us = 0; // created_at in microseconds since the Unix epoch
+};
+// A row of the retired ask_messages table with its recorded owner (migration 0045): the workspace
+// it is copied into, or empty with the reason it is not (`needs_selection`, `no_customer`).
+struct LegacyAskMessage {
+    AskMessage message;
+    std::string workspace_id;
+    std::string outcome;
 };
 struct NewManagedStore {
     std::string customer_id, type, provider, name, created_by_taap_id;
@@ -1095,10 +1104,12 @@ public:
     virtual Result<Opportunity> set_opportunity_status(const std::string& id,
                                                        const std::string& status,
                                                        const std::string& project) = 0;
-    // Ask Orama conversations (lake#236), only ever read back by the person who had them.
-    virtual Result<AskMessage> append_ask_message(const AskMessage&) = 0;
-    virtual Result<std::vector<AskMessage>>
-    ask_conversation(const std::string& conversation_id, const std::string& user_id, int limit) = 0;
+    // The retired ask_messages table (lake#370), for the one-shot copy into workspace Zettas only.
+    // Assigning records each unassigned row's owner in workspace_assignments, as migration 0045
+    // does, for rows written after it; listing pages by id, oldest id first.
+    virtual Result<void> assign_legacy_ask_messages() = 0;
+    virtual Result<std::vector<LegacyAskMessage>> legacy_ask_messages(const std::string& after_id,
+                                                                      int limit) = 0;
     virtual Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                     std::uint64_t quota_bytes) = 0;
 

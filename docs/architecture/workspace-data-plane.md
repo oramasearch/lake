@@ -92,6 +92,15 @@ workspace call and delegated create. Agent-runtime is the first client follow-up
 library agent repository. The operator must vendor the schema and use its new guard before Lake
 starts. Cross-repository code is outside this worktree and is tracked in the follow-ups.
 
+## Moving a Table
+
+Every workspace item in the audit below moves through one mechanism,
+[workspace records](workspace-records.md): sealed records in the workspace Zetta's reserved
+`lake_records` database, reached through the workspace caller, with an operator one-shot copy and
+verification before any table is dropped. That document gives the Zetta primitive for each record
+shape, the C++ interface, the migration and cutover sequence, and the checklist each follow-up
+applies. Rows that need atomic conditional writes wait for the Zetta capability it specifies.
+
 ## Storage Audit
 
 This is a source inventory of `db/schema.sql`, Lake's Zetta callers, and instance-local stores.
@@ -180,7 +189,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `agent_launches` | workspace | Agent inputs/configuration; split content-free dispatch. [Follow-up](https://github.com/oramasearch/lake/issues/367). |
 | `agent_launch_status` | workspace | Agent results, messages and credential digests. [Follow-up](https://github.com/oramasearch/lake/issues/368). |
 | `agent_schedules` | workspace | Retired but retained application schedule records. [Follow-up](https://github.com/oramasearch/lake/issues/369). |
-| `ask_messages` | workspace | Conversation bodies and answers. [Follow-up](https://github.com/oramasearch/lake/issues/370). |
+| `ask_messages` | workspace | Conversation bodies and answers. **Moved** to each workspace's `lake_records.ask_messages` by [lake#370](https://github.com/oramasearch/lake/issues/370) ([workspace-records.md](workspace-records.md)); the table is read only by the one-shot copy until a later migration drops it. |
 | `agent_cron_schedules` | workspace | Scheduled agent inputs and application settings. [Follow-up](https://github.com/oramasearch/lake/issues/371). |
 | `agent_cron_schedule_status` | workspace | Schedule credentials and application status. [Follow-up](https://github.com/oramasearch/lake/issues/373). |
 | `agent_cron_runs` | workspace | Run history and results. [Follow-up](https://github.com/oramasearch/lake/issues/372). |

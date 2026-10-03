@@ -10,6 +10,7 @@
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "record_fixture.hpp"
 #include "temporary_directory.hpp"
 
 namespace lake::test {
@@ -25,6 +26,8 @@ public:
     };
     std::map<std::string, Topic> topics;
     std::map<std::string, std::map<std::string, Topic>> routed_topics;
+    // Lake's workspace records (record_fixture.hpp), one store per workspace endpoint.
+    std::map<std::string, RecordTables> records;
     std::string first_url;
     std::vector<std::pair<std::string, json>> calls;
     std::string last_url, last_token;
@@ -44,6 +47,9 @@ public:
         const auto fail = [](std::string code) -> control::ZettaControlResult<json> {
             return std::unexpected(control::ZettaControlError{code, code});
         };
+        if (RecordTables::handles(capability, input)) {
+            co_return records[last_url].run(input);
+        }
         if (capability == "list_topics") {
             json rows = json::array();
             for (const auto& [name, topic] : topics) {

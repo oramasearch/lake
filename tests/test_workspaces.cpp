@@ -83,7 +83,8 @@ public:
             if (failure) {
                 answered = ZettaControlResult<json>(std::unexpected(*failure));
             } else if (capability != "create_topic" && capability != "update_topic" &&
-                       capability != "publish_event" && capability != "receive_events") {
+                       capability != "publish_event" && capability != "receive_events" &&
+                       !lake::test::RecordTables::handles(capability, input)) {
                 const auto answer = answers.find(capability);
                 answered =
                     ZettaControlResult<json>(answer == answers.end() ? value : answer->second);
@@ -3590,20 +3591,12 @@ TEST(AgentRuns, EveryAgentFlowTheSiteOffersIsACapability) {
     EXPECT_TRUE(lake::api::find_methodology(registry, "clustering", "S-99").is_null());
     EXPECT_TRUE(lake::api::find_methodology(json(nullptr), "M-3", "").is_null());
 
-    const std::string conversation = lake::control::new_uuid_v4();
-    ASSERT_TRUE(r.store.append_ask_message(
-        {"", conversation, r.w.customer_id, r.principal.user_id, "user", "hi", nullptr, ""}));
-    lake::api::ApiContext context;
-    context.store = &r.store;
-    context.authorized = true;
-    context.acting_user_id = r.principal.user_id;
-    context.acting_identity = r.principal.taap_id;
-    context.request_id = lake::control::new_uuid_v4();
-    const auto read = liquid::runtime::block_on(r.registry.call_async(
-        "get_ask_conversation", {{"conversation_id", conversation}}, context));
-    ASSERT_TRUE(read && read->ok) << (read ? read->error.message : "");
-    ASSERT_EQ((*read).value["messages"].size(), 1U);
-    EXPECT_EQ((*read).value["messages"][0]["content"], "hi");
+    // A conversation lives in its workspace's Zetta (lake#370), so reading one names the
+    // workspace; Stores/WorkspaceRecordStores.* covers the reads themselves.
+    const auto unnamed = r.call("get_ask_conversation", {{"conversation_id", lake::control::new_uuid_v4()},
+                                                         {"workspace_id", "not-a-workspace"}});
+    EXPECT_EQ(unnamed.error.code, "invalid_input");
+    EXPECT_EQ(unnamed.error.path, "/workspace_id");
 }
 
 TEST(AgentRuns, APersonStartsAndConfirmsTheProjectAgentsSolutionFoundation) {

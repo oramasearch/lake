@@ -35,6 +35,9 @@ void register_stream_capabilities(Registry& registry);
 void register_experiment_capabilities(Registry& registry);
 // Customer Zetta workspaces: status, start, and allow-listed calls (docs/api/workspaces.md).
 void register_workspace_capabilities(Registry& registry);
+// The operator's one-shot copy of retired control-store tables into workspace Zettas
+// (docs/architecture/workspace-records.md).
+void register_workspace_record_capabilities(Registry& registry);
 // Running and talking to agents (docs/api/agent-launches.md): launch_agent, list_agent_launches,
 // stop_agent_launch, schedule_agent, list_agent_schedules, unschedule_agent, agent_turn. Registered
 // by register_workspace_capabilities.
@@ -60,6 +63,9 @@ call_workspace(ApiContext& context,
                std::string capability,
                bool read,
                nlohmann::json input);
+// Removes rows of lake's reserved records database from a dataset listing or a system table
+// answer, so no workspace surface lists it (docs/architecture/workspace-records.md).
+void hide_workspace_records(nlohmann::json& value);
 // One name per concept on the workspace engine's capabilities (docs/api/naming.md): the engine
 // takes `run_id` on some calls and `run` on others, `model_id` and `model`, `index_id` and
 // `index`, `job_id` and `job`. Lake accepts either spelling and sends the one this capability

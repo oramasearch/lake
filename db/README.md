@@ -56,3 +56,11 @@ several or none is recorded as `needs_selection`. New stores go through
 `store_workspaces_guard`; the operator must vendor this schema and update its guard before
 rollout. `tests/test_operator_contract.cpp` runs the operator's statements against this schema.
 See [storage.md](../docs/control-plane/storage.md).
+
+Migration `0045_ask_message_workspaces` records the owner of each retired `ask_messages` row in
+`workspace_assignments` (a space's only live workspace; otherwise `needs_selection`; rows without a
+space are reported). Ask Orama conversations now live in the owning workspace Zetta (lake#370), so
+lake no longer writes or reads the table except through the operator's `copy_workspace_records`.
+It adds no column and drops nothing; a later migration drops the table once the copy is verified.
+The latest guard is `ask_message_workspaces_guard`; the operator must vendor this schema and update
+its guard before rollout. See [workspace-records.md](../docs/architecture/workspace-records.md).

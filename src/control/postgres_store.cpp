@@ -39,8 +39,24 @@
 #include <pqxx/pqxx>
 
 #include "lake/control/policy.hpp"
+#include "lake/control/workspace_records.hpp"
 
 namespace lake::control {
+
+namespace {
+
+// Migration 0045's assignment of the retired ask_messages rows (db/schema.sql), rerun before each
+// copy so a row an old replica wrote after the migration is recorded too. A space with exactly one
+// live workspace owns its rows; every other row is recorded as needs_selection for the operator.
+constexpr std::string_view legacy_ask_message_assignment_sql =
+    "INSERT INTO workspace_assignments (object_table, object_id, customer_id, workspace_id, "
+    "outcome) SELECT 'ask_messages', m.id, m.customer_id, w.id, CASE WHEN w.id IS NULL THEN "
+    "'needs_selection' ELSE 'sole_workspace' END FROM ask_messages m LEFT JOIN workspaces w ON "
+    "w.customer_id = m.customer_id AND w.desired <> 'deleted' AND (SELECT count(*) FROM "
+    "workspaces w2 WHERE w2.customer_id = m.customer_id AND w2.desired <> 'deleted') = 1 WHERE "
+    "m.customer_id IS NOT NULL ON CONFLICT DO NOTHING";
+
+} // namespace
 
 namespace identity_crypto {
 namespace {
@@ -5963,55 +5979,48 @@ public:
         });
     }
 
-    Result<AskMessage> append_ask_message(const AskMessage& message) override {
-        if (message.conversation_id.empty() || message.user_id.empty() ||
-            (message.role != "user" && message.role != "assistant")) {
-            return std::unexpected(StoreError{"invalid_input", "ask message is invalid"});
-        }
-        return with_tx<AskMessage>([&](pqxx::work& tx) -> Result<AskMessage> {
-            const pqxx::result rows = tx.exec_params(
-                "INSERT INTO ask_messages (conversation_id, customer_id, user_id, role, content, "
-                "payload) VALUES ($1::uuid, NULLIF($2, '')::uuid, $3::uuid, $4, $5, $6::jsonb) "
-                "RETURNING id::text, to_char(created_at AT TIME ZONE 'UTC', "
-                "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",
-                message.conversation_id,
-                message.customer_id,
-                message.user_id,
-                message.role,
-                message.content,
-                message.payload.dump());
-            AskMessage stored = message;
-            stored.id = rows[0][0].as<std::string>();
-            stored.created_at = rows[0][1].as<std::string>();
-            return stored;
+    Result<void> assign_legacy_ask_messages() override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            tx.exec(std::string(legacy_ask_message_assignment_sql));
+            return {};
         });
     }
 
-    Result<std::vector<AskMessage>> ask_conversation(const std::string& conversation_id,
-                                                     const std::string& user_id,
-                                                     int limit) override {
-        return with_tx<std::vector<AskMessage>>(
-            [&](pqxx::work& tx) -> Result<std::vector<AskMessage>> {
+    Result<std::vector<LegacyAskMessage>> legacy_ask_messages(const std::string& after_id,
+                                                              int limit) override {
+        return with_tx<std::vector<LegacyAskMessage>>(
+            [&](pqxx::work& tx) -> Result<std::vector<LegacyAskMessage>> {
                 const pqxx::result rows = tx.exec_params(
-                    "SELECT id::text, conversation_id::text, COALESCE(customer_id::text, ''), "
-                    "user_id::text, role, content, payload::text, to_char(created_at AT TIME "
-                    "ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM (SELECT * FROM "
-                    "ask_messages WHERE conversation_id = $1::uuid AND user_id = $2::uuid "
-                    "ORDER BY created_at DESC, id DESC LIMIT $3) newest ORDER BY created_at, id",
-                    conversation_id,
-                    user_id,
-                    limit > 0 ? limit : 200);
-                std::vector<AskMessage> messages;
+                    "SELECT m.id::text, m.conversation_id::text, COALESCE(m.customer_id::text, ''), "
+                    "m.user_id::text, m.role, m.content, m.payload::text, "
+                    "(extract(epoch FROM m.created_at) * 1000000)::bigint, "
+                    "COALESCE(a.workspace_id::text, ''), "
+                    "CASE WHEN m.customer_id IS NULL THEN 'no_customer' "
+                    "ELSE COALESCE(a.outcome, 'needs_selection') END "
+                    "FROM ask_messages m LEFT JOIN workspace_assignments a "
+                    "ON a.object_table = 'ask_messages' AND a.object_id = m.id "
+                    "WHERE ($1 = '' OR m.id > NULLIF($1, '')::uuid) ORDER BY m.id LIMIT $2",
+                    after_id,
+                    std::clamp(limit, 1, 5000));
+                std::vector<LegacyAskMessage> messages;
                 for (const pqxx::row& row : rows) {
-                    messages.push_back(
-                        AskMessage{row[0].as<std::string>(),
-                                   row[1].as<std::string>(),
-                                   row[2].as<std::string>(),
-                                   row[3].as<std::string>(),
-                                   row[4].as<std::string>(),
-                                   row[5].as<std::string>(),
-                                   nlohmann::json::parse(row[6].as<std::string>(), nullptr, false),
-                                   row[7].as<std::string>()});
+                    LegacyAskMessage legacy;
+                    legacy.message.id = row[0].as<std::string>();
+                    legacy.message.conversation_id = row[1].as<std::string>();
+                    legacy.message.customer_id = row[2].as<std::string>();
+                    legacy.message.user_id = row[3].as<std::string>();
+                    legacy.message.role = row[4].as<std::string>();
+                    legacy.message.content = row[5].as<std::string>();
+                    legacy.message.payload =
+                        nlohmann::json::parse(row[6].as<std::string>(), nullptr, false);
+                    if (legacy.message.payload.is_discarded()) {
+                        legacy.message.payload = nullptr;
+                    }
+                    legacy.message.at_us = row[7].as<std::int64_t>();
+                    legacy.message.created_at = record_instant(legacy.message.at_us);
+                    legacy.workspace_id = row[8].as<std::string>();
+                    legacy.outcome = row[9].as<std::string>();
+                    messages.push_back(std::move(legacy));
                 }
                 return messages;
             });
