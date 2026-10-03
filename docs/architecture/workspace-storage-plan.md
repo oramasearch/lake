@@ -9,35 +9,36 @@ Refs [lake#311](https://github.com/oramasearch/lake/issues/311),
 [lake#383](https://github.com/oramasearch/lake/issues/383) and
 [lake#384](https://github.com/oramasearch/lake/issues/384).
 
-**Status: design, 2026-10-03. Nothing here is implemented.** This page plans the moves that
+**Status: design, decided 2026-10-03 (decision 54); nothing here is implemented yet.** This page plans the moves that
 [workspace records](workspace-records.md) does not cover: the bytes on lake's store volume
 (liquid stores, search indexes, the registry, the transparency log), the two repository tables
 that sit beside them, and lake's operational telemetry. It states what each item is today, what it
-is under the umbrella rule, where its bytes should live, how it moves, and which choices are
-Steve's. The rule is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in a
+is under the umbrella rule, where its bytes live, how it moves, and the decisions Steve made. The rule is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in a
 workspace Zetta except multitenancy, dispatch and billing.
 
-## Decisions needed
+## Decisions
 
-Each question has a recommended answer and the alternatives. Nothing below the decisions should be
-built before the decision it depends on is answered.
+**Decided by Steve on 2026-10-03:** liquid-bridge `docs/decisions.md`
+[decision 54](https://github.com/oramasearch/liquid-bridge/blob/main/docs/decisions.md), recorded in
+[lake#512](https://github.com/oramasearch/lake/issues/512). Every answer is the recommendation
+except S12, where Steve chose cascade over refusal.
 
-| # | Item | Question | Recommended | Alternatives |
+| # | Item | Question | Decided | Not chosen |
 |---|---|---|---|---|
-| S1 | #380 | Where do a workspace's liquid store bytes live? | **In the workspace Zetta**, through a new Zetta object capability ([spec below](#the-zetta-object-capability)) that lake's liquid store backend writes to; the bytes sit on the workspace Zetta's own volume. | (a) A directory per workspace on lake's shared store volume (`<customer>/<workspace>/store`), an explicit, documented exception to the umbrella rule. (b) A liquid store server pod per workspace, with its own volume in the workspace namespace, that lake reaches over liquid's sync protocol. (c) A cloud bucket per workspace (Azure Blob or R2) through a liquid object-storage backend. |
-| S2 | #380 | Partition the shared volume by workspace first, as an interim step, before the Zetta object capability exists? | **No.** Go straight to the target: dev holds 18 MB in liquid stores, so one migration is cheap and two would copy the same data twice. | Yes: partition now (`<customer>/<workspace>/store`), which makes workspace deletion and per-workspace storage measurement work sooner, then move each partition into its Zetta later. |
-| S3 | #380, #383 | Are workspace liquid stores encrypted at rest with a per-workspace key? | **Yes:** liquid's encrypted objects, with the workspace's data key wrapped under a key derived from `LAKE_INSTANCE_KEK` (as records are sealed), so the workspace Zetta holds only ciphertext. | Plaintext stores: keeps liquid's chunk-delta compression (encrypted chunks do not take part) and lets an OCI digest be the stored identity directly. |
-| S4 | #383 | Is the registry split into tenant images (workspace data) and the instance's public registry (instance-level)? | **Yes.** Tenant OCI repositories (`<space>/<name>`, `<space>/cache/<name>`) move to the workspace. Legacy one-component OCI repositories, npm, Python and debuginfod, which are instance-wide namespaces written only by the administrator, stay with the instance. | Move everything: give npm, Python and debug packages an owning space and workspace, which changes their public names. |
-| S5 | #383 | Where do a tenant image's blobs live? | **In the workspace's liquid store**, as SHA-256 objects, so layers share chunks with build outputs; manifests and tags are records in the workspace Zetta. | A separate area of the workspace's object capability (no deduplication with liquid). |
-| S6 | #383 | Do image addresses change? | **No.** Keep `<space>/<name>`; lake finds the workspace through a content-free central route (space and repository name to workspace), written when a build of that workspace first pushes. Deployed image references keep working. | Put the workspace in the path (`<space>/<workspace>/<name>`): no route table, but every image reference and pull secret changes. |
-| S7 | #382 | Do the transparency log, TUF metadata and timestamp evidence stay with the instance? | **Yes.** They are the instance's public, append-only commitment that relying parties and peer instances verify; splitting them per workspace breaks one log's split-view protection. They stay on the instance's store volume, named in the umbrella rule as a third exception beside billing. | (a) One log per workspace, each with its own checkpoint and TUF root. (b) Move them to the lake Zetta (which the rule keeps for multitenancy and dispatch). |
-| S8 | #381 | Where does a workspace's search index live? | **Beside its liquid store**, as sealed objects in the same workspace object area, rebuilt from the store rather than copied. Lake loads a workspace's segments into memory on first use and evicts them. | (a) Zetta's own full-text index over a workspace table (Zetta search has no exact-substring, regex, history or artifact modes yet). (b) A lake-local cache rebuilt at will, which keeps customer text on lake's disk. |
-| S9 | #384 | Are lake's process metrics and request logs workspace data? | **No, they are instance operations**, content-free by construction: they stay as Prometheus exposition and stdout, and request logs carry the route pattern, not the raw path. What a workspace's people should see about their own traffic is a new per-workspace series in that workspace Zetta's time series. | Write every request's metrics and log line into its workspace Zetta. |
-| S10 | #315 | What of the `repositories` row moves? | **Only `description` (and any later settings)**, to a `lake_repositories` record. The row stays as routing: id, space, workspace, name, visibility and the tombstone fields, because name lookup, public reads and the retention collector act before any workspace is read. | Move name and visibility too: name uniqueness becomes a claim in each workspace, a lookup by name searches every workspace of the space, and an anonymous read opens a workspace before authorizing. |
-| S11 | #319 | Is `repository_refs` moved or dropped? | **Dropped.** Liquid's repository is the authority for refs; the table is a write-only mirror that nothing reads, and it has 0 rows on dev. | Move it to a `lake_repository_refs` collection as a cache. |
-| S12 | all | What does deleting a workspace do to its repositories and images? | **Refuse** while the workspace holds a live repository, a tombstoned repository still inside its 30-day retention, or a tenant image; the confirmation names them. | Cascade: delete them with the workspace, cutting the repository retention short. |
-| S13 | all | How are workspace volumes backed up? | **Scheduled CSI volume snapshots** of each workspace Zetta's volume and of lake's store volume, desired in lake's Postgres and taken by the operator; one snapshot before the cutover. | None until a production environment exists (dev data may be deleted). |
-| S14 | #315, #380 | The `liquid` repository (2026-09-02) sits in a space with no workspace. | **Create a workspace for that space and assign the repository** before the store move. | Delete it (dev data), or leave it behind on the old customer store. |
+| S1 | #380 | Where do a workspace's liquid store bytes live? | **In the workspace Zetta**, through a new Zetta object capability ([spec below](#the-zetta-object-capability), [zetta#1005](https://github.com/oramasearch/zetta/issues/1005)) that lake's liquid store backend writes to; the bytes sit on the workspace Zetta's own volume. | A directory per workspace on lake's shared volume; a liquid store server pod per workspace; a cloud bucket per workspace. |
+| S2 | #380 | An interim partition of the shared volume by workspace? | **No.** Straight to the target, one migration. | Partition now and move later. |
+| S3 | #380, #383 | Encrypt workspace liquid stores at rest? | **Yes**, with a per-workspace data key wrapped under a key derived from `LAKE_INSTANCE_KEK`; the workspace Zetta holds only ciphertext. | Plaintext stores (keeps chunk-delta compression). |
+| S4 | #383 | Split the registry? | **Yes.** Tenant OCI repositories (`<space>/<name>`, `<space>/cache/<name>`) move to the workspace; npm, Python, debuginfod and legacy one-component OCI stay with the instance. | Move everything, renaming instance packages. |
+| S5 | #383 | Where do a tenant image's blobs live? | **In the workspace's liquid store** as SHA-256 objects; manifests and tags are conditional records. | A separate area of the object capability. |
+| S6 | #383 | Do image addresses change? | **No.** `<space>/<name>` stays, through a content-free central route (space and name to workspace). | The workspace in the path. |
+| S7 | #382 | Do the transparency log, TUF and timestamp evidence stay with the instance? | **Yes**, named as an instance-level exception in the umbrella rule. | One log per workspace; the lake Zetta. |
+| S8 | #381 | Where does a workspace's search index live? | **Beside its liquid store**, as sealed objects, rebuilt rather than copied. | Zetta full-text over a workspace table; a lake-local cache. |
+| S9 | #384 | Are lake's process metrics and request logs workspace data? | **No: instance operations**, named as an exception in the umbrella rule. Logs carry route patterns, not raw paths; each workspace gets its own request series in its Zetta. | Every request's metrics and log line in its workspace Zetta. |
+| S10 | #315 | What of the `repositories` row moves? | **Only `description`** (and later settings) to `lake_repositories`; the row stays as routing. | Name and visibility too. |
+| S11 | #319 | Move or drop `repository_refs`? | **Dropped.** | Move it as a cache. |
+| S12 | all | What does deleting a workspace do to its repositories and images? | **Cascade** ([lake#514](https://github.com/oramasearch/lake/issues/514)): deleting a workspace deletes its repositories (live and tombstoned, cutting retention short) and its tenant images. Retained snapshots (S13) are the only copy left. | Refuse while the workspace holds repositories or images (the recommendation). |
+| S13 | all | Backups of workspace volumes? | **Scheduled CSI snapshots** of each workspace Zetta volume and of lake's store volume, desired in Postgres and taken by the operator, with one before the cutover ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260)). | None until production. |
+| S14 | #315, #380 | The `liquid` repository's space has no workspace. | **Create a workspace for that space and assign the repository** ([lake#513](https://github.com/oramasearch/lake/issues/513)). | Delete it; leave it behind. |
 
 ## Summary
 
@@ -111,8 +112,9 @@ volume. The cluster runs no Prometheus, Loki or monitors. Apps: 3 rows; builds: 
 
 ## The Zetta object capability
 
-This is the capability S1 recommends. It does not exist; this is its specification, to be filed
-as a Zetta issue. It maps one to one onto `liquid::store_backend`, so lake's backend is a thin
+This is the capability S1 decided on. It does not exist yet; it is tracked in
+[zetta#1005](https://github.com/oramasearch/zetta/issues/1005), whose 2026-10-03 comment carries
+the full specification, with its tests and latency budget. It maps one to one onto `liquid::store_backend`, so lake's backend is a thin
 client.
 
 **Model.** A **bucket** is declared once (`create_bucket`, replicated like a record collection's
@@ -124,6 +126,7 @@ never in the replicated catalogue.
 |---|---|---|
 | put | `PUT /v1/objects/<bucket>/<key>` | Atomically replace the whole object (temporary file, fsync, rename). |
 | put range | `PATCH /v1/objects/<bucket>/<key>?offset=<n>` | Create or extend the object at exactly `n`. `n` must equal the current size, or the bytes must equal the bytes already there (a retried append succeeds); otherwise `409 conflict` with the current size. |
+| put if absent | `PUT /v1/objects/<bucket>/<key>?if_absent=true` | Conditional create, decided atomically; `409` if the key exists (liquid's exclusive repository create). |
 | get range | `GET /v1/objects/<bucket>/<key>`, `Range: bytes=a-b` | Exactly that range, streamed; `416` outside the object (liquid's `corrupt`), `404` absent (`not_found`). |
 | remove | `DELETE /v1/objects/<bucket>/<key>` | Delete one object. |
 | list | `GET /v1/objects/<bucket>?prefix=&after=&limit=` | Keys and sizes, by key, paged. |
@@ -203,8 +206,16 @@ asks of the caller). `.lake-owner.lock` stays, covering only what remains on the
 (#382 and the instance registry). On SIGTERM lake drains, closes each store and releases each
 lease, then the root.
 
-**Backups.** The workspace Zetta's volume is the store's only copy (S13). Workspace deletion
-deletes the namespace and its volume, so S12 decides what a deletion may destroy.
+**Backups.** The workspace Zetta's volume is the store's only copy; scheduled CSI snapshots (S13,
+[orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260)) are its backup.
+
+**Workspace deletion (S12, cascade, [lake#514](https://github.com/oramasearch/lake/issues/514)).**
+Deleting a workspace deletes its repositories, live and tombstoned, cutting their retention short.
+Lake closes the workspace's store and releases its bucket lease before it reports the deletion, and
+the operator's deletion of the namespace and its volume destroys the bytes. Before the switch, the
+collector reclaims the deleted repositories from the space's store, since their retention has
+ended. The central audit log records one event per destroyed repository, because the workspace's
+own audit chain goes with its Zetta. Retained snapshots are the only copy left.
 
 **Migration and cutover.** No dual write; nothing on the store volume is deleted.
 
@@ -312,6 +323,8 @@ lock's protection.
 - **Routing.** A central, content-free `oci_repository_routes` (space, repository name, workspace,
   created by) is written `if_absent` at a build's first push, from the build row's workspace;
   pulls resolve it before any workspace is read. App images keep their addresses.
+- **Workspace deletion** (S12, cascade): a workspace's routes are deleted with it, and its images
+  go with its store and records.
 
 **Hot path: image pulls.** The kubelet pulls through lake, so pull latency is a workspace store
 read: lake streams the blob from the store with read-ahead and never holds a whole layer in
@@ -386,24 +399,30 @@ with #380.
 **Target (S11).** Drop it. One migration drops the table; lake removes `set_repository_ref` and
 `list_repository_refs` from the store interface and returns refs from liquid alone. No copy.
 
-## Dependencies
+## Work, in dependency order
 
-| Owner | Change | Needed by |
-|---|---|---|
-| Zetta | The object capability above: buckets, range append, ranged streaming reads, owner lease with fencing, usage, `rf` placement for multi-node workspaces | #380, #381, #383 |
-| liquid | Repository state (`LIQUID_REPO`, `LIQUID_JOURNAL`, checkpoint, replication cursor) through `store_backend` rather than `std::filesystem` | #380 |
-| liquid | A local whole-repository transfer between two open stores (the copy step) | #380 migration |
-| lake | `ZettaObjectBackend` (`liquid::store_backend`), per-workspace lazy store open with leases, `move_workspace_store` | #380, #383 |
-| operator | Workspace volume size from desired state, and scheduled snapshots (S13); the `move_workspace_store` call in its cutover runbook | #380, #383 |
-| bridge | The umbrella rule names the instance's public commitment (S7) and instance operations telemetry (S9) as exceptions, if Steve agrees | #382, #384 |
+| # | Issue | Change | Waits on |
+|---|---|---|---|
+| 1 | [zetta#1005](https://github.com/oramasearch/zetta/issues/1005) | The object capability above, with put-if-absent, tests and a latency budget (the decided specification is its 2026-10-03 comment) | nothing |
+| 2 | [liquid#326](https://github.com/oramasearch/liquid/issues/326) | Repository state (`LIQUID_REPO`, journal, checkpoint, replication cursor) through `store_backend` | nothing |
+| 3 | [liquid#327](https://github.com/oramasearch/liquid/issues/327) | An injected owner lock with fencing for backends without a local root | nothing |
+| 4 | [liquid#328](https://github.com/oramasearch/liquid/issues/328) | Copy a whole repository between two open stores (the copy step) | liquid#326 |
+| 5 | [orama-operator#259](https://github.com/oramasearch/orama-operator/issues/259) | Grow each workspace Zetta's volume from `workspaces.storage_gi` | nothing |
+| 6 | [orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260) | Scheduled CSI snapshots of workspace volumes and the store volume (dev has the snapshot CRDs but no `VolumeSnapshotClass`) | nothing |
+| 7 | [lake#513](https://github.com/oramasearch/lake/issues/513) | A workspace for the `liquid` repository's space, and its assignment (S14) | nothing |
+| 8 | [lake#319](https://github.com/oramasearch/lake/issues/319) | Drop `repository_refs` (S11) | nothing |
+| 9 | [lake#315](https://github.com/oramasearch/lake/issues/315) | Part 2: `description` to `lake_repositories` (S10) | lake#513 for the one unassigned row |
+| 10 | [lake#514](https://github.com/oramasearch/lake/issues/514) | Cascade workspace deletion (S12) | nothing; its store step follows #380 |
+| 11 | [lake#384](https://github.com/oramasearch/lake/issues/384) | Route patterns in request logs; the per-workspace `lake_requests` series (S9) | nothing |
+| 12 | [lake#382](https://github.com/oramasearch/lake/issues/382) | Stays with the instance (S7): the audit row, and the dynamic-secret leaf check | nothing |
+| 13 | [lake#383](https://github.com/oramasearch/lake/issues/383) | Phase A: the route table, manifests and tags as records. Phase B: blobs in the workspace store | A: nothing; B: lake#380 |
+| 14 | [lake#380](https://github.com/oramasearch/lake/issues/380) | `ZettaObjectBackend`, per-workspace leases and lazy open, encryption, `move_workspace_store` | 1–7 |
+| 15 | [lake#381](https://github.com/oramasearch/lake/issues/381) | Search beside the workspace store, rebuilt (S8) | lake#380 |
 
-Order: S-decisions; then #319 and #315 part 2 (independent of the store); then the Zetta capability
-and the liquid changes; then #380 with #381 and #383 in the same `move_workspace_store` run; #382
-and #384 need no migration.
+The umbrella rule's exceptions for S7 and S9 are already in the bridge `CLAUDE.md`.
 
 ## Changing this plan
 
-When a decision is answered, record it in the liquid-bridge `docs/decisions.md`, change its row
-above from a question to the answer, and update the item's row in
-[workspace-data-plane.md](workspace-data-plane.md#storage-audit). When an item ships, mark it there
-as moved and link its change, as the records moves do.
+When an item ships, mark its row in [workspace-data-plane.md](workspace-data-plane.md#storage-audit)
+as moved (or as an instance exception for #382 and #384) and link its change, as the records moves
+do. A change to a decision above is a new liquid-bridge decision, not an edit of this table.
