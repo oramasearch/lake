@@ -208,3 +208,10 @@ lake#350) live in the workspace named by `workspace_id` on create, list (`drive_
 and revoke, and by the bearer token on resolve, preview and download; the sharing pages carry the
 workspace in their URLs and forms (`http_server.cpp`, `web_ui.cpp`). `copy_workspace_records` also
 copies `drive_share_links`.
+(lake#370, `docs/architecture/workspace-records.md`). `app_capabilities.cpp` records application
+lifecycle events and delivery attempts in the application's workspace (lake#356, lake#357):
+`register_application` requires `workspace_id`, the synchronous identity callers record an event
+through `liquid::runtime::block_on`, and `list_application_webhook_events` and
+`retry_application_webhook` are asynchronous and take the application's `workspace_id`.
+`copy_workspace_records` also copies `auth_app_webhook_events` and `auth_app_webhook_deliveries`.
+The applications page registers into a chosen workspace, and the event log page reads it.

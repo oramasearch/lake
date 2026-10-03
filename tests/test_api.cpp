@@ -55,6 +55,7 @@
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/telemetry/metrics.hpp"
 #include "lake/version.hpp"
+#include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
 #include "workspace_fixture.hpp"
 #include "api/workspace_records_api.hpp"
@@ -2068,6 +2069,12 @@ TEST(ApplicationHttp, HostedAndCustomDomainPagesUseTheApplicationPool) {
     const std::string application_id = lake::control::new_uuid_v4();
     const auto key = lake::control::apps::generate_signing_key(application_id, 1);
     ASSERT_TRUE(key) << key.error();
+    // Sign-ups record the application's events in its workspace Zetta (lake#356).
+    const auto zetta = std::make_shared<lake::test::StreamCaller>();
+    const auto service_dir =
+        lake::test::fixture_path("hosted-application-" + lake::control::new_uuid_v4());
+    const std::string workspace_id =
+        lake::test::ready_workspace(*store, service_dir, customer->id, "hosted");
     const auto application =
         store->create_application({.id = application_id,
                                    .customer_id = customer->id,
@@ -2077,13 +2084,17 @@ TEST(ApplicationHttp, HostedAndCustomDomainPagesUseTheApplicationPool) {
                                    .redirect_uris = {"https://product.example.test/callback"},
                                    .custom_sign_in_domain = "login.product.example.test",
                                    .theme = {{"accent_color", "#123456"}},
-                                   .signing_key = *key});
+                                   .signing_key = *key,
+                                   .workspace_id = workspace_id});
     ASSERT_TRUE(application) << application.error().message;
 
     ServerOptions options;
     options.port = 0;
     options.public_host = "lake.example.test";
     options.store = store;
+    options.instance_kek = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    options.workspaces = std::make_shared<lake::control::WorkspaceService>(
+        lake::control::WorkspaceConfig{service_dir.string(), 0}, store, zetta);
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
 

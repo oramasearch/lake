@@ -2169,7 +2169,8 @@ control::Application application_from_json(const nlohmann::json& value) {
             json_string(value, "custom_sign_in_domain"),
             value.value("theme", nlohmann::json::object()),
             json_string(value, "created_at"),
-            json_string(value, "updated_at")};
+            json_string(value, "updated_at"),
+            json_string(value, "workspace_id")};
 }
 
 control::ApplicationUser application_user_from_json(const nlohmann::json& value) {
@@ -7100,9 +7101,17 @@ struct ApiServer::Impl {
         }
         std::vector<control::Customer> customers;
         std::vector<control::Application> applications;
+        std::vector<control::Workspace> workspaces;
         for (const auto& value : customer_rows.value.at("items")) {
             const control::Customer customer = customer_from_json(value);
             customers.push_back(customer);
+            if (auto owned = options.store->list_workspaces(customer.id)) {
+                for (control::Workspace& workspace : *owned) {
+                    if (workspace.desired != "deleted") {
+                        workspaces.push_back(std::move(workspace));
+                    }
+                }
+            }
             const ApiResult application_rows = registry.call(
                 "list_applications", {{"customer_id", customer.id}, {"limit", 500}}, context);
             if (!application_rows.ok) {
@@ -7114,7 +7123,8 @@ struct ApiServer::Impl {
         }
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_applications(applications, customers, error, viewer_for(context)),
+                         web_ui_applications(
+                             applications, customers, workspaces, error, viewer_for(context)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -7126,9 +7136,18 @@ struct ApiServer::Impl {
             co_return http::route_error(read_error);
         }
         ApiContext context = context_for(route);
+        // The form names the workspace; its space is the application's customer.
+        const std::string workspace_id = form_field(body, "workspace_id");
+        std::string customer_id = form_field(body, "customer_id");
+        if (options.store && !workspace_id.empty()) {
+            if (const auto workspace = options.store->get_workspace(workspace_id)) {
+                customer_id = workspace->customer_id;
+            }
+        }
         const ApiResult result =
             registry.call("register_application",
-                          {{"customer_id", form_field(body, "customer_id")},
+                          {{"customer_id", customer_id},
+                           {"workspace_id", workspace_id},
                            {"name", form_field(body, "name")},
                            {"allowed_origins", form_lines(form_field(body, "allowed_origins"))},
                            {"redirect_uris", form_lines(form_field(body, "redirect_uris"))},
@@ -7272,32 +7291,46 @@ struct ApiServer::Impl {
         co_return co_await redirect(route, "/application/organizations?id=" + application_id);
     }
 
+    // The application's event log, read from the workspace Zetta of the application's workspace
+    // (lake#356); a new webhook's secret is shown once, on the page its creation renders.
+    boost::http::route_task serve_application_events(boost::http::route_params& route,
+                                                     ApiContext& context,
+                                                     std::string id,
+                                                     std::string secret = {}) {
+        const ApiResult application = registry.call("get_application", {{"id", id}}, context);
+        if (!application.ok) {
+            co_return co_await serve_page_error(route, application);
+        }
+        const control::Application parsed = application_from_json(application.value);
+        auto rows = co_await registry.call_async(
+            "list_application_webhook_events",
+            {{"application_id", id}, {"workspace_id", parsed.workspace_id}, {"limit", 500}},
+            context);
+        if (!rows) {
+            co_return co_await serve_page_error(
+                route, ApiResult::failure("store_error", rows.error().message));
+        }
+        if (!rows->ok) {
+            co_return co_await serve_page_error(route, *rows);
+        }
+        std::vector<control::ApplicationWebhookEvent> events;
+        for (const auto& value : rows->value.at("items")) {
+            events.push_back(application_event_from_json(value));
+        }
+        co_return co_await send_text(
+            route,
+            boost::http::status::ok,
+            web_ui_application_events(parsed, events, secret, viewer_for(context)),
+            "text/html; charset=utf-8",
+            "no-store");
+    }
+
     boost::http::route_task serve_application_events_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
-        const std::string id = query_value(route, "id");
-        const ApiResult application = registry.call("get_application", {{"id", id}}, context);
-        const ApiResult rows = registry.call(
-            "list_application_webhook_events", {{"application_id", id}, {"limit", 500}}, context);
-        if (!application.ok) {
-            return serve_page_error(route, application);
-        }
-        if (!rows.ok) {
-            return serve_page_error(route, rows);
-        }
-        std::vector<control::ApplicationWebhookEvent> events;
-        for (const auto& value : rows.value.at("items")) {
-            events.push_back(application_event_from_json(value));
-        }
-        return send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_application_events(
-                application_from_json(application.value), events, "", viewer_for(context)),
-            "text/html; charset=utf-8",
-            "no-store");
+        co_return co_await serve_application_events(route, context, query_value(route, "id"));
     }
 
     boost::http::route_task serve_application_webhook_create(boost::http::route_params& route) {
@@ -7317,22 +7350,8 @@ struct ApiServer::Impl {
         if (!result.ok) {
             co_return co_await serve_page_error(route, result);
         }
-        auto application = options.store->get_application(application_id);
-        auto rows = options.store->list_application_webhook_events(application_id, 500);
-        if (!application || !rows) {
-            co_return co_await send_text(route,
-                                         http::status::internal_server_error,
-                                         error_body("store_error", "could not render webhook page"),
-                                         "application/json; charset=utf-8",
-                                         "no-store");
-        }
-        co_return co_await send_text(
-            route,
-            http::status::ok,
-            web_ui_application_events(
-                *application, *rows, result.value.value("secret", ""), viewer_for(context)),
-            "text/html; charset=utf-8",
-            "no-store");
+        co_return co_await serve_application_events(
+            route, context, application_id, result.value.value("secret", ""));
     }
 
     boost::http::route_task serve_application_identity_page(boost::http::route_params& route,

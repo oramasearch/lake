@@ -985,18 +985,16 @@ public:
     virtual Result<ApplicationWebhook> get_application_webhook(const std::string& id) = 0;
     virtual Result<std::vector<ApplicationWebhook>>
     list_application_webhooks(const std::string& application_id, int limit) = 0;
-    virtual Result<ApplicationWebhookEvent>
-    create_application_webhook_event(const std::string& application_id,
-                                     const std::string& event,
-                                     const nlohmann::json& payload) = 0;
-    virtual Result<ApplicationWebhookEvent>
-    get_application_webhook_event(const std::string& id) = 0;
-    virtual Result<std::vector<ApplicationWebhookEvent>>
-    list_application_webhook_events(const std::string& application_id, int limit) = 0;
-    virtual Result<ApplicationWebhookDelivery>
-    create_application_webhook_delivery(const NewApplicationWebhookDelivery& value) = 0;
-    virtual Result<std::vector<ApplicationWebhookDelivery>>
-    list_application_webhook_deliveries(const std::string& event_id) = 0;
+    // The retired auth_app_webhook_events and auth_app_webhook_deliveries tables (lake#356,
+    // lake#357), for the one-shot copy into workspace Zettas only. Assigning records each
+    // unassigned event's owner in workspace_assignments, as migration 0049 does, for rows written
+    // after it, and resolves needs_selection events whose application has since been assigned a
+    // workspace. Listing pages by id, oldest id first; a delivery's owner is its event's.
+    virtual Result<void> assign_legacy_application_webhook_events() = 0;
+    virtual Result<std::vector<LegacyApplicationWebhookEvent>>
+    legacy_application_webhook_events(const std::string& after_id, int limit) = 0;
+    virtual Result<std::vector<LegacyApplicationWebhookDelivery>>
+    legacy_application_webhook_deliveries(const std::string& after_id, int limit) = 0;
     virtual Result<void>
     create_application_authorization_code(const ApplicationAuthorizationCode& value) = 0;
     virtual Result<ApplicationAuthorizationCode>

@@ -7,8 +7,11 @@
 #include <mutex>
 #include <stdexcept>
 
+#include <pqxx/pqxx>
+
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "record_fixture.hpp"
 #include "temporary_directory.hpp"
@@ -217,4 +220,40 @@ struct StreamWorkspace {
         return row->id;
     }
 };
+// A new workspace of `customer`, Ready at http://<name>.test with its credential in `directory`
+// (the WorkspaceService's service directory), over the in-memory store or, when `database_uri` is
+// set, PostgreSQL, where the operator's status row is written directly.
+inline std::string ready_workspace(control::Store& store, const std::filesystem::path& directory,
+                                   const std::string& customer, const std::string& name,
+                                   const std::string& database_uri = {}) {
+    const auto row = store.create_workspace({customer, name, "prod", ""});
+    if (!row) {
+        throw std::runtime_error(row.error().message);
+    }
+    const auto service = store.get_service(row->zetta_service_id);
+    if (!service) {
+        throw std::runtime_error(service.error().message);
+    }
+    const std::string endpoint = "http://" + name + ".test";
+    if (database_uri.empty()) {
+        const auto ready = dynamic_cast<control::InMemoryStore&>(store).set_service_status(
+            service->id, "Ready", "", endpoint);
+        if (!ready) {
+            throw std::runtime_error(ready.error().message);
+        }
+    } else {
+        pqxx::connection connection(database_uri);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO service_status (service_id, phase, endpoint) VALUES ($1::uuid, "
+                       "'Ready', $2) ON CONFLICT (service_id) DO UPDATE SET phase = 'Ready', "
+                       "endpoint = EXCLUDED.endpoint",
+                       service->id, endpoint);
+        tx.commit();
+    }
+    std::filesystem::create_directories(directory);
+    std::ofstream(directory / (service->slug + ".json"))
+        << nlohmann::json{{"kind", "zetta"}, {"token", "token-" + name}}.dump();
+    return row->id;
+}
+
 } // namespace lake::test

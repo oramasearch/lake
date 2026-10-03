@@ -2,12 +2,16 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <map>
 #include <expected>
 #include <ranges>
 #include <string>
 #include <vector>
 
+#include "lake/control/application_webhook_records.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "workspace_records_api.hpp"
 
 namespace lake::api {
 namespace {
@@ -171,10 +175,41 @@ bool accepts_event(const control::ApplicationWebhook& webhook, std::string_view 
            std::ranges::find(webhook.events, std::string(event)) != webhook.events.end();
 }
 
-ApiResult deliver_to_webhook(const control::ApplicationWebhookEvent& event,
-                             const control::ApplicationWebhook& webhook,
-                             int first_attempt,
-                             ApiContext& context) {
+// The records of the application's workspace, where its events and delivery attempts live
+// (lake#356, lake#357). Never anywhere else: an application with no workspace yet, or a workspace
+// that is not ready, is refused.
+std::expected<control::WorkspaceRecords, ApiResult>
+application_records(const control::Application& application, const ApiContext& context) {
+    if (application.workspace_id.empty()) {
+        return std::unexpected(ApiResult::failure(
+            "workspace_not_ready", "application " + application.id +
+                                       " has no workspace yet; its events cannot be recorded until "
+                                       "an operator assigns one (migration 0049)"));
+    }
+    auto records = workspace_records(context, application.customer_id, application.workspace_id);
+    if (!records) {
+        return std::unexpected(
+            ApiResult::failure(records.error().code, records.error().message, records.error().path));
+    }
+    return std::move(*records);
+}
+
+// A pending attempt this old was claimed by a caller that stopped before recording the outcome:
+// an outbound exchange times out after 30 seconds.
+constexpr std::int64_t abandoned_claim_us = 5LL * 60 * 1'000'000;
+
+ApiResult from_records_error(const control::ZettaControlError& error) {
+    return ApiResult::failure(error.code, error.message, error.path);
+}
+
+// Sends `event` to `webhook` up to three consecutive attempts from `first_attempt`, stopping at the
+// first 2xx. Each attempt is claimed in the workspace before it is sent and its outcome recorded
+// after: a caller whose claim conflicts sends nothing, so an attempt is never sent twice.
+liquid::runtime::task<ApiResult> deliver_to_webhook(control::WorkspaceRecords& records,
+                                                    const control::ApplicationWebhookEvent& event,
+                                                    const control::ApplicationWebhook& webhook,
+                                                    int first_attempt,
+                                                    ApiContext& context) {
     const json body = {{"id", event.id},
                        {"application_id", event.application_id},
                        {"event", event.event},
@@ -185,6 +220,23 @@ ApiResult deliver_to_webhook(const control::ApplicationWebhookEvent& event,
         control::apps::webhook_signature(webhook.secret, event.id, payload);
     control::ApplicationWebhookDelivery last;
     for (int attempt = first_attempt; attempt < first_attempt + 3; ++attempt) {
+        control::ApplicationWebhookDelivery delivery;
+        delivery.application_id = event.application_id;
+        delivery.event_id = event.id;
+        delivery.webhook_id = webhook.id;
+        delivery.attempt = attempt;
+        delivery.signature = signature;
+        delivery.pending = true;
+        auto claimed = control::settled(
+            co_await control::claim_application_webhook_delivery(records, std::move(delivery)));
+        if (!claimed) {
+            if (claimed.error().code == "conflict") {
+                co_return ApiResult::failure(
+                    "conflict", "attempt " + std::to_string(attempt) +
+                                    " of this event to this webhook is already being delivered");
+            }
+            co_return from_records_error(claimed.error());
+        }
         WebhookDeliveryResult sent;
         if (context.webhook_sender) {
             sent = context.webhook_sender(webhook.url,
@@ -196,17 +248,64 @@ ApiResult deliver_to_webhook(const control::ApplicationWebhookEvent& event,
         } else {
             sent.error = "webhook sender is not configured";
         }
-        auto stored = context.store->create_application_webhook_delivery(
-            {event.id, webhook.id, attempt, sent.status, signature, sent.error});
-        if (!stored) {
-            return from_store_error(stored.error());
+        claimed->delivery.status = sent.status;
+        claimed->delivery.error = sent.error;
+        auto recorded = control::settled(
+            co_await control::settle_application_webhook_delivery(records, std::move(*claimed)));
+        if (!recorded) {
+            co_return from_records_error(recorded.error());
         }
-        last = *stored;
+        last = std::move(*recorded);
         if (sent.status >= 200 && sent.status < 300) {
             break;
         }
     }
-    return ApiResult::success(control::to_json(last));
+    co_return ApiResult::success(control::to_json(last));
+}
+
+// Records one event in the application's workspace and delivers it to each subscribed webhook.
+liquid::runtime::task<ApiResult> record_and_deliver(control::WorkspaceRecords& records,
+                                                    control::ApplicationWebhookEvent event,
+                                                    std::vector<control::ApplicationWebhook> webhooks,
+                                                    ApiContext& context) {
+    control::ApplicationWebhookEvents events(records);
+    auto stored = control::settled(co_await events.append(std::move(event)));
+    if (!stored) {
+        co_return from_records_error(stored.error());
+    }
+    for (const control::ApplicationWebhook& webhook : webhooks) {
+        if (!accepts_event(webhook, stored->event)) {
+            continue;
+        }
+        auto delivered = co_await deliver_to_webhook(records, *stored, webhook, 1, context);
+        if (!delivered) {
+            co_return ApiResult::failure("store_error", delivered.error().message);
+        }
+        if (!delivered->ok) {
+            co_return std::move(*delivered);
+        }
+    }
+    co_return ApiResult::success(control::to_json(*stored));
+}
+
+// The application named by `application_id`, provided `workspace_id` is the workspace that holds
+// its events: anything else is invalid input at /workspace_id, never a read elsewhere.
+std::expected<control::Application, ApiResult> application_in_workspace(const json& input,
+                                                                        ApiContext& context) {
+    auto application = context.store->get_application(input.at("application_id"));
+    if (!application) {
+        return std::unexpected(from_store_error(application.error()));
+    }
+    if (application->workspace_id.empty()) {
+        return std::unexpected(ApiResult::failure(
+            "workspace_not_ready", "application has no workspace yet; an operator assigns one"));
+    }
+    if (input.at("workspace_id") != application->workspace_id) {
+        return std::unexpected(ApiResult::failure(
+            "invalid_input", "workspace_id is not the workspace of this application",
+            "/workspace_id"));
+    }
+    return std::move(*application);
 }
 
 std::expected<control::ApplicationOrganization, ApiResult> application_organization(
@@ -248,25 +347,27 @@ ApiResult emit_application_event(const control::Application& application,
     if (std::ranges::find(lifecycle_events, event) == lifecycle_events.end()) {
         return ApiResult::failure("invalid_input", "unsupported application lifecycle event");
     }
-    auto stored =
-        context.store->create_application_webhook_event(application.id, std::string(event), data);
-    if (!stored) {
-        return from_store_error(stored.error());
+    auto records = application_records(application, context);
+    if (!records) {
+        return records.error();
     }
     auto webhooks = context.store->list_application_webhooks(application.id, 1000);
     if (!webhooks) {
         return from_store_error(webhooks.error());
     }
-    for (const control::ApplicationWebhook& webhook : *webhooks) {
-        if (!accepts_event(webhook, event)) {
-            continue;
-        }
-        const ApiResult delivered = deliver_to_webhook(*stored, webhook, 1, context);
-        if (!delivered.ok) {
-            return delivered;
-        }
+    control::ApplicationWebhookEvent value;
+    value.application_id = application.id;
+    value.event = std::string(event);
+    value.payload = data;
+    // The callers (sign-in, sign-up, MFA and the application lifecycle capabilities) are
+    // synchronous, so the workspace calls run to completion here, as the event was written before
+    // the caller answered when it lived in the control store.
+    auto completed = liquid::runtime::block_on(
+        record_and_deliver(*records, std::move(value), std::move(*webhooks), context));
+    if (!completed) {
+        return ApiResult::failure("store_error", completed.error().message);
     }
-    return ApiResult::success(control::to_json(*stored));
+    return std::move(*completed);
 }
 
 ApiResult application_session_result(control::Result<control::IssuedSession> issued,
@@ -354,15 +455,20 @@ void register_application_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "register_application",
         .title = "Register application",
-        .description = "Create an application user pool and its first Ed25519 JWT key.",
+        .description =
+            "Create an application user pool and its first Ed25519 JWT key, in one workspace of "
+            "the space: that workspace's Zetta holds the application's lifecycle events and "
+            "webhook delivery attempts. The workspace never changes.",
         .input_schema =
             input_schema({{"customer_id", {{"type", "string"}}},
                           {"name", {{"type", "string"}}},
                           {"allowed_origins", {{"type", "array"}, {"items", {{"type", "string"}}}}},
                           {"redirect_uris", {{"type", "array"}, {"items", {{"type", "string"}}}}},
                           {"custom_sign_in_domain", {{"type", "string"}}},
-                          {"theme", {{"type", "object"}}}},
-                         json::array({"customer_id", "name", "allowed_origins", "redirect_uris"})),
+                          {"theme", {{"type", "object"}}},
+                          {"workspace_id", {{"type", "string"}}}},
+                         json::array({"customer_id", "workspace_id", "name", "allowed_origins",
+                                      "redirect_uris"})),
         .output_schema = object_schema(),
         .kind = CapabilityKind::Action,
         .object = "customer applications",
@@ -386,7 +492,8 @@ void register_application_capabilities(Registry& registry) {
                  .redirect_uris = input.at("redirect_uris").get<std::vector<std::string>>(),
                  .custom_sign_in_domain = input.value("custom_sign_in_domain", ""),
                  .theme = input.value("theme", json::object()),
-                 .signing_key = *key}));
+                 .signing_key = *key,
+                 .workspace_id = input.at("workspace_id")}));
         }});
     registry.add(Capability{
         .name = "list_applications",
@@ -969,77 +1076,138 @@ void register_application_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "list_application_webhook_events",
         .title = "List application webhook events",
-        .description = "List lifecycle events and their recorded delivery attempts.",
-        .input_schema = input_schema(
-            {{"application_id", {{"type", "string"}}}, {"limit", {{"type", "integer"}}}},
-            json::array({"application_id"})),
+        .description =
+            "List an application's lifecycle events, newest first, with their delivery attempts. "
+            "They live in the workspace Zetta of the application's workspace: `workspace_id` must "
+            "name that workspace.",
+        .input_schema = input_schema({{"application_id", {{"type", "string"}}},
+                                      {"workspace_id", {{"type", "string"}}},
+                                      {"limit", {{"type", "integer"}}}},
+                                     json::array({"application_id", "workspace_id"})),
         .output_schema = items_schema(),
         .kind = CapabilityKind::Read,
         .object = "application",
         .action = "read",
         .resolve_object = application_object,
         .authorizes_candidates = true,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (auto denied = authorize_application_list(input, context)) {
-                return *denied;
+                co_return *denied;
             }
-            auto events = context.store->list_application_webhook_events(input.at("application_id"),
-                                                                         limit_of(input));
+            auto application = application_in_workspace(input, context);
+            if (!application) {
+                co_return application.error();
+            }
+            auto records = application_records(*application, context);
+            if (!records) {
+                co_return records.error();
+            }
+            auto events = control::settled(co_await control::list_application_webhook_events(
+                *records, application->id, static_cast<std::size_t>(limit_of(input))));
             if (!events) {
-                return from_store_error(events.error());
+                co_return from_records_error(events.error());
+            }
+            // One walk of the application's attempts back to the oldest listed event (less a
+            // minute for clocks that disagree), grouped by event.
+            std::map<std::string, json> deliveries;
+            if (!events->empty()) {
+                auto attempts = control::settled(co_await control::list_application_webhook_deliveries(
+                    *records, application->id, events->back().at_us - 60'000'000));
+                if (!attempts) {
+                    co_return from_records_error(attempts.error());
+                }
+                for (const auto& delivery : *attempts) {
+                    auto& listed = deliveries[delivery.event_id];
+                    if (!listed.is_array()) {
+                        listed = json::array();
+                    }
+                    listed.push_back(control::to_json(delivery));
+                }
             }
             json items = json::array();
             for (const auto& event : *events) {
                 json value = control::to_json(event);
-                auto deliveries = context.store->list_application_webhook_deliveries(event.id);
-                if (!deliveries) {
-                    return from_store_error(deliveries.error());
-                }
-                value["deliveries"] = json::array();
-                for (const auto& delivery : *deliveries) {
-                    value["deliveries"].push_back(control::to_json(delivery));
-                }
+                const auto found = deliveries.find(event.id);
+                value["deliveries"] = found == deliveries.end() ? json::array() : found->second;
                 items.push_back(std::move(value));
             }
-            return ApiResult::success({{"items", std::move(items)}});
+            co_return ApiResult::success({{"items", std::move(items)}});
         }});
     registry.add(Capability{
         .name = "retry_application_webhook",
         .title = "Retry application webhook",
-        .description = "Retry one event against one subscribed webhook and append attempts.",
+        .description =
+            "Retry one event against one subscribed webhook and append up to three attempts in the "
+            "application's workspace. An attempt another caller is already sending is refused as "
+            "a conflict and not sent twice.",
         .input_schema = input_schema({{"application_id", {{"type", "string"}}},
+                                      {"workspace_id", {{"type", "string"}}},
                                       {"event_id", {{"type", "string"}}},
                                       {"webhook_id", {{"type", "string"}}}},
-                                     json::array({"application_id", "event_id", "webhook_id"})),
+                                     json::array({"application_id", "workspace_id", "event_id",
+                                                  "webhook_id"})),
         .output_schema = object_schema(),
         .kind = CapabilityKind::Action,
         .object = "application",
         .action = "admin",
         .resolve_object = application_object,
-        .handler = [](const json& input, ApiContext& context) {
-            auto event = context.store->get_application_webhook_event(input.at("event_id"));
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            auto application = application_in_workspace(input, context);
+            if (!application) {
+                co_return application.error();
+            }
             auto webhook = context.store->get_application_webhook(input.at("webhook_id"));
-            if (!event) {
-                return from_store_error(event.error());
-            }
             if (!webhook) {
-                return from_store_error(webhook.error());
+                co_return from_store_error(webhook.error());
             }
-            const std::string application_id = input.at("application_id");
-            if (event->application_id != application_id ||
-                webhook->application_id != application_id) {
-                return ApiResult::failure("not_found",
-                                          "event or webhook belongs to another application");
+            if (webhook->application_id != application->id) {
+                co_return ApiResult::failure("not_found",
+                                             "event or webhook belongs to another application");
             }
-            if (!accepts_event(*webhook, event->event)) {
-                return ApiResult::failure("conflict", "webhook does not subscribe to this event");
+            auto records = application_records(*application, context);
+            if (!records) {
+                co_return records.error();
             }
-            auto attempts = context.store->list_application_webhook_deliveries(event->id);
+            auto event = control::settled(co_await control::get_application_webhook_event(
+                *records, application->id, input.at("event_id")));
+            if (!event) {
+                co_return from_records_error(event.error());
+            }
+            if (!*event) {
+                co_return ApiResult::failure("not_found",
+                                             "event or webhook belongs to another application");
+            }
+            if (!accepts_event(*webhook, (*event)->event)) {
+                co_return ApiResult::failure("conflict", "webhook does not subscribe to this event");
+            }
+            auto attempts = control::settled(co_await control::list_application_webhook_deliveries(
+                *records, application->id, (*event)->at_us - 60'000'000));
             if (!attempts) {
-                return from_store_error(attempts.error());
+                co_return from_records_error(attempts.error());
             }
-            return deliver_to_webhook(
-                *event, *webhook, static_cast<int>(attempts->size()) + 1, context);
+            int previous = 0;
+            const control::ApplicationWebhookDelivery* latest = nullptr;
+            for (const auto& attempt : *attempts) {
+                if (attempt.event_id == (*event)->id && attempt.webhook_id == webhook->id &&
+                    attempt.attempt > previous) {
+                    previous = attempt.attempt;
+                    latest = &attempt;
+                }
+            }
+            // Another caller is still sending this event to this webhook: refuse rather than
+            // deliver it a second time concurrently. A claim older than any send can take was
+            // abandoned by a caller that stopped, and no longer holds the webhook.
+            const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+            if (latest && latest->pending && now_us - latest->at_us < abandoned_claim_us) {
+                co_return ApiResult::failure(
+                    "conflict", "a delivery of this event to this webhook is in progress");
+            }
+            co_return co_await deliver_to_webhook(*records, **event, *webhook, previous + 1,
+                                                  context);
         }});
 }
 

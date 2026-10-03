@@ -241,9 +241,12 @@ TEST(IdentityExit, PostgresProvesIdentityPkiAndDynamicSecrets) {
     context.authentication_method = "taap";
     context.scopes = {"*"};
 
+    const auto workspace = store->create_workspace({customer->id, "identity-exit", "prod", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
     const ApiResult application =
         call("register_application",
              {{"customer_id", customer->id},
+              {"workspace_id", workspace->id},
               {"name", "Identity exit relying party"},
               {"allowed_origins", json::array({"https://rp.example.test"})},
               {"redirect_uris", json::array({"https://rp.example.test/callback"})}});

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <expected>
 #include <string>
 #include <string_view>
@@ -20,6 +21,10 @@ struct Application {
     nlohmann::json theme = nlohmann::json::object();
     std::string created_at;
     std::string updated_at;
+    // The workspace whose Zetta holds the application's lifecycle events and delivery attempts
+    // (lake#356, lake#357). Set at registration and never changed; empty only for an application
+    // registered before migration 0049 whose space had several workspaces, until it is assigned.
+    std::string workspace_id;
 };
 
 struct ApplicationSigningKey {
@@ -43,6 +48,7 @@ struct NewApplication {
     std::string custom_sign_in_domain;
     nlohmann::json theme = nlohmann::json::object();
     ApplicationSigningKey signing_key;
+    std::string workspace_id; // a live workspace of the customer (migration 0049)
 };
 
 struct ApplicationUser {
@@ -91,14 +97,20 @@ struct NewApplicationWebhook {
     std::string secret;
 };
 
+// One lifecycle event of an application. It lives in the workspace Zetta of the application's
+// workspace (lake#356, control/application_webhook_records.hpp).
 struct ApplicationWebhookEvent {
     std::string id;
     std::string application_id;
     std::string event;
     nlohmann::json payload = nlohmann::json::object();
     std::string created_at;
+    std::int64_t at_us = 0; // created_at in microseconds since the Unix epoch
 };
 
+// One delivery attempt of an event to a webhook, in the same workspace as its event (lake#357).
+// `pending` is true from the moment a caller claims the attempt until it records the outcome: a
+// claimed attempt is sent by that caller only.
 struct ApplicationWebhookDelivery {
     std::string id;
     std::string event_id;
@@ -108,15 +120,25 @@ struct ApplicationWebhookDelivery {
     std::string signature;
     std::string error;
     std::string created_at;
+    std::string application_id;
+    bool pending = false;
+    std::int64_t at_us = 0;
 };
 
-struct NewApplicationWebhookDelivery {
-    std::string event_id;
-    std::string webhook_id;
-    int attempt = 0;
-    int status = 0;
-    std::string signature;
-    std::string error;
+// Rows of the retired auth_app_webhook_events and auth_app_webhook_deliveries tables with their
+// recorded owner (migration 0049), for the one-shot copy only: the workspace each is copied into,
+// or empty with the reason it is not (`needs_selection`). A delivery's owner is its event's.
+struct LegacyApplicationWebhookEvent {
+    ApplicationWebhookEvent event;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
+};
+struct LegacyApplicationWebhookDelivery {
+    ApplicationWebhookDelivery delivery;
+    std::string customer_id;
+    std::string workspace_id;
+    std::string outcome;
 };
 
 struct ApplicationAuthorizationCode {

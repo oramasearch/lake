@@ -28,8 +28,10 @@ one invalidates both its sessions and its linked passkey credential.
 
 ## Application identity
 
-An operator registers applications at `/applications` and follows the application detail page to
-pool users, application organizations, lifecycle events, and webhook registration. Those pages
+An operator registers applications at `/applications`, choosing the workspace of a space that will
+hold the application's lifecycle events (it never changes), and follows the application detail
+page to pool users, application organizations, lifecycle events, and webhook registration. The
+event log reads the events and their delivery attempts from that workspace's Zetta (lake#356). Those pages
 call the application capabilities through the registry and use the application policy object for
 authorization. Protected application mutations are recorded by the same signed audit path.
 

@@ -9253,6 +9253,7 @@ std::string web_ui_application_passkey_sign_in(const control::Application& appli
 
 std::string web_ui_applications(const std::vector<control::Application>& applications,
                                 const std::vector<control::Customer>& customers,
+                                const std::vector<control::Workspace>& workspaces,
                                 std::string_view error,
                                 WebUiViewer viewer) {
     std::string content = "<p class=\"eyebrow\">auth as a service</p><h1>Applications</h1>";
@@ -9273,14 +9274,19 @@ std::string web_ui_applications(const std::vector<control::Application>& applica
         content += "<tr><td colspan=\"3\" class=\"empty\">No applications.</td></tr>";
     }
     content += "</tbody></table></div><div class=\"panel\"><h2>Register Application</h2><form "
-               "class=\"stack\" method=\"post\" action=\"/applications\"><label>Customer<select "
-               "name=\"customer_id\" required>";
-    for (const auto& customer : customers) {
-        content += "<option value=\"" + web_ui_escape(customer.id) + "\">" +
-                   web_ui_escape(customer.name) + "</option>";
+               "class=\"stack\" method=\"post\" action=\"/applications\"><label>Workspace<select "
+               "name=\"workspace_id\" required>";
+    for (const auto& workspace : workspaces) {
+        const auto customer = std::ranges::find_if(
+            customers, [&](const auto& value) { return value.id == workspace.customer_id; });
+        const std::string space = customer == customers.end() ? std::string() : customer->name;
+        content += "<option value=\"" + web_ui_escape(workspace.id) + "\">" +
+                   web_ui_escape(space.empty() ? workspace.name : space + " / " + workspace.name) +
+                   "</option>";
     }
     content +=
-        "</select></label><label>Name<input name=\"name\" required></label><label>Allowed origins "
+        "</select></label><p class=\"sub\">The workspace holds the application's lifecycle "
+        "events and webhook deliveries, and never changes.</p><label>Name<input name=\"name\" required></label><label>Allowed origins "
         "(one per line)<textarea name=\"allowed_origins\" "
         "required></textarea></label><label>Redirect "
         "URIs (one per line)<textarea name=\"redirect_uris\"></textarea></label><label>Custom "
@@ -9305,7 +9311,9 @@ std::string web_ui_application(const control::Application& application, WebUiVie
         "</dd><dt>Custom domain</dt><dd>" +
         web_ui_escape(
             application.custom_sign_in_domain.empty() ? "—" : application.custom_sign_in_domain) +
-        "</dd></dl></div><p><a href=\"/application/users?id=" + id +
+        "</dd><dt>Workspace</dt><dd><code>" +
+        web_ui_escape(application.workspace_id.empty() ? "not assigned" : application.workspace_id) +
+        "</code></dd></dl></div><p><a href=\"/application/users?id=" + id +
         "\">Users</a> · <a href=\"/application/organizations?id=" + id +
         "\">Organizations</a> · <a href=\"/application/events?id=" + id +
         "\">Webhook events</a> · <a href=\"/apps/" + id + "/sign-in\">Hosted sign-in</a></p>";

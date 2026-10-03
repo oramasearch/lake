@@ -192,6 +192,7 @@ nlohmann::json to_json(const Application& value) {
             {"redirect_uris", value.redirect_uris},
             {"custom_sign_in_domain", value.custom_sign_in_domain},
             {"theme", value.theme},
+            {"workspace_id", nullable_text(value.workspace_id)},
             {"created_at", value.created_at},
             {"updated_at", value.updated_at}};
 }
@@ -243,6 +244,7 @@ nlohmann::json to_json(const ApplicationWebhookDelivery& value) {
             {"status", value.status},
             {"signature", value.signature},
             {"error", nullable_text(value.error)},
+            {"pending", value.pending},
             {"created_at", value.created_at}};
 }
 

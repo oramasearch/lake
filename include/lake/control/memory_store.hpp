@@ -145,17 +145,14 @@ public:
     Result<ApplicationWebhook> get_application_webhook(const std::string& id) override;
     Result<std::vector<ApplicationWebhook>>
     list_application_webhooks(const std::string& application_id, int limit) override;
-    Result<ApplicationWebhookEvent>
-    create_application_webhook_event(const std::string& application_id,
-                                     const std::string& event,
-                                     const nlohmann::json& payload) override;
-    Result<ApplicationWebhookEvent> get_application_webhook_event(const std::string& id) override;
-    Result<std::vector<ApplicationWebhookEvent>>
-    list_application_webhook_events(const std::string& application_id, int limit) override;
-    Result<ApplicationWebhookDelivery>
-    create_application_webhook_delivery(const NewApplicationWebhookDelivery& value) override;
-    Result<std::vector<ApplicationWebhookDelivery>>
-    list_application_webhook_deliveries(const std::string& event_id) override;
+    Result<void> assign_legacy_application_webhook_events() override;
+    Result<std::vector<LegacyApplicationWebhookEvent>>
+    legacy_application_webhook_events(const std::string& after_id, int limit) override;
+    Result<std::vector<LegacyApplicationWebhookDelivery>>
+    legacy_application_webhook_deliveries(const std::string& after_id, int limit) override;
+    // Tests: rows of the retired tables as an earlier lake wrote them (id, instant and owner kept).
+    void seed_legacy_application_webhook_event(ApplicationWebhookEvent event);
+    void seed_legacy_application_webhook_delivery(ApplicationWebhookDelivery delivery);
     Result<void>
     create_application_authorization_code(const ApplicationAuthorizationCode& value) override;
     Result<ApplicationAuthorizationCode>
@@ -554,6 +551,8 @@ private:
     std::vector<ApplicationWebhook> application_webhooks_;
     std::vector<ApplicationWebhookEvent> application_webhook_events_;
     std::vector<ApplicationWebhookDelivery> application_webhook_deliveries_;
+    // Retired rows' owners: event id -> workspace, outcome (migration 0049).
+    std::map<std::string, std::pair<std::string, std::string>> legacy_application_event_assignments_;
     struct ApplicationAuthorizationCodeRecord {
         ApplicationAuthorizationCode code;
         std::chrono::steady_clock::time_point expires_at;

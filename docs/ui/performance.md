@@ -142,6 +142,10 @@ Agents none, Search Indexes `list_indexes`, Models `list_models` and `list_studi
 Experiments `list_runs` and `list_studies`. Every response's `zetta_<capability>` entries must equal the capabilities the fake
 workspace observed for it.
 
+`/application/events` is not a workspace route and the fixture has no application, so it is held at
+the implicit `0`. With an application that has events it reads its workspace twice, in two rounds:
+the newest events, then their delivery attempts back to the oldest of them (lake#356).
+
 The deferred panels are JSON routes, not pages, and are held to their own budgets:
 
 | Panel | Calls | Rounds | Capabilities | Filled into |

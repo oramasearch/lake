@@ -9,7 +9,9 @@ take a pool and use the same credential, device, session, and identity-document 
 own `lake` pool. A credential from one pool is never considered by another pool.
 
 The registration records a display name, exact allowed origins, redirect URIs, an optional custom
-sign-in host, and a JSON theme. Browser requests carrying an `Origin` header must come from the
+sign-in host, a JSON theme, and the **workspace** of the space the application belongs to
+(`workspace_id`, required and never changed). That workspace's Zetta holds the application's
+lifecycle events and webhook delivery attempts ([Lifecycle webhooks](#lifecycle-webhooks)). Browser requests carrying an `Origin` header must come from the
 hosted page itself or an allowed origin. Redirects use only a registered URI. The custom host is a
 DNS and ingress concern: route that host to lake with a valid certificate, then lake selects the
 application by `Host`.
@@ -22,7 +24,7 @@ denial, and failure.
 
 | Capability | Authorization | Result |
 |---|---|---|
-| `register_application` | customer `admin` | application, including its new `pool_id` |
+| `register_application` | customer `admin` | application, including its new `pool_id` and its `workspace_id` |
 | `list_applications`, `get_application` | customer/application `read` | registrations without key material |
 | `update_application_theme` | application `admin` | updated registration |
 | `rotate_application_signing_key` | application `admin` | new key ID and version |
@@ -35,8 +37,9 @@ denial, and failure.
 | `list_application_organizations` | application `read` | application-owned organizations |
 | `create_application_organization`, `update_application_organization`, `delete_application_organization` | application `admin` | organization lifecycle result |
 | `create_application_webhook` | application `admin` | webhook registration and its secret, returned once |
-| `list_application_webhooks`, `list_application_webhook_events` | application `read` | secret-free registrations, events, and delivery attempts |
-| `retry_application_webhook` | application `admin` | the last appended attempt |
+| `list_application_webhooks` | application `read` | secret-free registrations |
+| `list_application_webhook_events` | application `read`; `workspace_id` must be the application's | events, newest first, each with its delivery attempts |
+| `retry_application_webhook` | application `admin`; `workspace_id` must be the application's | the last appended attempt |
 
 The existing public identity capabilities accept the application's `pool_id`. A successful
 application sign-up or sign-in adds `access_token`, `token_type: Bearer`, and `expires_in` to the
@@ -132,8 +135,39 @@ and retried up to three consecutive attempts. `retry_application_webhook` append
 set without changing earlier attempts. The event log retains status, signature, error, and attempt
 number for each delivery.
 
+### Where events and attempts live (lake#356, lake#357)
+
+An application's events and delivery attempts are records in the workspace Zetta of the
+application's workspace: the sealed collections `lake_auth_app_webhook_events` and
+`lake_auth_app_webhook_deliveries` ([workspace-records.md](../architecture/workspace-records.md)).
+Lake's PostgreSQL holds no event payload, signature or outcome, and nothing falls back to it, to
+another workspace or to the lake Zetta.
+
+- **Writing.** Every lifecycle event (sign-up, sign-in, MFA changes, user and organization
+  changes) is appended to the application's workspace before the caller is answered, as it was
+  written to the control store before. An application with no workspace yet (a legacy
+  registration whose space had several workspaces) answers `workspace_not_ready`, and so does a
+  workspace that is not ready. The event is then not recorded and the action that raised it fails.
+- **Exactly one sender per attempt.** Each attempt is a record keyed by the blind index of
+  `event, webhook, attempt`. Lake claims it with `if_absent` and a `pending` outcome before it
+  sends, and records the status with `if_revision` afterwards. A caller whose claim conflicts
+  sends nothing, so two lake processes, or two concurrent retries, never send the same attempt. A
+  retry while the latest attempt of that event to that webhook is still `pending` answers
+  `conflict`. A pending claim older than five minutes was abandoned by a caller that stopped (an
+  outbound exchange times out after 30 seconds), and a retry continues after it.
+- **There is no background retry loop.** Delivery is the three inline attempts plus
+  `retry_application_webhook`, as before, so lake keeps no due-delivery index anywhere.
+- **Reading.** `list_application_webhook_events` and `retry_application_webhook` take the
+  application's `workspace_id`. A missing, malformed, unknown, foreign or other workspace of the
+  space is `invalid_input` at `/workspace_id`; the page passes the application's own. A listing is
+  two record reads: the newest events, then the attempts back to the oldest of them.
+- **Retention and deletion.** Events and attempts are kept until their workspace is deleted, which
+  deletes its Zetta and its records. The application's events then can no longer be written, so
+  its sign-ins fail until the application is registered again in a live workspace.
+
 Signing seeds and webhook secrets are AES-256-GCM protected through application-specific keystore
 purposes before Postgres storage. They never appear in list, application, event, or audit output.
+The webhook registrations and their secrets stay in PostgreSQL until lake#355.
 
 ## ApplicationAgent and Ship Apps
 
@@ -162,7 +196,8 @@ page is [the Ship Apps UI](../ui/apps.md).
 ```sh
 cmake --build build
 LAKE_TEST_DB_URI=postgresql://lake:password@127.0.0.1:5432/lake_test \
-  ctest --test-dir build --output-on-failure -R 'ApplicationAuth|ApplicationHttp|PostgresApplications'
+  ctest --test-dir build --output-on-failure \
+    -R 'ApplicationAuth|ApplicationHttp|PostgresApplications|TheOneShotCopyMovesApplication'
 ```
 
 `ApplicationAuth` verifies a real Ed25519 JWT against the returned JWKS and checks its audience,
@@ -170,7 +205,15 @@ records a failed webhook delivery followed by its successful retry, suspends the
 pool isolation. Its policy case proves application lists filter inaccessible registrations and
 reject access to another application's user list. `ApplicationHttp` submits the hosted forms,
 renders every custom-domain entry page, and reads the raw JWKS route.
-`PostgresApplications` exercises the registry capabilities against migration `0016_auth_apps`.
+`ApplicationAuth.EventsAndDeliveriesLiveInTheApplicationsWorkspace` covers two spaces, two
+workspaces in one space, missing, malformed, unknown and foreign `workspace_id`, a reader who may
+list but not retry, a workspace that is not ready, and workspace deletion.
+`ApplicationAuth.AnAttemptIsClaimedOnceAndSentOnce` proves a claimed attempt is not sent by a
+second caller and that an abandoned claim does not block retries.
+`PostgresApplications` exercises the registry capabilities against migration `0016_auth_apps` and
+the routing trigger of `0049`. `PostgresApplicationWebhooks.MigrationRecordsEachEventsOwnerForTheCopy`
+covers migration `0049`, and `WorkspaceRecordStores.TheOneShotCopyMovesApplicationEventsAndTheirDeliveries`
+the copy in both stores.
 `IdentityExit.PostgresProvesIdentityPkiAndDynamicSecrets` starts from a liquid TAAP-key lake
 session, completes the PKCE code exchange as a test relying party, and validates the ID token
 signature and claims against the application's JWKS.

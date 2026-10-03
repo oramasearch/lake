@@ -168,13 +168,13 @@ only the three listed below; no names are invented for the four unobserved datas
 | `metering_usage` | workspace | Usage measurements, independent of billing design. [Follow-up](https://github.com/oramasearch/lake/issues/348). |
 | `metering_build_records` | workspace | Build compute measurements. [Follow-up](https://github.com/oramasearch/lake/issues/349). |
 | `drive_share_links` | workspace | Drive share links: token digest, folder, role, expiry, revocation. **Moved** to each workspace Zetta's `lake_drive_share_links` record collection by [lake#350](https://github.com/oramasearch/lake/issues/350) ([sharing.md](../api/sharing.md#where-links-live)); the synthetic `share-link:<id>` grant stays a grant, and `drive_share_link_routes` (multitenancy/dispatch: token digest → workspace for pre-move tokens) stays central. The table is read only by the one-shot copy until a later migration drops it. |
-| `auth_applications` | workspace | Application identity-pool configuration. [Follow-up](https://github.com/oramasearch/lake/issues/351). |
+| `auth_applications` | workspace | Application identity-pool configuration. [Follow-up](https://github.com/oramasearch/lake/issues/351). Its `workspace_id` (migration `0049`, required at registration, set once) is content-free routing: the workspace that holds the application's events. |
 | `auth_app_signing_keys` | workspace | Application signing credentials. [Follow-up](https://github.com/oramasearch/lake/issues/352). |
 | `auth_app_users` | workspace | Application user records. [Follow-up](https://github.com/oramasearch/lake/issues/353). |
 | `auth_app_organizations` | workspace | Application organization records. [Follow-up](https://github.com/oramasearch/lake/issues/354). |
 | `auth_app_webhooks` | workspace | Webhook configuration and secrets. [Follow-up](https://github.com/oramasearch/lake/issues/355). |
-| `auth_app_webhook_events` | workspace | Application event history. [Follow-up](https://github.com/oramasearch/lake/issues/356). |
-| `auth_app_webhook_deliveries` | workspace | Delivery payloads and retry history. [Follow-up](https://github.com/oramasearch/lake/issues/357). |
+| `auth_app_webhook_events` | workspace | Application event history. **Moved** to the `lake_auth_app_webhook_events` record collection of the application's workspace Zetta by [lake#356](https://github.com/oramasearch/lake/issues/356) ([workspace-records.md](workspace-records.md)); the table is read only by the one-shot copy until a later migration drops it. |
+| `auth_app_webhook_deliveries` | workspace | Delivery payloads and retry history. **Moved** to `lake_auth_app_webhook_deliveries` in the event's workspace by [lake#357](https://github.com/oramasearch/lake/issues/357); each attempt is claimed there before it is sent. No due-delivery index is kept centrally, because there is no background retry loop. The table is read only by the one-shot copy. |
 | `agent_sessions` | workspace | Agent credential delegation and session state. [Follow-up](https://github.com/oramasearch/lake/issues/360). |
 | `customer_storage_quotas` | multitenancy/dispatch | Tenant allocation policy; measurements move. |
 | `platform_environments` | workspace | Repository environment definitions. [Follow-up](https://github.com/oramasearch/lake/issues/358). |

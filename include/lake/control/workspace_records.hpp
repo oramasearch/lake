@@ -87,10 +87,12 @@ public:
            RecordWrite write = {});
 
     // Every record found by `lookup`, oldest first (by instant, then id), at most the newest
-    // `newest` of them (0: all, following next_after). A missing collection is no records; records
-    // that do not open with this workspace's key are skipped.
+    // `newest` of them (0: all, following next_after), and none older than `since_us` (0: no
+    // bound; the walk stops at the first older record). A missing collection is no records;
+    // records that do not open with this workspace's key are skipped.
     liquid::runtime::task<ZettaControlResult<std::vector<StoredRecord>>>
-    list(RecordCollection collection, std::string lookup, std::size_t newest = 0);
+    list(RecordCollection collection, std::string lookup, std::size_t newest = 0,
+         std::int64_t since_us = 0);
 
     // One record by key; nullopt when it does not exist (or does not open here).
     liquid::runtime::task<ZettaControlResult<std::optional<StoredRecord>>>
