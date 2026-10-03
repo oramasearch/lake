@@ -185,7 +185,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `platform_mirror` | workspace | Deployment, log and environment state. [Follow-up](https://github.com/oramasearch/lake/issues/359). |
 | `identity_taap_assertions` | workspace | Authentication replay evidence. [Follow-up](https://github.com/oramasearch/lake/issues/361). |
 | `auth_app_authorization_codes` | workspace | Application authentication exchange state. [Follow-up](https://github.com/oramasearch/lake/issues/363). |
-| `secrets_dynamic_leases` | workspace | Generated credentials and lease lifecycle. [Follow-up](https://github.com/oramasearch/lake/issues/362). |
+| `secrets_dynamic_leases` | workspace | Generated credentials and lease lifecycle. **Moved** ([lake#362](https://github.com/oramasearch/lake/issues/362), migration `0058`): `lake_secrets_dynamic_leases` in the mount's workspace Zetta ([secrets.md](../api/secrets.md#where-leases-live-lake362)); the table is read only by the one-shot copy until a later migration drops it. |
 | `custodial_identities` | workspace | Encrypted identity signing seeds. [Follow-up](https://github.com/oramasearch/lake/issues/364). |
 | `services` | multitenancy/dispatch | Customer workspace/service identities and provisioning routing. |
 | `service_status` | multitenancy/dispatch | Workspace endpoint and readiness routing. |
@@ -205,6 +205,7 @@ only the three listed below; no names are invented for the four unobserved datas
 | `builds` | workspace | Build inputs, results and token hashes; workspace ID added here. [Follow-up](https://github.com/oramasearch/lake/issues/378). |
 | `stream_owners` | workspace | Moved: topic creators are sealed records in the topic's workspace Zetta (`lake_stream_owners`), so ownership follows the workspace incarnation; migration `0047_stream_owner_workspaces` records each row's workspace for the copy, and the table is dropped once it is verified ([lake#379](https://github.com/oramasearch/lake/issues/379), [streams.md](../control-plane/streams.md)). |
 | `secret_mount_routes` | multitenancy/dispatch | Which workspace holds which secret mount (lake#328, migration `0057`); no name, value or key. |
+| `secret_lease_routes` | multitenancy/dispatch | Which workspace holds which dynamic lease, and when the expiry loop must next look at it: the content-free due index (lake#362, migration `0058`); no role, value or ciphertext. |
 | `identity_core_guard`, `identity_mfa_guard`, `secrets_guard`, `sso_federation_guard`, `offline_recovery_guard`, `forge_guard`, `pki_guard`, `metering_guard`, `drive_guard`, `auth_app_guard`, `agent_guard`, `settings_guard`, `platform_guard`, `identity_exit_guard`, `token_attenuation_guard`, `session_lookup_guard`, `custodial_identity_guard`, `services_guard`, `service_catalog_guard`, `sqlite_services_guard`, `analytics_services_guard`, `stores_guard`, `credentials_guard`, `agents_guard`, `agent_cron_guard`, `agent_tasks_guard`, `agent_task_events_guard`, `web_apps_guard`, `web_apps_operator_contract_guard`, `builds_guard`, `streams_guard` | multitenancy/dispatch | Operator migration guards contain application timestamps only. |
 
 | Zetta or other storage | Classification | Reason |

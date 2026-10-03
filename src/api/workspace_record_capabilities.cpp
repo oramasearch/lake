@@ -5,7 +5,8 @@
 // auth_app_webhook_events and auth_app_webhook_deliveries, lake#356 and lake#357; metering_usage
 // and metering_build_records, lake#348 and lake#349; forge_records, lake#341; auth_app_users and
 // auth_app_organizations, lake#353 and lake#354; auth_app_signing_keys and auth_app_webhooks,
-// lake#352 and lake#355; the five secrets tables, lake#328-#332). A collection
+// lake#352 and lake#355; the five secrets tables, lake#328-#332; dynamic leases, lake#362). A
+// collection
 // leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
 // and verified on dev, dropped by migration 0050, lake#483).
 
@@ -36,7 +37,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 17> copy_collections = {"opportunities",
+constexpr std::array<std::string_view, 18> copy_collections = {"opportunities",
                                                                "stream_owners",
                                                                "drive_share_links",
                                                                "auth_app_webhook_events",
@@ -52,7 +53,8 @@ constexpr std::array<std::string_view, 17> copy_collections = {"opportunities",
                                                                "secrets_data_keys",
                                                                "secrets_encryption_keys",
                                                                "secrets_entries",
-                                                               "secrets_versions"};
+                                                               "secrets_versions",
+                                                               "secrets_dynamic_leases"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -1544,6 +1546,56 @@ struct DataKeyCopy {
     }
 };
 
+// A dynamic lease (lake#362) follows its mount. Its route is recorded before its record, as a new
+// lease's is, so the expiry loop finds every copied lease; the route is due when the lease
+// expires, or at once for a revoked lease, whose sealed value the loop then erases.
+struct LeaseCopy {
+    static std::string id(const control::LegacyDynamicSecretLease& row) {
+        return row.id;
+    }
+    static const control::LegacySecretOwner& owner(const control::LegacyDynamicSecretLease& row) {
+        return row.owner;
+    }
+    static liquid::runtime::task<PresentRecord>
+    present(control::WorkspaceRecords& records, const control::LegacyDynamicSecretLease& row) {
+        return present_record(records, control::SecretLeaseCodec::collection, row.id);
+    }
+    // The same lease, or one renewed, revoked or expired since the copy (a later lake revision).
+    static bool same(const ApiContext&, const control::StoredRecord& stored,
+                     const control::LegacyDynamicSecretLease& row) {
+        const auto lease = control::SecretLeaseCodec::decode(stored);
+        return lease && lease->mount_id == row.owner.mount_id && lease->role == row.role &&
+               lease->at_us == row.at_us &&
+               (lease->lake_revision > 1 ||
+                (lease->ciphertext.value_or("") == row.encrypted_value &&
+                 lease->expires_us == row.expires_us && lease->revoked_at == row.revoked_at &&
+                 lease->renewals == row.renewals));
+    }
+    static liquid::runtime::task<Copied> write(ApiContext& context,
+                                               control::WorkspaceRecords& records,
+                                               const control::LegacyDynamicSecretLease& row) {
+        auto routed = context.store->record_secret_lease_route(
+            {row.id, row.owner.mount_id, row.owner.customer_id, row.owner.workspace_id,
+             row.revoked_at.empty() ? row.expires_us : row.revoked_us});
+        if (!routed) {
+            co_return Copied(std::unexpected(
+                control::ZettaControlError{routed.error().code, routed.error().message}));
+        }
+        control::SecretLeaseRecord lease;
+        lease.id = row.id;
+        lease.mount_id = row.owner.mount_id;
+        lease.role = row.role;
+        lease.ciphertext = row.encrypted_value;
+        lease.expires_us = row.expires_us;
+        lease.revoked_at = row.revoked_at;
+        lease.renewals = row.renewals;
+        co_return control::settled(co_await put_absent(
+            records, control::SecretLeaseCodec::collection, row.id,
+            control::SecretLeaseCodec::lookup(row.owner.mount_id),
+            control::SecretLeaseCodec::encode(lease), row.at_us));
+    }
+};
+
 // One page of a retired secrets table, after recording each legacy mount's owner and route.
 liquid::runtime::task<ApiResult> copy_secrets(ApiContext& context, const std::string& collection,
                                               const std::string& mode, const std::string& after,
@@ -1583,6 +1635,13 @@ liquid::runtime::task<ApiResult> copy_secrets(ApiContext& context, const std::st
         }
         co_return co_await copy_secret_rows(context, collection, mode, *rows, limit,
                                             EncryptionKeyCopy{});
+    }
+    if (collection == "secrets_dynamic_leases") {
+        auto rows = context.store->legacy_dynamic_secret_leases(after, limit);
+        if (!rows) {
+            co_return failed(rows.error());
+        }
+        co_return co_await copy_secret_rows(context, collection, mode, *rows, limit, LeaseCopy{});
     }
     auto rows = context.store->legacy_secret_data_keys(after, limit);
     if (!rows) {

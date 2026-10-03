@@ -14,6 +14,8 @@
 
 #include "../control/secrets_crypto.hpp"
 #include "lake/control/handles.hpp"
+#include "lake/control/identity_crypto.hpp"
+#include "lake/control/store.hpp"
 #include "workspace_records_api.hpp"
 
 namespace lake::api {
@@ -967,21 +969,307 @@ SecretTask<control::DerivedEncryptionKey> MountSecrets::derive(std::string paren
                                                    parent->current_version});
 }
 
-SecretTask<std::string> MountSecrets::seal_lease(std::string lease_id, nlohmann::json value) {
-    using Result = ZettaControlResult<std::string>;
-    auto key = control::settled(co_await read_data_key(*store_, instance_kek_, records_,
-                                                       route_.customer_id, "mount",
-                                                       route_.mount_id, 1));
-    if (!key) {
-        co_return Result(std::unexpected(key.error()));
+namespace {
+
+ZettaControlError lease_not_found(const std::string& lease_id) {
+    return ZettaControlError{"not_found", "dynamic-secret lease " + lease_id + " does not exist",
+                             "/lease_id"};
+}
+
+// A lease record that is this mount's lease `lease_id`, or `not_found`.
+ZettaControlResult<control::SecretLeaseRecord> lease_of(const StoredRecord& stored,
+                                                        const std::string& mount_id,
+                                                        const std::string& lease_id) {
+    auto lease = control::SecretLeaseCodec::decode(stored);
+    if (!lease || lease->mount_id != mount_id || lease->id != lease_id) {
+        return std::unexpected(lease_not_found(lease_id));
     }
-    auto sealed = crypto::seal(*key, value.dump(),
-                               "lake dynamic secret/" + route_.mount_id + "/" + lease_id);
-    crypto::cleanse(*key);
-    if (!sealed) {
-        co_return Result(std::unexpected(from_store(sealed.error())));
+    return std::move(*lease);
+}
+
+} // namespace
+
+std::expected<MountSecrets, ApiError> MountSecrets::open_lease(const ApiContext& context,
+                                                               const std::string& lease_id) {
+    if (!context.store) {
+        return std::unexpected(ApiError{"store_unavailable",
+                                        "no control-plane store is configured", {}});
     }
-    co_return Result(std::move(*sealed));
+    if (!uuid_shaped(lease_id)) {
+        return std::unexpected(
+            ApiError{"not_found", "dynamic-secret lease " + lease_id + " does not exist",
+                     "/lease_id"});
+    }
+    auto route = context.store->get_secret_lease_route(lease_id);
+    if (!route) {
+        return std::unexpected(ApiError{route.error().code, route.error().message, "/lease_id"});
+    }
+    auto mount = open(context, route->mount_id);
+    if (mount && mount->route().workspace_id != route->workspace_id) {
+        return std::unexpected(ApiError{"not_found",
+                                        "dynamic-secret lease " + lease_id + " does not exist",
+                                        "/lease_id"});
+    }
+    return mount;
+}
+
+SecretTask<control::IssuedDynamicSecret> MountSecrets::lease(std::string role,
+                                                             int lifetime_seconds) {
+    using Result = ZettaControlResult<control::IssuedDynamicSecret>;
+    if (role.empty() || role.size() > 256 || lifetime_seconds < 1 || lifetime_seconds > 3600) {
+        co_return failure<control::IssuedDynamicSecret>("invalid_input",
+                                                        "dynamic-secret lease is invalid");
+    }
+    const std::string suffix = control::identity_crypto::random_secret();
+    json credential = {{"username", "lake-" + suffix.substr(0, 12)},
+                       {"password", control::identity_crypto::random_secret()}};
+    control::SecretLeaseRecord lease;
+    lease.id = control::new_uuid_v4();
+    lease.mount_id = route_.mount_id;
+    lease.role = std::move(role);
+    {
+        auto key = control::settled(co_await read_data_key(*store_, instance_kek_, records_,
+                                                           route_.customer_id, "mount",
+                                                           route_.mount_id, 1));
+        if (!key) {
+            co_return Result(std::unexpected(key.error()));
+        }
+        auto sealed = crypto::seal(*key, credential.dump(),
+                                   "lake dynamic secret/" + route_.mount_id + "/" + lease.id);
+        crypto::cleanse(*key);
+        if (!sealed) {
+            co_return Result(std::unexpected(from_store(sealed.error())));
+        }
+        lease.ciphertext = std::move(*sealed);
+    }
+    lease.at_us = now_us();
+    lease.expires_us = lease.at_us + std::int64_t{lifetime_seconds} * 1'000'000;
+    // The route first: a record never exists without the due index entry that expires it. A
+    // route whose record was never written is removed by the expiry loop.
+    auto routed = store_->record_secret_lease_route(
+        {lease.id, route_.mount_id, route_.customer_id, route_.workspace_id, lease.expires_us});
+    if (!routed) {
+        co_return Result(std::unexpected(from_store(routed.error())));
+    }
+    auto written = control::settled(co_await records_.put(
+        control::SecretLeaseCodec::collection, lease.id,
+        control::SecretLeaseCodec::lookup(route_.mount_id),
+        control::SecretLeaseCodec::encode(lease), RecordCondition{.if_absent = true}, 1,
+        lease.at_us));
+    if (!written) {
+        static_cast<void>(store_->delete_secret_lease_route(lease.id));
+        co_return Result(std::unexpected(written.error()));
+    }
+    co_return Result(control::IssuedDynamicSecret{control::to_lease(lease, route_.workspace_id),
+                                                  std::move(credential)});
+}
+
+SecretTask<control::DynamicSecretLease> MountSecrets::get_lease(std::string lease_id) {
+    using Result = ZettaControlResult<control::DynamicSecretLease>;
+    auto got = control::settled(
+        co_await records_.get(control::SecretLeaseCodec::collection, lease_id));
+    if (!got) {
+        co_return Result(std::unexpected(got.error()));
+    }
+    if (!*got) {
+        co_return Result(std::unexpected(lease_not_found(lease_id)));
+    }
+    auto lease = lease_of(**got, route_.mount_id, lease_id);
+    if (!lease) {
+        co_return Result(std::unexpected(lease.error()));
+    }
+    co_return Result(control::to_lease(*lease, route_.workspace_id));
+}
+
+SecretTask<control::DynamicSecretLease> MountSecrets::renew_lease(std::string lease_id,
+                                                                  int lifetime_seconds) {
+    using Result = ZettaControlResult<control::DynamicSecretLease>;
+    if (lifetime_seconds < 1 || lifetime_seconds > 3600) {
+        co_return failure<control::DynamicSecretLease>(
+            "invalid_input", "lease lifetime must be at most one hour", "/lifetime_seconds");
+    }
+    std::int64_t expires_us = 0;
+    auto written = control::settled(co_await rewrite(
+        records_, control::SecretLeaseCodec::collection, lease_id,
+        control::SecretLeaseCodec::lookup(route_.mount_id),
+        [&](const StoredRecord& stored) -> std::expected<std::optional<json>, ZettaControlError> {
+            auto lease = lease_of(stored, route_.mount_id, lease_id);
+            if (!lease) {
+                return std::unexpected(lease.error());
+            }
+            const std::int64_t now = now_us();
+            if (!lease->active(now)) {
+                return std::unexpected(
+                    ZettaControlError{"conflict", "dynamic-secret lease is not active"});
+            }
+            // A renewal extends and never shortens: a lease's expiry only moves forward, so
+            // every expiry the due index was ever given is no later than the record's.
+            lease->expires_us =
+                std::max(lease->expires_us, now + std::int64_t{lifetime_seconds} * 1'000'000);
+            ++lease->renewals;
+            expires_us = lease->expires_us;
+            return control::SecretLeaseCodec::encode(*lease);
+        }));
+    if (!written) {
+        co_return Result(std::unexpected(written.error()));
+    }
+    if (!*written) {
+        co_return Result(std::unexpected(lease_not_found(lease_id)));
+    }
+    // The due index follows the record. If this write is lost or lands after a later renewal's,
+    // the index holds an earlier expiry, never a later one: the loop then finds the lease
+    // renewed and moves it to the expiry it reads, so no lease outlives its expiry unsettled.
+    static_cast<void>(store_->reschedule_secret_lease(lease_id, expires_us));
+    auto lease = lease_of(**written, route_.mount_id, lease_id);
+    if (!lease) {
+        co_return Result(std::unexpected(lease.error()));
+    }
+    co_return Result(control::to_lease(*lease, route_.workspace_id));
+}
+
+SecretTask<control::DynamicSecretLease> MountSecrets::revoke_lease(std::string lease_id) {
+    using Result = ZettaControlResult<control::DynamicSecretLease>;
+    auto written = control::settled(co_await rewrite(
+        records_, control::SecretLeaseCodec::collection, lease_id,
+        control::SecretLeaseCodec::lookup(route_.mount_id),
+        [&](const StoredRecord& stored) -> std::expected<std::optional<json>, ZettaControlError> {
+            auto lease = lease_of(stored, route_.mount_id, lease_id);
+            if (!lease) {
+                return std::unexpected(lease.error());
+            }
+            if (!lease->revoked_at.empty() && !lease->ciphertext) {
+                return std::nullopt; // idempotent
+            }
+            if (lease->revoked_at.empty()) {
+                lease->revoked_at = now_text();
+            }
+            lease->ciphertext.reset();
+            return control::SecretLeaseCodec::encode(*lease);
+        }));
+    if (!written) {
+        co_return Result(std::unexpected(written.error()));
+    }
+    if (!*written) {
+        co_return Result(std::unexpected(lease_not_found(lease_id)));
+    }
+    // Settled: the loop has nothing left to do. If this write is lost, the loop finds the lease
+    // revoked at its due instant and settles the route then.
+    static_cast<void>(store_->reschedule_secret_lease(lease_id, 0));
+    auto lease = lease_of(**written, route_.mount_id, lease_id);
+    if (!lease) {
+        co_return Result(std::unexpected(lease.error()));
+    }
+    co_return Result(control::to_lease(*lease, route_.workspace_id));
+}
+
+namespace {
+
+// A route whose record is missing this long after the route was written belongs to a lease whose
+// write never completed (or a copy that stopped between route and record): it is removed.
+constexpr std::int64_t abandoned_route_us = 5LL * 60 * 1'000'000;
+
+bool workspace_gone(control::Store& store, const control::SecretLeaseRoute& route) {
+    const auto workspace = store.get_workspace(route.workspace_id);
+    if (!workspace) {
+        return workspace.error().code == "not_found";
+    }
+    return workspace->desired == "deleted" || workspace->customer_id != route.customer_id;
+}
+
+// One claimed lease, settled in its workspace.
+liquid::runtime::task<void> settle_lease(control::Store& store, WorkspaceRecords& records,
+                                         const control::SecretLeaseRoute& route,
+                                         SecretLeaseSweep& sweep) {
+    bool expired_now = false;
+    auto written = control::settled(co_await rewrite(
+        records, control::SecretLeaseCodec::collection, route.lease_id,
+        control::SecretLeaseCodec::lookup(route.mount_id),
+        [&](const StoredRecord& stored) -> std::expected<std::optional<json>, ZettaControlError> {
+            expired_now = false;
+            auto lease = lease_of(stored, route.mount_id, route.lease_id);
+            if (!lease) {
+                return std::unexpected(lease.error());
+            }
+            const std::int64_t now = now_us();
+            if (lease->active(now)) {
+                return std::nullopt; // renewed since it was indexed
+            }
+            if (lease->settled() && !lease->ciphertext) {
+                return std::nullopt;
+            }
+            if (lease->revoked_at.empty() && lease->expired_at.empty()) {
+                lease->expired_at = now_text();
+                expired_now = true;
+            }
+            lease->ciphertext.reset();
+            return control::SecretLeaseCodec::encode(*lease);
+        }));
+    if (!written) {
+        ++sweep.failed;
+        co_return {};
+    }
+    if (!*written) {
+        if (now_us() - route.created_us >= abandoned_route_us) {
+            static_cast<void>(store.delete_secret_lease_route(route.lease_id));
+            ++sweep.removed;
+        } else {
+            ++sweep.failed; // its record may still be on its way; looked at again after the hold
+        }
+        co_return {};
+    }
+    auto lease = lease_of(**written, route.mount_id, route.lease_id);
+    if (!lease) {
+        ++sweep.failed;
+        co_return {};
+    }
+    if (lease->settled()) {
+        static_cast<void>(store.reschedule_secret_lease(route.lease_id, 0));
+        ++(expired_now ? sweep.expired : sweep.settled);
+        co_return {};
+    }
+    static_cast<void>(store.reschedule_secret_lease(route.lease_id, lease->expires_us));
+    ++sweep.rescheduled;
+    co_return {};
+}
+
+} // namespace
+
+liquid::runtime::task<SecretLeaseSweep> expire_secret_leases(const ApiContext& context,
+                                                             int limit) {
+    SecretLeaseSweep sweep;
+    if (!context.store || !context.workspaces || context.instance_kek.empty()) {
+        co_return sweep;
+    }
+    control::Store& store = *context.store;
+    auto claimed = store.claim_due_secret_leases(limit, secret_lease_claim_hold_seconds);
+    if (!claimed) {
+        ++sweep.failed;
+        co_return sweep;
+    }
+    sweep.claimed = claimed->size();
+    std::map<std::string, std::vector<const control::SecretLeaseRoute*>> by_workspace;
+    for (const control::SecretLeaseRoute& route : *claimed) {
+        by_workspace[route.workspace_id].push_back(&route);
+    }
+    for (const auto& [workspace_id, routes] : by_workspace) {
+        if (workspace_gone(store, *routes.front())) {
+            // The workspace's Zetta and its records were deleted with it.
+            for (const control::SecretLeaseRoute* route : routes) {
+                static_cast<void>(store.reschedule_secret_lease(route->lease_id, 0));
+                ++sweep.settled;
+            }
+            continue;
+        }
+        auto records = workspace_records(context, routes.front()->customer_id, workspace_id);
+        if (!records) {
+            sweep.failed += routes.size();
+            continue;
+        }
+        for (const control::SecretLeaseRoute* route : routes) {
+            static_cast<void>(co_await settle_lease(store, *records, *route, sweep));
+        }
+    }
+    co_return sweep;
 }
 
 SecretTask<control::SecretMount> create_secret_mount(const ApiContext& context,

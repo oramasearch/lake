@@ -2865,3 +2865,61 @@ CREATE TABLE IF NOT EXISTS secret_workspaces_guard (
 );
 INSERT INTO schema_migrations (version) VALUES ('0057_secret_workspaces')
     ON CONFLICT DO NOTHING;
+
+-- ---------------------------------------------------------------------------------------------
+-- 0058_secret_lease_workspaces: dynamic-secret leases live in the workspace Zetta of their mount
+-- (lake#362; docs/api/secrets.md#dynamic-leases). Each lease is a sealed record of
+-- lake_secrets_dynamic_leases in its mount's workspace, keyed by the lease id: role, the generated
+-- credential sealed with the mount data key (unchanged since 0057), expiry, renewals, revocation.
+-- Lake no longer writes or reads secrets_dynamic_leases, which the operator's one-shot copy
+-- (copy_workspace_records, collection secrets_dynamic_leases) moves and verifies.
+--
+-- secret_lease_routes is what stays central, and it is dispatch only: which workspace holds a
+-- lease (so renew and revoke, which name only the lease, reach it without asking every
+-- workspace) and when the expiry loop must next look at it. It names no role, value or
+-- ciphertext. due_at is a hint that is never later than the expiry in the workspace record; the
+-- loop claims due rows with FOR UPDATE SKIP LOCKED, settles each lease in its workspace with a
+-- conditional write, and sets due_at to NULL once the lease is revoked or expired there.
+--
+-- A legacy lease follows its mount: the mount's route (secret_mount_routes) names its workspace,
+-- and the copy writes its route and record. A lease whose mount has no route is reported here and
+-- waits for its mount's assignment. Nothing is dropped; a later migration drops
+-- secrets_dynamic_leases once the copy has been verified on every environment.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS secret_lease_routes (
+    lease_id     uuid        PRIMARY KEY,
+    mount_id     uuid        NOT NULL REFERENCES secret_mount_routes(mount_id) ON DELETE CASCADE,
+    customer_id  uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+    workspace_id uuid        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    due_at       timestamptz,
+    created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS secret_lease_routes_due_idx
+    ON secret_lease_routes (due_at) WHERE due_at IS NOT NULL;
+
+-- A route names a live workspace of its own space; neither column changes afterwards.
+DROP TRIGGER IF EXISTS secret_lease_route_workspace_routing ON secret_lease_routes;
+CREATE TRIGGER secret_lease_route_workspace_routing BEFORE INSERT OR UPDATE ON secret_lease_routes
+    FOR EACH ROW EXECUTE FUNCTION enforce_workspace_routing();
+
+DO $$
+DECLARE
+    unresolved record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM schema_migrations
+                   WHERE version = '0058_secret_lease_workspaces') THEN
+        FOR unresolved IN
+            SELECT l.id, l.mount_id FROM secrets_dynamic_leases l
+            WHERE NOT EXISTS (SELECT 1 FROM secret_mount_routes r WHERE r.mount_id = l.mount_id)
+        LOOP
+            RAISE WARNING 'dynamic secret lease not copied (needs_selection): lease=%, mount=%',
+                unresolved.id, unresolved.mount_id;
+        END LOOP;
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS secret_lease_workspaces_guard (
+    applied_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO schema_migrations (version) VALUES ('0058_secret_lease_workspaces')
+    ON CONFLICT DO NOTHING;

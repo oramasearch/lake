@@ -268,3 +268,9 @@ written at the revision read. `secrets_capabilities.cpp` is asynchronous over it
 decision reads only PostgreSQL, so a refused caller reaches no workspace. `copy_workspace_records`
 copies the five secrets collections, and the `/secret-mounts`, `/secrets` and `/encryption-keys`
 pages call the registry asynchronously (`/secret-mounts` lists one workspace).
+Dynamic leases follow (lake#362): `MountSecrets::lease`, `renew_lease` and `revoke_lease` keep each
+lease as a record of its mount's workspace (route first, then the record `if_absent`; renewal and
+revocation rewrite it at the revision read), `MountSecrets::open_lease` finds the mount through the
+lease's route, and `expire_secret_leases` is one pass of the expiry loop: it claims due routes from
+the control store and settles each lease in its own workspace only. The server's tick runs it every
+`secret_lease_expiry_interval`; `copy_workspace_records` copies `secrets_dynamic_leases`.

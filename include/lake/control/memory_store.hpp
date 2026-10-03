@@ -368,11 +368,13 @@ public:
                                                     const std::string& instance_kek) override;
     Result<void> retire_customer_kek(const std::string& customer_id,
                                      std::uint64_t previous_version) override;
-    Result<DynamicSecretLease> lease_dynamic_secret(const NewDynamicSecretLease& value) override;
-    Result<DynamicSecretLease> get_dynamic_secret_lease(const std::string& id) override;
-    Result<DynamicSecretLease> renew_dynamic_secret_lease(const std::string& id,
-                                                          int lifetime_seconds) override;
-    Result<DynamicSecretLease> revoke_dynamic_secret_lease(const std::string& id) override;
+    Result<SecretLeaseRoute> record_secret_lease_route(const SecretLeaseRoute& value) override;
+    Result<SecretLeaseRoute> get_secret_lease_route(const std::string& lease_id) override;
+    Result<void> reschedule_secret_lease(const std::string& lease_id,
+                                         std::int64_t due_us) override;
+    Result<void> delete_secret_lease_route(const std::string& lease_id) override;
+    Result<std::vector<SecretLeaseRoute>> claim_due_secret_leases(int limit,
+                                                                  int hold_seconds) override;
     Result<void> assign_legacy_secrets() override;
     Result<std::vector<LegacySecretMount>> legacy_secret_mounts(const std::string& after_id,
                                                                 int limit) override;
@@ -384,6 +386,8 @@ public:
                                                                     int limit) override;
     Result<std::vector<LegacySecretDataKey>> legacy_secret_data_keys(const std::string& after_id,
                                                                      int limit) override;
+    Result<std::vector<LegacyDynamicSecretLease>>
+    legacy_dynamic_secret_leases(const std::string& after_id, int limit) override;
     // Rows of the retired secrets tables, as an earlier lake wrote them (tests of the copy). A
     // data key is given raw and wrapped here by the customer's current KEK, as 0009 wrapped it.
     void seed_legacy_secret_mount(SecretMount mount);
@@ -391,6 +395,8 @@ public:
     void seed_legacy_secret_version(LegacySecretVersion version);
     void seed_legacy_encryption_key(LegacyEncryptionKey key);
     Result<void> seed_legacy_secret_data_key(LegacySecretDataKey key, const std::string& raw_key);
+    // A secrets_dynamic_leases row; its owner follows its mount's route.
+    void seed_legacy_dynamic_secret_lease(LegacyDynamicSecretLease lease);
     // An operator's reviewed choice for a mount migration 0057 left as needs_selection.
     void select_legacy_secret_mount_workspace(const std::string& mount_id,
                                               const std::string& workspace_id);
@@ -582,7 +588,8 @@ private:
     };
     std::vector<CustomerKekRecord> customer_keks_;
     std::vector<SecretMountRoute> secret_mount_routes_;
-    std::vector<DynamicSecretLease> dynamic_secret_leases_;
+    std::vector<SecretLeaseRoute> secret_lease_routes_;
+    std::vector<LegacyDynamicSecretLease> legacy_dynamic_secret_leases_;
     std::vector<LegacySecretMount> legacy_secret_mounts_;
     std::vector<LegacySecretEntry> legacy_secret_entries_;
     std::vector<LegacySecretVersion> legacy_secret_versions_;

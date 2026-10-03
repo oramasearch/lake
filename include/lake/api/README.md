@@ -45,6 +45,9 @@ storage exists: it returns the unique bytes the OCI registry holds below `<space
 transfer and build records on their way to the workspace Zettas (lake#348, lake#349).
 `ApiContext::metering_recorder` points at the server's; `ServerOptions::metering_flush_interval`
 and `metering_max_pending` configure it. A null recorder (no workspaces) records nothing.
+`ServerOptions::secret_lease_expiry_interval` (ten seconds; zero: every tick) paces the owner
+loop's dynamic-lease expiry pass (lake#362), which runs only with a store, workspaces and an
+instance KEK.
 
 `forge.hpp` declares `BranchProtectionRecords` and `load_branch_protection`: the rules, reviews and
 releases a push needs, read from the repository's workspace before the push (lake#341), and

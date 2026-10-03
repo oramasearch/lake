@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -32,6 +33,9 @@ public:
     std::int64_t clock = 1'000'000;
     int busy_next = 0;
     std::vector<std::string> calls;
+    // Run once, just before the next put_record of that key is decided: another writer's change
+    // landing between a caller's read and its conditional write. It edits `collections` directly.
+    std::map<std::string, std::function<void(RecordTables&)>> before_put;
 
     static bool handles(std::string_view capability, const json&) {
         return capability == "create_collection" || capability == "put_record" ||
@@ -65,6 +69,12 @@ public:
         Collection& collection = found->second;
         const std::string key = input.value("key", std::string());
         if (capability == "put_record" || capability == "delete_record") {
+            if (const auto hook = before_put.find(key);
+                capability == "put_record" && hook != before_put.end()) {
+                auto change = std::move(hook->second);
+                before_put.erase(hook);
+                change(*this);
+            }
             const auto existing = collection.records.find(key);
             const bool live = existing != collection.records.end();
             if (input.value("if_absent", false) && live) {

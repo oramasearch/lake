@@ -924,24 +924,29 @@ public:
         return call("retire_customer_kek",
                     [&] { return store_->retire_customer_kek(customer_id, previous_version); });
     }
-    control::Result<control::DynamicSecretLease>
-    lease_dynamic_secret(const control::NewDynamicSecretLease& value) override {
-        return call("lease_dynamic_secret", [&] { return store_->lease_dynamic_secret(value); });
+    control::Result<control::SecretLeaseRoute>
+    record_secret_lease_route(const control::SecretLeaseRoute& value) override {
+        return call("record_secret_lease_route",
+                    [&] { return store_->record_secret_lease_route(value); });
     }
-    control::Result<control::DynamicSecretLease>
-    get_dynamic_secret_lease(const std::string& id) override {
-        return call("get_dynamic_secret_lease",
-                    [&] { return store_->get_dynamic_secret_lease(id); });
+    control::Result<control::SecretLeaseRoute>
+    get_secret_lease_route(const std::string& lease_id) override {
+        return call("get_secret_lease_route",
+                    [&] { return store_->get_secret_lease_route(lease_id); });
     }
-    control::Result<control::DynamicSecretLease>
-    renew_dynamic_secret_lease(const std::string& id, int lifetime_seconds) override {
-        return call("renew_dynamic_secret_lease",
-                    [&] { return store_->renew_dynamic_secret_lease(id, lifetime_seconds); });
+    control::Result<void> reschedule_secret_lease(const std::string& lease_id,
+                                                  std::int64_t due_us) override {
+        return call("reschedule_secret_lease",
+                    [&] { return store_->reschedule_secret_lease(lease_id, due_us); });
     }
-    control::Result<control::DynamicSecretLease>
-    revoke_dynamic_secret_lease(const std::string& id) override {
-        return call("revoke_dynamic_secret_lease",
-                    [&] { return store_->revoke_dynamic_secret_lease(id); });
+    control::Result<void> delete_secret_lease_route(const std::string& lease_id) override {
+        return call("delete_secret_lease_route",
+                    [&] { return store_->delete_secret_lease_route(lease_id); });
+    }
+    control::Result<std::vector<control::SecretLeaseRoute>>
+    claim_due_secret_leases(int limit, int hold_seconds) override {
+        return call("claim_due_secret_leases",
+                    [&] { return store_->claim_due_secret_leases(limit, hold_seconds); });
     }
     control::Result<void> assign_legacy_secrets() override {
         return call("assign_legacy_secrets", [&] { return store_->assign_legacy_secrets(); });
@@ -970,6 +975,11 @@ public:
     legacy_secret_data_keys(const std::string& after_id, int limit) override {
         return call("legacy_secret_data_keys",
                     [&] { return store_->legacy_secret_data_keys(after_id, limit); });
+    }
+    control::Result<std::vector<control::LegacyDynamicSecretLease>>
+    legacy_dynamic_secret_leases(const std::string& after_id, int limit) override {
+        return call("legacy_dynamic_secret_leases",
+                    [&] { return store_->legacy_dynamic_secret_leases(after_id, limit); });
     }
 
     control::Result<control::IssuedSession>

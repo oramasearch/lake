@@ -461,3 +461,11 @@ workspace deletion; `TheOneShotCopyMovesSecretsIntoTheirMountsWorkspace` the cop
 collections in both stores (the memory store seeds legacy rows with `seed_legacy_secret_*`);
 `PostgresSecrets.MigrationRecordsEachMountsOwnerAndRoute` migration `0057_secret_workspaces`. The
 identity exit scenario and the Postgres secrets round trip give their mount a Ready workspace.
+Dynamic leases (lake#362): `test_secrets.cpp` covers a lease's sealed record and content-free
+route, renewal and revocation, a renewal racing a revocation or an expiry (the record fixture's
+`before_put` lands the other writer's change between the read and the conditional write), the
+expiry pass reading only the workspaces of due leases, holds, not-ready and deleted workspaces, and
+the server tick. `test_workspace_records.cpp`'s `DynamicLeasesLiveInTheirMountsWorkspace` and
+`TheOneShotCopyMovesDynamicLeasesIntoTheirMountsWorkspace` cover two spaces with two workspaces
+each and the copy in both stores (`seed_legacy_dynamic_secret_lease`);
+`PostgresSecrets.LeaseRoutesAreAContentFreeDueIndex` migration `0058_secret_lease_workspaces`.

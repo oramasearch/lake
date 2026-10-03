@@ -111,14 +111,21 @@ CapabilityObjectResolver mount_object(std::string audit_kind) {
     };
 }
 
+// A lease's route (control store) names its mount, whose route names the policy object; the
+// lease's workspace is not reached before the caller is authorized.
 std::expected<std::string, ApiError> dynamic_lease_object(const json& input, ApiContext& context) {
-    auto lease = context.store->get_dynamic_secret_lease(input.at("lease_id"));
+    const std::string lease_id = input.at("lease_id");
+    if (!uuid_shaped(lease_id)) {
+        return std::unexpected(ApiError{
+            "not_found", "dynamic-secret lease " + lease_id + " does not exist", "/lease_id"});
+    }
+    auto lease = context.store->get_secret_lease_route(lease_id);
     if (!lease) {
         return std::unexpected(ApiError{lease.error().code, lease.error().message, "/lease_id"});
     }
     auto object = resolve_mount(lease->mount_id, "dynamic_secret", context);
-    context.audit_object = "dynamic_secret/" + lease->id;
-    context.audit_details["lease_id"] = lease->id;
+    context.audit_object = "dynamic_secret/" + lease->lease_id;
+    context.audit_details["lease_id"] = lease->lease_id;
     return object;
 }
 
@@ -198,6 +205,23 @@ AsyncCapabilityHandler on_mount(SecretHandler handler) {
             co_return no_store();
         }
         auto mount = MountSecrets::open(context, input.at("mount_id"));
+        if (!mount) {
+            co_return refused(mount.error());
+        }
+        auto completed = co_await handler(input, context, *mount);
+        co_return completed ? std::move(*completed)
+                            : ApiResult::failure("store_error", completed.error().message);
+    };
+}
+
+// A capability on one dynamic lease: the records of the workspace its route names.
+AsyncCapabilityHandler on_lease(SecretHandler handler) {
+    return [handler = std::move(handler)](const json& input,
+                                          ApiContext& context) -> liquid::runtime::task<ApiResult> {
+        if (!context.store) {
+            co_return no_store();
+        }
+        auto mount = MountSecrets::open_lease(context, input.at("lease_id"));
         if (!mount) {
             co_return refused(mount.error());
         }
@@ -482,29 +506,16 @@ void register_dynamic_secret_capabilities(Registry& registry) {
         .resolves_operator_audit_target = true,
         .async_handler = on_mount([](const json& input, ApiContext& context,
                                      MountSecrets& mount) -> liquid::runtime::task<ApiResult> {
-            const std::string role = input.at("role");
-            const int lifetime = input.value("lifetime_seconds", 300);
-            if (role.empty() || lifetime < 1 || lifetime > 3600) {
-                co_return ApiResult::failure("invalid_input", "dynamic-secret lease is invalid");
+            auto issued = control::settled(co_await mount.lease(
+                input.at("role"), input.value("lifetime_seconds", 300)));
+            if (!issued) {
+                co_return secret_records_failure(issued.error());
             }
-            const std::string suffix = control::identity_crypto::random_secret();
-            json credential = {{"username", "lake-" + suffix.substr(0, 12)},
-                               {"password", control::identity_crypto::random_secret()}};
-            const std::string lease_id = control::new_uuid_v4();
-            auto sealed = control::settled(co_await mount.seal_lease(lease_id, credential));
-            if (!sealed) {
-                co_return secret_records_failure(sealed.error());
-            }
-            auto lease = context.store->lease_dynamic_secret(
-                {lease_id, input.at("mount_id"), role, *sealed, lifetime});
-            if (!lease) {
-                co_return from_store_error(lease.error());
-            }
-            context.audit_object = "dynamic_secret/" + lease->id;
-            context.audit_details["lease_id"] = lease->id;
+            context.audit_object = "dynamic_secret/" + issued->lease.id;
+            context.audit_details["lease_id"] = issued->lease.id;
             context.audit_details["operation"] = "lease";
             co_return ApiResult::success(
-                {{"lease", control::to_json(*lease)}, {"value", credential}});
+                {{"lease", control::to_json(issued->lease)}, {"value", issued->value}});
         })});
     registry.add(Capability{
         .name = "renew_dynamic_secret",
@@ -520,13 +531,12 @@ void register_dynamic_secret_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = dynamic_lease_object,
         .resolves_operator_audit_target = true,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = on_lease([](const json& input, ApiContext& context,
+                                     MountSecrets& mount) -> liquid::runtime::task<ApiResult> {
             context.audit_details["operation"] = "renew";
-            auto lease = context.store->renew_dynamic_secret_lease(
-                input.at("lease_id"), input.value("lifetime_seconds", 300));
-            return lease ? ApiResult::success(control::to_json(*lease))
-                         : from_store_error(lease.error());
-        }});
+            co_return one_result(control::settled(co_await mount.renew_lease(
+                input.at("lease_id"), input.value("lifetime_seconds", 300))));
+        })});
     registry.add(Capability{
         .name = "revoke_dynamic_secret",
         .title = "Revoke dynamic secret",
@@ -540,12 +550,12 @@ void register_dynamic_secret_capabilities(Registry& registry) {
         .action = "write",
         .resolve_object = dynamic_lease_object,
         .resolves_operator_audit_target = true,
-        .handler = [](const json& input, ApiContext& context) {
+        .async_handler = on_lease([](const json& input, ApiContext& context,
+                                     MountSecrets& mount) -> liquid::runtime::task<ApiResult> {
             context.audit_details["operation"] = "revoke";
-            auto lease = context.store->revoke_dynamic_secret_lease(input.at("lease_id"));
-            return lease ? ApiResult::success(control::to_json(*lease))
-                         : from_store_error(lease.error());
-        }});
+            co_return one_result(
+                control::settled(co_await mount.revoke_lease(input.at("lease_id"))));
+        })});
 }
 
 void register_encryption_key_capabilities(Registry& registry) {

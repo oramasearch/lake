@@ -1353,6 +1353,171 @@ TEST(PostgresSecrets, MigrationRecordsEachMountsOwnerAndRoute) {
         << "a named key's data key follows its key's mount";
 }
 
+// Migration 0058 (lake#362): secret_lease_routes, the content-free route and due index of each
+// dynamic lease, and the store methods the expiry loop uses on it.
+TEST(PostgresSecrets, LeaseRoutesAreAContentFreeDueIndex) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto organization = store->create_organization(
+        {"taap:1:ed25519:lease-routes-" + suffix, "lease routes", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto customer = store->create_customer(
+        {"organization", "", organization->id, "lease-routes-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    std::vector<std::string> workspaces;
+    for (const std::string name : {"home", "lab"}) {
+        const auto workspace = store->create_workspace({customer->id, name, "dev", ""});
+        ASSERT_TRUE(workspace) << workspace.error().message;
+        workspaces.push_back(workspace->id);
+    }
+    const std::string mount = lake::control::new_uuid_v4();
+    ASSERT_TRUE(store->create_secret_mount_route(
+        {mount, customer->id, organization->id, workspaces[0], ""}));
+
+    pqxx::connection connection(uri);
+    // A legacy lease of a mount without a route is reported by the migration and left alone.
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO secrets_dynamic_leases (mount_id, role, encrypted_value, "
+                       "expires_at) VALUES ($1::uuid, 'reader', 'sealed', now() + interval '1 "
+                       "hour')",
+                       lake::control::new_uuid_v4());
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0058_secret_lease_workspaces'");
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0058_secret_lease_workspaces:");
+    ASSERT_NE(start, std::string::npos);
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+    }
+    {
+        pqxx::work tx(connection);
+        EXPECT_FALSE(tx.exec("SELECT 1 FROM schema_migrations WHERE version = "
+                             "'0058_secret_lease_workspaces'")
+                         .empty());
+        EXPECT_EQ(tx.exec("SELECT string_agg(column_name, ',' ORDER BY column_name) FROM "
+                          "information_schema.columns WHERE table_name = 'secret_lease_routes' "
+                          "AND table_schema = current_schema()")[0][0]
+                      .as<std::string>(),
+                  "created_at,customer_id,due_at,lease_id,mount_id,workspace_id")
+            << "no role, value or ciphertext";
+    }
+
+    const auto now_us = [] {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    };
+    const auto route = [&](std::int64_t due) {
+        return lake::control::SecretLeaseRoute{lake::control::new_uuid_v4(), mount, customer->id,
+                                               workspaces[0], due};
+    };
+    // A route names its mount's workspace and space, and nothing else.
+    auto wrong = route(now_us());
+    wrong.workspace_id = workspaces[1];
+    EXPECT_EQ(store->record_secret_lease_route(wrong).error().code, "invalid_input");
+    auto unrouted = route(now_us());
+    unrouted.mount_id = lake::control::new_uuid_v4();
+    EXPECT_EQ(store->record_secret_lease_route(unrouted).error().code, "invalid_input");
+
+    const std::int64_t past = now_us() - 2'000'000;
+    const auto early = route(past - 1'000'000), late = route(past), future = route(now_us() + 3'600'000'000);
+    for (const auto& value : {late, early, future}) {
+        const auto recorded = store->record_secret_lease_route(value);
+        ASSERT_TRUE(recorded) << recorded.error().message;
+        EXPECT_EQ(recorded->due_us, value.due_us);
+    }
+    auto again = early;
+    again.due_us = 0;
+    EXPECT_EQ(store->record_secret_lease_route(again)->due_us, early.due_us)
+        << "a lease that has a route keeps it";
+
+    // Due rows are claimed earliest first and held, so a second loop takes none of them.
+    const auto claimed = store->claim_due_secret_leases(100, 60);
+    ASSERT_TRUE(claimed) << claimed.error().message;
+    std::vector<std::string> ours;
+    for (const auto& row : *claimed) {
+        if (row.mount_id == mount) {
+            ours.push_back(row.lease_id);
+        }
+    }
+    EXPECT_EQ(ours, (std::vector<std::string>{early.lease_id, late.lease_id}));
+    const auto second = store->claim_due_secret_leases(100, 60);
+    ASSERT_TRUE(second);
+    EXPECT_TRUE(std::ranges::none_of(*second, [&](const auto& row) { return row.mount_id == mount; }));
+    EXPECT_GT(store->get_secret_lease_route(early.lease_id)->due_us, now_us());
+
+    // Settled routes are never made due again.
+    ASSERT_TRUE(store->reschedule_secret_lease(early.lease_id, 0));
+    EXPECT_EQ(store->get_secret_lease_route(early.lease_id)->due_us, 0);
+    ASSERT_TRUE(store->reschedule_secret_lease(early.lease_id, past));
+    EXPECT_EQ(store->get_secret_lease_route(early.lease_id)->due_us, 0);
+    ASSERT_TRUE(store->reschedule_secret_lease(late.lease_id, past));
+    EXPECT_EQ(store->get_secret_lease_route(late.lease_id)->due_us, past);
+    ASSERT_TRUE(store->delete_secret_lease_route(late.lease_id));
+    EXPECT_EQ(store->get_secret_lease_route(late.lease_id).error().code, "not_found");
+
+    {
+        pqxx::work tx(connection);
+        // A route's workspace never moves, and a route needs its mount's route.
+        EXPECT_THROW(tx.exec_params("UPDATE secret_lease_routes SET workspace_id = $2::uuid "
+                                    "WHERE lease_id = $1::uuid",
+                                    future.lease_id, workspaces[1]),
+                     pqxx::check_violation);
+    }
+    {
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec_params("INSERT INTO secret_lease_routes (lease_id, mount_id, "
+                                    "customer_id, workspace_id) VALUES ($1::uuid, $2::uuid, "
+                                    "$3::uuid, $4::uuid)",
+                                    lake::control::new_uuid_v4(), lake::control::new_uuid_v4(),
+                                    customer->id, workspaces[0]),
+                     pqxx::foreign_key_violation);
+    }
+    // The legacy listing pages by lease id and names each lease's mount route as its owner.
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO secrets_dynamic_leases (id, mount_id, role, encrypted_value, "
+                       "expires_at, revoked_at, renewals) VALUES ($1::uuid, $2::uuid, 'writer', "
+                       "'sealed-legacy', now() + interval '1 hour', now(), 4)",
+                       future.lease_id, mount);
+        tx.commit();
+    }
+    std::map<std::string, lake::control::LegacyDynamicSecretLease> legacy;
+    std::string after;
+    for (;;) {
+        const auto page = store->legacy_dynamic_secret_leases(after, 2);
+        ASSERT_TRUE(page) << page.error().message;
+        if (page->empty()) {
+            break;
+        }
+        for (const auto& row : *page) {
+            legacy.emplace(row.id, row);
+        }
+        after = page->back().id;
+    }
+    ASSERT_TRUE(legacy.contains(future.lease_id));
+    const auto& row = legacy.at(future.lease_id);
+    EXPECT_EQ(row.owner.workspace_id, workspaces[0]);
+    EXPECT_EQ(row.owner.customer_id, customer->id);
+    EXPECT_EQ(row.encrypted_value, "sealed-legacy");
+    EXPECT_EQ(row.renewals, 4);
+    EXPECT_FALSE(row.revoked_at.empty());
+    EXPECT_GT(row.revoked_us, 0);
+    EXPECT_GT(row.expires_us, row.at_us);
+}
+
 TEST(PostgresPlatform, EnvironmentBindingAndMirrorRoundTrip) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

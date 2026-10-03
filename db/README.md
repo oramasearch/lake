@@ -157,3 +157,9 @@ replaced customer KEK in `keystore` until rotation finishes, and drops `secrets_
 foreign key to `secrets_mounts`. Nothing is dropped. The latest guard is
 `secret_workspaces_guard`; the operator must vendor this schema and update its guard before
 rollout. See [secrets.md](../docs/api/secrets.md#migration-and-cutover-lake328-332).
+Migration `0058_secret_lease_workspaces` retires `secrets_dynamic_leases` (lake#362): leases live in
+their mount's workspace Zetta. It adds `secret_lease_routes` (lease → mount, workspace, content-free,
+immutable), whose `due_at` is the expiry loop's due index, and reports leases whose mount has no
+route. Nothing is dropped. The latest guard is `secret_lease_workspaces_guard`; the operator must
+vendor this schema and update its guard before rollout. See
+[secrets.md](../docs/api/secrets.md#migration-and-cutover-lake362).

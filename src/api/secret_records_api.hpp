@@ -32,6 +32,10 @@ public:
     // `not_found` at /mount_id when no route names the mount.
     static std::expected<MountSecrets, ApiError> open(const ApiContext& context,
                                                       const std::string& mount_id);
+    // The mount of a lease, found through the lease's route; `not_found` at /lease_id when no
+    // route names the lease.
+    static std::expected<MountSecrets, ApiError> open_lease(const ApiContext& context,
+                                                            const std::string& lease_id);
 
     const control::SecretMountRoute& route() const {
         return route_;
@@ -64,9 +68,16 @@ public:
     SecretTask<control::DerivedEncryptionKey> derive(std::string parent_name, std::string name,
                                                      std::string context);
 
-    // A dynamic lease's value sealed under this mount's data key, for the lease row the control
-    // store keeps (lake#362).
-    SecretTask<std::string> seal_lease(std::string lease_id, nlohmann::json value);
+    // Dynamic leases (lake#362), records of this mount's workspace. A lease's route is written
+    // first, so the expiry loop can always find a lease whose record exists. Renew, revoke and
+    // the expiry loop each rewrite the record at the revision they read: a renewal is refused
+    // once the lease is revoked or expired, and a revocation or expiry is never undone by a
+    // renewal computed from an earlier copy.
+    SecretTask<control::IssuedDynamicSecret> lease(std::string role, int lifetime_seconds);
+    SecretTask<control::DynamicSecretLease> get_lease(std::string lease_id);
+    SecretTask<control::DynamicSecretLease> renew_lease(std::string lease_id,
+                                                        int lifetime_seconds);
+    SecretTask<control::DynamicSecretLease> revoke_lease(std::string lease_id);
 
 private:
     MountSecrets(control::WorkspaceRecords records, control::SecretMountRoute route,
@@ -103,6 +114,24 @@ SecretTask<bool> rewrap_secret_data_key(const ApiContext& context,
 // The raw key a data key record holds, unwrapped by the customer KEK version it names.
 control::ZettaControlResult<std::string> unwrap_secret_data_key(const ApiContext& context,
                                                                 const control::SecretDataKey& key);
+
+// One pass of the dynamic-lease expiry loop (lake#362), run by the server's tick. It asks the
+// control store's due index (secret_lease_routes) for the leases due now, so it reads only the
+// workspaces that hold one, and settles each in its workspace with a conditional write: an expired
+// lease is marked expired and its sealed value erased, a revoked one has its value erased, and a
+// renewed one is given its new due instant. A workspace that is not ready keeps its leases claimed
+// until the hold passes and is tried again; a deleted workspace's leases went with it.
+struct SecretLeaseSweep {
+    std::size_t claimed = 0;
+    std::size_t expired = 0;     // marked expired by this pass
+    std::size_t settled = 0;     // already revoked or expired; route settled
+    std::size_t rescheduled = 0; // renewed since it was indexed
+    std::size_t removed = 0;     // a route whose record was never written
+    std::size_t failed = 0;      // left claimed, tried again after the hold
+};
+inline constexpr int secret_lease_claim_hold_seconds = 60;
+liquid::runtime::task<SecretLeaseSweep> expire_secret_leases(const ApiContext& context,
+                                                             int limit = 500);
 
 // A record failure or store error as a lake error.
 ApiResult secret_records_failure(const control::ZettaControlError& error);

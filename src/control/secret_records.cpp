@@ -253,4 +253,59 @@ std::optional<SecretDataKey> SecretDataKeyCodec::decode(const StoredRecord& reco
     return key;
 }
 
+std::string SecretLeaseCodec::lookup(const std::string& mount_id) {
+    return "mount:" + mount_id;
+}
+
+json SecretLeaseCodec::encode(const SecretLeaseRecord& lease) {
+    return {{"mount_id", lease.mount_id},
+            {"role", lease.role},
+            {"ciphertext", lease.ciphertext ? json(*lease.ciphertext) : json(nullptr)},
+            {"expires_us", lease.expires_us},
+            {"revoked_at", lease.revoked_at},
+            {"expired_at", lease.expired_at},
+            {"renewals", lease.renewals}};
+}
+
+std::optional<SecretLeaseRecord> SecretLeaseCodec::decode(const StoredRecord& record) {
+    if (record.schema_version != 1 || !record.body.is_object()) {
+        return std::nullopt;
+    }
+    SecretLeaseRecord lease;
+    lease.id = record.id;
+    lease.mount_id = text(record.body, "mount_id");
+    lease.role = text(record.body, "role");
+    if (const auto found = record.body.find("ciphertext");
+        found != record.body.end() && found->is_string()) {
+        lease.ciphertext = found->get<std::string>();
+    }
+    if (const auto found = record.body.find("expires_us");
+        found != record.body.end() && found->is_number_integer()) {
+        lease.expires_us = found->get<std::int64_t>();
+    }
+    lease.revoked_at = text(record.body, "revoked_at");
+    lease.expired_at = text(record.body, "expired_at");
+    lease.renewals = static_cast<int>(number(record.body, "renewals"));
+    lease.at_us = record.at_us;
+    lease.revision = record.revision;
+    lease.lake_revision = record.lake_revision;
+    if (lease.mount_id.empty() || lease.role.empty() || lease.expires_us <= 0 ||
+        (!lease.settled() && !lease.ciphertext)) {
+        return std::nullopt;
+    }
+    return lease;
+}
+
+DynamicSecretLease to_lease(const SecretLeaseRecord& lease, const std::string& workspace_id) {
+    return DynamicSecretLease{lease.id,
+                              lease.mount_id,
+                              workspace_id,
+                              lease.role,
+                              record_instant(lease.expires_us),
+                              lease.revoked_at,
+                              lease.expired_at,
+                              lease.renewals,
+                              record_instant(lease.at_us)};
+}
+
 } // namespace lake::control

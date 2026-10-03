@@ -129,4 +129,41 @@ struct SecretDataKeyCodec {
     static std::optional<SecretDataKey> decode(const StoredRecord& record);
 };
 
+// `secrets_dynamic_leases` (lake#362): one record per lease, keyed by the lease id and listed by
+// mount. `ciphertext` is the generated credential sealed under the mount data key with associated
+// data "lake dynamic secret/<mount>/<lease id>"; it is null once the lease is revoked or has been
+// settled as expired. Every change after creation (renew, revoke, expire) is a conditional write
+// at the revision read, so a renewal computed from an active copy never lands on a revoked or
+// expired lease.
+struct SecretLeaseRecord {
+    std::string id;
+    std::string mount_id;
+    std::string role;
+    std::optional<std::string> ciphertext;
+    std::int64_t expires_us = 0;
+    std::string revoked_at;
+    std::string expired_at;
+    int renewals = 0;
+    std::int64_t at_us = 0;
+    std::int64_t revision = 0;
+    std::int64_t lake_revision = 0;
+
+    // Revoked, or settled as expired: nothing can change it any more.
+    bool settled() const {
+        return !revoked_at.empty() || !expired_at.empty();
+    }
+    // Usable now: neither settled nor past its expiry.
+    bool active(std::int64_t now_us) const {
+        return !settled() && expires_us > now_us;
+    }
+};
+struct SecretLeaseCodec {
+    static constexpr RecordCollection collection{"secrets_dynamic_leases", 1};
+    static std::string lookup(const std::string& mount_id);
+    static nlohmann::json encode(const SecretLeaseRecord& lease);
+    static std::optional<SecretLeaseRecord> decode(const StoredRecord& record);
+};
+// The capability's view of a lease record.
+DynamicSecretLease to_lease(const SecretLeaseRecord& lease, const std::string& workspace_id);
+
 } // namespace lake::control

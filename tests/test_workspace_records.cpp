@@ -2932,6 +2932,360 @@ TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesSecretsIntoTheirMountsWorkspace
     EXPECT_EQ(refused.error.code, "unauthorized");
 }
 
+std::int64_t lease_now_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+// lake#362: dynamic leases are records of their mount's workspace among two spaces with two
+// workspaces each; the control store keeps only each lease's content-free route.
+TEST_P(WorkspaceRecordStores, DynamicLeasesLiveInTheirMountsWorkspace) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto admin = [&](const std::string& capability, json input) {
+        return secret_call(t, secret_operator(t), capability, std::move(input));
+    };
+    std::vector<SecretSpace> spaces{secret_space(t, "first", 2), secret_space(t, "second", 2)};
+    struct Placed {
+        std::size_t space, workspace;
+        std::string mount, lease, password;
+    };
+    std::vector<Placed> placed;
+    for (std::size_t s = 0; s < spaces.size(); ++s) {
+        for (std::size_t w = 0; w < spaces[s].workspaces.size(); ++w) {
+            const auto mount = admin("create_secret_mount",
+                                     {{"customer_id", spaces[s].customer_id},
+                                      {"workspace_id", spaces[s].workspaces[w]},
+                                      {"organization_id", spaces[s].organization_id},
+                                      {"name", "leases"}});
+            ASSERT_TRUE(mount.ok) << mount.error.message;
+            const auto leased = admin("lease_dynamic_secret",
+                                      {{"mount_id", mount.value["id"]},
+                                       {"role", "role-" + std::to_string(s) + std::to_string(w)},
+                                       {"lifetime_seconds", 600}});
+            ASSERT_TRUE(leased.ok) << leased.error.message;
+            EXPECT_EQ(leased.value["lease"]["workspace_id"], spaces[s].workspaces[w]);
+            placed.push_back({s, w, mount.value["id"], leased.value["lease"]["id"],
+                              leased.value["value"]["password"]});
+        }
+    }
+    // Each lease is stored, sealed, only at its own workspace's endpoint.
+    for (const auto& where : placed) {
+        const std::string workspace = spaces[where.space].workspaces[where.workspace];
+        auto& rows = t.zetta->records["http://" + workspace + ".test"].rows("secrets_dynamic_leases");
+        ASSERT_EQ(rows.size(), 1U) << workspace;
+        EXPECT_TRUE(rows.contains(where.lease));
+        const std::string dumped = rows.at(where.lease).dump();
+        EXPECT_EQ(dumped.find(where.password), std::string::npos);
+        EXPECT_EQ(dumped.find("role-"), std::string::npos);
+        const auto route = t.store->get_secret_lease_route(where.lease);
+        ASSERT_TRUE(route) << route.error().message;
+        EXPECT_EQ(route->workspace_id, workspace);
+        EXPECT_EQ(route->customer_id, spaces[where.space].customer_id);
+        EXPECT_EQ(route->mount_id, where.mount);
+        EXPECT_GT(route->due_us, 0);
+    }
+    if (GetParam()) {
+        // PostgreSQL holds no lease, and the route holds no content.
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM secrets_dynamic_leases")[0][0].as<int>(), 0);
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM secret_lease_routes")[0][0].as<int>(), 4);
+        const auto columns =
+            tx.exec("SELECT string_agg(column_name, ',' ORDER BY column_name) FROM "
+                    "information_schema.columns WHERE table_name = 'secret_lease_routes' AND "
+                    "table_schema = current_schema()");
+        EXPECT_EQ(columns[0][0].as<std::string>(),
+                  "created_at,customer_id,due_at,lease_id,mount_id,workspace_id");
+        // The route's workspace never changes.
+        EXPECT_THROW(tx.exec_params("UPDATE secret_lease_routes SET workspace_id = $2::uuid "
+                                    "WHERE lease_id = $1::uuid",
+                                    placed[0].lease, spaces[0].workspaces[1]),
+                     pqxx::check_violation);
+    }
+
+    // A record copied into another workspace does not open there.
+    {
+        auto context = secret_operator(t);
+        const auto& first = spaces[0];
+        auto& home = t.zetta->records["http://" + first.workspaces[0] + ".test"];
+        auto& lab = t.zetta->records["http://" + first.workspaces[1] + ".test"];
+        lab.rows("secrets_dynamic_leases")[placed[0].lease] =
+            home.rows("secrets_dynamic_leases").at(placed[0].lease);
+        auto records = lake::api::workspace_records(context, first.customer_id, first.workspaces[1]);
+        ASSERT_TRUE(records);
+        const auto moved = run(
+            records->get(lake::control::SecretLeaseCodec::collection, placed[0].lease));
+        ASSERT_TRUE(moved);
+        EXPECT_FALSE(*moved);
+        lab.rows("secrets_dynamic_leases").erase(placed[0].lease);
+    }
+
+    // Least privilege: a person of another space can neither renew nor revoke, and reaches no
+    // workspace doing so.
+    const auto person = t.context(t.spaces[1]);
+    auto& home = t.zetta->records["http://" + spaces[0].workspaces[0] + ".test"];
+    home.calls.clear();
+    for (const std::string capability : {"renew_dynamic_secret", "revoke_dynamic_secret"}) {
+        const auto denied = secret_call(t, person, capability, {{"lease_id", placed[0].lease}});
+        EXPECT_EQ(denied.error.code, "unauthorized") << capability;
+    }
+    EXPECT_TRUE(home.calls.empty()) << "a refused caller reaches no workspace";
+    const auto denied_lease = secret_call(t, person, "lease_dynamic_secret",
+                                          {{"mount_id", placed[0].mount}, {"role", "x"}});
+    EXPECT_EQ(denied_lease.error.code, "unauthorized");
+    for (const std::string bad : {std::string("not-a-lease"), lake::control::new_uuid_v4()}) {
+        const auto missing = admin("renew_dynamic_secret", {{"lease_id", bad}});
+        EXPECT_EQ(missing.error.code, "not_found") << bad;
+        EXPECT_EQ(missing.error.path, "/lease_id") << bad;
+    }
+
+    // A workspace that is not ready refuses its leases; the other workspace serves on, and the
+    // expiry loop leaves the lease for later.
+    const auto& first = spaces[0];
+    const auto lab_workspace = t.store->get_workspace(first.workspaces[1]);
+    t.status(lab_workspace->zetta_service_id, "Provisioning",
+             "http://" + first.workspaces[1] + ".test");
+    EXPECT_EQ(admin("renew_dynamic_secret", {{"lease_id", placed[1].lease}}).error.code,
+              "workspace_not_ready");
+    EXPECT_TRUE(admin("renew_dynamic_secret", {{"lease_id", placed[0].lease}}).ok);
+    t.ready(first.workspaces[1]);
+
+    // Due leases are settled in their own workspace only.
+    ASSERT_TRUE(t.store->reschedule_secret_lease(placed[1].lease, 1));
+    for (const auto& where : placed) {
+        if (where.lease != placed[1].lease) {
+            ASSERT_TRUE(admin("revoke_dynamic_secret", {{"lease_id", where.lease}}).ok);
+        }
+    }
+    auto context = secret_operator(t);
+    auto records = lake::api::workspace_records(context, first.customer_id, first.workspaces[1]);
+    ASSERT_TRUE(records);
+    {
+        auto got = run(records->get(lake::control::SecretLeaseCodec::collection, placed[1].lease));
+        ASSERT_TRUE(got && *got);
+        auto lease = lake::control::SecretLeaseCodec::decode(**got);
+        ASSERT_TRUE(lease);
+        lease->expires_us = lease_now_us() - 1;
+        ASSERT_TRUE(run(records->put(lake::control::SecretLeaseCodec::collection, placed[1].lease,
+                                     lake::control::SecretLeaseCodec::lookup(placed[1].mount),
+                                     lake::control::SecretLeaseCodec::encode(*lease),
+                                     lake::control::RecordCondition{.if_revision = lease->revision},
+                                     lease->lake_revision + 1, lease->at_us)));
+    }
+    const auto swept = liquid::runtime::block_on(lake::api::expire_secret_leases(context));
+    ASSERT_TRUE(swept);
+    EXPECT_EQ(swept->claimed, 1U) << "only the due lease is claimed";
+    EXPECT_EQ(swept->expired, 1U);
+    {
+        auto got = run(records->get(lake::control::SecretLeaseCodec::collection, placed[1].lease));
+        ASSERT_TRUE(got && *got);
+        const auto lease = lake::control::SecretLeaseCodec::decode(**got);
+        ASSERT_TRUE(lease);
+        EXPECT_FALSE(lease->expired_at.empty());
+        EXPECT_FALSE(lease->ciphertext);
+    }
+    EXPECT_EQ(admin("renew_dynamic_secret", {{"lease_id", placed[1].lease}}).error.code, "conflict");
+
+    if (GetParam()) {
+        // A route whose record was never written (a create that stopped between the two) is
+        // removed once it is old enough that no write can still be on its way.
+        const std::string abandoned = lake::control::new_uuid_v4();
+        ASSERT_TRUE(t.store->record_secret_lease_route(
+            {abandoned, placed[0].mount, first.customer_id, first.workspaces[0], 1}));
+        {
+            pqxx::connection connection(database_uri_);
+            pqxx::work tx(connection);
+            tx.exec_params("UPDATE secret_lease_routes SET created_at = now() - interval '10 "
+                           "minutes' WHERE lease_id = $1::uuid",
+                           abandoned);
+            tx.commit();
+        }
+        const auto removed = liquid::runtime::block_on(lake::api::expire_secret_leases(context));
+        ASSERT_TRUE(removed);
+        EXPECT_EQ(removed->removed, 1U);
+        EXPECT_EQ(t.store->get_secret_lease_route(abandoned).error().code, "not_found");
+    }
+
+    // Workspace deletion: its leases go with it; the space's other workspace keeps its own.
+    const auto fresh = admin("lease_dynamic_secret",
+                             {{"mount_id", placed[1].mount}, {"role", "late"}});
+    ASSERT_TRUE(fresh.ok) << fresh.error.message;
+    ASSERT_TRUE(t.store->update_workspace(first.workspaces[1], {.desired = "deleted"}));
+    EXPECT_FALSE(admin("revoke_dynamic_secret", {{"lease_id", fresh.value["lease"]["id"]}}).ok);
+    EXPECT_TRUE(admin("revoke_dynamic_secret", {{"lease_id", placed[0].lease}}).ok);
+    ASSERT_TRUE(t.store->reschedule_secret_lease(fresh.value["lease"]["id"], 1));
+    const auto after_delete = liquid::runtime::block_on(lake::api::expire_secret_leases(context));
+    ASSERT_TRUE(after_delete);
+    EXPECT_EQ(after_delete->settled, 1U);
+    EXPECT_EQ(t.store->get_secret_lease_route(fresh.value["lease"]["id"])->due_us, 0);
+}
+
+// lake#362: the one-shot copy moves each secrets_dynamic_leases row into its mount's workspace,
+// with its route, so the capabilities and the expiry loop then find it.
+TEST_P(WorkspaceRecordStores, TheOneShotCopyMovesDynamicLeasesIntoTheirMountsWorkspace) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto admin = [&](const std::string& capability, json input) {
+        return secret_call(t, secret_operator(t), capability, std::move(input));
+    };
+    const SecretSpace sole = secret_space(t, "sole", 1);
+    const SecretSpace several = secret_space(t, "several", 2);
+    // A mount made after 0057 (route, no secrets_mounts row) and a legacy mount waiting for its
+    // workspace to be chosen.
+    const auto mount = admin("create_secret_mount", {{"customer_id", sole.customer_id},
+                                                     {"workspace_id", sole.workspaces[0]},
+                                                     {"organization_id", sole.organization_id},
+                                                     {"name", "routed"}});
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::string mount_id = mount.value["id"];
+    const std::string waiting_mount = lake::control::new_uuid_v4();
+    const std::string active = lake::control::new_uuid_v4();
+    const std::string revoked = lake::control::new_uuid_v4();
+    const std::string waiting = lake::control::new_uuid_v4();
+    const std::int64_t created = (lease_now_us() / 1'000'000 - 120) * 1'000'000;
+    const std::int64_t expires = (lease_now_us() / 1'000'000 + 3600) * 1'000'000;
+    const std::int64_t revoked_at = (lease_now_us() / 1'000'000 - 60) * 1'000'000;
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO secrets_mounts (id, customer_id, organization_id, name) "
+                       "VALUES ($1::uuid, $2::uuid, $3::uuid, 'waiting')",
+                       waiting_mount, several.customer_id, several.organization_id);
+        const auto lease = [&](const std::string& id, const std::string& on, const char* value,
+                               bool is_revoked) {
+            tx.exec_params("INSERT INTO secrets_dynamic_leases (id, mount_id, role, "
+                           "encrypted_value, expires_at, revoked_at, renewals, created_at) VALUES "
+                           "($1::uuid, $2::uuid, 'reader', $3, to_timestamp($4::double precision "
+                           "/ 1000000), CASE WHEN $5 THEN to_timestamp($6::double precision / "
+                           "1000000) END, 2, to_timestamp($7::double precision / 1000000))",
+                           id, on, std::string(value), expires, is_revoked, revoked_at, created);
+        };
+        lease(active, mount_id, "sealed-active", false);
+        lease(revoked, mount_id, "sealed-revoked", true);
+        lease(waiting, waiting_mount, "sealed-waiting", false);
+        tx.commit();
+    } else {
+        auto& memory = static_cast<lake::control::InMemoryStore&>(*t.store);
+        lake::control::SecretMount legacy;
+        legacy.id = waiting_mount;
+        legacy.customer_id = several.customer_id;
+        legacy.organization_id = several.organization_id;
+        legacy.name = "waiting";
+        memory.seed_legacy_secret_mount(legacy);
+        const auto lease = [&](const std::string& id, const SecretSpace& space,
+                               const std::string& on, const char* value, bool is_revoked) {
+            memory.seed_legacy_dynamic_secret_lease(
+                {id, "reader", value, created, expires,
+                 is_revoked ? lake::control::record_instant(revoked_at) : "",
+                 is_revoked ? revoked_at : 0, 2, {space.customer_id, on, "", ""}});
+        };
+        lease(active, sole, mount_id, "sealed-active", false);
+        lease(revoked, sole, mount_id, "sealed-revoked", true);
+        lease(waiting, several, waiting_mount, "sealed-waiting", false);
+    }
+    auto operator_context = secret_operator(t);
+    const auto copy = [&](const std::string& mode) {
+        return secret_call(t, operator_context, "copy_workspace_records",
+                           {{"collection", "secrets_dynamic_leases"}, {"mode", mode}});
+    };
+    const auto plan = copy("plan");
+    ASSERT_TRUE(plan.ok) << plan.error.message;
+    EXPECT_EQ(plan.value["rows"], 3);
+    EXPECT_EQ(plan.value["assigned"], 2);
+    ASSERT_EQ(plan.value["unresolved"].size(), 1U);
+    EXPECT_EQ(plan.value["unresolved"][0]["id"], waiting);
+    EXPECT_EQ(plan.value["unresolved"][0]["outcome"], "needs_selection");
+    EXPECT_FALSE(t.store->get_secret_lease_route(active)) << "a plan writes nothing";
+    EXPECT_EQ(copy("verify").value["missing"].size(), 2U);
+
+    const auto copied = copy("copy");
+    ASSERT_TRUE(copied.ok) << copied.error.message;
+    EXPECT_EQ(copied.value["copied"], 2);
+    EXPECT_EQ(copy("copy").value["already_present"], 2) << "a rerun copies nothing twice";
+    const auto verified = copy("verify");
+    EXPECT_EQ(verified.value["verified"], 2);
+    EXPECT_TRUE(verified.value["mismatched"].empty());
+    EXPECT_EQ(verified.value["complete"], false) << "the waiting mount's lease holds it back";
+
+    // The copied leases have routes due at their expiry, or at once when revoked, and are read
+    // through the capabilities in their mount's workspace.
+    const auto active_route = t.store->get_secret_lease_route(active);
+    ASSERT_TRUE(active_route) << active_route.error().message;
+    EXPECT_EQ(active_route->workspace_id, sole.workspaces[0]);
+    EXPECT_EQ(active_route->due_us, expires);
+    EXPECT_EQ(t.store->get_secret_lease_route(revoked)->due_us, revoked_at);
+    auto records = lake::api::workspace_records(operator_context, sole.customer_id,
+                                                sole.workspaces[0]);
+    ASSERT_TRUE(records);
+    {
+        auto got = run(records->get(lake::control::SecretLeaseCodec::collection, active));
+        ASSERT_TRUE(got && *got);
+        const auto lease = lake::control::SecretLeaseCodec::decode(**got);
+        ASSERT_TRUE(lease);
+        EXPECT_EQ(lease->ciphertext, "sealed-active") << "the ciphertext is copied unopened";
+        EXPECT_EQ(lease->renewals, 2);
+        EXPECT_EQ(lease->at_us, created);
+    }
+    const auto renewed = admin("renew_dynamic_secret", {{"lease_id", active}});
+    ASSERT_TRUE(renewed.ok) << renewed.error.message;
+    EXPECT_EQ(renewed.value["renewals"], 3);
+    EXPECT_EQ(admin("renew_dynamic_secret", {{"lease_id", revoked}}).error.code, "conflict");
+    // The expiry loop settles the copied revoked lease (its sealed value erased); verify accepts
+    // that and the renewal as later changes.
+    const auto swept =
+        liquid::runtime::block_on(lake::api::expire_secret_leases(operator_context));
+    ASSERT_TRUE(swept);
+    EXPECT_EQ(swept->settled, 1U);
+    {
+        auto got = run(records->get(lake::control::SecretLeaseCodec::collection, revoked));
+        ASSERT_TRUE(got && *got);
+        EXPECT_FALSE(lake::control::SecretLeaseCodec::decode(**got)->ciphertext);
+    }
+    EXPECT_EQ(copy("verify").value["verified"], 2);
+
+    // A reviewed choice for the waiting mount routes it; the next copy moves its lease.
+    if (GetParam()) {
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE workspace_assignments SET workspace_id = $2::uuid WHERE "
+                       "object_table = 'secrets_mounts' AND object_id = $1::uuid",
+                       waiting_mount, several.workspaces[1]);
+        tx.commit();
+    } else {
+        static_cast<lake::control::InMemoryStore&>(*t.store)
+            .select_legacy_secret_mount_workspace(waiting_mount, several.workspaces[1]);
+    }
+    EXPECT_EQ(copy("copy").value["copied"], 1);
+    EXPECT_EQ(copy("verify").value["complete"], true);
+    EXPECT_EQ(t.store->get_secret_lease_route(waiting)->workspace_id, several.workspaces[1]);
+    EXPECT_EQ(t.zetta->records["http://" + several.workspaces[1] + ".test"]
+                  .rows("secrets_dynamic_leases")
+                  .size(),
+              1U);
+    EXPECT_TRUE(t.zetta->records["http://" + several.workspaces[0] + ".test"]
+                    .rows("secrets_dynamic_leases")
+                    .empty());
+
+    // A swapped record is reported.
+    t.zetta->records["http://" + sole.workspaces[0] + ".test"]
+        .rows("secrets_dynamic_leases")
+        .at(active)["value"] = "AAAA";
+    EXPECT_EQ(copy("verify").value["missing"].size(), 1U);
+
+    // Only the operator copies.
+    const auto refused = secret_call(t, t.context(t.spaces[0]), "copy_workspace_records",
+                                     {{"collection", "secrets_dynamic_leases"}, {"mode", "plan"}});
+    EXPECT_EQ(refused.error.code, "unauthorized");
+}
+
 INSTANTIATE_TEST_SUITE_P(Stores, WorkspaceRecordStores, testing::Values(false, true),
                          [](const auto& info) { return info.param ? "Postgres" : "Memory"; });
 
