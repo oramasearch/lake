@@ -27,7 +27,7 @@ and `unassigned`: the repositories of the space without a workspace. Any unassig
 | `plan` | Reads only. Lists the workspace's repositories, live and tombstoned, with `logical_bytes` and `unique_bytes` of their refs (`size_error` when a size cannot be read). | `repositories`, `blocked` |
 | `copy` | Copies each repository with liquid's `repository::transfer` (liquid#328): every reachable object keeping its digest, its lease records, then its state keys with `LIQUID_REPO` last. A rerun copies only what is missing. Refused once the workspace is switched. | `repositories` (one transfer report each), `complete` |
 | `verify` | Writes nothing. Compares every reachable object and every state key in both stores. | `repositories` with `differences`, `complete` |
-| `switch` | Holds every repository request of this lake, copies what arrived since `copy`, verifies each repository again, and only when all are complete sets `workspaces.store_moved_at`; from then on the workspace's repositories are served from its store. A repeated switch answers `switched: true` and changes nothing. | `repositories`, `switched`, `store_moved_at` |
+| `switch` | Holds the workspace's and its space's repository requests and repository creation in the workspace, lists the workspace's repositories under that hold, copies what arrived since `copy`, verifies each repository again, creates in the workspace store each one the space store never held, and only when all are complete sets `workspaces.store_moved_at`; from then on the workspace's repositories are served from its store. Requests for other workspaces' stores are not held. A repeated switch answers `switched: true` and changes nothing. | `repositories`, `switched`, `store_moved_at` |
 
 A transfer report has `repository_id`, `absent` (the space store never held it: nothing to copy),
 `complete`, `objects`, `objects_present`, `objects_written`, `bytes_written`, `state_written`,
@@ -44,8 +44,10 @@ A transfer report has `repository_id`, `absent` (the space store never held it: 
 - The plan's precondition of a fresh snapshot of the workspace volume and of lake's store volume
   ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260)) is not checked:
   lake has no snapshot desired state yet. Take the snapshots by hand before `copy`.
-- A repository created in a switched workspace is created in its store; one created before the
-  switch and never written has nothing to copy.
+- A repository created in a switched workspace is created in its store at creation. One created
+  before the switch and never written is created empty in the workspace store by the switch.
+- After the switch a missing workspace store, data key or repository answers `corrupt` (500); lake
+  never creates an empty one in its place.
 
 **Audit.** Each call is one central audit event (`workspace_store.move`, details `workspace_id` and
 `mode`): it is an operator action on the instance, classified central in

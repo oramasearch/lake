@@ -165,7 +165,11 @@ never rewrite); `ZettaStoreOwner` is liquid's `store_owner` over the bucket leas
 of `LAKE_WORKSPACE_STORE_LEASE_SECONDS`, and a lost lease answers that workspace `503
 store_unavailable`. Workspace stores open on first use and close on drain and on workspace deletion.
 The operator's `move_workspace_store` plans, copies (liquid#328), verifies and switches one workspace
-at a time (`workspaces.store_moved_at`); the space store is never written or removed. Replication
+at a time (`workspaces.store_moved_at`); the space store is never written or removed. A switched
+workspace's missing store, key or repository answers `corrupt`, never an empty store; each store has
+its own lane and repository-store capabilities run off the server thread, so one workspace's Zetta
+holds up only its own requests. Rollback by the workspace Zetta is not detected yet (lake#522), and
+every workspace store depends on `LAKE_INSTANCE_KEK`, which has no rotation or backup. Replication
 cursors go through liquid's cursor API. Writes need liquid#332 (until it lands the index merge is
 refused with a message naming it); no workspace is switched on dev, and the copy's snapshot
 precondition (orama-operator#260) is not enforced. See `docs/architecture/workspace-store.md` and
