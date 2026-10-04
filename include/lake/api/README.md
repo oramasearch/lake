@@ -129,3 +129,7 @@ each routed workspace (`tenant_image_bytes`), replacing the former
 
 `capabilities.hpp` declares `register_volume_capabilities` (migration `0069`,
 [volumes.md](../../../docs/api/volumes.md)).
+`sync_store.hpp` adds `WorkspaceStoreTransfer` and the `SyncStore` operations of the workspace store
+move (`transfer_to_workspace_store`, `switch_workspace_store`, `create_repository_content`,
+`close_workspace_store`, lake#380); `capabilities.hpp` adds `create_repository_row`;
+`server.hpp` adds `ServerOptions::object_transport` and `workspace_store_lease_ttl`.

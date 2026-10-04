@@ -94,6 +94,21 @@ content. Non-text/binary format extraction belongs to the format registry work i
 The query path resolves each candidate repository to its policy object, batches the object ids
 through `control::authorize_batch(principal, objects, "read", cache)`, and emits only allowed
 hits. This is the shared attestation-backed policy engine; `admin` is its operator principal.
+**Where search reads repositories (lake#380).** Search reads a repository only through lake's
+repository store, which lends it from the store that serves it (the space's store, or a switched
+workspace's own store) under that store's lane and on its one open instance
+(`search::Service::set_repository_access`). It never opens a second instance of a store: a liquid
+open removes the store's temporary files, which another writer may be about to publish. A search
+service that never had a repository store opens the space store itself; once one was set, search
+refuses instead. Search borrows a repository before it takes its own lock.
+
+**Temporary gap: switched workspaces are not searched (until lake#381).** The index files are on
+lake's volume. Indexing a switched workspace's repository there would put its content back on lake's
+volume, against the rule that a workspace's data lives in its workspace Zetta. Until lake#381 puts
+the index beside the workspace store, search neither indexes nor returns a repository served by a
+workspace store: publish and `reindex_artifacts` write nothing for it (and drop what the index held
+for it), a history scan of it returns no occurrence, and hot and artifact searches leave it out.
+
 Anonymous search, including search of public repositories, is intentionally unavailable: the
 registry rejects an unauthenticated request before the query executes. Search therefore satisfies
 #40's query-time filtering and anonymous-public-read decision.

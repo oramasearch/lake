@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -10,6 +11,10 @@
 
 namespace lake::control {
 class Store;
+}
+
+namespace liquid {
+class repository;
 }
 
 namespace lake::search {
@@ -81,9 +86,29 @@ struct QueryResult {
     std::vector<Hit> items;
 };
 
+// A repository lent to search by lake's repository store (lake#380): `hold` keeps the store's
+// lane and the shared open instance for as long as search reads it.
+struct BorrowedRepository {
+    std::shared_ptr<void> hold;
+    liquid::repository* repository = nullptr;
+};
+using RepositoryAccess =
+    std::function<Result<BorrowedRepository>(const std::string& customer, const std::string& repository)>;
+
 class Service {
 public:
     explicit Service(std::filesystem::path store_root);
+
+    // How search reads a repository. The server sets it to its repository store, which lends the
+    // repository from whichever store serves it, under that store's lane, so search never opens
+    // a second instance of a store another writer has open. Unset, search opens the space store
+    // itself, which only a service that never had a repository store may do; once one was set,
+    // search refuses instead.
+    void set_repository_access(RepositoryAccess access);
+    // Whether a repository is served by a workspace store. Until lake#381 puts the index beside
+    // the workspace store, such a repository is not indexed on lake's volume (publish and reindex
+    // drop what the index holds for it) and is not returned by a query.
+    void set_workspace_served(std::function<bool(const std::string&, const std::string&)> served);
 
     [[nodiscard]] Result<void> publish(const Publish& change);
     [[nodiscard]] Result<ReindexResult> reindex_artifacts(const std::string& customer,

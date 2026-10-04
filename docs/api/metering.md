@@ -22,17 +22,22 @@ Since migration `0053_metering_workspaces` lake no longer writes or reads `meter
 |---|---|---|
 | Transfer | `lake_metering_usage` in the repository's workspace: one sealed record per workspace and UTC hour | `transfer_in_bytes` counts binary request-body bytes accepted by missing-object, push, pull and chunk-upload paths; `transfer_out_bytes` counts binary response bytes of missing-object, push, pull and ranged chunk-read paths. Exact counters, added with a conditional write. |
 | Repository build compute | `lake_metering_build_records` in the repository's workspace: one sealed record per build result | Sum sandbox, execution, hash and store milliseconds of the result, round up to a whole second, and record each result id once (`if_absent`). Queue time is excluded. |
-| Repository storage | Nowhere: measured on every read | Sum the uncompressed lengths in libliquid pack-frame metadata once per digest across `LAKE_STORE_ROOT/<customer>/store`. Content-addressed duplicates are counted once. |
+| Repository storage | Nowhere: measured on every read | Sum the uncompressed lengths in libliquid pack-frame metadata once per digest across `LAKE_STORE_ROOT/<customer>/store` (while any workspace of the space is not switched), plus each switched workspace's bucket `usage` (lake#380). Content-addressed duplicates in the space store are counted once. |
 
 Both collections are found by the space (`customer:<id>`) and stamped with the start of their
 hour, and they hold only sealed values and blind indexes
 ([workspace records](../architecture/workspace-records.md)). They carry no price.
 
-**Storage stays a space-level measurement.** One libliquid store holds every repository of a space,
-and a digest shared by two repositories is stored once, so its bytes cannot be split between
-workspaces. Until lake#380 gives each workspace its own store, repository storage is measured live
-from that store on each read, and no hourly history of it is kept anywhere, so nothing space-level
-is persisted centrally.
+**Storage stays a space-level measurement.** Before a workspace is switched, one libliquid store
+holds every repository of its space, and a digest shared by two repositories is stored once, so its
+bytes cannot be split between workspaces. Repository storage is measured live on each read and no
+hourly history of it is kept anywhere, so nothing space-level is persisted centrally. With lake#380
+a switched workspace has its own store in its workspace Zetta
+([architecture/workspace-store.md](../architecture/workspace-store.md)): a space's storage is its
+space store (measured as before) while any of its workspaces is not switched, plus each switched
+workspace's bucket `usage` (the encrypted bytes Zetta holds). The space quota is enforced against
+that sum, and each workspace's bucket is created with the space's quota as its own. While a space is
+part way through the move, the moved repositories are counted in both stores.
 
 ### Transfer off the request path
 

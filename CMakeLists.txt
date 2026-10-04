@@ -192,6 +192,7 @@ add_library(lake-core STATIC
   src/control/web_apps.cpp
   src/control/zetta_workspace.cpp
   src/control/workspace_records.cpp
+  src/control/workspace_store.cpp
   src/control/ask_messages.cpp
   src/control/opportunities.cpp
   src/control/stream_owners.cpp
@@ -218,6 +219,7 @@ add_library(lake-core STATIC
   src/api/repository_records_api.cpp
   src/api/workspace_deletion.cpp
   src/api/workspace_record_capabilities.cpp
+  src/api/workspace_store_capabilities.cpp
   src/api/datasets.cpp
   src/api/stream_capabilities.cpp
   src/api/experiment_capabilities.cpp

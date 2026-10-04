@@ -135,8 +135,14 @@ liquid::runtime::task<ApiResult> export_repository(const json& input, ApiContext
             forge_values.push_back(control::to_json(record));
         }
     }
-    const auto portable = context.sync_store->export_portable(
-        repository->customer_id, repository->id, input.value("include_git", false));
+    const auto portable = co_await blocking_call(
+        [&] {
+            return context.sync_store->export_portable(
+                repository->customer_id, repository->id, input.value("include_git", false));
+        },
+        [](std::string message) -> SyncStoreResult<RepositoryPortableData> {
+            return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+        });
     if (!portable) {
         co_return sync_error(portable.error());
     }
@@ -211,8 +217,11 @@ liquid::runtime::task<ApiResult> import_repository(const json& input, ApiContext
     }
     const RepositoryPortableData portable{
         payload.at("history"), payload.at("artifacts"), payload.at("git")};
-    const auto imported =
-        context.sync_store->import_portable(created->customer_id, created->id, portable);
+    const auto imported = co_await blocking_call(
+        [&] { return context.sync_store->import_portable(created->customer_id, created->id, portable); },
+        [](std::string message) -> SyncStoreResult<void> {
+            return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+        });
     if (!imported) {
         co_return sync_error(imported.error());
     }

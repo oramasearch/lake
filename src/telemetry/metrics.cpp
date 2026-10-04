@@ -587,6 +587,10 @@ public:
     update_workspace(const std::string& id, const control::WorkspacePatch& patch) override {
         return call("update_workspace", [&] { return store_->update_workspace(id, patch); });
     }
+    control::Result<control::Workspace> mark_workspace_store_moved(const std::string& id) override {
+        return call("mark_workspace_store_moved",
+                    [&] { return store_->mark_workspace_store_moved(id); });
+    }
     control::Result<control::WorkspaceDeletion>
     delete_workspace_cascade(const control::WorkspaceDeletionRequest& request) override {
         return call("delete_workspace_cascade",

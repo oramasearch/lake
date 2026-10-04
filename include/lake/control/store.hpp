@@ -366,6 +366,10 @@ struct Workspace {
     std::int32_t storage_gi = 5;
     std::int32_t storage_gi_observed = 0;
     std::string storage_phase, storage_message;
+    // When the workspace's repositories moved into its own liquid store in its workspace Zetta
+    // (lake#380, migration 0067, move_workspace_store `switch`); empty while they are still served
+    // from the space's store on lake's volume.
+    std::string store_moved_at;
 };
 struct NewWorkspace {
     std::string customer_id, name, environment, created_by_taap_id;
@@ -1388,6 +1392,10 @@ public:
     virtual Result<Workspace> get_workspace(const std::string& id) = 0;
     virtual Result<Workspace> create_workspace(const NewWorkspace&) = 0;
     virtual Result<Workspace> update_workspace(const std::string& id, const WorkspacePatch&) = 0;
+    // Records that the workspace's repositories are now served from its own store in its workspace
+    // Zetta (lake#380, move_workspace_store `switch`). Idempotent: a workspace already switched
+    // keeps its first instant. A deleted workspace is a conflict.
+    virtual Result<Workspace> mark_workspace_store_moved(const std::string& id) = 0;
     // Deletes a workspace and everything it holds in one transaction (lake#514): every repository
     // of the workspace still live or inside its retention is tombstoned with its retention ended
     // (`deleted_at` kept where set, `retention_until` now), which releases its name; its apps are

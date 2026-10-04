@@ -6350,9 +6350,18 @@ TEST(SyncHttp, TwoLakeInstancesReplicateRepositoryAndResumeFromCursor) {
     const std::string resumed_response = replicate();
     EXPECT_NE(resumed_response.find(" 200 "), std::string::npos) << resumed_response;
     EXPECT_EQ(response_json(resumed_response).at("value").at("received_bytes"), 0);
-    EXPECT_TRUE(std::filesystem::exists(temporary.path() / "region-b" / customer->id /
-                                        "repositories" / repository->id / "replication" /
-                                        "region-a.cursor"));
+    // The cursor is liquid repository state (liquid#326), kept in the store that holds the
+    // repository, so it moves with it (lake#380).
+    bool cursor_in_store = false;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(
+             temporary.path() / "region-b" / customer->id / "store" / "repositories")) {
+        cursor_in_store = cursor_in_store || (entry.path().filename() == "region-a.cursor" &&
+                                              entry.path().parent_path().filename() == "replication");
+    }
+    EXPECT_TRUE(cursor_in_store);
+    EXPECT_FALSE(std::filesystem::exists(temporary.path() / "region-b" / customer->id /
+                                         "repositories" / repository->id / "replication" /
+                                         "region-a.cursor"));
 }
 
 TEST(SyncHttp, StorageQuotaThrottlesNewWritesAndKeepsExistingContentReadable) {

@@ -188,6 +188,7 @@ public:
     Result<Workspace> get_workspace(const std::string& id) override;
     Result<Workspace> create_workspace(const NewWorkspace&) override;
     Result<Workspace> update_workspace(const std::string& id, const WorkspacePatch&) override;
+    Result<Workspace> mark_workspace_store_moved(const std::string& id) override;
     Result<WorkspaceDeletion> delete_workspace_cascade(const WorkspaceDeletionRequest&) override;
     Result<WorkspaceDeletion> get_workspace_deletion(const std::string& workspace_id) override;
     Result<std::vector<WorkspaceDeletion>> pending_workspace_deletions(int limit) override;

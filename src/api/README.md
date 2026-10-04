@@ -229,6 +229,27 @@ Failed, with its reason (lake#442). See `docs/api/agent-launches.md`.
 The store capabilities (`list_stores`, `create_store`, `delete_store`, `store_connection`) take
 the workspace and see only its stores (lake#465). See `docs/api/storage.md`.
 
+`registry.cpp` runs the synchronous handlers of capabilities that wait on a repository store
+(repository, Drive, model and dataset objects, search, `replicate_repository`,
+`move_workspace_store`, `delete_workspace`) on a 32-thread pool, and `run_blocking` /
+`blocking_call` (`registry.hpp`, `capabilities.hpp`) run asynchronous handlers' store calls there,
+so a slow workspace Zetta holds up only its own requests (lake#380). `LiquidCustomerStores` admits
+at most four requests per store lane and refuses a moving lane with 503; it lends repositories to
+search (`lend_repository`) and tells search which repositories a workspace store serves
+(`served_by_workspace`), which search skips until lake#381. The server runs the usage refresh, the
+start-up usage priming and the deletion pass on a maintenance thread, and closes its io_context to
+the blocking pool at shutdown (`close_execution_context`).
+`create_repository_row` (`capabilities.cpp`) creates every repository row through
+`SyncStore::create_repository_content`. `workspace_store_capabilities.cpp` registers the operator-only `move_workspace_store` (plan, copy,
+verify, switch; lake#380, `docs/api/workspace-store.md`). `http_server.cpp`'s `LiquidCustomerStores`
+routes a repository to its workspace's store once `workspaces.store_moved_at` is set (failing
+closed), holds one lane per store (`s:<space>`, `w:<workspace>`) with its map lock never held across
+I/O, opens each workspace store on first use, never creates a workspace store, key or repository
+except explicitly (`create_repository_content`, the switch), closes and reopens a store whose lease
+was lost or whose write failed, closes them on drain and on workspace
+deletion (`WorkspaceContent::close_workspace_store`), measures a switched workspace's storage as
+its bucket's usage, and keeps replication cursors with liquid's cursor API.
+
 `workspace_records_api.hpp` opens one workspace's records through `call_workspace`, so record
 calls are owner-checked, refused when the workspace is not ready and named in Server-Timing.
 `workspace_record_capabilities.cpp` registers the operator-only `copy_workspace_records` (plan,

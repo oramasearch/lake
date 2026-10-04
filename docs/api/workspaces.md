@@ -213,10 +213,11 @@ that owns the store root). Repeating `delete_workspace` for the deleted workspac
 and answers the recorded deletion; the dry run of a deleted workspace answers the same record.
 
 The repositories' content stays in the space's liquid store until the collector reclaims it, as
-for any tombstone whose retention has ended. When repositories move into the workspace's own store
-([lake#380](https://github.com/oramasearch/lake/issues/380)), lake closes that store and releases
-its bucket lease before it reports the deletion complete (`WorkspaceContent::close_workspace_store`
-in `include/lake/api/workspace_deletion.hpp`), and the operator's deletion of the namespace and
+for any tombstone whose retention has ended. A workspace whose repositories moved into its own store
+([lake#380](https://github.com/oramasearch/lake/issues/380), [workspace-store.md](workspace-store.md))
+has that store closed and its bucket lease released before lake reports the deletion complete
+(`WorkspaceContent::close_workspace_store` in `include/lake/api/workspace_deletion.hpp`, set by the
+HTTP server to `SyncStore::close_workspace_store`), and the operator's deletion of the namespace and
 volume destroys the bytes. Tenant image routes are deleted in the transaction
 ([lake#383](https://github.com/oramasearch/lake/issues/383) phase A); their blobs move into the
 workspace's store, and go with it, in phase B.

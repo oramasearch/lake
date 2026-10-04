@@ -7,14 +7,32 @@
 #include <cstdio>
 #include <exception>
 #include <print>
+#include <set>
+#include <thread>
 
 #include "lake/api/audit_routing.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/store.hpp"
 #include "lake/transparency/log.hpp"
 
+#include <liquid/runtime.hpp>
+
 namespace lake::api {
 namespace {
+
+// Capabilities that wait on a repository store run off the server's thread (lake#380). Their
+// handlers reach shared state only through the control store, the repository store (one lane
+// per store), search (which reaches stores only through the repository store), and the
+// recorders, all of which lock.
+bool waits_on_repository_store(const Capability& capability) {
+    const std::string_view object = capability.object;
+    return object.starts_with("repository") || object.find("drive") != std::string_view::npos ||
+           object == "model" ||
+           object == "dataset" || object == "workspace store move" ||
+           capability.name == "replicate_repository" ||
+           // Deleting a workspace closes its store, waiting on its lane.
+           capability.name == "delete_workspace";
+}
 
 bool contains_database_diagnostic(std::string_view message) {
     std::string uppercase(message);
@@ -117,6 +135,47 @@ std::string_view documented_spelling(std::string_view code) {
 }
 
 } // namespace
+
+namespace detail {
+boost::capy::thread_pool& blocking_pool() {
+    static boost::capy::thread_pool pool(32, "lake-store-");
+    return pool;
+}
+std::atomic<int>& blocking_tasks() {
+    static std::atomic<int> tasks{0};
+    return tasks;
+}
+std::mutex& completion_gate() {
+    static std::mutex gate;
+    return gate;
+}
+namespace {
+std::set<const void*>& closed_contexts() {
+    static std::set<const void*> contexts;
+    return contexts;
+}
+} // namespace
+bool execution_context_closed(const void* context) {
+    return closed_contexts().contains(context);
+}
+} // namespace detail
+
+int wait_for_blocking_tasks(std::chrono::steady_clock::time_point deadline) {
+    while (detail::blocking_tasks().load() != 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return detail::blocking_tasks().load();
+}
+
+void close_execution_context(const void* context) {
+    std::lock_guard gate(detail::completion_gate());
+    detail::closed_contexts().insert(context);
+}
+
+void forget_execution_context(const void* context) {
+    std::lock_guard gate(detail::completion_gate());
+    detail::closed_contexts().erase(context);
+}
 
 std::span<const ErrorCode> error_codes() {
     return documented_error_codes;
@@ -957,6 +1016,12 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
                 } else {
                     state.result = std::move(*completed);
                 }
+            } else if (capability->handler && waits_on_repository_store(*capability)) {
+                const CapabilityHandler& handler = capability->handler;
+                auto completed = co_await run_blocking(
+                    [&handler, &call_input, &context] { return handler(call_input, context); });
+                state.result = completed ? std::move(*completed)
+                                         : ApiResult::failure("store_error", completed.error().message);
             } else if (capability->handler) {
                 state.result = capability->handler(call_input, context);
             } else {

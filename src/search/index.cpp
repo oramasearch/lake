@@ -351,6 +351,47 @@ struct Service::Impl {
     std::filesystem::path root;
     mutable std::shared_mutex mutex;
     std::map<std::string, CustomerState> customers;
+    RepositoryAccess access;
+    // Once lake's repository store has lent repositories, search never opens a store itself.
+    bool access_configured = false;
+    // Repositories served by a workspace store: not indexed here, and not returned (lake#381).
+    std::function<bool(const std::string&, const std::string&)> workspace_served;
+
+    [[nodiscard]] bool excluded(const std::string& customer, const std::string& repository) const {
+        return workspace_served && workspace_served(customer, repository);
+    }
+
+    // The repository from lake's repository store when one is set; otherwise opened here, on a
+    // store instance of its own.
+    [[nodiscard]] Result<BorrowedRepository> borrow(const std::string& customer,
+                                                    const std::string& repository) const {
+        if (access) {
+            return access(customer, repository);
+        }
+        if (access_configured) {
+            return std::unexpected(Error{
+                "store_unavailable",
+                "search reads repositories only through lake's repository store, which is closed"});
+        }
+        struct Owned {
+            liquid::store store;
+            liquid::repository repository;
+        };
+        auto store = liquid::runtime::block_on(liquid::store::open(root / customer / "store"));
+        if (!store) {
+            return std::unexpected(Error{"store_error", store.error().message});
+        }
+        auto owned = std::make_shared<Owned>(Owned{std::move(*store), liquid::repository{}});
+        liquid::repository_options options;
+        options.store = &owned->store;
+        auto opened = liquid::runtime::block_on(
+            liquid::repository::open(root / customer / "repositories" / repository, options));
+        if (!opened) {
+            return std::unexpected(Error{"store_error", opened.error().message});
+        }
+        owned->repository = std::move(*opened);
+        return BorrowedRepository{owned, &owned->repository};
+    }
 
     explicit Impl(std::filesystem::path value) : root(std::move(value)) {}
 
@@ -519,21 +560,10 @@ struct Service::Impl {
         std::size_t changes = 0;
     };
 
-    [[nodiscard]] Result<ScanOutput> scan(const Query& query, CustomerState& state) {
-        const std::filesystem::path repository_path =
-            root / query.customer / "repositories" / query.repository;
-        auto customer_store =
-            liquid::runtime::block_on(liquid::store::open(root / query.customer / "store"));
-        if (!customer_store) {
-            return std::unexpected(Error{"store_error", customer_store.error().message});
-        }
-        liquid::repository_options repository_options;
-        repository_options.store = &*customer_store;
-        auto opened = liquid::runtime::block_on(
-            liquid::repository::open(repository_path, repository_options));
-        if (!opened) {
-            return std::unexpected(Error{"store_error", opened.error().message});
-        }
+    // `opened` was borrowed before search's mutex was taken, so search never waits on a store's
+    // lane while holding it.
+    [[nodiscard]] Result<ScanOutput> scan(const Query& query, CustomerState& state,
+                                          liquid::repository* opened) {
         std::vector<liquid::change_id> changes;
         if (!query.change.empty()) {
             const auto parsed = liquid::parse_digest(query.change);
@@ -681,6 +711,17 @@ struct Service::Impl {
 Service::Service(std::filesystem::path store_root)
     : impl_(std::make_shared<Impl>(std::move(store_root))) {}
 
+void Service::set_repository_access(RepositoryAccess access) {
+    std::unique_lock lock(impl_->mutex);
+    impl_->access_configured = impl_->access_configured || static_cast<bool>(access);
+    impl_->access = std::move(access);
+}
+
+void Service::set_workspace_served(std::function<bool(const std::string&, const std::string&)> served) {
+    std::unique_lock lock(impl_->mutex);
+    impl_->workspace_served = std::move(served);
+}
+
 Result<void> Service::publish(const Publish& publication) {
     try {
         if (publication.customer.empty() || publication.repository.empty() ||
@@ -688,6 +729,15 @@ Result<void> Service::publish(const Publish& publication) {
             return std::unexpected(
                 Error{"invalid_input", "customer, repository, ref and change are required"});
         }
+        // A switched workspace's repository is not indexed on lake's volume until lake#381.
+        if (impl_->excluded(publication.customer, publication.repository)) {
+            return drop_repository(publication.customer, publication.repository);
+        }
+        auto borrowed = impl_->borrow(publication.customer, publication.repository);
+        if (!borrowed) {
+            return std::unexpected(borrowed.error());
+        }
+        liquid::repository* opened = borrowed->repository;
         std::unique_lock lock(impl_->mutex);
         const auto loaded = impl_->load_customer(publication.customer);
         if (!loaded) {
@@ -702,20 +752,6 @@ Result<void> Service::publish(const Publish& publication) {
             }
             return std::unexpected(
                 Error{"conflict", "a tag snapshot cannot move to another change"});
-        }
-        const std::filesystem::path repository_path =
-            impl_->root / publication.customer / "repositories" / publication.repository;
-        auto customer_store = liquid::runtime::block_on(
-            liquid::store::open(impl_->root / publication.customer / "store"));
-        if (!customer_store) {
-            return std::unexpected(Error{"store_error", customer_store.error().message});
-        }
-        liquid::repository_options repository_options;
-        repository_options.store = &*customer_store;
-        auto opened = liquid::runtime::block_on(
-            liquid::repository::open(repository_path, repository_options));
-        if (!opened) {
-            return std::unexpected(Error{"store_error", opened.error().message});
         }
         const auto parsed = liquid::parse_digest(publication.change);
         if (!parsed) {
@@ -860,6 +896,19 @@ Result<ReindexResult> Service::reindex_artifacts(const std::string& customer,
         if (customer.empty() || repository.empty()) {
             return std::unexpected(Error{"invalid_input", "customer and repository are required"});
         }
+        // A switched workspace's repository is not indexed on lake's volume until lake#381.
+        if (impl_->excluded(customer, repository)) {
+            const auto dropped = drop_repository(customer, repository);
+            if (!dropped) {
+                return std::unexpected(dropped.error());
+            }
+            return ReindexResult{};
+        }
+        auto borrowed = impl_->borrow(customer, repository);
+        if (!borrowed) {
+            return std::unexpected(borrowed.error());
+        }
+        liquid::repository* opened = borrowed->repository;
         std::unique_lock lock(impl_->mutex);
         const auto loaded = impl_->load_customer(customer);
         if (!loaded) {
@@ -868,18 +917,6 @@ Result<ReindexResult> Service::reindex_artifacts(const std::string& customer,
         auto& state = impl_->customers.at(customer);
         std::erase_if(state.artifacts,
                       [&](const auto& item) { return item.second.repository == repository; });
-        auto customer_store =
-            liquid::runtime::block_on(liquid::store::open(impl_->root / customer / "store"));
-        if (!customer_store) {
-            return std::unexpected(Error{"store_error", customer_store.error().message});
-        }
-        liquid::repository_options options;
-        options.store = &*customer_store;
-        auto opened = liquid::runtime::block_on(liquid::repository::open(
-            impl_->root / customer / "repositories" / repository, options));
-        if (!opened) {
-            return std::unexpected(Error{"store_error", opened.error().message});
-        }
         ReindexResult result;
         liquid::record_page_options page{.limit = 1'000};
         do {
@@ -1001,6 +1038,17 @@ Service::query(const Query& query, const std::string& principal, control::Store&
             return std::unexpected(Error{
                 "invalid_input", "artifact scope cannot be combined with ref, change, or history"});
         }
+        // A history scan borrows its repository before search's mutex is taken. A switched
+        // workspace's repository is not searched until lake#381.
+        const bool scan_excluded = scans_history && impl_->excluded(query.customer, query.repository);
+        std::optional<BorrowedRepository> scanned_repository;
+        if (scans_history && !scan_excluded) {
+            auto borrowed = impl_->borrow(query.customer, query.repository);
+            if (!borrowed) {
+                return std::unexpected(borrowed.error());
+            }
+            scanned_repository = std::move(*borrowed);
+        }
         std::unique_lock lock(impl_->mutex);
         const auto loaded = query.customer.empty() ? impl_->load_all_customers()
                                                    : impl_->load_customer(query.customer);
@@ -1032,6 +1080,9 @@ Service::query(const Query& query, const std::string& principal, control::Store&
             std::vector<Occurrence> selected;
             if (artifact_scope) {
                 for (const auto& [key, artifact] : state.artifacts) {
+                    if (impl_->excluded(customer, artifact.repository)) {
+                        continue;
+                    }
                     if ((!query.repository.empty() && query.repository != artifact.repository) ||
                         artifact_scope->name != artifact.artifact ||
                         (!artifact_scope->version.empty() &&
@@ -1041,8 +1092,10 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                     selected.insert(
                         selected.end(), artifact.members.begin(), artifact.members.end());
                 }
+            } else if (scans_history && scan_excluded) {
+                // nothing: the repository is served by its workspace store
             } else if (scans_history) {
-                const auto scanned = impl_->scan(query, state);
+                const auto scanned = impl_->scan(query, state, scanned_repository->repository);
                 if (!scanned) {
                     return std::unexpected(scanned.error());
                 }
@@ -1051,6 +1104,9 @@ Service::query(const Query& query, const std::string& principal, control::Store&
             } else {
                 for (const auto& [slot, segment] : state.active) {
                     if (!query.repository.empty() && query.repository != segment.repository) {
+                        continue;
+                    }
+                    if (impl_->excluded(customer, segment.repository)) {
                         continue;
                     }
                     if (query.ref.empty()) {

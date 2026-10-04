@@ -41,11 +41,31 @@ void register_volume_capabilities(Registry& registry);
 // id, is invalid_input at /workspace_id; there is no default workspace.
 std::expected<control::Workspace, ApiError> repository_workspace(ApiContext& context,
                                                                  const nlohmann::json& input);
+// Creates a repository's control-store row through the repository store
+// (SyncStore::create_repository_content), so a repository of a workspace served from its own
+// store (lake#380) is created there too, and no switch of the workspace runs meanwhile.
+control::Result<control::Repository> create_repository_row(ApiContext& context,
+                                                           control::NewRepository in);
+
+// A repository-store call from an asynchronous handler, run on the blocking pool so the server
+// thread never waits on a store's lane or a workspace Zetta (lake#380). A failure of the pool
+// itself becomes `on_pool_error`.
+template <class Callable, class Fallback>
+boost::capy::task<std::invoke_result_t<Callable>> blocking_call(Callable callable, Fallback on_pool_error) {
+    auto ran = co_await run_blocking(std::move(callable));
+    if (!ran) {
+        co_return on_pool_error(ran.error().message);
+    }
+    co_return std::move(*ran);
+}
 // Customer Zetta workspaces: status, start, and allow-listed calls (docs/api/workspaces.md).
 void register_workspace_capabilities(Registry& registry);
 // The operator's one-shot copy of retired control-store tables into workspace Zettas
 // (docs/architecture/workspace-records.md).
 void register_workspace_record_capabilities(Registry& registry);
+// The operator's move of a workspace's repositories from its space's store on lake's volume into
+// the workspace's own store in its workspace Zetta (lake#380, docs/api/workspace-store.md).
+void register_workspace_store_capabilities(Registry& registry);
 // Running and talking to agents (docs/api/agent-launches.md): launch_agent, list_agent_launches,
 // stop_agent_launch, schedule_agent, list_agent_schedules, unschedule_agent, agent_turn. Registered
 // by register_workspace_capabilities.

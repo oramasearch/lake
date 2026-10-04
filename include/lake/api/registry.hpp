@@ -114,6 +114,87 @@ struct MeteringConfig {
 };
 
 class Registry;
+
+// Repository-store work never runs on the server's thread (lake#380): a workspace's store is in
+// its workspace Zetta, and a slow or hung Zetta, a lease wait or a switch must hold up only the
+// requests for that store. run_blocking runs `callable` on lake's blocking pool and resumes the
+// awaiting coroutine on its own executor.
+namespace detail {
+boost::capy::thread_pool& blocking_pool();
+// Pool tasks not yet finished, posting their completion included.
+std::atomic<int>& blocking_tasks();
+// Completions are posted under this lock, and never to an execution context a server has
+// closed (close_execution_context): a task that outlives its server's drain is abandoned.
+std::mutex& completion_gate();
+bool execution_context_closed(const void* context);
+
+template <class Callable, class T, class Executor>
+boost::capy::task<> run_on_blocking_pool(Callable callable,
+                                         std::shared_ptr<liquid::runtime::detail::offload_state<T>> state,
+                                         Executor executor) {
+    try {
+        state->output.emplace(std::invoke(callable));
+    } catch (...) {
+        state->output.emplace(std::unexpected(liquid::error{
+            liquid::errc::internal, "a blocking handler threw", "lake::api::run_blocking"}));
+    }
+    {
+        std::lock_guard gate(completion_gate());
+        if (!execution_context_closed(&executor.context())) {
+            boost::capy::run_async(executor)(liquid::runtime::detail::wake_offload(std::move(state)));
+        }
+    }
+    blocking_tasks().fetch_sub(1);
+    co_return;
+}
+
+template <class Callable, class T, class Executor> class blocking_awaiter {
+public:
+    blocking_awaiter(Callable callable,
+                     std::shared_ptr<liquid::runtime::detail::offload_state<T>> state,
+                     Executor executor)
+        : callable_(std::move(callable)), state_(std::move(state)), executor_(std::move(executor)) {}
+    [[nodiscard]] bool await_ready() const noexcept {
+        return false;
+    }
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> handle, const boost::capy::io_env*) {
+        state_->completion.h = handle;
+        blocking_tasks().fetch_add(1);
+        boost::capy::run_async(blocking_pool().get_executor())(
+            run_on_blocking_pool<Callable, T>(std::move(callable_), state_, executor_));
+        return std::noop_coroutine();
+    }
+    void await_resume() const noexcept {}
+
+private:
+    Callable callable_;
+    std::shared_ptr<liquid::runtime::detail::offload_state<T>> state_;
+    Executor executor_;
+};
+} // namespace detail
+
+template <class Callable>
+liquid::runtime::task<std::invoke_result_t<Callable>> run_blocking(Callable callable) {
+    using output_type = std::invoke_result_t<Callable>;
+    auto state = std::make_shared<liquid::runtime::detail::offload_state<output_type>>();
+    const auto executor = co_await boost::capy::this_coro::executor;
+    co_await detail::blocking_awaiter<Callable, output_type, decltype(executor)>{std::move(callable), state,
+                                                                                executor};
+    if (!state->output.has_value()) {
+        co_return std::unexpected(liquid::error{liquid::errc::internal,
+                                                "a blocking handler completed without a result",
+                                                "lake::api::run_blocking"});
+    }
+    co_return std::move(*state->output);
+}
+
+// Waits until no blocking-pool task is unfinished, or `deadline`; answers how many remain.
+int wait_for_blocking_tasks(std::chrono::steady_clock::time_point deadline);
+// After this, no pool task posts to `context`; a task still running is abandoned: the request
+// that awaited it is never resumed, so its response and its audit event are lost. A server calls
+// it before destroying its io_context, and forget_execution_context once it is destroyed.
+void close_execution_context(const void* context);
+void forget_execution_context(const void* context);
 class MeteringRecorder;
 class AuditRecorder;
 

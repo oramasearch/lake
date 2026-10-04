@@ -82,8 +82,14 @@ liquid::runtime::task<ApiResult> import_github_repository(const json& input,
     if (!created) {
         co_return created.error();
     }
-    const auto history = context.sync_store->import_git(
-        created->customer_id, created->id, input.at("git_directory"));
+    const auto history = co_await blocking_call(
+        [&] {
+            return context.sync_store->import_git(created->customer_id, created->id,
+                                                  input.at("git_directory"));
+        },
+        [](std::string message) -> SyncStoreResult<RepositoryGitImport> {
+            return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+        });
     if (!history) {
         co_return sync_error(history.error());
     }

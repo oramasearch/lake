@@ -1846,6 +1846,68 @@ ApiResult authorized_object_list_result(control::Result<std::vector<control::Pol
 
 } // namespace
 
+control::Result<control::Repository> create_repository_row(ApiContext& context,
+                                                           control::NewRepository in) {
+    if (!context.sync_store) {
+        return context.store->create_repository(in);
+    }
+    if (in.id.empty()) {
+        in.id = control::new_uuid_v4();
+    }
+    const auto tombstone = [&](const std::string& id) {
+        return context.store->delete_repository(
+            id, control::RepositoryDeletion{.deleted_at = timestamp_after(std::chrono::seconds::zero()),
+                                            .retention_until = timestamp_after(std::chrono::seconds::zero())});
+    };
+    // A live row of this name whose repository is missing from its workspace store was left by an
+    // earlier creation whose store step and tombstone both failed: tombstone it now, so the name
+    // is free again.
+    if (const auto rows = context.store->list_repositories(in.customer_id, 100000, in.workspace_id)) {
+        for (const control::Repository& existing : *rows) {
+            if (existing.name != in.name || !existing.deleted_at.empty()) {
+                continue;
+            }
+            const auto missing =
+                context.sync_store->repository_missing_from_workspace_store(existing.customer_id, existing.id);
+            if (missing && *missing) {
+                static_cast<void>(tombstone(existing.id));
+            }
+        }
+    }
+    std::optional<control::Result<control::Repository>> row;
+    const auto content = context.sync_store->create_repository_content(
+        in.customer_id, in.workspace_id, in.id, [&]() -> SyncStoreResult<void> {
+            row = context.store->create_repository(in);
+            if (!*row) {
+                return std::unexpected(SyncStoreError{row->error().code, row->error().message});
+            }
+            return {};
+        });
+    if (row && !*row) {
+        return *row;
+    }
+    if (!content) {
+        // The row exists but its workspace store refused the repository: tombstone the row with
+        // its retention ended, which frees the name, so the creation can simply be retried. If the
+        // tombstone fails too, the error says so, and the next creation of the name removes it.
+        std::string tombstoned;
+        if (row) {
+            if (const auto removed = tombstone((*row)->id); !removed) {
+                tombstoned = "; the row " + (*row)->id + " could not be tombstoned (" +
+                             removed.error().message + ") and is removed by the next creation of " +
+                             "this name";
+            }
+        }
+        // Not `conflict`: callers read that as a taken name.
+        const std::string code =
+            content.error().code == "conflict" ? std::string("store_error") : content.error().code;
+        return std::unexpected(control::StoreError{
+            code, "the repository could not be created in its workspace store; retry: " +
+                      content.error().message + tombstoned});
+    }
+    return *row;
+}
+
 std::expected<control::Workspace, ApiError> repository_workspace(ApiContext& context,
                                                                  const nlohmann::json& input) {
     if (!context.store) {
@@ -3631,7 +3693,7 @@ void register_repository_capabilities(Registry& registry) {
                     workspace.error().code, workspace.error().message, workspace.error().path);
             }
             const std::string name = in.value("name", "");
-            auto repository = ctx.store->create_repository(control::NewRepository{
+            auto repository = create_repository_row(ctx, control::NewRepository{
                 in.value("customer_id", ""), name, "", in.value("visibility", ""), workspace->id});
             if (!repository && repository.error().code == "conflict") {
                 ApiResult result = from_store_error(repository.error());
@@ -4182,12 +4244,19 @@ void register_repository_capabilities(Registry& registry) {
                 loaded ? std::move(*loaded)
                        : std::unexpected(SyncStoreError{"store_error", loaded.error().message,
                                                         "branch protection", {}});
-            auto response = context.sync_store->push(
-                repository->customer_id,
-                repository->id,
-                context.sync_request,
-                sync_change_authorizer(context, *repository, std::move(protection)),
-                *quota);
+            const auto pool_failure = [](std::string message) -> SyncStoreResult<std::vector<std::byte>> {
+                return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+            };
+            auto response = co_await blocking_call(
+                [&] {
+                    return context.sync_store->push(
+                        repository->customer_id,
+                        repository->id,
+                        context.sync_request,
+                        sync_change_authorizer(context, *repository, std::move(protection)),
+                        *quota);
+                },
+                pool_failure);
             if (!response) {
                 if (response.error().rule == "storage_quota") {
                     context.audit_details["quota"] = {{"status", "throttled"},
@@ -4196,8 +4265,11 @@ void register_repository_capabilities(Registry& registry) {
                 co_return from_sync_error(context, response.error());
             }
             if (context.search) {
-                const auto indexed =
-                    context.search->reindex_artifacts(repository->customer_id, repository->id);
+                const auto indexed = co_await blocking_call(
+                    [&] { return context.search->reindex_artifacts(repository->customer_id, repository->id); },
+                    [](std::string message) -> search::Result<search::ReindexResult> {
+                        return std::unexpected(search::Error{"store_error", std::move(message)});
+                    });
                 if (!indexed) {
                     context.audit_details["artifact_index"] = indexed.error().message;
                 }
@@ -5548,6 +5620,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_volume_capabilities(registry);
     register_workspace_capabilities(registry);
     register_workspace_record_capabilities(registry);
+    register_workspace_store_capabilities(registry);
 }
 
 } // namespace lake::api

@@ -116,6 +116,13 @@ public:
                                                                    nlohmann::json input) override;
 };
 
+// Where a workspace's Zetta answers and the token lake presents to it (the operator's mounted
+// connection), for the object routes lake's workspace store uses (lake#380).
+struct WorkspaceEndpoint {
+    std::string url;
+    std::string token;
+};
+
 class WorkspaceService {
 public:
     WorkspaceService(WorkspaceConfig config,
@@ -172,6 +179,10 @@ public:
          bool read, nlohmann::json input,
          std::function<void(std::chrono::nanoseconds)> observe = {},
          bool cache_definitions = false);
+    // The workspace Zetta's address and credential, under the readiness rule call() applies:
+    // workspace_not_ready until the operator reports it Ready with an address and its token.
+    Result<WorkspaceEndpoint> endpoint(const std::string& customer_id,
+                                       const std::string& workspace_id);
     // Invalidate on a workspace change notification; successful actions also do this.
     void invalidate_registry(const std::string& customer_id, const std::string& workspace_id);
 

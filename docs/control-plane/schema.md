@@ -774,13 +774,22 @@ other change is refused as before. Nothing is added or dropped but the guard. Id
 `assign_unrouted_repositories_guard`. The operator vendors the schema and selects that guard. See
 [`../api/repositories.md`](../api/repositories.md#the-owning-workspace).
 
+## Workspace store migration
+
+`0067_workspace_store` (lake#380, decision 54 S1-S3) adds `workspaces.store_moved_at timestamptz`,
+NULL until `move_workspace_store` switches the workspace: from then on its repositories are served
+from its own encrypted liquid store in bucket `lake_store` of its workspace Zetta
+([`../architecture/workspace-store.md`](../architecture/workspace-store.md)). The column is the only
+thing PostgreSQL keeps about that store; the operator does not read it. Idempotent; guard
+`workspace_store_guard`; the latest guard is `workspace_volumes_guard` (migration `0069`), which the operator selects.
+
 ## Metering workspaces migration
 
 `0053_metering_workspaces` (lake#348, lake#349) retires `metering_usage` and
 `metering_build_records`: lake no longer writes or reads them. Repository transfer and build
 records live in the workspace Zetta of the repository's workspace
 ([`../api/metering.md`](../api/metering.md)), and repository storage is measured live on each read
-and stored nowhere until lake#380 makes stores per workspace. The migration only records each row's
+and stored nowhere; with lake#380 a switched workspace's storage is its bucket's `usage`. The migration only records each row's
 owner in `workspace_assignments` for the operator's copy: a space with exactly one live workspace
 owns its rows (`sole_workspace`), every other row is `needs_selection` and reported by a warning.
 A usage row's `object_id` is `md5(customer_id || E'\n' || hour)` with the hour printed as

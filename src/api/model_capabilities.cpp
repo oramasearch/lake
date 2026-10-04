@@ -453,7 +453,11 @@ Capability dataset_capability() {
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (input.contains("revision")) {
-                co_return repository_info(input, context, "dataset");
+                co_return co_await blocking_call(
+                    [&] { return repository_info(input, context, "dataset"); },
+                    [](std::string message) {
+                        return ApiResult::failure("store_unavailable", std::move(message));
+                    });
             }
             if (!context.workspaces) {
                 co_return ApiResult::failure("store_unavailable",
@@ -537,7 +541,11 @@ Capability model_capability() {
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (input.contains("revision")) {
-                co_return repository_info(input, context, "model");
+                co_return co_await blocking_call(
+                    [&] { return repository_info(input, context, "model"); },
+                    [](std::string message) {
+                        return ApiResult::failure("store_unavailable", std::move(message));
+                    });
             }
             if (!context.workspaces) {
                 co_return ApiResult::failure("store_unavailable",

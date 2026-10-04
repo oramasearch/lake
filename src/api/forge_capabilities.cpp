@@ -311,8 +311,14 @@ ForgeTask<ApiResult> create_release(const json& input, ApiContext& context) {
     const control::Repository& repository = forge->repository();
     json artifacts = json::array();
     for (const json& artifact_id : input.at("artifact_ids")) {
-        const auto artifact = context.sync_store->repository_artifact(
-            repository.customer_id, repository.id, artifact_id.get<std::string>());
+        const auto artifact = co_await blocking_call(
+            [&] {
+                return context.sync_store->repository_artifact(
+                    repository.customer_id, repository.id, artifact_id.get<std::string>());
+            },
+            [](std::string message) -> SyncStoreResult<RepositoryArtifact> {
+                return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+            });
         if (!artifact) {
             co_return ApiResult::failure(artifact.error().code, artifact.error().message);
         }
@@ -340,12 +346,17 @@ ForgeTask<ApiResult> create_release(const json& input, ApiContext& context) {
     value.erase("artifact_ids");
     value["artifacts"] = std::move(artifacts);
     if (context.search) {
-        const auto published =
-            context.search->publish(search::Publish{repository.customer_id,
-                                                    repository.id,
-                                                    input.at("tag").get<std::string>(),
-                                                    input.at("change_id").get<std::string>(),
-                                                    search::PublicationKind::TagSnapshot});
+        const auto published = co_await blocking_call(
+            [&] {
+                return context.search->publish(
+                    search::Publish{repository.customer_id, repository.id,
+                                    input.at("tag").get<std::string>(),
+                                    input.at("change_id").get<std::string>(),
+                                    search::PublicationKind::TagSnapshot});
+            },
+            [](std::string message) -> search::Result<void> {
+                return std::unexpected(search::Error{"store_unavailable", std::move(message)});
+            });
         if (!published) {
             co_return ApiResult::failure(published.error().code, published.error().message);
         }

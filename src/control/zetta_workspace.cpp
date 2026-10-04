@@ -495,6 +495,27 @@ void WorkspaceService::invalidate_registry(const std::string& customer_id,
     });
 }
 
+Result<WorkspaceEndpoint> WorkspaceService::endpoint(const std::string& customer_id,
+                                                    const std::string& workspace_id) {
+    const auto found = workspace(customer_id, workspace_id);
+    if (!found) {
+        return std::unexpected(found.error());
+    }
+    const WorkspaceState state = state_of(customer_id, *found);
+    if (!state.ready()) {
+        return std::unexpected(StoreError{"workspace_not_ready",
+                                          state.requested ? "the workspace is still being prepared"
+                                                          : "start the workspace first"});
+    }
+    const auto credential = connection(*found);
+    const std::string token = credential ? credential->value("token", std::string()) : std::string();
+    if (token.empty()) {
+        return std::unexpected(
+            StoreError{"workspace_not_ready", "the workspace credential is not available"});
+    }
+    return WorkspaceEndpoint{state.endpoint, token};
+}
+
 liquid::runtime::task<ZettaControlResult<nlohmann::json>> WorkspaceService::call(
     std::string customer_id, std::string workspace_id, std::string capability,
     bool read, nlohmann::json input,
