@@ -28,9 +28,9 @@ bool sha256_digest(std::string_view value) {
     });
 }
 
-// The image a build target names in `space` (`<authority>/<space>/<image>:<tag>`); empty when it
-// names another space or is malformed.
-std::string target_image(std::string_view target, std::string_view space) {
+} // namespace
+
+std::string build_target_image(std::string_view target, std::string_view space) {
     const std::size_t authority = target.find('/');
     const std::size_t tag = target.rfind(':');
     if (authority == std::string_view::npos || tag == std::string_view::npos ||
@@ -45,6 +45,8 @@ std::string target_image(std::string_view target, std::string_view space) {
     const std::string_view image = repository.substr(space.size() + 1);
     return image.contains('/') ? std::string() : std::string(image);
 }
+
+namespace {
 
 std::expected<std::string, ApiError> customer_object(const json& input, ApiContext& context) {
     if (context.store == nullptr) {
@@ -117,13 +119,13 @@ manifest_digests(const json& manifest) {
     return digests;
 }
 
-ImageOwner route_legacy_image(control::Store& store, const control::Customer& customer,
-                              const std::string& name) {
+ImageOwner legacy_image_owner(control::Store& store, const control::Customer& customer,
+                              const std::string& name, bool write) {
     if (!control::valid_oci_route_name(name)) {
-        return {std::nullopt, "invalid_name"};
+        return {{}, "invalid_name", false};
     }
     if (const auto route = store.get_oci_repository_route(customer.id, name)) {
-        return {*route, "route_exists"};
+        return {route->workspace_id, "route_exists", true};
     }
     std::set<std::string> live;
     if (const auto workspaces = store.list_workspaces(customer.id)) {
@@ -144,32 +146,33 @@ ImageOwner route_legacy_image(control::Store& store, const control::Customer& cu
     }
     if (const auto builds = store.list_builds(customer.id)) {
         for (const control::Build& build : *builds) {
-            if (target_image(build.target, customer.name) == image &&
+            if (build_target_image(build.target, customer.name) == image &&
                 live.contains(build.workspace_id)) {
                 users.insert(build.workspace_id);
             }
         }
     }
-    std::string workspace_id;
-    std::string outcome;
+    ImageOwner owner;
     if (users.size() == 1) {
-        workspace_id = *users.begin();
-        outcome = "image_workspace";
+        owner = {*users.begin(), "image_workspace", false};
     } else if (users.empty() && live.size() == 1) {
-        workspace_id = *live.begin();
-        outcome = "sole_workspace";
+        owner = {*live.begin(), "sole_workspace", false};
     } else {
-        return {std::nullopt, "needs_selection"};
+        return {{}, "needs_selection", false};
     }
-    const auto created = store.create_oci_repository_route(customer.id, name, workspace_id);
+    if (!write) {
+        return owner;
+    }
+    const auto created = store.create_oci_repository_route(customer.id, name, owner.workspace_id);
     if (!created) {
-        // A concurrent run routed it first: its route decides.
+        // A concurrent run or push routed it first: its route decides.
         if (const auto route = store.get_oci_repository_route(customer.id, name)) {
-            return {*route, "route_exists"};
+            return {route->workspace_id, "route_exists", true};
         }
-        return {std::nullopt, "needs_selection"};
+        return {{}, "needs_selection", false};
     }
-    return {*created, outcome};
+    owner.routed = true;
+    return owner;
 }
 
 liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,
@@ -268,6 +271,50 @@ void register_image_capabilities(Registry& registry) {
             return ApiResult::success(route_json(*route, customer->name));
         }});
     registry.add(Capability{
+        .name = "unroute_image_repository",
+        .title = "Unroute image repository",
+        .description =
+            "Operator only. Removes the route of a tenant image repository that went to the wrong "
+            "workspace, for example an app recreated in another workspace. The workspace's "
+            "manifest and tag records stay where they are (they go with that workspace); a later "
+            "create_image_repository, build push or copy may route the name again.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}}, {"name", {{"type", "string"}}}}},
+                         {"required", json::array({"customer_id", "name"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "image route",
+        .action = "admin",
+        .resolve_object = [](const json&, ApiContext&) -> std::expected<std::string, ApiError> {
+            return std::unexpected(ApiError{"unauthorized", "operator credential is required", {}});
+        },
+        .handler = [](const json& input, ApiContext& context) {
+            if (!context.operator_credential) {
+                return ApiResult::failure("unauthorized", "operator credential is required");
+            }
+            const std::string customer_id = input.at("customer_id");
+            const std::string name = input.at("name");
+            const auto customer = context.store->get_customer(customer_id);
+            if (!customer) {
+                return ApiResult::failure("invalid_input", "customer_id is unknown", "/customer_id");
+            }
+            const auto removed = context.store->delete_oci_repository_route(customer_id, name);
+            if (!removed) {
+                return ApiResult::failure(removed.error().code, removed.error().message,
+                                          removed.error().code == "not_found" ? "/name"
+                                                                              : std::string());
+            }
+            context.audit_customer_id = customer_id;
+            context.audit_kind = "image.route.remove";
+            context.audit_object = "image/" + customer->name + "/" + name;
+            context.audit_details = {{"customer_id", customer_id},
+                                     {"workspace_id", removed->workspace_id},
+                                     {"name", name}};
+            return ApiResult::success(route_json(*removed, customer->name));
+        }});
+    registry.add(Capability{
         .name = "list_image_repositories",
         .title = "List image repositories",
         .description =
@@ -311,8 +358,16 @@ void register_image_capabilities(Registry& registry) {
                 co_return ApiResult::failure("invalid_input", "customer_id is unknown",
                                              "/customer_id");
             }
-            const auto routes = context.store->list_oci_repository_routes(
-                customer_id, input.value("workspace_id", std::string()));
+            const std::string workspace_id = input.value("workspace_id", std::string());
+            if (input.contains("workspace_id")) {
+                const auto workspace = context.store->get_workspace(workspace_id);
+                if (!workspace || workspace->customer_id != customer_id) {
+                    co_return ApiResult::failure(
+                        "invalid_input", "workspace_id must name a workspace of this space",
+                        "/workspace_id");
+                }
+            }
+            const auto routes = context.store->list_oci_repository_routes(customer_id, workspace_id);
             if (!routes) {
                 co_return ApiResult::failure(routes.error().code, routes.error().message);
             }

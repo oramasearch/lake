@@ -14201,6 +14201,7 @@ struct ApiServer::Impl {
         std::string customer_id;
         std::string workspace_id;
         bool may_route = false;
+        std::string build_image; // a build may route only `<image>` and `cache/<image>`
     };
 
     // A refusal in the Distribution API's shape.
@@ -14270,7 +14271,8 @@ struct ApiServer::Impl {
             if (!repository.starts_with(prefix)) {
                 return {RegistryAccess::Denied};
             }
-            return {RegistryAccess::Allowed, customer->id, build->workspace_id, true};
+            return {RegistryAccess::Allowed, customer->id, build->workspace_id, true,
+                    build_target_image(build->target, customer->name)};
         }
         if (principal->kind == "app_pull") {
             if (write || credential.username != "app") {
@@ -14278,7 +14280,9 @@ struct ApiServer::Impl {
             }
             const auto app = options.store->get_web_app(principal->workload_id);
             const auto customer = options.store->get_customer(principal->workload_customer_id);
-            if (!app || !customer || app->customer_id != customer->id) {
+            // An app without a workspace has no image to pull: its route could not be checked.
+            if (!app || !customer || app->customer_id != customer->id ||
+                app->workspace_id.empty()) {
                 return {RegistryAccess::Denied};
             }
             if (repository != customer->name + "/" + app->name) {
@@ -14347,8 +14351,20 @@ struct ApiServer::Impl {
             return std::unexpected(RegistryRefusal{boost::http::status::not_found,
                                                    "image repository is unknown", "NAME_UNKNOWN"});
         }
+        const auto unavailable = [](const control::StoreError& error) {
+            return RegistryRefusal{boost::http::status::service_unavailable,
+                                   "image routes cannot be read: " + error.message, "UNAVAILABLE"};
+        };
         auto routed = options.store->get_oci_repository_route(customer->id, tenant->name);
-        if (!routed && write && grant.may_route) {
+        if (!routed && routed.error().code != "not_found") {
+            return std::unexpected(unavailable(routed.error()));
+        }
+        // A build's first push routes only its own target, `<image>` and `cache/<image>`: a
+        // route never moves, so a build cannot claim another name for its workspace.
+        const bool own_target = !grant.build_image.empty() &&
+                                (tenant->name == grant.build_image ||
+                                 tenant->name == "cache/" + grant.build_image);
+        if (!routed && write && grant.may_route && own_target) {
             routed = options.store->create_oci_repository_route(customer->id, tenant->name,
                                                                 grant.workspace_id);
             if (!routed && routed.error().code == "invalid_input") {
@@ -14359,6 +14375,14 @@ struct ApiServer::Impl {
                 return std::unexpected(RegistryRefusal{boost::http::status::forbidden,
                                                        routed.error().message, "DENIED"});
             }
+            if (!routed) {
+                return std::unexpected(unavailable(routed.error()));
+            }
+        }
+        if (!routed && write && grant.may_route) {
+            return std::unexpected(RegistryRefusal{
+                boost::http::status::forbidden,
+                "a build routes only its own target image and its cache", "DENIED"});
         }
         if (!routed) {
             return std::unexpected(RegistryRefusal{
@@ -14431,29 +14455,36 @@ struct ApiServer::Impl {
     }
 
     // Authorizes a blob upload request and, for a tenant repository, resolves (or for a build's
-    // first push, writes) its route. Blobs stay in the instance registry until lake#383 phase B.
-    std::optional<std::pair<RegistryAccess, std::optional<RegistryRefusal>>>
+    // first push of its own target, writes) its route. Blobs stay in the instance registry until
+    // lake#383 phase B; the workspace records each blob its repositories received.
+    struct UploadRefusal {
+        RegistryAccess access;
+        std::optional<RegistryRefusal> refusal;
+    };
+    std::expected<std::optional<TenantImage>, UploadRefusal>
     authorize_oci_upload(const boost::http::route_params& route, const std::string& repository) {
         const RegistryGrant grant = registry_access(route, repository, true);
         if (grant.access != RegistryAccess::Allowed) {
-            return std::pair{grant.access, std::optional<RegistryRefusal>{}};
+            return std::unexpected(UploadRefusal{grant.access, std::nullopt});
         }
-        if (repository.contains('/')) {
-            const auto tenant = tenant_image(route, repository, grant, true);
-            if (!tenant) {
-                return std::pair{grant.access, std::optional<RegistryRefusal>{tenant.error()}};
-            }
+        if (!repository.contains('/')) {
+            return std::optional<TenantImage>{};
         }
-        return std::nullopt;
+        auto tenant = tenant_image(route, repository, grant, true);
+        if (!tenant) {
+            return std::unexpected(UploadRefusal{grant.access, tenant.error()});
+        }
+        return std::optional<TenantImage>{std::move(*tenant)};
     }
 
     boost::http::route_task serve_oci_upload_start(boost::http::route_params& route) {
         const std::string repository = oci_repository(route);
-        if (const auto refused = authorize_oci_upload(route, repository)) {
-            if (refused->second) {
-                co_return co_await registry_refusal(route, *refused->second);
+        auto authorized = authorize_oci_upload(route, repository);
+        if (!authorized) {
+            if (authorized.error().refusal) {
+                co_return co_await registry_refusal(route, *authorized.error().refusal);
             }
-            co_return co_await registry_auth_error(route, refused->first);
+            co_return co_await registry_auth_error(route, authorized.error().access);
         }
         const auto started = artifacts.begin_upload(repository);
         if (!started) {
@@ -14471,11 +14502,12 @@ struct ApiServer::Impl {
 
     boost::http::route_task serve_oci_upload(boost::http::route_params& route, bool finish) {
         const std::string repository = oci_repository(route);
-        if (const auto refused = authorize_oci_upload(route, repository)) {
-            if (refused->second) {
-                co_return co_await registry_refusal(route, *refused->second);
+        auto authorized = authorize_oci_upload(route, repository);
+        if (!authorized) {
+            if (authorized.error().refusal) {
+                co_return co_await registry_refusal(route, *authorized.error().refusal);
             }
-            co_return co_await registry_auth_error(route, refused->first);
+            co_return co_await registry_auth_error(route, authorized.error().access);
         }
         const std::string upload = route_value(route, "upload");
         const auto initial_size = artifacts.upload_size(upload);
@@ -14567,6 +14599,22 @@ struct ApiServer::Impl {
                                               completed.error(),
                                               true,
                                               "BLOB_UPLOAD_INVALID");
+        }
+        if (*authorized) {
+            // The workspace records that its space pushed this blob, so its manifests may
+            // reference it; until it does, the push is refused and the client retries.
+            TenantImage& tenant = **authorized;
+            auto records = workspace_records(tenant.context, tenant.customer_id, tenant.workspace_id);
+            if (!records) {
+                co_return co_await registry_workspace_error(route, records.error());
+            }
+            auto recorded = control::settled(co_await control::record_oci_blob(
+                *records, {.customer_id = tenant.customer_id,
+                           .digest = *completed,
+                           .size = artifacts.blob_size(*completed).value_or(0)}));
+            if (!recorded) {
+                co_return co_await registry_workspace_error(route, recorded.error());
+            }
         }
         route.res.set(boost::http::field::location,
                       "/v2/" + repository + "/blobs/" + std::string(*completed));
@@ -14736,6 +14784,22 @@ struct ApiServer::Impl {
         auto records = workspace_records(tenant.context, tenant.customer_id, tenant.workspace_id);
         if (!records) {
             co_return co_await registry_workspace_error(route, records.error());
+        }
+        // Only blobs this space pushed into this workspace: knowing another space's digest is not
+        // enough to publish its layer.
+        for (const control::OciReference& reference : references) {
+            auto pushed = control::settled(
+                co_await control::has_oci_blob(*records, tenant.customer_id, reference.digest));
+            if (!pushed) {
+                co_return co_await registry_workspace_error(route, pushed.error());
+            }
+            if (!*pushed) {
+                co_return co_await registry_error(
+                    route, boost::http::status::bad_request,
+                    "OCI manifest references a blob not pushed to this workspace: " +
+                        reference.digest,
+                    true, "MANIFEST_BLOB_UNKNOWN");
+            }
         }
         auto stored = control::settled(co_await control::put_oci_manifest(
             *records, {.customer_id = tenant.customer_id,

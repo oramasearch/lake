@@ -2253,6 +2253,8 @@ TEST_P(TenantImages, TheOneShotCopyRoutesAndMovesLegacyTags) {
     legacy(alpha_name + "/cache/web", "buildcache");
     legacy(alpha_name + "/orphan", "v1");
     legacy(gamma_name + "/solo", "v1");
+    legacy(gamma_name + "/broken", "v1");
+    legacy(alpha_name + "/early", "v1");
     legacy("nobody-" + suffix + "/lost", "v1");
     legacy("public-image", "v1"); // the instance's own: never part of the copy
     start(temporary.path());
@@ -2271,27 +2273,52 @@ TEST_P(TenantImages, TheOneShotCopyRoutesAndMovesLegacyTags) {
         return found;
     };
 
-    // Before any copy the routed image is not served: the record is not there yet.
+    // A tag pushed through its route after the cutover and before the copy: newer than the
+    // registry's pointer, kept by the copy and accepted by verify.
+    ASSERT_TRUE(call("create_image_repository",
+                     {{"customer_id", alpha}, {"workspace_id", a1}, {"name", "early"}})
+                    .value("ok", false));
+    const std::string early = push_image(alpha_name + "/early", "v1", R"({"early":2})", "early 2");
+    ASSERT_TRUE(early.starts_with("{")) << early;
+    // A tag whose layer the registry lost is reported, never copied with a wrong size.
+    const std::string lost_layer =
+        lake::control::identity_crypto::sha256_hex("layer of " + gamma_name + "/broken");
+    std::filesystem::rename(registry / "blobs" / lost_layer, registry / "lost-layer");
+
+    // Plan and verify change nothing: no route is written before the copy.
     json plan = copy("plan");
-    EXPECT_EQ(plan["rows"], 5) << plan;
-    EXPECT_EQ(plan["assigned"], 3) << plan;
+    EXPECT_EQ(plan["rows"], 7) << plan;
+    EXPECT_EQ(plan["assigned"], 4) << plan;
     EXPECT_EQ(outcomes(plan), (std::map<std::string, std::string>{
                                   {alpha_name + "/orphan:v1", "needs_selection"},
+                                  {gamma_name + "/broken:v1", "blob_missing"},
                                   {"nobody-" + suffix + "/lost:v1", "unknown_space"}}));
+    EXPECT_FALSE(copy("verify")["complete"]);
+    for (const auto& [space_id, name] : {std::pair{alpha, std::string("web")},
+                                         std::pair{alpha, std::string("cache/web")},
+                                         std::pair{gamma, std::string("solo")},
+                                         std::pair{alpha, std::string("orphan")}}) {
+        EXPECT_FALSE(store->get_oci_repository_route(space_id, name)) << name;
+    }
+    EXPECT_NE(pull("/v2/" + alpha_name + "/web/manifests/v1").find(" 404 "), std::string::npos);
+    std::filesystem::rename(registry / "lost-layer", registry / "blobs" / lost_layer);
+
+    // Copy routes what is unambiguous and writes each tag once.
+    json copied = copy("copy");
+    EXPECT_EQ(copied["copied"], 4) << copied;
+    EXPECT_EQ(copied["already_present"], 1) << copied;
     EXPECT_EQ(store->get_oci_repository_route(alpha, "web")->workspace_id, a1);
     EXPECT_EQ(store->get_oci_repository_route(alpha, "cache/web")->workspace_id, a1);
     EXPECT_EQ(store->get_oci_repository_route(gamma, "solo")->workspace_id, g1);
     EXPECT_FALSE(store->get_oci_repository_route(alpha, "orphan"));
-    EXPECT_NE(pull("/v2/" + alpha_name + "/web/manifests/v1").find(" 404 "), std::string::npos);
-
-    json copied = copy("copy");
-    EXPECT_EQ(copied["copied"], 3) << copied;
     copied = copy("copy");
     EXPECT_EQ(copied["copied"], 0) << copied;
-    EXPECT_EQ(copied["already_present"], 3) << copied;
+    EXPECT_EQ(copied["already_present"], 5) << copied;
     json verified = copy("verify");
-    EXPECT_EQ(verified["verified"], 3) << verified;
+    EXPECT_EQ(verified["verified"], 5) << verified;
+    EXPECT_EQ(verified["mismatched"], json::array()) << verified;
     EXPECT_FALSE(verified["complete"]) << "the ambiguous repository blocks completion";
+    EXPECT_EQ(response_body(pull("/v2/" + alpha_name + "/early/manifests/v1")), early);
 
     // An operator routes the ambiguous repository; the next run copies it and completes.
     ASSERT_TRUE(call("create_image_repository",
@@ -2299,11 +2326,11 @@ TEST_P(TenantImages, TheOneShotCopyRoutesAndMovesLegacyTags) {
                     .value("ok", false));
     EXPECT_EQ(copy("copy")["copied"], 1);
     verified = copy("verify");
-    EXPECT_EQ(verified["verified"], 4) << verified;
+    EXPECT_EQ(verified["verified"], 6) << verified;
     EXPECT_TRUE(verified["complete"]) << verified;
-    EXPECT_EQ(workspaces->records(a1).rows("oci_tags").size(), 2U);
+    EXPECT_EQ(workspaces->records(a1).rows("oci_tags").size(), 3U);
     EXPECT_EQ(workspaces->records(a2).rows("oci_tags").size(), 1U);
-    EXPECT_EQ(workspaces->records(g1).rows("oci_tags").size(), 1U);
+    EXPECT_EQ(workspaces->records(g1).rows("oci_tags").size(), 2U);
 
     // The copied image pulls through its route with its old address and bytes.
     EXPECT_EQ(response_body(pull("/v2/" + alpha_name + "/web/manifests/v1")),
@@ -2317,10 +2344,13 @@ TEST_P(TenantImages, TheOneShotCopyRoutesAndMovesLegacyTags) {
         server->port(), "GET", "/v1/metering_usage?customer_id=" + gamma, "", "application/json",
         {}, "Bearer registry-admin"));
     ASSERT_TRUE(usage.value("ok", false)) << usage;
-    const std::string solo = documents[gamma_name + "/solo:v1"];
-    EXPECT_EQ(usage["value"]["summary"]["storage"]["images_bytes"],
-              solo.size() + std::string(R"({"legacy":")" + gamma_name + R"(/solo"})").size() +
-                  std::string("layer of " + gamma_name + "/solo").size());
+    std::size_t legacy_bytes = 0;
+    for (const std::string repository : {gamma_name + "/solo", gamma_name + "/broken"}) {
+        legacy_bytes += documents[repository + ":v1"].size() +
+                        std::string(R"({"legacy":")" + repository + R"("})").size() +
+                        std::string("layer of " + repository).size();
+    }
+    EXPECT_EQ(usage["value"]["summary"]["storage"]["images_bytes"], legacy_bytes);
 
     // A later push of a copied tag is accepted by verify; a changed legacy pointer is not.
     const std::string pushed = push_image(gamma_name + "/solo", "v1", R"({"new":1})", "new layer");
@@ -2344,6 +2374,215 @@ TEST_P(TenantImages, TheOneShotCopyRoutesAndMovesLegacyTags) {
                              "Bearer " + token->secret);
     EXPECT_FALSE(denied.value("ok", true)) << denied;
     server->stop();
+}
+
+// Who may claim a tenant image name (lake#383): a build's first push routes only its own target
+// and its cache, never another name of the space; an app recreated in another workspace cannot
+// pull or push through the old workspace's route until the operator removes it with
+// unroute_image_repository, after which the new workspace's build routes it on its push and its
+// app pulls; the old workspace's records stay where they were; only the operator unroutes; an app
+// without a workspace pulls nothing; a layer another space or workspace pushed cannot be published
+// by its digest; and list_image_repositories refuses a workspace that is not the space's.
+TEST_P(TenantImages, RoutesAreClaimedOnlyByTheirOwnerAndUnroutedOnlyByTheOperator) {
+    TemporarySyncRoot temporary;
+    const auto [alpha, alpha_name] = space("alpha");
+    const auto [beta, beta_name] = space("beta");
+    const std::string w1 = workspaces->create(alpha, "w1");
+    const std::string w2 = workspaces->create(alpha, "w2");
+    const std::string b1 = workspaces->create(beta, "b1");
+    start(temporary.path());
+    const auto sql = [&](const std::string& statement, const std::string& id, const std::string& value) {
+        pqxx::connection connection(database_uri);
+        pqxx::work tx(connection);
+        tx.exec_params(statement, id, value);
+        tx.commit();
+    };
+    const auto app = [&](const std::string& workspace, const std::string& name,
+                         const std::string& pull_token) {
+        const auto created = store->create_web_app(
+            {.customer_id = alpha,
+             .workspace_id = workspace,
+             .name = name,
+             .mode = "image",
+             .image = "lake.example.test/" + alpha_name + "/" + name + ":v1",
+             .framework = "container",
+             .port = 8080,
+             .host = name + "-" + lake::control::new_uuid_v4().substr(0, 8) + ".apps.example.test"});
+        EXPECT_TRUE(created) << created.error().message;
+        const json hashes{{"pull", lake::control::identity_crypto::sha256_hex(pull_token)}};
+        if (database_uri.empty()) {
+            EXPECT_TRUE(static_cast<lake::control::InMemoryStore&>(*store).set_web_app_token_hashes(
+                created->id, hashes));
+        } else {
+            sql("UPDATE apps SET token_hashes_json = $2::jsonb WHERE id = $1::uuid", created->id,
+                hashes.dump());
+        }
+        return created->id;
+    };
+    const auto build = [&](const std::string& workspace, const std::string& target,
+                           const std::string& push_token) {
+        const auto source =
+            store->create_repository({alpha, "source-" + lake::control::new_uuid_v4().substr(0, 8),
+                                      "", "private", workspace});
+        EXPECT_TRUE(source) << source.error().message;
+        const auto created = store->create_build({.customer_id = alpha,
+                                                  .workspace_id = workspace,
+                                                  .repository = source->id,
+                                                  .revision = "main",
+                                                  .target = "registry/" + alpha_name + "/" + target});
+        EXPECT_TRUE(created) << created.error().message;
+        const json hashes{{"push", lake::control::identity_crypto::sha256_hex(push_token)}};
+        if (database_uri.empty()) {
+            EXPECT_TRUE(static_cast<lake::control::InMemoryStore&>(*store).set_build_status(
+                created->id, {.phase = "Running", .token_hashes = hashes}));
+        } else {
+            sql("UPDATE builds SET phase = 'Running', token_hashes_json = $2::jsonb "
+                "WHERE id = $1::uuid",
+                created->id, hashes.dump());
+        }
+        return "Basic " + base64_bytes(bytes("lake:" + push_token));
+    };
+    const auto app_basic = [](const std::string& token) {
+        return "Basic " + base64_bytes(bytes("app:" + token));
+    };
+
+    // A build claims only its own target and its cache.
+    const std::string web_app = app(w1, "web", "w1-pull");
+    const std::string first = build(w1, "web:v1", "w1-push");
+    const std::string elsewhere = push_blob(alpha_name + "/other", "claim", first);
+    EXPECT_NE(elsewhere.find(" 403 "), std::string::npos) << elsewhere;
+    EXPECT_FALSE(store->get_oci_repository_route(alpha, "other"));
+    const std::string nested = push_blob(alpha_name + "/cache/other", "claim", first);
+    EXPECT_NE(nested.find(" 403 "), std::string::npos) << nested;
+    const std::string w1_image = push_image(alpha_name + "/web", "v1", R"({"w":1})", "w1", first);
+    ASSERT_TRUE(w1_image.starts_with("{")) << w1_image;
+    ASSERT_TRUE(push_blob(alpha_name + "/cache/web", "cache", first).starts_with("sha256:"));
+    EXPECT_EQ(store->get_oci_repository_route(alpha, "web")->workspace_id, w1);
+    EXPECT_EQ(store->get_oci_repository_route(alpha, "cache/web")->workspace_id, w1);
+    EXPECT_NE(pull("/v2/" + alpha_name + "/web/manifests/v1", app_basic("w1-pull")).find(" 200 "),
+              std::string::npos);
+    // Only `<image>` and `cache/<image>` are names at all.
+    json refused = call("create_image_repository",
+                        {{"customer_id", alpha}, {"workspace_id", w1}, {"name", "team/web"}});
+    EXPECT_EQ(refused["error"]["path"], "/name") << refused;
+
+    // The app moves to w2: the old route still answers for w1 only.
+    ASSERT_TRUE(store->update_web_app(web_app, {.desired = "deleted"}));
+    app(w2, "web", "w2-pull");
+    const std::string second = build(w2, "web:v2", "w2-push");
+    const std::string blocked = push_image(alpha_name + "/web", "v2", R"({"w":2})", "w2", second);
+    EXPECT_NE(blocked.find(" 403 "), std::string::npos) << blocked;
+    EXPECT_NE(pull("/v2/" + alpha_name + "/web/manifests/v1", app_basic("w2-pull")).find(" 403 "),
+              std::string::npos);
+
+    // Only the operator unroutes; the old workspace keeps its records.
+    const auto user = store->create_user({"taap:1:ed25519:unroute-" + suffix,
+                                          "unroute-" + suffix + "@example.test", "Unroute"});
+    ASSERT_TRUE(user);
+    const auto token = store->create_token({user->id, "lake", "unroute", "test", {"*"}, 300, false});
+    ASSERT_TRUE(token) << token.error().message;
+    EXPECT_FALSE(call("unroute_image_repository", {{"customer_id", alpha}, {"name", "web"}},
+                      "Bearer " + token->secret)
+                     .value("ok", true));
+    EXPECT_TRUE(store->get_oci_repository_route(alpha, "web"));
+    const json unrouted = call("unroute_image_repository", {{"customer_id", alpha}, {"name", "web"}});
+    ASSERT_TRUE(unrouted.value("ok", false)) << unrouted;
+    EXPECT_EQ(unrouted["value"]["workspace_id"], w1);
+    EXPECT_FALSE(store->get_oci_repository_route(alpha, "web"));
+    EXPECT_EQ(workspaces->records(w1).rows("oci_tags").size(), 1U);
+    EXPECT_EQ(call("unroute_image_repository", {{"customer_id", alpha}, {"name", "web"}})["error"]["code"],
+              "not_found");
+    const auto audit = lake::test::audit_events(*store, {.limit = 200});
+    ASSERT_TRUE(audit) << audit.error().message;
+    EXPECT_TRUE(std::ranges::any_of(*audit, [](const auto& event) {
+        return event.draft.kind == "image.route.remove";
+    })) << "the removal is in the central log";
+
+    // w2's build routes it on its push, and w2's app pulls it.
+    const std::string w2_image = push_image(alpha_name + "/web", "v2", R"({"w":2})", "w2", second);
+    ASSERT_TRUE(w2_image.starts_with("{")) << w2_image;
+    EXPECT_EQ(store->get_oci_repository_route(alpha, "web")->workspace_id, w2);
+    const std::string moved = pull("/v2/" + alpha_name + "/web/manifests/v2", app_basic("w2-pull"));
+    EXPECT_EQ(response_body(moved), w2_image) << moved;
+
+    // A layer pushed into another space or workspace cannot be published by its digest.
+    const std::string w1_layer =
+        "sha256:" + lake::control::identity_crypto::sha256_hex(std::string("w1"));
+    const std::string beta_config = R"({"beta":1})";
+    ASSERT_TRUE(call("create_image_repository",
+                     {{"customer_id", beta}, {"workspace_id", b1}, {"name", "thief"}})
+                    .value("ok", false));
+    ASSERT_TRUE(call("create_image_repository",
+                     {{"customer_id", alpha}, {"workspace_id", w2}, {"name", "borrow"}})
+                    .value("ok", false));
+    for (const std::string repository : {beta_name + "/thief", alpha_name + "/borrow"}) {
+        const std::string config_digest = push_blob(repository, beta_config);
+        const json manifest{{"schemaVersion", 2},
+                            {"config", {{"digest", config_digest}, {"size", beta_config.size()}}},
+                            {"layers", {{{"digest", w1_layer}, {"size", 2}}}}};
+        const std::string published = http_request(
+            server->port(), "PUT", "/v2/" + repository + "/manifests/v1", manifest.dump(),
+            "application/vnd.oci.image.manifest.v1+json", {}, "Bearer registry-admin");
+        EXPECT_NE(published.find(" 400 "), std::string::npos) << repository << published;
+        EXPECT_EQ(oci_code(published), "MANIFEST_BLOB_UNKNOWN") << published;
+        EXPECT_NE(pull("/v2/" + repository + "/blobs/" + w1_layer).find(" 404 "),
+                  std::string::npos);
+    }
+
+    // list_image_repositories refuses a workspace that is not the space's.
+    for (const std::string workspace : {std::string("not-a-uuid"), lake::control::new_uuid_v4(), b1}) {
+        const json listed = response_json(http_request(
+            server->port(), "GET",
+            "/v1/list_image_repositories?customer_id=" + alpha + "&workspace_id=" + workspace, "",
+            "application/json", {}, "Bearer registry-admin"));
+        EXPECT_EQ(listed["error"]["code"], "invalid_input") << workspace << listed;
+    }
+
+    // An app left without a workspace (a row from before workspaces) pulls nothing.
+    if (!database_uri.empty()) {
+        const std::string legacy_app = app(w1, "legacy", "legacy-pull");
+        ASSERT_TRUE(store->create_oci_repository_route(alpha, "legacy", w1));
+        pqxx::connection connection(database_uri);
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE apps DISABLE TRIGGER app_workspace_routing");
+        tx.exec_params("UPDATE apps SET workspace_id = NULL WHERE id = $1::uuid", legacy_app);
+        tx.exec("ALTER TABLE apps ENABLE TRIGGER app_workspace_routing");
+        tx.commit();
+        const std::string orphan =
+            pull("/v2/" + alpha_name + "/legacy/manifests/v1", app_basic("legacy-pull"));
+        EXPECT_NE(orphan.find(" 403 "), std::string::npos) << orphan;
+    }
+    server->stop();
+
+    // Routes that cannot be read are 503, never "unknown": a lake whose route table is broken
+    // (here, its new connections see a table of another shape first on their search path; the
+    // test's database is its own clone) refuses retryably.
+    if (!database_uri.empty()) {
+        const std::string broken = "broken_routes_" + suffix;
+        {
+            pqxx::connection connection(database_uri);
+            pqxx::work tx(connection);
+            tx.exec("CREATE SCHEMA " + broken);
+            tx.exec("CREATE TABLE " + broken + ".oci_repository_routes (unrelated int)");
+            tx.commit();
+            pqxx::nontransaction alter(connection);
+            alter.exec("DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET search_path = " + broken +
+                       ", public', current_database()); END $$");
+        }
+        store = lake::control::make_postgres_store(database_uri, kek);
+        start(temporary.path());
+        const std::string unreadable = pull("/v2/" + alpha_name + "/web/manifests/v2");
+        EXPECT_NE(unreadable.find(" 503 "), std::string::npos) << unreadable;
+        EXPECT_EQ(oci_code(unreadable), "UNAVAILABLE") << unreadable;
+        const std::string unwritable = push_blob(alpha_name + "/web", "retry", second);
+        EXPECT_NE(unwritable.find(" 503 "), std::string::npos) << unwritable;
+        server->stop();
+        pqxx::connection connection(database_uri);
+        pqxx::nontransaction tx(connection);
+        tx.exec("DO $$ BEGIN EXECUTE format('ALTER DATABASE %I RESET search_path', "
+                "current_database()); END $$");
+        tx.exec("DROP SCHEMA " + broken + " CASCADE");
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(Stores, TenantImages, testing::Values(false, true),

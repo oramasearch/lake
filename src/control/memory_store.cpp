@@ -839,6 +839,20 @@ InMemoryStore::list_oci_repository_routes(const std::string& customer_id,
     return routes;
 }
 
+Result<OciRepositoryRoute> InMemoryStore::delete_oci_repository_route(const std::string& customer_id,
+                                                                      const std::string& name) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(oci_repository_routes_, [&](const auto& route) {
+        return route.customer_id == customer_id && route.name == name;
+    });
+    if (found == oci_repository_routes_.end()) {
+        return std::unexpected(StoreError{"not_found", "no image repository " + name});
+    }
+    OciRepositoryRoute removed = *found;
+    oci_repository_routes_.erase(found);
+    return removed;
+}
+
 Result<WorkspaceDeletion> InMemoryStore::get_workspace_deletion(const std::string& workspace_id) {
     std::lock_guard lock(mutex_);
     const auto found =

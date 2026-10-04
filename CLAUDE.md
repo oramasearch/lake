@@ -141,9 +141,9 @@ in that workspace Zetta's `lake_requests` series (route, capability, status clas
 `docs/serving/telemetry.md#the-workspace-request-series`.
 The registry splits (decision 54 S4-S6, lake#383 phase A, migration `0068`): a tenant OCI
 repository (`<space>/<name>`, `<space>/cache/<name>`) is routed by the content-free
-`oci_repository_routes` (space, name, workspace; written by a build's first push from its workspace
-or by `create_image_repository` with an explicit `workspace_id`; never moved; deleted with the
-workspace), and its manifests and tags are sealed `lake_oci_manifests`/`lake_oci_tags` records in
+`oci_repository_routes` (space, name, workspace; written by a build's first push of its own target
+from its workspace or by `create_image_repository` with an explicit `workspace_id`; never changed;
+deleted with the workspace or by the operator's `unroute_image_repository`), and its manifests and tags are sealed `lake_oci_manifests`/`lake_oci_tags` records in
 that workspace's Zetta, so image addresses do not change. npm, Python, debuginfod and one-component
 OCI stay with the instance. Blobs stay in the instance registry until phase B (after lake#380);
 `copy_workspace_records` (`oci_tags`) moves the tags written before. See

@@ -25,8 +25,16 @@ namespace lake::control {
 // lake_oci_tags: one record per tag of a repository, keyed by the blind index of the repository
 // and tag, found by the repository (`customer:<id>\nrepository:<name>`), so one list_records reads
 // every tag of a repository. A tag moves to another manifest with a write conditional on the
-// revision read (`if_absent` for a new tag), which removes the old last-writer-wins on tags. Each
-// tag carries what its manifest references, so a blob read and a size count need only the tags.
+// revision read (`if_absent` for a new tag), reread on a conflict: a tag is never torn and every
+// move is applied whole, but two pushes of one tag still end with the last one, as the OCI
+// protocol expects. Each tag carries what its manifest references, so a blob read and a size count
+// need only the tags, and says whether the one-shot copy wrote it (`copied`).
+//
+// lake_oci_blobs: one record per blob the space pushed into this workspace (phase A keeps the
+// bytes in the instance registry), keyed by the blind index of its digest and written `if_absent`
+// when an upload into one of the workspace's repositories completes, or by the copy. A manifest
+// pushed into the workspace may reference only blobs recorded here, so a space never publishes
+// another space's (or another workspace's) layer by knowing its digest.
 
 // A digest a manifest references (its config or a layer), with the size the registry holds.
 struct OciReference {
@@ -52,6 +60,7 @@ struct OciTag {
     std::string content_type;
     std::uint64_t manifest_size = 0;
     std::vector<OciReference> references; // the manifest's, copied when the tag moves
+    bool copied = false; // written by the one-shot copy, not by a push
     std::string updated_at;
     std::int64_t at_us = 0;
     std::int64_t revision = 0;
@@ -64,6 +73,21 @@ struct OciManifestCodec {
     static std::string lookup(const OciManifest& manifest);
     static nlohmann::json encode(const OciManifest& manifest);
     static std::optional<OciManifest> decode(const StoredRecord& record);
+};
+
+// A blob the space pushed into this workspace.
+struct OciBlob {
+    std::string customer_id;
+    std::string digest;
+    std::uint64_t size = 0;
+};
+
+struct OciBlobCodec {
+    using Value = OciBlob;
+    static constexpr RecordCollection collection{"oci_blobs", 1};
+    static std::string lookup(const OciBlob& blob);
+    static nlohmann::json encode(const OciBlob& blob);
+    static std::optional<OciBlob> decode(const StoredRecord& record);
 };
 
 struct OciTagCodec {
@@ -101,6 +125,14 @@ set_oci_tag(WorkspaceRecords& records, OciTag tag, int attempts = 5);
 // Writes a copied tag only where none exists: `conflict` otherwise (the copy counts it present).
 liquid::runtime::task<ZettaControlResult<OciTag>> create_oci_tag(WorkspaceRecords& records,
                                                                  OciTag tag);
+
+// Records that the space pushed `blob` into this workspace; an existing record is kept.
+liquid::runtime::task<ZettaControlResult<void>> record_oci_blob(WorkspaceRecords& records,
+                                                                OciBlob blob);
+
+// Whether the space pushed the blob into this workspace.
+liquid::runtime::task<ZettaControlResult<bool>>
+has_oci_blob(WorkspaceRecords& records, std::string customer_id, std::string digest);
 
 // Every tag of a repository, by tag.
 liquid::runtime::task<ZettaControlResult<std::vector<OciTag>>>

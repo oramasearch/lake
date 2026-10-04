@@ -173,6 +173,8 @@ and `verify_event` (one event checked alone).
 `oci_records.hpp` holds a tenant image's manifests and tags in its routed workspace (lake#383
 phase A): `lake_oci_manifests`, keyed by the blind index of the digest and written `if_absent`, and
 `lake_oci_tags`, keyed by repository and tag, found by the repository and moved at the revision
-read. `store.hpp` declares `OciRepositoryRoute`, `valid_oci_route_name` and
-`create_oci_repository_route`/`get_oci_repository_route`/`list_oci_repository_routes`; the
+read, and `lake_oci_blobs`, the blobs the space pushed into the workspace, which a manifest may
+reference. `store.hpp` declares `OciRepositoryRoute`, `valid_oci_route_name` and
+`create_oci_repository_route`/`get_oci_repository_route`/`list_oci_repository_routes`/
+`delete_oci_repository_route`; the
 workspace deletion cascade deletes a workspace's routes.

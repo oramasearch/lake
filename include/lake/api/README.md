@@ -121,7 +121,7 @@ its workspace onto the routing row the store returns (lake#351), and `configured
 its completed answer; the identity capabilities and hosted pages use them.
 
 `images.hpp` declares the tenant image helpers of lake#383 phase A (splitting `<space>/<name>`,
-the legacy routing rule, the image byte count) and `register_image_capabilities`.
+a build target's image, the legacy owner rule, the image byte count) and `register_image_capabilities`.
 `WorkspaceContent` (`workspace_deletion.hpp`) also exposes the instance registry's legacy tenant
 tags and blob reads for the one-shot copy. `metering_usage` counts image bytes from the tags in
 each routed workspace (`tenant_image_bytes`), replacing the former

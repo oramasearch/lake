@@ -4709,6 +4709,24 @@ public:
             });
     }
 
+    Result<OciRepositoryRoute> delete_oci_repository_route(const std::string& customer_id,
+                                                           const std::string& name) override {
+        if (managed_service_slug("ws", customer_id).empty()) {
+            return std::unexpected(StoreError{"not_found", "no image repository " + name});
+        }
+        return with_tx<OciRepositoryRoute>([&](pqxx::work& tx) -> Result<OciRepositoryRoute> {
+            const auto rows = tx.exec_params(std::string("DELETE FROM oci_repository_routes "
+                                                         "WHERE customer_id = $1::uuid AND name = $2 "
+                                                         "RETURNING ") +
+                                                 oci_route_columns,
+                                             customer_id, name);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no image repository " + name});
+            }
+            return oci_route_from(rows[0]);
+        });
+    }
+
     Result<WorkspaceDeletion> get_workspace_deletion(const std::string& workspace_id) override {
         if (managed_service_slug("ws", workspace_id).empty()) {
             return std::unexpected(StoreError{"invalid_input", "workspace_id must be a UUID"});

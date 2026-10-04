@@ -174,6 +174,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "transparency_proof_bundle",
     "transparency_tile",
     "tuf_metadata",
+    // Removing a wrong image route is control plane: the route is multitenancy (lake#383).
+    "unroute_image_repository",
     "update_workspace",
     "upsert_scim_group",
     "upsert_scim_user",

@@ -192,9 +192,11 @@ workspace actions and `legacy_audit_events` pages the assigned central events in
 the copy only.
 
 `oci_records.cpp` keeps a tenant image's manifests and tags in its routed workspace (lake#383
-phase A): the two codecs, a manifest put `if_absent` (a conflict answers the stored bytes, which a
+phase A): the codecs (manifests, tags marked `copied` when the copy wrote them, and the blobs a
+workspace received), a manifest put `if_absent` (a conflict answers the stored bytes, which a
 digest fixes), a tag set `if_absent` or at the revision read (reread on a conflict), a copied tag
 created only where none exists, and one listing per repository. The stores keep
 `oci_repository_routes` (migration `0068`): a route is created only for a live workspace of the
 space, answered again for the same workspace, a `conflict` for another, and deleted in
-`delete_workspace_cascade`, which lists each as an image in state `routed`.
+`delete_workspace_cascade`, which lists each as an image in state `routed`, or by
+`delete_oci_repository_route` (the operator's `unroute_image_repository`).

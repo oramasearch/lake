@@ -624,6 +624,11 @@ public:
         return call("list_oci_repository_routes",
                     [&] { return store_->list_oci_repository_routes(customer_id, workspace_id); });
     }
+    control::Result<control::OciRepositoryRoute>
+    delete_oci_repository_route(const std::string& customer_id, const std::string& name) override {
+        return call("delete_oci_repository_route",
+                    [&] { return store_->delete_oci_repository_route(customer_id, name); });
+    }
     control::Result<std::vector<control::ManagedService>>
     list_services(const std::string& customer_id) override {
         return call("list_services", [&] { return store_->list_services(customer_id); });

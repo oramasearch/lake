@@ -37,18 +37,24 @@ std::optional<control::Customer> space_customer(control::Store& store, std::stri
 std::expected<std::vector<std::string>, std::string>
 manifest_digests(const nlohmann::json& manifest);
 
-// Routes a tenant repository the instance registry holds from before lake#383, where its owner is
+// The image a build target names in `space` (`<authority>/<space>/<image>:<tag>`); empty when it
+// names another space or is malformed. A build's first push may route only `<image>` and
+// `cache/<image>` (lake#383).
+std::string build_target_image(std::string_view target, std::string_view space);
+
+// The owner of a tenant repository the instance registry holds from before lake#383, where it is
 // unambiguous: its route if it has one; else the one live workspace of the space whose apps or
 // builds use the image's name (`cache/<image>` follows `<image>`); else the space's only live
-// workspace. Answers the route, or an `outcome` that is not: `needs_selection` (an operator routes
-// it with create_image_repository) or `unknown_space`.
+// workspace. `outcome` is route_exists | image_workspace | sole_workspace (a workspace found) or
+// needs_selection | invalid_name (none). Only with `write` (the copy, never plan or verify) is a
+// route written for a workspace found; `routed` says whether a route exists afterwards.
 struct ImageOwner {
-    std::optional<control::OciRepositoryRoute> route;
-    std::string outcome; // route_exists | image_workspace | sole_workspace | needs_selection |
-                         // unknown_space | invalid_name
+    std::string workspace_id;
+    std::string outcome;
+    bool routed = false;
 };
-ImageOwner route_legacy_image(control::Store& store, const control::Customer& customer,
-                              const std::string& name);
+ImageOwner legacy_image_owner(control::Store& store, const control::Customer& customer,
+                              const std::string& name, bool write);
 
 // The unique bytes a space's tenant images hold, each manifest and referenced blob counted once
 // (docs/api/metering.md), read from the tags in each routed workspace (one list per repository).
@@ -60,7 +66,8 @@ struct ImageBytes {
 liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,
                                                      std::string customer_id);
 
-// create_image_repository and list_image_repositories (docs/api/registry.md).
+// create_image_repository, list_image_repositories and the operator's unroute_image_repository
+// (docs/api/registry.md).
 void register_image_capabilities(Registry& registry);
 
 } // namespace lake::api

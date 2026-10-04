@@ -363,18 +363,23 @@ nothing to move on dev.
 `oci_repository_routes (customer_id, name, workspace_id, created_at, updated_at)`: no manifest,
 digest or tag, and, unlike the target above, no `created by` (`create_image_repository` records
 who in its audit event; a build's first push is the build's). A build's first
-push writes it from the build row's workspace; anything else needs `create_image_repository` with an
+push of its own target (`<image>`, `cache/<image>`) writes it from the build row's workspace;
+anything else needs `create_image_repository` with an
 explicit `workspace_id` (no default; missing or unknown is `invalid_input` at `/workspace_id`). A
-trigger refuses any change of a route, and the `0065` cascade deletes a workspace's routes in its
-transaction. The migration routes each image name the apps and builds of exactly one live workspace
+trigger refuses any change of a route, the `0065` cascade deletes a workspace's routes in its
+transaction, and the operator's `unroute_image_repository` removes a wrong one. The migration routes each image name the apps and builds of exactly one live workspace
 use. Manifests are `lake_oci_manifests` records keyed by the blind index of the digest, written
 `if_absent`; tags are `lake_oci_tags` records keyed by repository and tag and moved at the revision
 read, each carrying its manifest's references with their sizes, so blob reads and the usage count
-read only tags (one `list_records` per repository). Blobs stay in `blobs/`, uploads in `uploads/`.
-The copy is `copy_workspace_records` (collection `oci_tags`), not `move_workspace_store`: it routes
-what is unambiguous (route, then the one workspace whose apps or builds use the name, then the
+read only tags (one `list_records` per repository). A tag move is conditional, so never torn, but
+concurrent pushes of one tag still end last-writer-wins. Blobs stay in `blobs/`, uploads in
+`uploads/`; each blob uploaded into a workspace's repository is recorded in its `lake_oci_blobs`,
+and a manifest may reference only blobs recorded in its workspace.
+The copy is `copy_workspace_records` (collection `oci_tags`), not `move_workspace_store`: `copy`
+(never `plan` or `verify`) routes what is unambiguous (route, then the one workspace whose apps or builds use the name, then the
 space's only live workspace), reports the rest, and writes and verifies each manifest and tag.
-Phase B moves the blobs (and `lake_oci_blobs`, uploads in `lake_uploads`) after lake#380. Not done
+Phase B moves the blobs into the workspace store (`lake_oci_blobs` then maps each digest to the
+stored identity; uploads in `lake_uploads`) after lake#380. Not done
 in phase A: counting registry requests in a workspace's `lake_requests` series (#384).
 
 ### lake#384: Prometheus metrics and request logs

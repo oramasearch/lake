@@ -113,6 +113,7 @@ nlohmann::json OciTagCodec::encode(const OciTag& tag) {
             {"content_type", tag.content_type},
             {"manifest_size", tag.manifest_size},
             {"references", references_json(tag.references)},
+            {"copied", tag.copied},
             {"updated_at", tag.updated_at}};
 }
 
@@ -134,6 +135,7 @@ std::optional<OciTag> OciTagCodec::decode(const StoredRecord& record) {
         return std::nullopt;
     }
     tag.references = std::move(*references);
+    tag.copied = body.value("copied", false);
     tag.at_us = record.at_us;
     tag.updated_at = body.value("updated_at", record_instant(record.at_us));
     tag.revision = record.revision;
@@ -259,6 +261,56 @@ liquid::runtime::task<ZettaControlResult<OciTag>> create_oci_tag(WorkspaceRecord
         co_return failed<OciTag>(written.error());
     }
     co_return tag_or_error(*written);
+}
+
+std::string OciBlobCodec::lookup(const OciBlob& blob) {
+    return "customer:" + blob.customer_id;
+}
+
+nlohmann::json OciBlobCodec::encode(const OciBlob& blob) {
+    return {{"customer_id", blob.customer_id}, {"digest", blob.digest}, {"size", blob.size}};
+}
+
+std::optional<OciBlob> OciBlobCodec::decode(const StoredRecord& record) {
+    if (record.schema_version != 1 || !record.body.is_object()) {
+        return std::nullopt;
+    }
+    OciBlob blob{record.body.value("customer_id", std::string()),
+                 record.body.value("digest", std::string()),
+                 record.body.value("size", std::uint64_t{0})};
+    if (blob.customer_id.empty() || blob.digest.empty()) {
+        return std::nullopt;
+    }
+    return blob;
+}
+
+liquid::runtime::task<ZettaControlResult<void>> record_oci_blob(WorkspaceRecords& records,
+                                                                OciBlob blob) {
+    const std::string key =
+        records.index_of(OciBlobCodec::collection, manifest_name(blob.customer_id, blob.digest));
+    auto written = settled(co_await records.put(OciBlobCodec::collection, key,
+                                                OciBlobCodec::lookup(blob), OciBlobCodec::encode(blob),
+                                                RecordCondition{.if_absent = true}));
+    if (!written && written.error().code != "conflict") {
+        co_return failed<void>(written.error());
+    }
+    co_return ZettaControlResult<void>();
+}
+
+liquid::runtime::task<ZettaControlResult<bool>>
+has_oci_blob(WorkspaceRecords& records, std::string customer_id, std::string digest) {
+    const std::string key =
+        records.index_of(OciBlobCodec::collection, manifest_name(customer_id, digest));
+    auto stored = settled(co_await records.get(OciBlobCodec::collection, key));
+    if (!stored) {
+        co_return failed<bool>(stored.error());
+    }
+    if (!*stored) {
+        co_return ZettaControlResult<bool>(false);
+    }
+    const auto blob = OciBlobCodec::decode(**stored);
+    co_return ZettaControlResult<bool>(blob && blob->customer_id == customer_id &&
+                                       blob->digest == digest);
 }
 
 liquid::runtime::task<ZettaControlResult<std::vector<OciTag>>>

@@ -3502,10 +3502,11 @@ INSERT INTO schema_migrations (version) VALUES ('0066_assign_unrouted_repositori
 -- that workspace Zetta's lake_oci_manifests and lake_oci_tags, and this table is the content-free
 -- route lake resolves before it reads any workspace, so an image keeps its address. A route holds
 -- only the space, the repository name below it and the workspace, with its timestamps: no
--- manifest, digest or tag. It is written when a build first pushes (from the build row's
--- workspace) or by create_image_repository (an explicit workspace_id); there is no default
--- workspace. A route never changes (enforce_oci_repository_route), and the cascade that deletes
--- a workspace (0065) deletes its routes. npm, Python, debuginfod and legacy one-component OCI
+-- manifest, digest or tag. It is written when a build first pushes its own target (`<image>` or
+-- `cache/<image>`, from the build row's workspace) or by create_image_repository (an explicit
+-- workspace_id); there is no default workspace. A route never changes
+-- (enforce_oci_repository_route); the cascade that deletes a workspace (0065) deletes its routes,
+-- and the operator's unroute_image_repository removes a wrong one. npm, Python, debuginfod and legacy one-component OCI
 -- repositories stay with the instance and have no route. Blobs stay in the instance registry
 -- until phase B (lake#380) moves them into the workspace store.
 --
@@ -3519,8 +3520,8 @@ INSERT INTO schema_migrations (version) VALUES ('0066_assign_unrouted_repositori
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS oci_repository_routes (
     customer_id  uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
-    name         text        NOT NULL CHECK (length(name) <= 200 AND name ~
-                     '^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)?$'),
+    name         text        NOT NULL CHECK (length(name) <= 196 AND name ~
+                     '^(cache/)?[a-z0-9]([a-z0-9._-]*[a-z0-9])?$'),
     workspace_id uuid        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now(),

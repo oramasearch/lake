@@ -2278,12 +2278,15 @@ liquid::runtime::task<ApiResult> copy_audit_events(ApiContext& context, const st
 
 // The instance registry's tenant tags and the manifests they name (lake#383 phase A): each tag
 // goes to the workspace its repository is routed to, as a manifest record (`if_absent`, keyed by
-// digest) and a tag record (`if_absent`, keyed by repository and tag). Each run first routes the
-// repositories whose owner is unambiguous (route_legacy_image); the rest are unresolved
-// (`needs_selection` until an operator calls create_image_repository, `invalid_name`, and
-// `unknown_space`, which does not block completion). Verify reads each tag back: present, naming the same manifest (or moved by a
-// later push, a later lake revision), and the manifest present with the same bytes. Blobs stay
-// in the instance registry until phase B. Rows are ordered by `<repository>:<tag>`.
+// digest), a blob record for each blob the manifest references, and a tag record (`if_absent`,
+// keyed by repository and tag, marked `copied`). Each run finds the owner of each repository
+// (legacy_image_owner); only `copy` writes the route of an unrouted one, so `plan` and `verify`
+// change nothing. A repository without an owner is unresolved (`needs_selection` until an operator
+// calls create_image_repository, `invalid_name`), as is a tag whose manifest or blobs the registry
+// no longer holds (`blob_missing`); `unknown_space` does not block completion. Verify reads each tag
+// back: one the copy wrote must name the same manifest with the same bytes, unless a later push
+// moved it; one a push wrote (after the cutover, before the copy reached it) is newer and is kept.
+// Blobs stay in the instance registry until phase B. Rows are ordered by `<repository>:<tag>`.
 liquid::runtime::task<ApiResult> copy_oci_tags(ApiContext& context, const std::string& mode,
                                                const std::string& after, int limit) {
     const WorkspaceContent* content = context.workspace_content;
@@ -2298,39 +2301,59 @@ liquid::runtime::task<ApiResult> copy_oci_tags(ApiContext& context, const std::s
         const LegacyImageTag* row;
         std::string customer_id;
         std::string name;
+        std::string document;
+        std::vector<control::OciReference> references;
     };
     std::map<std::string, std::vector<Owned>> by_workspace;
     std::map<std::string, std::optional<control::Customer>> customers;
     std::map<std::pair<std::string, std::string>, ImageOwner> owners;
+    const bool write = mode == "copy";
     for (const LegacyImageTag& row : rows) {
+        const std::string id = row.repository + ":" + row.tag;
         const auto repository = tenant_repository(row.repository);
         auto& customer = customers[repository ? repository->space : std::string()];
         if (repository && !customer) {
             customer = space_customer(*context.store, repository->space);
         }
-        std::string outcome = "unknown_space";
-        std::string customer_id;
-        if (repository && customer) {
-            customer_id = customer->id;
-            auto [owner, fresh] = owners.try_emplace({customer->id, repository->name});
-            if (fresh) {
-                owner->second = route_legacy_image(*context.store, *customer, repository->name);
-            }
-            if (owner->second.route) {
-                by_workspace[owner->second.route->workspace_id].push_back(
-                    {&row, customer->id, repository->name});
-                continue;
-            }
-            outcome = owner->second.outcome;
+        if (!repository || !customer) {
+            unresolved.push_back({{"id", id}, {"outcome", "unknown_space"}});
+            continue;
         }
-        json item{{"id", row.repository + ":" + row.tag}, {"outcome", outcome}};
-        if (!customer_id.empty()) {
-            item["customer_id"] = customer_id;
+        auto [owner, fresh] = owners.try_emplace({customer->id, repository->name});
+        if (fresh) {
+            owner->second =
+                legacy_image_owner(*context.store, *customer, repository->name, write);
         }
-        unresolved.push_back(std::move(item));
+        if (owner->second.workspace_id.empty()) {
+            unresolved.push_back(
+                {{"id", id}, {"customer_id", customer->id}, {"outcome", owner->second.outcome}});
+            continue;
+        }
+        // The manifest and every blob it references must still be in the registry: a tag copied
+        // without them could never be pulled, and its sizes would be wrong.
+        const auto bytes = content->read_blob(row.digest);
+        const json document = bytes ? json::parse(*bytes, nullptr, false) : json();
+        auto digests = document.is_object()
+                           ? manifest_digests(document)
+                           : std::expected<std::vector<std::string>, std::string>(
+                                 std::unexpected("missing"));
+        std::vector<control::OciReference> references;
+        bool missing = !digests;
+        for (const std::string& digest : digests ? *digests : std::vector<std::string>{}) {
+            const auto size = content->blob_size(digest);
+            missing = missing || !size;
+            references.push_back({digest, size.value_or(0)});
+        }
+        if (missing) {
+            unresolved.push_back(
+                {{"id", id}, {"customer_id", customer->id}, {"outcome", "blob_missing"}});
+            continue;
+        }
+        by_workspace[owner->second.workspace_id].push_back(
+            {&row, customer->id, repository->name, *bytes, std::move(references)});
     }
     std::map<std::string, WorkspaceTally> tallies;
-    for (const auto& [workspace_id, owned] : by_workspace) {
+    for (auto& [workspace_id, owned] : by_workspace) {
         WorkspaceTally& tally = tallies[workspace_id];
         tally.customer_id = owned.front().customer_id;
         tally.rows = owned.size();
@@ -2342,7 +2365,7 @@ liquid::runtime::task<ApiResult> copy_oci_tags(ApiContext& context, const std::s
             tally.error = records.error().code + ": " + records.error().message;
             continue;
         }
-        for (const Owned& item : owned) {
+        for (Owned& item : owned) {
             const LegacyImageTag& row = *item.row;
             const std::string id = row.repository + ":" + row.tag;
             auto tag = control::settled(
@@ -2356,19 +2379,19 @@ liquid::runtime::task<ApiResult> copy_oci_tags(ApiContext& context, const std::s
                     tally.missing.push_back(id);
                     continue;
                 }
-                // A push since the copy moved the tag (a later lake revision): it is kept.
-                const std::string named = (*tag)->lake_revision > 1 ? (*tag)->digest : row.digest;
+                // A push wrote it, or moved it since the copy: newer than the registry's pointer.
+                if (!(*tag)->copied || (*tag)->lake_revision > 1) {
+                    ++tally.verified;
+                    continue;
+                }
                 auto manifest = control::settled(
-                    co_await control::get_oci_manifest(*records, item.customer_id, named));
+                    co_await control::get_oci_manifest(*records, item.customer_id, row.digest));
                 if (!manifest) {
                     tally.error = manifest.error().code + ": " + manifest.error().message;
                     break;
                 }
-                const auto bytes = content->read_blob(row.digest);
-                const bool same = (*tag)->digest == named && *manifest &&
-                                  ((*tag)->lake_revision > 1 ||
-                                   (bytes && (*manifest)->document == *bytes));
-                if (same) {
+                if ((*tag)->digest == row.digest && *manifest &&
+                    (*manifest)->document == item.document) {
                     ++tally.verified;
                 } else {
                     tally.mismatched.push_back(id);
@@ -2379,32 +2402,25 @@ liquid::runtime::task<ApiResult> copy_oci_tags(ApiContext& context, const std::s
                 ++tally.already_present;
                 continue;
             }
-            const auto bytes = content->read_blob(row.digest);
-            if (!bytes) {
-                tally.error = "store_error: manifest " + row.digest + " of " + id + ": " +
-                              bytes.error();
-                break;
+            bool failed = false;
+            for (const control::OciReference& reference : item.references) {
+                auto recorded = control::settled(co_await control::record_oci_blob(
+                    *records, {item.customer_id, reference.digest, reference.size}));
+                if (!recorded) {
+                    tally.error = recorded.error().code + ": " + recorded.error().message;
+                    failed = true;
+                    break;
+                }
             }
-            const json document = json::parse(*bytes, nullptr, false);
-            auto digests = document.is_object()
-                               ? manifest_digests(document)
-                               : std::expected<std::vector<std::string>, std::string>(
-                                     std::unexpected("not JSON"));
-            if (!digests) {
-                tally.error = "store_error: manifest " + row.digest + " of " + id + ": " +
-                              digests.error();
+            if (failed) {
                 break;
-            }
-            std::vector<control::OciReference> references;
-            for (const std::string& digest : *digests) {
-                references.push_back({digest, content->blob_size(digest).value_or(0)});
             }
             auto manifest = control::settled(co_await control::put_oci_manifest(
                 *records, {.customer_id = item.customer_id,
                            .digest = row.digest,
                            .content_type = row.content_type,
-                           .document = *bytes,
-                           .references = references}));
+                           .document = item.document,
+                           .references = item.references}));
             if (!manifest) {
                 tally.error = manifest.error().code + ": " + manifest.error().message;
                 break;
@@ -2415,8 +2431,9 @@ liquid::runtime::task<ApiResult> copy_oci_tags(ApiContext& context, const std::s
                            .tag = row.tag,
                            .digest = row.digest,
                            .content_type = row.content_type,
-                           .manifest_size = bytes->size(),
-                           .references = std::move(references)}));
+                           .manifest_size = item.document.size(),
+                           .references = item.references,
+                           .copied = true}));
             if (!written && written.error().code == "conflict") {
                 ++tally.already_present; // a concurrent copy or push; verify compares it
                 continue;

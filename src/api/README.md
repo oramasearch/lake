@@ -351,11 +351,14 @@ the code. `copy_workspace_records` also copies `auth_app_authorization_codes`
 (`copy_application_authorization_codes`: live codes only, each written at most once).
 
 `image_capabilities.cpp` registers `create_image_repository` (an explicit `workspace_id`, no
-default) and `list_image_repositories` (the routes with each workspace's tags), and holds the
-legacy routing rule (`route_legacy_image`) and the image byte count metering reads from tags
+default), `list_image_repositories` (the routes with each workspace's tags) and the operator-only
+`unroute_image_repository` (central audit), and holds the legacy owner rule (`legacy_image_owner`,
+which writes a route only for the copy, never for plan or verify) and the image byte count metering reads from tags
 (lake#383 phase A). `http_server.cpp` routes every tenant OCI request (`<space>/...`) through
 `oci_repository_routes` before reading a workspace: a build's first push writes the route from its
-workspace, a workload credential reaches only its own workspace, manifests and tags are read and
+own target from its workspace, a workload credential reaches only its own workspace, an upload
+records its blob in the workspace (`lake_oci_blobs`) and a manifest may reference only recorded
+blobs, routes that cannot be read answer 503, manifests and tags are read and
 written as workspace records, blobs stay in the instance registry, and Ship → Packages lists the
 selected space's images through `list_image_repositories`. `copy_workspace_records` gains `oci_tags`,
 reading the instance registry's tenant pointers through `WorkspaceContent`.

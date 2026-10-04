@@ -397,32 +397,18 @@ struct WorkspaceDeletionRequest {
 struct OciRepositoryRoute {
     std::string customer_id, name, workspace_id, created_at, updated_at;
 };
-// A tenant repository name below its space: one or two `/`-separated components (`<image>` or
-// `cache/<image>`) of lowercase letters, digits, `.`, `_` and `-`, each starting and ending with a
-// letter or digit (OCI's repository grammar), at most 200 characters.
+// A tenant repository name below its space: `<image>` or `cache/<image>`, where `<image>` is one
+// component of lowercase letters, digits, `.`, `_` and `-`, starting and ending with a letter or
+// digit (OCI's repository grammar), at most 190 characters.
 inline bool valid_oci_route_name(std::string_view name) {
-    if (name.empty() || name.size() > 200) {
-        return false;
+    if (name.starts_with("cache/")) {
+        name.remove_prefix(6);
     }
-    int components = 0;
-    while (true) {
-        const std::size_t slash = name.find('/');
-        const std::string_view component = name.substr(0, slash);
-        const auto alnum = [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); };
-        if (component.empty() || !alnum(component.front()) || !alnum(component.back()) ||
-            !std::ranges::all_of(component, [&](char c) {
-                return alnum(c) || c == '.' || c == '_' || c == '-';
-            })) {
-            return false;
-        }
-        if (++components > 2) {
-            return false;
-        }
-        if (slash == std::string_view::npos) {
-            return true;
-        }
-        name.remove_prefix(slash + 1);
-    }
+    const auto alnum = [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); };
+    return !name.empty() && name.size() <= 190 && alnum(name.front()) && alnum(name.back()) &&
+           std::ranges::all_of(name, [&](char c) {
+               return alnum(c) || c == '.' || c == '_' || c == '-';
+           });
 }
 // Reserve room for `-ws-` and twelve UUID digits in a DNS label.
 inline bool valid_workspace_environment(std::string_view value) {
@@ -1292,6 +1278,11 @@ public:
     // A space's routes by name; `workspace_id` empty: every workspace.
     virtual Result<std::vector<OciRepositoryRoute>>
     list_oci_repository_routes(const std::string& customer_id, const std::string& workspace_id) = 0;
+    // Removes a route (the operator's unroute_image_repository): the workspace's records stay
+    // where they are, and a later create or copy may route the name again. Answers the route
+    // removed; `not_found` when there is none.
+    virtual Result<OciRepositoryRoute> delete_oci_repository_route(const std::string& customer_id,
+                                                                   const std::string& name) = 0;
     // Managed services (docs/control-plane/services.md). Lists the customer's services, oldest
     // first, leaving out deleted ones the operator has finished with.
     virtual Result<std::vector<ManagedService>> list_services(const std::string& customer_id) = 0;
