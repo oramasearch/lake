@@ -3,6 +3,7 @@
 // (lake#376): sealing, structural isolation between workspaces and spaces, conditional writes,
 // workspace deletion, and the operator's one-shot copy.
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -14,6 +15,7 @@
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 #include <pqxx/pqxx>
 
 #include "api/forge_records_api.hpp"
@@ -24,6 +26,7 @@
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
 #include "lake/api/audit_recorder.hpp"
+#include "lake/api/audit_routing.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/audit/audit.hpp"
@@ -52,6 +55,7 @@
 #include "lake/control/workspace_records.hpp"
 #include "lake/control/zetta_control.hpp"
 #include "lake/control/zetta_workspace.hpp"
+#include "lake/transparency/log.hpp"
 #include "postgres_fixture.hpp"
 #include "record_fixture.hpp"
 #include "repository_test_support.hpp"
@@ -4878,6 +4882,101 @@ TEST_P(WorkspaceRecordStores, DynamicLeasesLiveInTheirMountsWorkspace) {
     ASSERT_TRUE(after_delete);
     EXPECT_EQ(after_delete->settled, 1U);
     EXPECT_EQ(t.store->get_secret_lease_route(fresh.value["lease"]["id"])->due_us, 0);
+}
+
+// lake#382 (decision 54, S7): the instance transparency log stays with the instance and keeps the
+// leaf a relying party expects for each dynamic-secret lease, renewal and revocation (the
+// identity-exit scenario), even though the lease itself is a record of its mount's workspace and a
+// workspace audit route is available. The three capabilities stay in the central chain, so
+// finish_call appends the recorded central event as the leaf; the leaf carries routing ids only,
+// never the credential, the role or the mount's name.
+TEST_P(WorkspaceRecordStores, DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    for (const std::string_view capability :
+         {"lease_dynamic_secret", "renew_dynamic_secret", "revoke_dynamic_secret"}) {
+        EXPECT_EQ(lake::api::audit_log_of(capability), lake::api::AuditLog::Central) << capability;
+    }
+    TwoSpaces t(store, database_uri_);
+    lake::api::AuditRecorder recorder(t.store.get(), t.service.get(), std::string(kek), "");
+    lake::transparency::TiledLog log(t.dir / "store", "lake");
+    const auto admin = [&](const std::string& capability, json input) {
+        auto context = secret_operator(t);
+        context.audit_recorder = &recorder;
+        context.transparency_log = &log;
+        return secret_call(t, std::move(context), capability, std::move(input));
+    };
+    const SecretSpace space = secret_space(t, "leaf", 1);
+    const std::string& workspace = space.workspaces[0];
+    const std::string mount_name = "leaf-mount-" + lake::control::new_uuid_v4().substr(0, 8);
+    const std::string role = "leaf-role-" + lake::control::new_uuid_v4().substr(0, 8);
+    const auto mount = admin("create_secret_mount", {{"customer_id", space.customer_id},
+                                                     {"workspace_id", workspace},
+                                                     {"organization_id", space.organization_id},
+                                                     {"name", mount_name}});
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::size_t queued = recorder.pending();
+    const auto before = log.state();
+    ASSERT_TRUE(before) << before.error().message;
+    ASSERT_EQ(before->tree_size, 0U) << "only dynamic-secret events reach this log";
+
+    const auto leased = admin("lease_dynamic_secret", {{"mount_id", mount.value["id"]},
+                                                       {"role", role},
+                                                       {"lifetime_seconds", 600}});
+    ASSERT_TRUE(leased.ok) << leased.error.message;
+    EXPECT_EQ(leased.value["lease"]["workspace_id"], workspace) << "the lease is workspace data";
+    const std::string lease_id = leased.value["lease"]["id"];
+    const std::string username = leased.value["value"]["username"];
+    const std::string password = leased.value["value"]["password"];
+    ASSERT_FALSE(password.empty());
+    const auto after_lease = log.state();
+    ASSERT_TRUE(after_lease) << after_lease.error().message;
+    EXPECT_EQ(after_lease->tree_size, 1U) << "leasing in a workspace appends the instance leaf";
+    ASSERT_TRUE(admin("renew_dynamic_secret", {{"lease_id", lease_id}}).ok);
+    ASSERT_TRUE(admin("revoke_dynamic_secret", {{"lease_id", lease_id}}).ok);
+    EXPECT_EQ(recorder.pending(), queued) << "no dynamic-secret event is queued for the workspace";
+
+    // Each leaf is exactly the central event's body, in order: lease, renew, revoke.
+    const auto events =
+        lake::test::audit_events(*t.store, {.object = "dynamic_secret/" + lease_id, .limit = 10});
+    ASSERT_TRUE(events) << events.error().message;
+    ASSERT_EQ(events->size(), 3U);
+    const auto state = log.state();
+    ASSERT_TRUE(state) << state.error().message;
+    ASSERT_EQ(state->tree_size, 3U);
+    const auto tile = log.tile(0, 3);
+    ASSERT_TRUE(tile) << tile.error().message;
+    std::string encoded = tile->encoded;
+    std::ranges::replace(encoded, '-', '+');
+    std::ranges::replace(encoded, '_', '/');
+    while (encoded.size() % 4 != 0) {
+        encoded.push_back('=');
+    }
+    std::string leaves((encoded.size() / 4) * 3, '\0');
+    ASSERT_GE(EVP_DecodeBlock(reinterpret_cast<unsigned char*>(leaves.data()),
+                              reinterpret_cast<const unsigned char*>(encoded.data()),
+                              static_cast<int>(encoded.size())),
+              0);
+    std::size_t previous = 0;
+    std::set<std::string> operations;
+    for (const auto& event : *events) {
+        EXPECT_EQ(event.draft.kind, "dynamic_secret");
+        operations.insert(event.draft.details.value("operation", ""));
+        const std::vector<std::uint8_t> body = json::to_cbor(lake::audit::to_json(event));
+        const auto at = leaves.find(std::string(body.begin(), body.end()));
+        ASSERT_NE(at, std::string::npos) << event.draft.action << " has no instance log leaf";
+        EXPECT_GE(at, previous);
+        previous = at;
+    }
+    EXPECT_EQ(operations, (std::set<std::string>{"lease", "renew", "revoke"}));
+    // Content-free: the lease id names the event; the credential, role and mount name never
+    // reach the public log.
+    EXPECT_NE(leaves.find(lease_id), std::string::npos);
+    for (const std::string& secret : {username, password, role, mount_name}) {
+        EXPECT_EQ(leaves.find(secret), std::string::npos) << secret;
+    }
 }
 
 // lake#362: the one-shot copy moves each secrets_dynamic_leases row into its mount's workspace,

@@ -10,8 +10,9 @@ Refs [lake#311](https://github.com/oramasearch/lake/issues/311),
 [lake#384](https://github.com/oramasearch/lake/issues/384).
 
 **Status: design, decided 2026-10-03 (decision 54).** Implemented: lake#319 (`repository_refs`
-dropped) and lake#315 part 2 (the description in `lake_repositories`), both in migration `0064`;
-everything else here is not implemented yet. This page plans the moves that
+dropped) and lake#315 part 2 (the description in `lake_repositories`), both in migration `0064`,
+and lake#382 (the log stays with the instance; no migration). Everything else here is not
+implemented yet. This page plans the moves that
 [workspace records](workspace-records.md) does not cover: the bytes on lake's store volume
 (liquid stores, search indexes, the registry, the transparency log), the two repository tables
 that sit beside them, and lake's operational telemetry. It states what each item is today, what it
@@ -50,7 +51,7 @@ except S12, where Steve chose cascade over refusal.
 | #319 `repository_refs` | Copy of each liquid ref | 0 rows | workspace (unused) | **Dropped** (migration `0064`) |
 | #380 `<customer>/store` | Liquid objects and history of every repository, Drive, model and dataset | 18.3 MB in 2 customer stores, 10 repositories | workspace | One liquid store per workspace in the workspace Zetta's object capability |
 | #381 `<customer>/index` | Search catalogue, segments and manifest | none written | workspace | Sealed objects beside the workspace store; rebuilt |
-| #382 transparency, TUF, timestamps | The instance's log, trust metadata and evidence | none written | instance | Stays with the instance |
+| #382 transparency, TUF, timestamps | The instance's log, trust metadata and evidence | none written | instance | Stays with the instance. **Done** (no migration) |
 | #383 registry | OCI, npm, Python and debug artifacts | 561 MB: 38 blobs, 7 manifests, one space | split | Tenant images to the workspace store; instance registry stays |
 | #384 metrics and request logs | Process counters and stdout lines | nothing kept (no Prometheus or Loki on the cluster) | instance | Stays; plus a per-workspace request series |
 
@@ -287,14 +288,24 @@ observer sees the same tree; its checkpoint is signed by the instance, and its e
 statements by design. TUF metadata and timestamp evidence protect that one log.
 
 **Target (S7).** Stays at `LAKE_STORE_ROOT/<instance>/log/` on lake's store volume, under the
-root lock. The umbrella rule names it as an exception: the instance's public commitment. Two
-follow-ups belong with it:
+root lock. The umbrella rule names it as an exception: the instance's public commitment.
+**Done** ([lake#382](https://github.com/oramasearch/lake/issues/382), [PR #519](https://github.com/oramasearch/lake/pull/519)): the audit row in
+[workspace-data-plane.md](workspace-data-plane.md#storage-audit) classifies it as instance exception
+S7. The two checks that belonged with it:
 
 - the TUF and timestamp writers are unsafe between two processes (in-process mutex, per-process
-  temporary names); the root lock covers that today, and nothing here changes it;
-- `dynamic_secret` events reach the log only when they are recorded centrally. After decision 52
-  routes them to a workspace, check that the instance log still receives the leaf a relying party
-  expects (the identity-exit scenario), or record that it no longer does.
+  temporary names). The store root lock (`.lake-owner.lock`, [store-volume.md](../deployment/store-volume.md))
+  admits one writing process at a time, which covers them; they are unchanged.
+- `dynamic_secret` events still reach the log. `lease_dynamic_secret`, `renew_dynamic_secret` and
+  `revoke_dynamic_secret` are in the central list of decision 52's audit routing
+  (`src/api/audit_routing.cpp`), although the lease is a record of its mount's workspace, so
+  `finish_call` signs each into the central chain and appends that event as the instance log leaf
+  the identity-exit scenario expects. No leaf was lost. The leaf is the central event's body: the
+  lease, mount and workspace ids, the principal and the operation, never the credential, the role
+  or the mount's name. `WorkspaceRecordStores.DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf`
+  proves it with a workspace audit route available, and fails if the three capabilities move to
+  the workspace list. Moving them there would need the log to name a workspace chain's event
+  first.
 
 **Migration.** None.
 
@@ -430,7 +441,7 @@ liquid; `updated_at` is gone.
 | 9 | [lake#315](https://github.com/oramasearch/lake/issues/315) | Part 2: `description` to `lake_repositories` (S10). **Done** (migration `0064`); the copy of the one unassigned row waits | lake#513 for the one unassigned row |
 | 10 | [lake#514](https://github.com/oramasearch/lake/issues/514) | Cascade workspace deletion (S12). Shipped before #380 and #383 (migration `0065`); the store and route steps are extension points | nothing; its store step follows #380 |
 | 11 | [lake#384](https://github.com/oramasearch/lake/issues/384) | Route patterns in request logs; the per-workspace `lake_requests` series (S9) | nothing |
-| 12 | [lake#382](https://github.com/oramasearch/lake/issues/382) | Stays with the instance (S7): the audit row, and the dynamic-secret leaf check | nothing |
+| 12 | [lake#382](https://github.com/oramasearch/lake/issues/382) | Stays with the instance (S7): the audit row, and the dynamic-secret leaf check. **Done** ([PR #519](https://github.com/oramasearch/lake/pull/519); no migration) | nothing |
 | 13 | [lake#383](https://github.com/oramasearch/lake/issues/383) | Phase A: the route table, manifests and tags as records. Phase B: blobs in the workspace store | A: nothing; B: lake#380 |
 | 14 | [lake#380](https://github.com/oramasearch/lake/issues/380) | `ZettaObjectBackend`, per-workspace leases and lazy open, encryption, `move_workspace_store` | 1–7 |
 | 15 | [lake#381](https://github.com/oramasearch/lake/issues/381) | Search beside the workspace store, rebuilt (S8) | lake#380 |
