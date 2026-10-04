@@ -289,7 +289,7 @@ statements by design. TUF metadata and timestamp evidence protect that one log.
 
 **Target (S7).** Stays at `LAKE_STORE_ROOT/<instance>/log/` on lake's store volume, under the
 root lock. The umbrella rule names it as an exception: the instance's public commitment.
-**Done** ([lake#382](https://github.com/oramasearch/lake/issues/382), PR_LINK): the audit row in
+**Done** ([lake#382](https://github.com/oramasearch/lake/issues/382), [PR #519](https://github.com/oramasearch/lake/pull/519)): the audit row in
 [workspace-data-plane.md](workspace-data-plane.md#storage-audit) classifies it as instance exception
 S7. The two checks that belonged with it:
 
@@ -441,7 +441,7 @@ liquid; `updated_at` is gone.
 | 9 | [lake#315](https://github.com/oramasearch/lake/issues/315) | Part 2: `description` to `lake_repositories` (S10). **Done** (migration `0064`); the copy of the one unassigned row waits | lake#513 for the one unassigned row |
 | 10 | [lake#514](https://github.com/oramasearch/lake/issues/514) | Cascade workspace deletion (S12). Shipped before #380 and #383 (migration `0065`); the store and route steps are extension points | nothing; its store step follows #380 |
 | 11 | [lake#384](https://github.com/oramasearch/lake/issues/384) | Route patterns in request logs; the per-workspace `lake_requests` series (S9) | nothing |
-| 12 | [lake#382](https://github.com/oramasearch/lake/issues/382) | Stays with the instance (S7): the audit row, and the dynamic-secret leaf check. **Done** (PR_LINK; no migration) | nothing |
+| 12 | [lake#382](https://github.com/oramasearch/lake/issues/382) | Stays with the instance (S7): the audit row, and the dynamic-secret leaf check. **Done** ([PR #519](https://github.com/oramasearch/lake/pull/519); no migration) | nothing |
 | 13 | [lake#383](https://github.com/oramasearch/lake/issues/383) | Phase A: the route table, manifests and tags as records. Phase B: blobs in the workspace store | A: nothing; B: lake#380 |
 | 14 | [lake#380](https://github.com/oramasearch/lake/issues/380) | `ZettaObjectBackend`, per-workspace leases and lazy open, encryption, `move_workspace_store` | 1–7 |
 | 15 | [lake#381](https://github.com/oramasearch/lake/issues/381) | Search beside the workspace store, rebuilt (S8) | lake#380 |
