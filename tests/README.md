@@ -463,7 +463,7 @@ through `call_async`.
 Repository usage in workspace Zettas (lake#348, lake#349): `test_workspace_records.cpp`'s
 `RepositoryUsageStaysInEachRepositorysWorkspace` covers `MeteringRecorder` across two spaces with
 two workspaces each (nothing written on the request path, merged counters, a second replica's
-conditional increment, not-ready and deleted workspaces, a repository without a workspace, the
+conditional increment, not-ready, deleted and unknown workspaces, a repository without a workspace, the
 bound, build records once), and `TheOneShotCopyMovesMeteringIntoEachSpacesWorkspace` the copy.
 `PostgresMetering.MigrationRecordsEachRowsOwnerForTheCopy` covers `0053_metering_workspaces`, and
 `PostgresSync.PushAndPullUsePostgresControlPlane` a real push and pull flushed into the

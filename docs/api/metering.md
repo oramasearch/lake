@@ -48,7 +48,9 @@ finish, before the stores close.
   An increment to a counter already held always merges; a new counter beyond the bound is dropped
   and counted, never blocked on.
 - **Failures.** A write that fails is kept for the next flush. A counter whose workspace has been
-  deleted is dropped and counted, because its records went with the workspace.
+  deleted is dropped and counted, because its records went with the workspace; so is one whose
+  workspace id is unknown (both stores answer it with `invalid_input`), rather than retried until
+  the bound drops it.
 - **Repositories without a workspace.** A repository migration `0051` recorded as
   `needs_selection` has nowhere to record transfer. Its bytes are counted as unattributed and not
   recorded, and the report says so.
@@ -193,7 +195,7 @@ covers the page's units and names.
 `Stores/WorkspaceRecordStores.RepositoryUsageStaysInEachRepositorysWorkspace/{Memory,Postgres}`
 covers the recorder across two spaces with two workspaces each: nothing written on the request
 path, one hourly record per workspace, merged counters, a second replica's conditional increment,
-a workspace that is not ready (kept), a deleted workspace (dropped and counted), a repository
+a workspace that is not ready (kept), a deleted or unknown workspace (dropped and counted), a repository
 without a workspace, the bound, and build records written once.
 `Stores/WorkspaceRecordStores.TheOneShotCopyMovesMeteringIntoEachSpacesWorkspace/{Memory,Postgres}`
 covers the copy, and `PostgresMetering.MigrationRecordsEachRowsOwnerForTheCopy` migration `0053`.
