@@ -4551,3 +4551,87 @@ TEST(PostgresImageRoutes, MigrationRoutesUnambiguousImagesOnly) {
     ASSERT_FALSE(deleted);
     EXPECT_EQ(deleted.error().code, "invalid_input");
 }
+
+// Migration 0069 (operator#259, operator#260): a workspace's storage only grows, whoever writes
+// it; every workspace and lake's store get a default snapshot policy, by the backfill and by the
+// trigger on new workspaces; a rerun of the schema changes neither the sizes nor the policies; and
+// the policy accepts only `store` or a workspace id, five cron fields and a bounded keep.
+TEST(PostgresVolumes, StorageNeverShrinksAndEveryTargetHasAPolicy) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "workspace-volumes-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const std::string name = "volumes-" + suffix;
+    const auto user = store->create_user({"taap:" + name, "", "Volumes"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", name});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto workspace = store->create_workspace({customer->id, "main", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    EXPECT_EQ(workspace->storage_gi, 5);
+
+    pqxx::connection connection(uri);
+    const auto policy_count = [&](const std::string& target) {
+        pqxx::work tx(connection);
+        return tx.exec_params("SELECT count(*) FROM volume_snapshot_policies WHERE target = $1",
+                              target)[0][0]
+            .as<int>();
+    };
+    EXPECT_EQ(policy_count("store"), 1);
+    EXPECT_EQ(policy_count(workspace->id), 1) << "the trigger adds a new workspace's policy";
+
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE workspaces SET storage_gi = 20 WHERE id = $1::uuid", workspace->id);
+        tx.commit();
+    }
+    {
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec_params("UPDATE workspaces SET storage_gi = 10 WHERE id = $1::uuid",
+                                    workspace->id),
+                     pqxx::check_violation);
+    }
+    {
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec_params("UPDATE workspaces SET storage_phase = 'Shrinking' WHERE id = "
+                                    "$1::uuid",
+                                    workspace->id),
+                     pqxx::check_violation);
+    }
+    const auto refused = store->set_workspace_storage(workspace->id, 19);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "invalid_input");
+    EXPECT_EQ(store->get_workspace(workspace->id)->storage_gi, 20);
+
+    // The backfill: a workspace from before the migration gets its policy, once.
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0069_workspace_volumes'");
+        tx.exec_params("DELETE FROM volume_snapshot_policies WHERE target IN ($1, 'store')",
+                       workspace->id);
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema);
+        tx.commit();
+        EXPECT_EQ(policy_count("store"), 1) << "pass " << pass;
+        EXPECT_EQ(policy_count(workspace->id), 1) << "pass " << pass;
+    }
+    EXPECT_EQ(store->get_workspace(workspace->id)->storage_gi, 20) << "a rerun keeps the size";
+
+    for (const char* statement :
+         {"INSERT INTO volume_snapshot_policies (target) VALUES ('everything')",
+          "INSERT INTO volume_snapshot_policies (target, schedule) VALUES "
+          "('00000000-0000-4000-8000-000000000001', '@daily')",
+          "INSERT INTO volume_snapshot_policies (target, keep) VALUES "
+          "('00000000-0000-4000-8000-000000000001', 0)"}) {
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec(statement), pqxx::check_violation) << statement;
+    }
+}

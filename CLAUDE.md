@@ -148,6 +148,14 @@ that workspace's Zetta, so image addresses do not change. npm, Python, debuginfo
 OCI stay with the instance. Blobs stay in the instance registry until phase B (after lake#380);
 `copy_workspace_records` (`oci_tags`) moves the tags written before. See
 `docs/api/registry.md#where-a-tenant-image-lives`.
+The operator gets its volumes (decision 54 S13, operator#259, operator#260, migration `0069`):
+`workspaces.storage_gi` (default 5, never decreasing, refused by a trigger) is the desired size of
+each workspace Zetta volume, with the operator's observed size, phase and message on the row;
+content-free `volume_snapshot_policies` (target `store` or a workspace id, cron schedule, keep,
+`requested_at`) and the operator-written `volume_snapshot_status`. `set_workspace_storage`,
+`request_volume_snapshot` and `volume_snapshots` are operator or instance-administrator only and
+audited centrally; the `move_workspace_store` snapshot check waits for lake#380's change. See
+`docs/api/volumes.md`.
 
 ## Historical status — superseded 2026-09-08
 

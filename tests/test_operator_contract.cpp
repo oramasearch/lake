@@ -4,7 +4,8 @@
 // in lake's tests noticed. This test runs the operator's own SQL against a fresh lake schema.
 //
 // The statements below are copied verbatim from oramasearch/orama-operator at 188f8ac
-// (internal/controller/*_pgx.go). When the operator changes one of them, copy it here again; when
+// (internal/controller/*_pgx.go), with the workspace and volume snapshot statements of
+// operator#259 and operator#260. When the operator changes one of them, copy it here again; when
 // lake changes a table the operator reads, this test says which statement breaks.
 
 #include "lake/control/agent_runs.hpp"
@@ -206,7 +207,8 @@ constexpr std::string_view listWorkspacesSQL =
  COALESCE(w.phase, ''), COALESCE(w.observed_generation, 0), COALESCE(w.message, ''),
  COALESCE(w.namespace, ''), COALESCE(w.zetta_service_id::text, ''), COALESCE(s.generation, 0),
  ss.service_id IS NOT NULL, COALESCE(ss.phase, ''), COALESCE(ss.message, ''),
- COALESCE(ss.endpoint, ''), COALESCE(ss.observed_generation, 0)
+ COALESCE(ss.endpoint, ''), COALESCE(ss.observed_generation, 0),
+ w.storage_gi, w.storage_gi_observed, w.storage_phase, w.storage_message
  FROM workspaces w
  LEFT JOIN services s ON s.id = w.zetta_service_id
  LEFT JOIN service_status ss ON ss.service_id = w.zetta_service_id
@@ -216,8 +218,31 @@ constexpr std::string_view listWorkspacesSQL =
 // internal/controller/lake_workspaces_pgx.go
 constexpr std::string_view updateWorkspaceStatusSQL =
     R"(UPDATE workspaces
- SET phase=$5, observed_generation=$6, message=$7, namespace=$8, updated_at=now()
+ SET phase=$5, observed_generation=$6, message=$7, namespace=$8,
+ storage_gi_observed=$9, storage_phase=$10, storage_message=$11, updated_at=now()
  WHERE id=$1::uuid AND customer_id=$2::uuid AND generation=$3 AND desired=$4)";
+
+// internal/controller/lake_volume_snapshots_pgx.go
+constexpr std::string_view listVolumeSnapshotPoliciesSQL =
+    R"(SELECT p.target, p.schedule, p.keep, p.requested_at,
+ COALESCE(w.desired, ''), COALESCE(w.namespace, ''),
+ st.target IS NOT NULL, COALESCE(st.snapshot_name, ''), COALESCE(st.ready_to_use, false),
+ st.snapshot_at, COALESCE(st.message, '')
+ FROM volume_snapshot_policies p
+ LEFT JOIN workspaces w ON w.id::text = p.target
+ LEFT JOIN volume_snapshot_status st ON st.target = p.target
+ ORDER BY p.target <> 'store', p.target)";
+
+// internal/controller/lake_volume_snapshots_pgx.go
+constexpr std::string_view upsertVolumeSnapshotStatusSQL =
+    R"(INSERT INTO volume_snapshot_status (target, snapshot_name, ready_to_use, snapshot_at, message, updated_at)
+VALUES ($1, $2, $3, $4, $5, now())
+ON CONFLICT (target) DO UPDATE SET
+    snapshot_name = EXCLUDED.snapshot_name,
+    ready_to_use = EXCLUDED.ready_to_use,
+    snapshot_at = EXCLUDED.snapshot_at,
+    message = EXCLUDED.message,
+    updated_at = now())";
 
 const std::vector<OperatorStatement>& operator_statements() {
     static const std::vector<OperatorStatement> statements{
@@ -237,6 +262,10 @@ const std::vector<OperatorStatement>& operator_statements() {
         {"lake_builds_pgx.go", "updateBuildStatusSQL", updateBuildStatusSQL},
         {"lake_workspaces_pgx.go", "listWorkspacesSQL", listWorkspacesSQL, true},
         {"lake_workspaces_pgx.go", "updateWorkspaceStatusSQL", updateWorkspaceStatusSQL},
+        {"lake_volume_snapshots_pgx.go", "listVolumeSnapshotPoliciesSQL",
+         listVolumeSnapshotPoliciesSQL, true},
+        {"lake_volume_snapshots_pgx.go", "upsertVolumeSnapshotStatusSQL",
+         upsertVolumeSnapshotStatusSQL},
     };
     return statements;
 }
@@ -338,6 +367,8 @@ TEST(OperatorContract, RowsLakeWritesAppearInTheOperatorsPolls) {
         {"listAppsSQL", app->id},
         {"listBuildsSQL", build->id},
         {"listWorkspacesSQL", workspace->id},
+        // Every workspace gets the default snapshot policy (migration 0069).
+        {"listVolumeSnapshotPoliciesSQL", workspace->id},
     };
     pqxx::connection connection(uri);
     for (const OperatorStatement& statement : operator_statements()) {

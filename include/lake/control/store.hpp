@@ -359,6 +359,12 @@ struct Workspace {
     std::string phase;
     std::int64_t observed_generation = 0;
     std::string message, namespace_name, zetta_service_id, created_at, updated_at;
+    // The desired size of each of the workspace Zetta's volumes, in GiB (migration 0069,
+    // operator#259); it never decreases. The operator reports the smallest claim capacity it sees
+    // (`storage_gi_observed`), `storage_phase` (Pending | Resizing | Ready | Failed) and why.
+    std::int32_t storage_gi = 5;
+    std::int32_t storage_gi_observed = 0;
+    std::string storage_phase, storage_message;
 };
 struct NewWorkspace {
     std::string customer_id, name, environment, created_by_taap_id;
@@ -397,6 +403,54 @@ struct WorkspaceDeletionRequest {
 struct OciRepositoryRoute {
     std::string customer_id, name, workspace_id, created_at, updated_at;
 };
+// The volume snapshot policy of one target (migration 0069, operator#260, decision 54 S13):
+// `store` (lake's own store volume) or a workspace id. Content-free: a five-field cron schedule
+// in UTC, how many snapshots the operator keeps, and `requested_at`, a one-off request the
+// operator honors when it is newer than the target's last snapshot. `status` is the operator's
+// observation (volume_snapshot_status): its last VolumeSnapshot's name, whether it is readyToUse,
+// when it was taken, and why it is not; empty fields until the operator has written one.
+struct VolumeSnapshotStatus {
+    std::string snapshot_name;
+    bool ready_to_use = false;
+    std::string snapshot_at, message, updated_at;
+};
+struct VolumeSnapshotPolicy {
+    std::string target, schedule = "0 3 * * *";
+    std::int32_t keep = 7;
+    std::string requested_at, created_at, updated_at;
+    std::optional<VolumeSnapshotStatus> status;
+};
+// request_volume_snapshot's input: the target and, optionally, a new schedule and keep.
+struct VolumeSnapshotRequest {
+    std::string target;
+    std::optional<std::string> schedule;
+    std::optional<std::int32_t> keep;
+};
+inline constexpr std::int32_t max_workspace_storage_gi = 32767;
+inline constexpr std::int32_t max_volume_snapshots_kept = 100;
+// A five-field cron expression of digits and `*`, `/`, `,`, `-` (what volume_snapshot_policies
+// accepts); the operator parses the fields themselves.
+inline bool valid_snapshot_schedule(std::string_view schedule) {
+    int fields = 0;
+    bool in_field = false;
+    for (const char c : schedule) {
+        if (c == ' ') {
+            if (!in_field) {
+                return false;
+            }
+            in_field = false;
+            continue;
+        }
+        if (!((c >= '0' && c <= '9') || c == '*' || c == '/' || c == ',' || c == '-')) {
+            return false;
+        }
+        if (!in_field) {
+            ++fields;
+            in_field = true;
+        }
+    }
+    return in_field && fields == 5;
+}
 // A tenant repository name below its space: `<image>` or `cache/<image>`, where `<image>` is one
 // component of lowercase letters, digits, `.`, `_` and `-`, starting and ending with a letter or
 // digit (OCI's repository grammar), at most 190 characters.
@@ -1264,6 +1318,18 @@ public:
     // The deletions lake has not completed, oldest first.
     virtual Result<std::vector<WorkspaceDeletion>> pending_workspace_deletions(int limit) = 0;
     virtual Result<void> complete_workspace_deletion(const std::string& workspace_id) = 0;
+    // Grows the workspace Zetta's volumes (migration 0069, operator#259): sets `storage_gi` and
+    // advances the generation so the operator reconciles it. `invalid_input` when the workspace is
+    // unknown or deleted, the size is outside 1..max_workspace_storage_gi, or it is below the
+    // current size (volumes never shrink); the same size answers the row unchanged.
+    virtual Result<Workspace> set_workspace_storage(const std::string& id, std::int32_t storage_gi) = 0;
+    // Records a one-off snapshot request for a target (requested_at = now) and, when given, its new
+    // schedule and keep, creating the target's policy with the defaults when it has none.
+    // `invalid_input` when the target is neither `store` nor a known, live workspace id, or the
+    // schedule or keep is invalid.
+    virtual Result<VolumeSnapshotPolicy> request_volume_snapshot(const VolumeSnapshotRequest&) = 0;
+    // Every snapshot policy with the operator's status, `store` first, then by target.
+    virtual Result<std::vector<VolumeSnapshotPolicy>> volume_snapshots() = 0;
     // Tenant image routes (lake#383, docs/api/registry.md#where-a-tenant-image-lives). Creating a
     // route names its workspace explicitly: `invalid_input` when the name is invalid or the
     // workspace is not a live workspace of the space, the existing route when the same workspace

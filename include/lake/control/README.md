@@ -178,3 +178,9 @@ reference. `store.hpp` declares `OciRepositoryRoute`, `valid_oci_route_name` and
 `create_oci_repository_route`/`get_oci_repository_route`/`list_oci_repository_routes`/
 `delete_oci_repository_route`; the
 workspace deletion cascade deletes a workspace's routes.
+
+`store.hpp` declares the operator's volumes (migration `0069`): `Workspace::storage_gi` and the
+operator's `storage_gi_observed`, `storage_phase` and `storage_message`; `VolumeSnapshotPolicy`,
+`VolumeSnapshotStatus`, `VolumeSnapshotRequest`, `valid_snapshot_schedule` and the bounds
+`max_workspace_storage_gi` and `max_volume_snapshots_kept`; and `set_workspace_storage`,
+`request_volume_snapshot` and `volume_snapshots`.

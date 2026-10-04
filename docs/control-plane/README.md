@@ -47,3 +47,8 @@ workspace (decision 54 S14, lake#513).
 [schema.md](schema.md#tenant-image-routes-migration-0068_oci_repository_routes) documents
 `0068_oci_repository_routes`, the content-free route from a tenant image repository to the workspace
 whose Zetta holds its manifests and tags (lake#383 phase A).
+
+[schema.md](schema.md#workspace-volumes-migration-0069_workspace_volumes) documents
+`0069_workspace_volumes`: each workspace Zetta's desired volume size, which never decreases, and the
+content-free volume snapshot policies and status the operator reads and writes (operator#259,
+operator#260).

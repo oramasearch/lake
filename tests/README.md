@@ -592,3 +592,11 @@ unaffected, a workspace that is not ready, workspace deletion and the copy; the 
 tests run tenant pushes against routed workspaces; `WorkspaceRecords.ImageTagsMoveAtTheRevisionReadAndManifestsAreWrittenOnce`
 the codecs and a raced tag move; `PostgresImageRoutes.MigrationRoutesUnambiguousImagesOnly`
 migration `0068`.
+
+Workspace volumes (migration `0069`, operator#259, operator#260): `test_volumes.cpp`
+(`Stores/Volumes.*`, on the memory store and PostgreSQL) covers growing a workspace's storage, the
+refused decrease, unknown and deleted workspaces, callers who are not the operator, central audit,
+the default snapshot policies, requests with schedule and keep, bad targets and schedules, and the
+operator's status read back; `PostgresVolumes.StorageNeverShrinksAndEveryTargetHasAPolicy` the
+trigger, the policy checks and the backfill; `OperatorContract.*` the operator's new workspace and
+snapshot statements.

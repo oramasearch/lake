@@ -654,6 +654,11 @@ Result<Workspace> InMemoryStore::create_workspace(const NewWorkspace& input) {
     row.zetta_service_id = service.id;
     services_.push_back(service);
     workspaces_.push_back(row);
+    // As the workspace_snapshot_policy trigger does (migration 0069).
+    VolumeSnapshotPolicy policy;
+    policy.target = row.id;
+    policy.created_at = policy.updated_at = row.created_at;
+    volume_snapshot_policies_.emplace(row.id, std::move(policy));
     return row;
 }
 
@@ -909,6 +914,106 @@ Result<void> InMemoryStore::complete_workspace_deletion(const std::string& works
     if (found->completed_at.empty()) {
         found->completed_at = now_iso8601();
     }
+    return {};
+}
+
+Result<Workspace> InMemoryStore::set_workspace_storage(const std::string& id, std::int32_t storage_gi) {
+    std::lock_guard lock(mutex_);
+    const auto row = std::ranges::find(workspaces_, id, &Workspace::id);
+    if (row == workspaces_.end() || row->desired == "deleted") {
+        return std::unexpected(StoreError{"invalid_input", "workspace_id is unknown"});
+    }
+    if (storage_gi < 1 || storage_gi > max_workspace_storage_gi) {
+        return std::unexpected(StoreError{"invalid_input", "storage_gi is out of range"});
+    }
+    if (storage_gi < row->storage_gi) {
+        return std::unexpected(StoreError{
+            "invalid_input", "workspace storage never decreases: " + std::to_string(storage_gi) +
+                                 " GiB is below " + std::to_string(row->storage_gi) + " GiB"});
+    }
+    if (storage_gi != row->storage_gi) {
+        row->storage_gi = storage_gi;
+        ++row->generation;
+        row->updated_at = now_iso8601();
+    }
+    return *row;
+}
+
+Result<VolumeSnapshotPolicy> InMemoryStore::request_volume_snapshot(const VolumeSnapshotRequest& request) {
+    std::lock_guard lock(mutex_);
+    if (request.target != "store") {
+        const auto row = std::ranges::find(workspaces_, request.target, &Workspace::id);
+        if (row == workspaces_.end() || row->desired == "deleted") {
+            return std::unexpected(StoreError{"invalid_input", "target is unknown"});
+        }
+    }
+    if ((request.schedule && !valid_snapshot_schedule(*request.schedule)) ||
+        (request.keep && (*request.keep < 1 || *request.keep > max_volume_snapshots_kept))) {
+        return std::unexpected(StoreError{"invalid_input", "invalid schedule or keep"});
+    }
+    const std::string now = now_iso8601();
+    auto [found, created] = volume_snapshot_policies_.try_emplace(request.target);
+    VolumeSnapshotPolicy& policy = found->second;
+    if (created) {
+        policy.target = request.target;
+        policy.created_at = now;
+    }
+    if (request.schedule) {
+        policy.schedule = *request.schedule;
+    }
+    if (request.keep) {
+        policy.keep = *request.keep;
+    }
+    policy.requested_at = policy.updated_at = now;
+    VolumeSnapshotPolicy value = policy;
+    if (const auto status = volume_snapshot_status_.find(request.target);
+        status != volume_snapshot_status_.end()) {
+        value.status = status->second;
+    }
+    return value;
+}
+
+Result<std::vector<VolumeSnapshotPolicy>> InMemoryStore::volume_snapshots() {
+    std::lock_guard lock(mutex_);
+    std::vector<VolumeSnapshotPolicy> values;
+    if (const auto store = volume_snapshot_policies_.find("store");
+        store != volume_snapshot_policies_.end()) {
+        values.push_back(store->second);
+    }
+    for (const auto& [target, policy] : volume_snapshot_policies_) {
+        if (target != "store") {
+            values.push_back(policy);
+        }
+    }
+    for (VolumeSnapshotPolicy& value : values) {
+        if (const auto status = volume_snapshot_status_.find(value.target);
+            status != volume_snapshot_status_.end()) {
+            value.status = status->second;
+        }
+    }
+    return values;
+}
+
+Result<void> InMemoryStore::set_workspace_storage_status(const std::string& id,
+                                                         std::int32_t observed_gi,
+                                                         std::string phase,
+                                                         std::string message) {
+    std::lock_guard lock(mutex_);
+    const auto row = std::ranges::find(workspaces_, id, &Workspace::id);
+    if (row == workspaces_.end()) {
+        return std::unexpected(StoreError{"not_found", "no workspace " + id});
+    }
+    row->storage_gi_observed = observed_gi;
+    row->storage_phase = std::move(phase);
+    row->storage_message = std::move(message);
+    return {};
+}
+
+Result<void> InMemoryStore::set_volume_snapshot_status(const std::string& target,
+                                                       VolumeSnapshotStatus status) {
+    std::lock_guard lock(mutex_);
+    status.updated_at = now_iso8601();
+    volume_snapshot_status_[target] = std::move(status);
     return {};
 }
 

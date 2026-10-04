@@ -362,3 +362,9 @@ blobs, routes that cannot be read answer 503, manifests and tags are read and
 written as workspace records, blobs stay in the instance registry, and Ship → Packages lists the
 selected space's images through `list_image_repositories`. `copy_workspace_records` gains `oci_tags`,
 reading the instance registry's tenant pointers through `WorkspaceContent`.
+
+`volume_capabilities.cpp` registers the operator's volumes (migration `0069`, operator#259,
+operator#260): `set_workspace_storage` (grow only; a smaller size is `invalid_input` at
+`/storage_gi`), `request_volume_snapshot` (stamps `requested_at`, optionally a new schedule and
+keep) and `volume_snapshots`. Only the operator credential and the instance administrator reach
+their handlers; their audit events are central. See [volumes.md](../../docs/api/volumes.md).

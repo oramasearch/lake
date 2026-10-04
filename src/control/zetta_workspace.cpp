@@ -47,6 +47,10 @@ nlohmann::json workspace_json(const Workspace& workspace) {
             {"phase", workspace.phase}, {"observed_generation", workspace.observed_generation},
             {"message", workspace.message}, {"namespace", workspace.namespace_name},
             {"zetta_service_id", workspace.zetta_service_id},
+            {"storage_gi", workspace.storage_gi},
+            {"storage_gi_observed", workspace.storage_gi_observed},
+            {"storage_phase", workspace.storage_phase},
+            {"storage_message", workspace.storage_message},
             {"created_at", workspace.created_at}, {"updated_at", workspace.updated_at}};
 }
 

@@ -379,6 +379,32 @@ npm, Python, debuginfod and one-component OCI repositories stay with the instanc
 route. Blobs stay in the instance registry until phase B (lake#380). The operator never reads the
 table; its vendored schema rehearsal needs the new guard.
 
+## Workspace volumes (migration `0069_workspace_volumes`)
+
+Decision 54 S13 (operator#259, operator#260, lake#380): after the move a workspace Zetta's volume
+holds the workspace's liquid store, tenant images and search index, and on a one-node workspace it is
+the only copy. Lake writes desired state; the operator grows each workspace Zetta's claims, takes CSI
+snapshots and reports back here. It never talks to a workspace Zetta (decision 51). The
+capabilities are in [volumes.md](../api/volumes.md). `0067` is held by the open lake#380 change.
+
+| Table or change | Purpose |
+|---|---|
+| `workspaces.storage_gi` | Desired size of each of the workspace Zetta's volumes, in GiB: integer, default 5, 1 to 32767. Set by `set_workspace_storage`, which advances `generation`. |
+| `enforce_workspace_storage_growth` (trigger `workspace_storage_growth`) | Refuses any update that lowers `storage_gi` (`23514`): an online-expanded block volume cannot shrink. |
+| `workspaces.storage_gi_observed`, `storage_phase`, `storage_message` | Written by the operator with the workspace's phase, in the same generation-guarded update: the smallest claim capacity it sees in GiB, `Pending` (no claim yet), `Resizing`, `Ready` or `Failed` (for example a storage class without expansion), and why. |
+| `volume_snapshot_policies` | Content-free desired state, one row per target: `target` (`store`, lake's own store volume, or a workspace id), `schedule` (five cron fields in UTC, default `0 3 * * *`), `keep` (1 to 100, default 7), `requested_at` (a one-off request the operator honors when it is newer than the target's last snapshot), `created_at`, `updated_at`. No foreign key to `workspaces`. |
+| `add_workspace_snapshot_policy` (trigger `workspace_snapshot_policy`) | Gives every new workspace the default policy. |
+| `notify_lake_volume_snapshots` (trigger `lake_volume_snapshots_changed`) | `NOTIFY lake_volume_snapshots` with the target on every policy insert or update, so the operator takes a requested snapshot without waiting for its poll. |
+| `volume_snapshot_status` | Written only by the operator, one row per target: `snapshot_name` (its last `VolumeSnapshot`, `<claim>-<UTC timestamp>`), `ready_to_use`, `snapshot_at`, `message`, `updated_at`. |
+| Backfill | Once: a policy for `store` and for every workspace that is not deleted. |
+| `workspace_volumes_guard` | Guard table for migration `0069_workspace_volumes`. |
+
+A deleted workspace's policy and status rows stay, as its snapshots do: the operator's
+`VolumeSnapshotClass` retains their contents (decision 54 S12), and removing them is a separate,
+explicit action. `move_workspace_store` does not yet wait for a snapshot taken after the request
+(lake#380 wires that check once its change merges). The operator selects the new guard and reads
+these tables with the statements `tests/test_operator_contract.cpp` copies.
+
 ## Identity exit scenario (migration `0020_identity_exit`)
 
 | Table or change | Purpose |
