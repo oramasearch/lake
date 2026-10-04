@@ -172,8 +172,9 @@ write past it is `507`.
 **Implemented 2026-10-03** as planned below; the design as built, including the encryption format,
 is [workspace-store.md](workspace-store.md), and the operator capability is
 [move_workspace_store](../api/workspace-store.md). Differences from this plan: the copy does not yet
-require the S13 snapshots (orama-operator#260 is not built); the bucket quota is the space's storage
-quota until `workspaces.storage_gi` exists (orama-operator#259); it needs liquid#332 (merged,
+check the S13 snapshots (the desired state is migration `0069`; the move does not wait on it yet);
+the bucket quota is the space's storage quota and does not yet follow `workspaces.storage_gi`; it
+needs liquid#332 (merged,
 liquid `8955519`), because liquid's index merge had rewritten runs in place.
 
 **Today.** `LAKE_STORE_ROOT/<customer>/store` is one libliquid store per space: packs, object map,

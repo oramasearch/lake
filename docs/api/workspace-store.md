@@ -43,7 +43,8 @@ A transfer report has `repository_id`, `absent` (the space store never held it: 
   again.
 - The plan's precondition of a fresh snapshot of the workspace volume and of lake's store volume
   ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260)) is not checked:
-  lake has no snapshot desired state yet. Take the snapshots by hand before `copy`.
+  the snapshot desired state exists (migration `0069`), but the move does not request a snapshot or
+  wait for one yet. Make sure recent snapshots exist before `copy`.
 - A repository created in a switched workspace is created in its store at creation. One created
   before the switch and never written is created empty in the workspace store by the switch.
 - After the switch a missing workspace store, data key or repository answers `corrupt` (500); lake

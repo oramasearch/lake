@@ -221,8 +221,9 @@ contract asks.
   answering within 5 s, keeps its last value), so no write waits on another workspace's Zetta. During a move the moved repositories are counted in both until every workspace of the
   space is switched.
 - The bucket is created with the space's storage quota (`create_bucket {quota_bytes}`); Zetta answers
-  a write past it `507`, which liquid sees as `busy`. An existing bucket keeps its quota.
-  `workspaces.storage_gi` ([orama-operator#259](https://github.com/oramasearch/orama-operator/issues/259)) is not built.
+  a write past it `507`, which liquid sees as `busy`. An existing bucket keeps its quota. The quota
+  does not yet follow `workspaces.storage_gi` (migration `0069`, the desired size of the workspace
+  Zetta's volume); raising `storage_gi` ahead of use is a follow-up.
 - Deleting a workspace closes its store and releases its lease before the deletion is reported
   (`WorkspaceContent::close_workspace_store`), waiting for an open in progress on the workspace's
   lane; a deleted workspace's store is never opened again. The workspace Zetta's deletion destroys
@@ -256,8 +257,10 @@ belong in the deployment record once a workspace is switched.
 ## Not yet
 
 - The copy's precondition of fresh snapshots of the workspace volume and of lake's store volume
-  ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260)) is not enforced:
-  lake has no snapshot desired state yet. The move never writes the space store.
+  ([orama-operator#260](https://github.com/oramasearch/orama-operator/issues/260)) is not enforced.
+  Migration `0069` added the snapshot desired state (`volume_snapshot_policies`) and the operator's
+  `volume_snapshot_status`, but `move_workspace_store` does not request a snapshot or wait for one
+  to be ready yet. The move never writes the space store.
 - The search index files stay on lake's volume until [lake#381](https://github.com/oramasearch/lake/issues/381)
   moves them beside the workspace store; search already reads a switched workspace's repositories
   from its store.

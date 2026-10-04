@@ -173,7 +173,7 @@ runs off the server thread, so one workspace's Zetta holds up only its own reque
 every workspace store depends on `LAKE_INSTANCE_KEK`, which has no rotation or backup. Replication
 cursors go through liquid's cursor API. It needs liquid `8955519` or later (liquid#332, write-once index
 runs); no workspace is switched on dev, and the copy's snapshot
-precondition (orama-operator#260) is not enforced. See `docs/architecture/workspace-store.md` and
+precondition is not enforced (the move does not wait on the `0069` snapshot state yet). See `docs/architecture/workspace-store.md` and
 `docs/api/workspace-store.md`.
 
 ## Historical status — superseded 2026-09-08

@@ -270,12 +270,13 @@ operator reports `storage_gi_observed`, `storage_phase` and `storage_message` on
 gives every new workspace the default policy, another notifies `lake_volume_snapshots`, and the
 backfill adds `store` and every live workspace once. `volume_snapshot_status` is written only by the
 operator. Neither table refers to `workspaces`, so a deleted workspace's rows stay with its retained
-snapshots. `0067` is held by the open lake#380 change. The latest guard is
+snapshots. `0067` is lake#380's, below. The latest guard is
 `workspace_volumes_guard`; the operator must vendor this schema and update its guard before rollout.
 See [schema.md](../docs/control-plane/schema.md#workspace-volumes-migration-0069_workspace_volumes).
-Migration `0067_workspace_store` adds `workspaces.store_moved_at` (lake#380): NULL while a
-workspace's repositories are served from its space's store on lake's volume, set by
-`move_workspace_store` `switch` once they are served from the workspace's own encrypted store in its
-workspace Zetta. Nothing else moves into PostgreSQL. The latest guard is `workspace_store_guard`; the
-operator must vendor this schema and update its guard before rollout. See
+Migration `0067_workspace_store` (it sits before `0068` in `schema.sql`) adds
+`workspaces.store_moved_at` (lake#380): NULL while a workspace's repositories are served from its
+space's store on lake's volume, set by `move_workspace_store` `switch` once they are served from the
+workspace's own encrypted store in its workspace Zetta. Nothing else moves into PostgreSQL. Its
+guard is `workspace_store_guard`; the latest guard stays `workspace_volumes_guard`, and the operator
+must vendor this schema before rollout. See
 [workspace-store.md](../docs/architecture/workspace-store.md).

@@ -781,7 +781,7 @@ NULL until `move_workspace_store` switches the workspace: from then on its repos
 from its own encrypted liquid store in bucket `lake_store` of its workspace Zetta
 ([`../architecture/workspace-store.md`](../architecture/workspace-store.md)). The column is the only
 thing PostgreSQL keeps about that store; the operator does not read it. Idempotent; guard
-`workspace_store_guard`. The operator vendors the schema and selects that guard.
+`workspace_store_guard`; the latest guard is `workspace_volumes_guard` (migration `0069`), which the operator selects.
 
 ## Metering workspaces migration
 
