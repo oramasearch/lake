@@ -4,8 +4,8 @@
 // in lake's tests noticed. This test runs the operator's own SQL against a fresh lake schema.
 //
 // The statements below are copied verbatim from oramasearch/orama-operator at 188f8ac
-// (internal/controller/*_pgx.go), with the workspace and volume snapshot statements of
-// operator#259 and operator#260. When the operator changes one of them, copy it here again; when
+// (internal/controller/*_pgx.go); the workspace and volume snapshot statements (operator#259,
+// operator#260) are copied from oramasearch/orama-operator at 6c32fea (PR #267). When the operator changes one of them, copy it here again; when
 // lake changes a table the operator reads, this test says which statement breaks.
 
 #include "lake/control/agent_runs.hpp"
@@ -227,7 +227,7 @@ constexpr std::string_view listVolumeSnapshotPoliciesSQL =
     R"(SELECT p.target, p.schedule, p.keep, p.requested_at,
  COALESCE(w.desired, ''), COALESCE(w.namespace, ''),
  st.target IS NOT NULL, COALESCE(st.snapshot_name, ''), COALESCE(st.ready_to_use, false),
- st.snapshot_at, COALESCE(st.message, '')
+ st.snapshot_at, COALESCE(st.message, ''), now()
  FROM volume_snapshot_policies p
  LEFT JOIN workspaces w ON w.id::text = p.target
  LEFT JOIN volume_snapshot_status st ON st.target = p.target

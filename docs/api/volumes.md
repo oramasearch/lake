@@ -24,12 +24,20 @@ events stay in the central log (decision 52, [audit.md](audit.md#which-log)).
 | Capability | Kind | Input | What it does |
 |---|---|---|---|
 | `set_workspace_storage` | action | `workspace_id`, `storage_gi` (1 to 32767) | Sets the desired size of each of the workspace Zetta's volumes, in GiB, and advances the workspace's `generation`. Answers the workspace row. The same size changes nothing. A smaller size is `invalid_input` at `/storage_gi` (volumes never shrink; the `enforce_workspace_storage_growth` trigger refuses it too). A missing, unknown or deleted workspace is `invalid_input`. Audit object `workspace/<id>/storage`, with the previous and new size. |
-| `request_volume_snapshot` | action | `target`, optional `schedule`, `keep` (1 to 100) | Records a one-off request (`requested_at` = now) for `target`: `store` or a live workspace id. `schedule` (five cron fields in UTC, digits and `* / , -` only) and `keep` change the target's policy. Answers the policy with its status. An unknown or deleted target, or a bad schedule or keep, is `invalid_input`. Audit object `volume/<target>/snapshot`. |
-| `volume_snapshots` | read | optional `target` | Every policy (`store` first, then each workspace) with the operator's `status`, or `target`'s alone (`invalid_input` when it has none). |
+| `request_volume_snapshot` | action | `target`, optional `schedule`, `keep` (1 to 100) | Records a one-off request (`requested_at` = now) for `target`: `store` or a live workspace id. `schedule` and `keep` change the target's policy. A schedule is the operator's five standard cron fields in UTC (minute 0-59, hour 0-23, day of month 1-31, month 1-12, day of week 0-6; each a comma list of `*`, `n` or `a-b`, optionally `/step`); one that can never fire, such as `0 0 31 2 *`, is refused, as the operator would find no next time for it. Answers the policy with its status. An unknown or deleted target, or a bad schedule or keep, is `invalid_input`. Audit object `volume/<target>/snapshot`. |
+| `volume_snapshots` | read | optional `target` | Every policy (`store` first, then each workspace, including deleted workspaces, whose policy and last status stay with their retained snapshots) with the operator's `status`, or `target`'s alone (`invalid_input` when it has none). |
+
+A store that cannot answer is `store_unavailable` (503) on all three, never `invalid_input`; only a
+missing, malformed or unknown id is the caller's error. A deleted workspace is `invalid_input` for
+`set_workspace_storage` and `request_volume_snapshot`, and is still listed by `volume_snapshots`.
 
 A workspace row ([workspaces.md](workspaces.md#capabilities)) carries `storage_gi`,
 `storage_gi_observed` (the smallest claim capacity the operator sees, in GiB), `storage_phase`
-(`Pending`, `Resizing`, `Ready` or `Failed`) and `storage_message`. A policy is:
+(`Pending`, `Resizing`, `Ready` or `Failed`) and `storage_reason`, a short code anyone who may read
+the workspace sees (`pending`, `resizing`, `ready`, `failed`, or empty). `storage_message`, the
+operator's own text, can carry Kubernetes API errors, so it is returned only to the operator
+credential and the instance administrator, on `get_workspace`, `list_workspaces` and
+`set_workspace_storage`. A policy is:
 
 ```json
 {

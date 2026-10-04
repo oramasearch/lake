@@ -367,4 +367,6 @@ reading the instance registry's tenant pointers through `WorkspaceContent`.
 operator#260): `set_workspace_storage` (grow only; a smaller size is `invalid_input` at
 `/storage_gi`), `request_volume_snapshot` (stamps `requested_at`, optionally a new schedule and
 keep) and `volume_snapshots`. Only the operator credential and the instance administrator reach
-their handlers; their audit events are central. See [volumes.md](../../docs/api/volumes.md).
+their handlers; their audit events are central. A store failure is `store_unavailable`, here and in
+the registry's own `workspace_id` check. Workspace rows carry `storage_reason` for every reader and
+`storage_message` only for the operator and the instance administrator (`operator_view`). See [volumes.md](../../docs/api/volumes.md).

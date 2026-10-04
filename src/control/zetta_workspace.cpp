@@ -40,8 +40,24 @@ std::string workspace_slug(std::string_view customer_id) {
     return managed_service_slug("ws", customer_id);
 }
 
-nlohmann::json workspace_json(const Workspace& workspace) {
-    return {{"id", workspace.id}, {"customer_id", workspace.customer_id},
+std::string workspace_storage_reason(std::string_view phase) {
+    if (phase == "Pending") {
+        return "pending";
+    }
+    if (phase == "Resizing") {
+        return "resizing";
+    }
+    if (phase == "Ready") {
+        return "ready";
+    }
+    if (phase == "Failed") {
+        return "failed";
+    }
+    return {};
+}
+
+nlohmann::json workspace_json(const Workspace& workspace, bool operator_detail) {
+    nlohmann::json value = {{"id", workspace.id}, {"customer_id", workspace.customer_id},
             {"name", workspace.name}, {"environment", workspace.environment},
             {"desired", workspace.desired}, {"generation", workspace.generation},
             {"phase", workspace.phase}, {"observed_generation", workspace.observed_generation},
@@ -50,8 +66,12 @@ nlohmann::json workspace_json(const Workspace& workspace) {
             {"storage_gi", workspace.storage_gi},
             {"storage_gi_observed", workspace.storage_gi_observed},
             {"storage_phase", workspace.storage_phase},
-            {"storage_message", workspace.storage_message},
+            {"storage_reason", workspace_storage_reason(workspace.storage_phase)},
             {"created_at", workspace.created_at}, {"updated_at", workspace.updated_at}};
+    if (operator_detail) {
+        value["storage_message"] = workspace.storage_message;
+    }
+    return value;
 }
 
 nlohmann::json service_json(const ManagedService& service) {

@@ -34,6 +34,16 @@ ApiResult refused() {
                               "the operator or the instance administrator is required");
 }
 
+// A lookup that failed because the store could not answer is store_unavailable, never a caller's
+// mistake; only an unknown or malformed id is invalid_input.
+bool unknown_id(const control::StoreError& error) {
+    return error.code == "invalid_input" || error.code == "not_found";
+}
+
+ApiResult store_down(const control::StoreError&) {
+    return ApiResult::failure("store_unavailable", "the control-plane store did not answer");
+}
+
 ApiResult no_store() {
     return ApiResult::failure("store_unavailable",
                               "no control-plane store is configured (LAKE_CONTROL_DB_URI)");
@@ -106,6 +116,9 @@ void register_volume_capabilities(Registry& registry) {
             context.audit_object = "workspace/" + workspace_id + "/storage";
             context.audit_details = {{"workspace_id", workspace_id}, {"storage_gi", storage_gi}};
             const auto before = context.store->get_workspace(workspace_id);
+            if (!before && !unknown_id(before.error())) {
+                return store_down(before.error());
+            }
             if (!before || before->desired == "deleted") {
                 return ApiResult::failure("invalid_input", "workspace_id is unknown",
                                           "/workspace_id");
@@ -121,10 +134,12 @@ void register_volume_capabilities(Registry& registry) {
             }
             const auto updated = context.store->set_workspace_storage(workspace_id, storage_gi);
             if (!updated) {
-                return ApiResult::failure(updated.error().code, updated.error().message,
-                                          "/storage_gi");
+                if (!unknown_id(updated.error())) {
+                    return store_down(updated.error());
+                }
+                return ApiResult::failure("invalid_input", updated.error().message, "/storage_gi");
             }
-            return ApiResult::success(control::workspace_json(*updated));
+            return ApiResult::success(control::workspace_json(*updated, true));
         }});
     registry.add(Capability{
         .name = "request_volume_snapshot",
@@ -162,6 +177,9 @@ void register_volume_capabilities(Registry& registry) {
             context.audit_details = {{"target", request.target}};
             if (request.target != "store") {
                 const auto workspace = context.store->get_workspace(request.target);
+                if (!workspace && !unknown_id(workspace.error())) {
+                    return store_down(workspace.error());
+                }
                 if (!workspace || workspace->desired == "deleted") {
                     return ApiResult::failure("invalid_input",
                                               "target must be store or a live workspace id",
@@ -183,7 +201,10 @@ void register_volume_capabilities(Registry& registry) {
             }
             const auto policy = context.store->request_volume_snapshot(request);
             if (!policy) {
-                return ApiResult::failure(policy.error().code, policy.error().message);
+                if (!unknown_id(policy.error())) {
+                    return store_down(policy.error());
+                }
+                return ApiResult::failure("invalid_input", policy.error().message);
             }
             context.audit_details["requested_at"] = policy->requested_at;
             return ApiResult::success(snapshot_policy_json(*policy));
@@ -216,7 +237,7 @@ void register_volume_capabilities(Registry& registry) {
             const std::string target = input.value("target", std::string());
             const auto policies = context.store->volume_snapshots();
             if (!policies) {
-                return ApiResult::failure(policies.error().code, policies.error().message);
+                return store_down(policies.error());
             }
             json values = json::array();
             for (const control::VolumeSnapshotPolicy& policy : *policies) {

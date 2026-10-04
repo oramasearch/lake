@@ -596,7 +596,9 @@ migration `0068`.
 Workspace volumes (migration `0069`, operator#259, operator#260): `test_volumes.cpp`
 (`Stores/Volumes.*`, on the memory store and PostgreSQL) covers growing a workspace's storage, the
 refused decrease, unknown and deleted workspaces, callers who are not the operator, central audit,
-the default snapshot policies, requests with schedule and keep, bad targets and schedules, and the
-operator's status read back; `PostgresVolumes.StorageNeverShrinksAndEveryTargetHasAPolicy` the
+the default snapshot policies, requests with schedule and keep, bad targets and schedules (a schedule
+that never fires is refused), the operator's status read back, and tenants seeing `storage_reason`
+but not the operator's message; `VolumeSchedules.*` the cron grammar and the never-fires check;
+`VolumeStoreFailures.*` a store that cannot answer being `store_unavailable`; `PostgresVolumes.StorageNeverShrinksAndEveryTargetHasAPolicy` the
 trigger, the policy checks and the backfill; `OperatorContract.*` the operator's new workspace and
 snapshot statements.

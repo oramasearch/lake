@@ -181,6 +181,7 @@ workspace deletion cascade deletes a workspace's routes.
 
 `store.hpp` declares the operator's volumes (migration `0069`): `Workspace::storage_gi` and the
 operator's `storage_gi_observed`, `storage_phase` and `storage_message`; `VolumeSnapshotPolicy`,
-`VolumeSnapshotStatus`, `VolumeSnapshotRequest`, `valid_snapshot_schedule` and the bounds
+`VolumeSnapshotStatus`, `VolumeSnapshotRequest`, `valid_snapshot_schedule` (the operator's five
+standard cron fields, refusing a schedule that can never fire) and the bounds
 `max_workspace_storage_gi` and `max_volume_snapshots_kept`; and `set_workspace_storage`,
 `request_volume_snapshot` and `volume_snapshots`.

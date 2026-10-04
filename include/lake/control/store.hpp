@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -428,28 +429,110 @@ struct VolumeSnapshotRequest {
 };
 inline constexpr std::int32_t max_workspace_storage_gi = 32767;
 inline constexpr std::int32_t max_volume_snapshots_kept = 100;
-// A five-field cron expression of digits and `*`, `/`, `,`, `-` (what volume_snapshot_policies
-// accepts); the operator parses the fields themselves.
-inline bool valid_snapshot_schedule(std::string_view schedule) {
-    int fields = 0;
-    bool in_field = false;
-    for (const char c : schedule) {
-        if (c == ' ') {
-            if (!in_field) {
-                return false;
-            }
-            in_field = false;
-            continue;
-        }
-        if (!((c >= '0' && c <= '9') || c == '*' || c == '/' || c == ',' || c == '-')) {
+// A five-field cron expression in UTC, as the operator parses it (robfig/cron's standard parser):
+// minute 0-59, hour 0-23, day of month 1-31, month 1-12, day of week 0-6; each field a comma list
+// of `*`, `n`, `a-b`, each optionally `/step`. It is refused when it can never fire: the day of week
+// is unrestricted (`*...`), so the day of month must match, and no selected month has any selected
+// day (February counts 29 days). Mirrors the operator's check, whose schedule.Next is then zero.
+namespace detail {
+inline bool parse_cron_field(std::string_view field, int low, int high, std::uint64_t& bits) {
+    if (field.empty()) {
+        return false;
+    }
+    const auto number = [](std::string_view text, int& out) {
+        if (text.empty() || text.size() > 2) {
             return false;
         }
-        if (!in_field) {
-            ++fields;
-            in_field = true;
+        out = 0;
+        for (const char c : text) {
+            if (c < '0' || c > '9') {
+                return false;
+            }
+            out = out * 10 + (c - '0');
+        }
+        return true;
+    };
+    while (!field.empty()) {
+        const std::size_t comma = field.find(',');
+        std::string_view part = field.substr(0, comma);
+        field = comma == std::string_view::npos ? std::string_view() : field.substr(comma + 1);
+        if (comma != std::string_view::npos && field.empty()) {
+            return false;
+        }
+        int step = 1;
+        if (const std::size_t slash = part.find('/'); slash != std::string_view::npos) {
+            if (!number(part.substr(slash + 1), step) || step < 1) {
+                return false;
+            }
+            part = part.substr(0, slash);
+        }
+        int first = low;
+        int last = high;
+        if (part != "*") {
+            const std::size_t dash = part.find('-');
+            if (dash == std::string_view::npos) {
+                if (!number(part, first)) {
+                    return false;
+                }
+                last = step > 1 ? high : first;
+            } else if (!number(part.substr(0, dash), first) || !number(part.substr(dash + 1), last)) {
+                return false;
+            }
+        }
+        if (first < low || last > high || first > last) {
+            return false;
+        }
+        for (int value = first; value <= last; value += step) {
+            bits |= std::uint64_t{1} << value;
         }
     }
-    return in_field && fields == 5;
+    return true;
+}
+} // namespace detail
+
+inline bool valid_snapshot_schedule(std::string_view schedule) {
+    std::array<std::string_view, 5> fields;
+    std::size_t count = 0;
+    while (!schedule.empty()) {
+        const std::size_t space = schedule.find(' ');
+        const std::string_view field = schedule.substr(0, space);
+        if (field.empty() || count == fields.size()) {
+            return false;
+        }
+        fields[count++] = field;
+        if (space == std::string_view::npos) {
+            break;
+        }
+        schedule.remove_prefix(space + 1);
+        if (schedule.empty()) {
+            return false;
+        }
+    }
+    if (count != fields.size()) {
+        return false;
+    }
+    constexpr std::array<std::pair<int, int>, 5> ranges{{{0, 59}, {0, 23}, {1, 31}, {1, 12}, {0, 6}}};
+    std::array<std::uint64_t, 5> bits{};
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        if (!detail::parse_cron_field(fields[i], ranges[i].first, ranges[i].second, bits[i])) {
+            return false;
+        }
+    }
+    if (fields[2].starts_with('*') || !fields[4].starts_with('*')) {
+        return true; // every day of the month, or the day of week can match
+    }
+    constexpr std::array<int, 13> days_in_month{0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    for (int month = 1; month <= 12; ++month) {
+        if ((bits[3] >> month & 1U) == 0) {
+            continue;
+        }
+        for (int day = 1; day <= days_in_month[month]; ++day) {
+            if ((bits[2] >> day & 1U) != 0) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 // A tenant repository name below its space: `<image>` or `cache/<image>`, where `<image>` is one
 // component of lowercase letters, digits, `.`, `_` and `-`, starting and ending with a letter or
