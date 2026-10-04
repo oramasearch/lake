@@ -261,3 +261,15 @@ blobs stay in the instance registry until phase B. `0067` is held by the open la
 latest guard is `oci_repository_routes_guard`; the operator must vendor this schema and update its
 guard before rollout (it never reads the table). See
 [registry.md](../docs/api/registry.md#where-a-tenant-image-lives).
+Migration `0069_workspace_volumes` gives the operator its volumes (decision 54 S13, operator#259,
+operator#260). `workspaces.storage_gi` (default 5, 1 to 32767) is the desired size of each of the
+workspace Zetta's volumes in GiB; `enforce_workspace_storage_growth` refuses a decrease, and the
+operator reports `storage_gi_observed`, `storage_phase` and `storage_message` on the same row.
+`volume_snapshot_policies` is content-free (target `store` or a workspace id, a five-field cron
+`schedule` in UTC defaulting to daily at 03:00, `keep` defaulting to 7, `requested_at`); a trigger
+gives every new workspace the default policy, another notifies `lake_volume_snapshots`, and the
+backfill adds `store` and every live workspace once. `volume_snapshot_status` is written only by the
+operator. Neither table refers to `workspaces`, so a deleted workspace's rows stay with its retained
+snapshots. `0067` is held by the open lake#380 change. The latest guard is
+`workspace_volumes_guard`; the operator must vendor this schema and update its guard before rollout.
+See [schema.md](../docs/control-plane/schema.md#workspace-volumes-migration-0069_workspace_volumes).

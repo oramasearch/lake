@@ -203,9 +203,17 @@ public:
     Result<std::vector<OciRepositoryRoute>>
     delete_oci_repository_route(const std::string& customer_id, const std::string& name,
                                 const std::string& to_workspace_id = {}) override;
+    Result<Workspace> set_workspace_storage(const std::string& id, std::int32_t storage_gi) override;
+    Result<VolumeSnapshotPolicy> request_volume_snapshot(const VolumeSnapshotRequest&) override;
+    Result<std::vector<VolumeSnapshotPolicy>> volume_snapshots() override;
     // The operator's workspace observation (phase, observed generation). Tests call this
     // directly; the production operator updates the same columns in Postgres.
     Result<void> set_workspace_status(const std::string& id, std::string phase);
+    // What the operator writes about a workspace's volumes and a target's snapshots (migration
+    // 0069); tests call these directly.
+    Result<void> set_workspace_storage_status(const std::string& id, std::int32_t observed_gi,
+                                              std::string phase, std::string message);
+    Result<void> set_volume_snapshot_status(const std::string& target, VolumeSnapshotStatus status);
     Result<std::vector<ManagedService>> list_services(const std::string& customer_id) override;
     Result<ManagedService> get_service(const std::string& id) override;
     Result<ManagedService> create_service(const NewManagedService&) override;
@@ -601,6 +609,11 @@ private:
     std::vector<Workspace> workspaces_;
     std::vector<WorkspaceDeletion> workspace_deletions_;
     std::vector<OciRepositoryRoute> oci_repository_routes_;
+    // volume_snapshot_policies by target (migration 0069) and the operator's status rows, which
+    // outlive their policy as they do in PostgreSQL.
+    std::map<std::string, VolumeSnapshotPolicy> volume_snapshot_policies_{
+        {"store", VolumeSnapshotPolicy{.target = "store"}}};
+    std::map<std::string, VolumeSnapshotStatus> volume_snapshot_status_;
     std::vector<WebApp> web_apps_;
     struct WebAppAuthorizationCodeRecord {
         WebAppAuthorizationCode code;

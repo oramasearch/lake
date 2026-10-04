@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -359,6 +360,12 @@ struct Workspace {
     std::string phase;
     std::int64_t observed_generation = 0;
     std::string message, namespace_name, zetta_service_id, created_at, updated_at;
+    // The desired size of each of the workspace Zetta's volumes, in GiB (migration 0069,
+    // operator#259); it never decreases. The operator reports the smallest claim capacity it sees
+    // (`storage_gi_observed`), `storage_phase` (Pending | Resizing | Ready | Failed) and why.
+    std::int32_t storage_gi = 5;
+    std::int32_t storage_gi_observed = 0;
+    std::string storage_phase, storage_message;
 };
 struct NewWorkspace {
     std::string customer_id, name, environment, created_by_taap_id;
@@ -397,6 +404,136 @@ struct WorkspaceDeletionRequest {
 struct OciRepositoryRoute {
     std::string customer_id, name, workspace_id, created_at, updated_at;
 };
+// The volume snapshot policy of one target (migration 0069, operator#260, decision 54 S13):
+// `store` (lake's own store volume) or a workspace id. Content-free: a five-field cron schedule
+// in UTC, how many snapshots the operator keeps, and `requested_at`, a one-off request the
+// operator honors when it is newer than the target's last snapshot. `status` is the operator's
+// observation (volume_snapshot_status): its last VolumeSnapshot's name, whether it is readyToUse,
+// when it was taken, and why it is not; empty fields until the operator has written one.
+struct VolumeSnapshotStatus {
+    std::string snapshot_name;
+    bool ready_to_use = false;
+    std::string snapshot_at, message, updated_at;
+};
+struct VolumeSnapshotPolicy {
+    std::string target, schedule = "0 3 * * *";
+    std::int32_t keep = 7;
+    std::string requested_at, created_at, updated_at;
+    std::optional<VolumeSnapshotStatus> status;
+};
+// request_volume_snapshot's input: the target and, optionally, a new schedule and keep.
+struct VolumeSnapshotRequest {
+    std::string target;
+    std::optional<std::string> schedule;
+    std::optional<std::int32_t> keep;
+};
+inline constexpr std::int32_t max_workspace_storage_gi = 32767;
+inline constexpr std::int32_t max_volume_snapshots_kept = 100;
+// A five-field cron expression in UTC, as the operator parses it (robfig/cron's standard parser):
+// minute 0-59, hour 0-23, day of month 1-31, month 1-12, day of week 0-6; each field a comma list
+// of `*`, `n`, `a-b`, each optionally `/step`. It is refused when it can never fire: the day of week
+// is unrestricted (`*...`), so the day of month must match, and no selected month has any selected
+// day (February counts 29 days). Mirrors the operator's check, whose schedule.Next is then zero.
+namespace detail {
+inline bool parse_cron_field(std::string_view field, int low, int high, std::uint64_t& bits) {
+    if (field.empty()) {
+        return false;
+    }
+    const auto number = [](std::string_view text, int& out) {
+        if (text.empty() || text.size() > 2) {
+            return false;
+        }
+        out = 0;
+        for (const char c : text) {
+            if (c < '0' || c > '9') {
+                return false;
+            }
+            out = out * 10 + (c - '0');
+        }
+        return true;
+    };
+    while (!field.empty()) {
+        const std::size_t comma = field.find(',');
+        std::string_view part = field.substr(0, comma);
+        field = comma == std::string_view::npos ? std::string_view() : field.substr(comma + 1);
+        if (comma != std::string_view::npos && field.empty()) {
+            return false;
+        }
+        int step = 1;
+        if (const std::size_t slash = part.find('/'); slash != std::string_view::npos) {
+            if (!number(part.substr(slash + 1), step) || step < 1) {
+                return false;
+            }
+            part = part.substr(0, slash);
+        }
+        int first = low;
+        int last = high;
+        if (part != "*") {
+            const std::size_t dash = part.find('-');
+            if (dash == std::string_view::npos) {
+                if (!number(part, first)) {
+                    return false;
+                }
+                last = step > 1 ? high : first;
+            } else if (!number(part.substr(0, dash), first) || !number(part.substr(dash + 1), last)) {
+                return false;
+            }
+        }
+        if (first < low || last > high || first > last) {
+            return false;
+        }
+        for (int value = first; value <= last; value += step) {
+            bits |= std::uint64_t{1} << value;
+        }
+    }
+    return true;
+}
+} // namespace detail
+
+inline bool valid_snapshot_schedule(std::string_view schedule) {
+    std::array<std::string_view, 5> fields;
+    std::size_t count = 0;
+    while (!schedule.empty()) {
+        const std::size_t space = schedule.find(' ');
+        const std::string_view field = schedule.substr(0, space);
+        if (field.empty() || count == fields.size()) {
+            return false;
+        }
+        fields[count++] = field;
+        if (space == std::string_view::npos) {
+            break;
+        }
+        schedule.remove_prefix(space + 1);
+        if (schedule.empty()) {
+            return false;
+        }
+    }
+    if (count != fields.size()) {
+        return false;
+    }
+    constexpr std::array<std::pair<int, int>, 5> ranges{{{0, 59}, {0, 23}, {1, 31}, {1, 12}, {0, 6}}};
+    std::array<std::uint64_t, 5> bits{};
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        if (!detail::parse_cron_field(fields[i], ranges[i].first, ranges[i].second, bits[i])) {
+            return false;
+        }
+    }
+    if (fields[2].starts_with('*') || !fields[4].starts_with('*')) {
+        return true; // every day of the month, or the day of week can match
+    }
+    constexpr std::array<int, 13> days_in_month{0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    for (int month = 1; month <= 12; ++month) {
+        if ((bits[3] >> month & 1U) == 0) {
+            continue;
+        }
+        for (int day = 1; day <= days_in_month[month]; ++day) {
+            if ((bits[2] >> day & 1U) != 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 // A tenant repository name below its space: `<image>` or `cache/<image>`, where `<image>` is one
 // component of lowercase letters, digits, `.`, `_` and `-`, starting and ending with a letter or
 // digit (OCI's repository grammar), at most 190 characters.
@@ -1264,6 +1401,18 @@ public:
     // The deletions lake has not completed, oldest first.
     virtual Result<std::vector<WorkspaceDeletion>> pending_workspace_deletions(int limit) = 0;
     virtual Result<void> complete_workspace_deletion(const std::string& workspace_id) = 0;
+    // Grows the workspace Zetta's volumes (migration 0069, operator#259): sets `storage_gi` and
+    // advances the generation so the operator reconciles it. `invalid_input` when the workspace is
+    // unknown or deleted, the size is outside 1..max_workspace_storage_gi, or it is below the
+    // current size (volumes never shrink); the same size answers the row unchanged.
+    virtual Result<Workspace> set_workspace_storage(const std::string& id, std::int32_t storage_gi) = 0;
+    // Records a one-off snapshot request for a target (requested_at = now) and, when given, its new
+    // schedule and keep, creating the target's policy with the defaults when it has none.
+    // `invalid_input` when the target is neither `store` nor a known, live workspace id, or the
+    // schedule or keep is invalid.
+    virtual Result<VolumeSnapshotPolicy> request_volume_snapshot(const VolumeSnapshotRequest&) = 0;
+    // Every snapshot policy with the operator's status, `store` first, then by target.
+    virtual Result<std::vector<VolumeSnapshotPolicy>> volume_snapshots() = 0;
     // Tenant image routes (lake#383, docs/api/registry.md#where-a-tenant-image-lives). Creating a
     // route names its workspace explicitly: `invalid_input` when the name is invalid or the
     // workspace is not a live workspace of the space, the existing route when the same workspace

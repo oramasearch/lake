@@ -67,7 +67,13 @@ struct ServiceCondition {
     std::string status, reason;
 };
 ServiceCondition service_condition(const ManagedService& service, bool connected);
-nlohmann::json workspace_json(const Workspace& workspace);
+// A workspace row as JSON. `storage_reason` is a short code from the operator's storage phase
+// (pending | resizing | ready | failed, or empty) that any reader may see; `storage_message`, the
+// operator's own text (it can carry Kubernetes API errors), is included only for the operator and
+// the instance administrator (`operator_detail`).
+nlohmann::json workspace_json(const Workspace& workspace, bool operator_detail = false);
+// The short storage reason code of an operator storage phase.
+std::string workspace_storage_reason(std::string_view phase);
 // A store as the API and the pages show it (docs/control-plane/storage.md): never its credential.
 nlohmann::json store_json(const ManagedStore& store);
 

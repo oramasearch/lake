@@ -33,6 +33,9 @@ void register_web_app_capabilities(Registry& registry);
 void register_build_capabilities(Registry& registry);
 void register_stream_capabilities(Registry& registry);
 void register_experiment_capabilities(Registry& registry);
+// The operator's volumes (migration 0069, docs/api/volumes.md): set_workspace_storage,
+// request_volume_snapshot, volume_snapshots.
+void register_volume_capabilities(Registry& registry);
 // The live workspace a new repository is created in (lake#315): `input.workspace_id` must name a
 // workspace of `input.customer_id`'s space that is not deleted. Anything else, including a missing
 // id, is invalid_input at /workspace_id; there is no default workspace.

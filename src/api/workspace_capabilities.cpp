@@ -701,6 +701,12 @@ void register_workspace_call(Registry& registry, bool read) {
         }});
 }
 
+// The operator and the instance administrator see the operator's own storage message on a
+// workspace row; everyone else sees its short reason code (migration 0069).
+bool operator_view(const ApiContext& context) {
+    return context.operator_credential || context.acting_identity == "admin";
+}
+
 ApiResult store_failure(const control::StoreError& error) {
     return ApiResult::failure(error.code, error.message);
 }
@@ -4973,7 +4979,7 @@ static ApiResult delete_workspace_cascading(const json& input, ApiContext& conte
     const auto finished = finish_workspace_deletion(context, *deletion);
     const auto current = context.store->get_workspace_deletion(row.id);
     const auto updated = context.store->get_workspace(row.id);
-    json value = control::workspace_json(updated ? *updated : row);
+    json value = control::workspace_json(updated ? *updated : row, operator_view(context));
     value["deletion"] = workspace_deletion_json(current ? *current : *deletion);
     if (!finished) {
         value["deletion"]["pending"] = finished.error();
@@ -5042,21 +5048,21 @@ void register_workspace_capabilities(Registry& registry) {
                     }
                     json result = json::array();
                     for (const auto& row : *rows) {
-                        result.push_back(control::workspace_json(row));
+                        result.push_back(control::workspace_json(row, operator_view(context)));
                     }
                     return ApiResult::success({{"workspaces", result}});
                 }
                 if (creating) {
                     const auto row = context.store->create_workspace({input.at("customer_id"),
                         input.at("name"), input.at("environment"), context.acting_identity});
-                    return row ? ApiResult::success(control::workspace_json(*row)) : store_failure(row.error());
+                    return row ? ApiResult::success(control::workspace_json(*row, operator_view(context))) : store_failure(row.error());
                 }
                 const auto row = context.store->get_workspace(input.at("workspace_id"));
                 if (!row || row->customer_id != input.at("customer_id").get<std::string>()) {
                     return ApiResult::failure("invalid_input", "workspace_id is not in this space", "/workspace_id");
                 }
                 if (operation == "get_workspace") {
-                    return ApiResult::success(control::workspace_json(*row));
+                    return ApiResult::success(control::workspace_json(*row, operator_view(context)));
                 }
                 if (deleting) {
                     return delete_workspace_cascading(input, context, *row);
@@ -5072,7 +5078,7 @@ void register_workspace_capabilities(Registry& registry) {
                     patch.desired = input.at("desired").get<std::string>();
                 }
                 const auto updated = context.store->update_workspace(row->id, patch);
-                return updated ? ApiResult::success(control::workspace_json(*updated)) : store_failure(updated.error());
+                return updated ? ApiResult::success(control::workspace_json(*updated, operator_view(context))) : store_failure(updated.error());
             }});
     }
     register_agent_run_capabilities(registry);

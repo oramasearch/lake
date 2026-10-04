@@ -58,7 +58,7 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 |---|---|---|---|
 | `workspace_status` | read | `read` | `{workspace, requested, phase, message, ready}` |
 | `list_workspaces` | read | `read` | Requires `customer_id`; lists contract rows, excluding completed deletions |
-| `get_workspace` | read | `read` | Requires `customer_id`, `workspace_id`; returns desired state and operator observations |
+| `get_workspace` | read | `read` | Requires `customer_id`, `workspace_id`; returns desired state and operator observations, including `storage_gi` (the desired size of each of its Zetta's volumes, in GiB, default 5) and the operator's `storage_gi_observed`, `storage_phase` and short `storage_reason`; the operator's `storage_message` only for the operator and the instance administrator (migration `0069`; only the operator and the instance administrator change the size, with `set_workspace_storage`, [volumes.md](volumes.md)) |
 | `create_workspace` | action | `write` | Requires `customer_id`, `name`, `environment`; atomically creates workspace and primary service desired state |
 | `update_workspace` | action | `write` | Requires `customer_id`, `workspace_id`; optional name, environment, desired (`running` or `stopped`); changes increment generation, status fields are refused |
 | `delete_workspace` | action | `admin` | Requires `customer_id`, `workspace_id`, `confirm` equal to the workspace name; deletes the workspace and everything it holds ([Deletion](#deletion)). `dry_run: true` deletes nothing and answers what would be destroyed, with counts (`confirm` optional, checked when given) |

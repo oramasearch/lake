@@ -126,3 +126,6 @@ a build target's image, the legacy owner rule, the image byte count) and `regist
 tags and blob reads for the one-shot copy. `metering_usage` counts image bytes from the tags in
 each routed workspace (`tenant_image_bytes`), replacing the former
 `ApiContext::registry_space_bytes` callable. See [metering.md](../../../docs/api/metering.md).
+
+`capabilities.hpp` declares `register_volume_capabilities` (migration `0069`,
+[volumes.md](../../../docs/api/volumes.md)).

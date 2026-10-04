@@ -252,6 +252,7 @@ add_library(lake-core STATIC
   src/api/web_app_capabilities.cpp
   src/api/build_capabilities.cpp
   src/api/image_capabilities.cpp
+  src/api/volume_capabilities.cpp
   src/audit/audit.cpp
   src/api/secrets_capabilities.cpp
   src/api/secret_records_api.cpp

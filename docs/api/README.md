@@ -8,6 +8,12 @@ lake#514: [workspaces.md](workspaces.md#deletion) documents the cascading `delet
 `dry_run` and its result; [repositories.md](repositories.md#the-owning-workspace),
 [registry.md](registry.md) and [forge.md](forge.md) what goes with a deleted workspace.
 
+Migration `0069` (operator#259, operator#260): [volumes.md](volumes.md) documents
+`set_workspace_storage`, `request_volume_snapshot` and `volume_snapshots`, the operator's and the
+instance administrator's desired state for each workspace Zetta's volume size and the scheduled CSI
+snapshots of those volumes and of lake's store volume; [workspaces.md](workspaces.md#capabilities)
+the storage fields a workspace row gains.
+
 [experiments.md](experiments.md) documents eleven training study, trial, run-metric, comparison
 and bounded-live-read capabilities, with identical REST POST/MCP schemas and confirmed actions,
 plus the `agent_turn` contract used for ExperimentsAgent proposals. These names are distinct from

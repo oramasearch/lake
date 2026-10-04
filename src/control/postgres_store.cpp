@@ -4361,7 +4361,8 @@ public:
     static constexpr const char* workspace_columns =
         "id::text, customer_id::text, name, environment, desired, generation, COALESCE(phase,''), "
         "COALESCE(observed_generation,0), COALESCE(message,''), COALESCE(namespace,''), "
-        "COALESCE(zetta_service_id::text,''), created_at::text, updated_at::text";
+        "COALESCE(zetta_service_id::text,''), created_at::text, updated_at::text, storage_gi, "
+        "storage_gi_observed, storage_phase, storage_message";
 
     static Workspace workspace_from(const pqxx::row& row) {
         Workspace value;
@@ -4378,6 +4379,10 @@ public:
         value.zetta_service_id = row[10].as<std::string>();
         value.created_at = row[11].as<std::string>();
         value.updated_at = row[12].as<std::string>();
+        value.storage_gi = row[13].as<std::int32_t>();
+        value.storage_gi_observed = row[14].as<std::int32_t>();
+        value.storage_phase = row[15].as<std::string>();
+        value.storage_message = row[16].as<std::string>();
         return value;
     }
 
@@ -4477,6 +4482,107 @@ public:
             tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
             return one_workspace(tx, id);
         });
+    }
+
+    Result<Workspace> set_workspace_storage(const std::string& id, std::int32_t storage_gi) override {
+        if (managed_service_slug("ws", id).empty()) {
+            return std::unexpected(StoreError{"invalid_input", "workspace_id is unknown"});
+        }
+        if (storage_gi < 1 || storage_gi > max_workspace_storage_gi) {
+            return std::unexpected(StoreError{"invalid_input", "storage_gi is out of range"});
+        }
+        return with_tx<Workspace>([&](pqxx::work& tx) -> Result<Workspace> {
+            tx.exec_params("SELECT 1 FROM workspaces WHERE id = $1::uuid FOR UPDATE", id);
+            const auto row = one_workspace(tx, id);
+            if (!row) {
+                return row;
+            }
+            if (row->desired == "deleted") {
+                return std::unexpected(StoreError{"invalid_input", "workspace_id is unknown"});
+            }
+            if (storage_gi == row->storage_gi) {
+                return row;
+            }
+            // enforce_workspace_storage_growth refuses a decrease (23514, invalid_input).
+            tx.exec_params("UPDATE workspaces SET storage_gi = $2, generation = generation + 1, "
+                           "updated_at = now() WHERE id = $1::uuid",
+                           id, storage_gi);
+            return one_workspace(tx, id);
+        });
+    }
+
+    static constexpr const char* volume_snapshot_columns =
+        "p.target, p.schedule, p.keep, "
+        "COALESCE(to_char(p.requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), ''), "
+        "to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), "
+        "to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), "
+        "st.target IS NOT NULL, COALESCE(st.snapshot_name, ''), COALESCE(st.ready_to_use, false), "
+        "COALESCE(to_char(st.snapshot_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), ''), "
+        "COALESCE(st.message, ''), "
+        "COALESCE(to_char(st.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), '')";
+
+    static VolumeSnapshotPolicy volume_snapshot_from(const pqxx::row& row) {
+        VolumeSnapshotPolicy value;
+        value.target = row[0].as<std::string>();
+        value.schedule = row[1].as<std::string>();
+        value.keep = row[2].as<std::int32_t>();
+        value.requested_at = row[3].as<std::string>();
+        value.created_at = row[4].as<std::string>();
+        value.updated_at = row[5].as<std::string>();
+        if (row[6].as<bool>()) {
+            value.status = VolumeSnapshotStatus{row[7].as<std::string>(), row[8].as<bool>(),
+                                                row[9].as<std::string>(), row[10].as<std::string>(),
+                                                row[11].as<std::string>()};
+        }
+        return value;
+    }
+
+    Result<VolumeSnapshotPolicy> request_volume_snapshot(const VolumeSnapshotRequest& request) override {
+        if (request.target != "store" && managed_service_slug("ws", request.target).empty()) {
+            return std::unexpected(StoreError{"invalid_input", "target is unknown"});
+        }
+        if ((request.schedule && !valid_snapshot_schedule(*request.schedule)) ||
+            (request.keep && (*request.keep < 1 || *request.keep > max_volume_snapshots_kept))) {
+            return std::unexpected(StoreError{"invalid_input", "invalid schedule or keep"});
+        }
+        return with_tx<VolumeSnapshotPolicy>([&](pqxx::work& tx) -> Result<VolumeSnapshotPolicy> {
+            if (request.target != "store" &&
+                tx.exec_params("SELECT 1 FROM workspaces WHERE id = $1::uuid AND desired <> 'deleted'",
+                               request.target)
+                    .empty()) {
+                return std::unexpected(StoreError{"invalid_input", "target is unknown"});
+            }
+            const std::optional<std::string> schedule = request.schedule;
+            const std::optional<std::int32_t> keep = request.keep;
+            tx.exec_params("INSERT INTO volume_snapshot_policies (target, schedule, keep, requested_at) "
+                           "VALUES ($1, COALESCE($2::text, '0 3 * * *'), COALESCE($3::integer, 7), now()) "
+                           "ON CONFLICT (target) DO UPDATE SET "
+                           "schedule = COALESCE($2::text, volume_snapshot_policies.schedule), "
+                           "keep = COALESCE($3::integer, volume_snapshot_policies.keep), "
+                           "requested_at = now(), updated_at = now()",
+                           request.target, schedule, keep);
+            const auto rows = tx.exec_params(std::string("SELECT ") + volume_snapshot_columns +
+                                                 " FROM volume_snapshot_policies p LEFT JOIN "
+                                                 "volume_snapshot_status st ON st.target = p.target "
+                                                 "WHERE p.target = $1",
+                                             request.target);
+            return volume_snapshot_from(rows.at(0));
+        });
+    }
+
+    Result<std::vector<VolumeSnapshotPolicy>> volume_snapshots() override {
+        return with_tx<std::vector<VolumeSnapshotPolicy>>(
+            [&](pqxx::work& tx) -> Result<std::vector<VolumeSnapshotPolicy>> {
+                const auto rows = tx.exec(std::string("SELECT ") + volume_snapshot_columns +
+                                          " FROM volume_snapshot_policies p LEFT JOIN "
+                                          "volume_snapshot_status st ON st.target = p.target "
+                                          "ORDER BY p.target <> 'store', p.target");
+                std::vector<VolumeSnapshotPolicy> values;
+                for (const auto& row : rows) {
+                    values.push_back(volume_snapshot_from(row));
+                }
+                return values;
+            });
     }
 
     static constexpr const char* workspace_deletion_columns =

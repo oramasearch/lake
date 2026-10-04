@@ -601,7 +601,13 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
             ? context.store->get_workspace(context.workspace_id)
             : control::Result<control::Workspace>(std::unexpect,
                   control::StoreError{"invalid_input", "workspace_id is unknown"});
-        if (!workspace || (!context.path_workspace_id.empty() &&
+        if (!workspace && workspace.error().code != "invalid_input" &&
+            workspace.error().code != "not_found") {
+            // The store could not answer; the id is not at fault.
+            state.result = ApiResult::failure("store_unavailable",
+                                              "the control-plane store did not answer");
+            state.proceed = false;
+        } else if (!workspace || (!context.path_workspace_id.empty() &&
                            context.workspace_id != context.path_workspace_id)) {
             state.result = ApiResult::failure("invalid_input",
                 "workspace_id must name a workspace Zetta in this space", "/workspace_id");

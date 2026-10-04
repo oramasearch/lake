@@ -631,6 +631,19 @@ public:
             return store_->delete_oci_repository_route(customer_id, name, to_workspace_id);
         });
     }
+    control::Result<control::Workspace> set_workspace_storage(const std::string& id,
+                                                              std::int32_t storage_gi) override {
+        return call("set_workspace_storage",
+                    [&] { return store_->set_workspace_storage(id, storage_gi); });
+    }
+    control::Result<control::VolumeSnapshotPolicy>
+    request_volume_snapshot(const control::VolumeSnapshotRequest& request) override {
+        return call("request_volume_snapshot",
+                    [&] { return store_->request_volume_snapshot(request); });
+    }
+    control::Result<std::vector<control::VolumeSnapshotPolicy>> volume_snapshots() override {
+        return call("volume_snapshots", [&] { return store_->volume_snapshots(); });
+    }
     control::Result<std::vector<control::ManagedService>>
     list_services(const std::string& customer_id) override {
         return call("list_services", [&] { return store_->list_services(customer_id); });

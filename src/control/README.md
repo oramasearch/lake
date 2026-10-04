@@ -201,3 +201,11 @@ space, answered again for the same workspace, a `conflict` for another, and dele
 `delete_workspace_cascade`, which lists each as an image in state `routed`, or by
 `delete_oci_repository_route` (the operator's `unroute_image_repository`), which removes `<image>`
 with `cache/<image>` and, given a workspace, writes them again for it in the same transaction.
+
+Both stores keep the operator's volumes (migration `0069`): `set_workspace_storage` refuses a smaller
+size (PostgreSQL's `enforce_workspace_storage_growth` trigger as well) and advances the generation;
+`request_volume_snapshot` upserts the target's policy with `requested_at` = now and checks that a
+workspace target is live; `volume_snapshots` joins each policy with the operator's
+`volume_snapshot_status`. The memory store starts with the `store` policy and adds one per workspace
+it creates, as the migration and its trigger do; `set_workspace_storage_status` and
+`set_volume_snapshot_status` stand in for the operator in tests.

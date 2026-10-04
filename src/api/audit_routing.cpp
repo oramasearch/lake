@@ -127,6 +127,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "renew_timestamp_evidence",
     "replicate_transparency_log",
     "repository_recovery_status",
+    // The operator's volumes are control plane (migration 0069, operator#259, operator#260).
+    "request_volume_snapshot",
     "revoke_agent_certificate",
     "revoke_agent_session",
     "revoke_device",
@@ -154,6 +156,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "set_customer_credential_policy",
     "set_member_role",
     "set_storage_quota",
+    "set_workspace_storage",
     "sign_in_passkey",
     "sign_in_password",
     "sign_in_saml",
@@ -182,6 +185,7 @@ constexpr std::array central = std::to_array<std::string_view>({
     "verify_agent_session_drip",
     "verify_audit",
     "verify_mfa",
+    "volume_snapshots",
     "workspace_status",
 });
 
