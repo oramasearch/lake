@@ -44,6 +44,7 @@
 #include "lake/control/forge_records.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/metering.hpp"
+#include "lake/control/oci_records.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/platform_records.hpp"
@@ -5782,4 +5783,78 @@ TEST(WorkspaceRecordsZetta, TheEngineStoresAndReturnsSealedRecords) {
     ASSERT_TRUE(verified) << verified.error().message;
     EXPECT_TRUE(verified->verified) << verified->error_message;
     EXPECT_EQ(verified->chained, 4U);
+}
+
+// Tenant image records (lake#383 phase A): a manifest is written once and found by digest, a
+// second write of the same bytes is answered as present, a tag moved by another push between the
+// read and the write is reread rather than overwritten, a tag listing reads one repository only,
+// and another space's or repository's keys never open.
+TEST(WorkspaceRecords, ImageTagsMoveAtTheRevisionReadAndManifestsAreWrittenOnce) {
+    DirectRecords direct;
+    auto records = direct.open();
+    const auto manifest = [](const std::string& text) {
+        return lake::control::OciManifest{
+            .customer_id = "customer-1",
+            .digest = "sha256:" + lake::control::identity_crypto::sha256_hex(text),
+            .content_type = "application/vnd.oci.image.manifest.v1+json",
+            .document = text,
+            .references = {{"sha256:" + std::string(64, 'a'), 12}}};
+    };
+    const auto first = manifest(R"({"schemaVersion":2,"layers":[]})");
+    const auto stored = run(lake::control::put_oci_manifest(records, first));
+    ASSERT_TRUE(stored) << stored.error().message;
+    EXPECT_EQ(stored->document, first.document);
+    const auto again = run(lake::control::put_oci_manifest(records, first));
+    ASSERT_TRUE(again) << again.error().message;
+    EXPECT_EQ(direct.tables->rows("oci_manifests").size(), 1U) << "content-addressed, once";
+    EXPECT_FALSE(*run(lake::control::get_oci_manifest(records, "customer-2", first.digest)))
+        << "another space's key";
+
+    lake::control::OciTag tag{.customer_id = "customer-1",
+                              .repository = "web",
+                              .tag = "v1",
+                              .digest = first.digest,
+                              .content_type = first.content_type,
+                              .manifest_size = first.document.size(),
+                              .references = first.references};
+    const auto created = run(lake::control::set_oci_tag(records, tag));
+    ASSERT_TRUE(created) << created.error().message;
+    EXPECT_EQ(created->lake_revision, 1);
+    EXPECT_EQ(run(lake::control::create_oci_tag(records, tag)).error().code, "conflict")
+        << "a copy never overwrites a tag";
+
+    // Another push moves the tag between this push's read and its write: reread and moved again.
+    const auto second = manifest(R"({"schemaVersion":2,"layers":[],"n":2})");
+    ASSERT_TRUE(run(lake::control::put_oci_manifest(records, second)));
+    const std::string key = direct.tables->rows("oci_tags").begin()->first;
+    bool raced = false;
+    auto racing = WorkspaceRecords::open(
+        [&, tables = direct.tables](std::string capability, bool, json input)
+            -> liquid::runtime::task<lake::control::ZettaControlResult<json>> {
+            if (capability == "put_record" && !raced) {
+                raced = true;
+                auto& live = tables->rows("oci_tags").at(key);
+                live["revision"] = live["revision"].get<std::int64_t>() + 1000;
+            }
+            co_return tables->run(capability, input);
+        },
+        direct.workspace_id, kek);
+    ASSERT_TRUE(racing);
+    tag.digest = second.digest;
+    const auto moved = run(lake::control::set_oci_tag(*racing, tag));
+    ASSERT_TRUE(moved) << moved.error().message;
+    EXPECT_TRUE(raced);
+    EXPECT_EQ(moved->digest, second.digest);
+    EXPECT_EQ(moved->lake_revision, 2);
+
+    lake::control::OciTag other = tag;
+    other.repository = "cache/web";
+    other.tag = "buildcache";
+    ASSERT_TRUE(run(lake::control::set_oci_tag(records, other)));
+    const auto listed = run(lake::control::list_oci_tags(records, "customer-1", "web"));
+    ASSERT_TRUE(listed);
+    ASSERT_EQ(listed->size(), 1U) << "one repository's tags";
+    EXPECT_EQ(listed->front().digest, second.digest);
+    EXPECT_TRUE(run(lake::control::list_oci_tags(records, "customer-2", "web"))->empty());
+    EXPECT_FALSE(*run(lake::control::get_oci_tag(records, "customer-1", "web", "v2")));
 }

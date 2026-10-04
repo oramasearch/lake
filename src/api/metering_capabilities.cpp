@@ -1,4 +1,5 @@
 #include "lake/api/capabilities.hpp"
+#include "lake/api/images.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -653,14 +654,22 @@ void register_metering_capabilities(Registry& registry) {
             for (const std::string& line : measured.unrecorded) {
                 not_measured.push_back(line);
             }
+            // Tenant images (lake#383): what the tags in each routed workspace name, each digest
+            // once. Blobs are still sized in the instance registry until phase B.
             std::optional<std::uint64_t> image_bytes;
-            const auto customer = context.store->get_customer(customer_id);
-            if (context.registry_space_bytes && customer) {
-                image_bytes = context.registry_space_bytes(customer->name);
-            }
-            if (!image_bytes) {
+            if (context.workspaces) {
+                auto images = co_await tenant_image_bytes(context, customer_id);
+                if (images) {
+                    image_bytes = images->bytes;
+                    for (const std::string& line : images->unmeasured) {
+                        not_measured.push_back(line);
+                    }
+                } else {
+                    not_measured.push_back("Container images: " + images.error().message);
+                }
+            } else {
                 not_measured.push_back(
-                    "Container images: this lake has no image registry storage.");
+                    "Container images: this lake has no workspaces to hold them.");
             }
             json image_builds{{"seconds", 0}, {"count", 0}};
             if (const auto builds = context.store->list_builds(customer_id)) {

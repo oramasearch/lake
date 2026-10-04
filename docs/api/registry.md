@@ -19,11 +19,92 @@ LAKE_STORE_ROOT/<instance>/registry/python/
 LAKE_STORE_ROOT/<instance>/registry/debug/
 ```
 
+Since lake#383 phase A, `manifests/` holds only the instance's one-component OCI repositories, and
+what it still holds of tenant repositories waits for the one-shot copy and is not served (see
+[below](#where-a-tenant-image-lives)). `blobs/` holds every blob, tenant blobs included, until
+phase B.
+
 Writes use a sibling temporary file followed by rename. OCI upload sessions are staged separately;
 completion recalculates SHA-256 and refuses bytes that do not match the requested digest. A
 manifest is accepted only when it is schema version 2 JSON and every referenced config or layer
 digest is already present. Blob and digest-manifest reads also require that a tag in the requested
 repository references the object, so a known tenant digest cannot be read through a public alias.
+
+## Where a tenant image lives
+
+The registry splits (decision 54 S4-S6, [lake#383](https://github.com/oramasearch/lake/issues/383)
+phase A). A tenant OCI repository, `<space>/<name>` or `<space>/cache/<name>`, belongs to one
+workspace. npm, Python, debuginfod and legacy one-component OCI repositories stay with the instance,
+as a named exception: one instance-wide namespace with public reads.
+
+- **The route.** `oci_repository_routes` (migration `0068`) maps the space and the name below it
+  (`<image>` or `cache/<image>`; no other shape is a name) to a workspace. It is content-free: no
+  manifest, digest or tag. Lake resolves it before it reads any workspace, so an image keeps its
+  address (`<in-cluster-registry-host>/<space>/<app>` for the kubelet). A route is never changed
+  in place; it is deleted with its workspace, or by the operator (below).
+- **Creating a repository names its workspace.** A build's first push routes only its own target,
+  `<image>` and `cache/<image>` of `<authority>/<space>/<image>:<tag>`, from the build row's
+  workspace; a build pushing any other unrouted name of its space is OCI `403 DENIED`. Anything
+  else (the administrator, a person) calls `create_image_repository` with `customer_id`,
+  `workspace_id` and `name` first; a missing, malformed or unknown `workspace_id`, or one that is
+  not a live workspace of the space, is `invalid_input` at `/workspace_id`, and an invalid name at
+  `/name`. There is no default workspace. Repeating it for the same workspace answers the route; a
+  name another workspace holds is `conflict`. A push to an unrouted repository is OCI
+  `404 NAME_UNKNOWN`.
+- **Removing or moving a wrong route.** `unroute_image_repository` (`customer_id`, `name`,
+  optional `workspace_id`; operator bearer only, audited in the central log as control plane)
+  deletes a route, for example after an app was recreated in another workspace. Removing `<image>`
+  also removes `cache/<image>`; removing `cache/<image>` alone leaves `<image>`. With
+  `workspace_id` it moves them there instead: the routes are deleted and written again in one
+  transaction, so a build of the old workspace still pushing cannot claim the name in between. The
+  target must be a live workspace of the space (otherwise `invalid_input` at `/workspace_id`, and
+  nothing changes). The old workspace's manifest and tag records stay where they are and go with
+  that workspace; after a plain removal a later `create_image_repository`, build push or copy
+  routes the name again.
+- **Manifests and tags are workspace records** (sealed, as every lake record,
+  [workspace records](../architecture/workspace-records.md)). `lake_oci_manifests` holds one record
+  per manifest of the space, keyed by the blind index of its digest, written `if_absent`: the exact
+  bytes, the media type and the digests it references with their sizes. `lake_oci_tags` holds one
+  record per tag, keyed by the blind index of the repository and tag and found by the repository,
+  so one `list_records` reads every tag of a repository. A push moves a tag with a write
+  conditional on the revision read (`if_absent` for a new tag), rereading on a conflict: a tag is
+  never torn and every move is applied whole, but two concurrent pushes of one tag still end with
+  the last one (last writer wins, as OCI expects). A tag carries its manifest's references, so a
+  blob read and the image byte count read only the tags; a blob `GET` lists every tag of its
+  repository.
+- **Blobs stay in the instance registry** (`blobs/`) until phase B
+  ([lake#380](https://github.com/oramasearch/lake/issues/380)) moves them into the workspace's
+  liquid store. Each blob an upload into one of a workspace's repositories completes is recorded in
+  `lake_oci_blobs` of that workspace, and a manifest pushed into the workspace may reference only
+  blobs recorded there (otherwise OCI `400 MANIFEST_BLOB_UNKNOWN`), so knowing another space's or
+  another workspace's digest does not publish its layer. A tenant blob is served only when a tag
+  of the requested repository references it.
+- **Workload credentials stay in their workspace.** A build pushes and reads only repositories
+  routed to its own workspace, so a build cannot pull a base or cache image of another workspace
+  of its space; an app pull token reads only its app's repository, only when the route names the
+  app's workspace, and never for an app without a workspace. Another workspace's route is OCI
+  `403 DENIED`.
+- **Routes or a workspace that cannot be read** are OCI `503 UNAVAILABLE`; lake never answers
+  "unknown" for them and never falls back to another copy.
+- `list_image_repositories` (`customer_id`, optional `workspace_id`; a workspace that is not the
+  space's is `invalid_input`) lists a space's routes with the tags read from each workspace; a
+  workspace that cannot be read lists its repositories with `tags_unavailable`. Ship → Packages
+  shows the tenant images of one space, the selected one, from it.
+- Usage counts a space's image bytes from the tags in each routed workspace, each digest once
+  ([metering.md](metering.md)).
+
+Tags written before the split stay in `manifests/` until the operator's one-shot copy
+(`copy_workspace_records`, collection `oci_tags`) moves each into its workspace. Each run finds the
+owner of each repository (its route; else the one live workspace whose apps or builds use the
+image's name, `cache/<image>` following `<image>`; else the space's only live workspace); `plan`
+and `verify` write nothing, and only `copy` writes the route of an unrouted repository. It reports
+the rest as unresolved (`needs_selection`, resolved with `create_image_repository`;
+`blob_missing`, a tag whose manifest or blobs the registry no longer holds; `unknown_space`,
+which does not block completion), records the manifest's blobs, writes the manifest and the tag
+`if_absent` (marked as copied), and verifies them. A tag a push wrote before the copy reached it is
+newer and is kept and accepted. Until a tag is copied, its repository answers `404`. The cutover
+steps are in
+[workspace records](../architecture/workspace-records.md#cutover-runbook-tenant-images-dev-cluster).
 
 ## The Packages page
 
@@ -48,11 +129,12 @@ identity may read; the operator can deliver that credential as an `imagePullSecr
 requests to tenant paths are refused. The administrator bearer remains valid across repositories.
 
 Deleting a workspace removes its tenant images (lake#514, [workspaces.md](workspaces.md#deletion)):
-the tags and manifest pointers of `<space>/<name>` and `<space>/cache/<name>` for each of its apps
-and each image its builds target, unless an app or build of another live workspace of the space
-uses the same name. Pulls of those repositories then answer 404. Blobs stay on the volume, since
-other manifests may reference them and the registry has no collection yet; after
-[lake#383](https://github.com/oramasearch/lake/issues/383) a workspace's images go with its store.
+the cascade transaction deletes its routes, and their manifest and tag records go with its Zetta
+(lake#383). Whatever the instance registry still holds for the workspace from before the split
+(the tags of `<space>/<name>` and `<space>/cache/<name>` for each of its apps and each image its
+builds target, unless another live workspace of the space uses the name) is removed too. Pulls of
+those repositories then answer 404. Blobs stay on the volume until phase B, since other manifests
+may reference them and the registry has no collection yet.
 
 An app pull token is accepted only as HTTP Basic user `app`, with the token as its password. Lake
 re-hashes it against the current app row and allows manifest and blob `GET`/`HEAD` only for the
@@ -93,6 +175,21 @@ private reads, and the cross-space `403 DENIED` boundary.
 `RegistryProtocols.AppPullCredentialReadsOnlyItsOwnImage` publishes an image through the real
 adapter, reads its manifest and blob with Basic user `app`, and refuses another app, the cache
 repository, writes, a different Basic username, and bearer use.
+`Stores/TenantImages.LiveInTheirRoutedWorkspaceAndKeepTheirAddresses/{Memory,Postgres}` runs two
+spaces with two workspaces each: missing, malformed, unknown, foreign and deleted `workspace_id` and
+a bad name refused, an unrouted push refused, a route repeated, never changed and shared by name with
+another space, push and pull through the route byte for byte (by tag, by digest, blobs), sealed
+records only in the routed workspace, a tag moved by a second push, a build confined to its own
+workspace and routing on its first push, npm and one-component OCI unaffected, a workspace that is
+not ready refused, and workspace deletion removing the route.
+`Stores/TenantImages.TheOneShotCopyRoutesAndMovesLegacyTags/{Memory,Postgres}` covers the copy
+(no route written by plan or verify, a tag pushed before the copy accepted, a lost blob reported),
+`Stores/TenantImages.RoutesAreClaimedOnlyByTheirOwnerAndUnroutedOnlyByTheOperator/{Memory,Postgres}`
+a build claiming only its own target, an app moved between workspaces and its route removed by
+the operator, foreign layers refused, an app without a workspace, and unreadable routes as `503`,
+`Stores/TenantImages.AMoveReroutesAnImageAndItsCacheInOneStep/{Memory,Postgres}` a move of an image
+and its cache while the old workspace's build keeps pushing, and
+`PostgresImageRoutes.MigrationRoutesUnambiguousImagesOnly` migration `0068`.
 
 `RegistryProtocols.NpmPublishesAndInstallsWithTheRealClient` runs the host `npm` binary to publish
 and then install a fixture package through Lake. If npm is unavailable, the same test exercises
@@ -108,7 +205,7 @@ three through debuginfod paths and compares exact bytes.
 
 ```sh
 cmake --build build -j 6
-./build/tests/lake-tests --gtest_filter='RegistryProtocols.*'
+./build/tests/lake-tests --gtest_filter='RegistryProtocols.*:Stores/TenantImages.*'
 ```
 
 The executable tests require no container daemon or external registry. They use loopback HTTP and

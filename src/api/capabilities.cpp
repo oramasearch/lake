@@ -1,4 +1,5 @@
 #include "lake/api/capabilities.hpp"
+#include "lake/api/images.hpp"
 #include "audit_logs.hpp"
 #include "repository_records_api.hpp"
 #include "lake/api/audit_routing.hpp"
@@ -5541,6 +5542,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_platform_capabilities(registry);
     register_web_app_capabilities(registry);
     register_build_capabilities(registry);
+    register_image_capabilities(registry);
     register_stream_capabilities(registry);
     register_experiment_capabilities(registry);
     register_workspace_capabilities(registry);

@@ -192,6 +192,17 @@ public:
     Result<WorkspaceDeletion> get_workspace_deletion(const std::string& workspace_id) override;
     Result<std::vector<WorkspaceDeletion>> pending_workspace_deletions(int limit) override;
     Result<void> complete_workspace_deletion(const std::string& workspace_id) override;
+    Result<OciRepositoryRoute> create_oci_repository_route(const std::string& customer_id,
+                                                           const std::string& name,
+                                                           const std::string& workspace_id) override;
+    Result<OciRepositoryRoute> get_oci_repository_route(const std::string& customer_id,
+                                                        const std::string& name) override;
+    Result<std::vector<OciRepositoryRoute>>
+    list_oci_repository_routes(const std::string& customer_id,
+                               const std::string& workspace_id) override;
+    Result<std::vector<OciRepositoryRoute>>
+    delete_oci_repository_route(const std::string& customer_id, const std::string& name,
+                                const std::string& to_workspace_id = {}) override;
     // The operator's workspace observation (phase, observed generation). Tests call this
     // directly; the production operator updates the same columns in Postgres.
     Result<void> set_workspace_status(const std::string& id, std::string phase);
@@ -589,6 +600,7 @@ private:
     std::vector<ManagedService> services_;
     std::vector<Workspace> workspaces_;
     std::vector<WorkspaceDeletion> workspace_deletions_;
+    std::vector<OciRepositoryRoute> oci_repository_routes_;
     std::vector<WebApp> web_apps_;
     struct WebAppAuthorizationCodeRecord {
         WebAppAuthorizationCode code;

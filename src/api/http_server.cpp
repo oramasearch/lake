@@ -78,6 +78,7 @@
 #include "lake/api/apps.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/datasets.hpp"
+#include "lake/api/images.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/registry.hpp"
@@ -92,6 +93,7 @@
 #include "secret_records_api.hpp"
 #include "workspace_records_api.hpp"
 #include "lake/control/ask_messages.hpp"
+#include "lake/control/oci_records.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/callers.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -884,6 +886,11 @@ public:
             }
             const std::string repository =
                 manifest.path().parent_path().lexically_relative(manifests_root).generic_string();
+            // Tenant repositories live in their workspaces since lake#383; what is left of them
+            // here waits for the one-shot copy and is not served.
+            if (repository.contains('/')) {
+                continue;
+            }
             auto [entry, inserted] = oci_repositories.try_emplace(repository);
             entry->second.push_back(manifest.path().stem().string());
         }
@@ -929,57 +936,6 @@ public:
                 {{"name", index.path().stem().string()}, {"versions", versions}});
         }
         return out;
-    }
-
-    // Usage (docs/api/metering.md): the bytes the OCI registry holds for one space, its images and
-    // their build cache below `<space>/`. Each manifest, config and layer digest is counted once,
-    // however many tags or repositories of the space reference it. nullopt without storage.
-    std::optional<std::uint64_t> space_stored_bytes(std::string_view space) const {
-        if (!available() || !safe_component(space)) {
-            return std::nullopt;
-        }
-        std::set<std::string> digests;
-        std::error_code error;
-        const std::filesystem::path manifests_root = root_ / "manifests" / std::string(space);
-        for (const auto& entry :
-             std::filesystem::recursive_directory_iterator(manifests_root, error)) {
-            if (!entry.is_regular_file() || entry.path().extension() != ".json") {
-                continue;
-            }
-            const auto pointer_text = read_text(entry.path());
-            const nlohmann::json pointer =
-                pointer_text ? nlohmann::json::parse(*pointer_text, nullptr, false)
-                             : nlohmann::json();
-            const std::string manifest_digest =
-                pointer.is_object() ? pointer.value("digest", "") : std::string();
-            if (!valid_digest(manifest_digest) || !digests.insert(manifest_digest).second) {
-                continue;
-            }
-            const auto manifest_bytes = read(blob_path(manifest_digest));
-            if (!manifest_bytes) {
-                continue;
-            }
-            const nlohmann::json manifest = nlohmann::json::parse(
-                std::string(reinterpret_cast<const char*>(manifest_bytes->data()),
-                            manifest_bytes->size()),
-                nullptr,
-                false);
-            if (!manifest.is_object()) {
-                continue;
-            }
-            if (const auto references = manifest_references(manifest)) {
-                digests.insert(references->begin(), references->end());
-            }
-        }
-        std::uint64_t total = 0;
-        for (const std::string& digest : digests) {
-            std::error_code size_error;
-            const std::uintmax_t size = std::filesystem::file_size(blob_path(digest), size_error);
-            if (!size_error) {
-                total += static_cast<std::uint64_t>(size);
-            }
-        }
-        return total;
     }
 
     ArtifactResult<std::string> begin_upload(std::string_view repository) {
@@ -1141,6 +1097,105 @@ public:
             }
         }
         return false;
+    }
+
+    // A blob's size; nullopt when the registry does not hold it.
+    std::optional<std::uint64_t> blob_size(std::string_view digest) const {
+        if (!available() || !valid_digest(digest)) {
+            return std::nullopt;
+        }
+        std::unique_lock lock(mutex_);
+        std::error_code error;
+        const std::uintmax_t size = std::filesystem::file_size(blob_path(digest), error);
+        if (error) {
+            return std::nullopt;
+        }
+        return static_cast<std::uint64_t>(size);
+    }
+
+    // A blob's bytes as text (a manifest's document).
+    ArtifactResult<std::string> blob_text(std::string_view digest) const {
+        if (!valid_digest(digest)) {
+            return std::unexpected("OCI digest is invalid");
+        }
+        return read_text(blob_path(digest));
+    }
+
+    // Checks a manifest for a tenant repository (lake#383) without storing anything: schema
+    // version 2 JSON whose config and layers the registry already holds. Answers each referenced
+    // digest with the size the registry holds.
+    ArtifactResult<std::vector<std::pair<std::string, std::uint64_t>>>
+    check_manifest(std::string_view document) const {
+        const nlohmann::json manifest = nlohmann::json::parse(document, nullptr, false);
+        if (manifest.is_discarded() || !manifest.is_object() ||
+            manifest.value("schemaVersion", 0) != 2) {
+            return std::unexpected("OCI manifest is not valid schema version 2 JSON");
+        }
+        const auto referenced = manifest_references(manifest);
+        if (!referenced) {
+            return std::unexpected(referenced.error());
+        }
+        std::vector<std::pair<std::string, std::uint64_t>> sized;
+        for (const std::string& digest : *referenced) {
+            const auto size = blob_size(digest);
+            if (!size) {
+                return std::unexpected("OCI manifest references an unknown blob: " + digest);
+            }
+            sized.emplace_back(digest, *size);
+        }
+        return sized;
+    }
+
+    static std::string digest_of(std::string_view bytes) {
+        return sha256_digest(std::as_bytes(std::span(bytes.data(), bytes.size())));
+    }
+
+    static bool tag_name(std::string_view value) {
+        return safe_component(value);
+    }
+
+    static bool digest_name(std::string_view value) {
+        return valid_digest(value);
+    }
+
+    // The tags of tenant repositories (`<space>/...`) written here before lake#383, for the
+    // one-shot copy: ordered by `<repository>:<tag>`, the `limit` after `after`.
+    std::vector<LegacyImageTag> legacy_tenant_tags(std::string_view after, int limit) const {
+        std::vector<LegacyImageTag> found;
+        if (!available()) {
+            return found;
+        }
+        std::error_code error;
+        const std::filesystem::path manifests_root = root_ / "manifests";
+        for (const auto& entry :
+             std::filesystem::recursive_directory_iterator(manifests_root, error)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".json") {
+                continue;
+            }
+            const std::string repository =
+                entry.path().parent_path().lexically_relative(manifests_root).generic_string();
+            const std::string tag = entry.path().stem().string();
+            if (!repository.contains('/') || !(repository + ":" + tag > after)) {
+                continue;
+            }
+            const auto pointer_text = read_text(entry.path());
+            const nlohmann::json pointer =
+                pointer_text ? nlohmann::json::parse(*pointer_text, nullptr, false)
+                             : nlohmann::json();
+            if (!pointer.is_object() || !valid_digest(pointer.value("digest", ""))) {
+                continue;
+            }
+            found.push_back({repository, tag, pointer.value("digest", ""),
+                             pointer.value("content_type",
+                                           "application/vnd.oci.image.manifest.v1+json")});
+        }
+        std::ranges::sort(found, {}, [](const LegacyImageTag& row) {
+            return row.repository + ":" + row.tag;
+        });
+        if (limit > 0 && found.size() > static_cast<std::size_t>(limit)) {
+            found.resize(static_cast<std::size_t>(limit));
+        }
+        return found;
     }
 
     ArtifactResult<std::string> put_manifest(std::string_view repository,
@@ -5244,6 +5299,13 @@ struct ApiServer::Impl {
             }
             return artifacts.remove_repository(repository);
         },
+        .legacy_image_tags = [this](const std::string& after, int limit) {
+            return artifacts.legacy_tenant_tags(after, limit);
+        },
+        .read_blob = [this](const std::string& digest) -> std::expected<std::string, std::string> {
+            return artifacts.blob_text(digest);
+        },
+        .blob_size = [this](const std::string& digest) { return artifacts.blob_size(digest); },
         .drop_repository_index = [this](const std::string& customer_id,
                                         const std::string& repository_id)
             -> std::expected<void, std::string> {
@@ -5836,9 +5898,6 @@ struct ApiServer::Impl {
         ctx.metering_recorder = metering_recorder.get();
         ctx.audit_recorder = audit_recorder.get();
         if (artifacts.available()) {
-            ctx.registry_space_bytes = [this](const std::string& space) {
-                return artifacts.space_stored_bytes(space);
-            };
             ctx.workspace_content = &workspace_content;
         }
         ctx.public_host = options.public_host;
@@ -11564,46 +11623,48 @@ struct ApiServer::Impl {
         co_return co_await redirect(route, back);
     }
 
-    // Ship > Packages: what this lake's registries hold. The registries are instance-wide and every
-    // package is a public read, so the page shows the catalog to any signed-in viewer.
+    // Ship > Packages: what this lake's registries hold. The instance registries (npm, Python,
+    // legacy one-component OCI) are public reads; the selected space's tenant images come from
+    // their routes and the tags in each routed workspace (lake#383), for a viewer who may read
+    // the space.
     boost::http::route_task serve_packages_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
         nlohmann::json catalog = artifacts.catalog();
         nlohmann::json builds = nlohmann::json::array();
-        std::set<std::string> visible_spaces;
         std::string customer_id = query_value(route, "customer_id");
         const ApiResult customers = registry.call("list_customers", {{"limit", 1000}}, context);
-        if (customers.ok) {
+        if (customers.ok && customer_id.empty()) {
             for (const nlohmann::json& customer : customers.value.at("items")) {
-                visible_spaces.insert(customer.value("name", std::string()));
-                if (customer_id.empty()) {
-                    customer_id = customer.value("id", std::string());
-                }
+                customer_id = customer.value("id", std::string());
+                break;
             }
         }
-        nlohmann::json visible_images = nlohmann::json::array();
-        for (const nlohmann::json& image : catalog.value("oci", nlohmann::json::array())) {
-            const std::string name = image.value("name", std::string());
-            const std::size_t slash = name.find('/');
-            const bool cache =
-                slash != std::string::npos && name.substr(slash + 1).starts_with("cache/");
-            if (!cache &&
-                (slash == std::string::npos || visible_spaces.contains(name.substr(0, slash)))) {
-                visible_images.push_back(image);
-            }
-        }
-        catalog["oci"] = std::move(visible_images);
         if (!customer_id.empty()) {
             const ApiResult listed =
                 registry.call("list_builds", {{"customer_id", customer_id}}, context);
             if (listed.ok) {
                 builds = listed.value.value("builds", nlohmann::json::array());
             }
+            const ApiResult images = unwrap(co_await registry.call_async(
+                "list_image_repositories", {{"customer_id", customer_id}}, context));
+            if (images.ok) {
+                for (const nlohmann::json& image : images.value.at("items")) {
+                    if (image.value("name", std::string()).starts_with("cache/")) {
+                        continue;
+                    }
+                    nlohmann::json versions = nlohmann::json::array();
+                    for (const nlohmann::json& tag : image.value("tags", nlohmann::json::array())) {
+                        versions.push_back(tag.value("tag", std::string()));
+                    }
+                    catalog["oci"].push_back(
+                        {{"name", image.value("repository", std::string())}, {"versions", versions}});
+                }
+            }
         }
-        return send_text(
+        co_return co_await send_text(
             route,
             boost::http::status::ok,
             web_ui_packages(catalog,
@@ -14132,6 +14193,33 @@ struct ApiServer::Impl {
 
     enum class RegistryAccess { Allowed, Missing, Denied };
 
+    // What a registry credential may do, and for a workload credential the workspace it acts in:
+    // a build pushes only into its own workspace's repositories and routes a repository on its
+    // first push from there; an app pulls only its own workspace's image (lake#383).
+    struct RegistryGrant {
+        RegistryAccess access = RegistryAccess::Denied;
+        std::string customer_id;
+        std::string workspace_id;
+        bool may_route = false;
+        std::string build_image; // a build may route only `<image>` and `cache/<image>`
+    };
+
+    // A refusal in the Distribution API's shape.
+    struct RegistryRefusal {
+        boost::http::status status;
+        std::string message;
+        std::string code;
+    };
+
+    // A tenant repository resolved through its route: the records of `workspace_id` hold its
+    // manifests and tags.
+    struct TenantImage {
+        std::string customer_id;
+        std::string name;
+        std::string workspace_id;
+        ApiContext context;
+    };
+
     bool registry_write_authorized(const boost::http::route_params& route) const {
         const std::string token = registry_token_of(route);
         return !options.admin_token.empty() && !token.empty() &&
@@ -14148,79 +14236,184 @@ struct ApiServer::Impl {
         return space + "/" + (category.empty() ? "" : category + "/") + repository;
     }
 
-    RegistryAccess registry_access(const boost::http::route_params& route,
-                                   std::string_view repository,
-                                   bool write) const {
+    RegistryGrant registry_access(const boost::http::route_params& route,
+                                  std::string_view repository,
+                                  bool write) const {
         if (!write && repository.find('/') == std::string_view::npos) {
-            return RegistryAccess::Allowed;
+            return {RegistryAccess::Allowed};
         }
         const RegistryCredential credential = registry_credential_of(route);
         if (credential.token.empty()) {
-            return RegistryAccess::Missing;
+            return {RegistryAccess::Missing};
         }
         if (!options.admin_token.empty() &&
             constant_time_equal(credential.token, options.admin_token)) {
-            return RegistryAccess::Allowed;
+            return {RegistryAccess::Allowed};
         }
         if (!options.store) {
-            return RegistryAccess::Denied;
+            return {RegistryAccess::Denied};
         }
         const auto principal = options.store->context_for(credential.token);
         if (!principal) {
-            return RegistryAccess::Denied;
+            return {RegistryAccess::Denied};
         }
         if (principal->kind == "build_push") {
             if (!credential.username.empty() && credential.username != "lake") {
-                return RegistryAccess::Denied;
+                return {RegistryAccess::Denied};
             }
             const auto customer = options.store->get_customer(principal->workload_customer_id);
-            if (!customer) {
-                return RegistryAccess::Denied;
+            const auto build = options.store->get_build(principal->workload_id);
+            if (!customer || !build || build->customer_id != customer->id ||
+                build->workspace_id.empty()) {
+                return {RegistryAccess::Denied};
             }
             const std::string prefix = customer->name + "/";
-            return repository.starts_with(prefix) ? RegistryAccess::Allowed
-                                                  : RegistryAccess::Denied;
+            if (!repository.starts_with(prefix)) {
+                return {RegistryAccess::Denied};
+            }
+            return {RegistryAccess::Allowed, customer->id, build->workspace_id, true,
+                    build_target_image(build->target, customer->name)};
         }
         if (principal->kind == "app_pull") {
             if (write || credential.username != "app") {
-                return RegistryAccess::Denied;
+                return {RegistryAccess::Denied};
             }
             const auto app = options.store->get_web_app(principal->workload_id);
             const auto customer = options.store->get_customer(principal->workload_customer_id);
-            if (!app || !customer || app->customer_id != customer->id) {
-                return RegistryAccess::Denied;
+            // An app without a workspace has no image to pull: its route could not be checked.
+            if (!app || !customer || app->customer_id != customer->id ||
+                app->workspace_id.empty()) {
+                return {RegistryAccess::Denied};
             }
-            return repository == customer->name + "/" + app->name ? RegistryAccess::Allowed
-                                                                  : RegistryAccess::Denied;
+            if (repository != customer->name + "/" + app->name) {
+                return {RegistryAccess::Denied};
+            }
+            return {RegistryAccess::Allowed, customer->id, app->workspace_id, false};
         }
         if (credential.username == "app") {
-            return RegistryAccess::Denied;
+            return {RegistryAccess::Denied};
         }
         if (write || principal->taap_id.empty() ||
             (std::ranges::find(principal->scopes, "*") == principal->scopes.end() &&
              std::ranges::find(principal->scopes, "registry_pull") == principal->scopes.end())) {
-            return RegistryAccess::Denied;
+            return {RegistryAccess::Denied};
         }
         const std::string space = std::string(repository.substr(0, repository.find('/')));
         const auto customers = options.store->list_customers(10000);
         if (!customers) {
-            return RegistryAccess::Denied;
+            return {RegistryAccess::Denied};
         }
         const auto customer = std::ranges::find(*customers, space, &control::Customer::name);
         if (customer == customers->end()) {
-            return RegistryAccess::Denied;
+            return {RegistryAccess::Denied};
         }
         if (!principal->user_id.empty() && customer->user_id == principal->user_id) {
-            return RegistryAccess::Allowed;
+            return {RegistryAccess::Allowed, customer->id};
         }
         const auto object = options.store->find_policy_object("customer", customer->id);
         if (!object) {
-            return RegistryAccess::Denied;
+            return {RegistryAccess::Denied};
         }
         control::AuthorizationCache cache;
         const auto decision =
             control::authorize(*options.store, principal->taap_id, object->id, "read", cache);
-        return decision && decision->allowed ? RegistryAccess::Allowed : RegistryAccess::Denied;
+        return decision && decision->allowed ? RegistryGrant{RegistryAccess::Allowed, customer->id}
+                                             : RegistryGrant{RegistryAccess::Denied};
+    }
+
+    // Resolves a tenant repository to its workspace through oci_repository_routes, before any
+    // workspace is read (lake#383, decision 54 S6). A build's first push routes it from the
+    // build's workspace; anything else needs a route that exists (create_image_repository names
+    // the workspace explicitly). A workload credential reaches only its own workspace's routes.
+    std::expected<TenantImage, RegistryRefusal> tenant_image(const boost::http::route_params& route,
+                                                             std::string_view repository,
+                                                             const RegistryGrant& grant,
+                                                             bool write) const {
+        const auto tenant = tenant_repository(repository);
+        if (!tenant) {
+            return std::unexpected(RegistryRefusal{boost::http::status::bad_request,
+                                                   "OCI repository name is invalid", "NAME_INVALID"});
+        }
+        if (!options.store || !options.workspaces) {
+            return std::unexpected(RegistryRefusal{
+                boost::http::status::not_found,
+                "tenant image repositories need a control store and workspaces", "NAME_UNKNOWN"});
+        }
+        std::optional<control::Customer> customer;
+        if (!grant.customer_id.empty()) {
+            if (const auto found = options.store->get_customer(grant.customer_id)) {
+                customer = *found;
+            }
+        } else {
+            customer = space_customer(*options.store, tenant->space);
+        }
+        if (!customer || customer->name != tenant->space) {
+            return std::unexpected(RegistryRefusal{boost::http::status::not_found,
+                                                   "image repository is unknown", "NAME_UNKNOWN"});
+        }
+        const auto unavailable = [](const control::StoreError& error) {
+            return RegistryRefusal{boost::http::status::service_unavailable,
+                                   "image routes cannot be read: " + error.message, "UNAVAILABLE"};
+        };
+        auto routed = options.store->get_oci_repository_route(customer->id, tenant->name);
+        if (!routed && routed.error().code != "not_found") {
+            return std::unexpected(unavailable(routed.error()));
+        }
+        // A build's first push routes only its own target, `<image>` and `cache/<image>`: a
+        // route never moves, so a build cannot claim another name for its workspace.
+        const bool own_target = !grant.build_image.empty() &&
+                                (tenant->name == grant.build_image ||
+                                 tenant->name == "cache/" + grant.build_image);
+        if (!routed && write && grant.may_route && own_target) {
+            routed = options.store->create_oci_repository_route(customer->id, tenant->name,
+                                                                grant.workspace_id);
+            if (!routed && routed.error().code == "invalid_input") {
+                return std::unexpected(RegistryRefusal{boost::http::status::bad_request,
+                                                       routed.error().message, "NAME_INVALID"});
+            }
+            if (!routed && routed.error().code == "conflict") {
+                return std::unexpected(RegistryRefusal{boost::http::status::forbidden,
+                                                       routed.error().message, "DENIED"});
+            }
+            if (!routed) {
+                return std::unexpected(unavailable(routed.error()));
+            }
+        }
+        if (!routed && write && grant.may_route) {
+            return std::unexpected(RegistryRefusal{
+                boost::http::status::forbidden,
+                "a build routes only its own target image and its cache", "DENIED"});
+        }
+        if (!routed) {
+            return std::unexpected(RegistryRefusal{
+                boost::http::status::not_found,
+                "image repository " + std::string(repository) +
+                    " has no workspace; route it with create_image_repository",
+                "NAME_UNKNOWN"});
+        }
+        if (!grant.workspace_id.empty() && routed->workspace_id != grant.workspace_id) {
+            return std::unexpected(RegistryRefusal{
+                boost::http::status::forbidden,
+                "image repository " + std::string(repository) + " belongs to another workspace",
+                "DENIED"});
+        }
+        ApiContext context = context_for(route);
+        context.workspace_id = routed->workspace_id;
+        return TenantImage{customer->id, tenant->name, routed->workspace_id, std::move(context)};
+    }
+
+    boost::http::route_task registry_refusal(boost::http::route_params& route,
+                                             const RegistryRefusal& refusal) {
+        return registry_error(route, refusal.status, refusal.message, true, refusal.code);
+    }
+
+    // A workspace that cannot be read: the pull or push may be retried.
+    boost::http::route_task registry_workspace_error(boost::http::route_params& route,
+                                                     const control::ZettaControlError& error) {
+        return registry_error(route, boost::http::status::service_unavailable,
+                              "the image repository's workspace cannot be reached: " +
+                                  error.code + ": " + error.message,
+                              true, "UNAVAILABLE");
     }
 
     boost::http::route_task registry_auth_error(boost::http::route_params& route,
@@ -14261,30 +14454,60 @@ struct ApiServer::Impl {
             route, boost::http::status::ok, "{}", "application/json; charset=utf-8", "no-store");
     }
 
+    // Authorizes a blob upload request and, for a tenant repository, resolves (or for a build's
+    // first push of its own target, writes) its route. Blobs stay in the instance registry until
+    // lake#383 phase B; the workspace records each blob its repositories received.
+    struct UploadRefusal {
+        RegistryAccess access;
+        std::optional<RegistryRefusal> refusal;
+    };
+    std::expected<std::optional<TenantImage>, UploadRefusal>
+    authorize_oci_upload(const boost::http::route_params& route, const std::string& repository) {
+        const RegistryGrant grant = registry_access(route, repository, true);
+        if (grant.access != RegistryAccess::Allowed) {
+            return std::unexpected(UploadRefusal{grant.access, std::nullopt});
+        }
+        if (!repository.contains('/')) {
+            return std::optional<TenantImage>{};
+        }
+        auto tenant = tenant_image(route, repository, grant, true);
+        if (!tenant) {
+            return std::unexpected(UploadRefusal{grant.access, tenant.error()});
+        }
+        return std::optional<TenantImage>{std::move(*tenant)};
+    }
+
     boost::http::route_task serve_oci_upload_start(boost::http::route_params& route) {
         const std::string repository = oci_repository(route);
-        const RegistryAccess access = registry_access(route, repository, true);
-        if (access != RegistryAccess::Allowed) {
-            return registry_auth_error(route, access);
+        auto authorized = authorize_oci_upload(route, repository);
+        if (!authorized) {
+            if (authorized.error().refusal) {
+                co_return co_await registry_refusal(route, *authorized.error().refusal);
+            }
+            co_return co_await registry_auth_error(route, authorized.error().access);
         }
         const auto started = artifacts.begin_upload(repository);
         if (!started) {
-            return registry_error(route, boost::http::status::bad_request, started.error(), true);
+            co_return co_await registry_error(route, boost::http::status::bad_request,
+                                              started.error(), true);
         }
         const std::string location =
             "/v2/" + repository + "/blobs/uploads/" + std::string(*started);
         route.res.set(boost::http::field::location, location);
         route.res.set("Docker-Upload-UUID", *started);
         route.res.set(boost::http::field::range, "0-0");
-        return send_text(
+        co_return co_await send_text(
             route, boost::http::status::accepted, {}, "application/octet-stream", "no-store");
     }
 
     boost::http::route_task serve_oci_upload(boost::http::route_params& route, bool finish) {
         const std::string repository = oci_repository(route);
-        const RegistryAccess access = registry_access(route, repository, true);
-        if (access != RegistryAccess::Allowed) {
-            co_return co_await registry_auth_error(route, access);
+        auto authorized = authorize_oci_upload(route, repository);
+        if (!authorized) {
+            if (authorized.error().refusal) {
+                co_return co_await registry_refusal(route, *authorized.error().refusal);
+            }
+            co_return co_await registry_auth_error(route, authorized.error().access);
         }
         const std::string upload = route_value(route, "upload");
         const auto initial_size = artifacts.upload_size(upload);
@@ -14377,6 +14600,22 @@ struct ApiServer::Impl {
                                               true,
                                               "BLOB_UPLOAD_INVALID");
         }
+        if (*authorized) {
+            // The workspace records that its space pushed this blob, so its manifests may
+            // reference it; until it does, the push is refused and the client retries.
+            TenantImage& tenant = **authorized;
+            auto records = workspace_records(tenant.context, tenant.customer_id, tenant.workspace_id);
+            if (!records) {
+                co_return co_await registry_workspace_error(route, records.error());
+            }
+            auto recorded = control::settled(co_await control::record_oci_blob(
+                *records, {.customer_id = tenant.customer_id,
+                           .digest = *completed,
+                           .size = artifacts.blob_size(*completed).value_or(0)}));
+            if (!recorded) {
+                co_return co_await registry_workspace_error(route, recorded.error());
+            }
+        }
         route.res.set(boost::http::field::location,
                       "/v2/" + repository + "/blobs/" + std::string(*completed));
         route.res.set("Docker-Content-Digest", *completed);
@@ -14386,15 +14625,61 @@ struct ApiServer::Impl {
 
     boost::http::route_task serve_oci_blob(boost::http::route_params& route, bool head) {
         const std::string repository = oci_repository(route);
-        const RegistryAccess access = registry_access(route, repository, false);
-        if (access != RegistryAccess::Allowed) {
-            co_return co_await registry_auth_error(route, access);
+        const std::string digest = route_value(route, "digest");
+        const RegistryGrant grant = registry_access(route, repository, false);
+        if (grant.access != RegistryAccess::Allowed) {
+            co_return co_await registry_auth_error(route, grant.access);
         }
-        if (!artifacts.repository_has_blob(repository, route_value(route, "digest"))) {
+        if (repository.contains('/')) {
+            // A tenant blob is readable through a repository only when one of its tags names it
+            // or references it (lake#383: one list of the repository's tags in its workspace).
+            auto tenant = tenant_image(route, repository, grant, false);
+            if (!tenant) {
+                co_return co_await registry_refusal(route, tenant.error());
+            }
+            auto records = workspace_records(tenant->context, tenant->customer_id,
+                                             tenant->workspace_id);
+            if (!records) {
+                co_return co_await registry_workspace_error(route, records.error());
+            }
+            auto tags = control::settled(
+                co_await control::list_oci_tags(*records, tenant->customer_id, tenant->name));
+            if (!tags) {
+                co_return co_await registry_workspace_error(route, tags.error());
+            }
+            bool referenced = false;
+            bool manifest = false;
+            for (const control::OciTag& tag : *tags) {
+                manifest = manifest || tag.digest == digest;
+                referenced = referenced || std::ranges::any_of(tag.references, [&](const auto& item) {
+                                 return item.digest == digest;
+                             });
+            }
+            if (manifest && !referenced) {
+                auto stored = control::settled(co_await control::get_oci_manifest(
+                    *records, tenant->customer_id, digest));
+                if (!stored) {
+                    co_return co_await registry_workspace_error(route, stored.error());
+                }
+                if (*stored) {
+                    route.res.set("Docker-Content-Digest", digest);
+                    const std::span<const char> characters((*stored)->document.data(),
+                                                           (*stored)->document.size());
+                    const auto bytes = std::as_bytes(characters);
+                    co_return co_await send_bytes(
+                        route, boost::http::status::ok, "application/octet-stream",
+                        bytes, digest, {}, head);
+                }
+            }
+            if (!referenced) {
+                co_return co_await registry_error(route, boost::http::status::not_found,
+                                                  "blob is unknown in this repository", true);
+            }
+        } else if (!artifacts.repository_has_blob(repository, digest)) {
             co_return co_await registry_error(
                 route, boost::http::status::not_found, "blob is unknown in this repository", true);
         }
-        const auto object = artifacts.blob(route_value(route, "digest"));
+        const auto object = artifacts.blob(digest);
         if (!object) {
             co_return co_await registry_error(
                 route, boost::http::status::not_found, object.error(), true);
@@ -14409,13 +14694,156 @@ struct ApiServer::Impl {
                                       head);
     }
 
+    // A tenant manifest read (lake#383): by tag, its tag record and then the manifest it names;
+    // by digest, only a manifest one of the repository's tags names.
+    boost::http::route_task serve_tenant_manifest_read(boost::http::route_params& route,
+                                                       TenantImage tenant,
+                                                       std::string reference,
+                                                       bool head) {
+        auto records = workspace_records(tenant.context, tenant.customer_id, tenant.workspace_id);
+        if (!records) {
+            co_return co_await registry_workspace_error(route, records.error());
+        }
+        std::string digest;
+        std::string content_type;
+        if (ArtifactRegistry::digest_name(reference)) {
+            auto tags = control::settled(
+                co_await control::list_oci_tags(*records, tenant.customer_id, tenant.name));
+            if (!tags) {
+                co_return co_await registry_workspace_error(route, tags.error());
+            }
+            const auto named = std::ranges::find(*tags, reference, &control::OciTag::digest);
+            if (named != tags->end()) {
+                digest = named->digest;
+                content_type = named->content_type;
+            }
+        } else if (ArtifactRegistry::tag_name(reference)) {
+            auto tag = control::settled(co_await control::get_oci_tag(
+                *records, tenant.customer_id, tenant.name, reference));
+            if (!tag) {
+                co_return co_await registry_workspace_error(route, tag.error());
+            }
+            if (*tag) {
+                digest = (*tag)->digest;
+                content_type = (*tag)->content_type;
+            }
+        }
+        if (digest.empty()) {
+            co_return co_await registry_error(route, boost::http::status::not_found,
+                                              "OCI manifest is unknown in this repository", true,
+                                              "MANIFEST_UNKNOWN");
+        }
+        auto manifest =
+            control::settled(co_await control::get_oci_manifest(*records, tenant.customer_id, digest));
+        if (!manifest) {
+            co_return co_await registry_workspace_error(route, manifest.error());
+        }
+        if (!*manifest) {
+            co_return co_await registry_error(route, boost::http::status::not_found,
+                                              "OCI manifest is unknown in this repository", true,
+                                              "MANIFEST_UNKNOWN");
+        }
+        route.res.set("Docker-Content-Digest", digest);
+        const std::span<const char> characters((*manifest)->document.data(),
+                                               (*manifest)->document.size());
+        const auto bytes = std::as_bytes(characters);
+        co_return co_await send_bytes(
+            route, boost::http::status::ok,
+            content_type.empty() ? "application/vnd.oci.image.manifest.v1+json" : content_type,
+            bytes, digest, {}, head);
+    }
+
+    // A tenant manifest push (lake#383): the manifest is stored once in the workspace (`if_absent`,
+    // keyed by digest) and the tag moved to it at the revision read. Its config and layers must
+    // already be in the instance registry, where blobs stay until phase B.
+    boost::http::route_task serve_tenant_manifest_write(boost::http::route_params& route,
+                                                        TenantImage tenant,
+                                                        std::string repository,
+                                                        std::string reference,
+                                                        std::string content_type,
+                                                        std::string document) {
+        if (!ArtifactRegistry::tag_name(reference)) {
+            co_return co_await registry_error(route, boost::http::status::bad_request,
+                                              "OCI manifest name is invalid", true, "TAG_INVALID");
+        }
+        const std::string digest = ArtifactRegistry::digest_of(document);
+        if (ArtifactRegistry::digest_name(reference) && reference != digest) {
+            co_return co_await registry_error(route, boost::http::status::bad_request,
+                                              "OCI manifest bytes do not match their digest", true,
+                                              "DIGEST_INVALID");
+        }
+        const auto checked = artifacts.check_manifest(document);
+        if (!checked) {
+            co_return co_await registry_error(route, boost::http::status::bad_request,
+                                              checked.error(), true, "MANIFEST_INVALID");
+        }
+        std::vector<control::OciReference> references;
+        for (const auto& [blob, size] : *checked) {
+            references.push_back({blob, size});
+        }
+        auto records = workspace_records(tenant.context, tenant.customer_id, tenant.workspace_id);
+        if (!records) {
+            co_return co_await registry_workspace_error(route, records.error());
+        }
+        // Only blobs this space pushed into this workspace: knowing another space's digest is not
+        // enough to publish its layer.
+        for (const control::OciReference& reference : references) {
+            auto pushed = control::settled(
+                co_await control::has_oci_blob(*records, tenant.customer_id, reference.digest));
+            if (!pushed) {
+                co_return co_await registry_workspace_error(route, pushed.error());
+            }
+            if (!*pushed) {
+                co_return co_await registry_error(
+                    route, boost::http::status::bad_request,
+                    "OCI manifest references a blob not pushed to this workspace: " +
+                        reference.digest,
+                    true, "MANIFEST_BLOB_UNKNOWN");
+            }
+        }
+        auto stored = control::settled(co_await control::put_oci_manifest(
+            *records, {.customer_id = tenant.customer_id,
+                       .digest = digest,
+                       .content_type = content_type,
+                       .document = document,
+                       .references = references}));
+        if (!stored) {
+            co_return co_await registry_workspace_error(route, stored.error());
+        }
+        auto tagged = control::settled(co_await control::set_oci_tag(
+            *records, {.customer_id = tenant.customer_id,
+                       .repository = tenant.name,
+                       .tag = reference,
+                       .digest = digest,
+                       .content_type = content_type,
+                       .manifest_size = document.size(),
+                       .references = std::move(references)}));
+        if (!tagged) {
+            co_return co_await registry_workspace_error(route, tagged.error());
+        }
+        route.res.set(boost::http::field::location,
+                      "/v2/" + repository + "/manifests/" + reference);
+        route.res.set("Docker-Content-Digest", digest);
+        co_return co_await send_text(
+            route, boost::http::status::created, {}, "application/json; charset=utf-8", "no-store");
+    }
+
     boost::http::route_task serve_oci_manifest(boost::http::route_params& route, bool head) {
         const std::string repository = oci_repository(route);
         const std::string reference = route_value(route, "reference");
+        const bool tenant_path = repository.contains('/');
         if (route.req.method() != boost::http::method::put) {
-            const RegistryAccess access = registry_access(route, repository, false);
-            if (access != RegistryAccess::Allowed) {
-                co_return co_await registry_auth_error(route, access);
+            const RegistryGrant grant = registry_access(route, repository, false);
+            if (grant.access != RegistryAccess::Allowed) {
+                co_return co_await registry_auth_error(route, grant.access);
+            }
+            if (tenant_path) {
+                auto tenant = tenant_image(route, repository, grant, false);
+                if (!tenant) {
+                    co_return co_await registry_refusal(route, tenant.error());
+                }
+                co_return co_await serve_tenant_manifest_read(route, std::move(*tenant), reference,
+                                                              head);
             }
             const auto object = artifacts.manifest(repository, reference);
             if (!object) {
@@ -14431,9 +14859,17 @@ struct ApiServer::Impl {
                                           {},
                                           head);
         }
-        const RegistryAccess access = registry_access(route, repository, true);
-        if (access != RegistryAccess::Allowed) {
-            co_return co_await registry_auth_error(route, access);
+        const RegistryGrant grant = registry_access(route, repository, true);
+        if (grant.access != RegistryAccess::Allowed) {
+            co_return co_await registry_auth_error(route, grant.access);
+        }
+        std::optional<TenantImage> tenant;
+        if (tenant_path) {
+            auto resolved = tenant_image(route, repository, grant, true);
+            if (!resolved) {
+                co_return co_await registry_refusal(route, resolved.error());
+            }
+            tenant = std::move(*resolved);
         }
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error || body.empty()) {
@@ -14444,6 +14880,11 @@ struct ApiServer::Impl {
             route.req.count(boost::http::field::content_type) == 0
                 ? "application/vnd.oci.image.manifest.v1+json"
                 : std::string(route.req.at(boost::http::field::content_type));
+        if (tenant) {
+            co_return co_await serve_tenant_manifest_write(route, std::move(*tenant), repository,
+                                                           reference, content_type,
+                                                           std::move(body));
+        }
         const std::span<const char> characters(body.data(), body.size());
         const auto published =
             artifacts.put_manifest(repository, reference, content_type, std::as_bytes(characters));

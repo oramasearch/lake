@@ -182,21 +182,24 @@ list it, with `counts` (`repositories`, `live_repositories`, `tombstoned_reposit
   workspace Zetta, lake#315 part 2) goes with the Zetta, like its forge records, so the cascade
   takes no step of its own for it;
 - its apps (desired `deleted`) and its unfinished builds (desired `cancelled`);
-- its tenant images: `<space>/<name>` and `<space>/cache/<name>` for each of its apps and each
-  image its builds target, when the instance registry holds tags for them. A name an app or build
-  of another live workspace of the same space also uses is kept, because images are addressed per
-  space until [lake#383](https://github.com/oramasearch/lake/issues/383).
+- its tenant images: every repository routed to it in `oci_repository_routes`
+  ([lake#383](https://github.com/oramasearch/lake/issues/383), state `routed`), whose manifests and
+  tags go with its Zetta; and what the instance registry still holds from before that split,
+  `<space>/<name>` and `<space>/cache/<name>` for each of its apps and each image its builds target
+  (state `tagged`), unless an app or build of another live workspace of the space uses the name.
 
 **One PostgreSQL transaction** tombstones the repositories, deletes the apps, cancels the builds,
-sets the workspace's desired state to `deleted` with its services `absent`, and records the
+deletes the workspace's image routes, sets the workspace's desired state to `deleted` with its
+services `absent`, and records the
 deletion with everything it destroyed in `workspace_deletions` (migration
 `0065_workspace_deletions`). The operator reads only the desired state, as before (decision 51).
 
 **After the commit**, lake removes what lives outside PostgreSQL and records the central audit:
 
 1. drops each destroyed repository's search segments, and the indexed blobs nothing else uses;
-2. removes each image repository's tags and manifests from the instance registry, so nothing can
-   pull it. Blobs stay: the registry has no collection yet, and other manifests may share them;
+2. removes whatever the instance registry still holds of each image repository from before
+   lake#383 (its tags and manifest pointers), so nothing can pull it. Blobs stay until lake#383
+   phase B: the registry has no collection yet, and other manifests may share them;
 3. records one central audit event per destroyed repository, app, build and image, and one for the
    cascade (`workspace/<id>`), all with request id `workspace-deletion:<workspace_id>`. The
    workspace's own audit chain goes with its Zetta, so this is where the history survives;
@@ -214,9 +217,9 @@ for any tombstone whose retention has ended. When repositories move into the wor
 ([lake#380](https://github.com/oramasearch/lake/issues/380)), lake closes that store and releases
 its bucket lease before it reports the deletion complete (`WorkspaceContent::close_workspace_store`
 in `include/lake/api/workspace_deletion.hpp`), and the operator's deletion of the namespace and
-volume destroys the bytes. When tenant images move ([lake#383](https://github.com/oramasearch/lake/issues/383)),
-the workspace's rows in `oci_repository_routes` are deleted in the transaction and its images go
-with its store.
+volume destroys the bytes. Tenant image routes are deleted in the transaction
+([lake#383](https://github.com/oramasearch/lake/issues/383) phase A); their blobs move into the
+workspace's store, and go with it, in phase B.
 
 **Result.** `delete_workspace` answers the workspace's row (desired `deleted`) and `deletion`:
 `requested_by`, `requested_at`, `completed`, `completed_at`, the destroyed `repositories`, `apps`,

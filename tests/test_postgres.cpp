@@ -4427,3 +4427,127 @@ TEST(PostgresAgentTasks, MigrationRecordsEachTasksOwnerAndKeepsDispatchContentFr
     EXPECT_EQ(rows.at(gone).outcome, "workspace_deleted");
     EXPECT_EQ(rows.at(unassigned).outcome, "needs_selection");
 }
+
+// Migration 0068 (lake#383 phase A): tenant image repositories get a route only where their owner
+// is unambiguous (the apps and builds of one live workspace use the name; both `<name>` and
+// `cache/<name>`), a name two workspaces use and one used only by a deleted workspace get none, a
+// rerun changes nothing, and a route never changes or points at a deleted workspace.
+TEST(PostgresImageRoutes, MigrationRoutesUnambiguousImagesOnly) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(uri, "image-routes-migration-test");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const std::string name = "image-routes-" + suffix;
+    const auto user = store->create_user({"taap:" + name, "", "Migration"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", name});
+    ASSERT_TRUE(customer) << customer.error().message;
+    std::vector<std::string> workspaces;
+    for (const char* label : {"one", "two", "gone"}) {
+        const auto workspace = store->create_workspace({customer->id, label, "dev", ""});
+        ASSERT_TRUE(workspace) << workspace.error().message;
+        workspaces.push_back(workspace->id);
+    }
+    const auto app = [&](const std::string& workspace, const std::string& image) {
+        const auto created = store->create_web_app(
+            {.customer_id = customer->id,
+             .workspace_id = workspace,
+             .name = image,
+             .mode = "image",
+             .image = "lake.example.test/" + name + "/" + image + ":v1",
+             .framework = "container",
+             .port = 8080,
+             .host = image + "-" + suffix + ".apps.example.test"});
+        ASSERT_TRUE(created) << created.error().message;
+    };
+    app(workspaces[0], "web");
+    app(workspaces[0], "shared");
+    app(workspaces[2], "lost");
+    const auto source = store->create_repository({customer->id, "source", "", "private", workspaces[1]});
+    ASSERT_TRUE(source) << source.error().message;
+    for (const char* image : {"shared", "api"}) {
+        const auto build = store->create_build({.customer_id = customer->id,
+                                                .workspace_id = workspaces[1],
+                                                .repository = source->id,
+                                                .revision = "main",
+                                                .target = "registry/" + name + "/" + image + ":v1"});
+        ASSERT_TRUE(build) << build.error().message;
+    }
+    ASSERT_TRUE(store->update_workspace(workspaces[2], {.desired = "deleted"}));
+
+    pqxx::connection connection(uri);
+    {
+        pqxx::work tx(connection);
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0068_oci_repository_routes'");
+        tx.exec_params("DELETE FROM oci_repository_routes WHERE customer_id = $1::uuid",
+                       customer->id);
+        tx.commit();
+    }
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0068_oci_repository_routes:");
+    ASSERT_NE(start, std::string::npos);
+    const auto routes = [&] {
+        std::map<std::string, std::string> found;
+        pqxx::work tx(connection);
+        for (const auto& row : tx.exec_params(
+                 "SELECT name, workspace_id::text FROM oci_repository_routes "
+                 "WHERE customer_id = $1::uuid",
+                 customer->id)) {
+            found[row[0].as<std::string>()] = row[1].as<std::string>();
+        }
+        return found;
+    };
+    const std::map<std::string, std::string> expected{{"web", workspaces[0]},
+                                                      {"cache/web", workspaces[0]},
+                                                      {"api", workspaces[1]},
+                                                      {"cache/api", workspaces[1]}};
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema.substr(start));
+        tx.commit();
+        EXPECT_EQ(routes(), expected) << "pass " << pass;
+    }
+    // A route made after the migration is untouched by a rerun of the whole schema.
+    ASSERT_TRUE(store->create_oci_repository_route(customer->id, "shared", workspaces[1]));
+    for (int pass = 0; pass < 2; ++pass) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(schema);
+        tx.commit();
+    }
+    EXPECT_EQ(routes().size(), expected.size() + 1);
+    EXPECT_EQ(routes().at("shared"), workspaces[1]);
+
+    // Immutable, and only to a live workspace of the same space.
+    {
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec_params("UPDATE oci_repository_routes SET workspace_id = $2::uuid "
+                                    "WHERE customer_id = $1::uuid AND name = 'web'",
+                                    customer->id, workspaces[1]),
+                     pqxx::check_violation);
+    }
+    {
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec_params("UPDATE oci_repository_routes SET name = 'renamed' "
+                                    "WHERE customer_id = $1::uuid AND name = 'web'",
+                                    customer->id),
+                     pqxx::check_violation);
+    }
+    {
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec_params("INSERT INTO oci_repository_routes (customer_id, name, "
+                                    "workspace_id) VALUES ($1::uuid, 'late', $2::uuid)",
+                                    customer->id, workspaces[2]),
+                     pqxx::check_violation);
+    }
+    const auto refused = store->create_oci_repository_route(customer->id, "web", workspaces[1]);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, "conflict");
+    const auto deleted = store->create_oci_repository_route(customer->id, "late", workspaces[2]);
+    ASSERT_FALSE(deleted);
+    EXPECT_EQ(deleted.error().code, "invalid_input");
+}

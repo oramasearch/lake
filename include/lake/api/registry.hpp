@@ -198,10 +198,6 @@ struct ApiContext {
     // Repository transfer and build records on their way to the workspace Zettas (lake#348,
     // docs/api/metering.md). Null: this lake records no repository usage (no workspaces).
     MeteringRecorder* metering_recorder = nullptr;
-    // Unique bytes the OCI registry holds below `<space>/` (images and their build cache), each
-    // digest counted once (docs/api/metering.md). Injected by the HTTP server, which owns the
-    // registry storage; null when no registry is configured, so usage reports images unmeasured.
-    std::function<std::optional<std::uint64_t>(const std::string& space)> registry_space_bytes;
     // Where a workspace's content lives outside PostgreSQL (the instance registry's tenant images),
     // for the workspace deletion cascade (lake#514, workspace_deletion.hpp). Injected by the HTTP
     // server; null when it has no registry storage.

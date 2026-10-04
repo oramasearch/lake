@@ -755,6 +755,22 @@ Result<WorkspaceDeletion> InMemoryStore::delete_workspace_cascade(
     for (const std::string& image : request.images) {
         deletion.images.push_back({"", image, "tagged"});
     }
+    // The workspace's tenant image routes (lake#383) go in the same change; their manifests and
+    // tags go with its Zetta.
+    const auto owner = std::ranges::find(customers_, row->customer_id, &Customer::id);
+    for (auto route = oci_repository_routes_.begin(); route != oci_repository_routes_.end();) {
+        if (route->workspace_id != row->id) {
+            ++route;
+            continue;
+        }
+        const std::string image =
+            (owner == customers_.end() ? std::string() : owner->name) + "/" + route->name;
+        if (std::ranges::find(request.images, image) == request.images.end()) {
+            deletion.images.push_back({"", image, "routed"});
+        }
+        route = oci_repository_routes_.erase(route);
+    }
+    std::ranges::sort(deletion.images, {}, &WorkspaceDeletionItem::name);
     row->desired = "deleted";
     ++row->generation;
     row->updated_at = now;
@@ -767,6 +783,98 @@ Result<WorkspaceDeletion> InMemoryStore::delete_workspace_cascade(
     }
     workspace_deletions_.push_back(deletion);
     return deletion;
+}
+
+Result<OciRepositoryRoute> InMemoryStore::create_oci_repository_route(
+    const std::string& customer_id, const std::string& name, const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    if (!valid_oci_route_name(name)) {
+        return std::unexpected(StoreError{"invalid_input", "name is not a valid image repository name"});
+    }
+    const auto workspace = std::ranges::find(workspaces_, workspace_id, &Workspace::id);
+    if (workspace == workspaces_.end() || workspace->customer_id != customer_id ||
+        workspace->desired == "deleted") {
+        return std::unexpected(
+            StoreError{"invalid_input", "workspace_id must name a live workspace of this space"});
+    }
+    const auto existing = std::ranges::find_if(oci_repository_routes_, [&](const auto& route) {
+        return route.customer_id == customer_id && route.name == name;
+    });
+    if (existing != oci_repository_routes_.end()) {
+        if (existing->workspace_id != workspace_id) {
+            return std::unexpected(StoreError{
+                "conflict", "image repository " + name + " belongs to another workspace"});
+        }
+        return *existing;
+    }
+    const std::string now = now_iso8601();
+    oci_repository_routes_.push_back({customer_id, name, workspace_id, now, now});
+    return oci_repository_routes_.back();
+}
+
+Result<OciRepositoryRoute> InMemoryStore::get_oci_repository_route(const std::string& customer_id,
+                                                                   const std::string& name) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find_if(oci_repository_routes_, [&](const auto& route) {
+        return route.customer_id == customer_id && route.name == name;
+    });
+    if (found == oci_repository_routes_.end()) {
+        return std::unexpected(StoreError{"not_found", "no image repository " + name});
+    }
+    return *found;
+}
+
+Result<std::vector<OciRepositoryRoute>>
+InMemoryStore::list_oci_repository_routes(const std::string& customer_id,
+                                          const std::string& workspace_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<OciRepositoryRoute> routes;
+    for (const OciRepositoryRoute& route : oci_repository_routes_) {
+        if (route.customer_id == customer_id &&
+            (workspace_id.empty() || route.workspace_id == workspace_id)) {
+            routes.push_back(route);
+        }
+    }
+    std::ranges::sort(routes, {}, &OciRepositoryRoute::name);
+    return routes;
+}
+
+Result<std::vector<OciRepositoryRoute>>
+InMemoryStore::delete_oci_repository_route(const std::string& customer_id, const std::string& name,
+                                           const std::string& to_workspace_id) {
+    std::lock_guard lock(mutex_);
+    if (!to_workspace_id.empty()) {
+        const auto workspace = std::ranges::find(workspaces_, to_workspace_id, &Workspace::id);
+        if (workspace == workspaces_.end() || workspace->customer_id != customer_id ||
+            workspace->desired == "deleted") {
+            return std::unexpected(StoreError{
+                "invalid_input", "workspace_id must name a live workspace of this space"});
+        }
+    }
+    std::vector<std::string> names{name};
+    if (!name.starts_with("cache/")) {
+        names.push_back("cache/" + name);
+    }
+    std::vector<OciRepositoryRoute> removed;
+    for (const std::string& each : names) {
+        const auto found = std::ranges::find_if(oci_repository_routes_, [&](const auto& route) {
+            return route.customer_id == customer_id && route.name == each;
+        });
+        if (found == oci_repository_routes_.end()) {
+            if (each == name) {
+                return std::unexpected(StoreError{"not_found", "no image repository " + name});
+            }
+            continue;
+        }
+        removed.push_back(*found);
+        if (to_workspace_id.empty()) {
+            oci_repository_routes_.erase(found);
+        } else {
+            const std::string now = now_iso8601();
+            *found = {customer_id, each, to_workspace_id, now, now};
+        }
+    }
+    return removed;
 }
 
 Result<WorkspaceDeletion> InMemoryStore::get_workspace_deletion(const std::string& workspace_id) {
