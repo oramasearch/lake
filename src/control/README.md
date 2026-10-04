@@ -199,4 +199,5 @@ created only where none exists, and one listing per repository. The stores keep
 `oci_repository_routes` (migration `0068`): a route is created only for a live workspace of the
 space, answered again for the same workspace, a `conflict` for another, and deleted in
 `delete_workspace_cascade`, which lists each as an image in state `routed`, or by
-`delete_oci_repository_route` (the operator's `unroute_image_repository`).
+`delete_oci_repository_route` (the operator's `unroute_image_repository`), which removes `<image>`
+with `cache/<image>` and, given a workspace, writes them again for it in the same transaction.

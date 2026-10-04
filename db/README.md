@@ -251,7 +251,8 @@ Migration `0068_oci_repository_routes` splits the registry (decision 54 S4-S6, l
 customer id and the name below it, `<image>` or `cache/<image>`) to the workspace whose Zetta holds
 its manifests and tags (`lake_oci_manifests`, `lake_oci_tags`); it holds no manifest, digest or tag.
 A build's first push writes it from the build's workspace and `create_image_repository` from an
-explicit `workspace_id`; there is no default. A name is `<image>` or `cache/<image>` only; a build routes only its own target, and the operator's `unroute_image_repository` deletes a wrong route. `enforce_oci_repository_route` refuses any change of a
+explicit `workspace_id`; there is no default. A name is `<image>` or `cache/<image>` only; a build routes only its own target, and the operator's `unroute_image_repository` deletes a wrong route, or moves it to another workspace
+in one transaction (`cache/<image>` with `<image>`). `enforce_oci_repository_route` refuses any change of a
 route and any route to a workspace that is not live in the space, and the workspace deletion cascade
 deletes a workspace's routes. Once, each image name the apps and builds of exactly one live
 workspace use is routed there (`<name>` and `cache/<name>`); a name several workspaces use is

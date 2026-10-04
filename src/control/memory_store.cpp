@@ -839,17 +839,41 @@ InMemoryStore::list_oci_repository_routes(const std::string& customer_id,
     return routes;
 }
 
-Result<OciRepositoryRoute> InMemoryStore::delete_oci_repository_route(const std::string& customer_id,
-                                                                      const std::string& name) {
+Result<std::vector<OciRepositoryRoute>>
+InMemoryStore::delete_oci_repository_route(const std::string& customer_id, const std::string& name,
+                                           const std::string& to_workspace_id) {
     std::lock_guard lock(mutex_);
-    const auto found = std::ranges::find_if(oci_repository_routes_, [&](const auto& route) {
-        return route.customer_id == customer_id && route.name == name;
-    });
-    if (found == oci_repository_routes_.end()) {
-        return std::unexpected(StoreError{"not_found", "no image repository " + name});
+    if (!to_workspace_id.empty()) {
+        const auto workspace = std::ranges::find(workspaces_, to_workspace_id, &Workspace::id);
+        if (workspace == workspaces_.end() || workspace->customer_id != customer_id ||
+            workspace->desired == "deleted") {
+            return std::unexpected(StoreError{
+                "invalid_input", "workspace_id must name a live workspace of this space"});
+        }
     }
-    OciRepositoryRoute removed = *found;
-    oci_repository_routes_.erase(found);
+    std::vector<std::string> names{name};
+    if (!name.starts_with("cache/")) {
+        names.push_back("cache/" + name);
+    }
+    std::vector<OciRepositoryRoute> removed;
+    for (const std::string& each : names) {
+        const auto found = std::ranges::find_if(oci_repository_routes_, [&](const auto& route) {
+            return route.customer_id == customer_id && route.name == each;
+        });
+        if (found == oci_repository_routes_.end()) {
+            if (each == name) {
+                return std::unexpected(StoreError{"not_found", "no image repository " + name});
+            }
+            continue;
+        }
+        removed.push_back(*found);
+        if (to_workspace_id.empty()) {
+            oci_repository_routes_.erase(found);
+        } else {
+            const std::string now = now_iso8601();
+            *found = {customer_id, each, to_workspace_id, now, now};
+        }
+    }
     return removed;
 }
 

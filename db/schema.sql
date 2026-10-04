@@ -3520,7 +3520,7 @@ INSERT INTO schema_migrations (version) VALUES ('0066_assign_unrouted_repositori
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS oci_repository_routes (
     customer_id  uuid        NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
-    name         text        NOT NULL CHECK (length(name) <= 196 AND name ~
+    name         text        NOT NULL CHECK (length(regexp_replace(name, '^cache/', '')) <= 190 AND name ~
                      '^(cache/)?[a-z0-9]([a-z0-9._-]*[a-z0-9])?$'),
     workspace_id uuid        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     created_at   timestamptz NOT NULL DEFAULT now(),

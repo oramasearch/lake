@@ -1278,11 +1278,15 @@ public:
     // A space's routes by name; `workspace_id` empty: every workspace.
     virtual Result<std::vector<OciRepositoryRoute>>
     list_oci_repository_routes(const std::string& customer_id, const std::string& workspace_id) = 0;
-    // Removes a route (the operator's unroute_image_repository): the workspace's records stay
-    // where they are, and a later create or copy may route the name again. Answers the route
-    // removed; `not_found` when there is none.
-    virtual Result<OciRepositoryRoute> delete_oci_repository_route(const std::string& customer_id,
-                                                                   const std::string& name) = 0;
+    // Removes a route, or moves it (the operator's unroute_image_repository), in one transaction:
+    // removing `<image>` also removes `cache/<image>`; with `to_workspace_id` each removed route is
+    // written again for that workspace (`invalid_input` unless it is live in the space), so no
+    // push in between can claim the name. The workspace's records stay where they are, and after a
+    // plain removal a later create or copy may route the name again. Answers the routes removed,
+    // `name`'s first; `not_found` when `name` has none.
+    virtual Result<std::vector<OciRepositoryRoute>>
+    delete_oci_repository_route(const std::string& customer_id, const std::string& name,
+                                const std::string& to_workspace_id = {}) = 0;
     // Managed services (docs/control-plane/services.md). Lists the customer's services, oldest
     // first, leaving out deleted ones the operator has finished with.
     virtual Result<std::vector<ManagedService>> list_services(const std::string& customer_id) = 0;

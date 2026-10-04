@@ -2487,8 +2487,12 @@ TEST_P(TenantImages, RoutesAreClaimedOnlyByTheirOwnerAndUnroutedOnlyByTheOperato
     EXPECT_TRUE(store->get_oci_repository_route(alpha, "web"));
     const json unrouted = call("unroute_image_repository", {{"customer_id", alpha}, {"name", "web"}});
     ASSERT_TRUE(unrouted.value("ok", false)) << unrouted;
-    EXPECT_EQ(unrouted["value"]["workspace_id"], w1);
+    ASSERT_EQ(unrouted["value"]["routes"].size(), 2U) << unrouted;
+    EXPECT_EQ(unrouted["value"]["routes"][0]["name"], "web");
+    EXPECT_EQ(unrouted["value"]["routes"][0]["workspace_id"], w1);
+    EXPECT_EQ(unrouted["value"]["routes"][1]["name"], "cache/web");
     EXPECT_FALSE(store->get_oci_repository_route(alpha, "web"));
+    EXPECT_FALSE(store->get_oci_repository_route(alpha, "cache/web")) << "the cache goes with it";
     EXPECT_EQ(workspaces->records(w1).rows("oci_tags").size(), 1U);
     EXPECT_EQ(call("unroute_image_repository", {{"customer_id", alpha}, {"name", "web"}})["error"]["code"],
               "not_found");
@@ -2583,6 +2587,103 @@ TEST_P(TenantImages, RoutesAreClaimedOnlyByTheirOwnerAndUnroutedOnlyByTheOperato
                 "current_database()); END $$");
         tx.exec("DROP SCHEMA " + broken + " CASCADE");
     }
+}
+
+// Moving a route (lake#383): unroute_image_repository with workspace_id deletes and rewrites the
+// route of `<image>` and of `cache/<image>` in one transaction, so a build of the old workspace
+// pushing all the while never claims the name back, and the image ends routed to the new
+// workspace; unrouting `cache/<image>` alone leaves `<image>`; a missing, unknown, foreign or
+// deleted target is invalid_input and moves nothing.
+TEST_P(TenantImages, AMoveReroutesAnImageAndItsCacheInOneStep) {
+    TemporarySyncRoot temporary;
+    const auto [alpha, alpha_name] = space("alpha");
+    const auto [beta, beta_name] = space("beta");
+    const std::string w1 = workspaces->create(alpha, "w1");
+    const std::string w2 = workspaces->create(alpha, "w2");
+    const std::string b1 = workspaces->create(beta, "b1");
+    start(temporary.path());
+    const auto source = store->create_repository({alpha, "source-" + suffix, "", "private", w1});
+    ASSERT_TRUE(source) << source.error().message;
+    const auto build = store->create_build({.customer_id = alpha,
+                                            .workspace_id = w1,
+                                            .repository = source->id,
+                                            .revision = "main",
+                                            .target = "registry/" + alpha_name + "/web:v1"});
+    ASSERT_TRUE(build) << build.error().message;
+    const json hashes{{"push", lake::control::identity_crypto::sha256_hex("mover-push")}};
+    if (database_uri.empty()) {
+        ASSERT_TRUE(static_cast<lake::control::InMemoryStore&>(*store).set_build_status(
+            build->id, {.phase = "Running", .token_hashes = hashes}));
+    } else {
+        pqxx::connection connection(database_uri);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE builds SET phase = 'Running', token_hashes_json = $2::jsonb "
+                       "WHERE id = $1::uuid",
+                       build->id, hashes.dump());
+        tx.commit();
+    }
+    const std::string basic = "Basic " + base64_bytes(bytes("lake:mover-push"));
+    ASSERT_TRUE(push_image(alpha_name + "/web", "v1", R"({"w":1})", "w1", basic).starts_with("{"));
+    ASSERT_TRUE(push_blob(alpha_name + "/cache/web", "cache", basic).starts_with("sha256:"));
+
+    // Refused targets move nothing.
+    for (const json& bad : {json{{"customer_id", alpha}, {"name", "web"}, {"workspace_id", ""}},
+                            json{{"customer_id", alpha}, {"name", "web"},
+                                 {"workspace_id", lake::control::new_uuid_v4()}},
+                            json{{"customer_id", alpha}, {"name", "web"}, {"workspace_id", b1}}}) {
+        const json refused = call("unroute_image_repository", bad);
+        EXPECT_EQ(refused["error"]["code"], "invalid_input") << refused;
+    }
+    EXPECT_EQ(store->get_oci_repository_route(alpha, "web")->workspace_id, w1);
+    EXPECT_EQ(store->get_oci_repository_route(alpha, "cache/web")->workspace_id, w1);
+
+    // The old workspace's build keeps pushing while the operator moves the image.
+    std::atomic<bool> moving{true};
+    std::atomic<int> attempts{0};
+    std::thread pusher([&] {
+        // Either outcome of each request is fine here (accepted before the move, refused after
+        // it); only where the route ends matters.
+        const auto attempt = [&](const std::string& repository, const std::string& contents) {
+            const std::string started =
+                http_request(server->port(), "POST", "/v2/" + repository + "/blobs/uploads/", "",
+                             "application/octet-stream", {}, basic);
+            const std::string location = response_header(started, "Location");
+            if (!location.empty()) {
+                http_request(server->port(), "PUT",
+                             location + "?digest=sha256:" +
+                                 lake::control::identity_crypto::sha256_hex(contents),
+                             contents, "application/octet-stream", {}, basic);
+            }
+        };
+        while (moving.load() || attempts.load() < 20) {
+            attempt(alpha_name + "/web", "racing-" + std::to_string(attempts.load()));
+            attempt(alpha_name + "/cache/web", "racing-cache");
+            ++attempts;
+        }
+    });
+    while (attempts.load() < 5) {
+        std::this_thread::yield();
+    }
+    const json moved = call("unroute_image_repository",
+                            {{"customer_id", alpha}, {"name", "web"}, {"workspace_id", w2}});
+    moving = false;
+    pusher.join();
+    ASSERT_TRUE(moved.value("ok", false)) << moved;
+    ASSERT_EQ(moved["value"]["routes"].size(), 2U) << moved;
+    EXPECT_EQ(moved["value"]["routes"][1]["name"], "cache/web");
+    EXPECT_EQ(store->get_oci_repository_route(alpha, "web")->workspace_id, w2);
+    EXPECT_EQ(store->get_oci_repository_route(alpha, "cache/web")->workspace_id, w2);
+    const std::string late = push_blob(alpha_name + "/web", "late", basic);
+    EXPECT_NE(late.find(" 403 "), std::string::npos) << late;
+    EXPECT_EQ(workspaces->records(w1).rows("oci_tags").size(), 1U) << "w1 keeps its records";
+
+    // The cache alone may be unrouted; its image stays.
+    const json cache_only = call("unroute_image_repository", {{"customer_id", alpha}, {"name", "cache/web"}});
+    ASSERT_TRUE(cache_only.value("ok", false)) << cache_only;
+    EXPECT_EQ(cache_only["value"]["routes"].size(), 1U);
+    EXPECT_FALSE(store->get_oci_repository_route(alpha, "cache/web"));
+    EXPECT_EQ(store->get_oci_repository_route(alpha, "web")->workspace_id, w2);
+    server->stop();
 }
 
 INSTANTIATE_TEST_SUITE_P(Stores, TenantImages, testing::Values(false, true),

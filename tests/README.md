@@ -585,7 +585,8 @@ Tenant images (lake#383 phase A): `test_api.cpp`
 covers two spaces with two workspaces each, explicit routing with missing, malformed, unknown,
 foreign and deleted `workspace_id`, immutable routes, a build claiming only its own target, an app
 moved between workspaces and unrouted by the operator, foreign layers refused, unreadable routes as
-503 (`RoutesAreClaimedOnlyByTheirOwnerAndUnroutedOnlyByTheOperator`), push and pull through the route, sealed records
+503 (`RoutesAreClaimedOnlyByTheirOwnerAndUnroutedOnlyByTheOperator`), a move with the cache name
+while the old workspace's build keeps pushing (`AMoveReroutesAnImageAndItsCacheInOneStep`), push and pull through the route, sealed records
 only in the routed workspace, builds confined to their workspace, npm and one-component OCI
 unaffected, a workspace that is not ready, workspace deletion and the copy; the `RegistryProtocols`
 tests run tenant pushes against routed workspaces; `WorkspaceRecords.ImageTagsMoveAtTheRevisionReadAndManifestsAreWrittenOnce`

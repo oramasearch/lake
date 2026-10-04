@@ -51,11 +51,16 @@ as a named exception: one instance-wide namespace with public reads.
   `/name`. There is no default workspace. Repeating it for the same workspace answers the route; a
   name another workspace holds is `conflict`. A push to an unrouted repository is OCI
   `404 NAME_UNKNOWN`.
-- **Removing a wrong route.** `unroute_image_repository` (`customer_id`, `name`; operator bearer
-  only, audited in the central log as control plane) deletes a route, for example after an app was
-  recreated in another workspace. The old workspace's manifest and tag records stay where they are
-  and go with that workspace; a later `create_image_repository`, build push or copy routes the
-  name again.
+- **Removing or moving a wrong route.** `unroute_image_repository` (`customer_id`, `name`,
+  optional `workspace_id`; operator bearer only, audited in the central log as control plane)
+  deletes a route, for example after an app was recreated in another workspace. Removing `<image>`
+  also removes `cache/<image>`; removing `cache/<image>` alone leaves `<image>`. With
+  `workspace_id` it moves them there instead: the routes are deleted and written again in one
+  transaction, so a build of the old workspace still pushing cannot claim the name in between. The
+  target must be a live workspace of the space (otherwise `invalid_input` at `/workspace_id`, and
+  nothing changes). The old workspace's manifest and tag records stay where they are and go with
+  that workspace; after a plain removal a later `create_image_repository`, build push or copy
+  routes the name again.
 - **Manifests and tags are workspace records** (sealed, as every lake record,
   [workspace records](../architecture/workspace-records.md)). `lake_oci_manifests` holds one record
   per manifest of the space, keyed by the blind index of its digest, written `if_absent`: the exact
@@ -182,7 +187,8 @@ not ready refused, and workspace deletion removing the route.
 `Stores/TenantImages.RoutesAreClaimedOnlyByTheirOwnerAndUnroutedOnlyByTheOperator/{Memory,Postgres}`
 a build claiming only its own target, an app moved between workspaces and its route removed by
 the operator, foreign layers refused, an app without a workspace, and unreadable routes as `503`,
-and
+`Stores/TenantImages.AMoveReroutesAnImageAndItsCacheInOneStep/{Memory,Postgres}` a move of an image
+and its cache while the old workspace's build keeps pushing, and
 `PostgresImageRoutes.MigrationRoutesUnambiguousImagesOnly` migration `0068`.
 
 `RegistryProtocols.NpmPublishesAndInstallsWithTheRealClient` runs the host `npm` binary to publish

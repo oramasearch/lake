@@ -275,12 +275,16 @@ void register_image_capabilities(Registry& registry) {
         .title = "Unroute image repository",
         .description =
             "Operator only. Removes the route of a tenant image repository that went to the wrong "
-            "workspace, for example an app recreated in another workspace. The workspace's "
-            "manifest and tag records stay where they are (they go with that workspace); a later "
-            "create_image_repository, build push or copy may route the name again.",
+            "workspace, for example an app recreated in another workspace; removing `<image>` also "
+            "removes `cache/<image>`. With `workspace_id` it moves them there instead, in the same "
+            "transaction, so no push in between can claim the name. The old workspace's manifest "
+            "and tag records stay where they are (they go with that workspace); after a removal a "
+            "later create_image_repository, build push or copy may route the name again.",
         .input_schema = {{"type", "object"},
                          {"properties",
-                          {{"customer_id", {{"type", "string"}}}, {"name", {{"type", "string"}}}}},
+                          {{"customer_id", {{"type", "string"}}},
+                           {"name", {{"type", "string"}}},
+                           {"workspace_id", {{"type", "string"}}}}},
                          {"required", json::array({"customer_id", "name"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
@@ -296,23 +300,44 @@ void register_image_capabilities(Registry& registry) {
             }
             const std::string customer_id = input.at("customer_id");
             const std::string name = input.at("name");
+            const std::string to = input.value("workspace_id", std::string());
             const auto customer = context.store->get_customer(customer_id);
             if (!customer) {
                 return ApiResult::failure("invalid_input", "customer_id is unknown", "/customer_id");
             }
-            const auto removed = context.store->delete_oci_repository_route(customer_id, name);
+            if (input.contains("workspace_id") && to.empty()) {
+                return ApiResult::failure("invalid_input",
+                                          "workspace_id must name a live workspace of this space",
+                                          "/workspace_id");
+            }
+            const auto removed = context.store->delete_oci_repository_route(customer_id, name, to);
             if (!removed) {
-                return ApiResult::failure(removed.error().code, removed.error().message,
-                                          removed.error().code == "not_found" ? "/name"
-                                                                              : std::string());
+                const std::string& code = removed.error().code;
+                return ApiResult::failure(code, removed.error().message,
+                                          code == "not_found"       ? "/name"
+                                          : code == "invalid_input" ? "/workspace_id"
+                                                                    : std::string());
+            }
+            json routes = json::array();
+            json names = json::array();
+            for (const control::OciRepositoryRoute& route : *removed) {
+                json item = route_json(route, customer->name);
+                if (!to.empty()) {
+                    item["moved_to"] = to;
+                }
+                routes.push_back(std::move(item));
+                names.push_back(route.name);
             }
             context.audit_customer_id = customer_id;
-            context.audit_kind = "image.route.remove";
+            context.audit_kind = to.empty() ? "image.route.remove" : "image.route.move";
             context.audit_object = "image/" + customer->name + "/" + name;
             context.audit_details = {{"customer_id", customer_id},
-                                     {"workspace_id", removed->workspace_id},
-                                     {"name", name}};
-            return ApiResult::success(route_json(*removed, customer->name));
+                                     {"from_workspace_id", removed->front().workspace_id},
+                                     {"names", names}};
+            if (!to.empty()) {
+                context.audit_details["to_workspace_id"] = to;
+            }
+            return ApiResult::success({{"routes", std::move(routes)}});
         }});
     registry.add(Capability{
         .name = "list_image_repositories",
