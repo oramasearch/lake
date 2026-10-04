@@ -139,6 +139,12 @@ struct ServerOptions {
     // drain() tick.
     std::chrono::milliseconds audit_flush_interval{std::chrono::seconds(1)};
     std::size_t audit_max_pending = 65536;
+    // Requests routed to a workspace are counted in memory and written to that workspace Zetta's
+    // `lake_requests` series by the owner loop at this interval, at once when half of
+    // `request_series_max_pending` is held, and once more on stop (docs/serving/telemetry.md,
+    // lake#384). Zero writes on every drain() tick.
+    std::chrono::milliseconds request_series_flush_interval{std::chrono::seconds(10)};
+    std::size_t request_series_max_pending = 16384;
     // Dynamic-secret leases that are due (expired, or revoked and not yet settled) are settled in
     // their workspaces by the owner loop at this interval (docs/api/secrets.md, lake#362). It
     // reads the control store's due index, never every workspace. Zero settles on every drain().

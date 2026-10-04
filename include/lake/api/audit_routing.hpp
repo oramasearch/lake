@@ -67,6 +67,24 @@ AuditRoute audit_route(const Capability* capability,
                        std::string_view outcome,
                        bool handled);
 
+// The workspace a capability call acted on, before any liveness check: the `workspace_id`
+// Registry::call validated (ApiContext::audit_workspace_id), else, for a workspace capability, the
+// workspace of the repository, secret mount, application, app, build or agent task its input
+// names. Empty when the call was refused before its handler ran or for want of authority, or when
+// no store is configured. Each object lookup is one indexed PostgreSQL read of a routing row.
+// The request series (lake#384) counts the request there; audit_route takes it as `acted`.
+std::string acted_workspace(const Capability* capability,
+                            std::string_view name,
+                            const nlohmann::json& input,
+                            const ApiContext& context,
+                            std::string_view outcome,
+                            bool handled);
+
+// audit_route with the acted-on workspace already found, so a call looks it up once.
+AuditRoute audit_route(std::string_view name,
+                       const std::string& acted,
+                       const ApiContext& context);
+
 // The route of an event recorded outside the registry about one workspace's data (branch
 // protection decisions at push, the push itself): that workspace when it is live and this lake has
 // a workspace audit, else central.

@@ -7,6 +7,7 @@
 
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/metering_recorder.hpp"
+#include "lake/api/request_recorder.hpp"
 #include "lake/api/server.hpp"
 #include "lake/thread.hpp"
 
@@ -86,6 +87,7 @@
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_ui.hpp"
 #include "agent_task_records_api.hpp"
+#include "request_log.hpp"
 #include "route_guard.hpp"
 #include "secret_records_api.hpp"
 #include "workspace_records_api.hpp"
@@ -335,6 +337,8 @@ struct RequestTiming {
     std::chrono::steady_clock::time_point started;
     std::shared_ptr<WorkspaceCallTiming> workspace_calls =
         std::make_shared<WorkspaceCallTiming>();
+    // What the request's capability calls resolved (lake#384): its log line and request series.
+    std::shared_ptr<RequestAttribution> attribution = std::make_shared<RequestAttribution>();
     std::optional<ApiContext> context;
 };
 
@@ -5221,6 +5225,11 @@ struct ApiServer::Impl {
     std::unique_ptr<AuditRecorder> audit_recorder;
     std::chrono::steady_clock::time_point next_audit_flush{};
     AuditRecorder::Totals reported_audit;
+    // Each workspace's `lake_requests` series on its way to its Zetta (lake#384); null without
+    // workspaces.
+    std::unique_ptr<RequestRecorder> request_recorder;
+    std::chrono::steady_clock::time_point next_request_series_flush{};
+    RequestRecorder::Totals reported_request_series;
     mutable LiquidCustomerStores sync_store;
     ArtifactRegistry artifacts;
     // The instance registry's tenant images, for the workspace deletion cascade (lake#514).
@@ -5502,21 +5511,42 @@ struct ApiServer::Impl {
         const double duration_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         const std::string method(route.req.method_text());
-        const std::string status = std::to_string(route.res.status_int());
+        const int status_code = route.res.status_int();
+        const std::string status = std::to_string(status_code);
         const telemetry::Labels labels{
             {"method", method}, {"route", std::string(route_pattern)}, {"status", status}};
         metrics.increment_counter("lake_http_requests_total", labels);
         metrics.observe_histogram("lake_http_request_duration_seconds", labels, duration_seconds);
 
-        std::println("{}",
-                     nlohmann::json{{"ts", log_timestamp()},
-                                    {"method", method},
-                                    {"path", std::string(route.url.path())},
-                                    {"route", route_pattern},
-                                    {"status", route.res.status_int()},
-                                    {"duration_ms", duration_seconds * 1000.0},
-                                    {"node", options.node_name}}
-                         .dump());
+        // What the request's capability calls resolved (lake#384). A request that resolved no
+        // workspace is not counted in any workspace's series.
+        const auto timing = request_timing(route);
+        const RequestAttribution::Snapshot resolved =
+            timing ? timing->attribution->snapshot() : RequestAttribution::Snapshot{};
+        const std::string capability =
+            request_log_capability_route(route_pattern) ? resolved.capability : std::string();
+        if (request_recorder && !resolved.workspace_id.empty()) {
+            request_recorder->add(
+                resolved.workspace_id, std::string(route_pattern), capability, status_code);
+        }
+
+        // Route patterns and identifiers only, never the raw path (decision 54 S9).
+        RequestLogEntry entry{.ts = log_timestamp(),
+                              .method = method,
+                              .route = std::string(route_pattern),
+                              .status = status_code,
+                              .duration_ms = duration_seconds * 1000.0,
+                              .node = options.node_name,
+                              .request_id = resolved.request_id,
+                              .capability = capability,
+                              .ids = request_log_ids(route.params)};
+        if (entry.request_id.empty() && route.req.count("x-request-id") != 0) {
+            entry.request_id = std::string(route.req.at("x-request-id"));
+        }
+        if (!resolved.workspace_id.empty()) {
+            entry.ids["workspace_id"] = resolved.workspace_id;
+        }
+        std::println("{}", request_log_line(entry));
     }
 
     boost::http::route_task observe_request(boost::http::route_params& route,
@@ -5772,6 +5802,7 @@ struct ApiServer::Impl {
         ctx.workspaces = options.workspaces.get();
         if (timing) {
             ctx.workspace_call_timing = timing->workspace_calls;
+            ctx.request_attribution = timing->attribution;
         }
         ctx.non_expiring_credentials_allowed = options.allow_non_expiring_credentials;
         ctx.agent_caller = options.agent_caller.get();
@@ -5885,6 +5916,12 @@ struct ApiServer::Impl {
             ctx.request_id = std::string(route.req.at("x-request-id"));
         } else {
             ctx.request_id = control::new_uuid_v4();
+        }
+        if (timing) {
+            std::lock_guard lock(timing->attribution->mutex);
+            if (timing->attribution->request_id.empty()) {
+                timing->attribution->request_id = ctx.request_id;
+            }
         }
         if (route.req.count("liquid-offline-grant") != 0) {
             ctx.offline_grant_id = std::string(route.req.at("liquid-offline-grant"));
@@ -15616,6 +15653,37 @@ struct ApiServer::Impl {
             "lake_audit_workspace_pending", {}, static_cast<double>(audit_recorder->pending()));
     }
 
+    // Writes the requests counted since the last flush to their workspaces' `lake_requests`
+    // series, off the request path (lake#384), and reports what was written, kept or dropped.
+    void flush_request_series() {
+        if (!request_recorder) {
+            return;
+        }
+        static_cast<void>(liquid::runtime::block_on(request_recorder->flush()));
+        const RequestRecorder::Totals now = request_recorder->totals();
+        const auto report = [this](const char* name,
+                                   const telemetry::Labels& labels,
+                                   std::uint64_t current,
+                                   std::uint64_t& reported) {
+            if (current > reported) {
+                metrics.increment_counter(name, labels, static_cast<double>(current - reported));
+                reported = current;
+            }
+        };
+        report("lake_request_series_requests_written_total", {}, now.recorded,
+               reported_request_series.recorded);
+        report("lake_request_series_flush_errors_total", {}, now.flush_errors,
+               reported_request_series.flush_errors);
+        report("lake_request_series_dropped_total", {{"reason", "bound"}}, now.dropped_bound,
+               reported_request_series.dropped_bound);
+        report("lake_request_series_dropped_total", {{"reason", "workspace_deleted"}},
+               now.dropped_workspace_deleted, reported_request_series.dropped_workspace_deleted);
+        report("lake_request_series_dropped_total", {{"reason", "refused"}}, now.dropped_refused,
+               reported_request_series.dropped_refused);
+        metrics.set_gauge("lake_request_series_pending", {},
+                          static_cast<double>(request_recorder->pending()));
+    }
+
     void log_store_owner(nlohmann::json event) const {
         event["event"] = "store_owner";
         event["node"] = options.node_name;
@@ -17732,6 +17800,13 @@ bool ApiServer::start() {
         impl.next_audit_flush =
             std::chrono::steady_clock::now() + impl.options.audit_flush_interval;
     }
+    if (impl.options.store && impl.options.workspaces) {
+        impl.request_recorder = std::make_unique<RequestRecorder>(
+            impl.options.store.get(), impl.options.workspaces.get(),
+            impl.options.request_series_max_pending);
+        impl.next_request_series_flush =
+            std::chrono::steady_clock::now() + impl.options.request_series_flush_interval;
+    }
     impl.server->start();
     impl.io_thread = lake::Thread([&impl] { impl.io_context.run(); });
     impl.is_running.store(true);
@@ -17774,6 +17849,7 @@ void ApiServer::stop() {
     // the workspace audit events they queued (decision 52).
     impl.flush_metering();
     impl.flush_audit();
+    impl.flush_request_series();
     // In-flight requests have finished: close every store (releasing liquid's per-store owner
     // locks), then the root lock, so the next owner opens a store nobody is writing.
     const bool owned = impl.store_owner.held();
@@ -17837,6 +17913,12 @@ void ApiServer::drain() {
          impl_->audit_recorder->pending() * 2 >= impl_->options.audit_max_pending)) {
         impl_->next_audit_flush = now + impl_->options.audit_flush_interval;
         impl_->flush_audit();
+    }
+    if (impl_->request_recorder &&
+        (now >= impl_->next_request_series_flush ||
+         impl_->request_recorder->pending() * 2 >= impl_->options.request_series_max_pending)) {
+        impl_->next_request_series_flush = now + impl_->options.request_series_flush_interval;
+        impl_->flush_request_series();
     }
     // The registry and search segments live under the store root: only its owner removes them.
     if (impl_->options.store &&

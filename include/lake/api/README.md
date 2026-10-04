@@ -61,6 +61,14 @@ the bounded queue of workspace audit events on their way to each workspace's cha
 `ServerOptions::audit_flush_interval` (one second) and `audit_max_pending` (65,536) configure it.
 `web_ui.hpp`'s `AuditPageView` carries each event's workspace, the queued events and the workspaces
 that could not be read.
+`audit_routing.hpp`'s `acted_workspace` is the one lookup of the workspace a call acted on, shared
+by the audit route and the request series. `request_recorder.hpp` declares `RequestRecorder`, the
+bounded per-workspace `lake_requests` counts on their way to each workspace Zetta's time series
+(decision 54 S9, lake#384); `registry.hpp`'s `RequestAttribution` (`ApiContext::request_attribution`)
+is what one HTTP request's capability calls resolved: its outermost capability, its workspace and
+its request id. `ServerOptions::request_series_flush_interval` (ten seconds) and
+`request_series_max_pending` (16,384) configure it. See
+[telemetry.md](../../../docs/serving/telemetry.md#the-workspace-request-series).
 `ServerOptions::secret_lease_expiry_interval` (ten seconds; zero: every tick) paces the owner
 loop's dynamic-lease expiry pass (lake#362), which runs only with a store, workspaces and an
 instance KEK.

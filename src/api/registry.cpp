@@ -670,6 +670,48 @@ std::string acting_agent(const ApiContext& context) {
     return {};
 }
 
+// Counts a capability call in progress on the request's attribution, so finish_call can tell the
+// outermost call from one a capability made through the registry.
+class AttributionDepth {
+public:
+    explicit AttributionDepth(const ApiContext& context)
+        : attribution_(context.request_attribution) {
+        if (attribution_) {
+            std::lock_guard lock(attribution_->mutex);
+            ++attribution_->depth;
+        }
+    }
+    ~AttributionDepth() {
+        if (attribution_) {
+            std::lock_guard lock(attribution_->mutex);
+            --attribution_->depth;
+        }
+    }
+    AttributionDepth(const AttributionDepth&) = delete;
+    AttributionDepth& operator=(const AttributionDepth&) = delete;
+
+private:
+    std::shared_ptr<RequestAttribution> attribution_;
+};
+
+// The request's capability is its first outermost call; its workspace the first one a handled
+// call acted on (lake#384). Nothing is looked up here.
+void attribute_request(const ApiContext& context,
+                       const std::string& name,
+                       const std::string& acted) {
+    if (!context.request_attribution) {
+        return;
+    }
+    RequestAttribution& attribution = *context.request_attribution;
+    std::lock_guard lock(attribution.mutex);
+    if (attribution.depth <= 1 && attribution.capability.empty()) {
+        attribution.capability = name;
+    }
+    if (attribution.workspace_id.empty() && !acted.empty()) {
+        attribution.workspace_id = acted;
+    }
+}
+
 ApiResult finish_call(const Capability* capability,
                       const std::string& name,
                       const nlohmann::json& input,
@@ -685,6 +727,7 @@ ApiResult finish_call(const Capability* capability,
         result.duration_ms = duration;
     }
     if (!context.store) {
+        attribute_request(context, name, {});
         return result;
     }
     const std::string kind = !context.audit_kind.empty()
@@ -711,10 +754,16 @@ ApiResult finish_call(const Capability* capability,
         .device = context.device,
         .details = std::move(details),
     };
+    // The workspace the call acted on, looked up once for the audit route and the request's
+    // series (lake#384) when either needs it.
+    const std::string acted =
+        context.audit_recorder != nullptr || context.request_attribution
+            ? acted_workspace(capability, name, input, context, event.outcome, handled)
+            : std::string();
+    attribute_request(context, name, acted);
     // Decision 52: events about a workspace's data go to that workspace's audit, queued without
     // I/O; the rest are signed into the central chain now.
-    const AuditRoute route =
-        audit_route(capability, name, input, context, event.outcome, handled);
+    const AuditRoute route = audit_route(name, acted, context);
     auto recorded = record_audit(context, event, route);
     if (!recorded) {
         return ApiResult::failure("store_error",
@@ -822,6 +871,7 @@ std::vector<std::shared_ptr<const Capability>> Registry::list() const {
 ApiResult
 Registry::call(const std::string& name, const nlohmann::json& input, ApiContext& context) const {
     context.registry = this;
+    const AttributionDepth depth(context);
     const auto capability = find(name);
     if (!capability)
         return ApiResult::failure("unknown_capability", "no capability named " + name);
@@ -868,6 +918,7 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
                                                       const nlohmann::json& input,
                                                       ApiContext& context) const {
     context.registry = this;
+    const AttributionDepth depth(context);
     const auto capability = find(name);
     if (!capability) {
         co_return ApiResult::failure("unknown_capability", "no capability named " + name);

@@ -133,6 +133,12 @@ A repository left without a workspace is assigned its space's only live workspac
 `0066_assign_unrouted_repositories` (decision 54 S14, lake#513), through a routing-trigger exception
 only that block opens; on dev this is the `liquid` repository. See
 `docs/api/repositories.md#the-owning-workspace`.
+Lake's process metrics and request logs stay with the instance (decision 54 S9, lake#384, no
+migration): a request log line names the route pattern, the request id and the captured UUIDs,
+never the raw path, so it carries no customer content; a request routed to a workspace is counted
+in that workspace Zetta's `lake_requests` series (route, capability, status class) by a bounded
+`RequestRecorder` the owner loop flushes every ten seconds with `record_metric`. See
+`docs/serving/telemetry.md#the-workspace-request-series`.
 
 ## Historical status — superseded 2026-09-08
 
