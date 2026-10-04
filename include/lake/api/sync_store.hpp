@@ -463,6 +463,12 @@ public:
                               const std::function<SyncStoreResult<void>()>& create_row) {
         return create_row();
     }
+    // Whether the repository's workspace store serves it but does not hold it (a creation whose
+    // store step failed). False for a repository in the space's store.
+    virtual SyncStoreResult<bool> repository_missing_from_workspace_store(const std::string&,
+                                                                          const std::string&) {
+        return false;
+    }
     // Closes the workspace's store and releases its bucket lease (workspace deletion, drain).
     virtual SyncStoreResult<void> close_workspace_store(const std::string&) {
         return {};

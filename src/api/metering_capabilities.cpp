@@ -564,7 +564,12 @@ void register_metering_capabilities(Registry& registry) {
             // result not yet recorded counts here and is queued for its workspace.
             const Window window = window_of(input);
             std::size_t without_workspace = 0;
-            auto repository_results = repository_builds(customer_id, context, without_workspace);
+            auto repository_results = co_await blocking_call(
+                [&] { return repository_builds(customer_id, context, without_workspace); },
+                [](std::string message) -> decltype(repository_builds(customer_id, context,
+                                                                      without_workspace)) {
+                    return std::unexpected(ApiResult::failure("store_unavailable", std::move(message)));
+                });
             if (!repository_results) {
                 co_return repository_results.error();
             }

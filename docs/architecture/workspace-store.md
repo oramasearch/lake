@@ -100,7 +100,9 @@ workspace's store answers `corrupt` too; repositories in a workspace store are c
 explicitly: by the switch (for one the space store never held) and by repository creation, which
 runs under the workspace's lane (`SyncStore::create_repository_content`), never by a read or a push.
 When the store refuses the creation, the new row is tombstoned with its retention ended, which
-frees its name, and the caller is told to retry; no row is left without its repository. A
+frees its name, and the caller is told to retry. If that tombstone fails too, the error says so,
+and the next creation of the same name in the workspace tombstones the row whose repository is
+missing from the workspace store before it creates the new one. A
 repository the space store lost (lake opened it there, so its directory exists beside the space
 store, but its entry point is gone) is refused by the move as `corrupt`, never created empty.
 
@@ -173,27 +175,56 @@ maps of open stores is never held across store I/O, a network call or a wait.
   import, GitHub import, `get_model`/`get_dataset` with a revision, `metering_usage`). Pages that
   call those capabilities synchronously still run on the server thread.
 - **Admission.** A request enters a lane only while fewer than four requests are in it, holding or
-  waiting, and never while the lane is being moved (a copy, verify or switch holds it). Otherwise it
+  waiting, and never while the lane is being moved (a copy or verify marks the workspace's lane; a
+  switch marks the workspace's and its space's). Otherwise it
   is answered `503 store_unavailable` with `Retry-After: 1` at once, so requests for one slow or
   moving store never take more than four of the pool's threads from other stores and spaces.
 - **No cross-store waits on writes.** A write's quota check counts each switched workspace's
-  usage as the owner loop last read it (every 10 s, `refresh_workspace_usage`), and a write in a
-  switched workspace counts the space store's last measurement when another request holds that
-  lane; no write waits on another store's lane or Zetta.
+  usage as last read (every 10 s, `refresh_workspace_usage`, on the maintenance thread), and a write
+  in a switched workspace counts the space store's last measurement when another request holds
+  that lane; no write waits on another store's lane or Zetta. Both are seeded at start (the space
+  store's size when lake opens it, every switched workspace's usage by a priming pass, and a
+  workspace's usage again at the first open of its store), so a restart never counts them as 0.
 - **Search** reads repositories only through the repository store, under their store's lane and on
   its one open instance (`search::Service::set_repository_access`, `LiquidCustomerStores::lend_repository`);
   it never opens a second instance of a store, whose open would remove another writer's temporary
-  files. A switched workspace's repositories are read from its store; the index files themselves
-  stay on lake's volume until [lake#381](https://github.com/oramasearch/lake/issues/381).
+  files. Once a repository store has lent repositories, search refuses rather than open a store
+  itself. Search borrows a repository before it takes its own lock, so a search waiting on one
+  store's lane holds up no search in another space.
+- **Search skips switched workspaces until [lake#381](https://github.com/oramasearch/lake/issues/381).**
+  The index files are on lake's volume, so indexing a switched workspace's repository there would
+  put its content back on lake's volume. Until lake#381 moves the index beside the workspace store,
+  publish and reindex of such a repository write nothing (they drop what the index held for it),
+  a history scan of it answers no occurrence, and hot and artifact searches leave it out. A
+  repository whose route cannot be read is treated as switched.
 - **Zetta's HTTP client** (`install_native_http_transport`) is safe from many threads at once: one
   dedicated thread runs every exchange, callers post to it and wait on an event, and its shared TLS
   context cache is locked.
 
-The maintenance tick's deletion pass (`resume_workspace_deletions`) closes stores on lake's owner
-loop thread, not the server thread. `.lake-owner.lock` still covers the volume's instance data and
-the space stores.
+**Maintenance thread.** Work that waits on workspace Zettas or a store's lane runs on its own thread,
+never on the owner loop or the server thread: the usage refresh, the start-up usage priming, and
+the deletion pass (`resume_workspace_deletions`, which closes workspace stores). The owner loop's
+audit, metering and request-series flushes and timestamp renewals are therefore not delayed by a
+Zetta timeout or a switch. A job is skipped when one of its name is already queued.
+
+**Shutdown.** `ApiServer::stop` drains requests, stops the maintenance thread, closes every store,
+then gives repository-store work still running on the blocking pool the rest of the drain deadline.
+After that it closes its io_context to the pool (`close_execution_context`): a task still running is
+abandoned and posts nothing into the destroyed context. The request that awaited an abandoned task
+is never resumed, so its response and its audit event are lost; the count is logged
+(`abandoned_store_tasks`) and counted (`lake_abandoned_store_tasks_total`).
+
+**Clients and 503.** liquid's sync client does not retry a 503, nor read `Retry-After`:
+[liquid#340](https://github.com/oramasearch/liquid/issues/340). Until it does, a `liquid push` or
+`pull` refused during a move or a lease hand-off must be rerun.
+
+`.lake-owner.lock` still covers the volume's instance data and the space stores.
 
 ## Moving a workspace
+
+`copy` and `verify` mark only the workspace's lane as moving and take the space's lane one
+repository at a time, so the space's other workspaces wait at most one repository's copy and are
+never refused.
 
 The switch marks the workspace's lane and its space's lane as being moved, then holds both for its
 whole run and never gives them up: requests for the workspace's repositories (still served by the
@@ -301,4 +332,11 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreMove.ACreationTheWorkspaceStoreRefusesLeavesNoRowAndCanBeRetried` | the row rollback and a retry under the same name |
 | `WorkspaceStoreMove.AStoppedSwitchedWorkspaceDoesNotRefuseItsSpacesWrites` | a stopped switched workspace does not block its space's writes |
 | `WorkspaceStoreMove.ADeletedWorkspaceIsNeverReopenedAndADeleteWaitsForAnOpen` | a delete racing an open releases the lease; a deleted workspace is not reopened or served from the space store |
+| `WorkspaceStoreMove.ACopyDoesNotRefuseTheSpacesOtherWorkspaces` | a copy marks only the workspace's lane |
+| `WorkspaceStoreMove.ACopyIntoADroppedBucketFailsInsteadOfReportingAbsent` | a dropped bucket fails the copy instead of answering `absent` |
+| `WorkspaceStoreMove.ASwitchedWorkspacesRepositoryIsNotIndexedOnTheVolumeOrReturned` | no segment or blob of a switched repository in the space index; not returned; the space's other repository still is |
+| `WorkspaceStoreMove.ARowLeftWithoutItsRepositoryIsCleanedUpByTheNextCreate` | an orphaned row is tombstoned by the next creation of its name |
+| `WorkspaceStoreMove.ARestartCountsSwitchedWorkspacesUsageBeforeAnyWrite` | usage primed at start |
+| `WorkspaceStoreMove.ASearchWaitingOnOneSpacesStoreDoesNotHoldSearchInAnother` | search borrows before its lock |
+| `WorkspaceStoreSearch.OnceTheRepositoryStoreLentRepositoriesSearchNeverOpensAStoreItself` | the fallback refuses once a repository store was set |
 | `WorkspaceStoreZetta.TheBackendOnARealZettaHoldsOnlyCiphertextAndItsLatencyIsMeasured` | the same on a real Zetta, and the latency table |

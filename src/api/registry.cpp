@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <exception>
 #include <print>
+#include <set>
 #include <thread>
 
 #include "lake/api/audit_routing.hpp"
@@ -25,7 +26,8 @@ namespace {
 // recorders, all of which lock.
 bool waits_on_repository_store(const Capability& capability) {
     const std::string_view object = capability.object;
-    return object.starts_with("repository") || object.starts_with("drive") || object == "model" ||
+    return object.starts_with("repository") || object.find("drive") != std::string_view::npos ||
+           object == "model" ||
            object == "dataset" || object == "workspace store move" ||
            capability.name == "replicate_repository" ||
            // Deleting a workspace closes its store, waiting on its lane.
@@ -139,16 +141,40 @@ boost::capy::thread_pool& blocking_pool() {
     static boost::capy::thread_pool pool(32, "lake-store-");
     return pool;
 }
-std::atomic<int>& blocking_posts() {
-    static std::atomic<int> posts{0};
-    return posts;
+std::atomic<int>& blocking_tasks() {
+    static std::atomic<int> tasks{0};
+    return tasks;
+}
+std::mutex& completion_gate() {
+    static std::mutex gate;
+    return gate;
+}
+namespace {
+std::set<const void*>& closed_contexts() {
+    static std::set<const void*> contexts;
+    return contexts;
+}
+} // namespace
+bool execution_context_closed(const void* context) {
+    return closed_contexts().contains(context);
 }
 } // namespace detail
 
-void wait_for_blocking_posts() {
-    while (detail::blocking_posts().load() != 0) {
-        std::this_thread::yield();
+int wait_for_blocking_tasks(std::chrono::steady_clock::time_point deadline) {
+    while (detail::blocking_tasks().load() != 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    return detail::blocking_tasks().load();
+}
+
+void close_execution_context(const void* context) {
+    std::lock_guard gate(detail::completion_gate());
+    detail::closed_contexts().insert(context);
+}
+
+void forget_execution_context(const void* context) {
+    std::lock_guard gate(detail::completion_gate());
+    detail::closed_contexts().erase(context);
 }
 
 std::span<const ErrorCode> error_codes() {

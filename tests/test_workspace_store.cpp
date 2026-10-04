@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <random>
@@ -1157,6 +1158,13 @@ TEST(WorkspaceStoreMove, OtherWorkspacesAndSpacesProceedWhileOneSwitchesOrItsZet
     // and beta and the other space are not held.
     ASSERT_NO_FATAL_FAILURE(rig.restart()); // alpha's store is not open, so its open will hang
     rig.zetta->hang(endpoint_a, 4s, ":acquire");
+    // A space-wide read that reaches alpha's store first (metering_usage reads every
+    // repository's builds) is admitted to alpha's lane and waits there: on the pool, not on the
+    // server's thread.
+    std::thread metering([&] {
+        static_cast<void>(rig.call("GET", "/v1/metering_usage?customer_id=" + rig.customer_id));
+    });
+    std::this_thread::sleep_for(200ms);
     std::atomic<int> waited_out{0};
     std::vector<std::thread> stuck;
     for (int index = 0; index < 40; ++index) {
@@ -1179,6 +1187,7 @@ TEST(WorkspaceStoreMove, OtherWorkspacesAndSpacesProceedWhileOneSwitchesOrItsZet
     for (std::thread& thread : stuck) {
         thread.join();
     }
+    metering.join();
     rig.zetta->hang(endpoint_a, 0ms);
     EXPECT_GE(waited_out.load(), 36) << "more than the admission limit waited on alpha's lane";
 }
@@ -1326,6 +1335,174 @@ TEST(WorkspaceStoreMove, ACreationTheWorkspaceStoreRefusesLeavesNoRowAndCanBeRet
         EXPECT_TRUE(rig.zetta->objects(endpoint_a).contains(
             hash_key(rig.root / rig.customer_id / "repositories" / retried->id) + "/LIQUID_REPO"));
     }
+}
+
+TEST(WorkspaceStoreMove, ACopyDoesNotRefuseTheSpacesOtherWorkspaces) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    rig.zetta->hang(endpoint_a, 60ms);
+    std::pair<unsigned, json> copied;
+    std::atomic<bool> copy_done{false};
+    std::thread copier([&] {
+        copied = rig.move(rig.alpha, "copy");
+        copy_done.store(true);
+    });
+    std::this_thread::sleep_for(300ms);
+    // Beta, unswitched in the same space, is served by the space store: it waits at most for the
+    // repository being copied and is never refused.
+    const bool copying_when_asked = !copy_done.load();
+    const auto [status, body] = rig.call("GET", "/v1/repository_tree?id=" + rig.repo_b.id + "&ref=main");
+    copier.join();
+    rig.zetta->hang(endpoint_a, 0ms);
+    EXPECT_TRUE(copying_when_asked) << "the copy finished before beta asked";
+    EXPECT_EQ(status, 200U) << body.dump();
+    EXPECT_EQ(copied.first, 200U) << copied.second.dump();
+}
+
+TEST(WorkspaceStoreMove, ACopyIntoADroppedBucketFailsInsteadOfReportingAbsent) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "copy").first, 200U);
+    // The workspace Zetta loses the bucket; lake still has the store open.
+    rig.zetta->drop_bucket(endpoint_a);
+    ASSERT_EQ(rig.commit(rig.repo_a, "after-copy.txt", "new content in the space store").first, 200U);
+    const auto [status, body] = rig.move(rig.alpha, "copy");
+    EXPECT_NE(status, 200U) << body.dump();
+    if (status == 200U) {
+        EXPECT_FALSE(body["value"]["repositories"][0]["absent"].get<bool>()) << body.dump();
+    }
+}
+
+TEST(WorkspaceStoreMove, ASwitchedWorkspacesRepositoryIsNotIndexedOnTheVolumeOrReturned) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const auto history = [&](const lake::control::Repository& repository) {
+        const auto [status, body] =
+            rig.call("GET", "/v1/search?query=readme&customer=" + rig.customer_id +
+                                "&repository=" + repository.id + "&history=true");
+        EXPECT_EQ(status, 200U) << body.dump();
+        return body;
+    };
+    // A text-only repository in alpha (search's history scan does not handle repo_a's binary blob).
+    const auto text = rig.create(rig.alpha, "alpha-text");
+    ASSERT_TRUE(text);
+    ASSERT_EQ(rig.commit(*text, "README.md", "alpha text readme").first, 200U);
+    EXPECT_NE(history(*text).dump().find("README.md"), std::string::npos) << "searchable before";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_EQ(rig.commit(*text, "after.txt", "readme after the switch").first, 200U);
+    ASSERT_EQ(rig.call("POST", "/v1/reindex_artifacts", {{"id", text->id}}).first, 200U);
+    // Nothing of the switched repository is written into the space's index on lake's volume.
+    const auto index = rig.root / rig.customer_id / "index";
+    if (std::filesystem::exists(index)) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(index)) {
+            if (!entry.is_regular_file()) {
+                continue;
+            }
+            EXPECT_EQ(entry.path().filename().string().find(text->id), std::string::npos)
+                << entry.path();
+            std::ifstream file(entry.path());
+            const std::string contents((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            EXPECT_EQ(contents.find(text->id), std::string::npos) << entry.path();
+            EXPECT_EQ(contents.find("readme after the switch"), std::string::npos) << entry.path();
+        }
+    }
+    // Nor is it returned, while the space's other repository still is.
+    EXPECT_EQ(history(*text).dump().find("README.md"), std::string::npos);
+    EXPECT_NE(history(rig.repo_b).dump().find("README.md"), std::string::npos);
+}
+
+TEST(WorkspaceStoreMove, ARowLeftWithoutItsRepositoryIsCleanedUpByTheNextCreate) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    // A row whose store step and tombstone both failed: it exists, its repository does not.
+    const auto orphan = rig.store->create_repository({rig.customer_id, "orphaned", "", "private", rig.alpha});
+    ASSERT_TRUE(orphan);
+    const auto created = rig.create(rig.alpha, "orphaned");
+    ASSERT_TRUE(created);
+    EXPECT_NE(created->id, orphan->id);
+    EXPECT_FALSE(rig.store->get_repository(orphan->id)->deleted_at.empty()) << "the orphan was tombstoned";
+    EXPECT_TRUE(rig.zetta->objects(endpoint_a).contains(
+        hash_key(rig.root / rig.customer_id / "repositories" / created->id) + "/LIQUID_REPO"));
+}
+
+TEST(WorkspaceStoreMove, ARestartCountsSwitchedWorkspacesUsageBeforeAnyWrite) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    // Every workspace of the space is switched, so its storage is the buckets' usage alone, which
+    // the restarted lake primes at start instead of counting as 0.
+    std::uint64_t counted = 0;
+    const auto started = std::chrono::steady_clock::now();
+    while (counted == 0 && std::chrono::steady_clock::now() - started < 10s) {
+        const auto [status, body] = rig.call("GET", "/v1/metering_usage?customer_id=" + rig.customer_id);
+        ASSERT_EQ(status, 200U) << body.dump();
+        const std::string text = body.dump();
+        const auto at = text.find("\"repositories_bytes\":");
+        ASSERT_NE(at, std::string::npos) << text;
+        counted = std::stoull(text.substr(at + std::string("\"repositories_bytes\":").size()));
+        if (counted == 0) {
+            std::this_thread::sleep_for(100ms);
+        }
+    }
+    EXPECT_GT(counted, 1'000'000U) << "alpha's 2 MiB repository is in its bucket";
+}
+
+TEST(WorkspaceStoreSearch, OnceTheRepositoryStoreLentRepositoriesSearchNeverOpensAStoreItself) {
+    const auto root = lake::test::fixture_path("workspace-store-search-" + lake::control::new_uuid_v4());
+    std::filesystem::create_directories(root / "space" / "store");
+    lake::search::Service service(root);
+    service.set_repository_access([](const std::string&, const std::string&)
+                                      -> lake::search::Result<lake::search::BorrowedRepository> {
+        return std::unexpected(lake::search::Error{"store_unavailable", "lent store refused"});
+    });
+    // The repository store closes (a server stopping): search refuses rather than open the space
+    // store a second time beside its writer.
+    service.set_repository_access({});
+    const auto reindexed = service.reindex_artifacts("space", "repository");
+    ASSERT_FALSE(reindexed);
+    EXPECT_EQ(reindexed.error().code, "store_unavailable");
+    EXPECT_FALSE(std::filesystem::exists(root / "space" / "store" / "LIQUID_STORE"))
+        << "search opened the store itself";
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
+TEST(WorkspaceStoreMove, ASearchWaitingOnOneSpacesStoreDoesNotHoldSearchInAnother) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    const auto history = [&](const std::string& customer, const lake::control::Repository& repository) {
+        return rig.call("GET", "/v1/search?query=readme&customer=" + customer + "&repository=" +
+                                   repository.id + "&history=true");
+    };
+    // Alpha's copy holds the first space's store for seconds against a slow Zetta.
+    rig.zetta->hang(endpoint_a, 60ms);
+    std::atomic<bool> copy_done{false};
+    std::thread copier([&] {
+        static_cast<void>(rig.move(rig.alpha, "copy"));
+        copy_done.store(true);
+    });
+    std::this_thread::sleep_for(300ms);
+    // A search of beta's repository waits for the first space's store...
+    std::thread waiting([&] { static_cast<void>(history(rig.customer_id, rig.repo_b)); });
+    std::this_thread::sleep_for(200ms);
+    // ...while a search in the other space is answered at once.
+    const bool copying = !copy_done.load();
+    const auto started = std::chrono::steady_clock::now();
+    const auto [status, body] = history(rig.other_customer_id, rig.repo_c);
+    const auto took = std::chrono::steady_clock::now() - started;
+    waiting.join();
+    copier.join();
+    rig.zetta->hang(endpoint_a, 0ms);
+    EXPECT_TRUE(copying) << "the copy finished before the check";
+    EXPECT_EQ(status, 200U) << body.dump();
+    EXPECT_LT(took, 1s) << "search in another space waited for the first space's store";
 }
 
 TEST(WorkspaceStoreMove, AStoppedSwitchedWorkspaceDoesNotRefuseItsSpacesWrites) {

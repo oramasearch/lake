@@ -102,8 +102,13 @@ public:
     // How search reads a repository. The server sets it to its repository store, which lends the
     // repository from whichever store serves it, under that store's lane, so search never opens
     // a second instance of a store another writer has open. Unset, search opens the space store
-    // itself, which only a service without a repository store may do.
+    // itself, which only a service that never had a repository store may do; once one was set,
+    // search refuses instead.
     void set_repository_access(RepositoryAccess access);
+    // Whether a repository is served by a workspace store. Until lake#381 puts the index beside
+    // the workspace store, such a repository is not indexed on lake's volume (publish and reindex
+    // drop what the index holds for it) and is not returned by a query.
+    void set_workspace_served(std::function<bool(const std::string&, const std::string&)> served);
 
     [[nodiscard]] Result<void> publish(const Publish& change);
     [[nodiscard]] Result<ReindexResult> reindex_artifacts(const std::string& customer,

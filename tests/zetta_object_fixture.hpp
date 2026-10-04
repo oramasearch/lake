@@ -135,6 +135,11 @@ public:
         std::lock_guard lock(mutex_);
         hangs_[endpoint] = {delay, std::move(fragment)};
     }
+    // The bucket is gone (a recreated workspace Zetta): every request to it answers 404.
+    void drop_bucket(const std::string& endpoint, const std::string& bucket = "lake_store") {
+        std::lock_guard lock(mutex_);
+        nodes_[endpoint].buckets.erase(bucket);
+    }
     void clear_bucket(const std::string& endpoint, const std::string& bucket = "lake_store") {
         std::lock_guard lock(mutex_);
         nodes_[endpoint].buckets[bucket].objects.clear();

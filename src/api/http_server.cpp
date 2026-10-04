@@ -2663,10 +2663,17 @@ public:
         }
         for (const auto& customer : std::filesystem::directory_iterator(root_, error)) {
             if (std::filesystem::is_directory(customer.path() / "store", error)) {
-                auto space = hold("s:" + customer.path().filename().string());
-                const auto opened = open_customer(customer.path().filename().string());
+                const std::string customer_id = customer.path().filename().string();
+                auto space = hold("s:" + customer_id);
+                const auto opened = open_customer(customer_id);
                 if (!opened) {
                     return std::unexpected(opened.error());
+                }
+                // Seed the space store's size, which a write in a switched workspace counts when
+                // the space's lane is busy, so a restart never counts it as 0.
+                if (const auto measured = space_stored_bytes_locked(customer_id)) {
+                    std::lock_guard maps(mutex_);
+                    last_space_bytes_[customer_id] = *measured;
                 }
             }
             error.clear();
@@ -5185,6 +5192,19 @@ private:
             return std::unexpected(error);
         }
         output->store = std::make_unique<liquid::store>(std::move(*store));
+        bool seeded = false;
+        {
+            std::lock_guard maps(mutex_);
+            seeded = last_usage_.contains(workspace_id);
+        }
+        if (!seeded) {
+            // The first open of a workspace store after a start seeds its usage for quota checks.
+            if (const auto usage = liquid::runtime::block_on(output->client->usage(std::chrono::seconds(5)))) {
+                std::lock_guard maps(mutex_);
+                last_usage_.emplace(workspace_id, usage->bytes);
+                usage_targets_[workspace_id] = customer_id;
+            }
+        }
         std::lock_guard maps(mutex_);
         lost_workspaces_.erase(workspace_id);
         auto inserted = workspace_stores_.insert_or_assign(workspace_id, std::move(output));
@@ -5229,7 +5249,7 @@ private:
                         "corrupt",
                         "repository " + repository_id + " is missing from its workspace store; "
                         "the workspace was switched, so lake will not create it empty",
-                        key});
+                        key, "missing_repository"});
                 }
                 return std::unexpected(error_of(opened.error()));
             }
@@ -5473,6 +5493,27 @@ private:
     }
 
 public:
+    // Registers a space's switched workspaces for refresh_workspace_usage; at start-up the server
+    // calls it for every space, then refreshes, so quota checks never count them as 0.
+    void track_space_usage(const std::string& customer_id) {
+        WorkspaceStoreConfig config;
+        {
+            std::lock_guard maps(mutex_);
+            config = workspace_config_;
+        }
+        if (!config.switched) {
+            return;
+        }
+        const auto listed = config.switched(customer_id);
+        if (!listed) {
+            return;
+        }
+        std::lock_guard maps(mutex_);
+        for (const auto& [workspace_id, serving] : listed->first) {
+            usage_targets_[workspace_id] = customer_id;
+        }
+    }
+
     // Reads each switched workspace's bucket usage for the space quota (docs/api/metering.md). The
     // owner loop calls it, off every request path; a workspace that does not answer within 5 s,
     // or is not serving, keeps its last known usage.
@@ -5512,6 +5553,32 @@ public:
     }
 
 public:
+    SyncStoreResult<bool> repository_missing_from_workspace_store(const std::string& customer_id,
+                                                                  const std::string& repository_id) override {
+        const auto route = workspace_route(customer_id, repository_id);
+        if (!route) {
+            return std::unexpected(route.error());
+        }
+        if (!*route) {
+            return false;
+        }
+        auto entered = enter_repository(customer_id, repository_id);
+        if (entered.state) {
+            return false;
+        }
+        if (entered.state.error().rule == "missing_repository") {
+            return true;
+        }
+        return std::unexpected(entered.state.error());
+    }
+
+    // Whether a workspace store serves the repository. A repository whose route cannot be read
+    // counts as served by one, so search never indexes it centrally by mistake.
+    bool served_by_workspace(const std::string& customer_id, const std::string& repository_id) {
+        const auto route = workspace_route(customer_id, repository_id);
+        return !route || route->has_value();
+    }
+
     // Lends search the repository from the store that serves it, under that store's lane and on
     // the one open instance (lake#380): `first` holds the lane until search lets go.
     SyncStoreResult<std::pair<std::shared_ptr<void>, liquid::repository*>>
@@ -5532,8 +5599,10 @@ public:
         if (!path_component_is_safe(customer_id) || !path_component_is_safe(workspace_id)) {
             return std::unexpected(SyncStoreError{"invalid_input", "invalid workspace location"});
         }
+        // Copy and verify mark only the workspace's lane as moving. The space's lane is taken for
+        // this one repository and not marked, so the space's other workspaces wait at most one
+        // repository's copy instead of being refused; only the switch holds it throughout.
         Moving moving_workspace(lane_of("w:" + workspace_id));
-        Moving moving_space(lane_of("s:" + customer_id));
         auto workspace_lane = hold("w:" + workspace_id);
         auto space_lane = hold("s:" + customer_id);
         // Copying creates the store; verifying only opens it.
@@ -6183,6 +6252,67 @@ struct ApiServer::Impl {
     // store_root_state tells requests and /readyz where that stands (lake#479).
     StoreOwnerLock store_owner;
     lake::Thread owner_thread;
+    // Work that waits on workspace Zettas or on a store's lane (usage refresh, the deletion pass's
+    // store closing, the start-up usage priming) runs on this thread, never on the owner loop, so
+    // the loop's flushes and renewals are not delayed by a Zetta timeout or a switch (lake#380).
+    // A job is dropped when one of its name is already queued.
+    std::mutex maintenance_mutex;
+    std::condition_variable maintenance_cv;
+    std::deque<std::pair<std::string, std::function<void()>>> maintenance_queue;
+    bool maintenance_stopping = false;
+    lake::Thread maintenance_thread;
+
+    void schedule_maintenance(std::string name, std::function<void()> job) {
+        std::lock_guard lock(maintenance_mutex);
+        if (maintenance_stopping ||
+            std::ranges::any_of(maintenance_queue, [&](const auto& queued) { return queued.first == name; })) {
+            return;
+        }
+        maintenance_queue.emplace_back(std::move(name), std::move(job));
+        maintenance_cv.notify_all();
+    }
+
+    void run_maintenance() {
+        for (;;) {
+            std::function<void()> job;
+            {
+                std::unique_lock lock(maintenance_mutex);
+                maintenance_cv.wait(lock, [this] { return maintenance_stopping || !maintenance_queue.empty(); });
+                if (maintenance_stopping) {
+                    return;
+                }
+                job = std::move(maintenance_queue.front().second);
+                maintenance_queue.pop_front();
+            }
+            job();
+        }
+    }
+
+    void stop_maintenance() {
+        {
+            std::lock_guard lock(maintenance_mutex);
+            maintenance_stopping = true;
+            maintenance_queue.clear();
+        }
+        maintenance_cv.notify_all();
+        if (maintenance_thread.joinable()) {
+            maintenance_thread.join();
+        }
+    }
+
+    void prime_workspace_usage() {
+        if (!options.store) {
+            return;
+        }
+        const auto customers = options.store->list_customers(100000);
+        if (!customers) {
+            return;
+        }
+        for (const control::Customer& customer : *customers) {
+            sync_store.track_space_usage(customer.id);
+        }
+        sync_store.refresh_workspace_usage();
+    }
     std::atomic<StoreRootState> store_root_state{StoreRootState::opening};
     // Set once another process was found holding the root: this server reported Ready while it
     // waited, so it stays Ready through the open that follows.
@@ -6298,6 +6428,12 @@ struct ApiServer::Impl {
                     return std::unexpected(search::Error{lent.error().code, lent.error().message});
                 }
                 return search::BorrowedRepository{std::move(lent->first), lent->second};
+            });
+        // Until lake#381 puts the index beside the workspace store, a switched workspace's
+        // repositories are neither indexed on lake's volume nor returned.
+        options.search->set_workspace_served(
+            [this](const std::string& customer_id, const std::string& repository_id) {
+                return sync_store.served_by_workspace(customer_id, repository_id);
             });
     }
 
@@ -17100,6 +17236,7 @@ struct ApiServer::Impl {
         if (!warmed) {
             std::println(stderr, "metering warmup: {}", warmed.error().message);
         }
+        schedule_maintenance("workspace usage priming", [this] { prime_workspace_usage(); });
         store_root_state.store(StoreRootState::open);
         const auto milliseconds = [](auto duration) {
             return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
@@ -17614,6 +17751,10 @@ ApiServer::ApiServer(ServerOptions options) : impl_(std::make_unique<Impl>(std::
 
 ApiServer::~ApiServer() {
     stop();
+    const void* context =
+        static_cast<const void*>(static_cast<boost::capy::execution_context*>(&impl_->io_context));
+    impl_.reset();
+    forget_execution_context(context);
 }
 
 bool ApiServer::start() {
@@ -19182,6 +19323,7 @@ bool ApiServer::start() {
     }
     impl.server->start();
     impl.io_thread = lake::Thread([&impl] { impl.io_context.run(); });
+    impl.maintenance_thread = lake::Thread([&impl] { impl.run_maintenance(); });
     impl.is_running.store(true);
     impl.metrics.set_gauge("lake_up", {}, 1.0);
     if (!impl.options.store_root.empty()) {
@@ -19217,9 +19359,6 @@ void ApiServer::stop() {
         impl.io_thread.join();
     if (impl.owner_thread.joinable())
         impl.owner_thread.join();
-    // A repository-store handler that just finished on the blocking pool may still be returning
-    // from posting its completion to the io_context, which the destructor destroys.
-    wait_for_blocking_posts();
     impl.work_cv.notify_all();
     // In-flight requests have finished: write the repository usage they counted (lake#348) and
     // the workspace audit events they queued (decision 52).
@@ -19228,11 +19367,24 @@ void ApiServer::stop() {
     impl.flush_request_series();
     // In-flight requests have finished: close every store (releasing liquid's per-store owner
     // locks), then the root lock, so the next owner opens a store nobody is writing.
+    // A maintenance job in progress finishes (its Zetta calls are bounded); queued ones are dropped.
+    impl.stop_maintenance();
     const bool owned = impl.store_owner.held();
     if (impl.options.search) {
         impl.options.search->set_repository_access({});
     }
     impl.sync_store.close();
+    // Repository-store work still on the blocking pool gets the rest of the drain deadline; then
+    // the io_context is closed to it, so no task posts into it once it is destroyed. A task
+    // abandoned here loses its response and its audit event (docs/architecture/workspace-store.md).
+    const int abandoned_tasks =
+        wait_for_blocking_tasks(std::max(drain_deadline, std::chrono::steady_clock::now()));
+    close_execution_context(static_cast<const void*>(
+        static_cast<boost::capy::execution_context*>(&impl.io_context)));
+    if (abandoned_tasks > 0) {
+        impl.metrics.increment_counter("lake_abandoned_store_tasks_total", {},
+                                       static_cast<double>(abandoned_tasks));
+    }
     impl.store_owner.release();
     if (!impl.options.store_root.empty()) {
         impl.log_store_owner(
@@ -19241,7 +19393,8 @@ void ApiServer::stop() {
               std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - drain_started)
                   .count()},
-             {"unfinished_requests", abandoned_requests}});
+             {"unfinished_requests", abandoned_requests},
+             {"abandoned_store_tasks", abandoned_tasks}});
     }
 }
 
@@ -19284,7 +19437,8 @@ void ApiServer::drain() {
     if (impl_->store_root_state.load() == StoreRootState::open &&
         now >= impl_->next_workspace_usage_refresh) {
         impl_->next_workspace_usage_refresh = now + std::chrono::seconds(10);
-        impl_->sync_store.refresh_workspace_usage();
+        Impl* impl = impl_.get();
+        impl_->schedule_maintenance("workspace usage", [impl] { impl->sync_store.refresh_workspace_usage(); });
     }
     if (impl_->metering_recorder &&
         (now >= impl_->next_metering_flush ||
@@ -19310,7 +19464,9 @@ void ApiServer::drain() {
          impl_->store_root_state.load() == StoreRootState::open) &&
         now >= impl_->next_workspace_deletion_pass) {
         impl_->next_workspace_deletion_pass = now + std::chrono::minutes(1);
-        impl_->resume_workspace_deletions();
+        // The deletion pass closes workspace stores, which waits on their lanes.
+        Impl* impl = impl_.get();
+        impl_->schedule_maintenance("workspace deletions", [impl] { impl->resume_workspace_deletions(); });
     }
     if (impl_->options.store && impl_->options.workspaces && !impl_->options.instance_kek.empty() &&
         now >= impl_->next_secret_lease_sweep) {

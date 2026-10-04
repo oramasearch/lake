@@ -121,9 +121,12 @@ class Registry;
 // awaiting coroutine on its own executor.
 namespace detail {
 boost::capy::thread_pool& blocking_pool();
-// Pool tasks between posting their completion to an executor and that post returning; a server
-// waits for none before it destroys the executor.
-std::atomic<int>& blocking_posts();
+// Pool tasks not yet finished, posting their completion included.
+std::atomic<int>& blocking_tasks();
+// Completions are posted under this lock, and never to an execution context a server has
+// closed (close_execution_context): a task that outlives its server's drain is abandoned.
+std::mutex& completion_gate();
+bool execution_context_closed(const void* context);
 
 template <class Callable, class T, class Executor>
 boost::capy::task<> run_on_blocking_pool(Callable callable,
@@ -135,9 +138,13 @@ boost::capy::task<> run_on_blocking_pool(Callable callable,
         state->output.emplace(std::unexpected(liquid::error{
             liquid::errc::internal, "a blocking handler threw", "lake::api::run_blocking"}));
     }
-    blocking_posts().fetch_add(1);
-    boost::capy::run_async(executor)(liquid::runtime::detail::wake_offload(std::move(state)));
-    blocking_posts().fetch_sub(1);
+    {
+        std::lock_guard gate(completion_gate());
+        if (!execution_context_closed(&executor.context())) {
+            boost::capy::run_async(executor)(liquid::runtime::detail::wake_offload(std::move(state)));
+        }
+    }
+    blocking_tasks().fetch_sub(1);
     co_return;
 }
 
@@ -152,6 +159,7 @@ public:
     }
     std::coroutine_handle<> await_suspend(std::coroutine_handle<> handle, const boost::capy::io_env*) {
         state_->completion.h = handle;
+        blocking_tasks().fetch_add(1);
         boost::capy::run_async(blocking_pool().get_executor())(
             run_on_blocking_pool<Callable, T>(std::move(callable_), state_, executor_));
         return std::noop_coroutine();
@@ -180,9 +188,13 @@ liquid::runtime::task<std::invoke_result_t<Callable>> run_blocking(Callable call
     co_return std::move(*state->output);
 }
 
-// Waits until no blocking-pool task is still posting a completion: called before a server
-// destroys its executor.
-void wait_for_blocking_posts();
+// Waits until no blocking-pool task is unfinished, or `deadline`; answers how many remain.
+int wait_for_blocking_tasks(std::chrono::steady_clock::time_point deadline);
+// After this, no pool task posts to `context`; a task still running is abandoned: the request
+// that awaited it is never resumed, so its response and its audit event are lost. A server calls
+// it before destroying its io_context, and forget_execution_context once it is destroyed.
+void close_execution_context(const void* context);
+void forget_execution_context(const void* context);
 class MeteringRecorder;
 class AuditRecorder;
 

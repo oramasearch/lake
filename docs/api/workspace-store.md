@@ -49,6 +49,11 @@ A transfer report has `repository_id`, `absent` (the space store never held it: 
   before the switch and never written is created empty in the workspace store by the switch.
 - After the switch a missing workspace store, data key or repository answers `corrupt` (500); lake
   never creates an empty one in its place.
+- `copy` and `verify` refuse only the workspace's own requests while they run; the space's other
+  workspaces wait at most one repository's copy. `switch` refuses the space's requests too.
+- Search does not index or return the workspace's repositories once it is switched, until lake#381.
+- liquid's sync client does not yet retry a `503` with `Retry-After` (liquid#340): rerun a
+  `liquid push` or `pull` refused during a move.
 
 **Audit.** Each call is one central audit event (`workspace_store.move`, details `workspace_id` and
 `mode`): it is an operator action on the instance, classified central in

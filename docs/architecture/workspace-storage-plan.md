@@ -263,6 +263,10 @@ Storage measurement for metering switches from a live `du` of the space's store 
 
 ### lake#381: the search index
 
+**Interim (lake#380).** Until this item lands, search neither indexes nor returns a switched
+workspace's repositories, so none of their content is written to the index on lake's volume
+([search.md](../api/search.md)).
+
 **Today.** `<customer>/index/`: `blobs.json` (blob digest to UTF-8 file text, append-only),
 `segment-<repository>-<change>-<kind>-<ref>.json` (path-to-blob occurrences), and `manifest.json`.
 Lake loads them into oramacore-cpp BM25F adapters at start, per space, and republishes from
