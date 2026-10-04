@@ -167,11 +167,12 @@ store_unavailable`. Workspace stores open on first use and close on drain and on
 The operator's `move_workspace_store` plans, copies (liquid#328), verifies and switches one workspace
 at a time (`workspaces.store_moved_at`); the space store is never written or removed. A switched
 workspace's missing store, key or repository answers `corrupt`, never an empty store; each store has
-its own lane and repository-store capabilities run off the server thread, so one workspace's Zetta
-holds up only its own requests. Rollback by the workspace Zetta is not detected yet (lake#522), and
+its own lane with at most four requests admitted, a moving store answers 503 with Retry-After, and
+repository-store work (search included, which reads stores only through the repository store)
+runs off the server thread, so one workspace's Zetta holds up only its own requests. Rollback by the workspace Zetta is not detected yet (lake#522), and
 every workspace store depends on `LAKE_INSTANCE_KEK`, which has no rotation or backup. Replication
-cursors go through liquid's cursor API. Writes need liquid#332 (until it lands the index merge is
-refused with a message naming it); no workspace is switched on dev, and the copy's snapshot
+cursors go through liquid's cursor API. It needs liquid `8955519` or later (liquid#332, write-once index
+runs); no workspace is switched on dev, and the copy's snapshot
 precondition (orama-operator#260) is not enforced. See `docs/architecture/workspace-store.md` and
 `docs/api/workspace-store.md`.
 

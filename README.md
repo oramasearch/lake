@@ -34,7 +34,7 @@ Workspace-scoped clients may use `/w/<workspace_id>/v1/<capability>`,
 A workspace's repositories can move into its own encrypted liquid store in its workspace Zetta
 (lake#380, migration `0067`): `move_workspace_store` plans, copies, verifies and switches one
 workspace at a time, after which they are served from that store and the space's store on lake's
-volume stays untouched. Writes to it need liquid#332; no workspace is switched on dev. See
+volume stays untouched. It needs liquid `8955519` or later (liquid#332); no workspace is switched on dev. See
 [workspace-store.md](docs/architecture/workspace-store.md).
 
 Workspaces are explicit `workspaces` contract rows, not service aliases. `/workspaces` lists

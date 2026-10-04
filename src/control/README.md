@@ -212,5 +212,5 @@ it creates, as the migration and its trigger do; `set_workspace_storage_status` 
 `workspace_store.cpp` implements `include/lake/control/workspace_store.hpp` (lake#380): Zetta's object
 routes and their errors, the wrapped workspace data key, the encrypted block and tail layout, the
 buffered appends sent as complete blocks at most one Zetta slice per PATCH, the refusal of a
-rewrite (liquid#332), the ciphertext window cache, and the lease's renewal thread. See
+rewrite (Zetta objects only grow), the ciphertext window cache, and the lease's renewal thread. See
 [workspace-store.md](../../docs/architecture/workspace-store.md).

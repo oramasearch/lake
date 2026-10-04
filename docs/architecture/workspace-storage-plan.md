@@ -16,8 +16,8 @@ and the per-workspace `lake_requests` series, [PR #521](https://github.com/orama
 no migration); lake#383 phase A (the tenant image route table and manifests and tags as
 workspace records, migration `0068`, [PR #523](https://github.com/oramasearch/lake/pull/523));
 lake#514's cascade (migration `0065`); and lake#380, the workspace store and its move
-(migration `0067`, [workspace-store.md](workspace-store.md); not switched on dev, writes need
-liquid#332). Everything else here is not implemented yet. This page plans the moves that
+(migration `0067`, [workspace-store.md](workspace-store.md); not switched on dev; needs liquid
+`8955519` or later). Everything else here is not implemented yet. This page plans the moves that
 [workspace records](workspace-records.md) does not cover: the bytes on lake's store volume
 (liquid stores, search indexes, the registry, the transparency log), the two repository tables
 that sit beside them, and lake's operational telemetry. It states what each item is today, what it
@@ -173,8 +173,8 @@ write past it is `507`.
 is [workspace-store.md](workspace-store.md), and the operator capability is
 [move_workspace_store](../api/workspace-store.md). Differences from this plan: the copy does not yet
 require the S13 snapshots (orama-operator#260 is not built); the bucket quota is the space's storage
-quota until `workspaces.storage_gi` exists (orama-operator#259); writes need liquid#332 because
-liquid's index merge rewrote runs in place.
+quota until `workspaces.storage_gi` exists (orama-operator#259); it needs liquid#332 (merged,
+liquid `8955519`), because liquid's index merge had rewritten runs in place.
 
 **Today.** `LAKE_STORE_ROOT/<customer>/store` is one libliquid store per space: packs, object map,
 chunk index, leases and collector state. Beside it, `<customer>/repositories/<id>/` holds each
@@ -491,7 +491,7 @@ liquid; `updated_at` is gone.
 | 11 | [lake#384](https://github.com/oramasearch/lake/issues/384) | Route patterns in request logs; the per-workspace `lake_requests` series (S9). **Done** ([PR #521](https://github.com/oramasearch/lake/pull/521)) | nothing |
 | 12 | [lake#382](https://github.com/oramasearch/lake/issues/382) | Stays with the instance (S7): the audit row, and the dynamic-secret leaf check. **Done** ([PR #519](https://github.com/oramasearch/lake/pull/519); no migration) | nothing |
 | 13 | [lake#383](https://github.com/oramasearch/lake/issues/383) | Phase A: the route table, manifests and tags as records. **Done** (migration `0068`, [PR #523](https://github.com/oramasearch/lake/pull/523)). Phase B: blobs in the workspace store | A: nothing; B: lake#380 |
-| 14 | [lake#380](https://github.com/oramasearch/lake/issues/380) | `ZettaObjectBackend`, per-workspace leases and lazy open, encryption, `move_workspace_store`. **Implemented** (migration `0067`); dev's switch waits on liquid#332 and the snapshots | 1–7, [liquid#332](https://github.com/oramasearch/liquid/issues/332) |
+| 14 | [lake#380](https://github.com/oramasearch/lake/issues/380) | `ZettaObjectBackend`, per-workspace leases and lazy open, encryption, `move_workspace_store`. **Implemented** (migration `0067`); dev's switch waits on the snapshots | 1–7, [liquid#332](https://github.com/oramasearch/liquid/issues/332) (merged) |
 | 15 | [lake#381](https://github.com/oramasearch/lake/issues/381) | Search beside the workspace store, rebuilt (S8) | lake#380 |
 
 The umbrella rule's exceptions for S7 and S9 are already in the bridge `CLAUDE.md`.

@@ -37,6 +37,7 @@
 #include "lake/control/memory_store.hpp"
 #include "lake/control/workspace_store.hpp"
 #include "lake/control/zetta_control.hpp"
+#include "lake/search/index.hpp"
 #include "one_thread_io.hpp"
 #include "temporary_directory.hpp"
 #include "workspace_fixture.hpp"
@@ -236,7 +237,7 @@ TEST(WorkspaceStoreBackend, RangesRoundTripAcrossBlocksTailsAndReopen) {
     }
 }
 
-TEST(WorkspaceStoreBackend, ARewriteWithOtherBytesIsRefusedAsLiquid332) {
+TEST(WorkspaceStoreBackend, ARewriteWithOtherBytesIsRefused) {
     Rig rig;
     auto backend = rig.backend(small_blocks());
     const auto header = random_bytes(64, 11);
@@ -245,12 +246,12 @@ TEST(WorkspaceStoreBackend, ARewriteWithOtherBytesIsRefusedAsLiquid332) {
     ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
     // A retried range with the bytes already there changes nothing.
     EXPECT_TRUE(liquid::runtime::block_on(backend->put_range("index/run-2.idx", 0, header)));
-    // The index merge's rewrite of a finished run's header is refused, plainly.
+    // A rewrite of written bytes with other bytes is refused, plainly.
     const auto rewritten =
         liquid::runtime::block_on(backend->put_range("index/run-2.idx", 0, random_bytes(64, 13)));
     ASSERT_FALSE(rewritten);
     EXPECT_EQ(rewritten.error().code, liquid::errc::conflict);
-    EXPECT_NE(rewritten.error().message.find("liquid#332"), std::string::npos)
+    EXPECT_NE(rewritten.error().message.find("only grow"), std::string::npos)
         << rewritten.error().message;
     // So is an append that skips past the end.
     const auto skipped =
@@ -348,15 +349,9 @@ TEST(WorkspaceStoreBackend, ALiquidStoreHoldsOnlyCiphertextAndReopens) {
         for (std::uint64_t seed = 0; seed < 6; ++seed) {
             auto contents = with_marker(random_bytes(seed == 0 ? 3 * 1024 * 1024 : 20000 + seed * 999, 30 + seed), 64);
             auto id = liquid::runtime::block_on(store->put(contents));
-            if (!id && id.error().message.find("liquid#332") != std::string::npos) {
-                // Without liquid#332 the index merge is refused; what was acknowledged stays.
-                std::printf("[ needs    ] liquid#332: %s\n", id.error().message.c_str());
-                break;
-            }
             ASSERT_TRUE(id) << id.error().message;
             written.emplace_back(*id, std::move(contents));
         }
-        ASSERT_FALSE(written.empty());
         ASSERT_TRUE(liquid::runtime::block_on(store->close()));
     }
     EXPECT_TRUE(rig.zetta->lease(rig.endpoint).holder.empty()) << "close releases the lease";
@@ -377,35 +372,23 @@ TEST(WorkspaceStoreBackend, ALiquidStoreHoldsOnlyCiphertextAndReopens) {
     EXPECT_FALSE(std::filesystem::exists(root)) << "a workspace store writes nothing locally";
 }
 
-// liquid's index merge rewrites a finished run's header and bloom filter in place, which Zetta's
-// object contract refuses (zetta docs/data/object-store.md, "One liquid write the contract
-// refuses"). With liquid#332 each run is written once, in order, and a store that merges runs
-// works; without it, the merge fails with the conflict below and nothing else is lost.
-TEST(WorkspaceStoreBackend, AStoreThatMergesIndexRunsNeedsLiquid332AndSaysSo) {
+// Zetta's objects only grow, and liquid writes each index run once, in order (liquid#332), so a
+// store that takes enough writes to merge its index runs works on the workspace store.
+TEST(WorkspaceStoreBackend, AStoreThatMergesIndexRunsWritesThemOnce) {
     Rig rig;
     const auto root = lake::test::fixture_path("workspace-store-merge-" + rig.workspace);
     std::shared_ptr<ZettaStoreOwner> owner;
     std::vector<std::pair<liquid::digest, std::vector<std::byte>>> acknowledged;
-    std::optional<liquid::error> refused;
     {
         auto store = liquid::runtime::block_on(liquid::store::open(root, owned(rig, owner)));
         ASSERT_TRUE(store) << store.error().message;
-        for (std::uint64_t seed = 0; seed < 24 && !refused; ++seed) {
+        for (std::uint64_t seed = 0; seed < 24; ++seed) {
             auto contents = random_bytes(9000 + seed * 13, 400 + seed);
             auto id = liquid::runtime::block_on(store->put(contents));
-            if (!id) {
-                refused = id.error();
-                break;
-            }
+            ASSERT_TRUE(id) << id.error().message;
             acknowledged.emplace_back(*id, std::move(contents));
         }
-        static_cast<void>(liquid::runtime::block_on(store->close()));
-    }
-    if (refused) {
-        EXPECT_EQ(refused->code, liquid::errc::conflict);
-        EXPECT_NE(refused->message.find("liquid#332"), std::string::npos) << refused->message;
-        EXPECT_NE(refused->message.find("index/run-"), std::string::npos) << refused->message;
-        std::printf("[ needs    ] liquid#332: %s\n", refused->message.c_str());
+        ASSERT_TRUE(liquid::runtime::block_on(store->close()));
     }
     auto store = liquid::runtime::block_on(liquid::store::open(root, owned(rig, owner)));
     ASSERT_TRUE(store) << store.error().message;
@@ -414,7 +397,7 @@ TEST(WorkspaceStoreBackend, AStoreThatMergesIndexRunsNeedsLiquid332AndSaysSo) {
         ASSERT_TRUE(read_back) << read_back.error().message;
         EXPECT_EQ(*read_back, contents);
     }
-    static_cast<void>(liquid::runtime::block_on(store->close()));
+    ASSERT_TRUE(liquid::runtime::block_on(store->close()));
 }
 
 TEST(WorkspaceStoreOwner, ASuccessorWaitsForTheHolderAndTakesOverWithAHigherFence) {
@@ -506,49 +489,26 @@ TEST(WorkspaceStoreBackend, ATransientFailureIsRetriedAndAPersistentOneIsUnavail
     EXPECT_EQ(failed.error().code, liquid::errc::unavailable);
 }
 
-// Whether this build's liquid has liquid#332 (write-once index runs): a store on the fake, whose
-// object contract refuses in-place rewrites, takes enough writes to merge index runs.
-bool liquid_has_332() {
-    static const bool present = [] {
-        Rig rig;
-        auto client = rig.client();
-        EXPECT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
-        liquid::store_options options;
-        options.backend = std::make_shared<ZettaObjectBackend>(
-            client, ZettaObjectBackendOptions{.workspace_id = rig.workspace,
-                                              .instance_kek = std::string(kek),
-                                              .create_key = true});
-        options.owner = std::make_shared<ZettaStoreOwner>(client, 30s);
-        auto store = liquid::runtime::block_on(liquid::store::open(
-            lake::test::fixture_path("workspace-store-probe-" + rig.workspace), std::move(options)));
-        EXPECT_TRUE(store) << store.error().message;
-        bool merged = true;
-        for (std::uint64_t seed = 0; store && seed < 24; ++seed) {
-            auto id = liquid::runtime::block_on(store->put(random_bytes(9000 + seed * 13, 7000 + seed)));
-            if (!id) {
-                merged = id.error().message.find("liquid#332") == std::string::npos;
-                break;
-            }
-        }
-        if (store) {
-            static_cast<void>(liquid::runtime::block_on(store->close()));
-        }
-        std::printf("[ liquid   ] liquid#332 %s in this build\n", merged ? "is" : "is not");
-        return merged;
-    }();
-    return present;
+// A write through lake succeeds.
+bool written(const std::pair<unsigned, json>& answer) {
+    EXPECT_EQ(answer.first, 200U) << answer.second.dump();
+    return answer.first == 200U;
 }
 
-// A write through lake succeeds when this liquid has liquid#332; without it, it either lands
-// before the store's first index merge or is refused with exactly the merge's 409.
-bool written(const std::pair<unsigned, json>& answer) {
-    if (liquid_has_332() || answer.first == 200U) {
-        EXPECT_EQ(answer.first, 200U) << answer.second.dump();
-        return answer.first == 200U;
+// A push through lake succeeds.
+bool pushed(const std::string& error) {
+    EXPECT_TRUE(error.empty()) << error;
+    return error.empty();
+}
+
+std::optional<lake::control::Repository> MoveRig_create(unsigned status, const json& body) {
+    if (status == 200U) {
+        lake::control::Repository output;
+        output.id = body["value"].value("id", std::string());
+        return output;
     }
-    EXPECT_EQ(answer.first, 409U) << answer.second.dump();
-    EXPECT_NE(answer.second.dump().find("liquid#332"), std::string::npos) << answer.second.dump();
-    return false;
+    ADD_FAILURE() << status << " " << body.dump();
+    return std::nullopt;
 }
 
 // ---- the move, through a lake server ---------------------------------------------------------
@@ -599,6 +559,10 @@ struct MoveRig {
     std::string beta;
     lake::control::Repository repo_a;
     lake::control::Repository repo_b;
+    // A second space with one workspace whose repository stays in that space's store.
+    std::string other_customer_id;
+    std::string gamma;
+    lake::control::Repository repo_c;
     std::filesystem::path root = lake::test::fixture_path("workspace-store-move-" + lake::control::new_uuid_v4());
     lake::api::ServerOptions options;
     std::unique_ptr<lake::api::ApiServer> server;
@@ -622,6 +586,16 @@ struct MoveRig {
         seed_repository(root, customer_id, repo_a.id, "alpha readme " + std::string(marker) + "\n",
                         2 * 1024 * 1024, 80);
         seed_repository(root, customer_id, repo_b.id, "beta readme\n", 0, 81);
+        const auto other_user = store->create_user({"taap:workspace-store-other", "", "Other Space"});
+        ASSERT_TRUE(other_user);
+        const auto other = store->create_customer({"individual", other_user->id, "", "other-space"});
+        ASSERT_TRUE(other);
+        other_customer_id = other->id;
+        gamma = workspaces->create(other_customer_id, "gamma");
+        auto created_c = store->create_repository({other_customer_id, "gamma-source", "", "private", gamma});
+        ASSERT_TRUE(created_c);
+        repo_c = *created_c;
+        seed_repository(root, other_customer_id, repo_c.id, "gamma readme\n", 0, 82);
         options.port = 0;
         options.store = store;
         options.workspaces = workspaces->service;
@@ -630,6 +604,7 @@ struct MoveRig {
         options.admin_token = "workspace-store-operator";
         options.instance_kek = std::string(kek);
         options.store_root = root.string();
+        options.search = std::make_shared<lake::search::Service>(root);
         ASSERT_NO_FATAL_FAILURE(start());
     }
 
@@ -683,6 +658,38 @@ struct MoveRig {
         return paths;
     }
 
+    // Pushes a new local history with one file into `repository` (its first push) through the
+    // liquid sync protocol. Answers the error message, empty on success.
+    std::string push(const lake::control::Repository& repository, const std::string& path,
+                     const std::string& text) {
+        const auto local = root.parent_path() / ("push-" + lake::control::new_uuid_v4());
+        auto source = liquid::runtime::block_on(liquid::repository::create(local));
+        if (!source) {
+            return source.error().message;
+        }
+        if (auto written = liquid::runtime::block_on(source->write(path, bytes_of(text))); !written) {
+            return written.error().message;
+        }
+        auto change = liquid::runtime::block_on(source->cut("Push " + path));
+        if (!change) {
+            return change.error().message;
+        }
+        if (auto ref = liquid::runtime::block_on(source->set_ref("main", *change)); !ref) {
+            return ref.error().message;
+        }
+        liquid::sync_endpoint endpoint(
+            "http://127.0.0.1:" + std::to_string(server->port()) + "/v1/repositories/" + repository.id,
+            liquid::sync_endpoint_options{.bearer_token = "workspace-store-operator"});
+        auto pushed = lake::test::block_on_one_thread(endpoint.push(*source));
+        std::error_code ignored;
+        std::filesystem::remove_all(local, ignored);
+        return pushed ? std::string() : pushed.error().message;
+    }
+
+    // Creates a repository; nothing (and a test failure) when lake refuses it.
+    std::optional<lake::control::Repository> create(const std::string& workspace_id,
+                                                    const std::string& name);
+
     // Commits one file and answers the status and body.
     std::pair<unsigned, json> commit(const lake::control::Repository& repository, const std::string& path,
                                      const std::string& text) {
@@ -726,6 +733,14 @@ struct MoveRig {
         std::filesystem::remove_all(root, ignored);
     }
 };
+
+std::optional<lake::control::Repository> MoveRig::create(const std::string& workspace_id,
+                                                         const std::string& name) {
+    const auto [status, body] = call("POST", "/v1/create_repository",
+                                     {{"customer_id", customer_id}, {"name", name},
+                                      {"workspace_id", workspace_id}, {"visibility", "private"}});
+    return MoveRig_create(status, body);
+}
 
 TEST(WorkspaceStoreMove, PlanCopyInterruptedVerifySwitchServeFromTheWorkspaceAndKeepWorkspacesApart) {
     MoveRig rig;
@@ -1079,65 +1094,238 @@ TEST(WorkspaceStoreMove, ADestinationThatLostObjectsNeverVerifiesOrSwitches) {
     }
 }
 
-TEST(WorkspaceStoreMove, OtherWorkspacesProceedWhileOneSwitchesOrItsZettaHangsAndASwitchMissesNothing) {
+TEST(WorkspaceStoreMove, OtherWorkspacesAndSpacesProceedWhileOneSwitchesOrItsZettaHangs) {
     MoveRig rig;
     ASSERT_NO_FATAL_FAILURE(rig.SetUp());
     const std::string endpoint_a = "http://" + rig.alpha + ".test";
     ASSERT_EQ(rig.move(rig.beta, "copy").first, 200U);
     ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
     EXPECT_EQ(rig.tree(rig.repo_b), (std::vector<std::string>{"README.md"}));
-    ASSERT_EQ(rig.move(rig.alpha, "copy").first, 200U);
 
-    // Alpha's switch runs slowly against a slow Zetta.
+    // Alpha's switch runs slowly against a slow Zetta, copying from the start.
     rig.zetta->hang(endpoint_a, 60ms);
     std::pair<unsigned, json> switched;
     std::thread switcher([&] { switched = rig.move(rig.alpha, "switch"); });
     std::this_thread::sleep_for(300ms);
-    // Beta, another workspace with its own store, is not held by it.
+    // Forty requests for alpha's repository and a creation in alpha are refused at once.
+    std::atomic<int> refused{0};
+    std::vector<std::thread> crowd;
+    for (int index = 0; index < 40; ++index) {
+        crowd.emplace_back([&] {
+            const auto [status, body] =
+                rig.call("GET", "/v1/repository_tree?id=" + rig.repo_a.id + "&ref=main");
+            if (status == 503U && body["error"]["code"] == "store_unavailable") {
+                refused.fetch_add(1);
+            }
+        });
+    }
+    const auto [creating_status, creating] =
+        rig.call("POST", "/v1/create_repository",
+                 {{"customer_id", rig.customer_id}, {"name", "created-mid-switch"},
+                  {"workspace_id", rig.alpha}, {"visibility", "private"}});
+    EXPECT_EQ(creating_status, 503U) << creating.dump();
+    // Beta, another workspace with its own store, and the other space answer, push included.
     const auto beta_started = std::chrono::steady_clock::now();
     EXPECT_EQ(rig.tree(rig.repo_b), (std::vector<std::string>{"README.md"}));
+    EXPECT_EQ(rig.tree(rig.repo_c), (std::vector<std::string>{"README.md"}));
+    const auto beta_new = rig.create(rig.beta, "beta-pushed");
+    const bool beta_pushed = beta_new && pushed(rig.push(*beta_new, "pushed.txt", "a push to beta"));
     const auto beta_took = std::chrono::steady_clock::now() - beta_started;
-    // A repository created in alpha meanwhile, and a write to alpha's existing repository, wait
-    // for the switch and land in the workspace store.
-    std::pair<unsigned, json> created;
-    std::pair<unsigned, json> pushed;
-    std::thread creator([&] {
-        created = rig.call("POST", "/v1/create_repository",
-                           {{"customer_id", rig.customer_id}, {"name", "created-mid-switch"},
-                            {"workspace_id", rig.alpha}, {"visibility", "private"}});
-        pushed = rig.commit(rig.repo_a, "mid-switch.txt", "written during the switch");
-    });
-    switcher.join();
-    creator.join();
-    rig.zetta->hang(endpoint_a, 0ms);
-    EXPECT_LT(beta_took, 1s) << "beta waited for alpha's switch";
-    ASSERT_EQ(switched.first, 200U) << switched.second.dump();
-    ASSERT_EQ(created.first, 200U) << created.second.dump();
-    const std::string new_id = created.second["value"]["id"].get<std::string>();
-    const auto space_packs = files_under(rig.root / rig.customer_id / "store" / "packs");
-    if (written(pushed)) {
-        EXPECT_EQ(rig.tree(rig.repo_a),
-                  (std::vector<std::string>{"README.md", "data", "data/blob.bin", "mid-switch.txt"}));
+    for (std::thread& thread : crowd) {
+        thread.join();
     }
-    // The created repository exists in the workspace store and answers.
-    const auto [new_status, new_tree] = rig.call("GET", "/v1/repository_refs?id=" + new_id);
-    EXPECT_EQ(new_status, 200U) << new_tree.dump();
-    EXPECT_TRUE(rig.zetta->objects(endpoint_a).contains(
-        hash_key(rig.root / rig.customer_id / "repositories" / new_id) + "/LIQUID_REPO"));
-    EXPECT_EQ(files_under(rig.root / rig.customer_id / "store" / "packs"), space_packs);
+    const bool still_switching = switched.first == 0U;
+    switcher.join();
+    rig.zetta->hang(endpoint_a, 0ms);
+    EXPECT_TRUE(still_switching) << "the switch finished before the checks ran";
+    EXPECT_LT(beta_took, 3s) << "beta or the other space waited for alpha's switch";
+    EXPECT_EQ(refused.load(), 40);
+    ASSERT_EQ(switched.first, 200U) << switched.second.dump();
+    if (beta_pushed) {
+        EXPECT_EQ(rig.tree(*beta_new), (std::vector<std::string>{"pushed.txt"}));
+    }
+    // After the switch, the creation and a push go to alpha's workspace store.
+    if (const auto alpha_new = rig.create(rig.alpha, "created-after-switch")) {
+        EXPECT_TRUE(rig.zetta->objects(endpoint_a).contains(
+            hash_key(rig.root / rig.customer_id / "repositories" / alpha_new->id) + "/LIQUID_REPO"));
+        if (pushed(rig.push(*alpha_new, "pushed.txt", "a push to alpha's workspace store"))) {
+            EXPECT_EQ(rig.tree(*alpha_new), (std::vector<std::string>{"pushed.txt"}));
+        }
+    }
 
-    // Alpha's Zetta hangs: alpha's request waits, beta's does not.
+    // Alpha's Zetta hangs: at most a few of alpha's requests wait, the rest are refused at once,
+    // and beta and the other space are not held.
     ASSERT_NO_FATAL_FAILURE(rig.restart()); // alpha's store is not open, so its open will hang
-    rig.zetta->hang(endpoint_a, 3s, ":acquire");
-    std::thread stuck([&] {
-        static_cast<void>(rig.call("GET", "/v1/repository_tree?id=" + rig.repo_a.id + "&ref=main"));
-    });
-    std::this_thread::sleep_for(200ms);
+    rig.zetta->hang(endpoint_a, 4s, ":acquire");
+    std::atomic<int> waited_out{0};
+    std::vector<std::thread> stuck;
+    for (int index = 0; index < 40; ++index) {
+        stuck.emplace_back([&] {
+            const auto [status, body] =
+                rig.call("GET", "/v1/repository_tree?id=" + rig.repo_a.id + "&ref=main");
+            if (status == 503U) {
+                waited_out.fetch_add(1);
+            }
+        });
+    }
+    std::this_thread::sleep_for(300ms);
     const auto hung_started = std::chrono::steady_clock::now();
     EXPECT_EQ(rig.tree(rig.repo_b), (std::vector<std::string>{"README.md"}));
-    EXPECT_LT(std::chrono::steady_clock::now() - hung_started, 1s);
-    stuck.join();
+    EXPECT_EQ(rig.tree(rig.repo_c), (std::vector<std::string>{"README.md"}));
+    if (const auto beta_again = rig.create(rig.beta, "beta-pushed-again")) {
+        static_cast<void>(pushed(rig.push(*beta_again, "again.txt", "a push while alpha hangs")));
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - hung_started, 3s);
+    for (std::thread& thread : stuck) {
+        thread.join();
+    }
     rig.zetta->hang(endpoint_a, 0ms);
+    EXPECT_GE(waited_out.load(), 36) << "more than the admission limit waited on alpha's lane";
+}
+
+TEST(WorkspaceStoreMove, ARepositoryTheSpaceStoreLostIsRefusedNotCreatedEmpty) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    const std::string state = hash_key(rig.root / rig.customer_id / "repositories" / rig.repo_a.id);
+    // Lake opens repo_a (which makes its directory beside the space store); then the space store's
+    // entry point for it is lost.
+    EXPECT_EQ(rig.tree(rig.repo_a), (std::vector<std::string>{"README.md", "data", "data/blob.bin"}));
+    std::filesystem::remove(rig.root / rig.customer_id / "store" / state / "LIQUID_REPO");
+    const auto [copy_status, copied] = rig.move(rig.alpha, "copy");
+    EXPECT_EQ(copy_status, 500U) << copied.dump();
+    EXPECT_EQ(copied["error"]["code"], "corrupt") << copied.dump();
+    const auto [switch_status, switched] = rig.move(rig.alpha, "switch");
+    EXPECT_NE(switch_status, 200U) << switched.dump();
+    EXPECT_FALSE(rig.zetta->objects(endpoint_a).contains(state + "/LIQUID_REPO"));
+    EXPECT_TRUE(rig.store->get_workspace(rig.alpha)->store_moved_at.empty());
+}
+
+TEST(WorkspaceStoreMove, SearchAndReindexRunBesideWritesToTheSameSpaceStore) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    std::atomic<bool> done{false};
+    std::atomic<int> failures{0};
+    std::thread searcher([&] {
+        while (!done.load()) {
+            const auto [status, body] = rig.call(
+                "GET", "/v1/search?query=readme&customer=" + rig.customer_id +
+                           "&repository=" + rig.repo_b.id + "&history=true");
+            if (status != 200U) {
+                failures.fetch_add(1);
+                ADD_FAILURE() << body.dump();
+            }
+            const auto [reindexed, reindex] =
+                rig.call("POST", "/v1/reindex_artifacts", {{"id", rig.repo_b.id}});
+            if (reindexed != 200U) {
+                failures.fetch_add(1);
+                ADD_FAILURE() << reindex.dump();
+            }
+        }
+    });
+    std::vector<std::string> expected{"README.md"};
+    for (int index = 0; index < 12; ++index) {
+        const std::string path = "file-" + std::to_string(index) + ".txt";
+        const auto [status, body] = rig.commit(rig.repo_b, path, "written beside search " + path);
+        EXPECT_EQ(status, 200U) << body.dump();
+        expected.push_back(path);
+    }
+    done.store(true);
+    searcher.join();
+    EXPECT_EQ(failures.load(), 0);
+    std::ranges::sort(expected);
+    EXPECT_EQ(rig.tree(rig.repo_b), expected);
+    // The space store reopens whole: nothing ran ahead of what is on disk.
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    EXPECT_EQ(rig.tree(rig.repo_b), expected);
+}
+
+// A write to a repository the switch has already copied, made while the switch is still copying
+// another, is refused at once (the store is being moved; retry) instead of landing in the space
+// store after its copy, where the switch would lose it. Retried after the switch, it lands in the
+// workspace store.
+TEST(WorkspaceStoreMove, AWriteDuringTheSwitchIsRefusedAndRetriedIntoTheWorkspaceStore) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    // The newest repository is copied first; repo_a (2 MiB) after it.
+    const auto created_early = rig.create(rig.alpha, "alpha-early");
+    ASSERT_TRUE(created_early);
+    const lake::control::Repository early = *created_early;
+    ASSERT_EQ(rig.commit(early, "first.txt", "before the switch").first, 200U);
+    const std::string early_state =
+        hash_key(rig.root / rig.customer_id / "repositories" / early.id) + "/LIQUID_REPO";
+
+    rig.zetta->hang(endpoint_a, 150ms);
+    std::pair<unsigned, json> switched;
+    std::thread switcher([&] { switched = rig.move(rig.alpha, "switch"); });
+    const auto started = std::chrono::steady_clock::now();
+    while (!rig.zetta->objects(endpoint_a).contains(early_state) &&
+           std::chrono::steady_clock::now() - started < 60s) {
+        std::this_thread::sleep_for(20ms);
+    }
+    ASSERT_TRUE(rig.zetta->objects(endpoint_a).contains(early_state));
+    const auto refused_started = std::chrono::steady_clock::now();
+    const auto refused = rig.commit(early, "late.txt", "written during the switch");
+    EXPECT_LT(std::chrono::steady_clock::now() - refused_started, 1s) << "the write did not wait";
+    EXPECT_EQ(refused.first, 503U) << refused.second.dump();
+    EXPECT_EQ(refused.second["error"]["code"], "store_unavailable") << refused.second.dump();
+    switcher.join();
+    rig.zetta->hang(endpoint_a, 0ms);
+    ASSERT_EQ(switched.first, 200U) << switched.second.dump();
+    if (written(rig.commit(early, "late.txt", "retried after the switch"))) {
+        EXPECT_EQ(rig.tree(early), (std::vector<std::string>{"first.txt", "late.txt"}));
+    }
+}
+
+TEST(WorkspaceStoreMove, APushLandsInTheWorkspaceStore) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    const auto target = rig.create(rig.alpha, "pushed-into-workspace");
+    if (!target) {
+        return; // create() recorded the failure
+    }
+    const auto before = files_under(rig.root / rig.customer_id / "store" / "packs");
+    if (pushed(rig.push(*target, "src/main.txt", "pushed " + std::string(marker)))) {
+        EXPECT_EQ(rig.tree(*target), (std::vector<std::string>{"src", "src/main.txt"}));
+        EXPECT_FALSE(holds_marker(rig.zetta->objects(endpoint_a)));
+    }
+    EXPECT_EQ(files_under(rig.root / rig.customer_id / "store" / "packs"), before);
+}
+
+TEST(WorkspaceStoreMove, ACreationTheWorkspaceStoreRefusesLeavesNoRowAndCanBeRetried) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    // Another process holds alpha's lease and the store is not open: the creation's store step
+    // fails after the row was written.
+    rig.options.store_owner_wait = 500ms;
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    rig.zetta->take_over(endpoint_a, "another lake");
+    const auto [failed_status, failed] =
+        rig.call("POST", "/v1/create_repository",
+                 {{"customer_id", rig.customer_id}, {"name", "retried"}, {"workspace_id", rig.alpha},
+                  {"visibility", "private"}});
+    EXPECT_NE(failed_status, 200U) << failed.dump();
+    const auto rows = rig.store->list_repositories(rig.customer_id, 100, rig.alpha);
+    ASSERT_TRUE(rows);
+    bool written_row = false;
+    for (const auto& row : *rows) {
+        if (row.name == "retried") {
+            written_row = true;
+            EXPECT_FALSE(row.deleted_at.empty()) << "the row was rolled back";
+        }
+    }
+    EXPECT_TRUE(written_row) << "the row is written before the store step";
+    rig.zetta->release(endpoint_a);
+    // The name is free again and the retry is created in the workspace store.
+    if (const auto retried = rig.create(rig.alpha, "retried")) {
+        EXPECT_TRUE(rig.zetta->objects(endpoint_a).contains(
+            hash_key(rig.root / rig.customer_id / "repositories" / retried->id) + "/LIQUID_REPO"));
+    }
 }
 
 TEST(WorkspaceStoreMove, AStoppedSwitchedWorkspaceDoesNotRefuseItsSpacesWrites) {
@@ -1258,8 +1446,6 @@ double milliseconds_since(std::chrono::steady_clock::time_point started) {
 }
 
 struct Timing {
-    // Set when liquid's index merge was refused (this liquid lacks liquid#332).
-    std::string needs;
     double put_ms = 0;
     double get_ms = 0;
     double large_put_ms = 0;
@@ -1279,10 +1465,6 @@ Timing measure(liquid::store& store, liquid::store* transfer_source,
     auto started = std::chrono::steady_clock::now();
     for (std::uint64_t index = 0; index < 64; ++index) {
         auto id = liquid::runtime::block_on(store.put(random_bytes(1024 * 1024, 900 + index)));
-        if (!id && id.error().message.find("liquid#332") != std::string::npos) {
-            timing.needs = id.error().message;
-            return timing;
-        }
         EXPECT_TRUE(id) << id.error().message;
         if (!id) {
             return timing;
@@ -1393,9 +1575,6 @@ TEST(WorkspaceStoreZetta, TheBackendOnARealZettaHoldsOnlyCiphertextAndItsLatency
         EXPECT_EQ(bytes->find(marker), std::string::npos) << object.key;
     }
 
-    if (!on_zetta.needs.empty()) {
-        GTEST_SKIP() << "the latency measurement needs liquid#332: " << on_zetta.needs;
-    }
     auto disk = liquid::runtime::block_on(liquid::store::open(disk_root / "measured"));
     ASSERT_TRUE(disk);
     const Timing on_disk = measure(*disk, &*source, identifier);

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -10,6 +11,10 @@
 
 namespace lake::control {
 class Store;
+}
+
+namespace liquid {
+class repository;
 }
 
 namespace lake::search {
@@ -81,9 +86,24 @@ struct QueryResult {
     std::vector<Hit> items;
 };
 
+// A repository lent to search by lake's repository store (lake#380): `hold` keeps the store's
+// lane and the shared open instance for as long as search reads it.
+struct BorrowedRepository {
+    std::shared_ptr<void> hold;
+    liquid::repository* repository = nullptr;
+};
+using RepositoryAccess =
+    std::function<Result<BorrowedRepository>(const std::string& customer, const std::string& repository)>;
+
 class Service {
 public:
     explicit Service(std::filesystem::path store_root);
+
+    // How search reads a repository. The server sets it to its repository store, which lends the
+    // repository from whichever store serves it, under that store's lane, so search never opens
+    // a second instance of a store another writer has open. Unset, search opens the space store
+    // itself, which only a service without a repository store may do.
+    void set_repository_access(RepositoryAccess access);
 
     [[nodiscard]] Result<void> publish(const Publish& change);
     [[nodiscard]] Result<ReindexResult> reindex_artifacts(const std::string& customer,

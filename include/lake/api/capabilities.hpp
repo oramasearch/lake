@@ -46,6 +46,18 @@ std::expected<control::Workspace, ApiError> repository_workspace(ApiContext& con
 // store (lake#380) is created there too, and no switch of the workspace runs meanwhile.
 control::Result<control::Repository> create_repository_row(ApiContext& context,
                                                            control::NewRepository in);
+
+// A repository-store call from an asynchronous handler, run on the blocking pool so the server
+// thread never waits on a store's lane or a workspace Zetta (lake#380). A failure of the pool
+// itself becomes `on_pool_error`.
+template <class Callable, class Fallback>
+boost::capy::task<std::invoke_result_t<Callable>> blocking_call(Callable callable, Fallback on_pool_error) {
+    auto ran = co_await run_blocking(std::move(callable));
+    if (!ran) {
+        co_return on_pool_error(ran.error().message);
+    }
+    co_return std::move(*ran);
+}
 // Customer Zetta workspaces: status, start, and allow-listed calls (docs/api/workspaces.md).
 void register_workspace_capabilities(Registry& registry);
 // The operator's one-shot copy of retired control-store tables into workspace Zettas

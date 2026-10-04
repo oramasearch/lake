@@ -1396,22 +1396,20 @@ ZettaObjectBackend::read_plain(const std::string& key, std::uint64_t offset, std
 liquid::runtime::task<void> ZettaObjectBackend::flush_entry(const std::string& key, bool barrier) {
     // One flush per key at a time: a threshold flush and a barrier on the same key would otherwise
     // send the same blocks twice and both remove them from the buffer.
-    for (;;) {
-        {
-            std::lock_guard lock(mutex_);
-            if (!flushing_.contains(key)) {
-                flushing_.insert(key);
-                break;
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    {
+        std::unique_lock lock(mutex_);
+        flushed_.wait(lock, [&] { return !flushing_.contains(key); });
+        flushing_.insert(key);
     }
     struct Done {
         ZettaObjectBackend& self;
         const std::string& key;
         ~Done() {
-            std::lock_guard lock(self.mutex_);
-            self.flushing_.erase(key);
+            {
+                std::lock_guard lock(self.mutex_);
+                self.flushing_.erase(key);
+            }
+            self.flushed_.notify_all();
         }
     } done{*this, key};
     co_return co_await flush_entry_once(key, barrier);
@@ -1751,9 +1749,8 @@ ZettaObjectBackend::put_range_impl(std::string key, std::uint64_t offset, std::v
             co_return std::unexpected(failure(
                 liquid::errc::conflict,
                 std::format("the workspace store on Zetta refuses to rewrite {} bytes of {} at "
-                            "offset {}: Zetta objects only grow, so liquid's index merge, which "
-                            "rewrites a finished run's header, needs liquid#332 (write-once index "
-                            "runs) before this store can merge index runs",
+                            "offset {} with other bytes: Zetta objects only grow (liquid writes "
+                            "each index run once since liquid#332)",
                             overlap, key, offset),
                 key));
         }

@@ -551,7 +551,11 @@ void register_metering_capabilities(Registry& registry) {
             }
             const std::uint64_t quota_bytes =
                 configured_quota->value_or(context.metering.storage_quota_bytes);
-            const auto stored_bytes = context.sync_store->unique_stored_bytes(customer_id);
+            const auto stored_bytes = co_await blocking_call(
+                [&] { return context.sync_store->unique_stored_bytes(customer_id); },
+                [](std::string message) -> SyncStoreResult<std::uint64_t> {
+                    return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+                });
             if (!stored_bytes) {
                 co_return sync_error(stored_bytes.error());
             }

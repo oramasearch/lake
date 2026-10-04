@@ -55,7 +55,11 @@ create_repository_with_settings(ApiContext& context, control::NewRepository in,
                                 std::string description) {
     using Created = std::expected<control::Repository, ApiResult>;
     if (description.empty()) {
-        auto created = create_repository_row(context, in);
+        auto created = co_await blocking_call(
+            [&] { return create_repository_row(context, in); },
+            [](std::string message) -> control::Result<control::Repository> {
+                return std::unexpected(control::StoreError{"store_unavailable", std::move(message)});
+            });
         if (!created) {
             co_return Created(std::unexpect,
                               ApiResult::failure(created.error().code, created.error().message));
@@ -76,7 +80,11 @@ create_repository_with_settings(ApiContext& context, control::NewRepository in,
         co_return Created(std::unexpect,
                           ApiResult::failure(settings.error().code, settings.error().message));
     }
-    auto created = create_repository_row(context, in);
+    auto created = co_await blocking_call(
+            [&] { return create_repository_row(context, in); },
+            [](std::string message) -> control::Result<control::Repository> {
+                return std::unexpected(control::StoreError{"store_unavailable", std::move(message)});
+            });
     if (!created) {
         // The row was refused (a taken name, a deleted workspace): the record goes too, so a
         // record never names a repository that does not exist. It is the record just written, so

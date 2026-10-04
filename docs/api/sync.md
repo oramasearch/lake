@@ -17,8 +17,7 @@ every other repository from its space's store on lake's volume. The protocol and
 change. A workspace store opens on the first sync that needs it; while another process holds its
 bucket lease (a hand-off, or after this lake lost the lease) its repositories answer
 `503 store_unavailable`, and repositories of other workspaces are unaffected. Pushes into a
-workspace store need liquid#332: without it liquid's index merge is refused `409 conflict` with a
-message naming liquid#332.
+workspace store need liquid `8955519` or later, which writes each index run once (liquid#332).
 
 ## Repository URL and requests
 

@@ -230,8 +230,12 @@ The store capabilities (`list_stores`, `create_store`, `delete_store`, `store_co
 the workspace and see only its stores (lake#465). See `docs/api/storage.md`.
 
 `registry.cpp` runs the synchronous handlers of capabilities that wait on a repository store
-(repository, Drive, model and dataset objects, `replicate_repository`, `move_workspace_store`) on a
-32-thread pool, so a slow workspace Zetta holds up only its own requests (lake#380).
+(repository, Drive, model and dataset objects, search, `replicate_repository`,
+`move_workspace_store`, `delete_workspace`) on a 32-thread pool, and `run_blocking` /
+`blocking_call` (`registry.hpp`, `capabilities.hpp`) run asynchronous handlers' store calls there,
+so a slow workspace Zetta holds up only its own requests (lake#380). `LiquidCustomerStores` admits
+at most four requests per store lane and refuses a moving lane with 503; it lends repositories to
+search (`lend_repository`).
 `create_repository_row` (`capabilities.cpp`) creates every repository row through
 `SyncStore::create_repository_content`. `workspace_store_capabilities.cpp` registers the operator-only `move_workspace_store` (plan, copy,
 verify, switch; lake#380, `docs/api/workspace-store.md`). `http_server.cpp`'s `LiquidCustomerStores`

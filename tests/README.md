@@ -603,8 +603,7 @@ but not the operator's message; `VolumeSchedules.*` the cron grammar and the nev
 trigger, the policy checks and the backfill; `OperatorContract.*` the operator's new workspace and
 snapshot statements.
 `test_workspace_store.cpp` covers lake#380 (the table is in
-`docs/architecture/workspace-store.md#tests`): the encrypted backend, its refusal of a rewrite
-(liquid#332), tampering, the owner's hand-off and lost lease, and, through a running lake, the
+`docs/architecture/workspace-store.md#tests`): the encrypted backend, its refusal of a rewrite, tampering, the owner's hand-off and lost lease, and, through a running lake, the
 move with an interrupted copy, the switch, two workspaces of one space and the lost lease's `503`.
 `zetta_object_fixture.hpp` is `FakeZettaObjects`, Zetta's object routes in memory. Set
 `LAKE_TEST_ZETTA_BINARY` to a `zetta` built from Zetta dev to run `WorkspaceStoreZetta.*` against it.

@@ -4,8 +4,8 @@ Refs [lake#380](https://github.com/oramasearch/lake/issues/380). The design is
 [architecture/workspace-store.md](../architecture/workspace-store.md); the decisions are liquid-bridge
 decision 54 S1-S3 and the [plan](../architecture/workspace-storage-plan.md#lake380-the-liquid-store).
 
-**Status: implemented in the source tree; not deployed; no workspace on dev is switched.** Writing a
-switched workspace's store needs liquid#332.
+**Status: implemented in the source tree; not deployed; no workspace on dev is switched.** It needs liquid
+`8955519` or later (liquid#332, write-once index runs).
 
 `move_workspace_store` is an operator capability (operator bearer only; every other caller is
 `unauthorized`; `src/api/workspace_store_capabilities.cpp`). It moves one workspace's repositories
@@ -27,7 +27,7 @@ and `unassigned`: the repositories of the space without a workspace. Any unassig
 | `plan` | Reads only. Lists the workspace's repositories, live and tombstoned, with `logical_bytes` and `unique_bytes` of their refs (`size_error` when a size cannot be read). | `repositories`, `blocked` |
 | `copy` | Copies each repository with liquid's `repository::transfer` (liquid#328): every reachable object keeping its digest, its lease records, then its state keys with `LIQUID_REPO` last. A rerun copies only what is missing. Refused once the workspace is switched. | `repositories` (one transfer report each), `complete` |
 | `verify` | Writes nothing. Compares every reachable object and every state key in both stores. | `repositories` with `differences`, `complete` |
-| `switch` | Holds the workspace's and its space's repository requests and repository creation in the workspace, lists the workspace's repositories under that hold, copies what arrived since `copy`, verifies each repository again, creates in the workspace store each one the space store never held, and only when all are complete sets `workspaces.store_moved_at`; from then on the workspace's repositories are served from its store. Requests for other workspaces' stores are not held. A repeated switch answers `switched: true` and changes nothing. | `repositories`, `switched`, `store_moved_at` |
+| `switch` | Refuses the workspace's and its space's repository requests and repository creation in the workspace with `503 store_unavailable` (`Retry-After`) while it runs, lists the workspace's repositories under that hold, copies what arrived since `copy`, verifies each repository again, creates in the workspace store each one the space store never held, and only when all are complete sets `workspaces.store_moved_at`; from then on the workspace's repositories are served from its store. Requests for other workspaces' stores are not held. A repeated switch answers `switched: true` and changes nothing. | `repositories`, `switched`, `store_moved_at` |
 
 A transfer report has `repository_id`, `absent` (the space store never held it: nothing to copy),
 `complete`, `objects`, `objects_present`, `objects_written`, `bytes_written`, `state_written`,
@@ -55,7 +55,7 @@ A transfer report has `repository_id`, `absent` (the space store never held it: 
 
 ## Dev cutover
 
-1. Deploy an image with this change and liquid#332, and Zetta with the object capability on every
+1. Deploy an image with this change and liquid `8955519` or later, and Zetta with the object capability on every
    workspace Zetta (dev Zetta has it). Apply migration `0067`.
 2. Snapshot `lake-prod-store` and each workspace Zetta's volume.
 3. For each workspace: `plan`, then `copy`, then `verify` until `complete`, then `switch`.

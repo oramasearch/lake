@@ -231,8 +231,7 @@ struct ZettaObjectBackendOptions {
 //
 // Appends are buffered and sent as complete blocks once flush_bytes is held, and always before
 // barrier() answers. A range rewritten with different bytes is refused with errc::conflict: Zetta
-// keeps objects append-only, so liquid's index merge, which rewrites a run's header, needs
-// liquid#332. Reads go through a bounded cache of aligned ciphertext windows keyed by the object
+// keeps objects append-only (liquid writes each index run once since liquid#332). Reads go through a bounded cache of aligned ciphertext windows keyed by the object
 // version's salt. The backend keeps a directory of the bucket from one listing, maintained by its
 // own writes; that is exact because the owner's fence makes it the only writer.
 class ZettaObjectBackend final : public liquid::store_backend {
@@ -291,6 +290,7 @@ private:
     std::map<std::string, std::unique_ptr<Entry>> directory_;
     std::set<std::string> stale_tails_;
     std::set<std::string> flushing_;
+    std::condition_variable flushed_;
     bool dirty_ = false;
 };
 

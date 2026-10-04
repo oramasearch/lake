@@ -1867,10 +1867,19 @@ control::Result<control::Repository> create_repository_row(ApiContext& context,
         return *row;
     }
     if (!content) {
+        if (row) {
+            // The row exists but its workspace store refused the repository: tombstone the row with
+            // its retention ended, which frees the name, so the creation can simply be retried.
+            static_cast<void>(context.store->delete_repository(
+                (*row)->id, control::RepositoryDeletion{.deleted_at = timestamp_after(std::chrono::seconds::zero()),
+                                                        .retention_until = timestamp_after(std::chrono::seconds::zero())}));
+        }
+        // Not `conflict`: callers read that as a taken name.
+        const std::string code =
+            content.error().code == "conflict" ? std::string("store_error") : content.error().code;
         return std::unexpected(control::StoreError{
-            content.error().code,
-            "the repository row exists but it could not be created in its workspace store: " +
-                content.error().message});
+            code, "the repository could not be created in its workspace store; retry: " +
+                      content.error().message});
     }
     return *row;
 }
@@ -4211,12 +4220,19 @@ void register_repository_capabilities(Registry& registry) {
                 loaded ? std::move(*loaded)
                        : std::unexpected(SyncStoreError{"store_error", loaded.error().message,
                                                         "branch protection", {}});
-            auto response = context.sync_store->push(
-                repository->customer_id,
-                repository->id,
-                context.sync_request,
-                sync_change_authorizer(context, *repository, std::move(protection)),
-                *quota);
+            const auto pool_failure = [](std::string message) -> SyncStoreResult<std::vector<std::byte>> {
+                return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+            };
+            auto response = co_await blocking_call(
+                [&] {
+                    return context.sync_store->push(
+                        repository->customer_id,
+                        repository->id,
+                        context.sync_request,
+                        sync_change_authorizer(context, *repository, std::move(protection)),
+                        *quota);
+                },
+                pool_failure);
             if (!response) {
                 if (response.error().rule == "storage_quota") {
                     context.audit_details["quota"] = {{"status", "throttled"},
@@ -4225,8 +4241,11 @@ void register_repository_capabilities(Registry& registry) {
                 co_return from_sync_error(context, response.error());
             }
             if (context.search) {
-                const auto indexed =
-                    context.search->reindex_artifacts(repository->customer_id, repository->id);
+                const auto indexed = co_await blocking_call(
+                    [&] { return context.search->reindex_artifacts(repository->customer_id, repository->id); },
+                    [](std::string message) -> search::Result<search::ReindexResult> {
+                        return std::unexpected(search::Error{"store_error", std::move(message)});
+                    });
                 if (!indexed) {
                     context.audit_details["artifact_index"] = indexed.error().message;
                 }
