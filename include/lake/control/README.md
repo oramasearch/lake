@@ -185,3 +185,12 @@ operator's `storage_gi_observed`, `storage_phase` and `storage_message`; `Volume
 standard cron fields, refusing a schedule that can never fire) and the bounds
 `max_workspace_storage_gi` and `max_volume_snapshots_kept`; and `set_workspace_storage`,
 `request_volume_snapshot` and `volume_snapshots`.
+`workspace_store.hpp` is a workspace's liquid store in its workspace Zetta (lake#380,
+[workspace-store.md](../../../docs/architecture/workspace-store.md)): `ObjectTransport` (raw HTTP to
+Zetta's object routes; `make_zetta_object_transport` uses Zetta's installed client), `ZettaObjectClient`
+(one bucket, liquid's error codes), `WorkspaceStoreCipher` (the data key wrapped under a key derived
+from `LAKE_INSTANCE_KEK`, AES-256-GCM blocks), `ZettaObjectBackend` (liquid's `store_backend`: the
+encrypted block layout, buffered appends, tails, the window cache, the bucket directory, `failed()`)
+and `ZettaStoreOwner` (liquid's `store_owner` over the bucket lease). `zetta_workspace.hpp` adds
+`WorkspaceService::endpoint`, and `store.hpp` `Workspace::store_moved_at` and
+`mark_workspace_store_moved` (migration `0067`).

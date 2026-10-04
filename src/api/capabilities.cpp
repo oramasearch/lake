@@ -5548,6 +5548,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_volume_capabilities(registry);
     register_workspace_capabilities(registry);
     register_workspace_record_capabilities(registry);
+    register_workspace_store_capabilities(registry);
 }
 
 } // namespace lake::api

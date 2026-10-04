@@ -31,6 +31,12 @@ Workspace-scoped clients may use `/w/<workspace_id>/v1/<capability>`,
 `/w/<workspace_id>/v1/openapi.json`, and `/w/<workspace_id>/mcp`. The path supplies
 `workspace_id`; an explicit value must match it.
 
+A workspace's repositories can move into its own encrypted liquid store in its workspace Zetta
+(lake#380, migration `0067`): `move_workspace_store` plans, copies, verifies and switches one
+workspace at a time, after which they are served from that store and the space's store on lake's
+volume stays untouched. Writes to it need liquid#332; no workspace is switched on dev. See
+[workspace-store.md](docs/architecture/workspace-store.md).
+
 Workspaces are explicit `workspaces` contract rows, not service aliases. `/workspaces` lists
 their environment and operator status, creates desired state, and deletes with typed-name
 confirmation. Routing resolves `workspaces.zetta_service_id`; migration 0039 and the operator's

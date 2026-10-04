@@ -26,9 +26,12 @@ Lake resolves the repository through the control store and authorizes `admin` on
 It pulls from `<source_url>/v1/repositories/<repository_id>` using liquid's signed sync protocol.
 The source validates its normal repository-read policy. Content-addressed objects are transferred
 before their referencing metadata is imported, and liquid verifies object digests and signed
-records. The latest returned journal cursor is atomically saved under
-`<root>/<customer>/repositories/<repository>/replication/<source>.cursor` only after the pull
-succeeds. It is local replication state and is not added to the liquid history. A retry therefore
+records. The latest returned journal cursor is saved with liquid's replication-cursor API
+(`repository::set_replication_cursor`, liquid#326) only after the pull succeeds, as the repository
+state key `repositories/<id-hash>/replication/<source>.cursor` of whichever store holds the
+repository, so it moves with the repository into its workspace store (lake#380). A cursor an older
+lake wrote at `<root>/<customer>/repositories/<repository>/replication/<source>.cursor` is read once
+when liquid holds none. It is local replication state and is not added to the liquid history. A retry therefore
 resumes at the last committed cursor and transfers no object already present. The response reports
 the cursor, metadata items, received objects and bytes, and current ref count.
 

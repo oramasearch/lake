@@ -46,6 +46,9 @@ void register_workspace_capabilities(Registry& registry);
 // The operator's one-shot copy of retired control-store tables into workspace Zettas
 // (docs/architecture/workspace-records.md).
 void register_workspace_record_capabilities(Registry& registry);
+// The operator's move of a workspace's repositories from its space's store on lake's volume into
+// the workspace's own store in its workspace Zetta (lake#380, docs/api/workspace-store.md).
+void register_workspace_store_capabilities(Registry& registry);
 // Running and talking to agents (docs/api/agent-launches.md): launch_agent, list_agent_launches,
 // stop_agent_launch, schedule_agent, list_agent_schedules, unschedule_agent, agent_turn. Registered
 // by register_workspace_capabilities.

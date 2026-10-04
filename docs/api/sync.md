@@ -10,6 +10,16 @@ registers their operations through its capability registry, streams the binary b
 HTTP adapter translation unit, and stores all repositories owned by a customer in that customer's
 caller-owned liquid store.
 
+**Where a repository's content is (lake#380).** A repository of a switched workspace
+(`workspaces.store_moved_at` set by `move_workspace_store`) is served from that workspace's own
+encrypted store in its workspace Zetta ([architecture/workspace-store.md](../architecture/workspace-store.md));
+every other repository from its space's store on lake's volume. The protocol and the client do not
+change. A workspace store opens on the first sync that needs it; while another process holds its
+bucket lease (a hand-off, or after this lake lost the lease) its repositories answer
+`503 store_unavailable`, and repositories of other workspaces are unaffected. Pushes into a
+workspace store need liquid#332: without it liquid's index merge is refused `409 conflict` with a
+message naming liquid#332.
+
 ## Repository URL and requests
 
 The URL passed to `liquid clone`, `liquid push` or `liquid pull` identifies one repository. For

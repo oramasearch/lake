@@ -209,3 +209,8 @@ workspace target is live; `volume_snapshots` joins each policy with the operator
 `volume_snapshot_status`. The memory store starts with the `store` policy and adds one per workspace
 it creates, as the migration and its trigger do; `set_workspace_storage_status` and
 `set_volume_snapshot_status` stand in for the operator in tests.
+`workspace_store.cpp` implements `include/lake/control/workspace_store.hpp` (lake#380): Zetta's object
+routes and their errors, the wrapped workspace data key, the encrypted block and tail layout, the
+buffered appends sent as complete blocks at most one Zetta slice per PATCH, the refusal of a
+rewrite (liquid#332), the ciphertext window cache, and the lease's renewal thread. See
+[workspace-store.md](../../docs/architecture/workspace-store.md).

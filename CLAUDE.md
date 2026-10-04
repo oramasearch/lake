@@ -157,6 +157,20 @@ content-free `volume_snapshot_policies` (target `store` or a workspace id, cron 
 audited centrally; the `move_workspace_store` snapshot check waits for lake#380's change. See
 `docs/api/volumes.md`.
 
+A workspace's liquid store moves into its workspace Zetta (decision 54 S1-S3, lake#380, migration
+`0067`): `ZettaObjectBackend` is liquid's `store_backend` over Zetta's object routes (bucket
+`lake_store`), encrypting every byte below liquid with the workspace's data key (wrapped under a key
+derived from `LAKE_INSTANCE_KEK`; fixed AES-256-GCM blocks plus a replaced tail object, so appends
+never rewrite); `ZettaStoreOwner` is liquid's `store_owner` over the bucket lease, renewed every third
+of `LAKE_WORKSPACE_STORE_LEASE_SECONDS`, and a lost lease answers that workspace `503
+store_unavailable`. Workspace stores open on first use and close on drain and on workspace deletion.
+The operator's `move_workspace_store` plans, copies (liquid#328), verifies and switches one workspace
+at a time (`workspaces.store_moved_at`); the space store is never written or removed. Replication
+cursors go through liquid's cursor API. Writes need liquid#332 (until it lands the index merge is
+refused with a message naming it); no workspace is switched on dev, and the copy's snapshot
+precondition (orama-operator#260) is not enforced. See `docs/architecture/workspace-store.md` and
+`docs/api/workspace-store.md`.
+
 ## Historical status — superseded 2026-09-08
 
 The following was the prior source-tree status record. Its production claims are retained only as

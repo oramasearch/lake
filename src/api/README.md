@@ -229,6 +229,14 @@ Failed, with its reason (lake#442). See `docs/api/agent-launches.md`.
 The store capabilities (`list_stores`, `create_store`, `delete_store`, `store_connection`) take
 the workspace and see only its stores (lake#465). See `docs/api/storage.md`.
 
+`workspace_store_capabilities.cpp` registers the operator-only `move_workspace_store` (plan, copy,
+verify, switch; lake#380, `docs/api/workspace-store.md`). `http_server.cpp`'s `LiquidCustomerStores`
+routes a repository to its workspace's store once `workspaces.store_moved_at` is set, opens each
+workspace store on first use with mutex_ given up while it waits for the bucket lease, closes and
+reopens a store whose lease was lost or whose write failed, closes them on drain and on workspace
+deletion (`WorkspaceContent::close_workspace_store`), measures a switched workspace's storage as
+its bucket's usage, and keeps replication cursors with liquid's cursor API.
+
 `workspace_records_api.hpp` opens one workspace's records through `call_workspace`, so record
 calls are owner-checked, refused when the workspace is not ready and named in Server-Timing.
 `workspace_record_capabilities.cpp` registers the operator-only `copy_workspace_records` (plan,

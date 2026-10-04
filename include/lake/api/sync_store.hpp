@@ -290,6 +290,23 @@ struct RepositoryGitImport {
     nlohmann::json commit_changes = nlohmann::json::object();
 };
 
+// One repository's copy into its workspace's store (lake#380, liquid#328 repository::transfer):
+// what the transfer examined and wrote, and, in verify mode, each way the workspace store differs.
+// `absent` is a repository the space's store never held (nothing to copy).
+struct WorkspaceStoreTransfer {
+    std::string repository_id;
+    bool absent = false;
+    bool complete = false;
+    std::uint64_t objects = 0;
+    std::uint64_t objects_present = 0;
+    std::uint64_t objects_written = 0;
+    std::uint64_t bytes_written = 0;
+    std::uint64_t state_written = 0;
+    std::uint64_t leases_written = 0;
+    std::vector<std::string> missing;
+    std::vector<std::pair<std::string, std::string>> differences;
+};
+
 // HTTP-free access to the liquid store selected by a repository's customer.
 // The libliquid implementation remains inside the HTTP adapter translation
 // unit.
@@ -418,6 +435,26 @@ public:
                                                                const std::string& digest,
                                                                std::uint64_t offset,
                                                                std::uint64_t length) = 0;
+    // lake#380: a workspace's repositories move from the space's store on lake's volume into the
+    // workspace's own store in its workspace Zetta. Copy (or, with verify, compare) one repository.
+    virtual SyncStoreResult<WorkspaceStoreTransfer>
+    transfer_to_workspace_store(const std::string&, const std::string&, const std::string&, bool) {
+        return std::unexpected(SyncStoreError{"unsupported", "workspace stores are unavailable"});
+    }
+    // Holds every repository request, copies what changed since the last copy, verifies every
+    // repository, and only when all are complete calls `record` and serves the workspace's
+    // repositories from its store from then on.
+    virtual SyncStoreResult<std::vector<WorkspaceStoreTransfer>>
+    switch_workspace_store(const std::string&,
+                           const std::string&,
+                           const std::vector<std::string>&,
+                           const std::function<SyncStoreResult<void>()>&) {
+        return std::unexpected(SyncStoreError{"unsupported", "workspace stores are unavailable"});
+    }
+    // Closes the workspace's store and releases its bucket lease (workspace deletion, drain).
+    virtual SyncStoreResult<void> close_workspace_store(const std::string&) {
+        return {};
+    }
     virtual SyncStoreResult<RepositoryReplicationReport> replicate_from(const std::string&,
                                                                         const std::string&,
                                                                         const std::string&,

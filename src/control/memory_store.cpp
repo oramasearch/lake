@@ -662,6 +662,21 @@ Result<Workspace> InMemoryStore::create_workspace(const NewWorkspace& input) {
     return row;
 }
 
+Result<Workspace> InMemoryStore::mark_workspace_store_moved(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto row = std::ranges::find(workspaces_, id, &Workspace::id);
+    if (row == workspaces_.end()) {
+        return std::unexpected(StoreError{"invalid_input", "workspace_id is unknown"});
+    }
+    if (row->desired == "deleted") {
+        return std::unexpected(StoreError{"conflict", "the workspace is deleted"});
+    }
+    if (row->store_moved_at.empty()) {
+        row->store_moved_at = now_iso8601();
+    }
+    return *row;
+}
+
 Result<Workspace> InMemoryStore::update_workspace(const std::string& id, const WorkspacePatch& patch) {
     std::lock_guard lock(mutex_);
     const auto row = std::ranges::find(workspaces_, id, &Workspace::id);

@@ -273,3 +273,9 @@ operator. Neither table refers to `workspaces`, so a deleted workspace's rows st
 snapshots. `0067` is held by the open lake#380 change. The latest guard is
 `workspace_volumes_guard`; the operator must vendor this schema and update its guard before rollout.
 See [schema.md](../docs/control-plane/schema.md#workspace-volumes-migration-0069_workspace_volumes).
+Migration `0067_workspace_store` adds `workspaces.store_moved_at` (lake#380): NULL while a
+workspace's repositories are served from its space's store on lake's volume, set by
+`move_workspace_store` `switch` once they are served from the workspace's own encrypted store in its
+workspace Zetta. Nothing else moves into PostgreSQL. The latest guard is `workspace_store_guard`; the
+operator must vendor this schema and update its guard before rollout. See
+[workspace-store.md](../docs/architecture/workspace-store.md).

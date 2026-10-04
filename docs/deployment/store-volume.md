@@ -178,6 +178,26 @@ The operator also vendors the byte-identical `db/schema.sql` asset. Migration
 `0006_repository_lifecycle` changes its `PostgresSchema` guard table to
 `repository_lifecycle_events`.
 
+## Workspace stores (lake#380)
+
+A switched workspace's repositories no longer live on this volume: they are one liquid store in
+bucket `lake_store` of the workspace's own Zetta, encrypted with the workspace's data key
+([architecture/workspace-store.md](../architecture/workspace-store.md)). The volume keeps the
+space stores (read-only for a switched workspace's repositories, never removed by the move), the
+search indexes, the registry and the instance's transparency data, all still under
+`.lake-owner.lock`.
+
+The hand-off above becomes per workspace for those stores. A workspace store is opened by the first
+request that needs it, not at start, after `.lake-owner.lock` is held. The open acquires the
+bucket's lease, waiting up to `LAKE_STORE_OWNER_WAIT_SECONDS` for a predecessor to release it, with
+lake's store mutex given up so requests for other workspaces proceed. Lake renews the lease every
+third of `LAKE_WORKSPACE_STORE_LEASE_SECONDS` (default 30) and releases it on drain, after the last
+request and before it releases the root. A lease lost while running (a successor took it, or no
+renewal was accepted in time) closes that store and answers its workspace's requests
+`503 store_unavailable` until the lease is free again; Zetta refuses every write carrying the old
+fence. `spec.rollout.overlapOnSharedStore` covers workspace stores unchanged: the predecessor's
+release lets the successor's waiting acquire answer.
+
 ## Verify
 
 Start a local lake with an explicit writable directory:

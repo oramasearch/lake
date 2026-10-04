@@ -114,6 +114,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "list_workspaces",
     "metering_usage",
     "mint_agent_session_key",
+    // lake#380: the operator's move of a workspace's repositories into its own store.
+    "move_workspace_store",
     "my_audit",
     "publish_transparency_checkpoint",
     "publish_tuf_metadata",

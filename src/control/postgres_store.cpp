@@ -4362,7 +4362,7 @@ public:
         "id::text, customer_id::text, name, environment, desired, generation, COALESCE(phase,''), "
         "COALESCE(observed_generation,0), COALESCE(message,''), COALESCE(namespace,''), "
         "COALESCE(zetta_service_id::text,''), created_at::text, updated_at::text, storage_gi, "
-        "storage_gi_observed, storage_phase, storage_message";
+        "storage_gi_observed, storage_phase, storage_message, COALESCE(store_moved_at::text,'')";
 
     static Workspace workspace_from(const pqxx::row& row) {
         Workspace value;
@@ -4383,6 +4383,7 @@ public:
         value.storage_gi_observed = row[14].as<std::int32_t>();
         value.storage_phase = row[15].as<std::string>();
         value.storage_message = row[16].as<std::string>();
+        value.store_moved_at = row[17].as<std::string>();
         return value;
     }
 
@@ -4445,6 +4446,27 @@ public:
                            managed_service_slug("ws", id), input.created_by_taap_id);
             tx.exec_params("UPDATE workspaces SET zetta_service_id = $2::uuid WHERE id = $1::uuid", id, service_id);
             tx.exec_params("SELECT pg_notify('lake_services', $1)", service_id);
+            return one_workspace(tx, id);
+        });
+    }
+
+    Result<Workspace> mark_workspace_store_moved(const std::string& id) override {
+        if (managed_service_slug("ws", id).empty()) {
+            return std::unexpected(StoreError{"invalid_input", "workspace_id must be a UUID"});
+        }
+        return with_tx<Workspace>([&](pqxx::work& tx) -> Result<Workspace> {
+            tx.exec_params("SELECT 1 FROM workspaces WHERE id = $1::uuid FOR UPDATE", id);
+            const auto row = one_workspace(tx, id);
+            if (!row) {
+                return row;
+            }
+            if (row->desired == "deleted") {
+                return std::unexpected(StoreError{"conflict", "the workspace is deleted"});
+            }
+            if (!row->store_moved_at.empty()) {
+                return row;
+            }
+            tx.exec_params("UPDATE workspaces SET store_moved_at = now() WHERE id = $1::uuid", id);
             return one_workspace(tx, id);
         });
     }

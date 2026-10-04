@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -103,6 +104,8 @@ int usage() {
         "  LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false refuses never-expiring keys and tokens");
     std::println("  LAKE_STORE_OWNER_WAIT_SECONDS bounds the wait for a predecessor to release "
                  "the store root (default 90)");
+    std::println("  LAKE_WORKSPACE_STORE_LEASE_SECONDS is a workspace store's bucket lease "
+                 "(default 30; renewed every third)");
     std::println("  LAKE_DRAIN_SECONDS bounds the wait for in-flight requests on SIGTERM "
                  "(default 20)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
@@ -124,6 +127,8 @@ int main(int argc, char** argv) {
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
     opts.store_owner_wait = std::chrono::seconds{env_u64("LAKE_STORE_OWNER_WAIT_SECONDS", 90)};
     opts.drain_timeout = std::chrono::seconds{env_u64("LAKE_DRAIN_SECONDS", 20)};
+    opts.workspace_store_lease_ttl =
+        std::chrono::seconds{std::max<std::uint64_t>(3, env_u64("LAKE_WORKSPACE_STORE_LEASE_SECONDS", 30))};
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
     opts.external_origin = env_or("LAKE_EXTERNAL_ORIGIN", "");
     opts.apps_wildcard = env_or("LAKE_APPS_WILDCARD", "");

@@ -18,6 +18,7 @@ class PlatformService;
 class WorkspaceService;
 class AgentCaller;
 class AgentTaskBus;
+class ObjectTransport;
 } // namespace lake::control
 namespace lake::control::callers {
 class TokenReviewer;
@@ -67,6 +68,13 @@ struct ServerOptions {
     // Customer Zetta workspaces (docs/api/workspaces.md); null leaves Design, Train and Ship
     // unavailable.
     std::shared_ptr<control::WorkspaceService> workspaces;
+    // Raw HTTP to each workspace Zetta's object routes, where a switched workspace's liquid store
+    // lives (lake#380, docs/architecture/workspace-store.md). Null with `workspaces` set uses
+    // Zetta's installed HTTP client; tests inject a fake object server.
+    std::shared_ptr<control::ObjectTransport> object_transport;
+    // How long a workspace store's bucket lease lasts without a renewal; lake renews it every
+    // third of this (LAKE_WORKSPACE_STORE_LEASE_SECONDS).
+    std::chrono::milliseconds workspace_store_lease_ttl{std::chrono::seconds(30)};
     // LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false turns off every customer's opt-in (lake#234).
     bool allow_non_expiring_credentials = true;
     // Talks to agent services (lake#231); tests inject a double, main the HTTP caller.
