@@ -41,6 +41,11 @@ void register_volume_capabilities(Registry& registry);
 // id, is invalid_input at /workspace_id; there is no default workspace.
 std::expected<control::Workspace, ApiError> repository_workspace(ApiContext& context,
                                                                  const nlohmann::json& input);
+// Creates a repository's control-store row through the repository store
+// (SyncStore::create_repository_content), so a repository of a workspace served from its own
+// store (lake#380) is created there too, and no switch of the workspace runs meanwhile.
+control::Result<control::Repository> create_repository_row(ApiContext& context,
+                                                           control::NewRepository in);
 // Customer Zetta workspaces: status, start, and allow-listed calls (docs/api/workspaces.md).
 void register_workspace_capabilities(Registry& registry);
 // The operator's one-shot copy of retired control-store tables into workspace Zettas

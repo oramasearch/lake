@@ -2617,8 +2617,9 @@ public:
         std::function<SyncStoreResult<std::optional<std::string>>(const std::string& customer_id,
                                                                   const std::string& repository_id)>
             route;
-        // A space's switched workspaces, and whether any of its workspaces is not switched yet.
-        std::function<SyncStoreResult<std::pair<std::vector<std::string>, bool>>(
+        // A space's switched workspaces, each with whether it is serving now (desired running),
+        // and whether any of its workspaces is not switched yet.
+        std::function<SyncStoreResult<std::pair<std::vector<std::pair<std::string, bool>>, bool>>(
             const std::string& customer_id)>
             switched;
         std::function<SyncStoreResult<control::WorkspaceEndpoint>(const std::string& customer_id,
@@ -2632,13 +2633,13 @@ public:
     };
 
     void configure_workspace_stores(WorkspaceStoreConfig config) {
-        Held lock(*this);
+        std::lock_guard maps(mutex_);
         workspace_config_ = std::move(config);
     }
 
     // The counters of an open workspace store, for tests and the latency measurement.
     std::shared_ptr<control::ObjectStoreCounters> workspace_store_counters(const std::string& workspace_id) {
-        Held lock(*this);
+        std::lock_guard maps(mutex_);
         const auto found = workspace_stores_.find(workspace_id);
         return found == workspace_stores_.end() ? nullptr : found->second->client->counters();
     }
@@ -2659,7 +2660,7 @@ public:
         }
         for (const auto& customer : std::filesystem::directory_iterator(root_, error)) {
             if (std::filesystem::is_directory(customer.path() / "store", error)) {
-                Held lock(*this);
+                auto space = hold("s:" + customer.path().filename().string());
                 const auto opened = open_customer(customer.path().filename().string());
                 if (!opened) {
                     return std::unexpected(opened.error());
@@ -2678,13 +2679,10 @@ public:
                 // A repository served from its workspace's store is warmed when that store opens
                 // on first use (lake#380), not at start.
                 {
-                    Held lock(*this);
                     const auto route = workspace_route(customer.path().filename().string(),
                                                        repository.path().filename().string());
-                    if (!route) {
-                        return std::unexpected(route.error());
-                    }
-                    if (*route) {
+                    // A directory no live repository routes to is warmed on first use, if ever.
+                    if (!route || *route) {
                         continue;
                     }
                 }
@@ -2713,7 +2711,7 @@ public:
 
     SyncStoreResult<std::vector<std::string>>
     find_missing(const std::string& customer_id, const std::vector<std::string>& digests) override {
-        Held lock(*this);
+        auto space = hold("s:" + customer_id);
         auto store = open_customer(customer_id);
         if (!store) {
             return std::unexpected(store.error());
@@ -2739,7 +2737,7 @@ public:
                                 const std::string& digest_text,
                                 std::vector<std::byte> contents,
                                 std::uint64_t storage_quota_bytes) override {
-        Held lock(*this);
+        auto space = hold("s:" + customer_id);
         const auto expected = liquid::parse_digest(digest_text);
         if (!expected) {
             return std::unexpected(error_of(expected.error()));
@@ -2752,7 +2750,7 @@ public:
         if (!present) {
             return std::unexpected(error_of(present.error()));
         }
-        auto stored_bytes = unique_stored_bytes_locked(customer_id);
+        auto stored_bytes = unique_stored_bytes_locked(customer_id, true);
         if (!stored_bytes) {
             return std::unexpected(stored_bytes.error());
         }
@@ -2772,7 +2770,7 @@ public:
 
     SyncStoreResult<std::vector<std::byte>> read(const std::string& customer_id,
                                                  const std::string& digest_text) override {
-        Held lock(*this);
+        auto space = hold("s:" + customer_id);
         const auto digest = liquid::parse_digest(digest_text);
         if (!digest) {
             return std::unexpected(error_of(digest.error()));
@@ -2789,14 +2787,13 @@ public:
     }
 
     SyncStoreResult<std::uint64_t> unique_stored_bytes(const std::string& customer_id) override {
-        Held lock(*this);
-        return unique_stored_bytes_locked(customer_id);
+        auto space = hold("s:" + customer_id);
+        return unique_stored_bytes_locked(customer_id, true);
     }
 
     SyncStoreResult<std::vector<std::pair<std::string, std::string>>>
     refs(const std::string& customer_id, const std::string& repository_id) override {
-        Held lock(*this);
-        auto state = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -2816,8 +2813,7 @@ public:
     find_missing(const std::string& customer_id,
                  const std::string& repository_id,
                  std::span<const std::byte> request) override {
-        Held lock(*this);
-        auto state = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -2830,12 +2826,11 @@ public:
                                                  std::span<const std::byte> request,
                                                  SyncPushAuthorizer authorize,
                                                  std::uint64_t storage_quota_bytes) override {
-        Held lock(*this);
-        auto state = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
-        auto stored_bytes = unique_stored_bytes_locked(customer_id);
+        auto stored_bytes = unique_stored_bytes_locked(customer_id, (*state)->workspace.empty());
         if (!stored_bytes) {
             return std::unexpected(stored_bytes.error());
         }
@@ -2889,8 +2884,7 @@ public:
     SyncStoreResult<std::vector<std::byte>> pull(const std::string& customer_id,
                                                  const std::string& repository_id,
                                                  std::span<const std::byte> request) override {
-        Held lock(*this);
-        auto state = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -2902,12 +2896,11 @@ public:
                                                  const std::string& repository_id,
                                                  std::span<const std::byte> request,
                                                  std::uint64_t storage_quota_bytes) override {
-        Held lock(*this);
-        auto state = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
-        auto stored_bytes = unique_stored_bytes_locked(customer_id);
+        auto stored_bytes = unique_stored_bytes_locked(customer_id, (*state)->workspace.empty());
         if (!stored_bytes) {
             return std::unexpected(stored_bytes.error());
         }
@@ -2923,7 +2916,7 @@ public:
         if (!stored) {
             return std::unexpected(stored.error());
         }
-        return unique_stored_bytes_locked(customer_id);
+        return unique_stored_bytes_locked(customer_id, (*state)->workspace.empty());
     }
 
     SyncStoreResult<std::vector<std::byte>> read_chunk(const std::string& customer_id,
@@ -2931,8 +2924,7 @@ public:
                                                        const std::string& digest_text,
                                                        std::uint64_t offset,
                                                        std::uint64_t length) override {
-        Held lock(*this);
-        if (length > std::numeric_limits<std::size_t>::max()) {
+                if (length > std::numeric_limits<std::size_t>::max()) {
             return std::unexpected(SyncStoreError{
                 "invalid_argument", "chunk range length is too large", "sync server"});
         }
@@ -2940,7 +2932,7 @@ public:
         if (!digest) {
             return std::unexpected(error_of(digest.error()));
         }
-        auto state = open_repository(customer_id, repository_id);
+        auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -2960,8 +2952,7 @@ public:
                    const std::string& source_instance,
                    const std::string& source_url,
                    const std::string& bearer) override {
-        Held lock(*this);
-        if (!peer_url_is_safe(source_url)) {
+                if (!peer_url_is_safe(source_url)) {
             return std::unexpected(SyncStoreError{
                 "invalid_input", "replication peer URL must use HTTPS or loopback HTTP"});
         }
@@ -2969,7 +2960,7 @@ public:
             return std::unexpected(
                 SyncStoreError{"invalid_input", "source instance is not a safe identifier"});
         }
-        auto state = open_repository(customer_id, repository_id);
+        auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -3017,8 +3008,7 @@ public:
 
     SyncStoreResult<std::vector<RepositoryContentRef>>
     repository_refs(const std::string& customer_id, const std::string& repository_id) override {
-        Held lock(*this);
-        auto repository = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3038,8 +3028,7 @@ public:
     repository_tree(const std::string& customer_id,
                     const std::string& repository_id,
                     const std::string& ref) override {
-        Held lock(*this);
-        auto repository = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3060,8 +3049,7 @@ public:
                                                     const std::string& repository_id,
                                                     const std::string& ref,
                                                     const std::string& path) override {
-        Held lock(*this);
-        auto repository = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3088,8 +3076,7 @@ public:
                                                     const std::string& repository_id,
                                                     const std::string& path,
                                                     const std::string& blob) override {
-        Held lock(*this);
-        auto repository = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3110,8 +3097,7 @@ public:
 
     SyncStoreResult<std::vector<RepositoryChange>>
     repository_log(const std::string& customer_id, const std::string& repository_id) override {
-        Held lock(*this);
-        auto repository = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3140,8 +3126,7 @@ public:
     repository_diff(const std::string& customer_id,
                     const std::string& repository_id,
                     const std::string& change_id) override {
-        Held lock(*this);
-        auto repository = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3228,7 +3213,6 @@ public:
     repository_artifacts(const std::string& customer_id,
                          const std::string& repository_id,
                          const RepositoryArtifactFilter& filter) override {
-        Held lock(*this);
         if (!path_component_is_safe(customer_id) || !path_component_is_safe(repository_id)) {
             return std::unexpected(SyncStoreError{"invalid_input", "invalid repository location"});
         }
@@ -3244,7 +3228,8 @@ public:
         if (error) {
             return std::unexpected(SyncStoreError{"io", error.message()});
         }
-        auto repository = open_repository(customer_id, repository_id);
+        auto entered_repository = enter_repository(customer_id, repository_id);
+        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3287,8 +3272,7 @@ public:
     SyncStoreResult<RepositoryArtifact> repository_artifact(const std::string& customer_id,
                                                             const std::string& repository_id,
                                                             const std::string& result_id) override {
-        Held lock(*this);
-        auto repository = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3311,8 +3295,7 @@ public:
     SyncStoreResult<std::vector<RepositoryConflict>>
     repository_conflicts(const std::string& customer_id,
                          const std::string& repository_id) override {
-        Held lock(*this);
-        auto repository = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3373,8 +3356,7 @@ public:
                                 const std::string& conflict_id,
                                 const std::string& resolution,
                                 std::vector<std::byte> blob) override {
-        Held lock(*this);
-        auto repository = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3426,8 +3408,7 @@ public:
 
     SyncStoreResult<RepositoryStorageSummary>
     repository_storage(const std::string& customer_id, const std::string& repository_id) override {
-        Held lock(*this);
-        auto state = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -3472,15 +3453,14 @@ public:
                           const std::string& oid,
                           std::vector<std::byte> contents,
                           std::uint64_t storage_quota_bytes) override {
-        Held lock(*this);
-        if (!valid_lfs_oid(oid)) {
+                if (!valid_lfs_oid(oid)) {
             return std::unexpected(SyncStoreError{"invalid_input", "invalid LFS SHA-256 oid"});
         }
-        auto state = open_repository(customer_id, repository_id);
+        auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
-        auto stored_bytes = unique_stored_bytes_locked(customer_id);
+        auto stored_bytes = unique_stored_bytes_locked(customer_id, (*state)->workspace.empty());
         if (!stored_bytes) {
             return std::unexpected(stored_bytes.error());
         }
@@ -3492,7 +3472,7 @@ public:
         if (!written) {
             return std::unexpected(error_of(written.error()));
         }
-        return unique_stored_bytes_locked(customer_id);
+        return unique_stored_bytes_locked(customer_id, (*state)->workspace.empty());
     }
 
     SyncStoreResult<std::string>
@@ -3501,8 +3481,7 @@ public:
                             const std::string& revision,
                             const std::string& message,
                             std::vector<RepositoryWriteOperation> operations) override {
-        Held lock(*this);
-        auto state = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -3609,8 +3588,7 @@ public:
                             const std::string& dataset_revision,
                             std::vector<std::byte> model_bytes,
                             std::vector<std::byte> run_bytes) override {
-        Held lock(*this);
-        auto state = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -3664,8 +3642,7 @@ public:
     model_provenance(const std::string& customer_id,
                      const std::string& repository_id,
                      const std::string& revision) override {
-        Held lock(*this);
-        auto state = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -3717,8 +3694,7 @@ public:
                                                               const std::string& repository_id,
                                                               const std::string& change_id,
                                                               const std::string& path) override {
-        Held lock(*this);
-        auto repository = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& repository = entered_repository.state;
         if (!repository) {
             return std::unexpected(repository.error());
         }
@@ -3765,8 +3741,7 @@ public:
                                                             bool include_git) override {
         RepositoryPortableData output;
         {
-            Held lock(*this);
-            auto state = open_repository(customer_id, repository_id);
+                        auto entered_repository = enter_repository(customer_id, repository_id);            auto& state = entered_repository.state;
             if (!state) {
                 return std::unexpected(state.error());
             }
@@ -3874,8 +3849,7 @@ public:
             filter.cursor = page->next_cursor;
         }
         if (output.artifacts.empty()) {
-            Held lock(*this);
-            auto state = open_repository(customer_id, repository_id);
+                        auto entered_repository = enter_repository(customer_id, repository_id);            auto& state = entered_repository.state;
             if (!state) {
                 return std::unexpected(state.error());
             }
@@ -3941,8 +3915,7 @@ public:
             }
             objects.emplace(digest, *contents);
         }
-        Held lock(*this);
-        auto state = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -3973,8 +3946,7 @@ public:
     SyncStoreResult<RepositoryGitImport> import_git(const std::string& customer_id,
                                                     const std::string& repository_id,
                                                     const std::string& source_directory) override {
-        Held lock(*this);
-        auto state = open_repository(customer_id, repository_id);
+                auto entered_repository = enter_repository(customer_id, repository_id);        auto& state = entered_repository.state;
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -4026,22 +3998,35 @@ private:
         }
     };
 
-    // Holds mutex_ for one call and lets open_workspace give it up while it waits for a bucket
-    // lease, so requests for other workspaces proceed while one workspace hands over.
-    class Held {
-    public:
-        explicit Held(LiquidCustomerStores& owner) : owner_(owner), lock_(owner.mutex_) {
-            owner_.held_ = &lock_;
+    // One lane per store: `s:<space>` for a space's store on lake's volume, `w:<workspace>` for a
+    // workspace's own store. A request holds its store's lane for its whole call; mutex_ guards
+    // only the maps below and is never held across store I/O, network calls or waits, so one
+    // workspace's I/O, lease wait or switch never holds up another's. Lock order: a workspace lane,
+    // then its space's lane.
+    struct Lane {
+        std::mutex mutex;
+    };
+    struct LaneLock {
+        std::shared_ptr<Lane> lane;
+        std::unique_lock<std::mutex> lock;
+    };
+    LaneLock hold(const std::string& name) {
+        std::shared_ptr<Lane> lane;
+        {
+            std::lock_guard maps(mutex_);
+            auto& slot = lanes_[name];
+            if (!slot) {
+                slot = std::make_shared<Lane>();
+            }
+            lane = slot;
         }
-        ~Held() {
-            owner_.held_ = nullptr;
-        }
-        Held(const Held&) = delete;
-        Held& operator=(const Held&) = delete;
+        LaneLock output{lane, std::unique_lock<std::mutex>(lane->mutex)};
+        return output;
+    }
 
-    private:
-        LiquidCustomerStores& owner_;
-        std::unique_lock<std::mutex> lock_;
+    struct Entered {
+        LaneLock lane;
+        SyncStoreResult<RepositoryState*> state;
     };
 
     static SyncStoreError error_of(const liquid::error& error) {
@@ -4434,10 +4419,14 @@ private:
             return std::unexpected(
                 SyncStoreError{"store_unavailable", "LAKE_STORE_ROOT is not configured"});
         }
-        const auto existing = stores_.find(customer_id);
-        if (existing != stores_.end()) {
-            return existing->second.get();
+        {
+            std::lock_guard maps(mutex_);
+            const auto existing = stores_.find(customer_id);
+            if (existing != stores_.end()) {
+                return existing->second.get();
+            }
         }
+        // The caller holds the space's lane, so no one else opens this store meanwhile.
         const std::filesystem::path path = std::filesystem::path(root_) / customer_id / "store";
         // Exclusive: the store holds liquid's owner lock on <store>/store.lock until close()
         // (liquid#321). The server's root lock already serializes processes, so this wait is
@@ -4449,6 +4438,7 @@ private:
         if (!opened) {
             return std::unexpected(error_of(opened.error()));
         }
+        std::lock_guard maps(mutex_);
         auto inserted =
             stores_.emplace(customer_id, std::make_unique<liquid::store>(std::move(*opened)));
         return inserted.first->second.get();
@@ -4921,43 +4911,105 @@ private:
         return std::filesystem::path(root_) / customer_id / "repositories" / repository_id;
     }
 
+    std::uint64_t epoch_of(const std::string& customer_id) {
+        std::lock_guard maps(mutex_);
+        return epochs_[customer_id];
+    }
+
+    // The workspace whose own store serves the repository, or nothing for the space's store. The
+    // answer is cached until the space's next switch; one computed across a switch is not kept.
     SyncStoreResult<std::optional<std::string>> workspace_route(const std::string& customer_id,
                                                                 const std::string& repository_id) {
-        if (!workspace_config_.route) {
-            return std::optional<std::string>{};
-        }
-        // A repository's store changes only when its workspace switches, which clears the entry.
+        decltype(workspace_config_.route) route_of;
         const std::string key = customer_id + "/" + repository_id;
-        if (const auto cached = routes_.find(key); cached != routes_.end()) {
-            return cached->second;
+        std::uint64_t epoch = 0;
+        {
+            std::lock_guard maps(mutex_);
+            if (!workspace_config_.route) {
+                return std::optional<std::string>{};
+            }
+            if (const auto cached = routes_.find(key); cached != routes_.end()) {
+                return cached->second;
+            }
+            route_of = workspace_config_.route;
+            epoch = epochs_[customer_id];
         }
-        auto route = workspace_config_.route(customer_id, repository_id);
+        auto route = route_of(customer_id, repository_id);
         if (route) {
-            routes_.insert_or_assign(key, *route);
+            std::lock_guard maps(mutex_);
+            if (epochs_[customer_id] == epoch) {
+                routes_.insert_or_assign(key, *route);
+            }
         }
         return route;
     }
 
-    // Evicts a workspace store's repositories and closes it, which releases its lease unless the
-    // lease was lost. Liquid recovers whatever a failed write left on the next open.
-    void discard_workspace_locked(const std::string& workspace_id) {
-        std::erase_if(repositories_, [&](const auto& row) { return row.second->workspace == workspace_id; });
-        const auto found = workspace_stores_.find(workspace_id);
-        if (found == workspace_stores_.end()) {
-            return;
+    // Takes the lane of the store that serves the repository and opens it there. A switch of the
+    // repository's space between the route and the lane starts it again, so a request held by a
+    // switch is answered from the store the switch chose.
+    Entered enter_repository(const std::string& customer_id, const std::string& repository_id) {
+        if (!path_component_is_safe(customer_id) || !path_component_is_safe(repository_id)) {
+            return {{}, std::unexpected(SyncStoreError{"invalid_input", "invalid repository location"})};
         }
-        auto store = std::move(found->second);
-        workspace_stores_.erase(found);
-        static_cast<void>(liquid::runtime::block_on(store->store->close()));
+        for (;;) {
+            const std::uint64_t epoch = epoch_of(customer_id);
+            auto route = workspace_route(customer_id, repository_id);
+            if (!route) {
+                return {{}, std::unexpected(route.error())};
+            }
+            auto lane = hold(*route ? "w:" + **route : "s:" + customer_id);
+            if (epoch_of(customer_id) != epoch) {
+                continue;
+            }
+            auto state = open_repository(customer_id, repository_id, *route);
+            return {std::move(lane), std::move(state)};
+        }
     }
 
-    // Opens the workspace's store on first use (lake#380): creates its bucket with the space's
-    // quota, acquires the bucket's lease (waiting, bounded, for a predecessor to release it, as
-    // lake#479 waits for the root) and opens liquid on the encrypted Zetta backend. mutex_ is given
-    // up while it opens; requests for the same workspace wait for it, others proceed.
+    // Closes a workspace store, releasing its lease unless the lease was lost, after evicting its
+    // repositories. The caller holds the workspace's lane; mutex_ is not held while it closes.
+    void discard_workspace(const std::string& workspace_id) {
+        std::unique_ptr<WorkspaceStore> store;
+        std::vector<std::unique_ptr<RepositoryState>> evicted;
+        {
+            std::lock_guard maps(mutex_);
+            for (auto it = repositories_.begin(); it != repositories_.end();) {
+                if (it->second->workspace == workspace_id) {
+                    evicted.push_back(std::move(it->second));
+                    it = repositories_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            const auto found = workspace_stores_.find(workspace_id);
+            if (found != workspace_stores_.end()) {
+                store = std::move(found->second);
+                workspace_stores_.erase(found);
+            }
+        }
+        evicted.clear();
+        if (store) {
+            static_cast<void>(liquid::runtime::block_on(store->store->close()));
+        }
+    }
+
+    // Opens the workspace's store on first use (lake#380); the caller holds the workspace's lane,
+    // so requests for this workspace wait here and others do not. `create` is set only while lake
+    // creates the store, before the workspace is switched to it: then the bucket is created with
+    // the space's quota and a data key may be created in it while it is empty. A switched
+    // workspace's store must already exist with its key; anything else is refused, never served
+    // as an empty store. The open acquires the bucket's lease, waiting (bounded) for a
+    // predecessor to release it, as lake#479 waits for the root.
     SyncStoreResult<WorkspaceStore*> open_workspace(const std::string& customer_id,
-                                                    const std::string& workspace_id) {
-        if (!workspace_config_.endpoint || !workspace_config_.transport) {
+                                                    const std::string& workspace_id, bool create) {
+        WorkspaceStoreConfig config;
+        bool reacquire = false;
+        {
+            std::lock_guard maps(mutex_);
+            config = workspace_config_;
+            reacquire = lost_workspaces_.contains(workspace_id);
+        }
+        if (!config.endpoint || !config.transport) {
             return std::unexpected(SyncStoreError{
                 "store_unavailable", "workspace stores are not configured on this lake"});
         }
@@ -4965,125 +5017,117 @@ private:
             return std::unexpected(
                 SyncStoreError{"store_unavailable", "LAKE_STORE_ROOT is not configured"});
         }
-        // A workspace whose lease this lake lost is tried again without waiting until it is owned
-        // again, so its requests answer 503 at once while another process holds it.
-        bool reacquire = lost_workspaces_.contains(workspace_id);
-        for (;;) {
+        WorkspaceStore* current = nullptr;
+        {
+            std::lock_guard maps(mutex_);
             const auto found = workspace_stores_.find(workspace_id);
             if (found != workspace_stores_.end()) {
-                if (found->second->customer_id != customer_id) {
-                    return std::unexpected(SyncStoreError{
-                        "invalid_input", "the workspace is not in the repository's space"});
-                }
-                if (found->second->usable()) {
-                    return found->second.get();
-                }
-                // Its lease was lost: try once to own it again without waiting. A store a write
-                // failed on releases its lease when it closes and is opened again at once.
-                if (found->second->owner->lost()) {
-                    reacquire = true;
-                    lost_workspaces_.insert(workspace_id);
-                }
-                discard_workspace_locked(workspace_id);
+                current = found->second.get();
             }
-            if (!opening_.contains(workspace_id)) {
-                break;
-            }
-            auto* mine = held_;
-            opened_.wait(*mine);
-            held_ = mine;
         }
-        const auto endpoint = workspace_config_.endpoint(customer_id, workspace_id);
+        if (current != nullptr) {
+            if (current->customer_id != customer_id) {
+                return std::unexpected(SyncStoreError{
+                    "invalid_input", "the workspace is not in the repository's space"});
+            }
+            if (current->usable()) {
+                return current;
+            }
+            // A lost lease is tried again without waiting until the store is owned again, so the
+            // workspace's requests answer 503 at once while another process holds it. A store a
+            // write failed on releases its lease when it closes and is opened again at once.
+            if (current->owner->lost()) {
+                reacquire = true;
+                std::lock_guard maps(mutex_);
+                lost_workspaces_.insert(workspace_id);
+            }
+            discard_workspace(workspace_id);
+        }
+        const auto endpoint = config.endpoint(customer_id, workspace_id);
         if (!endpoint) {
             return std::unexpected(endpoint.error());
         }
-        const std::uint64_t quota =
-            workspace_config_.quota_bytes ? workspace_config_.quota_bytes(customer_id) : 0;
-        const auto transport = workspace_config_.transport;
-        const std::string kek = workspace_config_.instance_kek;
-        const auto ttl = workspace_config_.lease_ttl;
-        const auto wait = reacquire ? std::chrono::milliseconds(0) : owner_wait_;
-        const std::filesystem::path location = std::filesystem::path(root_) / "workspaces" / workspace_id;
-        opening_.insert(workspace_id);
-        auto* mine = held_;
-        mine->unlock();
-        auto opened = [&]() -> SyncStoreResult<std::unique_ptr<WorkspaceStore>> {
-            auto output = std::make_unique<WorkspaceStore>();
-            output->customer_id = customer_id;
-            output->client = std::make_shared<control::ZettaObjectClient>(
-                transport, control::ObjectEndpoint{endpoint->url, endpoint->token});
+        auto output = std::make_unique<WorkspaceStore>();
+        output->customer_id = customer_id;
+        output->client = std::make_shared<control::ZettaObjectClient>(
+            config.transport, control::ObjectEndpoint{endpoint->url, endpoint->token});
+        if (create) {
+            const std::uint64_t quota = config.quota_bytes ? config.quota_bytes(customer_id) : 0;
             const auto bucket = liquid::runtime::block_on(output->client->create_bucket(quota));
             if (!bucket) {
                 return std::unexpected(error_of(bucket.error()));
             }
-            output->owner = std::make_shared<control::ZettaStoreOwner>(output->client, ttl);
-            output->backend = std::make_shared<control::ZettaObjectBackend>(
-                output->client, control::ZettaObjectBackendOptions{.workspace_id = workspace_id,
-                                                                   .instance_kek = kek});
-            liquid::store_options options;
-            options.backend = output->backend;
-            options.owner = output->owner;
-            options.owner_wait = wait;
-            auto store = liquid::runtime::block_on(liquid::store::open(location, std::move(options)));
-            if (!store) {
-                return std::unexpected(error_of(store.error()));
-            }
-            output->store = std::make_unique<liquid::store>(std::move(*store));
-            return output;
-        }();
-        mine->lock();
-        held_ = mine;
-        opening_.erase(workspace_id);
-        opened_.notify_all();
-        if (!opened) {
-            return std::unexpected(opened.error());
         }
+        output->owner = std::make_shared<control::ZettaStoreOwner>(output->client, config.lease_ttl);
+        output->backend = std::make_shared<control::ZettaObjectBackend>(
+            output->client, control::ZettaObjectBackendOptions{.workspace_id = workspace_id,
+                                                               .instance_kek = config.instance_kek,
+                                                               .create_key = create});
+        liquid::store_options options;
+        options.backend = output->backend;
+        options.owner = output->owner;
+        options.owner_wait = reacquire ? std::chrono::milliseconds(0) : owner_wait_;
+        auto store = liquid::runtime::block_on(liquid::store::open(
+            std::filesystem::path(root_) / "workspaces" / workspace_id, std::move(options)));
+        if (!store) {
+            auto error = error_of(store.error());
+            if (store.error().code == liquid::errc::not_found && !create) {
+                // A switched workspace whose bucket is gone (a recreated Zetta, a wrong endpoint).
+                error = SyncStoreError{"corrupt",
+                                       "the workspace store is missing from its workspace Zetta: "
+                                       "the workspace was switched to it, so lake will not create "
+                                       "an empty one: " + store.error().message,
+                                       store.error().context};
+            }
+            return std::unexpected(error);
+        }
+        output->store = std::make_unique<liquid::store>(std::move(*store));
+        std::lock_guard maps(mutex_);
         lost_workspaces_.erase(workspace_id);
-        auto inserted = workspace_stores_.insert_or_assign(workspace_id, std::move(*opened));
+        auto inserted = workspace_stores_.insert_or_assign(workspace_id, std::move(output));
         return inserted.first->second.get();
     }
 
+    // Opens the repository in the store `route` names; the caller holds that store's lane. A
+    // space-store repository is created on first use, as before. A repository in a workspace store
+    // is only opened here: it is created explicitly (create_repository_content, or the switch),
+    // so a store that lost it answers corrupt instead of serving an empty repository.
     SyncStoreResult<RepositoryState*> open_repository(const std::string& customer_id,
-                                                      const std::string& repository_id) {
-        if (!path_component_is_safe(customer_id) || !path_component_is_safe(repository_id)) {
-            return std::unexpected(SyncStoreError{"invalid_input", "invalid repository location"});
-        }
+                                                      const std::string& repository_id,
+                                                      const std::optional<std::string>& route) {
         const std::string key = customer_id + "/" + repository_id;
-        if (const auto existing = repositories_.find(key); existing != repositories_.end()) {
-            if (existing->second->workspace.empty()) {
-                return existing->second.get();
+        {
+            std::lock_guard maps(mutex_);
+            if (const auto existing = repositories_.find(key); existing != repositories_.end()) {
+                const std::string workspace = existing->second->workspace;
+                bool usable = workspace.empty();
+                if (!usable) {
+                    const auto store = workspace_stores_.find(workspace);
+                    usable = store != workspace_stores_.end() && store->second->usable();
+                }
+                if (usable && workspace == route.value_or(std::string())) {
+                    return existing->second.get();
+                }
             }
-            const auto workspace = workspace_stores_.find(existing->second->workspace);
-            if (workspace != workspace_stores_.end() && workspace->second->usable()) {
-                return existing->second.get();
-            }
-            repositories_.erase(existing);
         }
-        const auto route = workspace_route(customer_id, repository_id);
-        if (!route) {
-            return std::unexpected(route.error());
-        }
-        if (*route) {
-            const std::string workspace_id = **route;
-            auto workspace = open_workspace(customer_id, workspace_id);
+        if (route) {
+            const std::string& workspace_id = *route;
+            auto workspace = open_workspace(customer_id, workspace_id, false);
             if (!workspace) {
                 return std::unexpected(workspace.error());
-            }
-            // open_workspace may have given up the lock: another request may have opened it.
-            if (const auto existing = repositories_.find(key); existing != repositories_.end()) {
-                return existing->second.get();
             }
             const std::filesystem::path identifier = repository_identifier(customer_id, repository_id);
             liquid::repository_options options;
             options.store = (*workspace)->store.get();
             auto opened = liquid::runtime::block_on(liquid::repository::open(identifier, options));
-            if (!opened && opened.error().code == liquid::errc::not_found) {
-                opened = liquid::runtime::block_on(liquid::repository::create(identifier, options));
-                if (!opened && opened.error().code == liquid::errc::already_exists) {
-                    opened = liquid::runtime::block_on(liquid::repository::open(identifier, options));
-                }
-            }
             if (!opened) {
+                if (opened.error().code == liquid::errc::not_found) {
+                    return std::unexpected(SyncStoreError{
+                        "corrupt",
+                        "repository " + repository_id + " is missing from its workspace store; "
+                        "the workspace was switched, so lake will not create it empty",
+                        key});
+                }
                 return std::unexpected(error_of(opened.error()));
             }
             auto state = std::make_unique<RepositoryState>();
@@ -5091,7 +5135,8 @@ private:
             state->objects = (*workspace)->store.get();
             state->path = identifier;
             state->workspace = workspace_id;
-            auto inserted = repositories_.emplace(key, std::move(state));
+            std::lock_guard maps(mutex_);
+            auto inserted = repositories_.insert_or_assign(key, std::move(state));
             return inserted.first->second.get();
         }
         auto objects = open_customer(customer_id);
@@ -5134,17 +5179,27 @@ private:
         state->subject = std::make_unique<liquid::repository>(std::move(*opened));
         state->objects = *objects;
         state->path = path;
-        auto inserted = repositories_.emplace(key, std::move(state));
+        std::lock_guard maps(mutex_);
+        auto inserted = repositories_.insert_or_assign(key, std::move(state));
         return inserted.first->second.get();
     }
 
     // The bytes a space stores: its store on lake's volume while any of its workspaces is not
-    // switched yet, plus each switched workspace's bucket usage (docs/api/metering.md).
-    SyncStoreResult<std::uint64_t> unique_stored_bytes_locked(const std::string& customer_id) {
-        std::vector<std::string> switched;
+    // switched yet, plus each switched workspace's bucket usage (docs/api/metering.md). A
+    // workspace that is not serving, or whose Zetta does not answer in time, counts with its last
+    // known usage, so it never refuses another workspace's write. `space_held`: the caller holds
+    // the space's lane; otherwise it is taken to read the space store.
+    SyncStoreResult<std::uint64_t> unique_stored_bytes_locked(const std::string& customer_id,
+                                                              bool space_held) {
+        WorkspaceStoreConfig config;
+        {
+            std::lock_guard maps(mutex_);
+            config = workspace_config_;
+        }
+        std::vector<std::pair<std::string, bool>> switched;
         bool any_unswitched = true;
-        if (workspace_config_.switched) {
-            auto listed = workspace_config_.switched(customer_id);
+        if (config.switched) {
+            auto listed = config.switched(customer_id);
             if (!listed) {
                 return std::unexpected(listed.error());
             }
@@ -5153,68 +5208,115 @@ private:
         }
         std::uint64_t total = 0;
         if (any_unswitched) {
-            auto space = space_stored_bytes_locked(customer_id);
-            if (!space) {
-                return std::unexpected(space.error());
+            std::optional<LaneLock> space;
+            if (!space_held) {
+                space.emplace(hold("s:" + customer_id));
             }
-            total = *space;
+            auto measured = space_stored_bytes_locked(customer_id);
+            if (!measured) {
+                return std::unexpected(measured.error());
+            }
+            total = *measured;
         }
-        for (const std::string& workspace_id : switched) {
+        for (const auto& [workspace_id, serving] : switched) {
+            std::uint64_t last = 0;
             std::shared_ptr<control::ZettaObjectClient> client;
-            if (const auto open = workspace_stores_.find(workspace_id); open != workspace_stores_.end()) {
-                client = open->second->client;
-            } else if (workspace_config_.endpoint && workspace_config_.transport) {
-                const auto endpoint = workspace_config_.endpoint(customer_id, workspace_id);
-                if (!endpoint) {
-                    return std::unexpected(endpoint.error());
+            {
+                std::lock_guard maps(mutex_);
+                last = last_usage_[workspace_id];
+                if (const auto open = workspace_stores_.find(workspace_id); open != workspace_stores_.end()) {
+                    client = open->second->client;
                 }
-                client = std::make_shared<control::ZettaObjectClient>(
-                    workspace_config_.transport, control::ObjectEndpoint{endpoint->url, endpoint->token});
-            } else {
-                continue;
             }
-            const auto usage = liquid::runtime::block_on(client->usage());
-            if (!usage) {
-                if (usage.error().code == liquid::errc::not_found) {
-                    continue;
+            if (serving && !client && config.endpoint && config.transport) {
+                const auto endpoint = config.endpoint(customer_id, workspace_id);
+                if (endpoint) {
+                    client = std::make_shared<control::ZettaObjectClient>(
+                        config.transport, control::ObjectEndpoint{endpoint->url, endpoint->token});
                 }
-                return std::unexpected(error_of(usage.error()));
             }
-            total += usage->bytes;
+            if (serving && client) {
+                const auto usage = liquid::runtime::block_on(client->usage(std::chrono::seconds(5)));
+                if (usage) {
+                    last = usage->bytes;
+                    std::lock_guard maps(mutex_);
+                    last_usage_[workspace_id] = last;
+                }
+            }
+            total += last;
         }
         return total;
     }
 
     std::string root_;
     std::chrono::milliseconds owner_wait_;
+    // Guards the maps below and nothing else (see Lane).
     std::mutex mutex_;
-    std::unique_lock<std::mutex>* held_ = nullptr;
-    std::condition_variable_any opened_;
-    std::set<std::string> opening_;
+    std::map<std::string, std::shared_ptr<Lane>> lanes_;
+    std::map<std::string, std::uint64_t> epochs_;
     std::set<std::string> lost_workspaces_;
+    std::map<std::string, std::uint64_t> last_usage_;
     WorkspaceStoreConfig workspace_config_;
     std::map<std::string, std::unique_ptr<liquid::store>> stores_;
     std::map<std::string, std::unique_ptr<WorkspaceStore>> workspace_stores_;
     std::map<std::string, std::unique_ptr<RepositoryState>> repositories_;
     std::map<std::string, std::optional<std::string>> routes_;
 
+    // Whether the space's store holds the repository: decided from the source alone, so a
+    // not_found from the workspace store is never taken for "nothing to copy". The caller holds
+    // the space's lane.
+    SyncStoreResult<bool> held_by_space(const std::string& customer_id, const std::string& repository_id) {
+        // Read without opening the repository, which would write lease records into the source:
+        // the space store keeps a repository's entry point at repositories/<blake3 of its
+        // identifier>/LIQUID_REPO (liquid#326) on lake's volume.
+        const std::string identifier = repository_identifier(customer_id, repository_id).generic_string();
+        const auto id = liquid::hash(
+            liquid::algorithm::blake3,
+            std::span(reinterpret_cast<const std::byte*>(identifier.data()), identifier.size()));
+        if (!id) {
+            return std::unexpected(error_of(id.error()));
+        }
+        const std::string encoded = liquid::to_string(*id);
+        const std::filesystem::path marker = std::filesystem::path(root_) / customer_id / "store" /
+                                             "repositories" /
+                                             encoded.substr(encoded.find(':') + 1) / "LIQUID_REPO";
+        std::error_code error;
+        const bool present = std::filesystem::exists(marker, error);
+        if (error) {
+            return std::unexpected(SyncStoreError{"io", "could not inspect the space store: " + error.message()});
+        }
+        return present;
+    }
+
+    // Copies (or compares) one repository; the caller holds the workspace's lane and then the
+    // space's lane. A repository the space store never held is `absent`, decided from the source.
     SyncStoreResult<WorkspaceStoreTransfer> transfer_locked(const std::string& customer_id,
                                                             const std::string& repository_id,
                                                             const std::string& workspace_id,
-                                                            bool verify) {
+                                                            bool verify,
+                                                            bool create) {
         if (!path_component_is_safe(customer_id) || !path_component_is_safe(repository_id)) {
             return std::unexpected(SyncStoreError{"invalid_input", "invalid repository location"});
+        }
+        WorkspaceStoreTransfer output;
+        output.repository_id = repository_id;
+        auto held = held_by_space(customer_id, repository_id);
+        if (!held) {
+            return std::unexpected(held.error());
+        }
+        if (!*held) {
+            output.absent = true;
+            output.complete = true;
+            return output;
         }
         auto source = open_customer(customer_id);
         if (!source) {
             return std::unexpected(source.error());
         }
-        auto destination = open_workspace(customer_id, workspace_id);
+        auto destination = open_workspace(customer_id, workspace_id, create);
         if (!destination) {
             return std::unexpected(destination.error());
         }
-        WorkspaceStoreTransfer output;
-        output.repository_id = repository_id;
         liquid::repository_transfer_options options;
         options.mode = verify ? liquid::repository_transfer_mode::verify
                               : liquid::repository_transfer_mode::copy;
@@ -5222,11 +5324,6 @@ private:
             **source, *(*destination)->store, repository_identifier(customer_id, repository_id),
             options));
         if (!report) {
-            if (report.error().code == liquid::errc::not_found) {
-                output.absent = true;
-                output.complete = true;
-                return output;
-            }
             return std::unexpected(error_of(report.error()));
         }
         output.complete = report->complete;
@@ -5245,30 +5342,59 @@ private:
         return output;
     }
 
+    // Creates an empty repository in a workspace store; the caller holds the workspace's lane.
+    SyncStoreResult<void> create_in_workspace(const std::string& customer_id,
+                                              const std::string& repository_id,
+                                              const std::string& workspace_id,
+                                              bool create_store) {
+        auto workspace = open_workspace(customer_id, workspace_id, create_store);
+        if (!workspace) {
+            return std::unexpected(workspace.error());
+        }
+        liquid::repository_options options;
+        options.store = (*workspace)->store.get();
+        auto created = liquid::runtime::block_on(liquid::repository::create(
+            repository_identifier(customer_id, repository_id), options));
+        if (!created && created.error().code != liquid::errc::already_exists) {
+            return std::unexpected(error_of(created.error()));
+        }
+        return {};
+    }
+
 public:
     SyncStoreResult<WorkspaceStoreTransfer>
     transfer_to_workspace_store(const std::string& customer_id,
                                 const std::string& repository_id,
                                 const std::string& workspace_id,
                                 bool verify) override {
-        Held lock(*this);
-        return transfer_locked(customer_id, repository_id, workspace_id, verify);
+        auto workspace_lane = hold("w:" + workspace_id);
+        auto space_lane = hold("s:" + customer_id);
+        // Copying creates the store; verifying only opens it.
+        return transfer_locked(customer_id, repository_id, workspace_id, verify, !verify);
     }
 
     SyncStoreResult<std::vector<WorkspaceStoreTransfer>>
     switch_workspace_store(const std::string& customer_id,
                            const std::string& workspace_id,
-                           const std::vector<std::string>& repository_ids,
+                           const std::function<SyncStoreResult<std::vector<std::string>>()>& list,
                            const std::function<SyncStoreResult<void>()>& record) override {
-        // Every repository request waits on mutex_ until the switch is recorded.
-        Held lock(*this);
+        // Every request for this workspace's store, every request for the space's store (which
+        // serves the workspace's repositories until the switch) and every repository created in
+        // the workspace (create_repository_content) waits until the switch is recorded. The lanes
+        // are held throughout and never given up.
+        auto workspace_lane = hold("w:" + workspace_id);
+        auto space_lane = hold("s:" + customer_id);
+        auto listed = list();
+        if (!listed) {
+            return std::unexpected(listed.error());
+        }
         std::vector<WorkspaceStoreTransfer> output;
-        for (const std::string& repository_id : repository_ids) {
-            auto copied = transfer_locked(customer_id, repository_id, workspace_id, false);
+        for (const std::string& repository_id : *listed) {
+            auto copied = transfer_locked(customer_id, repository_id, workspace_id, false, true);
             if (!copied) {
                 return std::unexpected(copied.error());
             }
-            auto verified = transfer_locked(customer_id, repository_id, workspace_id, true);
+            auto verified = transfer_locked(customer_id, repository_id, workspace_id, true, false);
             if (!verified) {
                 return std::unexpected(verified.error());
             }
@@ -5283,26 +5409,88 @@ public:
             verified->leases_written = copied->leases_written;
             output.push_back(std::move(*verified));
         }
+        // A repository the space store never held is created empty in the workspace store, so
+        // every repository of the workspace exists there once it is switched.
+        for (const WorkspaceStoreTransfer& transfer : output) {
+            if (transfer.absent) {
+                if (auto created = create_in_workspace(customer_id, transfer.repository_id,
+                                                       workspace_id, true);
+                    !created) {
+                    return std::unexpected(created.error());
+                }
+            }
+        }
         if (auto recorded = record(); !recorded) {
             return std::unexpected(recorded.error());
         }
-        // The next request for each repository opens it from the workspace store.
-        for (const std::string& repository_id : repository_ids) {
-            repositories_.erase(customer_id + "/" + repository_id);
-            routes_.erase(customer_id + "/" + repository_id);
+        // Every route of the space is recomputed and its space-store repositories reopened, so no
+        // request is answered from a route chosen before the switch.
+        std::vector<std::unique_ptr<RepositoryState>> evicted;
+        {
+            std::lock_guard maps(mutex_);
+            ++epochs_[customer_id];
+            const std::string prefix = customer_id + "/";
+            for (auto it = routes_.lower_bound(prefix);
+                 it != routes_.end() && it->first.starts_with(prefix);) {
+                it = routes_.erase(it);
+            }
+            for (auto it = repositories_.lower_bound(prefix);
+                 it != repositories_.end() && it->first.starts_with(prefix);) {
+                if (it->second->workspace.empty()) {
+                    evicted.push_back(std::move(it->second));
+                    it = repositories_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
         }
         return output;
     }
 
-    SyncStoreResult<void> close_workspace_store(const std::string& workspace_id) override {
-        Held lock(*this);
-        std::erase_if(repositories_, [&](const auto& row) { return row.second->workspace == workspace_id; });
-        const auto found = workspace_stores_.find(workspace_id);
-        if (found == workspace_stores_.end()) {
+    SyncStoreResult<void> create_repository_content(const std::string& customer_id,
+                                                    const std::string& workspace_id,
+                                                    const std::string& repository_id,
+                                                    const std::function<SyncStoreResult<void>()>& create_row) override {
+        // Under the workspace's lane: a switch either finished before (and the repository is
+        // created in the workspace store here) or starts after (and finds the row in its list).
+        auto workspace_lane = hold("w:" + workspace_id);
+        if (auto created = create_row(); !created) {
+            return std::unexpected(created.error());
+        }
+        auto route = workspace_route(customer_id, repository_id);
+        if (!route) {
+            return std::unexpected(route.error());
+        }
+        if (!*route) {
             return {};
         }
-        auto store = std::move(found->second);
-        workspace_stores_.erase(found);
+        return create_in_workspace(customer_id, repository_id, **route, false);
+    }
+
+    SyncStoreResult<void> close_workspace_store(const std::string& workspace_id) override {
+        // The lane waits for an open in progress (one waiting for the bucket lease included), so
+        // a deletion that races an open still releases the lease the open took.
+        auto workspace_lane = hold("w:" + workspace_id);
+        std::unique_ptr<WorkspaceStore> store;
+        std::vector<std::unique_ptr<RepositoryState>> evicted;
+        {
+            std::lock_guard maps(mutex_);
+            for (auto it = repositories_.begin(); it != repositories_.end();) {
+                if (it->second->workspace == workspace_id) {
+                    evicted.push_back(std::move(it->second));
+                    it = repositories_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            const auto found = workspace_stores_.find(workspace_id);
+            if (found == workspace_stores_.end()) {
+                return {};
+            }
+            store = std::move(found->second);
+            workspace_stores_.erase(found);
+        }
+        evicted.clear();
         const auto closed = liquid::runtime::block_on(store->store->close());
         if (!closed) {
             return std::unexpected(error_of(closed.error()));
@@ -5312,15 +5500,41 @@ public:
 
     // Destroys every open repository, closes every workspace store (releasing its bucket lease),
     // then every space store, which releases their liquid owner locks. The server calls it after
-    // the last request has finished.
+    // the last request has finished; each store is closed under its own lane.
     void close() {
-        Held lock(*this);
-        repositories_.clear();
-        for (auto& [workspace_id, workspace] : workspace_stores_) {
-            static_cast<void>(liquid::runtime::block_on(workspace->store->close()));
+        std::vector<std::string> workspaces;
+        std::vector<std::string> spaces;
+        {
+            std::lock_guard maps(mutex_);
+            for (const auto& [workspace_id, store] : workspace_stores_) {
+                workspaces.push_back(workspace_id);
+            }
+            for (const auto& [customer_id, store] : stores_) {
+                spaces.push_back(customer_id);
+            }
         }
-        workspace_stores_.clear();
-        stores_.clear();
+        for (const std::string& workspace_id : workspaces) {
+            static_cast<void>(close_workspace_store(workspace_id));
+        }
+        for (const std::string& customer_id : spaces) {
+            auto space_lane = hold("s:" + customer_id);
+            std::unique_ptr<liquid::store> store;
+            std::vector<std::unique_ptr<RepositoryState>> evicted;
+            {
+                std::lock_guard maps(mutex_);
+                const std::string prefix = customer_id + "/";
+                for (auto it = repositories_.lower_bound(prefix);
+                     it != repositories_.end() && it->first.starts_with(prefix);) {
+                    evicted.push_back(std::move(it->second));
+                    it = repositories_.erase(it);
+                }
+                const auto found = stores_.find(customer_id);
+                if (found != stores_.end()) {
+                    store = std::move(found->second);
+                    stores_.erase(found);
+                }
+            }
+        }
     }
 };
 
@@ -5820,25 +6034,32 @@ struct ApiServer::Impl {
         LiquidCustomerStores::WorkspaceStoreConfig config;
         std::shared_ptr<control::Store> store = options.store;
         std::shared_ptr<control::WorkspaceService> workspaces = options.workspaces;
+        // Fails closed: a repository or workspace that cannot be read is an error, never the space
+        // store, so a switched workspace's repositories are never answered from the old store.
         config.route = [store](const std::string& customer_id, const std::string& repository_id)
             -> SyncStoreResult<std::optional<std::string>> {
             const auto repository = store->get_repository(repository_id);
             if (!repository) {
                 if (repository.error().code == "not_found" ||
                     repository.error().code == "invalid_input") {
-                    return std::optional<std::string>{};
+                    return std::unexpected(SyncStoreError{"not_found", "no repository " + repository_id});
                 }
                 return std::unexpected(SyncStoreError{"store_unavailable", repository.error().message});
             }
-            if (repository->customer_id != customer_id || repository->workspace_id.empty()) {
+            if (repository->customer_id != customer_id) {
+                return std::unexpected(SyncStoreError{
+                    "invalid_input", "the repository is not in this space"});
+            }
+            if (repository->workspace_id.empty()) {
+                // Not yet assigned (lake#513): it can only be in the space's store.
                 return std::optional<std::string>{};
             }
             const auto workspace = store->get_workspace(repository->workspace_id);
             if (!workspace) {
-                if (workspace.error().code == "invalid_input") {
-                    return std::optional<std::string>{};
-                }
                 return std::unexpected(SyncStoreError{"store_unavailable", workspace.error().message});
+            }
+            if (workspace->desired == "deleted") {
+                return std::unexpected(SyncStoreError{"not_found", "the repository's workspace is deleted"});
             }
             if (workspace->store_moved_at.empty()) {
                 return std::optional<std::string>{};
@@ -5846,15 +6067,17 @@ struct ApiServer::Impl {
             return std::optional<std::string>{workspace->id};
         };
         config.switched = [store](const std::string& customer_id)
-            -> SyncStoreResult<std::pair<std::vector<std::string>, bool>> {
+            -> SyncStoreResult<std::pair<std::vector<std::pair<std::string, bool>>, bool>> {
             const auto rows = store->list_workspaces(customer_id);
             if (!rows) {
                 return std::unexpected(SyncStoreError{"store_unavailable", rows.error().message});
             }
-            std::pair<std::vector<std::string>, bool> output{{}, false};
+            std::pair<std::vector<std::pair<std::string, bool>>, bool> output{{}, false};
             for (const control::Workspace& workspace : *rows) {
                 if (!workspace.store_moved_at.empty()) {
-                    output.first.push_back(workspace.id);
+                    if (workspace.desired != "deleted") {
+                        output.first.emplace_back(workspace.id, workspace.desired == "running");
+                    }
                 } else if (workspace.desired != "deleted") {
                     output.second = true;
                 }
@@ -16907,7 +17130,7 @@ struct ApiServer::Impl {
         const auto length = decimal_value(query_value(route, "length"));
         input["offset"] = offset ? nlohmann::json(*offset) : nlohmann::json("invalid");
         input["length"] = length ? nlohmann::json(*length) : nlohmann::json("invalid");
-        const ApiResult result = registry.call("read_chunk", input, context);
+        const ApiResult result = unwrap(co_await registry.call_async("read_chunk", input, context));
         if (!result.ok) {
             co_return co_await send_sync_error(route, sync_error_of(result, context));
         }

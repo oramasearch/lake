@@ -128,6 +128,22 @@ public:
         nodes_[endpoint].buckets[bucket].lease.holder.clear();
         changed_.notify_all();
     }
+    // Every request to `endpoint` whose URL contains `fragment` (empty: every one) waits `delay`
+    // first. A delay past the request's timeout ends at the timeout with no answer, as a
+    // transport does.
+    void hang(const std::string& endpoint, std::chrono::milliseconds delay, std::string fragment = {}) {
+        std::lock_guard lock(mutex_);
+        hangs_[endpoint] = {delay, std::move(fragment)};
+    }
+    void clear_bucket(const std::string& endpoint, const std::string& bucket = "lake_store") {
+        std::lock_guard lock(mutex_);
+        nodes_[endpoint].buckets[bucket].objects.clear();
+    }
+    void erase_object(const std::string& endpoint, const std::string& key,
+                      const std::string& bucket = "lake_store") {
+        std::lock_guard lock(mutex_);
+        nodes_[endpoint].buckets[bucket].objects.erase(key);
+    }
     // Added to every exchange, to stand in for a network.
     void set_latency(std::chrono::microseconds latency) {
         std::lock_guard lock(mutex_);
@@ -136,12 +152,27 @@ public:
 
     liquid::runtime::task<control::ObjectResponse> exchange(control::ObjectRequest request) override {
         std::chrono::microseconds latency{};
+        std::chrono::milliseconds delay{};
         {
             std::lock_guard lock(mutex_);
             latency = latency_;
+            for (const auto& [endpoint, hung] : hangs_) {
+                if (request.url.starts_with(endpoint) &&
+                    (hung.second.empty() || request.url.find(hung.second) != std::string::npos)) {
+                    delay = hung.first;
+                }
+            }
         }
         if (latency.count() > 0) {
             std::this_thread::sleep_for(latency);
+        }
+        if (delay.count() > 0) {
+            const auto timeout = std::chrono::seconds(request.timeout_seconds);
+            if (delay >= timeout) {
+                std::this_thread::sleep_for(timeout);
+                co_return control::ObjectResponse{0, {}, "timed out"};
+            }
+            std::this_thread::sleep_for(delay);
         }
         co_return answer(std::move(request));
     }
@@ -452,6 +483,7 @@ private:
     int drop_count_ = 0;
     bool keep_bodies_ = true;
     std::chrono::microseconds latency_{};
+    std::map<std::string, std::pair<std::chrono::milliseconds, std::string>> hangs_;
 };
 
 } // namespace lake::test

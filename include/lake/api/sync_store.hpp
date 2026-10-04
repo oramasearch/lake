@@ -441,15 +441,27 @@ public:
     transfer_to_workspace_store(const std::string&, const std::string&, const std::string&, bool) {
         return std::unexpected(SyncStoreError{"unsupported", "workspace stores are unavailable"});
     }
-    // Holds every repository request, copies what changed since the last copy, verifies every
-    // repository, and only when all are complete calls `record` and serves the workspace's
-    // repositories from its store from then on.
+    // Holds the workspace's and its space's repository requests, then calls `list` for the
+    // workspace's repositories, copies what changed since the last copy, verifies every
+    // repository, creates in the workspace store each one the space store never held, and only
+    // when all are complete calls `record` and serves the workspace's repositories from its store
+    // from then on.
     virtual SyncStoreResult<std::vector<WorkspaceStoreTransfer>>
     switch_workspace_store(const std::string&,
                            const std::string&,
-                           const std::vector<std::string>&,
+                           const std::function<SyncStoreResult<std::vector<std::string>>()>&,
                            const std::function<SyncStoreResult<void>()>&) {
         return std::unexpected(SyncStoreError{"unsupported", "workspace stores are unavailable"});
+    }
+    // Runs `create_row` (which creates the repository's control-store row) while no switch of the
+    // workspace can run, then, when the workspace is served from its own store, creates the
+    // repository there. A repository in a workspace store is never created implicitly.
+    virtual SyncStoreResult<void>
+    create_repository_content(const std::string&,
+                              const std::string&,
+                              const std::string&,
+                              const std::function<SyncStoreResult<void>()>& create_row) {
+        return create_row();
     }
     // Closes the workspace's store and releases its bucket lease (workspace deletion, drain).
     virtual SyncStoreResult<void> close_workspace_store(const std::string&) {

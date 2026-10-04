@@ -138,11 +138,15 @@ public:
     // Every key under prefix with its size, by key, following next_after.
     liquid::runtime::task<std::vector<ObjectListEntry>> list(std::string prefix);
     liquid::runtime::task<void> barrier();
-    liquid::runtime::task<ObjectUsage> usage();
+    // One attempt within `timeout`: a caller with a last known value uses it on failure.
+    liquid::runtime::task<ObjectUsage> usage(std::chrono::milliseconds timeout = std::chrono::seconds(5));
     liquid::runtime::task<ObjectLease>
     acquire(std::string holder, std::chrono::milliseconds ttl, std::chrono::milliseconds wait);
-    liquid::runtime::task<ObjectLease>
-    renew(std::string holder, std::uint64_t fence, std::chrono::milliseconds ttl);
+    // One attempt that gives up after `timeout`, so a renewal never outlasts the lease.
+    liquid::runtime::task<ObjectLease> renew(std::string holder,
+                                             std::uint64_t fence,
+                                             std::chrono::milliseconds ttl,
+                                             std::chrono::milliseconds timeout);
     liquid::runtime::task<void> release(std::string holder, std::uint64_t fence);
 
 private:
@@ -210,6 +214,10 @@ struct ZettaObjectBackendOptions {
     std::size_t window_bytes = 4 * 1024 * 1024;
     // The window cache's bound, per workspace store.
     std::size_t cache_bytes = 64 * 1024 * 1024;
+    // Whether a missing data key may be created, which the backend still does only when the
+    // bucket holds no object. Lake sets it only while it creates a workspace's store, before the
+    // workspace is switched to it.
+    bool create_key = false;
 };
 
 // Liquid's store_backend over one workspace Zetta bucket (docs/architecture/workspace-store.md).
@@ -269,6 +277,7 @@ private:
     liquid::runtime::task<void> ensure_header(const std::string& key);
     liquid::runtime::task<void> ensure_open_region(const std::string& key);
     liquid::runtime::task<void> flush_entry(const std::string& key, bool barrier);
+    liquid::runtime::task<void> flush_entry_once(const std::string& key, bool barrier);
     liquid::runtime::task<std::string>
     read_main(const std::string& key, std::uint64_t offset, std::uint64_t size);
     liquid::runtime::task<std::vector<std::byte>>
@@ -281,6 +290,7 @@ private:
     bool directory_loaded_ = false;
     std::map<std::string, std::unique_ptr<Entry>> directory_;
     std::set<std::string> stale_tails_;
+    std::set<std::string> flushing_;
     bool dirty_ = false;
 };
 

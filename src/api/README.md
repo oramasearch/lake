@@ -229,11 +229,17 @@ Failed, with its reason (lake#442). See `docs/api/agent-launches.md`.
 The store capabilities (`list_stores`, `create_store`, `delete_store`, `store_connection`) take
 the workspace and see only its stores (lake#465). See `docs/api/storage.md`.
 
-`workspace_store_capabilities.cpp` registers the operator-only `move_workspace_store` (plan, copy,
+`registry.cpp` runs the synchronous handlers of capabilities that wait on a repository store
+(repository, Drive, model and dataset objects, `replicate_repository`, `move_workspace_store`) on a
+32-thread pool, so a slow workspace Zetta holds up only its own requests (lake#380).
+`create_repository_row` (`capabilities.cpp`) creates every repository row through
+`SyncStore::create_repository_content`. `workspace_store_capabilities.cpp` registers the operator-only `move_workspace_store` (plan, copy,
 verify, switch; lake#380, `docs/api/workspace-store.md`). `http_server.cpp`'s `LiquidCustomerStores`
-routes a repository to its workspace's store once `workspaces.store_moved_at` is set, opens each
-workspace store on first use with mutex_ given up while it waits for the bucket lease, closes and
-reopens a store whose lease was lost or whose write failed, closes them on drain and on workspace
+routes a repository to its workspace's store once `workspaces.store_moved_at` is set (failing
+closed), holds one lane per store (`s:<space>`, `w:<workspace>`) with its map lock never held across
+I/O, opens each workspace store on first use, never creates a workspace store, key or repository
+except explicitly (`create_repository_content`, the switch), closes and reopens a store whose lease
+was lost or whose write failed, closes them on drain and on workspace
 deletion (`WorkspaceContent::close_workspace_store`), measures a switched workspace's storage as
 its bucket's usage, and keeps replication cursors with liquid's cursor API.
 

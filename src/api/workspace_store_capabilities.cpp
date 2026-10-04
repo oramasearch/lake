@@ -120,13 +120,22 @@ ApiResult move_workspace_store(const json& input, ApiContext& context) {
             output["repositories"] = json::array();
             return ApiResult::success(std::move(output));
         }
-        std::vector<std::string> identifiers;
-        for (const control::Repository& repository : repositories) {
-            identifiers.push_back(repository.id);
-        }
         std::string moved_at;
+        // The repositories are listed while the switch holds the workspace's requests and
+        // creations, so one created meanwhile is not missed.
+        const auto list = [&]() -> SyncStoreResult<std::vector<std::string>> {
+            const auto current = context.store->list_repositories(customer_id, 100000, workspace_id);
+            if (!current) {
+                return std::unexpected(SyncStoreError{current.error().code, current.error().message});
+            }
+            std::vector<std::string> identifiers;
+            for (const control::Repository& repository : *current) {
+                identifiers.push_back(repository.id);
+            }
+            return identifiers;
+        };
         auto switched = context.sync_store->switch_workspace_store(
-            customer_id, workspace_id, identifiers, [&]() -> SyncStoreResult<void> {
+            customer_id, workspace_id, list, [&]() -> SyncStoreResult<void> {
                 const auto marked = context.store->mark_workspace_store_moved(workspace_id);
                 if (!marked) {
                     return std::unexpected(

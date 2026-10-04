@@ -430,12 +430,13 @@ liquid::runtime::task<void> ZettaObjectClient::barrier() {
     co_return liquid::result<void>{};
 }
 
-liquid::runtime::task<ObjectUsage> ZettaObjectClient::usage() {
+liquid::runtime::task<ObjectUsage> ZettaObjectClient::usage(std::chrono::milliseconds timeout) {
     ObjectRequest request;
     request.method = "GET";
     request.url = bucket_url(":usage");
     request.headers = {{"Accept", "application/json"}};
-    auto response = co_await send(std::move(request), true);
+    request.timeout_seconds = std::max<int>(1, static_cast<int>(timeout.count() / 1000));
+    auto response = co_await send(std::move(request), false);
     if (!response) {
         co_return std::unexpected(response.error());
     }
@@ -496,14 +497,18 @@ liquid::runtime::task<ObjectLease> ZettaObjectClient::acquire(std::string holder
 
 liquid::runtime::task<ObjectLease> ZettaObjectClient::renew(std::string holder,
                                                             std::uint64_t fence,
-                                                            std::chrono::milliseconds ttl) {
+                                                            std::chrono::milliseconds ttl,
+                                                            std::chrono::milliseconds timeout) {
     ObjectRequest request;
     request.method = "POST";
     request.url = bucket_url(":renew");
     request.headers = {{"Content-Type", "application/json"}, {"Accept", "application/json"}};
     request.body =
         nlohmann::json{{"holder", holder}, {"fence", fence}, {"ttl_ms", ttl.count()}}.dump();
-    auto response = co_await send(std::move(request), true);
+    // One attempt, answered well inside the lease: a renewal that cannot finish in time is worth
+    // nothing, and the owner's next renewal is the retry.
+    request.timeout_seconds = std::max<int>(1, static_cast<int>(timeout.count() / 1000));
+    auto response = co_await send(std::move(request), false);
     if (!response) {
         co_return std::unexpected(response.error());
     }
@@ -1041,16 +1046,26 @@ liquid::runtime::task<void> ZettaObjectBackend::ensure_cipher() {
             co_return liquid::result<void>{};
         }
     }
+    // The directory decides whether a missing key may be created: only in an empty bucket.
+    if (auto ready = co_await ensure_directory(); !ready) {
+        co_return std::unexpected(ready.error());
+    }
     const std::string& workspace_id = shared_->options.workspace_id;
     auto wrapping = WorkspaceStoreCipher::wrapping_key(shared_->options.instance_kek, workspace_id);
     if (!wrapping) {
         co_return std::unexpected(wrapping.error());
     }
+    // The wrapping key is wiped on every path out of this function.
+    struct Wipe {
+        WorkspaceStoreCipher::Key& key;
+        ~Wipe() {
+            secrets_crypto::cleanse(key);
+        }
+    } wipe{*wrapping};
     for (int attempt = 0; attempt < 2; ++attempt) {
         auto document = co_await shared_->client->get_all(std::string(workspace_store_key_object));
         if (document) {
             auto unwrapped = WorkspaceStoreCipher::unwrap(*wrapping, workspace_id, *document);
-            secrets_crypto::cleanse(*wrapping);
             if (!unwrapped) {
                 co_return std::unexpected(unwrapped.error());
             }
@@ -1065,7 +1080,26 @@ liquid::runtime::task<void> ZettaObjectBackend::ensure_cipher() {
         if (document.error().code != liquid::errc::not_found) {
             co_return std::unexpected(document.error());
         }
-        // The first open of this workspace's store: a new random data key, created once.
+        // A missing key is created only for a store that is being created: one the caller opened
+        // to create (before its workspace is switched) whose bucket holds nothing yet. A switched
+        // workspace's store, or a bucket that holds objects, without its key was wiped, recreated
+        // or is the wrong bucket; serving it as an empty store would lose its repositories.
+        bool empty = false;
+        {
+            std::lock_guard lock(mutex_);
+            empty = directory_.empty() && stale_tails_.empty();
+        }
+        if (!shared_->options.create_key || !empty) {
+            co_return std::unexpected(failure(
+                liquid::errc::corrupt,
+                !shared_->options.create_key
+                    ? "the workspace store has no data key: its workspace was switched to it, so "
+                      "the store was wiped, recreated, or this is the wrong workspace Zetta; lake "
+                      "will not serve it as an empty store"
+                    : "the workspace store has no data key but holds objects: it was damaged or "
+                      "this is the wrong workspace Zetta; lake will not create a new key over it",
+                std::string(workspace_store_key_object)));
+        }
         auto key = secrets_crypto::random_key();
         if (!key) {
             co_return std::unexpected(failure(liquid::errc::internal, key.error().message));
@@ -1086,7 +1120,6 @@ liquid::runtime::task<void> ZettaObjectBackend::ensure_cipher() {
                                       "the workspace store key could not be created",
                                       std::string(workspace_store_key_object)));
 }
-
 
 liquid::runtime::task<void> ZettaObjectBackend::ensure_header(const std::string& key) {
     std::uint64_t ct_size = 0;
@@ -1127,7 +1160,19 @@ liquid::runtime::task<void> ZettaObjectBackend::ensure_header(const std::string&
     std::lock_guard lock(mutex_);
     const auto found = directory_.find(key);
     if (found != directory_.end() && !found->second->header && found->second->ct_size == ct_size) {
-        apply_header(*found->second, std::move(header), *parsed);
+        Entry& entry = *found->second;
+        apply_header(entry, std::move(header), *parsed);
+        // Only the tail of the current block can be live; any other was left by an interrupted
+        // barrier or an older version of the object and is removed after the next barrier.
+        const std::string current = entry.tail_key(key, entry.append_blocks());
+        for (auto it = entry.tails.begin(); it != entry.tails.end();) {
+            if (it->first != current) {
+                stale_tails_.insert(it->first);
+                it = entry.tails.erase(it);
+            } else {
+                ++it;
+            }
+        }
     }
     co_return liquid::result<void>{};
 }
@@ -1349,6 +1394,30 @@ ZettaObjectBackend::read_plain(const std::string& key, std::uint64_t offset, std
 }
 
 liquid::runtime::task<void> ZettaObjectBackend::flush_entry(const std::string& key, bool barrier) {
+    // One flush per key at a time: a threshold flush and a barrier on the same key would otherwise
+    // send the same blocks twice and both remove them from the buffer.
+    for (;;) {
+        {
+            std::lock_guard lock(mutex_);
+            if (!flushing_.contains(key)) {
+                flushing_.insert(key);
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    struct Done {
+        ZettaObjectBackend& self;
+        const std::string& key;
+        ~Done() {
+            std::lock_guard lock(self.mutex_);
+            self.flushing_.erase(key);
+        }
+    } done{*this, key};
+    co_return co_await flush_entry_once(key, barrier);
+}
+
+liquid::runtime::task<void> ZettaObjectBackend::flush_entry_once(const std::string& key, bool barrier) {
     std::vector<std::string> patches;
     std::uint64_t first_offset = 0;
     std::optional<std::pair<std::string, std::string>> tail;
@@ -1602,11 +1671,10 @@ liquid::runtime::task<void> ZettaObjectBackend::put_if_absent_impl(std::string k
     auto written = co_await shared_->client->put(key, std::move(object), fence_, true);
     if (!written) {
         if (written.error().code == liquid::errc::already_exists) {
-            // Another writer created it, which the fence should have excluded: read the directory
-            // again before the next operation.
-            std::lock_guard lock(mutex_);
-            directory_loaded_ = false;
-            directory_.clear();
+            // The directory said the key was absent: another writer exists, which the fence should
+            // have excluded, so nothing this backend knows can be trusted. The directory and any
+            // buffered appends are kept as they are; the store must be closed and reopened.
+            shared_->failed.store(true);
         }
         co_return std::unexpected(written.error());
     }
@@ -1983,14 +2051,16 @@ void ZettaStoreOwner::renew_loop() {
         const std::string holder = holder_;
         const std::uint64_t fence = grant_.fence();
         lock.unlock();
-        auto renewed = liquid::runtime::block_on(client_->renew(holder, fence, ttl_));
+        // The lease runs from when Zetta could have granted it at the earliest: the send.
+        const auto sent = std::chrono::steady_clock::now();
+        auto renewed = liquid::runtime::block_on(client_->renew(holder, fence, ttl_, ttl_ / 3));
         lock.lock();
         if (stopping_) {
             return;
         }
         const auto now = std::chrono::steady_clock::now();
         if (renewed) {
-            expires = now + ttl_;
+            expires = sent + ttl_;
             continue;
         }
         // Refused as fenced, or no renewal accepted before the lease ran out: another holder may

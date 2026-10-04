@@ -1846,6 +1846,35 @@ ApiResult authorized_object_list_result(control::Result<std::vector<control::Pol
 
 } // namespace
 
+control::Result<control::Repository> create_repository_row(ApiContext& context,
+                                                           control::NewRepository in) {
+    if (!context.sync_store) {
+        return context.store->create_repository(in);
+    }
+    if (in.id.empty()) {
+        in.id = control::new_uuid_v4();
+    }
+    std::optional<control::Result<control::Repository>> row;
+    const auto content = context.sync_store->create_repository_content(
+        in.customer_id, in.workspace_id, in.id, [&]() -> SyncStoreResult<void> {
+            row = context.store->create_repository(in);
+            if (!*row) {
+                return std::unexpected(SyncStoreError{row->error().code, row->error().message});
+            }
+            return {};
+        });
+    if (row && !*row) {
+        return *row;
+    }
+    if (!content) {
+        return std::unexpected(control::StoreError{
+            content.error().code,
+            "the repository row exists but it could not be created in its workspace store: " +
+                content.error().message});
+    }
+    return *row;
+}
+
 std::expected<control::Workspace, ApiError> repository_workspace(ApiContext& context,
                                                                  const nlohmann::json& input) {
     if (!context.store) {
@@ -3631,7 +3660,7 @@ void register_repository_capabilities(Registry& registry) {
                     workspace.error().code, workspace.error().message, workspace.error().path);
             }
             const std::string name = in.value("name", "");
-            auto repository = ctx.store->create_repository(control::NewRepository{
+            auto repository = create_repository_row(ctx, control::NewRepository{
                 in.value("customer_id", ""), name, "", in.value("visibility", ""), workspace->id});
             if (!repository && repository.error().code == "conflict") {
                 ApiResult result = from_store_error(repository.error());

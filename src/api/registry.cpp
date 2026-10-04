@@ -13,8 +13,63 @@
 #include "lake/control/store.hpp"
 #include "lake/transparency/log.hpp"
 
+#include <liquid/runtime.hpp>
+
 namespace lake::api {
 namespace {
+
+// Capabilities that wait on a repository store run off the server's thread (lake#380): a
+// workspace's store is in its workspace Zetta, and a slow or hung Zetta must hold up only the
+// requests for that workspace. Handlers of these capabilities reach shared state only through the
+// control store, the repository store, search and the recorders, all of which lock.
+boost::capy::thread_pool& blocking_pool() {
+    static boost::capy::thread_pool pool(32, "lake-store-");
+    return pool;
+}
+
+template <class Callable, class T, class Executor> class pool_awaiter {
+public:
+    pool_awaiter(Callable callable,
+                 std::shared_ptr<liquid::runtime::detail::offload_state<T>> state,
+                 Executor executor)
+        : callable_(std::move(callable)), state_(std::move(state)), executor_(std::move(executor)) {}
+    [[nodiscard]] bool await_ready() const noexcept {
+        return false;
+    }
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> handle, const boost::capy::io_env*) {
+        state_->completion.h = handle;
+        boost::capy::run_async(blocking_pool().get_executor())(
+            liquid::runtime::detail::run_blocking<Callable, T>(std::move(callable_), state_, executor_));
+        return std::noop_coroutine();
+    }
+    void await_resume() const noexcept {}
+
+private:
+    Callable callable_;
+    std::shared_ptr<liquid::runtime::detail::offload_state<T>> state_;
+    Executor executor_;
+};
+
+// Runs `callable` on the blocking pool and resumes on the caller's executor.
+template <class Callable> liquid::runtime::task<std::invoke_result_t<Callable>> off_thread(Callable callable) {
+    using output_type = std::invoke_result_t<Callable>;
+    auto state = std::make_shared<liquid::runtime::detail::offload_state<output_type>>();
+    const auto executor = co_await boost::capy::this_coro::executor;
+    co_await pool_awaiter<Callable, output_type, decltype(executor)>{std::move(callable), state, executor};
+    if (!state->output.has_value()) {
+        co_return std::unexpected(liquid::error{liquid::errc::internal,
+                                                "a blocking handler completed without a result",
+                                                "registry"});
+    }
+    co_return std::move(*state->output);
+}
+
+bool waits_on_repository_store(const Capability& capability) {
+    const std::string_view object = capability.object;
+    return object.starts_with("repository") || object.starts_with("drive") || object == "model" ||
+           object == "dataset" || object == "workspace store move" ||
+           capability.name == "replicate_repository";
+}
 
 bool contains_database_diagnostic(std::string_view message) {
     std::string uppercase(message);
@@ -957,6 +1012,12 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
                 } else {
                     state.result = std::move(*completed);
                 }
+            } else if (capability->handler && waits_on_repository_store(*capability)) {
+                const CapabilityHandler& handler = capability->handler;
+                auto completed =
+                    co_await off_thread([&handler, &call_input, &context] { return handler(call_input, context); });
+                state.result = completed ? std::move(*completed)
+                                         : ApiResult::failure("store_error", completed.error().message);
             } else if (capability->handler) {
                 state.result = capability->handler(call_input, context);
             } else {
