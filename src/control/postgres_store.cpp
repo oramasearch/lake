@@ -4567,8 +4567,26 @@ public:
                 "SELECT COALESCE(jsonb_agg(jsonb_build_object('id', id::text, 'name', target, "
                 "'state', phase) ORDER BY id), '[]'::jsonb)::text FROM changed",
                 request.workspace_id);
-            // lake#383: the workspace's rows in oci_repository_routes are deleted here, in this
-            // transaction, once tenant images are routed through it.
+            // lake#383: the workspace's tenant image routes go in this transaction; their
+            // manifests and tags go with its Zetta.
+            const auto routes = tx.exec_params(
+                "WITH gone AS (DELETE FROM oci_repository_routes WHERE workspace_id = $1::uuid "
+                "RETURNING customer_id, name) SELECT c.name || '/' || g.name FROM gone g "
+                "JOIN customers c ON c.id = g.customer_id ORDER BY 1",
+                request.workspace_id);
+            for (const auto& route : routes) {
+                const std::string image = route[0].as<std::string>();
+                if (std::ranges::find(request.images, image) == request.images.end()) {
+                    images.push_back({{"id", ""}, {"name", image}, {"state", "routed"}});
+                }
+            }
+            {
+                std::vector<nlohmann::json> sorted(images.begin(), images.end());
+                std::ranges::sort(sorted, {}, [](const nlohmann::json& image) {
+                    return image.value("name", std::string());
+                });
+                images = sorted;
+            }
             tx.exec_params("UPDATE workspaces SET desired = 'deleted', generation = generation + 1, "
                            "updated_at = now() WHERE id = $1::uuid",
                            request.workspace_id);
@@ -4598,6 +4616,97 @@ public:
             tx.exec_params("SELECT pg_notify('lake_services', $1)", request.workspace_id);
             return workspace_deletion_from(inserted[0]);
         });
+    }
+
+    static OciRepositoryRoute oci_route_from(const pqxx::row& row) {
+        return {row[0].as<std::string>(), row[1].as<std::string>(), row[2].as<std::string>(),
+                row[3].as<std::string>(), row[4].as<std::string>()};
+    }
+
+    static constexpr const char* oci_route_columns =
+        "customer_id::text, name, workspace_id::text, "
+        "to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'), "
+        "to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')";
+
+    Result<OciRepositoryRoute> create_oci_repository_route(const std::string& customer_id,
+                                                           const std::string& name,
+                                                           const std::string& workspace_id) override {
+        if (!valid_oci_route_name(name)) {
+            return std::unexpected(
+                StoreError{"invalid_input", "name is not a valid image repository name"});
+        }
+        if (managed_service_slug("ws", workspace_id).empty() ||
+            managed_service_slug("ws", customer_id).empty()) {
+            return std::unexpected(
+                StoreError{"invalid_input", "workspace_id must name a live workspace of this space"});
+        }
+        return with_tx<OciRepositoryRoute>([&](pqxx::work& tx) -> Result<OciRepositoryRoute> {
+            const auto workspace = tx.exec_params(
+                "SELECT 1 FROM workspaces WHERE id = $1::uuid AND customer_id = $2::uuid "
+                "AND desired <> 'deleted' FOR SHARE",
+                workspace_id, customer_id);
+            if (workspace.empty()) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "workspace_id must name a live workspace of this space"});
+            }
+            tx.exec_params("INSERT INTO oci_repository_routes (customer_id, name, workspace_id) "
+                           "VALUES ($1::uuid, $2, $3::uuid) ON CONFLICT (customer_id, name) "
+                           "DO NOTHING",
+                           customer_id, name, workspace_id);
+            const auto rows = tx.exec_params(std::string("SELECT ") + oci_route_columns +
+                                                 " FROM oci_repository_routes WHERE customer_id = "
+                                                 "$1::uuid AND name = $2",
+                                             customer_id, name);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"store_error", "the image route was not kept"});
+            }
+            OciRepositoryRoute route = oci_route_from(rows[0]);
+            if (route.workspace_id != workspace_id) {
+                return std::unexpected(StoreError{
+                    "conflict", "image repository " + name + " belongs to another workspace"});
+            }
+            return route;
+        });
+    }
+
+    Result<OciRepositoryRoute> get_oci_repository_route(const std::string& customer_id,
+                                                        const std::string& name) override {
+        if (managed_service_slug("ws", customer_id).empty()) {
+            return std::unexpected(StoreError{"not_found", "no image repository " + name});
+        }
+        return with_tx<OciRepositoryRoute>([&](pqxx::work& tx) -> Result<OciRepositoryRoute> {
+            const auto rows = tx.exec_params(std::string("SELECT ") + oci_route_columns +
+                                                 " FROM oci_repository_routes WHERE customer_id = "
+                                                 "$1::uuid AND name = $2",
+                                             customer_id, name);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no image repository " + name});
+            }
+            return oci_route_from(rows[0]);
+        });
+    }
+
+    Result<std::vector<OciRepositoryRoute>>
+    list_oci_repository_routes(const std::string& customer_id,
+                               const std::string& workspace_id) override {
+        if (managed_service_slug("ws", customer_id).empty() ||
+            (!workspace_id.empty() && managed_service_slug("ws", workspace_id).empty())) {
+            return std::vector<OciRepositoryRoute>{};
+        }
+        return with_tx<std::vector<OciRepositoryRoute>>(
+            [&](pqxx::work& tx) -> Result<std::vector<OciRepositoryRoute>> {
+                const auto rows = tx.exec_params(
+                    std::string("SELECT ") + oci_route_columns +
+                        " FROM oci_repository_routes WHERE customer_id = $1::uuid AND "
+                        "(NULLIF($2, '') IS NULL OR workspace_id = NULLIF($2, '')::uuid) "
+                        "ORDER BY name",
+                    customer_id, workspace_id);
+                std::vector<OciRepositoryRoute> routes;
+                for (const auto& row : rows) {
+                    routes.push_back(oci_route_from(row));
+                }
+                return routes;
+            });
     }
 
     Result<WorkspaceDeletion> get_workspace_deletion(const std::string& workspace_id) override {

@@ -578,3 +578,14 @@ and another space's administrator, dry run included. `RegistryProtocols.Deleting
 `Search.DroppingARepositoryRemovesItsSegmentsAndUnsharedBlobs` covers the index.
 `WorkspaceNavigationHttp.SelectorRedirectsRememberedWorkspaceAndValidatesForms` renders the
 confirmation with its counts.
+
+Tenant images (lake#383 phase A): `test_api.cpp`
+(`Stores/TenantImages.LiveInTheirRoutedWorkspaceAndKeepTheirAddresses`,
+`Stores/TenantImages.TheOneShotCopyRoutesAndMovesLegacyTags`, on the memory store and PostgreSQL)
+covers two spaces with two workspaces each, explicit routing with missing, malformed, unknown,
+foreign and deleted `workspace_id`, immutable routes, push and pull through the route, sealed records
+only in the routed workspace, builds confined to their workspace, npm and one-component OCI
+unaffected, a workspace that is not ready, workspace deletion and the copy; the `RegistryProtocols`
+tests run tenant pushes against routed workspaces; `WorkspaceRecords.ImageTagsMoveAtTheRevisionReadAndManifestsAreWrittenOnce`
+the codecs and a raced tag move; `PostgresImageRoutes.MigrationRoutesUnambiguousImagesOnly`
+migration `0068`.

@@ -82,7 +82,7 @@ workspace Zetta, and lake's control store keeps none of them. It carries no pric
 | Field | Rule |
 |---|---|
 | `storage.repositories_bytes` | Repository storage, measured now (above). |
-| `storage.images_bytes` | Unique bytes the OCI registry holds below `<space handle>/`: every manifest a tag points to, plus its config and layers, each digest once across all tags and repositories of the space (build cache under `<space>/cache/` included). `null` when the server has no registry storage. |
+| `storage.images_bytes` | Unique bytes of the space's tenant images (`<space handle>/...`, build cache under `<space>/cache/` included): every manifest a tag points to, plus its config and layers, each digest once across all tags and repositories of the space. Read from the tags in each routed workspace (lake#383, [registry.md](registry.md#where-a-tenant-image-lives)), one read per repository; a workspace that cannot be read is named in `not_measured`. `null` when the lake has no workspaces. |
 | `storage.workspace_data_bytes` | The sum of `size_bytes` from Zetta `list_datasets` in each of the customer's workspaces (the on-disk row chunks of every dataset). |
 | `storage.total_bytes` | The three above added. |
 | `compute.repository_build_seconds` | The sum of `compute_seconds` in the returned hourly rows. |
@@ -90,7 +90,7 @@ workspace Zetta, and lake's control store keeps none of them. It carries no pric
 | `compute.workspace_run_seconds`, `workspace_runs` | Every Zetta run in each workspace (`list_runs`), training and study trials included, from `created` to `updated`, each rounded up to a second. A run without both timestamps counts nothing. |
 | `compute.total_seconds` | The three compute figures added. |
 | `workspaces[]` | Per workspace: `name`, `measured`, `data_bytes`, `datasets`, `run_seconds`, `runs`, and the reason in `message` when it could not be read. |
-| `not_measured[]` | Plain sentences for what this report could not include: repository storage over time (only its current size is measured), a workspace that is not running or whose metering records could not be read, repositories without a workspace, no registry storage, no workspaces on this lake, and model files and indexes inside a workspace, whose size Zetta does not report yet. |
+| `not_measured[]` | Plain sentences for what this report could not include: repository storage over time (only its current size is measured), a workspace that is not running or whose metering records could not be read, repositories without a workspace, a workspace whose image tags could not be read, no workspaces on this lake, and model files and indexes inside a workspace, whose size Zetta does not report yet. |
 | `priced` | Whether any price is configured. |
 
 `from` and `to` also bound the summary's image builds and workspace runs, by the time each finished.
@@ -189,8 +189,8 @@ is complete on dev. The runbook is in
 a workspace double (dataset bytes, run seconds rounded up, the `from`/`to` window, a stopped
 workspace reported as not measured, and only finished image builds counted).
 `RegistryProtocols.UsageCountsEachImageDigestOnceForItsSpace` pushes real OCI images through the
-server, including two tags and a cache image sharing a layer and another space's image, and checks
-`images_bytes` counts each of the space's digests exactly once. `WebUi.UsageUsesPlainUnits*`
+server into two routed workspaces, including two tags and a cache image sharing a layer and another
+space's image, and checks `images_bytes` counts each of the space's digests exactly once. `WebUi.UsageUsesPlainUnits*`
 covers the page's units and names.
 `Stores/WorkspaceRecordStores.RepositoryUsageStaysInEachRepositorysWorkspace/{Memory,Postgres}`
 covers the recorder across two spaces with two workspaces each: nothing written on the request

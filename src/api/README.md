@@ -49,8 +49,7 @@ script fills them in, and `?inline=1` renders Agents and Indexes in place withou
 Startup warms existing repository indexes for Metering without
 caching usage. `metering_capabilities.cpp` is asynchronous: its summary reads every workspace's
 datasets, runs, and repository transfer and build records concurrently (lake#348, lake#349), and
-`http_server.cpp` injects `registry_space_bytes` so registry image bytes are counted where the
-registry storage lives. `metering_recorder.cpp` is the `MeteringRecorder`: the sync capabilities in
+image bytes are counted from the tags in each routed workspace (`tenant_image_bytes`, lake#383). `metering_recorder.cpp` is the `MeteringRecorder`: the sync capabilities in
 `capabilities.cpp` add each request's bytes to it without I/O, `ApiServer::drain` flushes it to the
 workspace Zettas every `metering_flush_interval`, and `ApiServer::stop` flushes it once more after
 in-flight requests finish. Contracts and regression proof: [page performance](../../docs/ui/performance.md)
@@ -350,3 +349,13 @@ workspace (lake#363): `begin_application_authorization` writes the code there, a
 `exchange_application_authorization_code` reads the routing row for the workspace before it redeems
 the code. `copy_workspace_records` also copies `auth_app_authorization_codes`
 (`copy_application_authorization_codes`: live codes only, each written at most once).
+
+`image_capabilities.cpp` registers `create_image_repository` (an explicit `workspace_id`, no
+default) and `list_image_repositories` (the routes with each workspace's tags), and holds the
+legacy routing rule (`route_legacy_image`) and the image byte count metering reads from tags
+(lake#383 phase A). `http_server.cpp` routes every tenant OCI request (`<space>/...`) through
+`oci_repository_routes` before reading a workspace: a build's first push writes the route from its
+workspace, a workload credential reaches only its own workspace, manifests and tags are read and
+written as workspace records, blobs stay in the instance registry, and Ship → Packages lists the
+selected space's images through `list_image_repositories`. `copy_workspace_records` gains `oci_tags`,
+reading the instance registry's tenant pointers through `WorkspaceContent`.

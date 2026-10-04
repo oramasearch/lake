@@ -9,7 +9,8 @@
 // auth_applications, the settings of each application, lake#351; platform_environments and
 // platform_mirror, lake#358 and lake#359; agent_tasks, the content of each agent task, lake#374
 // and lake#375; audit_events, the central events about a workspace's data, lake#317;
-// repositories, the description of each repository, lake#315 part 2). A collection
+// repositories, the description of each repository, lake#315 part 2; oci_tags, the tenant tags
+// of the instance registry and the manifests they name, lake#383). A collection
 // leaves the list when the migration that drops its table lands (ask_messages, lake#370: copied
 // and verified on dev, dropped by migration 0050, lake#483).
 
@@ -23,6 +24,8 @@
 
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/images.hpp"
+#include "lake/api/workspace_deletion.hpp"
 #include "lake/control/agent_task_records.hpp"
 #include "lake/control/application_authorization_codes.hpp"
 #include "lake/control/application_user_records.hpp"
@@ -32,6 +35,7 @@
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/forge_records.hpp"
 #include "lake/control/metering.hpp"
+#include "lake/control/oci_records.hpp"
 #include "lake/control/opportunities.hpp"
 #include "lake/control/platform_records.hpp"
 #include "lake/control/repository_records.hpp"
@@ -47,7 +51,7 @@ namespace {
 
 using json = nlohmann::json;
 
-constexpr std::array<std::string_view, 25> copy_collections = {"opportunities",
+constexpr std::array<std::string_view, 26> copy_collections = {"opportunities",
                                                                "stream_owners",
                                                                "drive_share_links",
                                                                "auth_app_webhook_events",
@@ -71,7 +75,8 @@ constexpr std::array<std::string_view, 25> copy_collections = {"opportunities",
                                                                "auth_app_authorization_codes",
                                                                "agent_tasks",
                                                                "audit_events",
-                                                               "repositories"};
+                                                               "repositories",
+                                                               "oci_tags"};
 
 struct WorkspaceTally {
     std::string customer_id;
@@ -2271,6 +2276,167 @@ liquid::runtime::task<ApiResult> copy_audit_events(ApiContext& context, const st
                           std::move(unresolved), tallies, false);
 }
 
+// The instance registry's tenant tags and the manifests they name (lake#383 phase A): each tag
+// goes to the workspace its repository is routed to, as a manifest record (`if_absent`, keyed by
+// digest) and a tag record (`if_absent`, keyed by repository and tag). Each run first routes the
+// repositories whose owner is unambiguous (route_legacy_image); the rest are unresolved
+// (`needs_selection` until an operator calls create_image_repository, `invalid_name`, and
+// `unknown_space`, which does not block completion). Verify reads each tag back: present, naming the same manifest (or moved by a
+// later push, a later lake revision), and the manifest present with the same bytes. Blobs stay
+// in the instance registry until phase B. Rows are ordered by `<repository>:<tag>`.
+liquid::runtime::task<ApiResult> copy_oci_tags(ApiContext& context, const std::string& mode,
+                                               const std::string& after, int limit) {
+    const WorkspaceContent* content = context.workspace_content;
+    if (content == nullptr || !content->legacy_image_tags || !content->read_blob ||
+        !content->blob_size) {
+        co_return ApiResult::failure("store_unavailable",
+                                     "this lake has no registry storage to copy images from");
+    }
+    const std::vector<LegacyImageTag> rows = content->legacy_image_tags(after, limit);
+    json unresolved = json::array();
+    struct Owned {
+        const LegacyImageTag* row;
+        std::string customer_id;
+        std::string name;
+    };
+    std::map<std::string, std::vector<Owned>> by_workspace;
+    std::map<std::string, std::optional<control::Customer>> customers;
+    std::map<std::pair<std::string, std::string>, ImageOwner> owners;
+    for (const LegacyImageTag& row : rows) {
+        const auto repository = tenant_repository(row.repository);
+        auto& customer = customers[repository ? repository->space : std::string()];
+        if (repository && !customer) {
+            customer = space_customer(*context.store, repository->space);
+        }
+        std::string outcome = "unknown_space";
+        std::string customer_id;
+        if (repository && customer) {
+            customer_id = customer->id;
+            auto [owner, fresh] = owners.try_emplace({customer->id, repository->name});
+            if (fresh) {
+                owner->second = route_legacy_image(*context.store, *customer, repository->name);
+            }
+            if (owner->second.route) {
+                by_workspace[owner->second.route->workspace_id].push_back(
+                    {&row, customer->id, repository->name});
+                continue;
+            }
+            outcome = owner->second.outcome;
+        }
+        json item{{"id", row.repository + ":" + row.tag}, {"outcome", outcome}};
+        if (!customer_id.empty()) {
+            item["customer_id"] = customer_id;
+        }
+        unresolved.push_back(std::move(item));
+    }
+    std::map<std::string, WorkspaceTally> tallies;
+    for (const auto& [workspace_id, owned] : by_workspace) {
+        WorkspaceTally& tally = tallies[workspace_id];
+        tally.customer_id = owned.front().customer_id;
+        tally.rows = owned.size();
+        if (mode == "plan") {
+            continue;
+        }
+        auto records = workspace_records(context, tally.customer_id, workspace_id);
+        if (!records) {
+            tally.error = records.error().code + ": " + records.error().message;
+            continue;
+        }
+        for (const Owned& item : owned) {
+            const LegacyImageTag& row = *item.row;
+            const std::string id = row.repository + ":" + row.tag;
+            auto tag = control::settled(
+                co_await control::get_oci_tag(*records, item.customer_id, item.name, row.tag));
+            if (!tag) {
+                tally.error = tag.error().code + ": " + tag.error().message;
+                break;
+            }
+            if (mode == "verify") {
+                if (!*tag) {
+                    tally.missing.push_back(id);
+                    continue;
+                }
+                // A push since the copy moved the tag (a later lake revision): it is kept.
+                const std::string named = (*tag)->lake_revision > 1 ? (*tag)->digest : row.digest;
+                auto manifest = control::settled(
+                    co_await control::get_oci_manifest(*records, item.customer_id, named));
+                if (!manifest) {
+                    tally.error = manifest.error().code + ": " + manifest.error().message;
+                    break;
+                }
+                const auto bytes = content->read_blob(row.digest);
+                const bool same = (*tag)->digest == named && *manifest &&
+                                  ((*tag)->lake_revision > 1 ||
+                                   (bytes && (*manifest)->document == *bytes));
+                if (same) {
+                    ++tally.verified;
+                } else {
+                    tally.mismatched.push_back(id);
+                }
+                continue;
+            }
+            if (*tag) {
+                ++tally.already_present;
+                continue;
+            }
+            const auto bytes = content->read_blob(row.digest);
+            if (!bytes) {
+                tally.error = "store_error: manifest " + row.digest + " of " + id + ": " +
+                              bytes.error();
+                break;
+            }
+            const json document = json::parse(*bytes, nullptr, false);
+            auto digests = document.is_object()
+                               ? manifest_digests(document)
+                               : std::expected<std::vector<std::string>, std::string>(
+                                     std::unexpected("not JSON"));
+            if (!digests) {
+                tally.error = "store_error: manifest " + row.digest + " of " + id + ": " +
+                              digests.error();
+                break;
+            }
+            std::vector<control::OciReference> references;
+            for (const std::string& digest : *digests) {
+                references.push_back({digest, content->blob_size(digest).value_or(0)});
+            }
+            auto manifest = control::settled(co_await control::put_oci_manifest(
+                *records, {.customer_id = item.customer_id,
+                           .digest = row.digest,
+                           .content_type = row.content_type,
+                           .document = *bytes,
+                           .references = references}));
+            if (!manifest) {
+                tally.error = manifest.error().code + ": " + manifest.error().message;
+                break;
+            }
+            auto written = control::settled(co_await control::create_oci_tag(
+                *records, {.customer_id = item.customer_id,
+                           .repository = item.name,
+                           .tag = row.tag,
+                           .digest = row.digest,
+                           .content_type = row.content_type,
+                           .manifest_size = bytes->size(),
+                           .references = std::move(references)}));
+            if (!written && written.error().code == "conflict") {
+                ++tally.already_present; // a concurrent copy or push; verify compares it
+                continue;
+            }
+            if (!written) {
+                tally.error = written.error().code + ": " + written.error().message;
+                break;
+            }
+            ++tally.copied;
+        }
+    }
+    // A tag of a space that no longer exists has nowhere to go and does not hold the copy back.
+    const bool blocking = std::ranges::any_of(unresolved, [](const json& item) {
+        return item.value("outcome", std::string()) != "unknown_space";
+    });
+    co_return copy_result("oci_tags", mode, rows.size(), limit,
+                          rows.empty() ? std::string() : rows.back().repository + ":" + rows.back().tag,
+                          std::move(unresolved), tallies, blocking);
+}
+
 // Only the operator copies, and the operator bypasses policy; anyone else is refused here, before
 // a policy lookup on an object no grant can name.
 std::expected<std::string, ApiError> records_object(const json&, ApiContext&) {
@@ -2368,6 +2534,9 @@ void register_workspace_record_capabilities(Registry& registry) {
             }
             if (input.at("collection") == "repositories") {
                 co_return co_await copy_repository_descriptions(context, mode, after, limit);
+            }
+            if (input.at("collection") == "oci_tags") {
+                co_return co_await copy_oci_tags(context, mode, after, limit);
             }
             if (input.at("collection") == "agent_tasks") {
                 co_return co_await copy_agent_tasks(context, mode, after, limit);

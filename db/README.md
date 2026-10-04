@@ -246,3 +246,17 @@ left alone and reported by a warning. The `repository_workspace_routing` trigger
 `0066_assign_unrouted_repositories`, which the block sets and clears around its updates. The latest
 guard is `assign_unrouted_repositories_guard`; the operator must vendor this schema and update its
 guard before rollout. See [repositories.md](../docs/api/repositories.md#the-owning-workspace).
+Migration `0068_oci_repository_routes` splits the registry (decision 54 S4-S6, lake#383 phase A).
+`oci_repository_routes` is the content-free route from a tenant image repository (the space's
+customer id and the name below it, `<image>` or `cache/<image>`) to the workspace whose Zetta holds
+its manifests and tags (`lake_oci_manifests`, `lake_oci_tags`); it holds no manifest, digest or tag.
+A build's first push writes it from the build's workspace and `create_image_repository` from an
+explicit `workspace_id`; there is no default. `enforce_oci_repository_route` refuses any change of a
+route and any route to a workspace that is not live in the space, and the workspace deletion cascade
+deletes a workspace's routes. Once, each image name the apps and builds of exactly one live
+workspace use is routed there (`<name>` and `cache/<name>`); a name several workspaces use is
+reported by a warning. npm, Python, debuginfod and one-component OCI stay with the instance, and
+blobs stay in the instance registry until phase B. `0067` is held by the open lake#380 change. The
+latest guard is `oci_repository_routes_guard`; the operator must vendor this schema and update its
+guard before rollout (it never reads the table). See
+[registry.md](../docs/api/registry.md#where-a-tenant-image-lives).

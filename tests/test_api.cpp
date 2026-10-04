@@ -20,6 +20,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <thread>
 #include <vector>
 
@@ -466,11 +467,6 @@ TEST(Metering, UsageIncludesWorkspaceDataImagesAndComputeOutsideRepositories) {
     lake::control::WorkspaceService workspaces(
         lake::control::WorkspaceConfig{directory.string(), 5}, store, caller);
     surface.ctx.workspaces = &workspaces;
-    std::string measured_space;
-    surface.ctx.registry_space_bytes = [&measured_space](const std::string& space) {
-        measured_space = space;
-        return std::optional<std::uint64_t>{4'096};
-    };
 
     const ApiResult user =
         surface.call("create_user", {{"email", "usage@example.com"}, {"display_name", "Usage"}});
@@ -512,12 +508,13 @@ TEST(Metering, UsageIncludesWorkspaceDataImagesAndComputeOutsideRepositories) {
 
     const ApiResult usage = surface.call("metering_usage", {{"customer_id", customer_id}});
     ASSERT_TRUE(usage.ok) << usage.error.message;
-    EXPECT_EQ(measured_space, "usage");
     const json& summary = usage.value.at("summary");
     EXPECT_EQ(summary.at("storage").at("repositories_bytes"), 123);
-    EXPECT_EQ(summary.at("storage").at("images_bytes"), 4'096);
+    // Images are counted from the tags of each routed workspace (lake#383); this space has none
+    // (RegistryProtocols.UsageCountsEachImageDigestOnceForItsSpace counts some).
+    EXPECT_EQ(summary.at("storage").at("images_bytes"), 0);
     EXPECT_EQ(summary.at("storage").at("workspace_data_bytes"), 15'000);
-    EXPECT_EQ(summary.at("storage").at("total_bytes"), 123 + 4'096 + 15'000);
+    EXPECT_EQ(summary.at("storage").at("total_bytes"), 123 + 15'000);
     EXPECT_EQ(summary.at("compute").at("workspace_run_seconds"), 91 + 9);
     EXPECT_EQ(summary.at("compute").at("workspace_runs"), 2);
     EXPECT_EQ(summary.at("compute").at("image_builds"), 1) << "only finished builds count";
@@ -1165,7 +1162,7 @@ TEST(RegistryProtocols, OciClientPushesAndPullsTwoLayersByteIdentical) {
     options.port = 0;
     options.node_name = "oci-registry-test";
     options.admin_token = "registry-admin";
-    options.instance_kek = "registry-test-instance-kek";
+    options.instance_kek = "72656769737472792d746573742d696e7374616e63652d6b656b2d6865782121";
     options.store_root = temporary.path().string();
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
@@ -1257,7 +1254,7 @@ TEST(RegistryProtocols, OciUploadStreamsBodiesLargerThanTheGeneralRequestLimit) 
     options.port = 0;
     options.node_name = "large-oci-upload-test";
     options.admin_token = "registry-admin";
-    options.instance_kek = "registry-test-instance-kek";
+    options.instance_kek = "72656769737472792d746573742d696e7374616e63652d6b656b2d6865782121";
     options.store_root = temporary.path().string();
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
@@ -1293,7 +1290,7 @@ TEST(RegistryProtocols, OciUploadHonoursChunkRangesBeforeAnEmptyFinalPut) {
     options.port = 0;
     options.node_name = "chunked-oci-upload-test";
     options.admin_token = "registry-admin";
-    options.instance_kek = "registry-test-instance-kek";
+    options.instance_kek = "72656769737472792d746573742d696e7374616e63652d6b656b2d6865782121";
     options.store_root = temporary.path().string();
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
@@ -1351,7 +1348,7 @@ TEST(RegistryProtocols, OciUploadLimitReturnsARegistrySizeError) {
     options.port = 0;
     options.node_name = "bounded-oci-upload-test";
     options.admin_token = "registry-admin";
-    options.instance_kek = "registry-test-instance-kek";
+    options.instance_kek = "72656769737472792d746573742d696e7374616e63652d6b656b2d6865782121";
     options.store_root = temporary.path().string();
     options.max_registry_blob_bytes = 8;
     ApiServer server(options);
@@ -1414,10 +1411,10 @@ TEST(RegistryProtocols, BuildPushCredentialIsLimitedToItsCustomerPrefix) {
                                                       lake::test::repository_workspace(
                                                           *store, customer->id)});
     ASSERT_TRUE(repository) << repository.error().message;
-    const auto build_workspace = store->create_workspace({customer->id, "builds", "dev", ""});
-    ASSERT_TRUE(build_workspace);
+    lake::test::RecordWorkspaces workspaces(store);
+    const std::string build_workspace = workspaces.create(customer->id, "builds");
     const auto build = store->create_build({.customer_id = customer->id,
-                                            .workspace_id = build_workspace->id,
+                                            .workspace_id = build_workspace,
                                             .repository = repository->id,
                                             .revision = "main",
                                             .target = "registry/tenant-one/service:v1"});
@@ -1434,9 +1431,10 @@ TEST(RegistryProtocols, BuildPushCredentialIsLimitedToItsCustomerPrefix) {
     options.port = 0;
     options.node_name = "scoped-oci-registry-test";
     options.admin_token = "registry-admin";
-    options.instance_kek = "registry-test-instance-kek";
+    options.instance_kek = "72656769737472792d746573742d696e7374616e63652d6b656b2d6865782121";
     options.store_root = temporary.path().string();
     options.store = store;
+    options.workspaces = workspaces.service;
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
     const std::string basic = "Basic bGFrZTpzY29wZWQtcHVzaA==";
@@ -1449,6 +1447,10 @@ TEST(RegistryProtocols, BuildPushCredentialIsLimitedToItsCustomerPrefix) {
                                              {},
                                              basic);
     EXPECT_NE(allowed.find(" 202 "), std::string::npos) << allowed;
+    // The first push routed the repository to the build's workspace (lake#383).
+    const auto routed = store->get_oci_repository_route(customer->id, "service");
+    ASSERT_TRUE(routed) << routed.error().message;
+    EXPECT_EQ(routed->workspace_id, build_workspace);
     const std::string refused = http_request(server.port(),
                                              "POST",
                                              "/v2/tenant-two/service/blobs/uploads/",
@@ -1495,17 +1497,39 @@ TEST(RegistryProtocols, UsageCountsEachImageDigestOnceForItsSpace) {
     ASSERT_TRUE(user) << user.error().message;
     const auto customer = store->create_customer({"individual", user->id, "", "tenant-one"});
     ASSERT_TRUE(customer) << customer.error().message;
+    const auto other_user = store->create_user(
+        {"taap:1:ed25519:registry-usage-two", "registry-usage-two@example.test", "Usage two"});
+    ASSERT_TRUE(other_user) << other_user.error().message;
+    const auto other = store->create_customer({"individual", other_user->id, "", "tenant-two"});
+    ASSERT_TRUE(other) << other.error().message;
+    // Tenant images live in their routed workspace (lake#383): two of the space's, and another
+    // space's.
+    lake::test::RecordWorkspaces workspaces(store);
+    const std::string images = workspaces.create(customer->id, "images");
+    const std::string cache = workspaces.create(customer->id, "cache");
+    const std::string elsewhere = workspaces.create(other->id, "home");
 
     ServerOptions options;
     options.port = 0;
     options.node_name = "usage-oci-registry-test";
     options.admin_token = "registry-admin";
-    options.instance_kek = "registry-test-instance-kek";
+    options.instance_kek = "72656769737472792d746573742d696e7374616e63652d6b656b2d6865782121";
     options.store_root = temporary.path().string();
     options.store = store;
+    options.workspaces = workspaces.service;
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
     const std::string authorization = "Bearer registry-admin";
+    for (const auto& [space, workspace, name] :
+         {std::tuple{customer->id, images, std::string("service")},
+          std::tuple{customer->id, cache, std::string("cache/service")},
+          std::tuple{other->id, elsewhere, std::string("other")}}) {
+        const std::string created = http_request(
+            server.port(), "POST", "/v1/create_image_repository",
+            json{{"customer_id", space}, {"workspace_id", workspace}, {"name", name}}.dump(),
+            "application/json", {}, authorization);
+        ASSERT_NE(created.find(" 200 "), std::string::npos) << created;
+    }
 
     const auto push_blob = [&](const std::string& repository, const std::string& contents) {
         const std::string digest = "sha256:" + lake::control::identity_crypto::sha256_hex(contents);
@@ -1584,9 +1608,9 @@ TEST(RegistryProtocols, UsageCountsEachImageDigestOnceForItsSpace) {
     server.stop();
 }
 
-// Deleting a workspace removes its tenant images from the instance registry (lake#514): the app's
-// image and its build cache stop answering pulls, while another workspace's image of the same
-// space, and the blobs it uses, stay.
+// Deleting a workspace removes its tenant images (lake#514, lake#383): the routes of the app's
+// image and its build cache go with the cascade, so neither answers pulls, while another
+// workspace's image of the same space, and the blobs it uses, stay.
 TEST(RegistryProtocols, DeletingAWorkspaceMakesItsImagesUnpullable) {
     TemporarySyncRoot temporary;
     auto store = std::make_shared<lake::control::InMemoryStore>();
@@ -1595,8 +1619,9 @@ TEST(RegistryProtocols, DeletingAWorkspaceMakesItsImagesUnpullable) {
     ASSERT_TRUE(user) << user.error().message;
     const auto customer = store->create_customer({"individual", user->id, "", "tenant-one"});
     ASSERT_TRUE(customer) << customer.error().message;
-    const auto doomed = store->create_workspace({customer->id, "doomed", "dev", ""});
-    const auto kept = store->create_workspace({customer->id, "kept", "dev", ""});
+    lake::test::RecordWorkspaces workspaces(store);
+    const auto doomed = store->get_workspace(workspaces.create(customer->id, "doomed"));
+    const auto kept = store->get_workspace(workspaces.create(customer->id, "kept"));
     ASSERT_TRUE(doomed && kept);
     for (const auto& [workspace, name] :
          {std::pair{doomed->id, std::string("reports")}, std::pair{kept->id, std::string("other")}}) {
@@ -1616,9 +1641,20 @@ TEST(RegistryProtocols, DeletingAWorkspaceMakesItsImagesUnpullable) {
     options.instance_kek = "6c616b652d666f7267652d7265636f7264732d746573742d696e7374616e6365";
     options.store_root = temporary.path().string();
     options.store = store;
+    options.workspaces = workspaces.service;
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
     const std::string admin = "Bearer registry-admin";
+    // Each repository is routed to its workspace before its first push (lake#383).
+    for (const auto& [workspace, name] : {std::pair{doomed->id, std::string("reports")},
+                                          std::pair{doomed->id, std::string("cache/reports")},
+                                          std::pair{kept->id, std::string("other")}}) {
+        const std::string created = http_request(
+            server.port(), "POST", "/v1/create_image_repository",
+            json{{"customer_id", customer->id}, {"workspace_id", workspace}, {"name", name}}.dump(),
+            "application/json", {}, admin);
+        ASSERT_NE(created.find(" 200 "), std::string::npos) << created;
+    }
     const std::string config = R"({"architecture":"amd64","os":"linux"})";
     const std::string digest = "sha256:" + lake::control::identity_crypto::sha256_hex(config);
     const json manifest{{"schemaVersion", 2},
@@ -1669,8 +1705,11 @@ TEST(RegistryProtocols, DeletingAWorkspaceMakesItsImagesUnpullable) {
     ASSERT_TRUE(body.at("ok")) << body;
     EXPECT_TRUE(body["value"]["deletion"]["completed"]) << body;
 
-    EXPECT_EQ(pull("tenant-one/reports", "latest").find(" 200 "), std::string::npos);
-    EXPECT_EQ(pull("tenant-one/cache/reports", "buildcache").find(" 200 "), std::string::npos);
+    // The routes went with the cascade, and the records with the workspace's Zetta.
+    EXPECT_NE(pull("tenant-one/reports", "latest").find(" 404 "), std::string::npos);
+    EXPECT_NE(pull("tenant-one/cache/reports", "buildcache").find(" 404 "), std::string::npos);
+    EXPECT_FALSE(store->get_oci_repository_route(customer->id, "reports"));
+    EXPECT_FALSE(store->get_oci_repository_route(customer->id, "cache/reports"));
     EXPECT_NE(pull("tenant-one/other", "latest").find(" 200 "), std::string::npos);
     const std::string blob = http_request(server.port(), "GET",
                                           "/v2/tenant-one/other/blobs/" + digest, "",
@@ -1687,7 +1726,8 @@ TEST(RegistryProtocols, AppPullCredentialReadsOnlyItsOwnImage) {
     ASSERT_TRUE(user) << user.error().message;
     const auto customer = store->create_customer({"individual", user->id, "", "tenant-one"});
     ASSERT_TRUE(customer) << customer.error().message;
-    const auto workspace = store->create_workspace({customer->id, "apps", "dev", ""});
+    lake::test::RecordWorkspaces workspaces(store);
+    const auto workspace = store->get_workspace(workspaces.create(customer->id, "apps"));
     ASSERT_TRUE(workspace) << workspace.error().message;
     const auto app = store->create_web_app({.customer_id = customer->id,
                                             .workspace_id = workspace->id,
@@ -1714,12 +1754,14 @@ TEST(RegistryProtocols, AppPullCredentialReadsOnlyItsOwnImage) {
     options.port = 0;
     options.node_name = "app-pull-oci-registry-test";
     options.admin_token = "registry-admin";
-    options.instance_kek = "registry-test-instance-kek";
+    options.instance_kek = "72656769737472792d746573742d696e7374616e63652d6b656b2d6865782121";
     options.store_root = temporary.path().string();
     options.store = store;
+    options.workspaces = workspaces.service;
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
     const std::string admin = "Bearer registry-admin";
+    ASSERT_TRUE(store->create_oci_repository_route(customer->id, "reports", workspace->id));
     const std::string config = R"({"architecture":"arm64","os":"darwin"})";
     const std::string digest = "sha256:" + lake::control::identity_crypto::sha256_hex(config);
     const std::string started = http_request(server.port(),
@@ -1823,13 +1865,499 @@ TEST(RegistryProtocols, AppPullCredentialReadsOnlyItsOwnImage) {
     server.stop();
 }
 
+namespace {
+
+// A space and its workspaces for the tenant image tests (lake#383), on the memory store or, with
+// LAKE_TEST_DB_URI, on PostgreSQL.
+class TenantImages : public testing::TestWithParam<bool> {
+protected:
+    static constexpr const char* kek =
+        "74656e616e742d696d616765732d696e7374616e63652d6b656b2d7465737421";
+
+    void SetUp() override {
+        if (GetParam()) {
+            const char* uri = lake::test::postgres_uri();
+            if (uri == nullptr || *uri == '\0') {
+                GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+            }
+            database_uri = uri;
+            store = lake::control::make_postgres_store(uri, kek);
+        } else {
+            store = std::make_shared<lake::control::InMemoryStore>();
+        }
+        workspaces = std::make_unique<lake::test::RecordWorkspaces>(store, database_uri);
+        suffix = lake::control::new_uuid_v4().substr(0, 8);
+    }
+
+    void start(const std::filesystem::path& root) {
+        ServerOptions options;
+        options.port = 0;
+        options.node_name = "tenant-images-" + suffix;
+        options.admin_token = "registry-admin";
+        options.instance_kek = kek;
+        options.store_root = root.string();
+        options.store = store;
+        options.workspaces = workspaces->service;
+        server = std::make_unique<ApiServer>(options);
+        ASSERT_TRUE(server->start()) << server->reason();
+    }
+
+    // A space named `<name>-<suffix>`: its id and name.
+    std::pair<std::string, std::string> space(const std::string& name) {
+        const std::string handle = name + "-" + suffix;
+        const auto user = store->create_user(
+            {"taap:1:ed25519:" + handle, handle + "@example.test", handle});
+        EXPECT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", handle});
+        EXPECT_TRUE(customer) << customer.error().message;
+        return {customer->id, handle};
+    }
+
+    json call(const std::string& capability, const json& input,
+              std::string_view authorization = "Bearer registry-admin") {
+        const std::string response = http_request(server->port(), "POST", "/v1/" + capability,
+                                                  input.dump(), "application/json", {},
+                                                  authorization);
+        return response_json(response);
+    }
+
+    std::string push_blob(const std::string& repository, const std::string& contents,
+                          std::string_view authorization = "Bearer registry-admin") {
+        const std::string digest = "sha256:" + lake::control::identity_crypto::sha256_hex(contents);
+        const std::string started =
+            http_request(server->port(), "POST", "/v2/" + repository + "/blobs/uploads/", "",
+                         "application/octet-stream", {}, authorization);
+        if (started.find(" 202 ") == std::string::npos) {
+            return started;
+        }
+        const std::string completed = http_request(
+            server->port(), "PUT", response_header(started, "Location") + "?digest=" + digest,
+            contents, "application/octet-stream", {}, authorization);
+        EXPECT_NE(completed.find(" 201 "), std::string::npos) << completed;
+        return digest;
+    }
+
+    // An image of one config and one layer pushed to `repository:tag`; answers the manifest's
+    // text, or the refusal.
+    std::string push_image(const std::string& repository, const std::string& tag,
+                           const std::string& config, const std::string& layer,
+                           std::string_view authorization = "Bearer registry-admin") {
+        const std::string config_digest = push_blob(repository, config, authorization);
+        if (!config_digest.starts_with("sha256:")) {
+            return config_digest;
+        }
+        const std::string layer_digest = push_blob(repository, layer, authorization);
+        const json manifest{{"schemaVersion", 2},
+                            {"mediaType", "application/vnd.oci.image.manifest.v1+json"},
+                            {"config",
+                             {{"mediaType", "application/vnd.oci.image.config.v1+json"},
+                              {"digest", config_digest},
+                              {"size", config.size()}}},
+                            {"layers",
+                             {{{"mediaType", "application/vnd.oci.image.layer.v1.tar"},
+                               {"digest", layer_digest},
+                               {"size", layer.size()}}}}};
+        const std::string text = manifest.dump();
+        const std::string published = http_request(
+            server->port(), "PUT", "/v2/" + repository + "/manifests/" + tag, text,
+            "application/vnd.oci.image.manifest.v1+json", {}, authorization);
+        return published.find(" 201 ") == std::string::npos ? published : text;
+    }
+
+    std::string pull(const std::string& path, std::string_view authorization = "Bearer registry-admin") {
+        return http_request(server->port(), "GET", path, "", "application/json", {},
+                            authorization);
+    }
+
+    std::shared_ptr<lake::control::Store> store;
+    std::string database_uri;
+    std::unique_ptr<lake::test::RecordWorkspaces> workspaces;
+    std::unique_ptr<ApiServer> server;
+    std::string suffix;
+};
+
+std::string oci_code(const std::string& response) {
+    const json body = response_json(response);
+    return body.contains("errors") ? body["errors"][0].value("code", std::string()) : std::string();
+}
+
+} // namespace
+
+// Two spaces with two workspaces each (lake#383 phase A): a tenant image repository is routed to
+// one workspace by an explicit workspace_id, never by default; its manifests and tags are sealed
+// records only in that workspace's Zetta, pulled back through the route byte for byte; the route
+// never moves; another space may use the same name; builds push only into their own workspace and
+// route on their first push; a workspace that is not ready refuses rather than falling back;
+// npm and one-component OCI stay with the instance; deleting a workspace removes its routes and
+// its records go with its Zetta.
+TEST_P(TenantImages, LiveInTheirRoutedWorkspaceAndKeepTheirAddresses) {
+    TemporarySyncRoot temporary;
+    const auto [alpha, alpha_name] = space("alpha");
+    const auto [beta, beta_name] = space("beta");
+    const std::string a1 = workspaces->create(alpha, "a1");
+    const std::string a2 = workspaces->create(alpha, "a2");
+    const std::string b1 = workspaces->create(beta, "b1");
+    const std::string b2 = workspaces->create(beta, "b2");
+    start(temporary.path());
+
+    // Missing, unknown, foreign and deleted workspaces, and a bad name: invalid_input naming the
+    // field. There is no default workspace.
+    json refused = call("create_image_repository", {{"customer_id", alpha}, {"name", "web"}});
+    EXPECT_EQ(refused["error"]["code"], "invalid_input") << refused;
+    EXPECT_EQ(refused["error"]["path"], "/workspace_id") << refused;
+    refused = call("create_image_repository", {{"customer_id", alpha},
+                                               {"workspace_id", lake::control::new_uuid_v4()},
+                                               {"name", "web"}});
+    EXPECT_EQ(refused["error"]["code"], "invalid_input") << refused;
+    EXPECT_EQ(refused["error"]["path"], "/workspace_id") << refused;
+    refused = call("create_image_repository",
+                   {{"customer_id", alpha}, {"workspace_id", "not-a-uuid"}, {"name", "web"}});
+    EXPECT_EQ(refused["error"]["code"], "invalid_input") << refused;
+    EXPECT_EQ(refused["error"]["path"], "/workspace_id") << refused;
+    refused = call("create_image_repository",
+                   {{"customer_id", alpha}, {"workspace_id", b1}, {"name", "web"}});
+    EXPECT_EQ(refused["error"]["code"], "invalid_input") << refused;
+    refused = call("create_image_repository",
+                   {{"customer_id", alpha}, {"workspace_id", a1}, {"name", "Web/../x"}});
+    EXPECT_EQ(refused["error"]["code"], "invalid_input") << refused;
+    EXPECT_EQ(refused["error"]["path"], "/name") << refused;
+    const std::string doomed = workspaces->create(alpha, "doomed");
+    ASSERT_TRUE(store->update_workspace(doomed, {.desired = "deleted"}));
+    refused = call("create_image_repository",
+                   {{"customer_id", alpha}, {"workspace_id", doomed}, {"name", "web"}});
+    EXPECT_EQ(refused["error"]["code"], "invalid_input") << refused;
+    EXPECT_EQ(refused["error"]["path"], "/workspace_id") << refused;
+    // Nothing was routed by any refusal.
+    EXPECT_TRUE(store->list_oci_repository_routes(alpha, {})->empty());
+
+    // An unrouted tenant repository takes no push from the administrator and answers no pull.
+    const std::string unrouted = push_blob(alpha_name + "/web", "orphan");
+    EXPECT_NE(unrouted.find(" 404 "), std::string::npos) << unrouted;
+    EXPECT_EQ(oci_code(unrouted), "NAME_UNKNOWN");
+
+    // Routed explicitly; repeating it answers the route; another workspace cannot take it.
+    json routed = call("create_image_repository",
+                       {{"customer_id", alpha}, {"workspace_id", a1}, {"name", "web"}});
+    ASSERT_TRUE(routed.value("ok", false)) << routed;
+    EXPECT_EQ(routed["value"]["repository"], alpha_name + "/web");
+    EXPECT_EQ(routed["value"]["workspace_id"], a1);
+    EXPECT_TRUE(call("create_image_repository",
+                     {{"customer_id", alpha}, {"workspace_id", a1}, {"name", "web"}})
+                    .value("ok", false));
+    refused = call("create_image_repository",
+                   {{"customer_id", alpha}, {"workspace_id", a2}, {"name", "web"}});
+    EXPECT_EQ(refused["error"]["code"], "conflict") << refused;
+    // The other space may use the same name in its own workspace.
+    ASSERT_TRUE(call("create_image_repository",
+                     {{"customer_id", beta}, {"workspace_id", b2}, {"name", "web"}})
+                    .value("ok", false));
+    if (!database_uri.empty()) {
+        // The route never changes, whoever writes the table.
+        pqxx::connection connection(database_uri);
+        pqxx::work tx(connection);
+        EXPECT_THROW(tx.exec_params("UPDATE oci_repository_routes SET workspace_id = $2::uuid "
+                                    "WHERE customer_id = $1::uuid AND name = 'web'",
+                                    alpha, a2),
+                     pqxx::check_violation);
+    }
+    EXPECT_EQ(store->get_oci_repository_route(alpha, "web")->workspace_id, a1);
+
+    // Push and pull through the route: the bytes come back, and the records sit only in a1.
+    const std::string alpha_manifest =
+        push_image(alpha_name + "/web", "v1", R"({"space":"alpha"})", "alpha layer");
+    ASSERT_TRUE(alpha_manifest.starts_with("{")) << alpha_manifest;
+    const std::string beta_manifest =
+        push_image(beta_name + "/web", "v1", R"({"space":"beta"})", "beta layer");
+    ASSERT_TRUE(beta_manifest.starts_with("{")) << beta_manifest;
+    EXPECT_EQ(response_body(pull("/v2/" + alpha_name + "/web/manifests/v1")), alpha_manifest);
+    EXPECT_EQ(response_body(pull("/v2/" + beta_name + "/web/manifests/v1")), beta_manifest);
+    const std::string alpha_digest =
+        "sha256:" + lake::control::identity_crypto::sha256_hex(alpha_manifest);
+    EXPECT_EQ(response_body(pull("/v2/" + alpha_name + "/web/manifests/" + alpha_digest)),
+              alpha_manifest);
+    const std::string layer_digest =
+        "sha256:" + lake::control::identity_crypto::sha256_hex(std::string("alpha layer"));
+    EXPECT_EQ(response_body(pull("/v2/" + alpha_name + "/web/blobs/" + layer_digest)),
+              "alpha layer");
+    // Another space's repository never serves this space's digests.
+    EXPECT_NE(pull("/v2/" + beta_name + "/web/blobs/" + layer_digest).find(" 404 "),
+              std::string::npos);
+    EXPECT_NE(pull("/v2/" + beta_name + "/web/manifests/" + alpha_digest).find(" 404 "),
+              std::string::npos);
+    EXPECT_EQ(workspaces->records(a1).rows("oci_tags").size(), 1U);
+    EXPECT_EQ(workspaces->records(a1).rows("oci_manifests").size(), 1U);
+    EXPECT_TRUE(workspaces->records(a2).rows("oci_tags").empty());
+    EXPECT_TRUE(workspaces->records(b1).rows("oci_tags").empty());
+    EXPECT_EQ(workspaces->records(b2).rows("oci_tags").size(), 1U);
+    // Sealed: the workspace holds neither the tag nor the manifest in the clear.
+    for (const auto& [key, record] : workspaces->records(a1).rows("oci_manifests")) {
+        EXPECT_EQ(record.dump().find("alpha"), std::string::npos) << record;
+    }
+    for (const auto& [key, record] : workspaces->records(a1).rows("oci_tags")) {
+        EXPECT_EQ(record.dump().find("\"v1\""), std::string::npos) << record;
+    }
+    // The route holds no manifest, digest or tag.
+    if (!database_uri.empty()) {
+        pqxx::connection connection(database_uri);
+        pqxx::work tx(connection);
+        const auto columns = tx.exec(
+            "SELECT string_agg(column_name, ',' ORDER BY column_name) FROM "
+            "information_schema.columns WHERE table_name = 'oci_repository_routes'");
+        EXPECT_EQ(columns[0][0].as<std::string>(), "created_at,customer_id,name,updated_at,workspace_id");
+    }
+
+    // A tag moves at the revision read: the next push of v1 is what v1 pulls.
+    const std::string moved =
+        push_image(alpha_name + "/web", "v1", R"({"space":"alpha","build":2})", "alpha layer two");
+    ASSERT_TRUE(moved.starts_with("{")) << moved;
+    EXPECT_EQ(response_body(pull("/v2/" + alpha_name + "/web/manifests/v1")), moved);
+    EXPECT_EQ(workspaces->records(a1).rows("oci_tags").size(), 1U);
+    EXPECT_EQ(workspaces->records(a1).rows("oci_manifests").size(), 2U);
+    const json listed = response_json(http_request(
+        server->port(), "GET", "/v1/list_image_repositories?customer_id=" + alpha, "",
+        "application/json", {}, "Bearer registry-admin"));
+    ASSERT_TRUE(listed.value("ok", false)) << listed;
+    ASSERT_EQ(listed["value"]["items"].size(), 1U) << listed;
+    EXPECT_EQ(listed["value"]["items"][0]["tags"][0]["tag"], "v1");
+
+    // A build pushes only into its own workspace, and routes a new repository on its first push.
+    const auto source = store->create_repository({alpha, "source-" + suffix, "", "private", a2});
+    ASSERT_TRUE(source) << source.error().message;
+    const auto build = store->create_build({.customer_id = alpha,
+                                            .workspace_id = a2,
+                                            .repository = source->id,
+                                            .revision = "main",
+                                            .target = "registry/" + alpha_name + "/api:v1"});
+    ASSERT_TRUE(build) << build.error().message;
+    const json hashes{{"push", lake::control::identity_crypto::sha256_hex("a2-push")}};
+    if (database_uri.empty()) {
+        ASSERT_TRUE(static_cast<lake::control::InMemoryStore&>(*store).set_build_status(
+            build->id, {.phase = "Running", .token_hashes = hashes}));
+    } else {
+        // What the operator writes for a running build.
+        pqxx::connection connection(database_uri);
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE builds SET phase = 'Running', token_hashes_json = $2::jsonb "
+                       "WHERE id = $1::uuid",
+                       build->id, hashes.dump());
+        tx.commit();
+    }
+    const std::string basic = "Basic bGFrZTphMi1wdXNo"; // lake:a2-push
+    const std::string foreign = push_blob(alpha_name + "/web", "into a1", basic);
+    EXPECT_NE(foreign.find(" 403 "), std::string::npos) << foreign;
+    const std::string built = push_image(alpha_name + "/api", "v1", R"({"api":1})", "api", basic);
+    ASSERT_TRUE(built.starts_with("{")) << built;
+    EXPECT_EQ(store->get_oci_repository_route(alpha, "api")->workspace_id, a2);
+    EXPECT_EQ(workspaces->records(a2).rows("oci_tags").size(), 1U);
+
+    // npm and one-component OCI stay with the instance: no route, no workspace record.
+    const json npm_metadata{{"name", "instance-package-" + suffix},
+                            {"dist-tags", {{"latest", "1.0.0"}}},
+                            {"versions",
+                             {{"1.0.0",
+                               {{"name", "instance-package-" + suffix},
+                                {"version", "1.0.0"},
+                                {"dist", {{"tarball", "placeholder"}}}}}}},
+                            {"_attachments",
+                             {{"package-1.0.0.tgz",
+                               {{"content_type", "application/octet-stream"},
+                                {"data", base64_bytes(bytes("npm bytes"))},
+                                {"length", 9}}}}}};
+    const std::string published =
+        http_request(server->port(), "PUT", "/instance-package-" + suffix, npm_metadata.dump(),
+                     "application/json", {}, "Bearer registry-admin");
+    ASSERT_NE(published.find(" 201 "), std::string::npos) << published;
+    EXPECT_EQ(response_body(http_request(server->port(), "GET",
+                                         "/instance-package-" + suffix + "/-/package-1.0.0.tgz", "",
+                                         "application/octet-stream")),
+              "npm bytes");
+    const std::string legacy = push_image("instance-image", "v1", R"({"instance":1})", "public");
+    ASSERT_TRUE(legacy.starts_with("{")) << legacy;
+    EXPECT_EQ(response_body(http_request(server->port(), "GET", "/v2/instance-image/manifests/v1",
+                                         "", "application/json")),
+              legacy);
+    EXPECT_EQ(store->list_oci_repository_routes(alpha, {})->size(), 2U);
+    EXPECT_EQ(store->list_oci_repository_routes(beta, {})->size(), 1U);
+
+    // A workspace that is not ready is refused, never served from elsewhere.
+    workspaces->status(a1, "Pending");
+    const std::string pending = pull("/v2/" + alpha_name + "/web/manifests/v1");
+    EXPECT_NE(pending.find(" 503 "), std::string::npos) << pending;
+    workspaces->ready(a1);
+    EXPECT_NE(pull("/v2/" + alpha_name + "/web/manifests/v1").find(" 200 "), std::string::npos);
+
+    // Deleting a1 deletes its route in the cascade; a2's repository and the other space stay.
+    const json deleted = call("delete_workspace",
+                              {{"customer_id", alpha}, {"workspace_id", a1}, {"confirm", "a1"}});
+    ASSERT_TRUE(deleted.value("ok", false)) << deleted;
+    EXPECT_TRUE(deleted["value"]["deletion"]["completed"]) << deleted;
+    ASSERT_EQ(deleted["value"]["deletion"]["images"].size(), 1U) << deleted;
+    EXPECT_EQ(deleted["value"]["deletion"]["images"][0]["name"], alpha_name + "/web");
+    EXPECT_EQ(deleted["value"]["deletion"]["images"][0]["state"], "routed");
+    EXPECT_FALSE(store->get_oci_repository_route(alpha, "web"));
+    EXPECT_NE(pull("/v2/" + alpha_name + "/web/manifests/v1").find(" 404 "), std::string::npos);
+    EXPECT_NE(pull("/v2/" + alpha_name + "/api/manifests/v1").find(" 200 "), std::string::npos);
+    EXPECT_NE(pull("/v2/" + beta_name + "/web/manifests/v1").find(" 200 "), std::string::npos);
+    server->stop();
+}
+
+// The one-shot copy of the instance registry's tenant tags (lake#383, copy_workspace_records,
+// collection oci_tags): a repository whose image one workspace's app uses is routed there with its
+// build cache, a space's only workspace takes its space's repositories, an ambiguous one waits for
+// create_image_repository and blocks completion, an unknown space is reported without blocking;
+// copy writes each manifest and tag once, a rerun writes nothing, verify reads them back and finds
+// tampering, the copied image pulls through its route, and only the operator copies.
+TEST_P(TenantImages, TheOneShotCopyRoutesAndMovesLegacyTags) {
+    TemporarySyncRoot temporary;
+    const auto [alpha, alpha_name] = space("alpha");
+    const auto [gamma, gamma_name] = space("gamma");
+    const std::string a1 = workspaces->create(alpha, "a1");
+    const std::string a2 = workspaces->create(alpha, "a2");
+    const std::string g1 = workspaces->create(gamma, "g1");
+    ASSERT_TRUE(store->create_web_app({.customer_id = alpha,
+                                       .workspace_id = a1,
+                                       .name = "web",
+                                       .mode = "image",
+                                       .image = "lake.example.test/" + alpha_name + "/web:v1",
+                                       .framework = "container",
+                                       .port = 8080,
+                                       .host = "web-" + suffix + ".apps.example.test"}));
+
+    // What lake wrote before lake#383: blobs and tag pointers in the instance registry.
+    const std::filesystem::path registry =
+        temporary.path() / ("tenant-images-" + suffix) / "registry";
+    const auto blob = [&](const std::string& contents) {
+        const std::string hex = lake::control::identity_crypto::sha256_hex(contents);
+        std::filesystem::create_directories(registry / "blobs");
+        std::ofstream(registry / "blobs" / hex, std::ios::binary) << contents;
+        return "sha256:" + hex;
+    };
+    std::map<std::string, std::string> documents;
+    const auto legacy = [&](const std::string& repository, const std::string& tag) {
+        const std::string config = R"({"legacy":")" + repository + R"("})";
+        const std::string layer = "layer of " + repository;
+        const json manifest{{"schemaVersion", 2},
+                            {"mediaType", "application/vnd.oci.image.manifest.v1+json"},
+                            {"config", {{"digest", blob(config)}, {"size", config.size()}}},
+                            {"layers", {{{"digest", blob(layer)}, {"size", layer.size()}}}}};
+        const std::string text = manifest.dump();
+        const std::string digest = blob(text);
+        std::filesystem::create_directories(registry / "manifests" / repository);
+        std::ofstream(registry / "manifests" / repository / (tag + ".json"))
+            << json{{"digest", digest},
+                    {"content_type", "application/vnd.oci.image.manifest.v1+json"}}
+                   .dump();
+        documents[repository + ":" + tag] = text;
+    };
+    legacy(alpha_name + "/web", "v1");
+    legacy(alpha_name + "/cache/web", "buildcache");
+    legacy(alpha_name + "/orphan", "v1");
+    legacy(gamma_name + "/solo", "v1");
+    legacy("nobody-" + suffix + "/lost", "v1");
+    legacy("public-image", "v1"); // the instance's own: never part of the copy
+    start(temporary.path());
+    const auto copy = [&](const std::string& mode) {
+        const json result = call("copy_workspace_records", {{"collection", "oci_tags"},
+                                                            {"mode", mode},
+                                                            {"limit", 1000}});
+        EXPECT_TRUE(result.value("ok", false)) << result;
+        return result.value("value", json::object());
+    };
+    const auto outcomes = [](const json& page) {
+        std::map<std::string, std::string> found;
+        for (const json& item : page.value("unresolved", json::array())) {
+            found[item.value("id", std::string())] = item.value("outcome", std::string());
+        }
+        return found;
+    };
+
+    // Before any copy the routed image is not served: the record is not there yet.
+    json plan = copy("plan");
+    EXPECT_EQ(plan["rows"], 5) << plan;
+    EXPECT_EQ(plan["assigned"], 3) << plan;
+    EXPECT_EQ(outcomes(plan), (std::map<std::string, std::string>{
+                                  {alpha_name + "/orphan:v1", "needs_selection"},
+                                  {"nobody-" + suffix + "/lost:v1", "unknown_space"}}));
+    EXPECT_EQ(store->get_oci_repository_route(alpha, "web")->workspace_id, a1);
+    EXPECT_EQ(store->get_oci_repository_route(alpha, "cache/web")->workspace_id, a1);
+    EXPECT_EQ(store->get_oci_repository_route(gamma, "solo")->workspace_id, g1);
+    EXPECT_FALSE(store->get_oci_repository_route(alpha, "orphan"));
+    EXPECT_NE(pull("/v2/" + alpha_name + "/web/manifests/v1").find(" 404 "), std::string::npos);
+
+    json copied = copy("copy");
+    EXPECT_EQ(copied["copied"], 3) << copied;
+    copied = copy("copy");
+    EXPECT_EQ(copied["copied"], 0) << copied;
+    EXPECT_EQ(copied["already_present"], 3) << copied;
+    json verified = copy("verify");
+    EXPECT_EQ(verified["verified"], 3) << verified;
+    EXPECT_FALSE(verified["complete"]) << "the ambiguous repository blocks completion";
+
+    // An operator routes the ambiguous repository; the next run copies it and completes.
+    ASSERT_TRUE(call("create_image_repository",
+                     {{"customer_id", alpha}, {"workspace_id", a2}, {"name", "orphan"}})
+                    .value("ok", false));
+    EXPECT_EQ(copy("copy")["copied"], 1);
+    verified = copy("verify");
+    EXPECT_EQ(verified["verified"], 4) << verified;
+    EXPECT_TRUE(verified["complete"]) << verified;
+    EXPECT_EQ(workspaces->records(a1).rows("oci_tags").size(), 2U);
+    EXPECT_EQ(workspaces->records(a2).rows("oci_tags").size(), 1U);
+    EXPECT_EQ(workspaces->records(g1).rows("oci_tags").size(), 1U);
+
+    // The copied image pulls through its route with its old address and bytes.
+    EXPECT_EQ(response_body(pull("/v2/" + alpha_name + "/web/manifests/v1")),
+              documents[alpha_name + "/web:v1"]);
+    const std::string layer_digest =
+        "sha256:" + lake::control::identity_crypto::sha256_hex("layer of " + alpha_name + "/web");
+    EXPECT_EQ(response_body(pull("/v2/" + alpha_name + "/web/blobs/" + layer_digest)),
+              "layer of " + alpha_name + "/web");
+    // Image bytes are counted from the copied tags.
+    const json usage = response_json(http_request(
+        server->port(), "GET", "/v1/metering_usage?customer_id=" + gamma, "", "application/json",
+        {}, "Bearer registry-admin"));
+    ASSERT_TRUE(usage.value("ok", false)) << usage;
+    const std::string solo = documents[gamma_name + "/solo:v1"];
+    EXPECT_EQ(usage["value"]["summary"]["storage"]["images_bytes"],
+              solo.size() + std::string(R"({"legacy":")" + gamma_name + R"(/solo"})").size() +
+                  std::string("layer of " + gamma_name + "/solo").size());
+
+    // A later push of a copied tag is accepted by verify; a changed legacy pointer is not.
+    const std::string pushed = push_image(gamma_name + "/solo", "v1", R"({"new":1})", "new layer");
+    ASSERT_TRUE(pushed.starts_with("{")) << pushed;
+    const std::string other = blob(R"({"schemaVersion":2,"layers":[]})");
+    std::ofstream(registry / "manifests" / alpha_name / "web" / "v1.json")
+        << json{{"digest", other}, {"content_type", "application/vnd.oci.image.manifest.v1+json"}}
+               .dump();
+    verified = copy("verify");
+    EXPECT_EQ(verified["mismatched"], json::array({alpha_name + "/web:v1"})) << verified;
+    EXPECT_FALSE(verified["complete"]);
+
+    // Only the operator copies.
+    const auto user = store->create_user({"taap:1:ed25519:copy-" + suffix,
+                                          "copy-" + suffix + "@example.test", "Copy"});
+    ASSERT_TRUE(user);
+    const auto token = store->create_token(
+        {user->id, "lake", "copy", "test", {"*"}, 300, false});
+    ASSERT_TRUE(token) << token.error().message;
+    const json denied = call("copy_workspace_records", {{"collection", "oci_tags"}, {"mode", "plan"}},
+                             "Bearer " + token->secret);
+    EXPECT_FALSE(denied.value("ok", true)) << denied;
+    server->stop();
+}
+
+INSTANTIATE_TEST_SUITE_P(Stores, TenantImages, testing::Values(false, true),
+                         [](const testing::TestParamInfo<bool>& info) {
+                             return info.param ? "Postgres" : "Memory";
+                         });
+
 TEST(RegistryProtocols, NpmPublishesAndInstallsWithTheRealClient) {
     TemporarySyncRoot temporary;
     ServerOptions options;
     options.port = 0;
     options.node_name = "npm-registry-test";
     options.admin_token = "registry-admin";
-    options.instance_kek = "registry-test-instance-kek";
+    options.instance_kek = "72656769737472792d746573742d696e7374616e63652d6b656b2d6865782121";
     options.store_root = (temporary.path() / "store").string();
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
@@ -1913,7 +2441,7 @@ TEST(RegistryProtocols, PythonPackagePublishesAndInstallsWithPip) {
     options.port = 0;
     options.node_name = "python-registry-test";
     options.admin_token = "registry-admin";
-    options.instance_kek = "registry-test-instance-kek";
+    options.instance_kek = "72656769737472792d746573742d696e7374616e63652d6b656b2d6865782121";
     options.store_root = (temporary.path() / "store").string();
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
@@ -2002,7 +2530,7 @@ TEST(RegistryProtocols, DebuginfodServesExecutableDebuginfoAndSource) {
     options.port = 0;
     options.node_name = "debug-registry-test";
     options.admin_token = "registry-admin";
-    options.instance_kek = "registry-test-instance-kek";
+    options.instance_kek = "72656769737472792d746573742d696e7374616e63652d6b656b2d6865782121";
     options.store_root = (temporary.path() / "store").string();
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();

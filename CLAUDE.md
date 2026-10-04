@@ -139,6 +139,15 @@ never the raw path, so it carries no customer content; a request routed to a wor
 in that workspace Zetta's `lake_requests` series (route, capability, status class) by a bounded
 `RequestRecorder` the owner loop flushes every ten seconds with `record_metric`. See
 `docs/serving/telemetry.md#the-workspace-request-series`.
+The registry splits (decision 54 S4-S6, lake#383 phase A, migration `0068`): a tenant OCI
+repository (`<space>/<name>`, `<space>/cache/<name>`) is routed by the content-free
+`oci_repository_routes` (space, name, workspace; written by a build's first push from its workspace
+or by `create_image_repository` with an explicit `workspace_id`; never moved; deleted with the
+workspace), and its manifests and tags are sealed `lake_oci_manifests`/`lake_oci_tags` records in
+that workspace's Zetta, so image addresses do not change. npm, Python, debuginfod and one-component
+OCI stay with the instance. Blobs stay in the instance registry until phase B (after lake#380);
+`copy_workspace_records` (`oci_tags`) moves the tags written before. See
+`docs/api/registry.md#where-a-tenant-image-lives`.
 
 ## Historical status — superseded 2026-09-08
 

@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <expected>
+#include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,15 +29,29 @@ namespace lake::api {
 // it. The HTTP server, which owns the instance registry, injects it through
 // ApiContext::workspace_content. Every member may be empty when this lake has no such storage, and
 // every action is idempotent.
+// One tag of a tenant repository that the instance registry still holds, written before lake#383
+// moved tenant manifests and tags into workspace records: `repository` is `<space>/<name>`.
+struct LegacyImageTag {
+    std::string repository, tag, digest, content_type;
+};
+
 struct WorkspaceContent {
-    // Before lake#383: the tags one OCI repository holds in the instance registry.
+    // Written before lake#383: the tags one OCI repository still holds in the instance registry.
     std::function<std::vector<std::string>(const std::string& repository)> image_tags;
-    // Before lake#383: removes one OCI repository's tags and manifests from the instance registry.
-    // Blobs stay: the registry has no collection yet, and other manifests may share them.
-    // After lake#383 a workspace's images are manifests and tags in its own store and records and
-    // go with its Zetta; their central routes are deleted in the cascade transaction.
+    // Written before lake#383: removes one OCI repository's tags and manifest pointers from the
+    // instance registry. Blobs stay: the registry has no collection yet, and other manifests may
+    // share them. Since lake#383 phase A a routed repository's manifests and tags are records in
+    // its workspace Zetta and go with it, and its central route is deleted in the cascade
+    // transaction; phase B (lake#380) moves its blobs into the workspace store.
     std::function<std::expected<void, std::string>(const std::string& repository)>
         remove_image_repository;
+    // The one-shot copy of lake#383 (copy_workspace_records, collection oci_tags): the instance
+    // registry's tenant tags ordered by `<repository>:<tag>`, the `limit` after `after`.
+    std::function<std::vector<LegacyImageTag>(const std::string& after, int limit)>
+        legacy_image_tags;
+    // A blob's bytes (a manifest's document) and its size; the error says why it is missing.
+    std::function<std::expected<std::string, std::string>(const std::string& digest)> read_blob;
+    std::function<std::optional<std::uint64_t>(const std::string& digest)> blob_size;
     // Drops one repository's search segments (lake#381 moves them beside the workspace store).
     // Unset: ApiContext::search is used directly.
     std::function<std::expected<void, std::string>(const std::string& customer_id,

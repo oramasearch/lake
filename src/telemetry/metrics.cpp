@@ -606,6 +606,24 @@ public:
         return call("complete_workspace_deletion",
                     [&] { return store_->complete_workspace_deletion(workspace_id); });
     }
+    control::Result<control::OciRepositoryRoute>
+    create_oci_repository_route(const std::string& customer_id, const std::string& name,
+                                const std::string& workspace_id) override {
+        return call("create_oci_repository_route", [&] {
+            return store_->create_oci_repository_route(customer_id, name, workspace_id);
+        });
+    }
+    control::Result<control::OciRepositoryRoute>
+    get_oci_repository_route(const std::string& customer_id, const std::string& name) override {
+        return call("get_oci_repository_route",
+                    [&] { return store_->get_oci_repository_route(customer_id, name); });
+    }
+    control::Result<std::vector<control::OciRepositoryRoute>>
+    list_oci_repository_routes(const std::string& customer_id,
+                               const std::string& workspace_id) override {
+        return call("list_oci_repository_routes",
+                    [&] { return store_->list_oci_repository_routes(customer_id, workspace_id); });
+    }
     control::Result<std::vector<control::ManagedService>>
     list_services(const std::string& customer_id) override {
         return call("list_services", [&] { return store_->list_services(customer_id); });

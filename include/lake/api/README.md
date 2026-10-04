@@ -43,11 +43,6 @@ into `ApiContext`, and `build_app` records it as the generated Dockerfile's
 server parser ceiling for OCI upload traffic only; body sinks retain the 64 MiB general limit.
 See [the HTTP body-limit contract](../../../docs/serving/http.md).
 
-`ApiContext::registry_space_bytes` is an injected callable the HTTP adapter sets when registry
-storage exists: it returns the unique bytes the OCI registry holds below `<space>/`. The
-`metering_usage` summary calls it, so the registry layout stays inside the adapter. See
-[metering.md](../../../docs/api/metering.md).
-
 `metering_recorder.hpp` declares `MeteringRecorder`, the bounded in-process buffer of repository
 transfer and build records on their way to the workspace Zettas (lake#348, lake#349).
 `ApiContext::metering_recorder` points at the server's; `ServerOptions::metering_flush_interval`
@@ -124,3 +119,10 @@ claims a pool user's email there before the account exists (lake#353). See
 `apps.hpp` declares `configured_application`, which reads an application's settings record from
 its workspace onto the routing row the store returns (lake#351), and `configured`, which unwraps
 its completed answer; the identity capabilities and hosted pages use them.
+
+`images.hpp` declares the tenant image helpers of lake#383 phase A (splitting `<space>/<name>`,
+the legacy routing rule, the image byte count) and `register_image_capabilities`.
+`WorkspaceContent` (`workspace_deletion.hpp`) also exposes the instance registry's legacy tenant
+tags and blob reads for the one-shot copy. `metering_usage` counts image bytes from the tags in
+each routed workspace (`tenant_image_bytes`), replacing the former
+`ApiContext::registry_space_bytes` callable. See [metering.md](../../../docs/api/metering.md).

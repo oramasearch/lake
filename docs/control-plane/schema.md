@@ -358,6 +358,27 @@ The operator does not read the table: it still deletes a workspace's Zetta from 
 A workspace deleted before the migration has no row, and repeating `delete_workspace` for it is a
 `conflict`, as before.
 
+## Tenant image routes (migration `0068_oci_repository_routes`)
+
+Decision 54 S4-S6 (lake#383 phase A): the registry splits. A tenant image repository belongs to one
+workspace, whose Zetta holds its manifests and tags as sealed records (`lake_oci_manifests`, keyed by
+digest and written `if_absent`; `lake_oci_tags`, keyed by repository and tag and moved at the
+revision read). Image addresses do not change: lake resolves this route before it reads any
+workspace ([registry.md](../api/registry.md#where-a-tenant-image-lives)). `0067` is held by the open
+lake#380 change.
+
+| Table or change | Purpose |
+|---|---|
+| `oci_repository_routes` | `(customer_id, name)` → `workspace_id`, with `created_at` and `updated_at`. `name` is the path below the space (`<image>` or `cache/<image>`, checked against OCI's lowercase grammar). No manifest, digest or tag. Written by a build's first push (from the build's workspace) or by `create_image_repository` (an explicit `workspace_id`); there is no default workspace. Deleted for a workspace in the `0065` cascade transaction. |
+| `oci_repository_routes_workspace_idx` | A workspace's routes, for the deletion cascade and listings. |
+| `enforce_oci_repository_route` (trigger `oci_repository_route_routing`) | Refuses any change of a route's space, name or workspace, and a route to a workspace that is not live in the space (`23514`). |
+| Backfill | Once: each image name the apps and builds of exactly one live workspace of the space use gets a route there, for `<name>` and `cache/<name>`; a name several workspaces use is reported with `RAISE WARNING`. The registry's files are not visible to SQL: the one-shot copy (`copy_workspace_records`, collection `oci_tags`) routes the repositories it finds by the same rule, then by the space's only live workspace, and reports the rest. |
+| `oci_repository_routes_guard` | Guard table for migration `0068_oci_repository_routes`. |
+
+npm, Python, debuginfod and one-component OCI repositories stay with the instance and have no
+route. Blobs stay in the instance registry until phase B (lake#380). The operator never reads the
+table; its vendored schema rehearsal needs the new guard.
+
 ## Identity exit scenario (migration `0020_identity_exit`)
 
 | Table or change | Purpose |

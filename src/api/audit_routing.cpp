@@ -95,6 +95,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "list_devices",
     "list_federation_issuers",
     "list_grants",
+    // Tenant image routes span the workspaces of a space (lake#383).
+    "list_image_repositories",
     "list_invitations",
     "list_memberships",
     "list_objects",
@@ -207,6 +209,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "create_drive_folder",
     "create_drive_share_link",
     "create_encryption_key",
+    "create_image_repository",
     "create_issue",
     "create_issue_comment",
     "create_pipeline",

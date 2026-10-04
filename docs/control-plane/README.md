@@ -43,3 +43,7 @@ description's workspace for the copy into its `lake_repositories` record (lake#3
 (decision 54 S12, lake#514). [schema.md](schema.md#unrouted-repositories-migration) documents
 `0066_assign_unrouted_repositories`, the reviewed assignment of repositories left without a
 workspace (decision 54 S14, lake#513).
+
+[schema.md](schema.md#tenant-image-routes-migration-0068_oci_repository_routes) documents
+`0068_oci_repository_routes`, the content-free route from a tenant image repository to the workspace
+whose Zetta holds its manifests and tags (lake#383 phase A).

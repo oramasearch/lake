@@ -384,10 +384,46 @@ struct WorkspaceDeletion {
 };
 struct WorkspaceDeletionRequest {
     std::string workspace_id, requested_by;
-    // The tenant image repositories that exist when the workspace is deleted, resolved by the
-    // caller: the registry lives outside the store until lake#383.
+    // The tenant image repositories the instance registry still holds for the workspace (written
+    // before lake#383 and not yet copied), resolved by the caller. The workspace's routes
+    // (oci_repository_routes) are added and deleted by the store in the cascade transaction.
     std::vector<std::string> images;
 };
+// Where a tenant image repository lives (lake#383, decision 54 S4-S6, migration 0068): the
+// content-free central route from `<space>/<name>` (the space by its customer id, `name` the path
+// below it, `<image>` or `cache/<image>`) to the workspace whose Zetta holds the repository's
+// manifests and tags. It holds no manifest, digest or tag. The route never changes: its workspace,
+// space and name are immutable, and it goes when its workspace is deleted.
+struct OciRepositoryRoute {
+    std::string customer_id, name, workspace_id, created_at, updated_at;
+};
+// A tenant repository name below its space: one or two `/`-separated components (`<image>` or
+// `cache/<image>`) of lowercase letters, digits, `.`, `_` and `-`, each starting and ending with a
+// letter or digit (OCI's repository grammar), at most 200 characters.
+inline bool valid_oci_route_name(std::string_view name) {
+    if (name.empty() || name.size() > 200) {
+        return false;
+    }
+    int components = 0;
+    while (true) {
+        const std::size_t slash = name.find('/');
+        const std::string_view component = name.substr(0, slash);
+        const auto alnum = [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); };
+        if (component.empty() || !alnum(component.front()) || !alnum(component.back()) ||
+            !std::ranges::all_of(component, [&](char c) {
+                return alnum(c) || c == '.' || c == '_' || c == '-';
+            })) {
+            return false;
+        }
+        if (++components > 2) {
+            return false;
+        }
+        if (slash == std::string_view::npos) {
+            return true;
+        }
+        name.remove_prefix(slash + 1);
+    }
+}
 // Reserve room for `-ws-` and twelve UUID digits in a DNS label.
 inline bool valid_workspace_environment(std::string_view value) {
     if (value.empty() || value.size() > 47 || value.front() == '-' || value.back() == '-') {
@@ -1242,6 +1278,20 @@ public:
     // The deletions lake has not completed, oldest first.
     virtual Result<std::vector<WorkspaceDeletion>> pending_workspace_deletions(int limit) = 0;
     virtual Result<void> complete_workspace_deletion(const std::string& workspace_id) = 0;
+    // Tenant image routes (lake#383, docs/api/registry.md#where-a-tenant-image-lives). Creating a
+    // route names its workspace explicitly: `invalid_input` when the name is invalid or the
+    // workspace is not a live workspace of the space, the existing route when the same workspace
+    // already holds the name, and `conflict` when another workspace does. A route is never
+    // changed; delete_workspace_cascade deletes the workspace's routes in its transaction.
+    virtual Result<OciRepositoryRoute> create_oci_repository_route(const std::string& customer_id,
+                                                                   const std::string& name,
+                                                                   const std::string& workspace_id) = 0;
+    // `not_found` when the space has no route of that name.
+    virtual Result<OciRepositoryRoute> get_oci_repository_route(const std::string& customer_id,
+                                                                const std::string& name) = 0;
+    // A space's routes by name; `workspace_id` empty: every workspace.
+    virtual Result<std::vector<OciRepositoryRoute>>
+    list_oci_repository_routes(const std::string& customer_id, const std::string& workspace_id) = 0;
     // Managed services (docs/control-plane/services.md). Lists the customer's services, oldest
     // first, leaving out deleted ones the operator has finished with.
     virtual Result<std::vector<ManagedService>> list_services(const std::string& customer_id) = 0;

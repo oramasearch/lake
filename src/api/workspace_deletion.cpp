@@ -249,6 +249,20 @@ std::expected<json, ApiError> workspace_deletion_plan(const ApiContext& context,
             }
         }
     }
+    // Routed tenant repositories (lake#383): their manifests and tags go with the workspace's
+    // Zetta and their routes with the cascade.
+    if (const auto routes = context.store->list_oci_repository_routes(workspace.customer_id,
+                                                                      workspace.id)) {
+        const auto customer = context.store->get_customer(workspace.customer_id);
+        for (const control::OciRepositoryRoute& route : *routes) {
+            const std::string image = (customer ? customer->name : std::string()) + "/" + route.name;
+            if (std::ranges::find(images, image, &control::WorkspaceDeletionItem::name) ==
+                images.end()) {
+                images.push_back({"", image, "routed"});
+            }
+        }
+    }
+    std::ranges::sort(images, {}, &control::WorkspaceDeletionItem::name);
     json image_values = items_json(images);
     for (json& image : image_values) {
         image["tags"] = tags.value(image.value("name", std::string()), json::array());
@@ -331,6 +345,8 @@ std::expected<void, std::string> finish_workspace_deletion(const ApiContext& con
             return recorded;
         }
     }
+    // A routed image's records went with the workspace's Zetta and its route with the cascade;
+    // whatever the instance registry still holds of it from before lake#383 is removed too.
     for (const control::WorkspaceDeletionItem& image : deletion.images) {
         if (context.workspace_content && context.workspace_content->remove_image_repository) {
             const auto removed = context.workspace_content->remove_image_repository(image.name);
@@ -338,7 +354,7 @@ std::expected<void, std::string> finish_workspace_deletion(const ApiContext& con
                 return std::unexpected("could not remove image " + image.name + ": " +
                                        removed.error());
             }
-        } else if (!context.workspace_content) {
+        } else if (!context.workspace_content && image.state != "routed") {
             // The registry lives in this lake's store root; only a lake that has it removes the
             // tags. The deletion stays pending until one does.
             return std::unexpected("this lake has no registry storage to remove image " +
