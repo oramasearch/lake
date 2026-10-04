@@ -106,7 +106,8 @@ MeteringRecorder::Totals MeteringRecorder::totals() const {
     return totals_;
 }
 
-// A workspace that was deleted, or never belonged to this space, will never accept the write.
+// A workspace that was deleted, is unknown, or never belonged to this space, will never accept
+// the write. Both stores answer an unknown workspace id with invalid_input, not not_found.
 bool MeteringRecorder::workspace_gone(const std::string& customer_id,
                                       const std::string& workspace_id) const {
     if (!store_) {
@@ -114,7 +115,7 @@ bool MeteringRecorder::workspace_gone(const std::string& customer_id,
     }
     const auto workspace = store_->get_workspace(workspace_id);
     if (!workspace) {
-        return workspace.error().code == "not_found";
+        return workspace.error().code == "not_found" || workspace.error().code == "invalid_input";
     }
     return workspace->desired == "deleted" || workspace->customer_id != customer_id;
 }

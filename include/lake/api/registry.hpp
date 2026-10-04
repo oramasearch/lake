@@ -140,6 +140,28 @@ struct WorkspaceCallTiming {
     }
 };
 
+// What one HTTP request's capability calls resolved, for its request log line and the
+// workspace's `lake_requests` series (lake#384, docs/serving/telemetry.md). Shared by every
+// ApiContext the HTTP server makes for the request; Registry::call fills it, the server reads it
+// once the response is sent.
+struct RequestAttribution {
+    mutable std::mutex mutex;
+    int depth = 0;            // capability calls in progress (nested calls go through Registry)
+    std::string capability;   // the first outermost capability call
+    std::string workspace_id; // the first workspace a handled call acted on
+    std::string request_id;   // the id the request's first context chose
+
+    struct Snapshot {
+        std::string capability;
+        std::string workspace_id;
+        std::string request_id;
+    };
+    Snapshot snapshot() const {
+        std::lock_guard lock(mutex);
+        return {capability, workspace_id, request_id};
+    }
+};
+
 struct ApiContext {
     control::Store* store = nullptr; // null = no control-plane store configured
     // The registry running this call, set by Registry::call / call_async: a capability that is
@@ -197,6 +219,8 @@ struct ApiContext {
     control::PlatformService* platform = nullptr;
     control::WorkspaceService* workspaces = nullptr;
     std::shared_ptr<WorkspaceCallTiming> workspace_call_timing;
+    // The HTTP request this call serves (lake#384); null outside a request (owner loop, tests).
+    std::shared_ptr<RequestAttribution> request_attribution;
     // GET-page navigation resolves the same authorized customer list once per request.
     std::shared_ptr<std::optional<ApiResult>> page_customers;
     // Only renderer definition reads opt in; edits must read the current graph.

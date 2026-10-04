@@ -24,6 +24,7 @@
 #include <print>
 #include <ranges>
 #include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -55,6 +56,7 @@
 #include "lake/control/zetta_workspace.hpp"
 #include "temporary_directory.hpp"
 #include "stream_fixture.hpp"
+#include "workspace_fixture.hpp"
 #include "lake/api/web_ui.hpp"
 #include "api/route_guard.hpp"
 #include "repository_test_support.hpp"
@@ -67,20 +69,22 @@
 
 namespace {
 
-class StderrPipe {
+// Captures what the process writes to one descriptor (stderr by default, or stdout).
+class OutputPipe {
 public:
-    StderrPipe() {
+    explicit OutputPipe(int fd = STDERR_FILENO, std::FILE* stream = stderr)
+        : fd_(fd), stream_(stream) {
         if (::pipe(pipe_) != 0) {
             return;
         }
-        original_ = ::dup(STDERR_FILENO);
+        original_ = ::dup(fd_);
         if (original_ < 0) {
             close_pipe();
             return;
         }
-        std::fflush(stderr);
+        std::fflush(stream_);
         std::cerr.flush();
-        if (::dup2(pipe_[1], STDERR_FILENO) < 0) {
+        if (::dup2(pipe_[1], fd_) < 0) {
             ::close(original_);
             original_ = -1;
             close_pipe();
@@ -91,7 +95,7 @@ public:
         capturing_ = true;
     }
 
-    ~StderrPipe() {
+    ~OutputPipe() {
         restore();
         close_pipe();
     }
@@ -121,9 +125,9 @@ private:
         if (!capturing_) {
             return;
         }
-        std::fflush(stderr);
+        std::fflush(stream_);
         std::cerr.flush();
-        static_cast<void>(::dup2(original_, STDERR_FILENO));
+        static_cast<void>(::dup2(original_, fd_));
         ::close(original_);
         original_ = -1;
         capturing_ = false;
@@ -138,6 +142,8 @@ private:
         }
     }
 
+    int fd_;
+    std::FILE* stream_;
     int pipe_[2]{-1, -1};
     int original_{-1};
     bool capturing_{false};
@@ -3606,7 +3612,7 @@ TEST(HttpServer, ClerkSessionExchangeIsAbsentWithoutClerk) {
 }
 
 TEST(HttpServer, IdleKeepAliveCloseWritesNothingToStderr) {
-    StderrPipe captured_stderr;
+    OutputPipe captured_stderr;
     ASSERT_TRUE(captured_stderr.ready());
 
     lake::api::ServerOptions options;
@@ -3640,6 +3646,124 @@ TEST(HttpServer, IdleKeepAliveCloseWritesNothingToStderr) {
 
     server.stop();
     EXPECT_EQ(captured_stderr.finish(), "");
+}
+
+// Decision 54 S9 (lake#384): a request log line names the route pattern and the identifiers it
+// captured, never the raw path, and a request routed to a workspace is counted in that workspace's
+// own `lake_requests` series by the owner loop.
+TEST(HttpServer, RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    lake::test::RecordWorkspaces workspaces(store);
+    const auto create_space = [&store](const std::string& handle) {
+        const auto user = store->create_user(
+            {"taap:1:ed25519:" + handle, handle + "@example.test", handle});
+        EXPECT_TRUE(user) << user.error().message;
+        const auto customer = store->create_customer({"individual", user->id, "", handle});
+        EXPECT_TRUE(customer) << customer.error().message;
+        return customer->id;
+    };
+    const std::string mine = create_space("request-series-mine");
+    const std::string theirs = create_space("request-series-theirs");
+    const std::string home = workspaces.create(mine, "home");
+    const std::string lab = workspaces.create(mine, "lab");
+    const std::string other = workspaces.create(theirs, "home");
+    const auto repository =
+        store->create_repository({mine, "secret-project", "", "private", home});
+    ASSERT_TRUE(repository) << repository.error().message;
+
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.worker_coroutines = 1;
+    options.node_name = "request-series";
+    options.admin_token = "request-series-admin";
+    options.instance_kek = "726571756573742d7365726965732d696e7374616e63652d6b656b2d74657374";
+    options.store = store;
+    options.workspaces = workspaces.service;
+    options.request_series_flush_interval = std::chrono::milliseconds(0);
+    lake::api::ApiServer server(options);
+    ASSERT_TRUE(server.start()) << server.reason();
+
+    std::string output;
+    std::vector<std::string> statuses;
+    {
+        OutputPipe captured(STDOUT_FILENO, stdout);
+        ASSERT_TRUE(captured.ready());
+        HttpConnection connection(server.port());
+        const auto get = [&](const std::string& path, std::string_view bearer = {}) {
+            const std::string response = connection.request(
+                "GET", path, {}, {}, "HTTP/1.1", bearer, "application/json",
+                {{"X-Request-Id", "request-384"}});
+            statuses.push_back(response.substr(0, response.find("\r\n")));
+        };
+        const std::string admin = options.admin_token;
+        // A repository read: its repository's workspace.
+        get("/v1/get_repository?id=" + repository->id, admin);
+        get("/v1/get_repository?id=" + repository->id, admin);
+        // A capability naming its workspace: that workspace, in either space.
+        get("/v1/workspace_status?customer_id=" + mine + "&workspace_id=" + lab, admin);
+        get("/v1/workspace_status?customer_id=" + theirs + "&workspace_id=" + other, admin);
+        // No workspace: counted nowhere.
+        get("/v1/server_info");
+        // Registry, drive and repository sync routes whose paths carry names.
+        get("/secret-package");
+        get("/v2/" + mine + "/secret-image/manifests/latest", admin);
+        get("/drive?path=secret-folder/secret-file.txt", admin);
+        const std::string pull = connection.request(
+            "POST", "/v1/repositories/" + repository->id + "/sync/pull", "not a sync request",
+            {}, "HTTP/1.1", admin, "application/octet-stream", {{"X-Request-Id", "request-384"}});
+        statuses.push_back(pull.substr(0, pull.find("\r\n")));
+        server.drain();
+        output = captured.finish();
+    }
+    server.stop();
+
+    std::vector<nlohmann::json> lines;
+    std::istringstream stream(output);
+    for (std::string text; std::getline(stream, text);) {
+        const auto line = nlohmann::json::parse(text, nullptr, false);
+        if (!line.is_discarded() && line.is_object() && line.contains("route")) {
+            lines.push_back(line);
+        }
+    }
+    ASSERT_EQ(lines.size(), 9U) << output;
+    for (const auto& line : lines) {
+        EXPECT_FALSE(line.contains("path")) << line.dump();
+        EXPECT_EQ(line["node"], "request-series");
+        EXPECT_EQ(line["request_id"], "request-384") << line.dump();
+    }
+    EXPECT_EQ(output.find("secret-package"), std::string::npos) << output;
+    EXPECT_EQ(output.find("secret-image"), std::string::npos) << output;
+    EXPECT_EQ(output.find("secret-file"), std::string::npos) << output;
+    EXPECT_EQ(output.find("secret-project"), std::string::npos) << output;
+    EXPECT_EQ(lines[0]["route"], "/v1/get_repository");
+    EXPECT_EQ(lines[0]["capability"], "get_repository");
+    EXPECT_EQ(lines[0]["workspace_id"], home);
+    EXPECT_EQ(lines[2]["workspace_id"], lab);
+    EXPECT_EQ(lines[3]["workspace_id"], other);
+    EXPECT_FALSE(lines[4].contains("workspace_id"));
+    EXPECT_EQ(lines[5]["route"], "/:package");
+    EXPECT_EQ(lines[6]["route"], "/v2/:space/:repository/manifests/:reference");
+    EXPECT_EQ(lines[7]["route"], "/drive");
+    EXPECT_EQ(lines[8]["route"], "/v1/repositories/:repository_id/sync/pull");
+    EXPECT_EQ(lines[8]["repository_id"], repository->id);
+
+    // Two workspaces of one space and one of another: three separate series.
+    auto& home_series = workspaces.records(home);
+    EXPECT_EQ(home_series.metric_total("lake_requests",
+                                       {{"route", "/v1/get_repository"},
+                                        {"capability", "get_repository"},
+                                        {"status_class", "2xx"}}),
+              2)
+        << statuses[0];
+    EXPECT_EQ(workspaces.records(lab).metric_total("lake_requests"), 1) << statuses[2];
+    EXPECT_EQ(workspaces.records(lab).metric_total(
+                  "lake_requests", {{"capability", "workspace_status"}}),
+              1);
+    EXPECT_EQ(workspaces.records(other).metric_total("lake_requests"), 1) << statuses[3];
+    EXPECT_EQ(home_series.metric_total("lake_requests", {{"route", "/v1/server_info"}}), 0);
+    EXPECT_EQ(home_series.metric_total("lake_requests", {{"route", "/:package"}}), 0);
+    // Nothing reached the workspace on the request path: only the owner loop's flush wrote.
+    EXPECT_EQ(std::ranges::count(home_series.calls, std::string("record_metric")), 1);
 }
 
 namespace {

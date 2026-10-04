@@ -67,6 +67,16 @@ every `audit_flush_interval`, and `ApiServer::stop` flushes it once more. `audit
 both logs for `audit`, `my_audit`, `export_audit`, `verify_audit` and the `/activity` and `/audit`
 pages, every workspace concurrently in one round. See [audit](../../docs/api/audit.md#which-log).
 
+Request telemetry (decision 54 S9, lake#384) stays with the instance. `request_log.hpp` builds the
+per-request stdout line from the route pattern and the captured UUID identifiers, never the raw
+path; `http_server.cpp`'s `record_request` writes it. `Registry::call` fills the request's
+`RequestAttribution` in `finish_call` (the first outermost capability, the first workspace a
+handled call acted on, through `acted_workspace`); `record_request` adds a routed request to
+`request_recorder.cpp`'s `RequestRecorder` without I/O, `ApiServer::drain` flushes it to each
+workspace Zetta's `lake_requests` series every `request_series_flush_interval`, and
+`ApiServer::stop` flushes it once more. `route_guard.hpp`'s `handler_exception` line no longer logs
+the path. See [telemetry](../../docs/serving/telemetry.md#request-logs).
+
 `datasets.cpp` holds the workspace dataset rules lake applies on top of Zetta (lake#447): engine
 result databases, SQL-queryable names, CSV row checks with line numbers, and the one
 `<database>/<name>` id. `workspace_query`/`workspace_act` apply them to `list_datasets`,

@@ -542,20 +542,42 @@ std::optional<AuditLog> audit_log_of(std::string_view capability) {
     return std::nullopt;
 }
 
+std::string acted_workspace(const Capability* capability,
+                            std::string_view name,
+                            const nlohmann::json& input,
+                            const ApiContext& context,
+                            std::string_view outcome,
+                            bool handled) {
+    if (!handled || outcome == "denied" || context.store == nullptr) {
+        return {};
+    }
+    if (!context.audit_workspace_id.empty()) {
+        return context.audit_workspace_id;
+    }
+    return audit_log_of(name) == AuditLog::Workspace ? object_workspace(capability, input, context)
+                                                     : std::string();
+}
+
+AuditRoute audit_route(std::string_view name,
+                       const std::string& acted,
+                       const ApiContext& context) {
+    if (audit_log_of(name) != AuditLog::Workspace || context.audit_recorder == nullptr) {
+        return {};
+    }
+    return live_workspace(context, acted, context.audit_customer_id);
+}
+
 AuditRoute audit_route(const Capability* capability,
                        std::string_view name,
                        const nlohmann::json& input,
                        const ApiContext& context,
                        std::string_view outcome,
                        bool handled) {
-    if (audit_log_of(name) != AuditLog::Workspace || !handled || outcome == "denied" ||
-        context.audit_recorder == nullptr || context.store == nullptr) {
+    if (audit_log_of(name) != AuditLog::Workspace || context.audit_recorder == nullptr) {
         return {};
     }
-    const std::string workspace_id = !context.audit_workspace_id.empty()
-                                         ? context.audit_workspace_id
-                                         : object_workspace(capability, input, context);
-    return live_workspace(context, workspace_id, context.audit_customer_id);
+    return audit_route(name, acted_workspace(capability, name, input, context, outcome, handled),
+                       context);
 }
 
 AuditRoute workspace_audit_route(const ApiContext& context, const std::string& workspace_id) {

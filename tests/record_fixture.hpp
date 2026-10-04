@@ -40,14 +40,102 @@ public:
     // conditional delete (a racing redemption) landing first.
     std::map<std::string, std::function<void(RecordTables&)>> before_delete;
 
+    // The labelled time series (zetta#1231, zetta docs/data/time-series.md) as lake's request
+    // series uses it: counters only, every point kept as recorded.
+    struct Metric {
+        json definition;
+        std::vector<json> points; // {labels, value, at_ms}
+    };
+    std::map<std::string, Metric> metrics;
+    // Answers that many metric calls with 503 `store_unavailable` first.
+    int metric_unavailable_next = 0;
+
     static bool handles(std::string_view capability, const json&) {
         return capability == "create_collection" || capability == "put_record" ||
                capability == "get_record" || capability == "delete_record" ||
-               capability == "list_records";
+               capability == "list_records" || capability == "create_metric" ||
+               capability == "record_metric" || capability == "query_metric";
+    }
+
+    // The total of a counter over the series whose labels include `labels`.
+    double metric_total(const std::string& name, const json& labels = json::object()) const {
+        const auto found = metrics.find(name);
+        double total = 0;
+        if (found == metrics.end()) {
+            return total;
+        }
+        for (const auto& point : found->second.points) {
+            bool matches = true;
+            for (const auto& [key, value] : labels.items()) {
+                matches = matches && point.at("labels").value(key, json()) == value;
+            }
+            total += matches ? point.at("value").get<double>() : 0;
+        }
+        return total;
+    }
+
+    control::ZettaControlResult<json> run_metric(std::string_view capability, const json& input) {
+        if (metric_unavailable_next > 0) {
+            --metric_unavailable_next;
+            return fail("store_unavailable", "the workspace did not answer", "");
+        }
+        const std::string name = input.value("metric", std::string());
+        if (capability == "create_metric") {
+            json definition{{"metric", name},
+                            {"kind", input.value("kind", std::string())},
+                            {"resolution_ms", input.value("resolution_ms", 60000)},
+                            {"retention_ms", input.value("retention_ms", json())}};
+            const auto existing = metrics.find(name);
+            if (existing != metrics.end()) {
+                if (existing->second.definition != definition) {
+                    return fail("conflict", "a different metric exists", "/metric");
+                }
+                return json{{"metric", definition}, {"created", false}};
+            }
+            metrics[name] = Metric{definition, {}};
+            return json{{"metric", definition}, {"created", true}};
+        }
+        const auto found = metrics.find(name);
+        if (found == metrics.end()) {
+            return fail("not_found", "no metric '" + name + "'", "/metric");
+        }
+        if (capability == "record_metric") {
+            const json points = input.value("points", json::array());
+            if (points.empty() || points.size() > 1000) {
+                return fail("invalid_input", "1 to 1000 points", "/points");
+            }
+            for (const auto& point : points) {
+                found->second.points.push_back(point);
+            }
+            return json{{"metric", name}, {"recorded", points.size()}};
+        }
+        // query_metric: one series per distinct label set, with its total.
+        std::map<std::string, std::pair<json, double>> series;
+        const json wanted = input.value("labels", json::object());
+        for (const auto& point : found->second.points) {
+            bool matches = true;
+            for (const auto& [key, value] : wanted.items()) {
+                matches = matches && point.at("labels").value(key, json()) == value;
+            }
+            if (!matches) {
+                continue;
+            }
+            auto& entry = series[point.at("labels").dump()];
+            entry.first = point.at("labels");
+            entry.second += point.at("value").get<double>();
+        }
+        json rows = json::array();
+        for (const auto& [ignored, entry] : series) {
+            rows.push_back({{"labels", entry.first}, {"total", entry.second}});
+        }
+        return json{{"metric", found->second.definition}, {"aggregate", "sum"}, {"series", rows}};
     }
 
     control::ZettaControlResult<json> run(std::string_view capability, const json& input) {
         calls.emplace_back(capability);
+        if (capability.ends_with("_metric")) {
+            return run_metric(capability, input);
+        }
         if (busy_next > 0) {
             --busy_next;
             return fail("busy", "ownership of this key is moving; retry", "");

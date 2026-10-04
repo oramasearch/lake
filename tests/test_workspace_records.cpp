@@ -3120,6 +3120,19 @@ TEST_P(WorkspaceRecordStores, RepositoryUsageStaysInEachRepositorysWorkspace) {
     EXPECT_EQ(recorder.pending(), 0U);
     EXPECT_EQ(recorder.totals().dropped_bytes, 50U);
 
+    // An unknown workspace id is dropped the same way, not retried forever: both stores answer it
+    // with invalid_input rather than not_found. Transfer and a build record alike.
+    const std::string unknown = lake::control::new_uuid_v4();
+    recorder.add_transfer(repository(second, unknown), 20, 0, hour);
+    recorder.add_build(unknown, {.customer_id = second.customer_id,
+                                 .result_id = "result-unknown",
+                                 .hour = hour,
+                                 .compute_seconds = 1});
+    ASSERT_TRUE(liquid::runtime::block_on(recorder.flush()));
+    EXPECT_EQ(recorder.pending(), 0U) << "an unknown workspace is never retried";
+    EXPECT_EQ(recorder.totals().dropped_bytes, 70U);
+    EXPECT_EQ(recorder.totals().dropped_builds, 1U);
+
     // Bounded: a new counter beyond the bound is dropped and counted, an existing one merges.
     lake::api::MeteringRecorder bounded(t.store.get(), t.service.get(), std::string(kek), 2);
     bounded.add_transfer(first_home, 1, 0, "2026-09-04T11:00:00Z");

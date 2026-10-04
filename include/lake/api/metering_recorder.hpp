@@ -39,7 +39,8 @@ struct PendingTransfer {
 // Bounded: at most `max_pending` counters and queued build records are held. An increment for a
 // counter already held always merges; a new one beyond the bound is dropped and counted
 // (`dropped_bytes`, `dropped_builds`), never blocked on. A failed write is kept for the next flush
-// unless its workspace is gone, in which case it is dropped and counted.
+// unless its workspace is gone (deleted, unknown, or of another space), in which case it is
+// dropped and counted.
 //
 // Loss on a crash: what was counted since the last successful flush (the flush interval, five
 // seconds by default, plus any write that kept failing). A drain flushes before the process

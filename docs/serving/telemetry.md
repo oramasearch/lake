@@ -38,6 +38,11 @@ The exported metric families are:
   `failed`) and `lake_secret_lease_sweep_errors_total`: the owner loop's dynamic-lease expiry pass,
   which reads the due index and settles each due lease in its workspace
   ([secrets](../api/secrets.md#where-leases-live-lake362), lake#362)
+- `lake_request_series_requests_written_total`, `lake_request_series_flush_errors_total`,
+  `lake_request_series_dropped_total{reason}` (`bound`, `workspace_deleted`, `refused`) and the
+  gauge `lake_request_series_pending`: requests on their way to their workspaces' `lake_requests`
+  series, written by the owner loop every ten seconds ([below](#the-workspace-request-series),
+  lake#384)
 - `lake_workspace_deletions_completed_total` and `lake_workspace_deletion_errors_total`: the owner
   loop's pass, every minute, that finishes workspace deletions left pending (tenant image tags,
   search segments, central audit events); an error also logs `lake: workspace deletion pending`
@@ -58,10 +63,73 @@ The store-root owner writes `{"event":"store_owner",...}` lines to stderr: `wait
 holder), `open` (with `handoff`, `waited_ms` and `opened_ms`), `failed`, `abandoned`, and
 `released` or `not_owned` at shutdown (with `drain_ms` and `unfinished_requests`).
 
-Every completed request writes one JSON object to stdout with RFC 3339 UTC `ts`, `method`,
-query-free `path`, `route`, `status`, `duration_ms` and `node`. Startup is also one JSON object and
-records `admin_token_set` and `replication_token_set` as `yes` or `no`, never either token.
-Authorization and cookie values are never logged.
+### Request logs
+
+Every completed request writes one JSON object to stdout:
+
+| Field | Value |
+|---|---|
+| `ts` | RFC 3339 UTC |
+| `method` | the HTTP method |
+| `route` | the registered route pattern (`/v1/repositories/:repository_id/sync/pull`, `/:package`, `/v2/:space/:repository/manifests/:reference`), or `unmatched` |
+| `status`, `duration_ms`, `node` | as before |
+| `request_id` | the request's id: the caller's `X-Request-Id` when it is a short token (letters, digits, `-_.:`, at most 128), else the one lake chose; left out otherwise |
+| `capability` | the capability a REST `/v1/…` or MCP request called, when it called one |
+| `<name>_id` | each identifier the route captured (`repository_id`, `customer_id`, `workspace_id`, `order_id`, …) when it is a UUID |
+| `workspace_id` | the workspace the request was routed to ([below](#the-workspace-request-series)), when it was |
+
+The raw path is not logged (decision 54 S9, lake#384): a path can carry a repository, package,
+image or file name. A captured value that is not a UUID (`:package`, an OCI `:repository`,
+`:digest`, `:filename`, an ACME `:token`) is left out, and the query string never was logged. A
+request log line therefore carries no customer content. The `handler_exception` line
+([http.md](http.md#handler-exceptions)) dropped its `path` the same way.
+
+Startup is also one JSON object and records `admin_token_set` and `replication_token_set` as `yes`
+or `no`, never either token. Authorization and cookie values are never logged.
+
+### The workspace request series
+
+Lake's process metrics and request logs are instance operations data, a named exception to the
+rule that everything goes in a workspace Zetta (decision 54 S9). Each workspace still gets its own
+view of its traffic: a counter `lake_requests` in its Zetta's labelled time series (zetta
+`docs/data/time-series.md`, zetta#1231), created by lake with `create_metric` (counter,
+`resolution_ms` 60000, `retention_ms` 30 days).
+
+| Label | Value |
+|---|---|
+| `route` | the route pattern, as in the request log |
+| `capability` | the capability called, only for REST `/v1/…` and MCP requests |
+| `status_class` | `1xx` … `5xx` |
+
+A request is counted in the workspace it was routed to: the first workspace one of its capability
+calls acted on after Registry::call let its handler run. That is the validated `workspace_id`
+(including the `/w/<workspace>/` path, which becomes the call's `workspace_id`), else the workspace
+of the repository, secret mount, application, app, build or agent task its input names, the same
+lookup that routes a workspace audit event (`acted_workspace`, `src/api/audit_routing.cpp`). A
+request refused before its handler ran or for want of authority, a request that called no
+capability (health, metrics, the instance registry's npm, Python, debuginfod and OCI routes until
+lake#383 gives tenant images a workspace route), and one whose capabilities resolved no workspace
+are counted in no workspace. There is no default workspace and no fallback to the lake Zetta or
+PostgreSQL.
+
+The request path only adds one to an in-memory count for (workspace, minute, labels)
+(`RequestRecorder`, `include/lake/api/request_recorder.hpp`). The owner loop flushes it every ten
+seconds (`ServerOptions::request_series_flush_interval`), at once when half of
+`request_series_max_pending` (16,384 counts) is held, and once more on stop: it reads each
+workspace's routing row, defines the metric once per workspace and process, and writes the counts
+with `record_metric` (at most 1000 points per call) through the workspace's own connection, the
+path its records take. A count beyond the bound is dropped (`reason="bound"`); a failed write is
+kept for the next flush; a deleted or unknown workspace's counts are dropped
+(`reason="workspace_deleted"`); a workspace that refuses for good (a different `lake_requests`
+definition) has them dropped (`reason="refused"`).
+
+The series is approximate: a crash loses the last interval, and a write whose answer was lost is
+retried and may count twice. Exact usage is metering's, in records
+([metering](../api/metering.md)); metering never reads this series. No migration: the series starts
+empty.
+
+Read it with the workspace's `query_metric`, for example
+`{"metric":"lake_requests","from_ms":…,"to_ms":…,"group_by":["route","status_class"]}`.
 
 ## Why
 
@@ -73,6 +141,14 @@ logs. The registry stays in `lake-core`, free of the HTTP and Postgres client ty
 
 Build and run `ctest --test-dir build --output-on-failure`. The `Telemetry` tests check exposition,
 a measured in-memory store ping, both probe routes, and refused and authorized metrics requests.
+`RequestLog.*` checks the log line's fields; `RequestRecorder.*` the aggregation, the bound, two
+workspaces of one space and another space counted apart, a failed write kept, and deleted, unknown
+and refusing workspaces dropped; `HttpServer.RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries`
+captures stdout for repository, registry, drive and sync requests (no raw path, no names) and
+reads three workspaces' series after the owner loop's flush.
+`RequestRecorderZetta.QueryMetricReturnsTheFlushedCounts` runs against a real Zetta node (zetta
+dev with #1231) when `LAKE_TEST_ZETTA_URL` and `LAKE_TEST_ZETTA_TOKEN` are set and reads the counts
+back with `query_metric`.
 
 For a running memory store:
 
@@ -88,7 +164,8 @@ curl -i -H 'Authorization: Bearer testtoken' localhost:4900/metrics
 
 Add measurements through `lake::telemetry::Metrics`; do not assemble Prometheus text at call
 sites. Keep metric labels bounded and never put raw request paths, customer identifiers or secret
-values in them. Change the bucket array in `src/telemetry/metrics.cpp` only when both request and
+values in them. Never add the raw path, or a captured value that is not a UUID, to the request log
+line (`src/api/request_log.hpp`). A new per-workspace series label must be bounded as well. Change the bucket array in `src/telemetry/metrics.cpp` only when both request and
 store latency histograms should change together.
 
 Register new HTTP routes before the trailing 404 through `add_route` (which applies
