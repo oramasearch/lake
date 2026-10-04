@@ -14,7 +14,7 @@ dropped) and lake#315 part 2 (the description in `lake_repositories`), both in m
 and lake#382 (the log stays with the instance; no migration), and lake#384 (route patterns in
 request logs and the per-workspace `lake_requests` series, [PR #521](https://github.com/oramasearch/lake/pull/521), no migration), and lake#383 phase A
 (the tenant image route table and manifests and tags as workspace records, migration `0068`,
-PR_383). Everything else here is not implemented yet. This page plans the moves that
+[PR #523](https://github.com/oramasearch/lake/pull/523)). Everything else here is not implemented yet. This page plans the moves that
 [workspace records](workspace-records.md) does not cover: the bytes on lake's store volume
 (liquid stores, search indexes, the registry, the transparency log), the two repository tables
 that sit beside them, and lake's operational telemetry. It states what each item is today, what it
@@ -359,7 +359,7 @@ records, and writes the route. Cache repositories may be dropped instead (dev da
 by the next build. Blobs no tenant manifest references stay behind. The instance registry has
 nothing to move on dev.
 
-**Phase A done** (migration `0068_oci_repository_routes`, PR_383). The route table is
+**Phase A done** (migration `0068_oci_repository_routes`, [PR #523](https://github.com/oramasearch/lake/pull/523)). The route table is
 `oci_repository_routes (customer_id, name, workspace_id, created_at, updated_at)`: no manifest,
 digest or tag, and, unlike the target above, no `created by` (`create_image_repository` records
 who in its audit event; a build's first push is the build's). A build's first
@@ -474,7 +474,7 @@ liquid; `updated_at` is gone.
 | 10 | [lake#514](https://github.com/oramasearch/lake/issues/514) | Cascade workspace deletion (S12). Shipped before #380 and #383 (migration `0065`); the store and route steps are extension points | nothing; its store step follows #380 |
 | 11 | [lake#384](https://github.com/oramasearch/lake/issues/384) | Route patterns in request logs; the per-workspace `lake_requests` series (S9). **Done** ([PR #521](https://github.com/oramasearch/lake/pull/521)) | nothing |
 | 12 | [lake#382](https://github.com/oramasearch/lake/issues/382) | Stays with the instance (S7): the audit row, and the dynamic-secret leaf check. **Done** ([PR #519](https://github.com/oramasearch/lake/pull/519); no migration) | nothing |
-| 13 | [lake#383](https://github.com/oramasearch/lake/issues/383) | Phase A: the route table, manifests and tags as records. **Done** (migration `0068`, PR_383). Phase B: blobs in the workspace store | A: nothing; B: lake#380 |
+| 13 | [lake#383](https://github.com/oramasearch/lake/issues/383) | Phase A: the route table, manifests and tags as records. **Done** (migration `0068`, [PR #523](https://github.com/oramasearch/lake/pull/523)). Phase B: blobs in the workspace store | A: nothing; B: lake#380 |
 | 14 | [lake#380](https://github.com/oramasearch/lake/issues/380) | `ZettaObjectBackend`, per-workspace leases and lazy open, encryption, `move_workspace_store` | 1–7 |
 | 15 | [lake#381](https://github.com/oramasearch/lake/issues/381) | Search beside the workspace store, rebuilt (S8) | lake#380 |
 
