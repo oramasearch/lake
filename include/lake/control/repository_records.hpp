@@ -26,8 +26,7 @@ namespace lake::control {
 // workspace holds, and a listing page pays one call per workspace rather than one per row. The
 // body names the repository and its space, and a record under another key or of another space is
 // not this repository's. A change is a write conditional on the revision read, reread on a
-// conflict. RepositorySettings and LegacyRepositoryDescription are in store.hpp, beside
-// Repository.
+// conflict. RepositorySettings is in store.hpp, beside Repository.
 struct RepositorySettingsCodec {
     using Value = RepositorySettings;
     static constexpr RecordCollection collection{"repositories", 1};

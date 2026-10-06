@@ -37,7 +37,7 @@ records the event after the store accepted it; `get_agent_task`, `receive_agent_
 conversation's next turn, the confined compile check, `settle_solution`, Opportunities' settle and
 `create_app`'s public acknowledgement read the record. The Apps and Experiments working panels read
 it for the running message, and the project page takes the build's message from `get_agent_task`.
-`copy_workspace_records` also copies `agent_tasks`.
+The retired content columns, and their copy, went with migration `0070`.
 
 Page reads share authentication and customer selection within each GET, and batch independent
 workspace and local reads with `when_all`. Data uses a projected dataset/database list from `system.datasets`; dataset
@@ -267,19 +267,19 @@ input's workspace. `settle_discover`, `list_opportunities`, `dismiss_opportunity
 (lake#376); the Opportunities page reads them concurrently with the methodology registry. The record store capabilities stay out of
 the `workspace_query`/`workspace_act` allow-lists, so only lake reaches its `lake_*` collections
 (lake#370, `docs/architecture/workspace-records.md`). `stream_capabilities.cpp` reads and claims
-topic creators in the topic's workspace (`lake_stream_owners`, lake#379), and
-`copy_workspace_records` also copies the retired `stream_owners` rows.
+topic creators in the topic's workspace (`lake_stream_owners`, lake#379); the retired
+`stream_owners` table and its copy went with migration `0070`.
 (lake#370, `docs/architecture/workspace-records.md`). Drive share links (`drive_capabilities.cpp`,
 lake#350) live in the workspace named by `workspace_id` on create, list (`drive_effective_access`)
 and revoke, and by the bearer token on resolve, preview and download; the sharing pages carry the
-workspace in their URLs and forms (`http_server.cpp`, `web_ui.cpp`). `copy_workspace_records` also
-copies `drive_share_links`.
+workspace in their URLs and forms (`http_server.cpp`, `web_ui.cpp`). The retired `drive_share_links` table and its copy went with
+migration `0070`.
 (lake#370, `docs/architecture/workspace-records.md`). `app_capabilities.cpp` records application
 lifecycle events and delivery attempts in the application's workspace (lake#356, lake#357):
 `register_application` requires `workspace_id`, the synchronous identity callers record an event
 through `liquid::runtime::block_on`, and `list_application_webhook_events` and
 `retry_application_webhook` are asynchronous and take the application's `workspace_id`.
-`copy_workspace_records` also copies `auth_app_webhook_events` and `auth_app_webhook_deliveries`.
+The retired event and delivery tables, and their copy, went with migration `0070`.
 The applications page registers into a chosen workspace, and the event log page reads it.
 An application's users and organizations live in the same workspace (lake#353, lake#354):
 `app_capabilities.cpp` reads and writes them there, the user and organization capabilities take the
@@ -288,8 +288,8 @@ application's pool against the user's record before returning it, revoking it ot
 `sign_up_password_session` claims a pool user's email before the account exists. These, the
 identity capabilities in `capabilities.cpp` (sign-up, sign-in, TOTP, passkey, SSO, MFA, tokens) and
 recovery in `offline_recovery_capabilities.cpp` are asynchronous, with no `block_on`; the hosted
-pages call them through `call_async`. `copy_workspace_records` also copies `auth_app_users` and
-`auth_app_organizations`.
+pages call them through `call_async`. The retired `auth_app_users` and `auth_app_organizations`
+tables, and their copy, went with migration `0070`.
 Repositories belong to one workspace (lake#315, part 1). `create_repository`,
 `import_repository` (`export_capabilities.cpp`) and `import_github_repository` require
 `workspace_id`, checked by `repository_workspace` (declared in `capabilities.hpp`);
@@ -315,8 +315,8 @@ reviews and releases they ask for, once with `load_branch_protection` (`forge.hp
 snapshot to `sync_change_authorizer`, because the push runs synchronously inside the repository
 store; a snapshot that could not be read refuses every reference update. `serve_sync_post` and the
 repository pages call the registry asynchronously; the home page and change view render without
-releases or reviews, saying why, when the workspace cannot be read. `copy_workspace_records` also
-copies `forge_records`.
+releases or reviews, saying why, when the workspace cannot be read. The retired `forge_records` table and its copy went
+with migration `0070`.
 `app_capabilities.cpp` keeps an application's signing keys and webhooks in its workspace (lake#352,
 lake#355): `register_application` is asynchronous and writes the first key ring there before the
 application row, `rotate_application_signing_key`, `create_application_webhook` and
@@ -324,23 +324,24 @@ application row, `rotate_application_signing_key`, `create_application_webhook` 
 `application_jwks` is asynchronous and finds the workspace from the application id alone, and the
 token issuers read the current key with `application_signing_key` on their asynchronous path, with
 no `block_on`. The `POST /applications` and `POST /application/webhooks` page actions and the raw
-JWKS route call the capabilities asynchronously. `copy_workspace_records` also
-copies `auth_app_signing_keys` and `auth_app_webhooks`.
+JWKS route call the capabilities asynchronously. The retired `auth_app_signing_keys` and
+`auth_app_webhooks` tables, and their copy, went with migration `0070`.
 Secrets live in the workspace of their mount (lake#328-#332): `secret_records_api.hpp` declares
 `MountSecrets` (one mount's records, opened through the mount's route: put, read, metadata, version
 changes, named keys and transit), `create_secret_mount`, `list_secret_mounts` and
 `rotate_customer_kek`, which rewraps every data key of the space's workspaces before forgetting the
 replaced KEK. Every version and key-version number is claimed `if_absent` and every transition
 written at the revision read. `secrets_capabilities.cpp` is asynchronous over it; the policy
-decision reads only PostgreSQL, so a refused caller reaches no workspace. `copy_workspace_records`
-copies the five secrets collections, and the `/secret-mounts`, `/secrets` and `/encryption-keys`
+decision reads only PostgreSQL, so a refused caller reaches no workspace. The five retired secrets
+tables, and their copy, went with migration `0070`; the `/secret-mounts`, `/secrets` and `/encryption-keys`
 pages call the registry asynchronously (`/secret-mounts` lists one workspace).
 Dynamic leases follow (lake#362): `MountSecrets::lease`, `renew_lease` and `revoke_lease` keep each
 lease as a record of its mount's workspace (route first, then the record `if_absent`; renewal and
 revocation rewrite it at the revision read), `MountSecrets::open_lease` finds the mount through the
 lease's route, and `expire_secret_leases` is one pass of the expiry loop: it claims due routes from
 the control store and settles each lease in its own workspace only. The server's tick runs it every
-`secret_lease_expiry_interval`; `copy_workspace_records` copies `secrets_dynamic_leases`.
+`secret_lease_expiry_interval`. The retired `secrets_dynamic_leases` table and its copy went with
+migration `0070`.
 `repository_records_api.cpp` joins a repository's routing row with its settings record (lake#315
 part 2): `create_repository_with_settings` (the record first, then the row; a refused row removes
 the record), `fill_repository_settings` (one `get_record`, or one `list_records` per workspace,
@@ -350,7 +351,7 @@ asynchronous handlers that use them; their synchronous handlers answer the routi
 description. `refs`, `push` and `replicate_repository` no longer copy refs into the control store
 (lake#319); `refs` answers `{repository_id, name, head}` from liquid. The imports in
 `export_capabilities.cpp` and `github_import_capabilities.cpp` write their description to the
-workspace, and `copy_workspace_records` gains `repositories`.
+workspace; the retired description column and its copy went with migration `0070`.
 `app_capabilities.cpp` keeps an application's settings in its workspace (lake#351):
 `register_application` writes them there with the first key ring, `get_application` and
 `list_applications` are asynchronous and fill them from the workspace (`configured_application`,
@@ -359,8 +360,8 @@ application's `workspace_id` and writes conditionally. `capabilities.cpp` reads 
 from there on the asynchronous path (`begin_passkey_registration`, `begin_passkey_sign_in` and
 `start_oauth` became asynchronous). `http_server.cpp` reads them for the hosted and custom-domain
 identity pages, the password and OAuth forms' redirects, and the application pages, which read the
-settings concurrently with their listing (`application_page_reads`). `copy_workspace_records` also
-copies `auth_applications`.
+settings concurrently with their listing (`application_page_reads`). The retired settings columns and their copy went with migration
+`0070`.
 Environments and the platform mirror live in the workspace of their repository (lake#358,
 lake#359): every platform capability in `platform_capabilities.cpp` is asynchronous and opens the
 repository's own workspace (a repository without one is `conflict` at `/repository_id`). An
@@ -369,12 +370,12 @@ caller reaches no workspace, and `list_environments`/`list_deployments` answer a
 without a workspace call to a caller who may read no environment of the repository. The
 `/deployments`, `/environments` and `/environment` pages call the registry asynchronously, and the
 owner loop hands `PlatformService::sync` an opener over the workspace caller.
-`copy_workspace_records` copies `platform_mirror` and then `platform_environments`.
+The retired platform tables and their copy went with migration `0070`.
 `app_capabilities.cpp` issues and redeems application authorization codes in the application's
 workspace (lake#363): `begin_application_authorization` writes the code there, and
 `exchange_application_authorization_code` reads the routing row for the workspace before it redeems
-the code. `copy_workspace_records` also copies `auth_app_authorization_codes`
-(`copy_application_authorization_codes`: live codes only, each written at most once).
+the code. The retired `auth_app_authorization_codes` table and its copy went with migration
+`0070`.
 
 `image_capabilities.cpp` registers `create_image_repository` (an explicit `workspace_id`, no
 default), `list_image_repositories` (the routes with each workspace's tags) and the operator-only
