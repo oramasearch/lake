@@ -178,6 +178,14 @@ cursors go through liquid's cursor API. It needs liquid `8955519` or later (liqu
 runs); no workspace is switched on dev, and the copy's snapshot
 precondition is not enforced (the move does not wait on the `0069` snapshot state yet). See `docs/architecture/workspace-store.md` and
 `docs/api/workspace-store.md`.
+A switched workspace's search index lives beside its store (decision 54 S8, lake#381, no migration):
+the catalogue, segments, artifact members and manifest are `search/` objects in bucket `lake_store`,
+written through a view of the store's backend (sealed with the workspace's data key, fenced by its
+lease) under the store's lane; loaded on first search, evicted when idle under
+`LAKE_SEARCH_MEMORY_BYTES`, and rebuilt from the repositories when missing or unreadable, never
+copied. A switch and every start drop switched workspaces from the space index on lake's volume, and
+a workspace deletion removes its index objects. `search` gains an optional `workspace_id`; the
+interim skip of switched workspaces is gone. See `docs/api/search.md`.
 
 ## Historical status — superseded 2026-09-08
 

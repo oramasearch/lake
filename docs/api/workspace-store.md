@@ -27,7 +27,7 @@ and `unassigned`: the repositories of the space without a workspace. Any unassig
 | `plan` | Reads only. Lists the workspace's repositories, live and tombstoned, with `logical_bytes` and `unique_bytes` of their refs (`size_error` when a size cannot be read). | `repositories`, `blocked` |
 | `copy` | Copies each repository with liquid's `repository::transfer` (liquid#328): every reachable object keeping its digest, its lease records, then its state keys with `LIQUID_REPO` last. A rerun copies only what is missing. Refused once the workspace is switched. | `repositories` (one transfer report each), `complete` |
 | `verify` | Writes nothing. Compares every reachable object and every state key in both stores. | `repositories` with `differences`, `complete` |
-| `switch` | Refuses the workspace's and its space's repository requests and repository creation in the workspace with `503 store_unavailable` (`Retry-After`) while it runs, lists the workspace's repositories under that hold, copies what arrived since `copy`, verifies each repository again, creates in the workspace store each one the space store never held, and only when all are complete sets `workspaces.store_moved_at`; from then on the workspace's repositories are served from its store. Requests for other workspaces' stores are not held. A repeated switch answers `switched: true` and changes nothing. | `repositories`, `switched`, `store_moved_at` |
+| `switch` | Refuses the workspace's and its space's repository requests and repository creation in the workspace with `503 store_unavailable` (`Retry-After`) while it runs, lists the workspace's repositories under that hold, copies what arrived since `copy`, verifies each repository again, creates in the workspace store each one the space store never held, and only when all are complete sets `workspaces.store_moved_at`; from then on the workspace's repositories are served from its store. Requests for other workspaces' stores are not held. A repeated switch answers `switched: true` and changes nothing. A completed switch then drops from the space's search index on lake's volume what it holds of the switched repositories (lake#381); the workspace's own index is built beside its store on its first search. | `repositories`, `switched`, `store_moved_at`, `space_index_repositories_dropped` (or `space_index_error`) |
 
 A transfer report has `repository_id`, `absent` (the space store never held it: nothing to copy),
 `complete`, `objects`, `objects_present`, `objects_written`, `bytes_written`, `state_written`,
@@ -52,7 +52,9 @@ A transfer report has `repository_id`, `absent` (the space store never held it: 
   never creates an empty one in its place.
 - `copy` and `verify` refuse only the workspace's own requests while they run; the space's other
   workspaces wait at most one repository's copy. `switch` refuses the space's requests too.
-- Search does not index or return the workspace's repositories once it is switched, until lake#381.
+- Once switched, the workspace's search index lives beside its store as sealed `search/` objects and
+  is rebuilt from its repositories on first use; releases made before the switch keep no tag
+  snapshot there ([search.md](search.md#where-the-index-lives-lake381-decision-54-s8)).
 - liquid's sync client does not yet retry a `503` with `Retry-After` (liquid#340): rerun a
   `liquid push` or `pull` refused during a move.
 

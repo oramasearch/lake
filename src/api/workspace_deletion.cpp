@@ -302,8 +302,8 @@ std::expected<void, std::string> finish_workspace_deletion(const ApiContext& con
         return std::unexpected("no control store");
     }
     // Repositories: their content stays in the space's liquid store until the collector reclaims
-    // it (their retention has ended); their search segments are dropped now. After lake#380 the
-    // workspace's store goes with its Zetta.
+    // it (their retention has ended); what the space's search index holds of them is dropped now.
+    // After lake#380 the workspace's store goes with its Zetta.
     for (const control::WorkspaceDeletionItem& repository : deletion.repositories) {
         if (context.workspace_content && context.workspace_content->drop_repository_index) {
             const auto dropped = context.workspace_content->drop_repository_index(
@@ -364,6 +364,19 @@ std::expected<void, std::string> finish_workspace_deletion(const ApiContext& con
                                           "image/" + image.name, {{"image", image.name}});
         if (!recorded) {
             return recorded;
+        }
+    }
+    // The workspace's search index (lake#381) goes before its store closes.
+    if (context.workspace_content && context.workspace_content->drop_workspace_index) {
+        const auto dropped = context.workspace_content->drop_workspace_index(deletion.workspace_id);
+        if (!dropped) {
+            return std::unexpected("could not drop the workspace's search index: " + dropped.error());
+        }
+    } else if (context.search) {
+        const auto dropped = context.search->drop_workspace(deletion.workspace_id);
+        if (!dropped) {
+            return std::unexpected("could not drop the workspace's search index: " +
+                                   dropped.error().message);
         }
     }
     if (context.workspace_content && context.workspace_content->close_workspace_store) {

@@ -25,6 +25,7 @@
 #include <map>
 #include <memory>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1380,42 +1381,265 @@ TEST(WorkspaceStoreMove, ACopyIntoADroppedBucketFailsInsteadOfReportingAbsent) {
     }
 }
 
-TEST(WorkspaceStoreMove, ASwitchedWorkspacesRepositoryIsNotIndexedOnTheVolumeOrReturned) {
+// ---- search beside the workspace store (lake#381) ---------------------------------------------
+
+constexpr std::string_view alpha_term = "alphaterm381";
+constexpr std::string_view beta_term = "betaterm381";
+
+// The search index objects of a bucket.
+std::map<std::string, std::string> search_objects(lake::test::FakeZettaObjects& zetta,
+                                                  const std::string& endpoint) {
+    std::map<std::string, std::string> output;
+    for (const auto& [key, bytes] : zetta.objects(endpoint)) {
+        if (key.starts_with(lake::search::workspace_index_prefix)) {
+            output.emplace(key, bytes);
+        }
+    }
+    return output;
+}
+
+bool holds_text(const std::map<std::string, std::string>& objects, std::string_view text) {
+    return std::ranges::any_of(objects, [&](const auto& object) {
+        return object.second.find(text) != std::string::npos;
+    });
+}
+
+// Every file under the space's index directory on lake's volume, with its contents.
+std::string space_index_text(const std::filesystem::path& directory) {
+    std::string output;
+    if (!std::filesystem::exists(directory)) {
+        return output;
+    }
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(directory)) {
+        if (entry.is_regular_file()) {
+            std::ifstream file(entry.path(), std::ios::binary);
+            output += entry.path().filename().string() + "\n";
+            output += std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        }
+    }
+    return output;
+}
+
+std::set<std::string> workspaces_of(const json& body) {
+    std::set<std::string> output;
+    for (const json& item : body["value"]["items"]) {
+        output.insert(item.value("workspace_id", std::string()));
+    }
+    return output;
+}
+
+TEST(WorkspaceStoreSearch, TwoWorkspacesOfASpaceKeepSealedIndexesBesideTheirStoresAndARestartReloadsThem) {
     MoveRig rig;
     ASSERT_NO_FATAL_FAILURE(rig.SetUp());
-    const auto history = [&](const lake::control::Repository& repository) {
-        const auto [status, body] =
-            rig.call("GET", "/v1/search?query=readme&customer=" + rig.customer_id +
-                                "&repository=" + repository.id + "&history=true");
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    const std::string endpoint_b = "http://" + rig.beta + ".test";
+    const auto search = [&](const std::string& query) {
+        const auto [status, body] = rig.call("GET", "/v1/search?query=" + query);
         EXPECT_EQ(status, 200U) << body.dump();
         return body;
     };
-    // A text-only repository in alpha (search's history scan does not handle repo_a's binary blob).
+    // Before the switch, a history scan puts alpha's text into the space's index on lake's volume.
+    const auto alpha_text = rig.create(rig.alpha, "alpha-text");
+    ASSERT_TRUE(alpha_text);
+    ASSERT_EQ(rig.commit(*alpha_text, "README.md", "alpha readme " + std::string(alpha_term)).first, 200U);
+    const auto [scanned, scan] = rig.call("GET", "/v1/search?query=" + std::string(alpha_term) +
+                                                     "&customer=" + rig.customer_id + "&repository=" +
+                                                     alpha_text->id + "&history=true");
+    ASSERT_EQ(scanned, 200U) << scan.dump();
+    ASSERT_NE(scan.dump().find("README.md"), std::string::npos);
+    const auto space_index = rig.root / rig.customer_id / "index";
+    ASSERT_NE(space_index_text(space_index).find(alpha_term), std::string::npos);
+
+    // The switch drops it from the space's index; nothing of either switched workspace is
+    // written there afterwards.
+    ASSERT_EQ(rig.move(rig.alpha, "copy").first, 200U);
+    const auto [switched_a, switch_a] = rig.move(rig.alpha, "switch");
+    ASSERT_EQ(switched_a, 200U) << switch_a.dump();
+    EXPECT_TRUE(switch_a["value"].contains("space_index_repositories_dropped")) << switch_a.dump();
+    EXPECT_EQ(space_index_text(space_index).find(alpha_term), std::string::npos);
+    ASSERT_EQ(rig.move(rig.beta, "copy").first, 200U);
+    ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
+    const auto beta_text = rig.create(rig.beta, "beta-text");
+    ASSERT_TRUE(beta_text);
+    ASSERT_EQ(rig.commit(*beta_text, "README.md", "beta readme " + std::string(beta_term)).first, 200U);
+
+    // A space-wide search builds each workspace's index from its store on first use and answers
+    // from both, each hit naming its workspace.
+    const auto alpha_hits = search(std::string(alpha_term) + "&customer=" + rig.customer_id);
+    EXPECT_EQ(workspaces_of(alpha_hits), (std::set<std::string>{rig.alpha})) << alpha_hits.dump();
+    const auto beta_hits = search(std::string(beta_term) + "&customer=" + rig.customer_id);
+    EXPECT_EQ(workspaces_of(beta_hits), (std::set<std::string>{rig.beta})) << beta_hits.dump();
+    // One workspace's index holds nothing of the other's.
+    EXPECT_TRUE(search(std::string(alpha_term) + "&workspace_id=" + rig.beta)["value"]["items"].empty());
+    EXPECT_TRUE(search(std::string(beta_term) + "&workspace_id=" + rig.alpha)["value"]["items"].empty());
+    EXPECT_EQ(search(std::string(alpha_term) + "&workspace_id=" + rig.alpha)["value"]["items"].size(), 1U);
+
+    // The indexes are objects beside each store, sealed: no term in the clear in either Zetta,
+    // and none on lake's volume.
+    const auto objects_a = search_objects(*rig.zetta, endpoint_a);
+    const auto objects_b = search_objects(*rig.zetta, endpoint_b);
+    EXPECT_TRUE(objects_a.contains("search/manifest.json"));
+    EXPECT_TRUE(objects_a.contains("search/blobs.json"));
+    EXPECT_TRUE(objects_b.contains("search/manifest.json"));
+    for (const std::string_view term : {alpha_term, beta_term, std::string_view("readme")}) {
+        EXPECT_FALSE(holds_text(rig.zetta->objects(endpoint_a), term)) << term;
+        EXPECT_FALSE(holds_text(rig.zetta->objects(endpoint_b), term)) << term;
+    }
+    EXPECT_EQ(space_index_text(space_index).find(alpha_term), std::string::npos);
+    EXPECT_EQ(space_index_text(space_index).find(beta_term), std::string::npos);
+
+    // A restarted lake loads them from the workspace Zettas and rewrites nothing.
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    const auto reloaded = search(std::string(alpha_term) + "&customer=" + rig.customer_id);
+    EXPECT_EQ(workspaces_of(reloaded), (std::set<std::string>{rig.alpha})) << reloaded.dump();
+    EXPECT_EQ(search_objects(*rig.zetta, endpoint_a), objects_a) << "a reload is not a rebuild";
+    // The other space's unswitched repository is still searched from its space's index.
+    const auto [other_status, other] =
+        rig.call("GET", "/v1/search?query=gamma&customer=" + rig.other_customer_id +
+                            "&repository=" + rig.repo_c.id + "&history=true");
+    ASSERT_EQ(other_status, 200U) << other.dump();
+    EXPECT_NE(other.dump().find("README.md"), std::string::npos);
+}
+
+TEST(WorkspaceStoreSearch, AWipedWorkspaceIndexIsRebuiltNotServedEmpty) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
     const auto text = rig.create(rig.alpha, "alpha-text");
     ASSERT_TRUE(text);
-    ASSERT_EQ(rig.commit(*text, "README.md", "alpha text readme").first, 200U);
-    EXPECT_NE(history(*text).dump().find("README.md"), std::string::npos) << "searchable before";
-    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
-    ASSERT_EQ(rig.commit(*text, "after.txt", "readme after the switch").first, 200U);
-    ASSERT_EQ(rig.call("POST", "/v1/reindex_artifacts", {{"id", text->id}}).first, 200U);
-    // Nothing of the switched repository is written into the space's index on lake's volume.
-    const auto index = rig.root / rig.customer_id / "index";
-    if (std::filesystem::exists(index)) {
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(index)) {
-            if (!entry.is_regular_file()) {
-                continue;
-            }
-            EXPECT_EQ(entry.path().filename().string().find(text->id), std::string::npos)
-                << entry.path();
-            std::ifstream file(entry.path());
-            const std::string contents((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            EXPECT_EQ(contents.find(text->id), std::string::npos) << entry.path();
-            EXPECT_EQ(contents.find("readme after the switch"), std::string::npos) << entry.path();
+    ASSERT_EQ(rig.commit(*text, "README.md", "alpha readme " + std::string(alpha_term)).first, 200U);
+    const std::string query = "/v1/search?query=" + std::string(alpha_term) + "&workspace_id=" + rig.alpha;
+    ASSERT_EQ(rig.call("GET", query).second["value"]["items"].size(), 1U);
+    // The workspace Zetta loses the index.
+    for (const auto& [key, bytes] : search_objects(*rig.zetta, endpoint_a)) {
+        rig.zetta->erase_object(endpoint_a, key);
+    }
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    const auto [status, body] = rig.call("GET", query);
+    ASSERT_EQ(status, 200U) << body.dump();
+    EXPECT_EQ(body["value"]["items"].size(), 1U) << "rebuilt from the store, not served empty";
+    EXPECT_TRUE(search_objects(*rig.zetta, endpoint_a).contains("search/manifest.json"));
+    // A segment the manifest names is gone: rebuilt too.
+    for (const auto& [key, bytes] : search_objects(*rig.zetta, endpoint_a)) {
+        if (key.find("segment-") != std::string::npos) {
+            rig.zetta->erase_object(endpoint_a, key);
         }
     }
-    // Nor is it returned, while the space's other repository still is.
-    EXPECT_EQ(history(*text).dump().find("README.md"), std::string::npos);
-    EXPECT_NE(history(rig.repo_b).dump().find("README.md"), std::string::npos);
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    EXPECT_EQ(rig.call("GET", query).second["value"]["items"].size(), 1U);
+    // An object that no longer authenticates under the workspace's key: rebuilt too.
+    std::string catalogue = search_objects(*rig.zetta, endpoint_a).at("search/blobs.json");
+    catalogue[catalogue.size() - 20] = static_cast<char>(catalogue[catalogue.size() - 20] ^ 0x01);
+    rig.zetta->set_object(endpoint_a, "search/blobs.json", catalogue);
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    const auto [tampered_status, tampered] = rig.call("GET", query);
+    ASSERT_EQ(tampered_status, 200U) << tampered.dump();
+    EXPECT_EQ(tampered["value"]["items"].size(), 1U);
+    EXPECT_NE(search_objects(*rig.zetta, endpoint_a).at("search/blobs.json"), catalogue);
+}
+
+TEST(WorkspaceStoreSearch, PushesAndSearchesInOneWorkspaceRunSideBySide) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    std::vector<lake::control::Repository> pushed;
+    for (int index = 0; index < 6; ++index) {
+        const auto created = rig.create(rig.alpha, "pushed-" + std::to_string(index));
+        ASSERT_TRUE(created);
+        pushed.push_back(*created);
+    }
+    const auto text = rig.create(rig.alpha, "alpha-text");
+    ASSERT_TRUE(text);
+    std::atomic<bool> done{false};
+    std::atomic<int> failures{0};
+    std::thread searcher([&] {
+        while (!done.load()) {
+            for (const std::string& query :
+                 {"/v1/search?query=pushterm&customer=" + rig.customer_id,
+                  "/v1/search?query=pushterm&workspace_id=" + rig.alpha,
+                  "/v1/search?query=written&customer=" + rig.customer_id + "&repository=" + text->id +
+                      "&history=true"}) {
+                const auto [status, body] = rig.call("GET", query);
+                // A lane at its admission limit answers 503 at once; anything else is a failure.
+                if (status != 200U && status != 503U) {
+                    failures.fetch_add(1);
+                    ADD_FAILURE() << status << " " << body.dump();
+                }
+            }
+        }
+    });
+    std::thread committer([&] {
+        for (int index = 0; index < 8; ++index) {
+            const std::string path = "file-" + std::to_string(index) + ".txt";
+            const auto [status, body] = rig.commit(*text, path, "written beside search " + path);
+            if (status != 200U) {
+                failures.fetch_add(1);
+                ADD_FAILURE() << body.dump();
+            }
+        }
+    });
+    for (std::size_t index = 0; index < pushed.size(); ++index) {
+        const std::string error = rig.push(pushed[index], "pushed.txt",
+                                           "pushterm number" + std::to_string(index) + " lands");
+        EXPECT_TRUE(error.empty()) << error;
+    }
+    committer.join();
+    done.store(true);
+    searcher.join();
+    EXPECT_EQ(failures.load(), 0);
+    // Each push reindexed its repository in the workspace's index.
+    const auto [status, body] =
+        rig.call("GET", "/v1/search?query=pushterm&workspace_id=" + rig.alpha + "&limit=100");
+    ASSERT_EQ(status, 200U) << body.dump();
+    std::set<std::string> repositories;
+    for (const json& item : body["value"]["items"]) {
+        repositories.insert(item.value("repository", std::string()));
+    }
+    EXPECT_EQ(repositories.size(), pushed.size()) << body.dump();
+    // Reindexing publishes the committed branch tip.
+    ASSERT_EQ(rig.call("POST", "/v1/reindex_artifacts", {{"id", text->id}}).first, 200U);
+    EXPECT_EQ(rig.call("GET", "/v1/search?query=written&workspace_id=" + rig.alpha + "&limit=100")
+                  .second["value"]["items"]
+                  .size(),
+              8U);
+    EXPECT_FALSE(holds_text(rig.zetta->objects(endpoint_a), "pushterm"));
+    // Everything acknowledged reloads whole.
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    EXPECT_EQ(rig.call("GET", "/v1/search?query=pushterm&workspace_id=" + rig.alpha + "&limit=100")
+                  .second["value"]["items"]
+                  .size(),
+              pushed.size());
+}
+
+TEST(WorkspaceStoreSearch, DeletingAWorkspaceRemovesItsIndexObjects) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
+    const auto text = rig.create(rig.alpha, "alpha-text");
+    ASSERT_TRUE(text);
+    ASSERT_EQ(rig.commit(*text, "README.md", "alpha readme " + std::string(alpha_term)).first, 200U);
+    ASSERT_EQ(rig.call("GET", "/v1/search?query=" + std::string(alpha_term) + "&customer=" + rig.customer_id)
+                  .second["value"]["items"]
+                  .size(),
+              1U);
+    ASSERT_FALSE(search_objects(*rig.zetta, endpoint_a).empty());
+    const auto [status, body] = rig.call("POST", "/v1/delete_workspace",
+                                         {{"customer_id", rig.customer_id},
+                                          {"workspace_id", rig.alpha},
+                                          {"confirm", "alpha"}});
+    ASSERT_EQ(status, 200U) << body.dump();
+    EXPECT_TRUE(search_objects(*rig.zetta, endpoint_a).empty()) << "the index went with the workspace";
+    const auto [after_status, after] =
+        rig.call("GET", "/v1/search?query=" + std::string(alpha_term) + "&customer=" + rig.customer_id);
+    ASSERT_EQ(after_status, 200U) << after.dump();
+    EXPECT_TRUE(after["value"]["items"].empty());
+    EXPECT_EQ(rig.call("GET", "/v1/search?query=" + std::string(alpha_term) + "&workspace_id=" + rig.alpha)
+                  .first,
+              400U);
 }
 
 TEST(WorkspaceStoreMove, ARowLeftWithoutItsRepositoryIsCleanedUpByTheNextCreate) {
@@ -2051,6 +2275,129 @@ TEST(WorkspaceStoreZetta, TheBackendOnARealZettaHoldsOnlyCiphertextAndItsLatency
                 static_cast<unsigned long long>(counters->lists.load()),
                 static_cast<unsigned long long>(counters->removes.load()),
                 static_cast<unsigned long long>(counters->barriers.load()));
+}
+
+// lake#381 on a real Zetta: a workspace's index written through its store's backend is sealed in
+// the bucket, reloads in a new process, and is rebuilt once wiped.
+TEST(WorkspaceStoreZetta, TheSearchIndexOnARealZettaIsSealedReloadsAndIsRebuilt) {
+    RealZetta zetta;
+    if (!zetta.start()) {
+        GTEST_SKIP() << "set LAKE_TEST_ZETTA_BINARY to a zetta built from origin/dev";
+    }
+    const std::string workspace = lake::control::new_uuid_v4();
+    auto client = std::make_shared<ZettaObjectClient>(lake::control::make_zetta_object_transport(),
+                                                      ObjectEndpoint{zetta.url, zetta.token});
+    ASSERT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
+    auto owner = std::make_shared<ZettaStoreOwner>(client, 30s);
+    auto backend = std::make_shared<ZettaObjectBackend>(
+        client, ZettaObjectBackendOptions{.workspace_id = workspace,
+                                          .instance_kek = std::string(kek),
+                                          .create_key = true});
+    liquid::store_options options;
+    options.backend = backend;
+    options.owner = owner;
+    auto store = liquid::runtime::block_on(liquid::store::open(zetta.directory / "unused", std::move(options)));
+    ASSERT_TRUE(store) << store.error().message;
+    const std::filesystem::path identifier = zetta.directory / "repositories" / "searched";
+    liquid::repository_options repository_options;
+    repository_options.store = &*store;
+    auto repository = liquid::runtime::block_on(liquid::repository::create(identifier, repository_options));
+    ASSERT_TRUE(repository) << repository.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(
+        repository->write("README.md", bytes_of("searched on zetta " + std::string(alpha_term)))));
+    const auto change = liquid::runtime::block_on(repository->cut("searched"));
+    ASSERT_TRUE(change);
+    ASSERT_TRUE(liquid::runtime::block_on(repository->set_ref("main", *change)));
+
+    auto view = backend->fenced(owner->fence());
+    ASSERT_TRUE(view);
+    std::mutex lane;
+    const auto index = [&]() {
+        lake::search::WorkspaceIndex output;
+        output.customer = "space";
+        output.workspace = workspace;
+        output.generation = owner->fence();
+        output.objects = lake::search::make_store_index_objects(
+            *view, [&]() -> lake::search::Result<void> {
+                if (!liquid::runtime::block_on(client->barrier())) {
+                    return std::unexpected(lake::search::Error{"unavailable", "barrier failed"});
+                }
+                return {};
+            });
+        output.repositories = []() -> lake::search::Result<std::vector<std::string>> {
+            return std::vector<std::string>{"searched"};
+        };
+        output.open = [&](const std::string&) -> lake::search::Result<liquid::repository*> {
+            return &*repository;
+        };
+        return output;
+    };
+    const auto configure = [&](lake::search::Service& service) {
+        lake::search::WorkspaceAccess access;
+        access.lend = [&](const std::string&, const std::string&)
+            -> lake::search::Result<lake::search::BorrowedWorkspace> {
+            return lake::search::BorrowedWorkspace{std::make_shared<std::unique_lock<std::mutex>>(lane),
+                                                   index()};
+        };
+        access.route = [&](const std::string&, const std::string&)
+            -> lake::search::Result<std::optional<std::string>> {
+            return std::optional<std::string>{workspace};
+        };
+        access.switched = [&](const std::string&)
+            -> lake::search::Result<std::vector<std::pair<std::string, std::string>>> {
+            return std::vector<std::pair<std::string, std::string>>{{"space", workspace}};
+        };
+        service.set_workspace_access(std::move(access));
+    };
+    lake::control::InMemoryStore control;
+    const lake::search::Query query{std::string(alpha_term), "space", "", "", 20, "", false, workspace};
+    const auto search_keys = [&]() {
+        std::map<std::string, std::string> output;
+        auto listed = liquid::runtime::block_on(client->list(std::string(lake::search::workspace_index_prefix)));
+        EXPECT_TRUE(listed);
+        for (const auto& object : listed ? *listed : std::vector<lake::control::ObjectListEntry>{}) {
+            auto bytes = liquid::runtime::block_on(client->get_all(object.key));
+            EXPECT_TRUE(bytes) << object.key;
+            output[object.key] = bytes ? *bytes : std::string();
+        }
+        return output;
+    };
+    const auto root = zetta.directory / "search-root";
+    {
+        lake::search::Service service(root);
+        configure(service);
+        const auto built = service.query(query, "admin", control);
+        ASSERT_TRUE(built) << built.error().message;
+        ASSERT_EQ(built->items.size(), 1U);
+    }
+    const auto sealed = search_keys();
+    ASSERT_TRUE(sealed.contains("search/manifest.json"));
+    ASSERT_TRUE(sealed.contains("search/blobs.json"));
+    EXPECT_FALSE(holds_text(sealed, alpha_term)) << "the index holds only ciphertext in the Zetta";
+    EXPECT_FALSE(holds_text(sealed, "README.md"));
+    EXPECT_FALSE(std::filesystem::exists(root));
+    {
+        lake::search::Service reopened(root);
+        configure(reopened);
+        const auto reloaded = reopened.query(query, "admin", control);
+        ASSERT_TRUE(reloaded) << reloaded.error().message;
+        EXPECT_EQ(reloaded->items.size(), 1U);
+        EXPECT_EQ(search_keys(), sealed) << "a reload is not a rebuild";
+    }
+    for (const auto& [key, bytes] : sealed) {
+        ASSERT_TRUE(liquid::runtime::block_on(client->remove(key, owner->fence())));
+    }
+    // The view's directory is its own; a fresh one sees the bucket as the wipe left it.
+    view = backend->fenced(owner->fence());
+    ASSERT_TRUE(view);
+    lake::search::Service rebuilt(root);
+    configure(rebuilt);
+    const auto answered = rebuilt.query(query, "admin", control);
+    ASSERT_TRUE(answered) << answered.error().message;
+    EXPECT_EQ(answered->items.size(), 1U) << "rebuilt, not served empty";
+    EXPECT_TRUE(search_keys().contains("search/manifest.json"));
+    repository = std::unexpected(liquid::error{liquid::errc::not_found, "closed", ""});
+    ASSERT_TRUE(liquid::runtime::block_on(store->close()));
 }
 
 } // namespace

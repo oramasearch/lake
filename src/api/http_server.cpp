@@ -4025,6 +4025,9 @@ private:
         std::shared_ptr<control::ZettaObjectBackend> backend;
         std::shared_ptr<control::ZettaStoreOwner> owner;
         std::unique_ptr<liquid::store> store;
+        // The view search writes its index through (lake#381): the same backend and data key,
+        // fenced by this store's lease, used only for keys under `search/`.
+        std::shared_ptr<liquid::store_backend> search_objects;
 
         // A store whose lease was lost, or one a write failed on, is closed and opened again.
         bool usable() const {
@@ -5051,6 +5054,19 @@ private:
         return route;
     }
 
+    // The search index's view of an open workspace store; mutex_ is held by the caller.
+    static SyncStoreResult<std::shared_ptr<liquid::store_backend>>
+    search_objects_locked(WorkspaceStore& store) {
+        if (!store.search_objects) {
+            auto view = store.backend->fenced(store.owner->fence());
+            if (!view) {
+                return std::unexpected(error_of(view.error()));
+            }
+            store.search_objects = *view;
+        }
+        return store.search_objects;
+    }
+
     // Takes the lane of the store that serves the repository and opens it there. A switch of the
     // repository's space between the route and the lane starts it again, so a request held by a
     // switch is answered from the store the switch chose.
@@ -5572,23 +5588,125 @@ public:
         return std::unexpected(entered.state.error());
     }
 
-    // Whether a workspace store serves the repository. A repository whose route cannot be read
-    // counts as served by one, so search never indexes it centrally by mistake.
-    bool served_by_workspace(const std::string& customer_id, const std::string& repository_id) {
-        const auto route = workspace_route(customer_id, repository_id);
-        return !route || route->has_value();
+    // The workspace whose own store serves the repository, or nothing for its space's store.
+    SyncStoreResult<std::optional<std::string>> route_of(const std::string& customer_id,
+                                                         const std::string& repository_id) {
+        return workspace_route(customer_id, repository_id);
     }
 
+    // What search borrows: the repository, and for one served by a workspace store, the view its
+    // index is written through and the store's fence (lake#381). `hold` keeps the store's lane.
+    struct LentRepository {
+        std::shared_ptr<void> hold;
+        liquid::repository* repository = nullptr;
+        std::string workspace;
+        std::shared_ptr<liquid::store_backend> search_objects;
+        std::shared_ptr<control::ZettaObjectClient> client;
+        std::uint64_t fence = 0;
+    };
+
     // Lends search the repository from the store that serves it, under that store's lane and on
-    // the one open instance (lake#380): `first` holds the lane until search lets go.
-    SyncStoreResult<std::pair<std::shared_ptr<void>, liquid::repository*>>
-    lend_repository(const std::string& customer_id, const std::string& repository_id) {
+    // the one open instance (lake#380).
+    SyncStoreResult<LentRepository> lend_repository(const std::string& customer_id,
+                                                    const std::string& repository_id) {
         auto entered = std::make_shared<Entered>(enter_repository(customer_id, repository_id));
         if (!entered->state) {
             return std::unexpected(entered->state.error());
         }
-        liquid::repository* repository = (*entered->state)->subject.get();
-        return std::pair<std::shared_ptr<void>, liquid::repository*>{entered, repository};
+        LentRepository output;
+        output.repository = (*entered->state)->subject.get();
+        output.workspace = (*entered->state)->workspace;
+        if (!output.workspace.empty()) {
+            std::lock_guard maps(mutex_);
+            const auto found = workspace_stores_.find(output.workspace);
+            if (found == workspace_stores_.end()) {
+                return std::unexpected(SyncStoreError{
+                    "store_unavailable", "the workspace store closed while search borrowed it; retry"});
+            }
+            auto objects = search_objects_locked(*found->second);
+            if (!objects) {
+                return std::unexpected(objects.error());
+            }
+            output.search_objects = *objects;
+            output.client = found->second->client;
+            output.fence = found->second->owner->fence();
+        }
+        output.hold = std::move(entered);
+        return output;
+    }
+
+    struct LentWorkspace {
+        std::shared_ptr<void> hold;
+        std::string customer_id;
+        std::shared_ptr<liquid::store_backend> search_objects;
+        std::shared_ptr<control::ZettaObjectClient> client;
+        std::uint64_t fence = 0;
+    };
+
+    // Lends search a workspace's index objects under the workspace store's lane, opening the
+    // store on first use (lake#381). With `only_if_open` (a workspace deletion) nothing is opened:
+    // a store lake does not have open lends nothing.
+    SyncStoreResult<std::optional<LentWorkspace>> lend_workspace(const std::string& customer_id,
+                                                                 const std::string& workspace_id,
+                                                                 bool only_if_open) {
+        if (!path_component_is_safe(workspace_id) ||
+            (!customer_id.empty() && !path_component_is_safe(customer_id))) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid workspace location"});
+        }
+        LaneLock lane;
+        if (only_if_open) {
+            lane = hold("w:" + workspace_id);
+        } else {
+            auto admitted = admit("w:" + workspace_id);
+            if (!admitted) {
+                return std::unexpected(admitted.error());
+            }
+            lane = std::move(*admitted);
+        }
+        WorkspaceStore* store = nullptr;
+        if (only_if_open) {
+            std::lock_guard maps(mutex_);
+            const auto found = workspace_stores_.find(workspace_id);
+            if (found == workspace_stores_.end() || !found->second->usable()) {
+                return std::optional<LentWorkspace>{};
+            }
+            store = found->second.get();
+        } else {
+            auto opened = open_workspace(customer_id, workspace_id, false);
+            if (!opened) {
+                return std::unexpected(opened.error());
+            }
+            store = *opened;
+        }
+        LentWorkspace output;
+        output.customer_id = store->customer_id;
+        {
+            std::lock_guard maps(mutex_);
+            auto objects = search_objects_locked(*store);
+            if (!objects) {
+                return std::unexpected(objects.error());
+            }
+            output.search_objects = *objects;
+        }
+        output.client = store->client;
+        output.fence = store->owner->fence();
+        output.hold = std::make_shared<LaneLock>(std::move(lane));
+        return std::optional<LentWorkspace>{std::move(output)};
+    }
+
+    // A repository of a workspace whose lane the caller holds through a lend (a rebuild of the
+    // workspace's index).
+    SyncStoreResult<liquid::repository*> open_lent_repository(const std::string& customer_id,
+                                                              const std::string& repository_id,
+                                                              const std::string& workspace_id) {
+        if (!path_component_is_safe(customer_id) || !path_component_is_safe(repository_id)) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid repository location"});
+        }
+        auto state = open_repository(customer_id, repository_id, std::optional<std::string>{workspace_id});
+        if (!state) {
+            return std::unexpected(state.error());
+        }
+        return (*state)->subject.get();
     }
 
     SyncStoreResult<WorkspaceStoreTransfer>
@@ -6348,6 +6466,17 @@ struct ApiServer::Impl {
             }
             return {};
         },
+        .drop_workspace_index = [this](const std::string& workspace_id)
+            -> std::expected<void, std::string> {
+            if (!options.search) {
+                return {};
+            }
+            const auto dropped = options.search->drop_workspace(workspace_id);
+            if (!dropped) {
+                return std::unexpected(dropped.error().message);
+            }
+            return {};
+        },
         // lake#380: the workspace's own store is closed and its bucket lease released before the
         // deletion is reported; the workspace Zetta's deletion destroys its bytes.
         .close_workspace_store = [this](const std::string& workspace_id)
@@ -6439,6 +6568,35 @@ struct ApiServer::Impl {
         maintenance_cv.notify_all();
         if (maintenance_thread.joinable()) {
             maintenance_thread.join();
+        }
+    }
+
+    // lake#381: each space's search index on lake's volume drops what it holds of repositories now
+    // served by a workspace store (their index is rebuilt beside that store), once at start.
+    void purge_space_search_indexes() {
+        if (!options.search || options.store_root.empty()) {
+            return;
+        }
+        std::error_code error;
+        const std::filesystem::path root(options.store_root);
+        if (!std::filesystem::exists(root, error)) {
+            return;
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(root, error)) {
+            if (!entry.is_directory() || !std::filesystem::exists(entry.path() / "index", error)) {
+                continue;
+            }
+            const std::string customer_id = entry.path().filename().string();
+            const auto dropped = options.search->drop_switched(customer_id);
+            if (!dropped) {
+                std::println(stderr, "search index purge {}: {}", customer_id, dropped.error().message);
+            } else if (*dropped > 0 || !std::filesystem::exists(entry.path() / "index", error)) {
+                std::println(stderr, "search index purge {}: dropped {} repositories of switched workspaces{}",
+                             customer_id, *dropped,
+                             std::filesystem::exists(entry.path() / "index", error)
+                                 ? ""
+                                 : "; the space index is empty and was removed");
+            }
         }
     }
 
@@ -6569,14 +6727,164 @@ struct ApiServer::Impl {
                 if (!lent) {
                     return std::unexpected(search::Error{lent.error().code, lent.error().message});
                 }
-                return search::BorrowedRepository{std::move(lent->first), lent->second};
+                search::BorrowedRepository output{lent->hold, lent->repository, std::nullopt};
+                if (!lent->workspace.empty()) {
+                    output.workspace = workspace_index(customer_id, lent->workspace,
+                                                       lent->search_objects, lent->client, lent->fence);
+                }
+                return output;
             });
-        // Until lake#381 puts the index beside the workspace store, a switched workspace's
-        // repositories are neither indexed on lake's volume nor returned.
-        options.search->set_workspace_served(
-            [this](const std::string& customer_id, const std::string& repository_id) {
-                return sync_store.served_by_workspace(customer_id, repository_id);
+        // lake#381: a switched workspace's index lives beside its store, in its workspace Zetta.
+        search::WorkspaceAccess access;
+        access.lend = [this](const std::string& customer_id, const std::string& workspace_id)
+            -> search::Result<search::BorrowedWorkspace> {
+            std::string customer = customer_id;
+            if (options.store) {
+                const auto workspace = options.store->get_workspace(workspace_id);
+                if (!workspace) {
+                    return std::unexpected(
+                        search::Error{workspace.error().code, workspace.error().message});
+                }
+                if (!customer.empty() && workspace->customer_id != customer) {
+                    return std::unexpected(
+                        search::Error{"invalid_input", "the workspace is not in this space"});
+                }
+                if (workspace->store_moved_at.empty() || workspace->desired == "deleted") {
+                    return std::unexpected(search::Error{
+                        "invalid_input", "the workspace's repositories are not served from its "
+                                         "own store, so it has no index of its own"});
+                }
+                customer = workspace->customer_id;
+            }
+            auto lent = sync_store.lend_workspace(customer, workspace_id, false);
+            if (!lent) {
+                return std::unexpected(search::Error{lent.error().code, lent.error().message});
+            }
+            return search::BorrowedWorkspace{
+                (*lent)->hold,
+                workspace_index(customer, workspace_id, (*lent)->search_objects, (*lent)->client,
+                                (*lent)->fence)};
+        };
+        access.lend_if_open = [this](const std::string& workspace_id)
+            -> search::Result<std::optional<search::BorrowedWorkspace>> {
+            auto lent = sync_store.lend_workspace("", workspace_id, true);
+            if (!lent) {
+                return std::unexpected(search::Error{lent.error().code, lent.error().message});
+            }
+            if (!*lent) {
+                return std::optional<search::BorrowedWorkspace>{};
+            }
+            return std::optional<search::BorrowedWorkspace>{search::BorrowedWorkspace{
+                (*lent)->hold, workspace_index((*lent)->customer_id, workspace_id,
+                                               (*lent)->search_objects, (*lent)->client,
+                                               (*lent)->fence)}};
+        };
+        access.switched = [this](const std::string& customer_id)
+            -> search::Result<std::vector<std::pair<std::string, std::string>>> {
+            std::vector<std::pair<std::string, std::string>> output;
+            if (!options.store) {
+                return output;
+            }
+            std::vector<std::string> customers;
+            if (customer_id.empty()) {
+                const auto listed = options.store->list_customers(10'000);
+                if (!listed) {
+                    return std::unexpected(search::Error{listed.error().code, listed.error().message});
+                }
+                for (const control::Customer& customer : *listed) {
+                    customers.push_back(customer.id);
+                }
+            } else {
+                customers.push_back(customer_id);
+            }
+            for (const std::string& customer : customers) {
+                const auto rows = options.store->list_workspaces(customer);
+                if (!rows) {
+                    return std::unexpected(search::Error{rows.error().code, rows.error().message});
+                }
+                for (const control::Workspace& workspace : *rows) {
+                    if (!workspace.store_moved_at.empty() && workspace.desired != "deleted") {
+                        output.emplace_back(customer, workspace.id);
+                    }
+                }
+            }
+            return output;
+        };
+        access.route = [this](const std::string& customer_id, const std::string& repository_id)
+            -> search::Result<std::optional<std::string>> {
+            std::string customer = customer_id;
+            if (customer.empty() && options.store) {
+                const auto repository = options.store->get_repository(repository_id);
+                if (!repository) {
+                    return std::unexpected(
+                        search::Error{repository.error().code, repository.error().message});
+                }
+                customer = repository->customer_id;
+            }
+            auto route = sync_store.route_of(customer, repository_id);
+            if (!route) {
+                return std::unexpected(search::Error{route.error().code, route.error().message});
+            }
+            return *route;
+        };
+        options.search->set_workspace_access(std::move(access));
+        options.search->set_memory_bound(options.search_memory_bytes);
+    }
+
+    // One workspace's index as search sees it, valid while the lend's hold is kept.
+    search::WorkspaceIndex workspace_index(const std::string& customer_id,
+                                           const std::string& workspace_id,
+                                           std::shared_ptr<liquid::store_backend> objects,
+                                           std::shared_ptr<control::ZettaObjectClient> client,
+                                           std::uint64_t fence) {
+        search::WorkspaceIndex index;
+        index.customer = customer_id;
+        index.workspace = workspace_id;
+        index.generation = fence;
+        // Durability is Zetta's `:barrier` on the bucket, not the view's barrier, which would
+        // also tidy liquid's objects from the view's own listing.
+        index.objects = search::make_store_index_objects(
+            std::move(objects), [client]() -> search::Result<void> {
+                auto synced = liquid::runtime::block_on(client->barrier());
+                if (!synced) {
+                    return std::unexpected(search::Error{
+                        synced.error().code == liquid::errc::locked
+                            ? "store_unavailable"
+                            : std::string(liquid::to_string(synced.error().code)),
+                        synced.error().message});
+                }
+                return {};
             });
+        index.repositories = [this, customer_id, workspace_id]()
+            -> search::Result<std::vector<std::string>> {
+            if (!options.store) {
+                return std::vector<std::string>{};
+            }
+            const auto rows = options.store->list_repositories(customer_id, 100'000, workspace_id);
+            if (!rows) {
+                return std::unexpected(search::Error{rows.error().code, rows.error().message});
+            }
+            std::vector<std::string> output;
+            for (const control::Repository& repository : *rows) {
+                if (repository.deleted_at.empty() && repository.workspace_id == workspace_id) {
+                    output.push_back(repository.id);
+                }
+            }
+            return output;
+        };
+        index.open = [this, customer_id, workspace_id](const std::string& repository_id)
+            -> search::Result<liquid::repository*> {
+            auto opened = sync_store.open_lent_repository(customer_id, repository_id, workspace_id);
+            if (!opened) {
+                // A row whose repository the store never created (its creation failed) is not
+                // indexed; the next creation of its name tombstones it.
+                return std::unexpected(search::Error{
+                    opened.error().rule == "missing_repository" ? "not_found" : opened.error().code,
+                    opened.error().message});
+            }
+            return *opened;
+        };
+        return index;
     }
 
     explicit Impl(ServerOptions opts)
@@ -16741,7 +17049,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_search_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
         const search::Query query{.text = query_value(route, "query"),
                                   .customer = query_value(route, "customer"),
@@ -16749,7 +17057,8 @@ struct ApiServer::Impl {
                                   .ref = query_value(route, "ref"),
                                   .limit = 100,
                                   .change = query_value(route, "change"),
-                                  .history = query_value(route, "history") == "1"};
+                                  .history = query_value(route, "history") == "1",
+                                  .workspace = query_value(route, "workspace_id")};
         search::QueryResult search_result;
         if (!query.text.empty()) {
             nlohmann::json input{{"query", query.text}, {"limit", query.limit}};
@@ -16768,9 +17077,15 @@ struct ApiServer::Impl {
             if (query.history) {
                 input["history"] = true;
             }
-            const ApiResult result = registry.call("search", input, context);
+            if (!query.workspace.empty()) {
+                input["workspace_id"] = query.workspace;
+            }
+            // Search reads workspace indexes under their stores' lanes and may rebuild one
+            // (lake#381), so it runs on the asynchronous registry path, off the server thread.
+            const ApiResult result =
+                unwrap(co_await registry.call_async("search", input, context));
             if (!result.ok) {
-                return serve_page_error(route, result);
+                co_return co_await serve_page_error(route, result);
             }
             const std::string mode = result.value.value("mode", "hot");
             search_result.mode = mode == "scan"       ? search::QueryMode::Scan
@@ -16790,14 +17105,15 @@ struct ApiServer::Impl {
                     .artifact_version = item.value("artifact_version", ""),
                     .digest = item.value("digest", ""),
                     .line = item.value("line", std::size_t{0}),
+                    .workspace = item.value("workspace_id", ""),
                 });
             }
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_search(query, search_result, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_search(query, search_result, viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_metering_page(boost::http::route_params& route) {
@@ -17379,6 +17695,7 @@ struct ApiServer::Impl {
             std::println(stderr, "metering warmup: {}", warmed.error().message);
         }
         schedule_maintenance("workspace usage priming", [this] { prime_workspace_usage(); });
+        schedule_maintenance("space search index purge", [this] { purge_space_search_indexes(); });
         store_root_state.store(StoreRootState::open);
         const auto milliseconds = [](auto duration) {
             return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();

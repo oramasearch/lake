@@ -17,6 +17,7 @@ rewrote a finished run in place, which Zetta refuses.
 |---|---|
 | Packs, index runs, object map, leases, collector state, each repository's `LIQUID_REPO`, journal, sessions and replication cursors | Bucket `lake_store` of the workspace Zetta, one object per liquid key, encrypted |
 | The workspace's data key, wrapped | Object `keys/workspace-v1.wrapped` of the same bucket |
+| The workspace's search index (lake#381): catalogue, segments, artifact members, manifest | Objects `search/<file>` of the same bucket, written through the store's backend (so encrypted and fenced the same way), never by liquid ([search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)) |
 | Whether the workspace is switched | `workspaces.store_moved_at` (migration `0067`), content-free |
 | The space's store from before the switch | `LAKE_STORE_ROOT/<space>/store` and `<space>/repositories`, unchanged and read-only from the switch on, until the operator's `remove_space_store` removes both once every workspace of the space is switched ([below](#removing-the-spaces-store)) |
 
@@ -170,7 +171,7 @@ maps of open stores is never held across store I/O, a network call or a wait.
 - **Off the server thread.** Synchronous capabilities that wait on a repository store (repository,
   Drive, model and dataset capabilities, search, `replicate_repository`, `move_workspace_store`,
   `delete_workspace`) run on a pool of 32 threads instead of lake's single server thread
-  (`Registry::call_async`), and asynchronous handlers run each repository-store call there too
+  (`Registry::call_async`; the `/search` page too), and asynchronous handlers run each repository-store call there too
   (`run_blocking`, `blocking_call`: push and its artifact reindex, repository creation, export,
   import, GitHub import, `get_model`/`get_dataset` with a revision, `metering_usage`). Pages that
   call those capabilities synchronously still run on the server thread.
@@ -191,12 +192,14 @@ maps of open stores is never held across store I/O, a network call or a wait.
   files. Once a repository store has lent repositories, search refuses rather than open a store
   itself. Search borrows a repository before it takes its own lock, so a search waiting on one
   store's lane holds up no search in another space.
-- **Search skips switched workspaces until [lake#381](https://github.com/oramasearch/lake/issues/381).**
-  The index files are on lake's volume, so indexing a switched workspace's repository there would
-  put its content back on lake's volume. Until lake#381 moves the index beside the workspace store,
-  publish and reindex of such a repository write nothing (they drop what the index held for it),
-  a history scan of it answers no occurrence, and hot and artifact searches leave it out. A
-  repository whose route cannot be read is treated as switched.
+- **A switched workspace's search index** (lake#381) is kept beside its store as `search/` objects in
+  the same bucket. The repository store lends it with a repository, or alone
+  (`LiquidCustomerStores::lend_workspace`), under the workspace's lane, through a view of the
+  store's backend fenced by its lease (`WorkspaceStore::search_objects`, made once per open store),
+  so publish, reindex and history scans write it under the lane and the lease, and a lost lease
+  stops them as it stops the store. Search's own map lock is never held across a lane wait or I/O.
+  It is loaded on first use, evicted when idle under `LAKE_SEARCH_MEMORY_BYTES`, and rebuilt from
+  the repositories when missing or unreadable ([search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)).
 - **Zetta's HTTP client** (`install_native_http_transport`) is safe from many threads at once: one
   dedicated thread runs every exchange, callers post to it and wait on an event, and its shared TLS
   context cache is locked.
@@ -255,7 +258,8 @@ contract asks.
   a write past it `507`, which liquid sees as `busy`. An existing bucket keeps its quota. The quota
   does not yet follow `workspaces.storage_gi` (migration `0069`, the desired size of the workspace
   Zetta's volume); raising `storage_gi` ahead of use is a follow-up.
-- Deleting a workspace closes its store and releases its lease before the deletion is reported
+- Deleting a workspace removes its search index objects (when its store is open) and then closes its
+  store and releases its lease before the deletion is reported
   (`WorkspaceContent::close_workspace_store`), waiting for an open in progress on the workspace's
   lane; a deleted workspace's store is never opened again. The workspace Zetta's deletion destroys
   the bytes.
@@ -292,9 +296,6 @@ belong in the deployment record once a workspace is switched.
   Migration `0069` added the snapshot desired state (`volume_snapshot_policies`) and the operator's
   `volume_snapshot_status`, but `move_workspace_store` does not request a snapshot or wait for one
   to be ready yet. The move never writes the space store.
-- The search index files stay on lake's volume until [lake#381](https://github.com/oramasearch/lake/issues/381)
-  moves them beside the workspace store; search already reads a switched workspace's repositories
-  from its store.
 - Data-key rotation; quota resize of an existing bucket.
 
 ## Removing the space's store
@@ -355,7 +356,10 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreMove.ADeletedWorkspaceIsNeverReopenedAndADeleteWaitsForAnOpen` | a delete racing an open releases the lease; a deleted workspace is not reopened or served from the space store |
 | `WorkspaceStoreMove.ACopyDoesNotRefuseTheSpacesOtherWorkspaces` | a copy marks only the workspace's lane |
 | `WorkspaceStoreMove.ACopyIntoADroppedBucketFailsInsteadOfReportingAbsent` | a dropped bucket fails the copy instead of answering `absent` |
-| `WorkspaceStoreMove.ASwitchedWorkspacesRepositoryIsNotIndexedOnTheVolumeOrReturned` | no segment or blob of a switched repository in the space index; not returned; the space's other repository still is |
+| `WorkspaceStoreSearch.TwoWorkspacesOfASpaceKeepSealedIndexesBesideTheirStoresAndARestartReloadsThem` | the switch drops the space index's copy; two workspaces' indexes apart, sealed in their buckets, nothing on lake's volume; a restart reloads without rewriting |
+| `WorkspaceStoreSearch.AWipedWorkspaceIndexIsRebuiltNotServedEmpty` | a wiped index, a lost segment and a tampered catalogue are rebuilt from the store |
+| `WorkspaceStoreSearch.PushesAndSearchesInOneWorkspaceRunSideBySide` | pushes, commits, reindexes and searches in one workspace at once; every push indexed; a restart reloads whole |
+| `WorkspaceStoreSearch.DeletingAWorkspaceRemovesItsIndexObjects` | the deletion removes the `search/` objects |
 | `WorkspaceStoreMove.ARowLeftWithoutItsRepositoryIsCleanedUpByTheNextCreate` | an orphaned row is tombstoned by the next creation of its name |
 | `WorkspaceStoreMove.ARestartCountsSwitchedWorkspacesUsageBeforeAnyWrite` | usage primed at start |
 | `WorkspaceStoreMove.ASearchWaitingOnOneSpacesStoreDoesNotHoldSearchInAnother` | search borrows before its lock |
@@ -365,3 +369,4 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreRemoval.ALiveRepositoryOfADeletedWorkspaceOrAPersonIsRefused` | a live repository of a deleted workspace refuses the removal (dry run too); no bearer and a person are refused |
 | `WorkspaceStoreRemoval.AnUnassignedRepositoryIsRefused` | on PostgreSQL, a repository without a workspace refuses the removal although the space's only workspace is switched |
 | `WorkspaceStoreZetta.TheBackendOnARealZettaHoldsOnlyCiphertextAndItsLatencyIsMeasured` | the same on a real Zetta, and the latency table |
+| `WorkspaceStoreZetta.TheSearchIndexOnARealZettaIsSealedReloadsAndIsRebuilt` | a workspace's search index on a real Zetta: sealed, reloaded without rewriting, rebuilt once wiped |

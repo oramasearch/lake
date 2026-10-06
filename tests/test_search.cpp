@@ -6,6 +6,9 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <mutex>
+#include <optional>
+#include <set>
 #include <memory>
 #include <string>
 #include <thread>
@@ -518,6 +521,302 @@ TEST(Search, RegisteredCapabilityReturnsAuthorizedHits) {
     ASSERT_TRUE(events) << events.error().message;
     ASSERT_FALSE(events->empty());
     EXPECT_EQ(events->front().draft.details.value("mode", ""), "hot");
+}
+
+// ---- workspace indexes (lake#381) ------------------------------------------------------------
+
+// A workspace's index objects held in memory, counting what is read and written.
+class MemoryObjects final : public lake::search::IndexObjects {
+public:
+    lake::search::Result<std::optional<std::string>> get(const std::string& name) override {
+        std::lock_guard lock(mutex_);
+        ++gets;
+        const auto found = objects.find(name);
+        if (found == objects.end()) {
+            return std::optional<std::string>{};
+        }
+        return std::optional<std::string>{found->second};
+    }
+    lake::search::Result<void> put(const std::string& name, std::string bytes) override {
+        std::lock_guard lock(mutex_);
+        ++puts;
+        objects[name] = std::move(bytes);
+        return {};
+    }
+    lake::search::Result<void> remove(const std::string& name) override {
+        std::lock_guard lock(mutex_);
+        objects.erase(name);
+        return {};
+    }
+    lake::search::Result<std::vector<std::string>> list() override {
+        std::lock_guard lock(mutex_);
+        std::vector<std::string> output;
+        for (const auto& [name, bytes] : objects) {
+            output.push_back(name);
+        }
+        return output;
+    }
+    lake::search::Result<void> sync() override {
+        return {};
+    }
+
+    std::map<std::string, std::string> snapshot() {
+        std::lock_guard lock(mutex_);
+        return objects;
+    }
+    void clear() {
+        std::lock_guard lock(mutex_);
+        objects.clear();
+    }
+
+    std::map<std::string, std::string> objects;
+    int gets = 0;
+    int puts = 0;
+
+private:
+    std::mutex mutex_;
+};
+
+// Two switched workspaces of one space, each with one repository, lent to search the way lake's
+// repository store lends them: under one lane per workspace, with the workspace's index objects.
+struct Workspaces {
+    TemporaryStore directory;
+    std::filesystem::path root = directory.path();
+    std::map<std::string, std::string> workspace_of;
+    std::map<std::string, std::shared_ptr<MemoryObjects>> objects{
+        {"ws-one", std::make_shared<MemoryObjects>()}, {"ws-two", std::make_shared<MemoryObjects>()}};
+    std::map<std::string, std::unique_ptr<std::mutex>> lanes;
+    std::unique_ptr<liquid::store> store;
+    std::map<std::string, std::unique_ptr<liquid::repository>> repositories;
+    std::atomic<int> lends{0};
+
+    Workspaces() {
+        lanes["ws-one"] = std::make_unique<std::mutex>();
+        lanes["ws-two"] = std::make_unique<std::mutex>();
+    }
+
+    // A repository in `workspace` whose `main` names one change with `files`.
+    void add(const std::string& repository, const std::string& workspace,
+             const std::vector<std::pair<std::string, std::string>>& files) {
+        workspace_of[repository] = workspace;
+        if (!store) {
+            auto opened = liquid::runtime::block_on(liquid::store::open(root / "space" / "store"));
+            ASSERT_TRUE(opened) << opened.error().message;
+            store = std::make_unique<liquid::store>(std::move(*opened));
+        }
+        liquid::repository_options options;
+        options.store = store.get();
+        auto created = liquid::runtime::block_on(
+            liquid::repository::create(root / "space" / "repositories" / repository, options));
+        ASSERT_TRUE(created) << created.error().message;
+        for (const auto& [file, contents] : files) {
+            ASSERT_TRUE(liquid::runtime::block_on(created->write(file, bytes(contents))));
+        }
+        const auto change = liquid::runtime::block_on(created->cut("workspace fixture"));
+        ASSERT_TRUE(change) << change.error().message;
+        ASSERT_TRUE(liquid::runtime::block_on(created->set_ref("main", *change)));
+        repositories[repository] = std::make_unique<liquid::repository>(std::move(*created));
+    }
+
+    lake::search::WorkspaceIndex index(const std::string& workspace) {
+        lake::search::WorkspaceIndex output;
+        output.customer = "space";
+        output.workspace = workspace;
+        output.generation = 1;
+        output.objects = objects.at(workspace);
+        output.repositories = [this, workspace]() -> lake::search::Result<std::vector<std::string>> {
+            std::vector<std::string> ids;
+            for (const auto& [repository, owner] : workspace_of) {
+                if (owner == workspace) {
+                    ids.push_back(repository);
+                }
+            }
+            return ids;
+        };
+        output.open = [this](const std::string& repository) -> lake::search::Result<liquid::repository*> {
+            const auto found = repositories.find(repository);
+            if (found == repositories.end()) {
+                return std::unexpected(lake::search::Error{"not_found", "no repository"});
+            }
+            return found->second.get();
+        };
+        return output;
+    }
+
+    std::shared_ptr<void> hold(const std::string& workspace) {
+        ++lends;
+        return std::make_shared<std::unique_lock<std::mutex>>(*lanes.at(workspace));
+    }
+
+    void configure(lake::search::Service& service) {
+        service.set_repository_access(
+            [this](const std::string&, const std::string& repository)
+                -> lake::search::Result<lake::search::BorrowedRepository> {
+                const std::string workspace = workspace_of.at(repository);
+                return lake::search::BorrowedRepository{hold(workspace),
+                                                        repositories.at(repository).get(),
+                                                        index(workspace)};
+            });
+        lake::search::WorkspaceAccess access;
+        access.lend = [this](const std::string&, const std::string& workspace)
+            -> lake::search::Result<lake::search::BorrowedWorkspace> {
+            if (!objects.contains(workspace)) {
+                return std::unexpected(lake::search::Error{"not_found", "no workspace"});
+            }
+            return lake::search::BorrowedWorkspace{hold(workspace), index(workspace)};
+        };
+        access.lend_if_open = [this](const std::string& workspace)
+            -> lake::search::Result<std::optional<lake::search::BorrowedWorkspace>> {
+            return std::optional<lake::search::BorrowedWorkspace>{
+                lake::search::BorrowedWorkspace{hold(workspace), index(workspace)}};
+        };
+        access.switched = [](const std::string&)
+            -> lake::search::Result<std::vector<std::pair<std::string, std::string>>> {
+            return std::vector<std::pair<std::string, std::string>>{{"space", "ws-one"},
+                                                                    {"space", "ws-two"}};
+        };
+        access.route = [this](const std::string&, const std::string& repository)
+            -> lake::search::Result<std::optional<std::string>> {
+            return std::optional<std::string>{workspace_of.at(repository)};
+        };
+        service.set_workspace_access(std::move(access));
+    }
+
+    static lake::search::Query in(const std::string& text, const std::string& workspace) {
+        return lake::search::Query{text, "space", "", "", 20, "", false, workspace};
+    }
+};
+
+std::set<std::string> hit_workspaces(const lake::search::QueryResult& result) {
+    std::set<std::string> output;
+    for (const auto& hit : result.items) {
+        output.insert(hit.workspace);
+    }
+    return output;
+}
+
+TEST(SearchWorkspaces, TwoWorkspacesKeepSeparateIndexesAndAReopenedServiceLoadsThem) {
+    Workspaces fixture;
+    ASSERT_NO_FATAL_FAILURE(fixture.add("repo-one", "ws-one", {{"one.txt", "alphaonly shared token"}}));
+    ASSERT_NO_FATAL_FAILURE(fixture.add("repo-two", "ws-two", {{"two.txt", "betaonly shared token"}}));
+    lake::control::InMemoryStore control;
+    {
+        lake::search::Service service(fixture.root);
+        fixture.configure(service);
+        // First use builds each workspace's index from its repositories.
+        const auto one = service.query(Workspaces::in("alphaonly", "ws-one"), "admin", control);
+        ASSERT_TRUE(one) << one.error().message;
+        ASSERT_EQ(one->items.size(), 1U);
+        EXPECT_EQ(one->items[0].workspace, "ws-one");
+        EXPECT_EQ(one->items[0].repository, "repo-one");
+        const auto crossed = service.query(Workspaces::in("alphaonly", "ws-two"), "admin", control);
+        ASSERT_TRUE(crossed) << crossed.error().message;
+        EXPECT_TRUE(crossed->items.empty()) << "ws-two's index holds nothing of ws-one";
+        EXPECT_TRUE(service.query(Workspaces::in("betaonly", "ws-one"), "admin", control)->items.empty());
+        // A space-wide search reads both, each hit naming its workspace.
+        const auto both = service.query({"shared", "space", "", "", 20}, "admin", control);
+        ASSERT_TRUE(both) << both.error().message;
+        EXPECT_EQ(hit_workspaces(*both), (std::set<std::string>{"ws-one", "ws-two"}));
+        // A search of one repository reads only its workspace's index.
+        const auto scoped = service.query({"shared", "space", "repo-two", "", 20}, "admin", control);
+        ASSERT_TRUE(scoped) << scoped.error().message;
+        EXPECT_EQ(hit_workspaces(*scoped), (std::set<std::string>{"ws-two"}));
+    }
+    // Nothing of either workspace is on lake's volume.
+    EXPECT_FALSE(std::filesystem::exists(fixture.root / "space" / "index"));
+    for (const auto& [workspace, objects] : fixture.objects) {
+        const auto held = objects->snapshot();
+        EXPECT_TRUE(held.contains("manifest.json")) << workspace;
+        EXPECT_TRUE(held.contains("blobs.json")) << workspace;
+        const std::string other = workspace == "ws-one" ? "betaonly" : "alphaonly";
+        for (const auto& [name, bytes] : held) {
+            EXPECT_EQ(bytes.find(other), std::string::npos) << workspace << " " << name;
+        }
+    }
+    // A new process loads both from their objects and writes nothing.
+    const int puts_before = fixture.objects["ws-one"]->puts + fixture.objects["ws-two"]->puts;
+    lake::search::Service reopened(fixture.root);
+    fixture.configure(reopened);
+    const auto again = reopened.query({"shared", "space", "", "", 20}, "admin", control);
+    ASSERT_TRUE(again) << again.error().message;
+    EXPECT_EQ(again->items.size(), 2U);
+    EXPECT_EQ(fixture.objects["ws-one"]->puts + fixture.objects["ws-two"]->puts, puts_before)
+        << "a reload is not a rebuild";
+}
+
+TEST(SearchWorkspaces, AWipedWorkspaceIndexIsRebuiltNotServedEmpty) {
+    Workspaces fixture;
+    ASSERT_NO_FATAL_FAILURE(fixture.add("repo-one", "ws-one", {{"one.txt", "alphaonly token"}}));
+    ASSERT_NO_FATAL_FAILURE(fixture.add("repo-two", "ws-two", {{"two.txt", "betaonly token"}}));
+    lake::control::InMemoryStore control;
+    {
+        lake::search::Service service(fixture.root);
+        fixture.configure(service);
+        ASSERT_EQ(service.query(Workspaces::in("alphaonly", "ws-one"), "admin", control)->items.size(), 1U);
+    }
+    // The workspace Zetta lost the index (wiped, or a segment the manifest names is gone).
+    fixture.objects["ws-one"]->clear();
+    {
+        lake::search::Service service(fixture.root);
+        fixture.configure(service);
+        const auto rebuilt = service.query(Workspaces::in("alphaonly", "ws-one"), "admin", control);
+        ASSERT_TRUE(rebuilt) << rebuilt.error().message;
+        EXPECT_EQ(rebuilt->items.size(), 1U) << "rebuilt from the repositories, not served empty";
+        EXPECT_TRUE(fixture.objects["ws-one"]->snapshot().contains("manifest.json"));
+    }
+    auto held = fixture.objects["ws-one"]->snapshot();
+    for (const auto& [name, bytes] : held) {
+        if (name.starts_with("segment-")) {
+            fixture.objects["ws-one"]->remove(name);
+        }
+    }
+    lake::search::Service service(fixture.root);
+    fixture.configure(service);
+    const auto rebuilt = service.query(Workspaces::in("alphaonly", "ws-one"), "admin", control);
+    ASSERT_TRUE(rebuilt) << rebuilt.error().message;
+    EXPECT_EQ(rebuilt->items.size(), 1U);
+    // A rebuild on demand replaces the index and removes what it no longer names.
+    fixture.objects["ws-one"]->put("segment-stale.json", "{}");
+    ASSERT_TRUE(service.rebuild_workspace("space", "ws-one"));
+    EXPECT_FALSE(fixture.objects["ws-one"]->snapshot().contains("segment-stale.json"));
+    EXPECT_EQ(service.query(Workspaces::in("alphaonly", "ws-one"), "admin", control)->items.size(), 1U);
+}
+
+TEST(SearchWorkspaces, ReindexFollowsTheReferencesAndIdleWorkspacesAreEvicted) {
+    Workspaces fixture;
+    ASSERT_NO_FATAL_FAILURE(fixture.add("repo-one", "ws-one", {{"one.txt", "alphaonly token"}}));
+    ASSERT_NO_FATAL_FAILURE(fixture.add("repo-two", "ws-two", {{"two.txt", "betaonly token"}}));
+    lake::control::InMemoryStore control;
+    lake::search::Service service(fixture.root);
+    fixture.configure(service);
+    ASSERT_EQ(service.query(Workspaces::in("alphaonly", "ws-one"), "admin", control)->items.size(), 1U);
+    // A push moves main: reindexing the repository publishes its branch tip again.
+    auto& repository = *fixture.repositories.at("repo-one");
+    ASSERT_TRUE(liquid::runtime::block_on(repository.write("later.txt", bytes("gammalater token"))));
+    const auto change = liquid::runtime::block_on(repository.cut("later"));
+    ASSERT_TRUE(change);
+    ASSERT_TRUE(liquid::runtime::block_on(repository.set_ref("main", *change)));
+    EXPECT_TRUE(service.query(Workspaces::in("gammalater", "ws-one"), "admin", control)->items.empty());
+    ASSERT_TRUE(service.reindex_artifacts("space", "repo-one"));
+    EXPECT_EQ(service.query(Workspaces::in("gammalater", "ws-one"), "admin", control)->items.size(), 1U);
+
+    // Under a bound smaller than one index, only the index in use stays loaded.
+    service.set_memory_bound(1);
+    ASSERT_EQ(service.query(Workspaces::in("betaonly", "ws-two"), "admin", control)->items.size(), 1U);
+    EXPECT_EQ(service.loaded_workspaces(), (std::vector<std::string>{"ws-two"}));
+    const int gets = fixture.objects["ws-one"]->gets;
+    ASSERT_EQ(service.query(Workspaces::in("gammalater", "ws-one"), "admin", control)->items.size(), 1U);
+    EXPECT_GT(fixture.objects["ws-one"]->gets, gets) << "an evicted index is loaded again";
+    EXPECT_EQ(service.loaded_workspaces(), (std::vector<std::string>{"ws-one"}));
+    service.set_memory_bound(256ULL * 1024ULL * 1024ULL);
+    ASSERT_EQ(service.query(Workspaces::in("betaonly", "ws-two"), "admin", control)->items.size(), 1U);
+    EXPECT_EQ(service.loaded_workspaces().size(), 2U);
+    EXPECT_GT(service.workspace_memory(), 0U);
+
+    // Dropping a workspace forgets it and removes its objects.
+    ASSERT_TRUE(service.drop_workspace("ws-one"));
+    EXPECT_TRUE(fixture.objects["ws-one"]->snapshot().empty());
+    EXPECT_EQ(service.loaded_workspaces(), (std::vector<std::string>{"ws-two"}));
 }
 
 TEST(SearchBenchmark, DISABLED_BuildAndQueryTenThousandFiles) {

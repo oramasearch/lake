@@ -196,7 +196,10 @@ deletion with everything it destroyed in `workspace_deletions` (migration
 
 **After the commit**, lake removes what lives outside PostgreSQL and records the central audit:
 
-1. drops each destroyed repository's search segments, and the indexed blobs nothing else uses;
+1. drops each destroyed repository from its space's search index on lake's volume, and the indexed
+   blobs nothing else uses; for a switched workspace, forgets its search index and removes its
+   `search/` objects from the workspace Zetta while lake has the workspace's store open (lake#381;
+   otherwise they go with the workspace Zetta), before the store is closed;
 2. removes whatever the instance registry still holds of each image repository from before
    lake#383 (its tags and manifest pointers), so nothing can pull it. Blobs stay until lake#383
    phase B: the registry has no collection yet, and other manifests may share them;

@@ -637,7 +637,8 @@ json search_schema() {
               {"artifact", {{"type", "string"}}},
               {"artifact_version", {{"type", "string"}}},
               {"digest", {{"type", "string"}}},
-              {"line", {{"type", "integer"}}}}}};
+              {"line", {{"type", "integer"}}},
+              {"workspace_id", {{"type", "string"}}}}}};
 }
 
 json search_output_schema() {
@@ -645,6 +646,7 @@ json search_output_schema() {
             {"properties",
              {{"mode", {{"type", "string"}}},
               {"scanned_changes", {{"type", "integer"}}},
+              {"skipped_workspaces", {{"type", "array"}, {"items", {{"type", "string"}}}}},
               {"items", {{"type", "array"}, {"items", search_schema()}}}}}};
 }
 
@@ -663,10 +665,12 @@ ApiResult search_result(search::Result<search::QueryResult> result) {
                           {"artifact", hit.artifact},
                           {"artifact_version", hit.artifact_version},
                           {"digest", hit.digest},
-                          {"line", hit.line}});
+                          {"line", hit.line},
+                          {"workspace_id", hit.workspace}});
     }
     return ApiResult::success({{"mode", search::to_string(result->mode)},
                                {"scanned_changes", result->scanned_changes},
+                               {"skipped_workspaces", result->skipped_workspaces},
                                {"items", std::move(values)}});
 }
 
@@ -5101,7 +5105,8 @@ void register_search_capability(Registry& registry) {
         .description = "Ranked BM25F search; quoted text is a substring query and "
                        "/expression/ is a regex query. Historical changes use scan "
                        "mode. Append in:artifact:<name>[@<version>] to search indexed "
-                       "members of one published artifact.",
+                       "members of one published artifact. workspace_id narrows the "
+                       "search to one workspace's index.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"query", {{"type", "string"}}},
@@ -5110,7 +5115,8 @@ void register_search_capability(Registry& registry) {
                            {"ref", {{"type", "string"}}},
                            {"change", {{"type", "string"}}},
                            {"history", {{"type", "boolean"}}},
-                           {"limit", {{"type", "integer"}}}}},
+                           {"limit", {{"type", "integer"}}},
+                           {"workspace_id", {{"type", "string"}}}}},
                          {"required", json::array({"query"})},
                          {"additionalProperties", false}},
         .output_schema = search_output_schema(),
@@ -5132,7 +5138,8 @@ void register_search_capability(Registry& registry) {
                                                               input.value("ref", ""),
                                                               limit_of(input),
                                                               input.value("change", ""),
-                                                              input.value("history", false)},
+                                                              input.value("history", false),
+                                                              input.value("workspace_id", "")},
                                                 context.acting_identity,
                                                 *context.store);
             if (result) {

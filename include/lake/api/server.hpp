@@ -75,6 +75,8 @@ struct ServerOptions {
     // How long a workspace store's bucket lease lasts without a renewal; lake renews it every
     // third of this (LAKE_WORKSPACE_STORE_LEASE_SECONDS).
     std::chrono::milliseconds workspace_store_lease_ttl{std::chrono::seconds(30)};
+    // The bound on loaded workspace search indexes (LAKE_SEARCH_MEMORY_BYTES, lake#381).
+    std::size_t search_memory_bytes = 256ULL * 1024ULL * 1024ULL;
     // LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false turns off every customer's opt-in (lake#234).
     bool allow_non_expiring_credentials = true;
     // Talks to agent services (lake#231); tests inject a double, main the HTTP caller.

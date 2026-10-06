@@ -21,7 +21,8 @@ needs liquid `8955519` or later). With every workspace switched, the records' re
 columns are dropped by migration `0070_drop_moved_tables` (lake#311,
 [schema.md](../control-plane/schema.md#drop-moved-tables-migration)), and the operator's
 `remove_space_store` removes a space's old store from lake's volume once every workspace of the
-space is switched ([workspace-store.md](workspace-store.md)); neither has run on dev yet.
+space is switched ([workspace-store.md](workspace-store.md)); neither has run on dev yet. lake#381 keeps the search index beside the workspace store (no migration,
+[search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)).
 Everything else here is not implemented yet. This page plans the moves that
 [workspace records](workspace-records.md) does not cover: the bytes on lake's store volume
 (liquid stores, search indexes, the registry, the transparency log), the two repository tables
@@ -60,7 +61,7 @@ except S12, where Steve chose cascade over refusal.
 | #315 part 2 `repositories` | One row per repository | 10 rows (8 live and 1 tombstoned in one workspace, 1 unassigned) | split | Row stays as routing; `description` moves to `lake_repositories`. **Done** (migration `0064`); the column is dropped after the copy is verified |
 | #319 `repository_refs` | Copy of each liquid ref | 0 rows | workspace (unused) | **Dropped** (migration `0064`) |
 | #380 `<customer>/store` | Liquid objects and history of every repository, Drive, model and dataset | 18.3 MB in 2 customer stores, 10 repositories | workspace | One liquid store per workspace in the workspace Zetta's object capability. **Implemented** ([workspace-store.md](workspace-store.md), migration `0067`); each workspace is switched by `move_workspace_store`, and `remove_space_store` removes the space's old store once all its workspaces are |
-| #381 `<customer>/index` | Search catalogue, segments and manifest | none written | workspace | Sealed objects beside the workspace store; rebuilt |
+| #381 `<customer>/index` | Search catalogue, segments and manifest | none written | workspace | Sealed objects beside the workspace store; rebuilt. **Implemented** (no migration; `search/` objects in bucket `lake_store`) |
 | #382 transparency, TUF, timestamps | The instance's log, trust metadata and evidence | none written | instance | Stays with the instance. **Done** (no migration) |
 | #383 registry | OCI, npm, Python and debug artifacts | 561 MB: 38 blobs, 7 manifests, one space | split | Tenant images to the workspace store; instance registry stays. Phase A **done** (routes, manifests and tags as records, migration `0068`); blobs wait for phase B |
 | #384 metrics and request logs | Process counters and stdout lines | nothing kept (no Prometheus or Loki on the cluster) | instance | Stays; plus a per-workspace request series. **Done** ([PR #521](https://github.com/oramasearch/lake/pull/521)) |
@@ -268,30 +269,58 @@ Storage measurement for metering switches from a live `du` of the space's store 
 
 ### lake#381: the search index
 
-**Interim (lake#380).** Until this item lands, search neither indexes nor returns a switched
-workspace's repositories, so none of their content is written to the index on lake's volume
-([search.md](../api/search.md)).
+**Implemented** ([lake#381](https://github.com/oramasearch/lake/issues/381), no migration;
+[search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)). The interim of lake#380,
+in which search neither indexed nor returned a switched workspace's repositories, is gone.
 
-**Today.** `<customer>/index/`: `blobs.json` (blob digest to UTF-8 file text, append-only),
-`segment-<repository>-<change>-<kind>-<ref>.json` (path-to-blob occurrences), and `manifest.json`.
-Lake loads them into oramacore-cpp BM25F adapters at start, per space, and republishes from
-memory. It is derived entirely from the liquid store and holds file text in the clear.
+**Before.** `<customer>/index/`: `blobs.json` (blob digest to UTF-8 file text), `segment-<repository>-<change>-<kind>-<ref>.json`
+(path-to-blob occurrences), `artifacts.json` and `manifest.json`. Lake loaded them into
+oramacore-cpp BM25F adapters per space and republished from memory. It is derived entirely from the
+liquid store and holds file text in the clear.
 
-- **Writers:** lake, on sync publication, release creation and `reindex_artifacts`.
-- **Readers:** lake's `search` capability (REST, MCP, which agents use) and `/search`.
+- **Writers:** lake, on release creation, `reindex_artifacts` (which a push runs) and history scans.
+- **Readers:** lake's `search` capability (REST, MCP, which agents use), `get_artifact`'s members
+  and `/search`.
 
 **Classification.** Workspace: it is repository content.
 
-**Target (S8).** Sealed objects in the workspace's object area, bucket `lake_search`, beside the
-store: the catalogue, segments and manifest, each sealed with the workspace's record seal key
-(`lake/workspace-records/v1/seal/<workspace>`) so file text is never plaintext in the Zetta. Lake
-loads a workspace's segments on its first search and evicts idle workspaces under a memory bound.
-The `customer` search input becomes `workspace_id`; a search spans one workspace. The manifest is
-replaced by `put` (atomic), and its writes follow the store's lease, so the lost-update row in
-[store-volume.md](../deployment/store-volume.md) no longer applies.
+**Done (S8).** A switched workspace's catalogue, segments, artifact members and manifest are the
+objects `search/<file>` in its store's bucket `lake_store`, beside the store:
 
-**Migration.** None to copy on dev. After #380's switch, `reindex_artifacts` and a re-publication
-of each branch tip rebuild every workspace's index from its store.
+- **Where.** A prefix in `lake_store`, not a bucket `lake_search` as first planned: one lease and
+  fence then cover the store and its index (a second bucket would need a lease of its own or take
+  writes from any process), no key of its own is needed, and the index counts in the workspace's
+  usage and quota and goes with the bucket. Liquid never lists or writes under `search/`.
+- **Sealing.** Each object is written through a view of the workspace store's `ZettaObjectBackend`,
+  so it is encrypted with the workspace's data key exactly as the store's objects are, its key bound
+  in the associated data, rather than with the record seal key the plan first named. File text is
+  never plaintext in the Zetta; nothing of a switched workspace's index is on lake's volume or in
+  PostgreSQL.
+- **Writes.** Under the workspace store's lane, lent with the repository (`lend_repository`), and
+  with the store's lease fence; the manifest is replaced by one atomic `put` after a barrier, so the
+  lost-update row in [store-volume.md](../deployment/store-volume.md) no longer applies to a
+  switched workspace.
+- **Loading.** On a workspace's first search, and again under a new fence; idle workspaces are
+  evicted under `LAKE_SEARCH_MEMORY_BYTES` (default 256 MiB).
+- **Rebuilt, not copied.** A missing, partial or unreadable index is rebuilt from the workspace's
+  repositories (branch tips and artifacts), on first use or by `reindex_artifacts`; nothing is copied
+  from the space's index.
+- **The space's index.** A switch, and every start, drops from it what it holds of switched
+  workspaces' repositories and the history-scan blobs no segment references, and removes the
+  directory once empty.
+- **Cascade (#514).** Deleting a workspace removes its `search/` objects while lake has its store
+  open; otherwise they go with the workspace Zetta.
+- **API.** `search` keeps `customer` and gains an optional `workspace_id`; a space-wide search reads
+  the space's index and each switched workspace's, and lists the workspaces it could not read in
+  `skipped_workspaces`. The required `workspace_id` and the `/w/<id>/` path are not done.
+
+**Migration.** None. On dev, a workspace's index is built on its first search after the deployment;
+whatever `<space>/index` holds of switched workspaces is removed at start (on 2026-10-03 no
+`<customer>/index` existed on dev).
+
+**Not done.** A rebuild does not republish tag snapshots of releases created before a switch or a
+wipe; the decided `rebuild_search_index` capability and the required `workspace_id` input;
+rollback detection ([lake#522](https://github.com/oramasearch/lake/issues/522)).
 
 ### lake#382: transparency log, TUF and timestamp evidence
 
@@ -502,7 +531,7 @@ liquid; `updated_at` is gone.
 | 12 | [lake#382](https://github.com/oramasearch/lake/issues/382) | Stays with the instance (S7): the audit row, and the dynamic-secret leaf check. **Done** ([PR #519](https://github.com/oramasearch/lake/pull/519); no migration) | nothing |
 | 13 | [lake#383](https://github.com/oramasearch/lake/issues/383) | Phase A: the route table, manifests and tags as records. **Done** (migration `0068`, [PR #523](https://github.com/oramasearch/lake/pull/523)). Phase B: blobs in the workspace store | A: nothing; B: lake#380 |
 | 14 | [lake#380](https://github.com/oramasearch/lake/issues/380) | `ZettaObjectBackend`, per-workspace leases and lazy open, encryption, `move_workspace_store`, and `remove_space_store` for the space's old store once every workspace is switched ([API](../api/workspace-store.md#removing-the-spaces-store)). **Implemented** (migration `0067`) | 1–7, [liquid#332](https://github.com/oramasearch/liquid/issues/332) (merged) |
-| 15 | [lake#381](https://github.com/oramasearch/lake/issues/381) | Search beside the workspace store, rebuilt (S8) | lake#380 |
+| 15 | [lake#381](https://github.com/oramasearch/lake/issues/381) | Search beside the workspace store, rebuilt (S8). **Implemented** (no migration) | lake#380 |
 
 The umbrella rule's exceptions for S7 and S9 are already in the bridge `CLAUDE.md`.
 

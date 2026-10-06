@@ -20,8 +20,9 @@ commands are omitted. See
 [forge.md](../../../docs/ui/forge.md).
 
 `workspace_deletion.hpp` declares the workspace deletion cascade (lake#514): `WorkspaceContent`,
-the injected dependency through which the HTTP server lets a deletion reach the instance registry
-and the search segments, and the extension point for closing a workspace's own store (lake#380);
+the injected dependency through which the HTTP server lets a deletion reach the instance registry,
+the space index's search segments and the workspace's own search index (lake#381), and the
+extension point for closing a workspace's own store (lake#380);
 the dry-run plan; and the idempotent `finish_workspace_deletion`/`resume_workspace_deletions`.
 `ApiContext::workspace_content` carries it. See
 [workspaces.md](../../../docs/api/workspaces.md#deletion).
