@@ -411,8 +411,10 @@ it by SHA-256. `move_workspace_store` gains mode `provision` (`workspace_store_c
 now an asynchronous handler that runs the other modes on the blocking pool), which creates the
 store of a switched workspace that never held anything (`provision_workspace_store`). A
 completion claims the staged upload (`ArtifactRegistry::claim_upload`) before hashing it; a pull
-holds a lane admission for its whole stream (`admit_workspace_stream`, `stream_blob`, at most 64
-streams); image blobs are rooted with a liquid lease; the owner loop sweeps abandoned uploads
+holds one of its workspace's eight stream slots for its whole stream (`admit_workspace_stream`,
+`stream_blob`, at most 24 streams, ended after `registry_stream_idle_timeout` without progress,
+refusals sent with `Connection: close`); image blobs are rooted with a liquid lease once per
+record (`root_workspace_blob` for the copy); the owner loop sweeps abandoned uploads
 (`sweep_uploads`, `ServerOptions::registry_upload_max_age`).
 
 `volume_capabilities.cpp` registers the operator's volumes (migration `0069`, operator#259,

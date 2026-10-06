@@ -460,7 +460,7 @@ phase A recorded.
   `object`).
 - **Pulls.** A blob is served when a tag of the repository references it **and** the workspace's
   `lake_oci_blobs` records it. A record naming an object is streamed from the store in 1 MiB
-  windows, the pull holding one lane admission for its whole stream, never from the instance
+  windows, the pull holding one of its workspace's stream slots for its whole stream, never from the instance
   registry; a store that lost it is `500`. A record without `object` is streamed from the instance
   registry until the copy names its object.
 - **Manifests** take each referenced blob's size from its record, not from the instance registry.
@@ -477,11 +477,13 @@ phase A recorded.
   Zetta.
 - A switch of a workspace with no repository now creates its store, since its images need one.
 - Review fixes: a completion claims the staged file before hashing it (no PATCH can change the
-  bytes stored), a correct push repairs a record naming other bytes, a pull holds a lane admission
-  for its whole stream (and at most 64 streams run), HEAD checks the object, abandoned uploads are
+  bytes stored), a correct push repairs a record naming other bytes (keeping the old root in
+  `superseded`), a pull holds one of eight stream slots of its workspace for its whole stream (at
+  most 24 in the process, ended after 60 s without progress, refusals close their connection),
+  HEAD checks the object, retryable store errors keep a claimed upload for the retry, abandoned uploads are
   swept after a day, the quota counts only new bytes, usage keys stored blobs per workspace,
   `instance_paths` is withheld unless complete and is advisory, and each image blob is rooted by a
-  liquid lease ([liquid#342](https://github.com/oramasearch/liquid/issues/342) asks for a pin).
+  liquid lease once (the copy roots older objects) ([liquid#342](https://github.com/oramasearch/liquid/issues/342) asks for a pin).
 - `move_workspace_store` mode `provision` creates the store of a workspace an earlier lake switched
   with no repository, only when it never held anything.
 - Not done: unreferenced instance blobs stay on the volume.

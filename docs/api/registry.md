@@ -86,29 +86,38 @@ as a named exception: one instance-wide namespace with public reads.
   (`put_file`, which reads it in windows) off the server thread under the workspace's lane, checks
   that the stored object has the size it hashed, records it and removes the file. The space's
   storage quota is checked first (OCI `507 DENIED` past it), except for a re-push of an object the
-  store already holds, which adds nothing. A store that is unavailable or over quota removes the
-  claimed file; a record that cannot be written puts it back under its upload id, so the client may
-  retry the same completion. Uploads untouched for `registry_upload_max_age` (24 hours) are removed
-  by the maintenance thread. A
+  store already holds, which adds nothing. Bytes that are not their digest, or that the quota
+  refuses, are removed; after any other failure (an unavailable or busy store, a record that
+  cannot be written) the claimed file goes back under its upload id, so the client may retry the
+  same completion. A claim restarts the file's age. Uploads untouched for `registry_upload_max_age`
+  (24 hours) are removed by the maintenance thread, which lists them without the registry's lock and
+  takes it briefly per file. A
   workspace not yet switched (`move_workspace_store`) keeps phase A: the bytes go to `blobs/` and
   the record has no `object`.
 - **A correct push repairs a record.** A liquid object's identity is the hash of its bytes, so a
   record that names another object than the one a verified push just stored names other bytes (or
-  none the store holds): the push rewrites it at the revision read.
+  none the store holds): the push rewrites it at the revision read. If the old object was rooted, the
+  record keeps it in `superseded`: liquid's lease API cannot release a root by its object, so those
+  roots wait for [liquid#342](https://github.com/oramasearch/liquid/issues/342).
 - **Image blobs are liquid roots.** Nothing in liquid refers to an image blob; only its record
   does. Each stored blob is rooted with a liquid lease for a century (`store::lease_root`), so a
-  liquid collection of the workspace store keeps it. A durable pin API is
+  liquid collection of the workspace store keeps it. The record says so (`rooted`), and a re-push
+  of an object its record already names as rooted adds no second lease; the copy roots, once, an
+  object in place that was stored before lake rooted image blobs (`rooted` in its answer). A durable pin API is
   [liquid#342](https://github.com/oramasearch/liquid/issues/342). A manifest pushed into the workspace may reference only blobs recorded
   there (otherwise OCI `400 MANIFEST_BLOB_UNKNOWN`), with the sizes the records hold, so knowing
   another space's or another workspace's digest does not publish its layer.
 - **Pulls stream from the store.** A tenant blob is served only when a tag of the requested
   repository references it and the workspace's `lake_oci_blobs` records it. A record that names an
-  object is read only from the workspace's store, 1 MiB at a time. A pull holds one of the
-  workspace lane's four admissions for its whole stream, so stalled pulls never park more of the
-  blocking pool than the lane admits; past that, and past 64 streams in the process (which bounds
-  pull buffers to 64 MiB), a pull is OCI `503 UNAVAILABLE` with `Retry-After` before any header is
-  sent. Each window takes the lane only for its read; a read that fails part way ends the
-  connection. HEAD checks that the store holds the object. A store that lost an object its record
+  object is read only from the workspace's store, 1 MiB at a time. A pull holds one of its
+  workspace's eight stream slots for its whole stream; they are apart from the lane's admissions,
+  so pulls never lock pushes, git or the repository API of the workspace out. At most 24 pulls run
+  in the process (fewer than the server's 32 workers, and at most 24 MiB of buffers). Past either
+  limit a pull is OCI `503 UNAVAILABLE` with `Retry-After` and `Connection: close` before any
+  header is sent, so a refused client does not keep a worker
+  ([lake#534](https://github.com/oramasearch/lake/issues/534)). Each window takes the lane only for
+  its one read; a read that fails part way, or a client that takes no bytes for
+  `registry_stream_idle_timeout` (60 s), ends the connection and frees the slot. HEAD checks that the store holds the object. A store that lost an object its record
   names is `500` to GET and HEAD, never answered from the instance registry; a push of the blob
   repairs it. A record without `object` (pushed before phase B, or before its workspace was
   switched) is streamed from `blobs/`, also in windows, until the copy below names its object.
@@ -149,7 +158,8 @@ reads each object back in windows and compares its SHA-256 and size, and lists i
 instance's own repositories use, a record not yet copied still needs, or a legacy tenant tag not
 yet in its workspace still needs. The list is given only when every routed workspace's records
 were read and every legacy tenant tag is in its workspace (otherwise `instance_paths` is null and
-`instance_paths_withheld` says why). It is **advisory**: the later removal step must check each
+`instance_paths_withheld` says why). A legacy tag of a space that no longer exists (`unknown_space`)
+never withholds it; its digests count as needed only where a record references them too. It is **advisory**: the later removal step must check each
 path again against the records and the instance's repositories of its own time. Unresolved, each blocking
 completion: `workspace_not_switched` (switch the workspace first), `blob_missing` (the registry no
 longer holds the file) and `blob_corrupt` (its bytes are not the digest). Nothing is removed from

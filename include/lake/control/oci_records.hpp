@@ -89,6 +89,12 @@ struct OciBlob {
     // The blob's identity in the workspace's liquid store (a liquid digest, `blake3:<hex>`);
     // empty while its bytes are in the instance registry.
     std::string object;
+    // Whether lake rooted `object` in liquid (a lease), so a collection keeps it.
+    bool rooted = false;
+    // Objects this record named before a correct push repaired it, still rooted by their leases;
+    // liquid's lease API cannot release a root by its object, so they are kept here for the
+    // pin API of liquid#342.
+    std::vector<std::string> superseded;
     std::int64_t revision = 0;
     std::int64_t lake_revision = 1;
 };
@@ -154,7 +160,8 @@ get_oci_blob(WorkspaceRecords& records, std::string customer_id, std::string dig
 // object (its bytes were in the instance registry) or another object is rewritten at the revision
 // read. A liquid object's identity is the hash of its bytes, so a record naming another object
 // names other bytes, and a correct push repairs it. One that already names this object is kept.
-// Answers the record as stored.
+// A record rewritten away from a rooted object keeps that object in `superseded`. Answers the
+// record as stored.
 liquid::runtime::task<ZettaControlResult<OciBlob>> store_oci_blob(WorkspaceRecords& records,
                                                                   OciBlob blob);
 

@@ -441,6 +441,32 @@ struct RegistryRig {
         return exchange(port(), method, "/v2/" + repository + "/blobs/" + digest);
     }
 
+    // Liquid leases (roots) in the workspace's bucket; their object names are visible to Zetta.
+    std::size_t leases(const std::string& workspace) {
+        std::size_t count = 0;
+        for (const auto& [key, bytes] : zetta->objects(endpoint(workspace))) {
+            count += key.starts_with("leases/") && !key.contains(".lake-tail-") ? 1 : 0;
+        }
+        return count;
+    }
+
+    // Rewrites a blob record as one written before lake rooted image blobs.
+    void unroot(const std::string& customer, const std::string& workspace, const std::string& digest) {
+        auto records = records_of(customer, workspace);
+        auto found = lake::control::settled(
+            liquid::runtime::block_on(lake::control::get_oci_blob(records, customer, digest)));
+        ASSERT_TRUE(found && *found);
+        lake::control::OciBlob blob = **found;
+        blob.rooted = false;
+        const std::string key = records.index_of(lake::control::OciBlobCodec::collection,
+                                                 "customer:" + customer + "\ndigest:" + digest);
+        auto written = lake::control::settled(liquid::runtime::block_on(records.put(
+            lake::control::OciBlobCodec::collection, key, lake::control::OciBlobCodec::lookup(blob),
+            lake::control::OciBlobCodec::encode(blob),
+            lake::control::RecordCondition{.if_revision = blob.revision}, blob.lake_revision + 1)));
+        ASSERT_TRUE(written) << written.error().message;
+    }
+
     // Blob files the instance registry holds.
     std::vector<std::string> instance_blobs() const {
         std::vector<std::string> names;
@@ -1011,6 +1037,9 @@ TEST(RegistryStore, ARecordNamingAMissingOrWrongObjectIsAnErrorUntilARePushRepai
     EXPECT_TRUE(rig.get_blob("tenant-one/damaged", sha256(first)).body == second.substr(0, first.size()));
     EXPECT_EQ(rig.push_blob("tenant-one/damaged", first).status, 201U);
     EXPECT_NE(rig.blob_record(rig.one, rig.alpha, sha256(first))->object, other);
+    const auto superseded = rig.blob_record(rig.one, rig.alpha, sha256(first))->superseded;
+    EXPECT_NE(std::ranges::find(superseded, other), superseded.end())
+        << "the root of the object it named before is recorded for later";
     EXPECT_TRUE(rig.get_blob("tenant-one/damaged", sha256(first)).body == first);
 }
 
@@ -1020,6 +1049,7 @@ namespace {
 struct PausedPull {
     int socket = -1;
     unsigned status = 0;
+    std::string head;
     ~PausedPull() {
         if (socket >= 0) {
             ::close(socket);
@@ -1050,6 +1080,7 @@ std::unique_ptr<PausedPull> start_pull(unsigned short port, const std::string& p
     if (head.size() > 12) {
         pull->status = static_cast<unsigned>(std::stoul(head.substr(9, 3)));
     }
+    pull->head = head;
     if (pull->status != 200) {
         ::close(pull->socket); // a refused pull holds no connection
         pull->socket = -1;
@@ -1084,7 +1115,7 @@ TEST(RegistryStore, PullsCountAgainstTheLaneForTheirWholeStreamAndOtherWorkspace
     const auto admitted = std::ranges::count_if(pulls, [](const auto& pull) { return pull->status == 200; });
     const auto refused = std::ranges::count_if(pulls, [](const auto& pull) { return pull->status == 503; });
     EXPECT_GE(admitted, 1);
-    EXPECT_LE(admitted, 4) << "a stalled pull keeps its admission";
+    EXPECT_LE(admitted, 8) << "a stalled pull keeps its stream slot";
     EXPECT_EQ(admitted + refused, 40);
     const auto calm_started = std::chrono::steady_clock::now();
     EXPECT_TRUE(rig.get_blob("tenant-one/calm", sha256(calm)).body == calm);
@@ -1115,7 +1146,7 @@ TEST(RegistryStore, PullsCountAgainstTheLaneForTheirWholeStreamAndOtherWorkspace
     putter.join();
     rig.zetta->hang(RegistryRig::endpoint(rig.alpha), 0ms);
     EXPECT_EQ(put.status, 201U) << put.body;
-    EXPECT_GE(unavailable.load(), 36);
+    EXPECT_GE(unavailable.load(), 32);
     // Afterwards the lane admits pulls again.
     Reply after;
     for (int attempt = 0; attempt < 50 && after.status != 200; ++attempt) {
@@ -1162,6 +1193,15 @@ TEST(RegistryStore, InstancePathsLeaveOutWhatIsStillNeededAndAreWithheldWhenInco
     EXPECT_TRUE(verified["value"]["instance_paths"].is_null()) << verified;
     EXPECT_FALSE(verified["value"].value("instance_paths_withheld", std::string()).empty());
     rig.workspaces->ready(rig.gamma);
+
+    // A legacy tag of a space that no longer exists never withholds the list.
+    std::filesystem::create_directories(rig.registry() / "manifests" / "gone-space" / "img");
+    std::ofstream(rig.registry() / "manifests" / "gone-space" / "img" / "v1.json")
+        << json{{"digest", sha256(own)}}.dump();
+    verified = rig.copy("verify");
+    ASSERT_TRUE(verified.value("ok", false)) << verified;
+    ASSERT_TRUE(verified["value"]["instance_paths"].is_array()) << verified;
+    std::filesystem::remove_all(rig.registry() / "manifests" / "gone-space");
 
     // A tenant tag the instance registry still holds and its workspace does not (oci_tags not
     // complete): no list.
@@ -1266,4 +1306,187 @@ TEST(RegistryStore, ALiquidCollectionOfTheWorkspaceStoreKeepsImageBlobs) {
     }
     ASSERT_NO_FATAL_FAILURE(rig.start());
     EXPECT_TRUE(rig.get_blob("tenant-one/rooted", sha256(layer)).body == layer);
+}
+
+// ---- second review of PR #528 -----------------------------------------------------------------
+
+// Pulls have their own eight stream slots per workspace, apart from the admissions of other
+// requests: with eight pulls of one workspace in flight a push to it still succeeds, a ninth pull
+// is refused at once with `Connection: close`, and a stalled reader is ended by the idle timeout,
+// freeing its slot.
+TEST(RegistryStore, PullsHaveTheirOwnSlotsAndAStalledReaderTimesOut) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp([](lake::api::ServerOptions& options) {
+        options.registry_stream_idle_timeout = std::chrono::milliseconds(1500);
+    }));
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "pulled"));
+    const std::string layer = layer_bytes(24 * 1024 * 1024, 141);
+    rig.push_image("tenant-one/pulled", "v1", R"({"pulled":1})", {layer});
+    const std::string path = "/v2/tenant-one/pulled/blobs/" + sha256(layer);
+
+    std::vector<std::unique_ptr<PausedPull>> pulls;
+    for (int index = 0; index < 8; ++index) {
+        pulls.push_back(start_pull(rig.port(), path));
+        ASSERT_EQ(pulls.back()->status, 200U) << index;
+    }
+    // A push into the same workspace is not refused by the pulls.
+    Reply pushed = rig.push_blob("tenant-one/pulled", layer_bytes(4096, 142));
+    EXPECT_EQ(pushed.status, 201U) << pushed.body;
+    // A ninth pull is refused, and its connection closed.
+    auto ninth = start_pull(rig.port(), path);
+    EXPECT_EQ(ninth->status, 503U);
+    std::string head = ninth->head;
+    std::ranges::transform(head, head.begin(), [](unsigned char c) { return std::tolower(c); });
+    EXPECT_NE(head.find("connection: close"), std::string::npos) << ninth->head;
+
+    // The stalled readers are ended by the idle timeout; their slots are free again.
+    Reply after;
+    for (int attempt = 0; attempt < 100 && after.status != 200; ++attempt) {
+        std::this_thread::sleep_for(100ms);
+        after = rig.get_blob("tenant-one/pulled", sha256(layer), "HEAD");
+    }
+    EXPECT_EQ(after.status, 200U) << "the idle timeout released the stalled pulls";
+    auto fresh = start_pull(rig.port(), path);
+    EXPECT_EQ(fresh->status, 200U);
+}
+
+// At most 24 pulls run in the process, fewer than the server's workers, and once they do a
+// pull of another workspace is refused at once while that workspace's other requests answer.
+TEST(RegistryStore, WithTheGlobalPullCapReachedOtherWorkspacesStillAnswer) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string delta = rig.workspaces->create(rig.two, "delta");
+    rig.zetta->add_node(RegistryRig::endpoint(delta), "token-" + delta);
+    const std::vector<std::pair<std::string, std::string>> spaces = {
+        {rig.one, rig.alpha}, {rig.one, rig.beta}, {rig.two, rig.gamma}, {rig.two, delta}};
+    const std::string layer = layer_bytes(16 * 1024 * 1024, 151);
+    std::vector<std::string> repositories;
+    for (std::size_t index = 0; index < spaces.size(); ++index) {
+        const auto& [space, workspace] = spaces[index];
+        ASSERT_NO_FATAL_FAILURE(rig.switch_store(workspace));
+        const std::string name = "image" + std::to_string(index);
+        ASSERT_NO_FATAL_FAILURE(rig.route(space, workspace, name));
+        const std::string repository =
+            std::string(space == rig.one ? "tenant-one/" : "tenant-two/") + name;
+        rig.push_image(repository, "v1", R"({"i":)" + std::to_string(index) + "}", {layer});
+        repositories.push_back(repository);
+    }
+    std::vector<std::unique_ptr<PausedPull>> pulls;
+    for (std::size_t index = 0; index < 3; ++index) {
+        for (int pull = 0; pull < 8; ++pull) {
+            pulls.push_back(start_pull(rig.port(), "/v2/" + repositories[index] + "/blobs/" + sha256(layer)));
+            ASSERT_EQ(pulls.back()->status, 200U) << index << " " << pull;
+        }
+    }
+    auto refused = start_pull(rig.port(), "/v2/" + repositories[3] + "/blobs/" + sha256(layer));
+    EXPECT_EQ(refused->status, 503U) << "the process runs at most 24 pulls";
+    const auto started = std::chrono::steady_clock::now();
+    Reply manifest = exchange(rig.port(), "GET", "/v2/" + repositories[3] + "/manifests/v1");
+    EXPECT_EQ(manifest.status, 200U) << manifest.body;
+    Reply pushed = rig.push_blob(repositories[3], layer_bytes(4096, 152));
+    EXPECT_EQ(pushed.status, 201U) << pushed.body;
+    EXPECT_LT(std::chrono::steady_clock::now() - started, 5s);
+}
+
+// A root is created once per object a record names: re-pushing a blob adds no lease, and the copy
+// roots an object already in place that was stored before lake rooted image blobs, once.
+TEST(RegistryStore, ImageBlobRootsAreCreatedOnceAndTheCopyRootsOlderObjects) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "roots"));
+    const std::string layer = layer_bytes(5000, 161);
+    ASSERT_EQ(rig.push_blob("tenant-one/roots", layer).status, 201U);
+    EXPECT_TRUE(rig.blob_record(rig.one, rig.alpha, sha256(layer))->rooted);
+    const std::size_t rooted = rig.leases(rig.alpha);
+    for (int again = 0; again < 3; ++again) {
+        ASSERT_EQ(rig.push_blob("tenant-one/roots", layer).status, 201U);
+    }
+    EXPECT_EQ(rig.leases(rig.alpha), rooted) << "a re-push adds no lease";
+
+    ASSERT_NO_FATAL_FAILURE(rig.unroot(rig.one, rig.alpha, sha256(layer)));
+    json copied = rig.copy("copy");
+    ASSERT_TRUE(copied.value("ok", false)) << copied;
+    EXPECT_EQ(copied["value"]["rooted"], 1U) << copied;
+    EXPECT_TRUE(rig.blob_record(rig.one, rig.alpha, sha256(layer))->rooted);
+    EXPECT_EQ(rig.leases(rig.alpha), rooted + 1);
+    copied = rig.copy("copy");
+    EXPECT_EQ(copied["value"]["rooted"], 0U) << copied;
+    EXPECT_EQ(rig.leases(rig.alpha), rooted + 1);
+}
+
+// After a store error a client may retry, so the claimed bytes go back under the upload id and a
+// retry of the same completion succeeds. A completion's claim also restarts the upload's age, so
+// the sweep never removes the bytes a slow completion is storing.
+TEST(RegistryStore, AClaimedUploadSurvivesARetryableErrorAndTheSweepDuringItsCompletion) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp([](lake::api::ServerOptions& options) {
+        options.registry_upload_max_age = std::chrono::seconds(30);
+    }));
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "retried"));
+    const std::string bytes = layer_bytes(2 * 1024 * 1024, 171);
+    Reply started = exchange(rig.port(), "POST", "/v2/tenant-one/retried/blobs/uploads/");
+    ASSERT_EQ(started.status, 202U);
+    const std::string location = started.headers.at("location");
+    ASSERT_EQ(exchange(rig.port(), "PATCH", location, bytes,
+                       {{"Content-Type", "application/octet-stream"},
+                        {"Content-Range", "0-" + std::to_string(bytes.size() - 1)}})
+                  .status,
+              202U);
+    // The workspace's Zetta stops answering for the completion: a store error, retried later.
+    rig.zetta->drop_next(1000);
+    Reply failed = exchange(rig.port(), "PUT", location + "?digest=" + sha256(bytes));
+    rig.zetta->drop_next(0);
+    EXPECT_NE(failed.status, 201U);
+    EXPECT_NE(failed.status, 400U) << failed.body;
+    EXPECT_EQ(rig.staged_uploads(), 1U) << "the bytes are back under the upload id";
+    Reply retried;
+    for (int attempt = 0; attempt < 20 && retried.status != 201; ++attempt) {
+        retried = exchange(rig.port(), "PUT", location + "?digest=" + sha256(bytes));
+        if (retried.status != 201) {
+            std::this_thread::sleep_for(200ms);
+        }
+    }
+    EXPECT_EQ(retried.status, 201U) << retried.body;
+    EXPECT_TRUE(rig.blob_record(rig.one, rig.alpha, sha256(bytes)).has_value());
+
+    // An upload last written an hour ago is claimed by a slow completion; the sweep runs meanwhile.
+    started = exchange(rig.port(), "POST", "/v2/tenant-one/retried/blobs/uploads/");
+    const std::string second = started.headers.at("location");
+    const std::string other = layer_bytes(2 * 1024 * 1024, 172);
+    ASSERT_EQ(exchange(rig.port(), "PATCH", second, other,
+                       {{"Content-Type", "application/octet-stream"},
+                        {"Content-Range", "0-" + std::to_string(other.size() - 1)}})
+                  .status,
+              202U);
+    const std::string id = second.substr(second.rfind('/') + 1);
+    std::filesystem::last_write_time(rig.registry() / "uploads" / id,
+                                     std::filesystem::file_time_type::clock::now() - std::chrono::hours(1));
+    rig.zetta->hang(RegistryRig::endpoint(rig.alpha), 100ms);
+    Reply completed;
+    std::thread completion([&] { completed = exchange(rig.port(), "PUT", second + "?digest=" + sha256(other)); });
+    std::size_t claimed = 0;
+    for (int waited = 0; waited < 20 && claimed == 0; ++waited) {
+        std::this_thread::sleep_for(50ms);
+        std::error_code ignored;
+        for (const auto& entry : std::filesystem::directory_iterator(rig.registry() / "claimed", ignored)) {
+            static_cast<void>(entry);
+            ++claimed;
+        }
+    }
+    ASSERT_EQ(claimed, 1U);
+    rig.server->drain(); // schedules the sweep
+    std::this_thread::sleep_for(300ms);
+    std::size_t still = 0;
+    std::error_code ignored;
+    for (const auto& entry : std::filesystem::directory_iterator(rig.registry() / "claimed", ignored)) {
+        static_cast<void>(entry);
+        ++still;
+    }
+    completion.join();
+    rig.zetta->hang(RegistryRig::endpoint(rig.alpha), 0ms);
+    EXPECT_EQ(still, 1U) << "the sweep measured the claimed upload from its claim";
+    EXPECT_EQ(completed.status, 201U) << completed.body;
 }

@@ -453,64 +453,107 @@ SyncStoreResult<bool> store_holds_blob(SyncStore& store, const std::string& cust
 
 // The legacy tenant tags (written to the instance registry before lake#383) that are not in their
 // workspace yet, with the manifest and blob digests they need from the instance registry.
-// `complete`: every legacy tag was found in its routed workspace.
+// `complete`: every legacy tag of a space that still exists was found in its routed workspace. A
+// tag of a deleted space (`unknown_space` in oci_tags) can never be copied or pulled, so it does
+// not hold completion back, and its digests count as needed only where a record (`recorded`)
+// references them too. The control-store reads and the registry's files are read on the blocking
+// pool; only the tag lookups in the workspaces are awaited here.
 struct UncopiedLegacy {
     bool complete = true;
     std::set<std::string> digests;
 };
 liquid::runtime::task<UncopiedLegacy> uncopied_legacy_digests(ApiContext& context,
-                                                              const WorkspaceContent& content) {
+                                                              const WorkspaceContent& content,
+                                                              const std::set<std::string>& recorded) {
     UncopiedLegacy output;
     if (!content.legacy_image_tags) {
         co_return output;
     }
-    std::map<std::string, std::optional<control::WorkspaceRecords>> records_of;
-    std::string after;
-    for (;;) {
-        const std::vector<LegacyImageTag> page = content.legacy_image_tags(after, 1000);
-        for (const LegacyImageTag& row : page) {
-            bool copied = false;
-            const auto repository = tenant_repository(row.repository);
-            const auto customer =
-                repository ? space_customer(*context.store, repository->space) : std::nullopt;
-            const auto route = customer ? context.store->get_oci_repository_route(customer->id,
-                                                                                  repository->name)
-                                        : control::Result<control::OciRepositoryRoute>(
-                                              std::unexpected(control::StoreError{"not_found", ""}));
-            if (route) {
-                auto [slot, fresh] = records_of.try_emplace(route->workspace_id);
-                if (fresh) {
-                    auto opened = workspace_records(context, customer->id, route->workspace_id);
-                    if (opened) {
-                        slot->second.emplace(std::move(*opened));
+    struct Legacy {
+        std::string customer_id, name, tag, workspace_id;
+        bool unknown_space = false;
+        std::set<std::string> digests;
+    };
+    auto listed = co_await blocking_call(
+        [&]() -> SyncStoreResult<std::vector<Legacy>> {
+            std::vector<Legacy> legacy;
+            std::map<std::string, std::optional<control::Customer>> customers;
+            std::string after;
+            for (;;) {
+                const std::vector<LegacyImageTag> page = content.legacy_image_tags(after, 1000);
+                for (const LegacyImageTag& row : page) {
+                    Legacy item{.tag = row.tag};
+                    item.digests.insert(row.digest);
+                    if (content.read_blob) {
+                        const auto document = content.read_blob(row.digest);
+                        const json manifest =
+                            document ? json::parse(*document, nullptr, false) : json();
+                        if (manifest.is_object()) {
+                            if (const auto references = manifest_digests(manifest)) {
+                                item.digests.insert(references->begin(), references->end());
+                            }
+                        }
                     }
+                    const auto repository = tenant_repository(row.repository);
+                    auto& customer = customers[repository ? repository->space : std::string()];
+                    if (repository && !customer) {
+                        customer = space_customer(*context.store, repository->space);
+                    }
+                    if (!repository || !customer) {
+                        item.unknown_space = true;
+                    } else {
+                        item.customer_id = customer->id;
+                        item.name = repository->name;
+                        if (const auto route =
+                                context.store->get_oci_repository_route(customer->id, item.name)) {
+                            item.workspace_id = route->workspace_id;
+                        }
+                    }
+                    legacy.push_back(std::move(item));
                 }
-                if (slot->second) {
-                    auto tag = control::settled(co_await control::get_oci_tag(
-                        *slot->second, customer->id, repository->name, row.tag));
-                    copied = tag && *tag;
+                if (page.size() < 1000) {
+                    break;
+                }
+                after = page.back().repository + ":" + page.back().tag;
+            }
+            return legacy;
+        },
+        [](std::string message) -> SyncStoreResult<std::vector<Legacy>> {
+            return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+        });
+    if (!listed) {
+        // Nothing known about the legacy tags: treat them as not copied.
+        output.complete = false;
+        co_return output;
+    }
+    std::map<std::string, std::optional<control::WorkspaceRecords>> records_of;
+    for (const Legacy& item : *listed) {
+        if (item.unknown_space) {
+            for (const std::string& digest : item.digests) {
+                if (recorded.contains(digest)) {
+                    output.digests.insert(digest);
                 }
             }
-            if (copied) {
-                continue;
+            continue;
+        }
+        bool copied = false;
+        if (!item.workspace_id.empty()) {
+            auto [slot, fresh] = records_of.try_emplace(item.workspace_id);
+            if (fresh) {
+                if (auto opened = workspace_records(context, item.customer_id, item.workspace_id)) {
+                    slot->second.emplace(std::move(*opened));
+                }
             }
+            if (slot->second) {
+                auto tag = control::settled(co_await control::get_oci_tag(
+                    *slot->second, item.customer_id, item.name, item.tag));
+                copied = tag && *tag;
+            }
+        }
+        if (!copied) {
             output.complete = false;
-            output.digests.insert(row.digest);
-            if (content.read_blob) {
-                const auto document = content.read_blob(row.digest);
-                const json manifest = document ? json::parse(*document, nullptr, false) : json();
-                if (const auto references = manifest.is_object() ? manifest_digests(manifest)
-                                                                 : std::expected<std::vector<std::string>, std::string>(
-                                                                       std::unexpected("missing"));
-                    references) {
-                    output.digests.insert(references->begin(), references->end());
-                }
-            }
+            output.digests.insert(item.digests.begin(), item.digests.end());
         }
-        if (page.size() < 1000) {
-            break;
-        }
-        after = page.back().repository + ":" + page.back().tag;
     }
     co_return output;
 }
@@ -587,7 +630,9 @@ liquid::runtime::task<ApiResult> copy_oci_blobs(ApiContext& context, const std::
     std::ranges::sort(rows, {}, &Row::id);
     // What a record without an object still reads from the instance registry, on any page.
     std::set<std::string> still_needed;
+    std::set<std::string> recorded;
     for (const Row& row : rows) {
+        recorded.insert(row.blob.digest);
         if (row.blob.object.empty()) {
             still_needed.insert(row.blob.digest);
         }
@@ -624,7 +669,7 @@ liquid::runtime::task<ApiResult> copy_oci_blobs(ApiContext& context, const std::
             co_return ApiResult::failure(digests.error().code, digests.error().message);
         }
         instance = std::move(*digests);
-        auto uncopied = co_await uncopied_legacy_digests(context, *content);
+        auto uncopied = co_await uncopied_legacy_digests(context, *content, recorded);
         if (!uncopied) {
             co_return ApiResult::failure("store_error", uncopied.error().message);
         }
@@ -632,6 +677,7 @@ liquid::runtime::task<ApiResult> copy_oci_blobs(ApiContext& context, const std::
         still_needed.insert(uncopied->digests.begin(), uncopied->digests.end());
     }
     std::set<std::string> instance_paths;
+    std::size_t rooted_now = 0;
     for (const auto& [workspace_id, owned] : by_workspace) {
         WorkspaceTally& tally = tallies[workspace_id];
         tally.customer_id = owned.front()->customer_id;
@@ -671,6 +717,30 @@ liquid::runtime::task<ApiResult> copy_oci_blobs(ApiContext& context, const std::
                 continue;
             }
             if (!blob.object.empty()) {
+                // In place. One stored before lake rooted image blobs is rooted now, once.
+                if (!blob.rooted) {
+                    auto rooted = co_await blocking_call(
+                        [&] {
+                            return context.sync_store->root_workspace_blob(row->customer_id,
+                                                                           workspace_id, blob.object);
+                        },
+                        [](std::string message) -> SyncStoreResult<void> {
+                            return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+                        });
+                    if (!rooted) {
+                        tally.error = rooted.error().code + ": " + rooted.error().message;
+                        break;
+                    }
+                    control::OciBlob marked = blob;
+                    marked.rooted = true;
+                    auto recorded =
+                        control::settled(co_await control::store_oci_blob(records, std::move(marked)));
+                    if (!recorded) {
+                        tally.error = recorded.error().code + ": " + recorded.error().message;
+                        break;
+                    }
+                    ++rooted_now;
+                }
                 ++tally.already_present;
                 continue;
             }
@@ -709,7 +779,8 @@ liquid::runtime::task<ApiResult> copy_oci_blobs(ApiContext& context, const std::
                 records, {.customer_id = row->customer_id,
                           .digest = blob.digest,
                           .size = stored->size,
-                          .object = stored->object}));
+                          .object = stored->object,
+                          .rooted = stored->rooted}));
             if (!recorded) {
                 tally.error = recorded.error().code + ": " + recorded.error().message;
                 break;
@@ -720,6 +791,9 @@ liquid::runtime::task<ApiResult> copy_oci_blobs(ApiContext& context, const std::
     ApiResult result = copy_result("oci_blobs", mode, rows.size(), limit,
                                    rows.empty() ? std::string() : rows.back().id,
                                    std::move(unresolved), tallies);
+    if (result.ok && mode == "copy") {
+        result.value["rooted"] = rooted_now; // objects already in place given their liquid root
+    }
     if (result.ok && mode == "verify") {
         // Advisory, and only when nothing could have been missed: every routed workspace's records
         // were read and every legacy tenant tag is in its workspace. The removal step re-checks

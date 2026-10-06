@@ -317,10 +317,11 @@ belong in the deployment record once a workspace is switched.
 into the store with liquid's `put_file` under the workspace's lane, admitted for a push (refused at
 once when the lane is full or moving) and held for the copy; it holds the lane, and liquid's
 mutation lock, for the whole put, so the workspace's other requests wait for a large layer, and it
-roots the new object with a lease. A pull is admitted once for its whole stream: it counts as one
-of the lane's four admissions until it ends, without holding the lane, and each window (1 MiB)
-takes the lane only for its read. Pulls therefore never park more than the lane's four blocking
-pool threads per workspace. Nothing here changes `ZettaObjectBackend`.
+roots the new object with a lease (once per object its record names). A pull takes one of the
+workspace's eight stream slots for its whole stream, apart from the lane's four admissions, so
+pulls never refuse the workspace's pushes, git or repository requests; it does not hold the lane,
+and each window (1 MiB) takes the lane only for its read. At most 24 pulls run in the process,
+below the server's 32 workers, and a client that takes no bytes for 60 s loses its stream. Nothing here changes `ZettaObjectBackend`.
 
 ## Not yet
 

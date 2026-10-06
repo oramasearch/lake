@@ -141,4 +141,5 @@ image blob as an object of its workspace's liquid store, lake#383 phase B),
 move (`transfer_to_workspace_store`, `switch_workspace_store`, `create_repository_content`,
 `close_workspace_store`, lake#380); `capabilities.hpp` adds `create_repository_row`;
 `server.hpp` adds `ServerOptions::object_transport` and `workspace_store_lease_ttl`, and
-`registry_upload_max_age` (lake#383 phase B: abandoned OCI uploads are removed after it).
+`registry_upload_max_age` (lake#383 phase B: abandoned OCI uploads are removed after it) and
+`registry_stream_idle_timeout` (a pull whose client takes no bytes for it is ended).

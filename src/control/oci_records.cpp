@@ -272,6 +272,12 @@ nlohmann::json OciBlobCodec::encode(const OciBlob& blob) {
     if (!blob.object.empty()) {
         body["object"] = blob.object;
     }
+    if (blob.rooted) {
+        body["rooted"] = true;
+    }
+    if (!blob.superseded.empty()) {
+        body["superseded"] = blob.superseded;
+    }
     return body;
 }
 
@@ -285,6 +291,15 @@ std::optional<OciBlob> OciBlobCodec::decode(const StoredRecord& record) {
                  record.body.value("object", std::string())};
     if (blob.customer_id.empty() || blob.digest.empty()) {
         return std::nullopt;
+    }
+    blob.rooted = record.body.value("rooted", false);
+    if (const auto superseded = record.body.find("superseded");
+        superseded != record.body.end() && superseded->is_array()) {
+        for (const nlohmann::json& object : *superseded) {
+            if (object.is_string()) {
+                blob.superseded.push_back(object.get<std::string>());
+            }
+        }
     }
     blob.revision = record.revision;
     blob.lake_revision = record.lake_revision;
@@ -342,10 +357,20 @@ liquid::runtime::task<ZettaControlResult<OciBlob>> store_oci_blob(WorkspaceRecor
         if (!found) {
             co_return failed<OciBlob>(found.error());
         }
-        if (*found && (*found)->object == blob.object && (*found)->size == blob.size) {
+        if (*found && (*found)->object == blob.object && (*found)->size == blob.size &&
+            ((*found)->rooted || !blob.rooted)) {
             co_return ZettaControlResult<OciBlob>(std::move(**found));
         }
         const bool absent = !*found;
+        if (!absent) {
+            blob.superseded = (*found)->superseded;
+            if ((*found)->object == blob.object) {
+                blob.rooted = blob.rooted || (*found)->rooted;
+            } else if (!(*found)->object.empty() && (*found)->rooted &&
+                       std::ranges::find(blob.superseded, (*found)->object) == blob.superseded.end()) {
+                blob.superseded.push_back((*found)->object);
+            }
+        }
         auto written = settled(co_await records.put(
             OciBlobCodec::collection, key, OciBlobCodec::lookup(blob), OciBlobCodec::encode(blob),
             absent ? RecordCondition{.if_absent = true}

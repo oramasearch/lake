@@ -502,7 +502,8 @@ and are not run by this change.
    instance registry.
 3. Run `POST /v1/copy_workspace_records {"collection":"oci_blobs","mode":"plan"}` with the operator
    bearer, then `{"mode":"copy"}` following `next_after` until it is null, then `{"mode":"verify"}`
-   over every page. `plan` and `verify` write nothing. A rerun copies nothing twice.
+   over every page. `plan` and `verify` write nothing. A rerun copies nothing twice. `copy` also
+   roots, once, each blob already in a workspace store without a liquid root (`rooted`).
 4. Unresolved rows: `workspace_not_switched` (switch it, then rerun), `blob_missing` and
    `blob_corrupt` (push the image again, or rerun its build; cache repositories may simply be
    rebuilt). From then on a copied blob is read only from its workspace store.
