@@ -1176,7 +1176,12 @@ ZettaObjectBackend::ZettaObjectBackend(std::shared_ptr<ZettaObjectClient> client
 
 ZettaObjectBackend::ZettaObjectBackend(std::shared_ptr<Shared> shared,
                                        std::optional<std::uint64_t> fence)
-    : shared_(std::move(shared)), fence_(fence) {}
+    : shared_(std::move(shared)), fence_(fence) {
+    // A new view starts unsynced (lake#535): what the bucket holds may include writes a
+    // predecessor (or this process before a reopen) sent but never made durable, and they are
+    // served from now on. Its first sync therefore sends :barrier, even with nothing new.
+    dirty_ = true;
+}
 
 ZettaObjectBackend::~ZettaObjectBackend() {
     // The root backend (the one lake and liquid's options hold) ends the views' lives, unless one

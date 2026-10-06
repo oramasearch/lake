@@ -5599,6 +5599,13 @@ private:
             return std::unexpected(error);
         }
         output->store = std::make_unique<liquid::store>(std::move(*store));
+        // A new view starts unsynced (lake#535): what a predecessor sent may not be durable, and
+        // liquid's open may have written. One :barrier before anything is served from the store;
+        // a store whose :barrier fails is not served.
+        if (auto durable = liquid::runtime::block_on(output->backend->make_durable()); !durable) {
+            static_cast<void>(liquid::runtime::block_on(output->store->close()));
+            return std::unexpected(error_of(durable.error()));
+        }
         bool seeded = false;
         {
             std::lock_guard maps(mutex_);

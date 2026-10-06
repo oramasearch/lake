@@ -4230,4 +4230,47 @@ TEST(WorkspaceStoreOwner, ALiquidCloseSyncsWhatTheBackendHolds) {
     ASSERT_TRUE(liquid::runtime::block_on(store->close()));
 }
 
+// lake#535 review B: a write a predecessor sent but never made durable is served by the next
+// view, so that view's first sync sends :barrier even with nothing new, and a crash after it
+// keeps what was served.
+TEST(WorkspaceStoreBackend, ANewViewsFirstSyncMakesWhatItServesDurable) {
+    for (std::uint64_t seed = 1; seed <= 12; ++seed) {
+        Rig rig;
+        {
+            auto writer = rig.backend(small_blocks());
+            auto view = std::static_pointer_cast<ZettaObjectBackend>(*writer->fenced(1));
+            ASSERT_TRUE(liquid::runtime::block_on(view->put("objects/a", bytes_of("acknowledged?"))));
+            // The sync's :barrier is lost: the PUT landed, nothing made it durable.
+            rig.zetta->drop_matching(":barrier", 8);
+            EXPECT_FALSE(liquid::runtime::block_on(view->sync()));
+            rig.zetta->drop_matching({}, 0);
+        }
+        auto reader = rig.backend(small_blocks(), false);
+        auto view = std::static_pointer_cast<ZettaObjectBackend>(*reader->fenced(2));
+        EXPECT_EQ(read(*view, "objects/a", 0, 13), bytes_of("acknowledged?")) << "served";
+        const std::uint64_t barriers = rig.zetta->barriers(rig.endpoint);
+        ASSERT_TRUE(liquid::runtime::block_on(view->sync()));
+        EXPECT_EQ(rig.zetta->barriers(rig.endpoint), barriers + 1) << "the first sync of a view";
+        ASSERT_TRUE(liquid::runtime::block_on(view->sync()));
+        EXPECT_EQ(rig.zetta->barriers(rig.endpoint), barriers + 1) << "and only the first";
+        rig.zetta->crash(rig.endpoint, seed);
+        EXPECT_TRUE(rig.zetta->objects(rig.endpoint).contains("objects/a")) << "seed " << seed;
+    }
+}
+
+// lake#535 review B: a switched workspace's store whose first :barrier fails after an open is
+// not served; once Zetta answers it again, the store opens.
+TEST(WorkspaceStoreMove, AStoreWhoseOpeningBarrierFailsIsNotServed) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_TRUE(written(rig.commit(rig.repo_a, "before.txt", "before the restart")));
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    rig.zetta->drop_matching(":barrier", 1000);
+    // A read too: what the store holds is not served before it is durable.
+    EXPECT_NE(rig.call("GET", "/v1/repository_tree?id=" + rig.repo_a.id + "&ref=main").first, 200U);
+    rig.zetta->drop_matching({}, 0);
+    EXPECT_TRUE(written(rig.commit(rig.repo_a, "after.txt", "served again")));
+}
+
 } // namespace

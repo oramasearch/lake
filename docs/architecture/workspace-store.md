@@ -178,6 +178,11 @@ records anything about the operation elsewhere (a repository row, a switch, an i
   stale by an earlier sync are removed beside it. `make_durable()` syncs the backend and every view
   of it; a sync with nothing sent and no stale tail costs no request. Only the data key's creation
   is sent `?durable=true` (the bucket's first object).
+- **A new view starts unsynced.** What the bucket holds when a store is opened may include writes
+  a predecessor (or this process before a reopen) sent but never made durable: its last `:barrier`
+  failed, or it stopped first. They are served from then on, so every fenced view starts as needing
+  a `:barrier`, and lake syncs right after it opens a workspace store, before serving anything; a
+  store whose `:barrier` fails then is closed and not served. That is one fsync per open.
 - **Where lake syncs.** Every repository call on a workspace store (`enter_repository`) syncs when
   it leaves the store's lane, while the request's `Server-Timing` still counts it. The calls that
   write (commit, push, chunk upload, LFS staging, conflict resolution, restore, provenance,
