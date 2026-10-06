@@ -5,6 +5,11 @@
 // directions independently: a byte read at t is written at t + rtt/2, so concurrent requests on
 // separate connections overlap as they would on a real network, and a sequence of dependent
 // requests pays the round trip each time.
+//
+// With `durable_delay` (lake#535), a request that asks Zetta to fsync (a POST `:barrier`, or a
+// write with `durable=true` in its query) is held that much longer before it is forwarded, as a
+// disk whose fsync costs that long would hold its answer. The proxy reads each request's line and
+// headers to find it and skips its body by Content-Length.
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -12,8 +17,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
+#include <cctype>
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -27,8 +35,9 @@ namespace lake::test {
 
 class LatencyProxy {
 public:
-    LatencyProxy(int target_port, std::chrono::microseconds round_trip)
-        : target_port_(target_port), half_(round_trip / 2) {
+    LatencyProxy(int target_port, std::chrono::microseconds round_trip,
+                 std::chrono::microseconds durable_delay = std::chrono::microseconds(0))
+        : target_port_(target_port), half_(round_trip / 2), durable_delay_(durable_delay) {
         listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
         int yes = 1;
         ::setsockopt(listener_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -73,14 +82,25 @@ public:
         return port_;
     }
 
+    // Requests that asked for an fsync, as the proxy saw them (counted when `durable_delay` is set).
+    std::uint64_t durable_requests() const {
+        return durable_requests_.load();
+    }
+
 private:
     using clock = std::chrono::steady_clock;
 
     // One direction of one connection: bytes read from `from` are written to `to` after `delay`.
+    // A request pipe with `durable_delay` adds it to the bytes that end a durable request's headers.
     struct Pipe {
         int from = -1;
         int to = -1;
         std::chrono::microseconds delay{};
+        std::chrono::microseconds durable_delay{};
+        std::atomic<std::uint64_t>* durable_requests = nullptr;
+        // The request being read: its line and headers so far, then the body bytes still to skip.
+        std::string head;
+        std::uint64_t body_left = 0;
         std::mutex mutex;
         std::condition_variable ready;
         std::deque<std::pair<clock::time_point, std::string>> queue;
@@ -106,9 +126,58 @@ private:
                     ready.notify_all();
                     return;
                 }
-                queue.emplace_back(clock::now() + delay, buffer.substr(0, static_cast<std::size_t>(got)));
+                std::string_view bytes(buffer.data(), static_cast<std::size_t>(got));
+                auto at = clock::now() + delay;
+                if (durable_delay.count() > 0) {
+                    // Every durable request whose headers end in these bytes holds them back; the
+                    // queue is in order, so later bytes wait behind them.
+                    at += durable_delay * static_cast<std::int64_t>(durable_requests_in(bytes));
+                }
+                queue.emplace_back(at, std::string(bytes));
                 ready.notify_all();
             }
+        }
+
+        // How many requests that ask for an fsync end their headers within `bytes`.
+        std::uint64_t durable_requests_in(std::string_view bytes) {
+            std::uint64_t found = 0;
+            while (!bytes.empty()) {
+                if (body_left > 0) {
+                    const std::size_t skip = static_cast<std::size_t>(std::min<std::uint64_t>(body_left, bytes.size()));
+                    body_left -= skip;
+                    bytes.remove_prefix(skip);
+                    continue;
+                }
+                const std::size_t before = head.size();
+                head.append(bytes);
+                const std::size_t end = head.find("\r\n\r\n");
+                if (end == std::string::npos) {
+                    return found;
+                }
+                const std::size_t used = end + 4 - before;
+                bytes.remove_prefix(used);
+                const std::string_view request(head.data(), end);
+                const std::string_view line = request.substr(0, request.find("\r\n"));
+                if (line.find(":barrier") != std::string_view::npos ||
+                    line.find("durable=true") != std::string_view::npos) {
+                    ++found;
+                    if (durable_requests != nullptr) {
+                        durable_requests->fetch_add(1);
+                    }
+                }
+                std::string lower(request);
+                std::ranges::transform(lower, lower.begin(),
+                                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (const std::size_t length = lower.find("\r\ncontent-length:"); length != std::string::npos) {
+                    std::size_t digit = length + 17;
+                    while (digit < lower.size() && lower[digit] == ' ') {
+                        ++digit;
+                    }
+                    std::from_chars(lower.data() + digit, lower.data() + lower.size(), body_left);
+                }
+                head.clear();
+            }
+            return found;
         }
 
         void write_loop() {
@@ -160,6 +229,8 @@ private:
             up->from = client;
             up->to = server;
             up->delay = half_;
+            up->durable_delay = durable_delay_;
+            up->durable_requests = &durable_requests_;
             auto down = std::make_shared<Pipe>();
             down->from = server;
             down->to = client;
@@ -189,6 +260,8 @@ private:
 
     int target_port_;
     std::chrono::microseconds half_;
+    std::chrono::microseconds durable_delay_;
+    std::atomic<std::uint64_t> durable_requests_{0};
     int listener_ = -1;
     int port_ = 0;
     std::atomic<bool> stopping_{false};

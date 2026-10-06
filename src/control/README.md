@@ -198,5 +198,8 @@ it creates, as the migration and its trigger do; `set_workspace_storage_status` 
 `workspace_store.cpp` implements `include/lake/control/workspace_store.hpp` (lake#380): Zetta's object
 routes and their errors, the wrapped workspace data key, the encrypted block and tail layout, the
 buffered appends sent as complete blocks at most one Zetta slice per PATCH, the refusal of a
-rewrite (Zetta objects only grow), the ciphertext window cache, and the lease's renewal thread. See
+rewrite (Zetta objects only grow), the ciphertext window cache, and the lease's renewal thread.
+Since lake#535 its writes go without durability and in issue order, liquid's barrier sends nothing,
+and `sync()`/`make_durable()` end an operation with one Zetta `:barrier`; the owner's release
+syncs what a closed store's backend still holds. See
 [workspace-store.md](../../docs/architecture/workspace-store.md).

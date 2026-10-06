@@ -69,11 +69,11 @@ block's index and its length. A block altered, moved within the object, moved to
 read under another workspace's key fails authentication (`corrupt`).
 
 **Appending without rewriting.** Zetta objects only grow. A partial block of appended bytes cannot be
-completed in place, so at each barrier it is written whole to its own object
-`K.lake-tail-<block>-<salt prefix>` (an atomic replacing put), and the next barrier appends the
+completed in place, so when the appends are sent it is written whole to its own object
+`K.lake-tail-<block>-<salt prefix>` (an atomic replacing put), and the next send appends the
 completed block to `K` and replaces the tail. A tail whose block number is below `K`'s count of
 appended blocks, or whose salt is not `K`'s, is stale: readers ignore it and the backend removes it
-after the next barrier. Every offset is therefore computable from the header and `K`'s size alone:
+with the sync after the one that made its replacement durable. Every offset is therefore computable from the header and `K`'s size alone:
 plaintext size = base length + appended blocks × block size + the current tail's length.
 
 **What it does not hide or prove.** Object names (`packs/pack-3.pack`, `repositories/<hash>/…`),
@@ -117,93 +117,133 @@ store, but its entry point is gone) is refused by the move as `corrupt`, never c
 ## Writes
 
 Since lake#527 the backend sends every mutation in the order liquid issued it, one at a time (each
-answered before the next is sent), and holds small puts and buffered appends until the next
-barrier or until a later write needs them sent first. The bucket's log therefore holds a prefix of
-liquid's issue order, and a crash keeps such a prefix (Zetta truncates its log at the first torn
-frame), never a later write without an earlier one. That is the order liquid relies on between
-barriers; its contract does not state it yet
-([liquid#344](https://github.com/oramasearch/liquid/issues/344)).
+answered before the next is sent), and holds small puts and buffered appends until a later write
+needs them sent first. The bucket's log therefore holds a prefix of liquid's issue order, and a
+crash keeps such a prefix (Zetta truncates its log at the first torn frame), never a later write
+without an earlier one. That is the order liquid relies on between barriers; its contract does not
+state it yet ([liquid#344](https://github.com/oramasearch/liquid/issues/344)).
+
+Since lake#535 no write asks Zetta to fsync. Liquid's `barrier()` sends nothing, and the store is
+made durable once per store operation, by lake, before it answers: `make_durable()` sends what is
+held, in order, and then one Zetta `:barrier`. Before lake#535 every write went with
+`?durable=true`, so a one-file commit on dev paid about 100 fsyncs (about 33 ms each on its Azure
+disk, 3.1 to 3.4 s per commit); it now pays one.
 
 What "a crash keeps a prefix" covers: a crash of the lake process or of the Zetta process on a
-one-node workspace Zetta (every workspace today). It does not yet cover a power loss across a
-Zetta segment roll, where a later segment can survive an earlier one's unsynced tail
-([zetta#1235](https://github.com/oramasearch/zetta/issues/1235)). With `rf` above 1 each key has
-its own primary, so Zetta gives no order across keys; the barrier's durability still holds.
+one-node workspace Zetta (every workspace today). A power loss of the workspace Zetta's node also
+keeps a prefix, except across a segment roll: a later segment's pages can reach the disk while an
+earlier segment's unsynced tail does not, so a later write can survive without an earlier one
+([zetta#1235](https://github.com/oramasearch/zetta/issues/1235)). Lake#535 makes that window
+larger: before, each write was fsynced before the next was sent, so only the writes sent without
+durability (large puts, threshold flushes) were exposed; now every write between two syncs is,
+which is one store operation. The `:barrier` at the end of the operation closes it (it fsyncs every
+segment written since the last one), so what lake acknowledged is never affected, and a roll
+happens once per 64 MiB written, after which Zetta's maintenance fsyncs the rolled segment within
+100 ms. Once zetta#1235 lands (the roll fsyncs the previous segment), a power loss keeps a prefix
+too. With `rf` above 1 each key has its own primary, so Zetta gives no order across keys; the
+`:barrier`'s durability still holds.
+
+Why liquid's barriers need not be durable: a crash keeps a prefix of the issue order, and every
+prefix is a state liquid could have been left in by a crash at the moment that prefix ends, on a
+backend whose every barrier was durable (every write before that moment applied, none after).
+Liquid recovers from such a crash by its own contract. What a crash may take back is therefore only
+what no one outside the process has been told about, since lake's sync runs before lake answers or
+records anything about the operation elsewhere (a repository row, a switch, an image blob record).
 
 - `put` of at most 1 MiB is held: reads are answered from memory, and the bucket keeps the previous
   version until the held put is sent as one PUT, which Zetta commits atomically. A larger put is
-  sent at once, after what is held, without durability.
+  sent at once, after what is held.
 - `put_if_absent` (`?if_absent=true`, whose `409` is `already_exists`) is sent at once, after what
   is held: its answer decides the create.
-- `remove` is sent at once, after what is held. Liquid ends some operations with a removal and no
-  barrier (a checkpoint removes `LIQUID_JOURNAL`, [liquid#343](https://github.com/oramasearch/liquid/issues/343)),
-  so a removal must not wait for a barrier that may never come. A removal of a key that was only
-  held, and is the last thing held, sends nothing. The key's tails go after the next barrier.
-- `put_range` appends to a buffer. Complete blocks are sent once at least 1 MiB is held, without
-  durability, as PATCHes at the object's exact size of at most one Zetta slice (4 MiB), each
-  applied by Zetta as one frame, so an object never ends inside a block. An object not in Zetta
-  yet (a held put appended to, or one created by appends) is sent whole, as one PUT of its header
-  and base blocks, so a put is never seen in part and the object needs no tail.
+- `remove` is sent at once, after what is held. A removal of a key that was only held, never sent,
+  and that is followed by at most one held key which goes as a single PUT, sends nothing and drops
+  the held put (lake#535): liquid stages its object map as `packs/objects.meta.tmp`, publishes it
+  as `packs/objects.meta` and removes the staging, and every prefix of the PUT of `objects.meta`
+  alone is a prefix of those three. The key's tails go after the next sync.
+- **Liquid's journal.** A checkpoint ends with the removal of `LIQUID_JOURNAL` and no barrier after
+  it ([liquid#343](https://github.com/oramasearch/liquid/issues/343)), and a reopen prefers the
+  journal while it exists. The removal is sent at once and made durable by the sync before lake
+  answers the commit, so an acknowledged commit is never reverted by a journal that comes back.
+  Liquid's next barrier would not do it: it sends nothing, and the next operation may never come.
+- `put_range` appends to a buffer. Complete blocks are sent once at least 1 MiB is held, as PATCHes
+  at the object's exact size of at most one Zetta slice (4 MiB), each applied by Zetta as one
+  frame, so an object never ends inside a block. An object not in Zetta yet (a held put appended
+  to, or one created by appends) is sent whole, as one PUT of its header and base blocks, so a put
+  is never seen in part and the object needs no tail.
 - **Order.** Held writes are kept per key in the order of each key's earliest held write. A write
   about a key that is held before another key's held write sends what is held first, so coalescing
-  never moves a later write ahead of an earlier one.
-- **Durability.** A write is sent with `?durable=true` (Zetta fsyncs it before it answers) unless
-  a write since the last barrier went without durability (a large put, a threshold flush, held
-  writes sent early past their bound); then the barrier sends Zetta's `:barrier` after them.
+  never moves a later write ahead of an earlier one. Holding spans liquid's barriers.
+- **Durability.** Writes go without `?durable=true`. `ZettaObjectBackend::sync()` sends what one
+  view holds and, when anything was sent since the last `:barrier`, one `:barrier`; the tails made
+  stale by an earlier sync are removed beside it. `make_durable()` syncs the backend and every view
+  of it; a sync with nothing sent and no stale tail costs no request. Only the data key's creation
+  is sent `?durable=true` (the bucket's first object).
+- **Where lake syncs.** Every repository call on a workspace store (`enter_repository`) syncs when
+  it leaves the store's lane, while the request's `Server-Timing` still counts it. The calls that
+  write (commit, push, chunk upload, LFS staging, conflict resolution, restore, provenance,
+  replication, portable and git import) sync explicitly before they answer, so a failed `:barrier`
+  fails the call; so do a repository's creation in a workspace store, the move's copy, and an image
+  blob's put and rooting. A sync that fails on the way out of the lane (a call that does not write,
+  or one that already failed) marks the backend failed, and lake reopens the store before its next
+  use.
 - **Bounds.** Held writes past 8 MiB (`held_bytes_limit`) or 256 held puts (`held_puts_limit`) are
-  sent at once, without durability. The count is exact: a put replacing a held put, a held key
-  removed, and a threshold flush leave only what is still held. A view also keeps, to skip an identical rewrite, the
-  plaintext of small objects it wrote whole and durably: at most 16 KiB each and 1 MiB in all.
-- A put of the bytes the bucket already holds durably for that key (written whole by this view,
-  nothing appended since) sends nothing: liquid publishes its index manifest twice in a row, with
-  barriers between, and the second is the same bytes.
-- `barrier()` sends what is held, in order, and `:barrier` when needed. Then it removes the tails
-  made stale by earlier barriers, without durability, and answers. It never removes a tail an
-  object holds now (one the drain may just have written again). No reader needs a stale tail, and
-  a removal brought back by a crash leaves a stale tail, which readers ignore. A barrier with
-  nothing held and no stale tail costs no request.
+  sent at once. The count is exact: a put replacing a held put, a held key removed, and a threshold
+  flush leave only what is still held. A view also keeps, to skip an identical rewrite, the
+  plaintext of small objects it sent whole: at most 16 KiB each and 1 MiB in all.
+- A put of the bytes the bucket already holds for that key (sent whole by this view, nothing
+  appended since) sends nothing: liquid publishes its index manifest twice in a row, with barriers
+  between, and the second is the same bytes. The skip leaves every prefix as it was, since the
+  bucket's log holds that version before anything issued after it.
 - **Search's objects.** The search index's sealed objects (`search/`, lake#381) are written with
   the store's client, outside this backend; the backend leaves them out of its directory and
-  refuses liquid keys under that prefix.
-- **Why the guarantees hold.** Everything acknowledged before a barrier is durable when it answers:
-  each write it sends is fsynced before Zetta answers it, and a `:barrier` covers the writes sent
-  without durability before it. A crash keeps a prefix of the issue order that includes
-  everything the last answered barrier acknowledged. A tail is removed only after the barrier that
+  refuses liquid keys under that prefix. A search commit sends its new objects and then its
+  manifest, one at a time, and one `:barrier` after the manifest (lake#535 dropped the `:barrier`
+  before it: the bucket's log keeps the order).
+- **Why the guarantees hold.** Everything issued before a sync is durable when it answers: the
+  writes it sends are applied before its `:barrier`, which fsyncs every segment written since the
+  last one, and the writes sent earlier are too. A crash keeps a prefix of the issue order that
+  includes everything the last answered sync covered. A tail is removed only after the sync that
   made its replacement durable, so a crash never leaves an object shorter than acknowledged.
 - **A lost answer.** A PUT, PATCH or DELETE whose answer is lost is retried, and the retry changes
   nothing more (a PUT of the same bytes, a PATCH that repeats the bytes there, a DELETE answered
   `404`). A conditional create whose answer is lost is not retried: it answers `unavailable` and
   fails the backend, and the reopened store finds whatever landed.
 - **Quota.** A held put meets the bucket's quota when it is sent, so a write past the quota
-  (`507`, liquid's `busy`) can fail at the barrier, or at the next write sent at once, rather
-  than at the `put` that went over.
+  (`507`, liquid's `busy`) can fail at the sync, or at the next write sent at once, rather than at
+  the `put` that went over.
 - A range that overlaps written bytes must repeat them (a retry, which changes nothing). Different
   bytes are refused `conflict`, as Zetta refuses them (zetta `docs/data/object-store.md`); liquid
   since liquid#332 never writes so, and the store is reopened before its next use.
 - Every mutation carries the lease's fence (`Zetta-Fence`).
-- One sender at a time: a buffered-append flush and a barrier wait for each other rather than send
+- One sender at a time: a buffered-append flush and a sync wait for each other rather than send
   the same blocks twice.
-- **Closing.** The owner sends what the store's backend holds before it releases the lease
+- **Closing.** The owner syncs the store's backend before it releases the lease
   (`ZettaObjectClient::before_release`, set by the backend; liquid's close releases without a last
-  barrier), so a store closed cleanly leaves nothing unsent. This settling is bounded (10 s by
-  default): each of its requests gets one attempt, cut to the time left, so a drain with the
-  workspace Zetta unreachable does not stall. Only the settling's requests are cut; other users of
-  the client (search) keep their timeouts. A lost lease or a failed store is closed without it; what was
-  held then is lost, as liquid allows for writes no barrier acknowledged.
+  barrier), so a store closed cleanly leaves nothing unsent or undurable. Liquid's close lets go of
+  the backend and revokes the store's copy of the grant before it calls the release, so the root
+  backend keeps a view that still holds writes for the release, and the release settles unless its
+  own renewal lost the lease (lake#535; before, the revoked grant read as a lost lease and the
+  settling never ran on liquid's close, which cost nothing while liquid's barriers sent
+  everything). After a takeover the settling's writes are refused as fenced and land nothing; a
+  lease lost to the renewal lets go of the views without sending. This settling is bounded
+  (10 s by default): each of its requests gets one attempt, cut to the time left, so a drain with
+  the workspace Zetta unreachable does not stall. Only the settling's requests are cut; other users
+  of the client (search) keep their timeouts. A lost lease or a failed store is closed without it;
+  what was held then is lost, as liquid allows for writes no barrier acknowledged.
 - A conditional create that Zetta refuses while the directory said the key was absent (another
   writer, which the fence should exclude) marks the backend failed and keeps the directory and
   buffered appends as they are.
-- A failed mutation marks the backend failed: liquid may already have advanced its memory of the
-  store (an index flush clears its memtable before the barrier that fails), and liquid's contract is
-  to recover on the next open. Lake closes such a store and opens it again before the next request
-  uses it.
+- A failed mutation or sync marks the backend failed: liquid may already have advanced its memory
+  of the store (an index flush clears its memtable before the write that fails), and liquid's
+  contract is to recover on the next open. Lake closes such a store and opens it again before the
+  next request uses it.
 
 ## Reads
 
 The backend keeps a directory of the bucket from one paged listing, maintained by its own writes;
 that is exact because the fence makes it the only writer, and `list` and `exists` cost no request.
 Headers are read with the first window of each object, on first use; a tail that is not the
-object's current one is then removed after the next barrier. Ranges are read through a
+object's current one is then removed by the next sync. Ranges are read through a
 bounded per-store cache (64 MiB) of aligned 4 MiB ciphertext windows keyed by object, salt and
 window: a version's bytes never change (appends only add complete blocks; a replacement has a new
 salt), so nothing is invalidated except on `put` and `remove`. The bytes each put (up to 16 MiB)
@@ -530,6 +570,81 @@ The process metrics `lake_workspace_store_requests_total{kind,outcome}` and
 `lake_workspace_store_request_duration_seconds{kind}` and each response's `store` Server-Timing
 entries give the same counts on dev; a deployed measurement belongs in the deployment record.
 
+### One fsync per operation (lake#535)
+
+**On dev** (lake `20261006d`, `d86f1ca`, 2026-10-06, before lake#535), a one-file commit to
+`test1` in workspace `6bb777ba` took 3.1 to 3.4 s, with this `Server-Timing`:
+
+```
+store;dur=3445.630;desc="104 requests"
+store_put;dur=2119.637;desc="59"
+store_put_if_absent;dur=44.872;desc="3"
+store_barrier;dur=57.233;desc="2"
+store_delete;dur=1223.888;desc="40"
+```
+
+About 33 ms per request against an in-cluster round trip of about 2 ms: each write was sent
+`?durable=true`, and an fsync on the workspace Zetta's Azure disk costs about 30 ms. The fsync is
+what the proxy models with `LAKE_TEST_ZETTA_FSYNC_MS=30`: it holds every request that asks for one
+30 ms longer. The model reproduces dev's figure (80 requests, 3.4 s at a 2 ms round trip).
+
+**Where dev's 104 requests come from**, against the benchmark's 80:
+- **The search index (lake#381, PR #530): 8.** The commit's reindex writes one new segment, one
+  artifacts object and one blob run (write-once: the 3 `put_if_absent`), the manifest (a PUT), and
+  removes the replaced segment and artifacts object (2 DELETEs); one `:barrier` before the manifest
+  and one after (the 2 `:barrier`s).
+- **Image blobs: none.** Only a registry push writes them (`put_workspace_blob`), never a commit.
+- **Liquid: the other 96** (about 58 PUTs and 38 DELETEs). Per object the commit stores (about
+  nine for one file) 4 writes: the pack's tail, the object map, an index run, the index manifest
+  (plus, before lake#535, the object map's staging PUT and its DELETE). On top of that, two things
+  that grow with the repository, which the benchmark's young five-directory repository barely has:
+  - **Directory leases.** Each checkpoint retains every directory of the repository, and each
+    retention renews the directory's lease: a PUT of the next generation and a DELETE of the last,
+    2 requests per directory per commit.
+  - **Index merges.** Liquid merges its index runs as they accumulate: each merge is a PUT of the
+    merged run and a DELETE per run merged.
+  `LAKE_TEST_ZETTA_SEED_COMMITS=40` (40 earlier commits of 8 files over 16 directories) reproduces
+  dev's mix: 116 requests before lake#535 (72 PUT, 1 PATCH, 43 DELETE). In one such commit after
+  lake#535 (107 requests), 44 are lease writes (34 of them renewals) and 27 are index runs (15 of
+  them DELETEs of merged runs); the count moves by about 10 from commit to commit with the merges.
+
+**What lake#535 changed** (Apple M3 Max, real Zetta `f6a82675`, liquid `8955519`, the steady-state
+fourth commit including lake's sync, a load average of 5 to 8 from other builds; the lake#535
+ranges are two runs):
+
+| | Requests | durable (fsync) | 0 ms RTT | 5 ms | 10 ms | 2 ms + 30 ms fsync | 10 ms + 30 ms fsync |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| #532 (before) | 80 | 80 | 71 ms | 607 ms | 1,068 ms | 3,371 ms | 4,261 ms |
+| lake#535 | 63 | 1 | 56-60 ms | 473-594 ms | 844-946 ms | 264-369 ms | 895-964 ms |
+
+With the dev-like repository (`LAKE_TEST_ZETTA_SEED_COMMITS=40`, 2 ms round trip, 30 ms fsync):
+116 requests and 115 fsyncs, 5.3 s in requests, before; 113 requests and 1 fsync, 0.6 s in
+requests, after. That run also spends about 1.5 s outside requests (2.6 s before), in liquid and
+the backend's own work for a repository of 320 files on a loaded machine; dev's `Server-Timing`
+shows no such share (its store time is the whole commit).
+
+Through a running lake (`WorkspaceStoreMove.ACommitNamesItsStoreRequestsInServerTimingAndMetrics`,
+fake Zetta) a commit is 56 requests, 70 before: liquid's 48 writes (62 before) and one `:barrier`,
+and the search index's 6 writes and one `:barrier` (two before). The test checks that a commit asks
+for one or two fsyncs.
+
+What was cut, and why it is safe:
+- **The fsync per write.** Writes go without durability and one `:barrier` per operation makes them
+  durable before lake answers ([Writes](#writes)).
+- **The object map's staging** (`packs/objects.meta.tmp`, a PUT and a DELETE per object): dropped
+  while it is held and only the publication follows it, which leaves every prefix a prefix of the
+  issue order.
+- **The search index's first `:barrier`**, before its manifest: the bucket's log keeps the order.
+
+What is left is liquid's: 4 writes per object stored and, on a repository with history, the
+directory lease renewals and index merges. Fewer of them need liquid: an object batch per
+operation and one manifest publication per index flush
+([liquid#341](https://github.com/oramasearch/liquid/issues/341)), and renewing a directory's lease
+only when its retention changes or nears expiry rather than at every checkpoint. At dev's 2 ms round
+trip a one-file commit should now cost about its request count times the round trip plus one fsync:
+about 0.25 to 0.3 s for dev's 104 requests. The measurement on dev belongs in the deployment record
+once deployed.
+
 ## Image blobs (lake#383 phase B)
 
 `put_workspace_blob`, `admit_workspace_stream`, `workspace_blob_present` and `read_workspace_blob`
@@ -594,7 +709,7 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreMove.ALostLeaseAnswers503UntilReacquiredAndDeletionReleasesTheLease` | `503 store_unavailable` for the workspace only, reacquisition with a higher fence, deletion releasing the lease |
 | `WorkspaceStoreBackend.AMissingKeyIsCreatedOnlyForANewStoreInAnEmptyBucket` | no key without `create_key`; never over objects |
 | `WorkspaceStoreBackend.ARemoteConflictOnAConditionalCreateFailsTheBackendAndKeepsItsBuffer` | a refused conditional create fails the backend and loses no buffered append |
-| `WorkspaceStoreBackend.TailRollbackDeletionTruncationAndACrashBeforeTheTailAreAsDocumented` | tail rollback and deletion read as the shorter object, truncation inside a block is `corrupt`, a crash between the PATCH and the tail keeps what the last barrier acknowledged |
+| `WorkspaceStoreBackend.TailRollbackDeletionTruncationAndACrashBeforeTheTailAreAsDocumented` | tail rollback and deletion read as the shorter object, truncation inside a block is `corrupt`, a crash between the PATCH and the tail keeps what the last sync acknowledged |
 | `WorkspaceStoreBackend.TailsThatAreNotCurrentAreRemovedAfterOpen` | stale tails removed |
 | `WorkspaceStoreBackend.AThresholdFlushAndABarrierOnOneKeyDoNotSendItsBlocksTwice` | the flush guard |
 | `WorkspaceStoreOwner.ARenewalThatTimesOutLosesTheLeaseInTime` | renewal timeout under the TTL; the grant is lost before the lease runs out |
@@ -631,19 +746,19 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreRemoval.AnUnassignedRepositoryIsRefused` | on PostgreSQL, a repository without a workspace refuses the removal although the space's only workspace is switched |
 | `WorkspaceStoreZetta.TheBackendOnARealZettaHoldsOnlyCiphertextAndItsLatencyIsMeasured` | the same on a real Zetta, and the latency table |
 | `WorkspaceStoreZetta.TheSearchIndexOnARealZettaIsSealedReloadsAndIsRebuilt` | a workspace's search index on a real Zetta: sealed, reloaded without rewriting, rebuilt once wiped |
-| `WorkspaceStoreZetta.AOneFileCommitsRequestsAreCountedAndTimed` | lake#527: one-file commits on a real Zetta behind a round trip, requests by kind, rounds, the request trace |
-| `WorkspaceStoreBackend.ACrashAnywhereKeepsAPrefixOfTheIssueOrderPastTheLastBarrier` | lake#527: 200 random sequences of held puts, immediate puts, appends past the threshold, conditional creates, removes, repeated bytes and crossed bounds, ending in a barrier that is answered, stopped part way, or loses requests or answers at random, then a crash keeping a prefix of the bucket's log: what survives is a prefix of the issue order at least as long as the last answered barrier |
-| `WorkspaceStoreBackend.AnIntervalsWritesAreSentOneAtATimeInIssueOrder` | lake#527: a marker, a pack, an index run with appends, a removal and a manifest reach Zetta in that order, never two at once |
+| `WorkspaceStoreZetta.AOneFileCommitsRequestsAreCountedAndTimed` | lake#527: one-file commits on a real Zetta behind a round trip, requests by kind, rounds, the request trace; lake#535: each commit with lake's sync, an fsync cost per durable request (`LAKE_TEST_ZETTA_FSYNC_MS`), a repository with history (`LAKE_TEST_ZETTA_SEED_COMMITS`), and one durable request per commit |
+| `WorkspaceStoreBackend.ACrashAnywhereKeepsAPrefixOfTheIssueOrderPastTheLastBarrier` | lake#527: 200 random sequences of held puts, immediate puts, appends past the threshold, conditional creates, removes, repeated bytes and crossed bounds, with liquid's barriers and lake's syncs between (lake#535), ending in a sync that is answered, stopped part way, or loses requests or answers at random, then a crash keeping a prefix of the bucket's log: what survives is a prefix of the issue order at least as long as the last answered sync |
+| `WorkspaceStoreBackend.AnIntervalsWritesAreSentOneAtATimeInIssueOrder` | lake#527: a marker, a pack, an index run with appends, a removal and a manifest reach Zetta in that order, never two at once; lake#535: liquid's barriers between them send nothing, and the sync sends one `:barrier` |
 | `WorkspaceStoreBackend.AWriteWhoseAnswerWasLostIsRetriedOrFailsTheBackend` | lake#527: a durable PUT and a DELETE whose answers were lost after they landed are retried harmlessly; a conditional create that landed answers `unavailable`, fails the backend, and the reopened store holds it |
-| `WorkspaceStoreBackend.HeldWritesPastTheirBoundAreSentEarly` | lake#527: past the held-put count or byte bound, held writes are sent at once, and the next barrier sends `:barrier` |
+| `WorkspaceStoreBackend.HeldWritesPastTheirBoundAreSentEarly` | lake#527: past the held-put count or byte bound, held writes are sent at once, and the next sync sends `:barrier` |
 | `WorkspaceStoreBackend.ConcurrentRequestsStopAtTheFirstFailureAndReportALostLeaseFirst` | lake#527: no request starts after a failure; `locked` is reported before other errors |
-| `WorkspaceStoreBackend.ACrashMidCommitKeepsEveryAcknowledgedCommit` | lake#527: liquid one-file commits with checkpoints at several intervals, one interrupted (stopped, requests lost, or answers lost), a crash, a successor's reopen: every acknowledged commit reads back and the head is the last acknowledged change (a stale `LIQUID_JOURNAL` would revert it) |
+| `WorkspaceStoreBackend.ACrashMidCommitKeepsEveryAcknowledgedCommit` | lake#527: liquid one-file commits with checkpoints at several intervals, each acknowledged once lake's sync after it answers (lake#535), one interrupted (stopped, requests lost, or answers lost), a crash, a successor's reopen: every acknowledged commit reads back and the head is the last acknowledged change (a stale `LIQUID_JOURNAL` would revert it), or the interrupted one when liquid answered it and only the sync failed |
 | `WorkspaceStoreOwner.ReleaseSettlesWithinItsBudgetWhenZettaDoesNotAnswer` | lake#527: release with Zetta not answering the held writes returns within its budget and still releases the lease |
 | `WorkspaceStoreOwner.TheSettleBudgetCutsOnlyTheSettlingRequests` | lake#527: a request beside the settling keeps its own timeout |
 | `WorkspaceStoreBackend.HeldBytesAndPutsStayExact` | lake#527: a replaced held put, a removed held key and a threshold flush leave the held count exact |
-| `WorkspaceStoreBackend.ABarrierNeverRemovesATailItJustWrote` | lake#527: a stale tail whose name the barrier writes again survives the barrier |
+| `WorkspaceStoreBackend.ABarrierNeverRemovesATailItJustWrote` | lake#527: a stale tail whose name the sync writes again survives the sync |
 | `WorkspaceStoreBackend.TheSearchIndexsObjectsAreNotLiquids` | lake#527: `search/` objects stay out of liquid's directory, and liquid cannot write there |
-| `WorkspaceStoreMove.ACommitNamesItsStoreRequestsInServerTimingAndMetrics` | lake#527: a commit through lake names its store requests in `Server-Timing`, equal to what the workspace Zetta received, and the metrics count them by kind without a workspace label |
+| `WorkspaceStoreMove.ACommitNamesItsStoreRequestsInServerTimingAndMetrics` | lake#527: a commit through lake names its store requests in `Server-Timing`, equal to what the workspace Zetta received, and the metrics count them by kind without a workspace label; lake#535: the commit asks the workspace Zetta for one or two fsyncs |
 | `WorkspaceStoreOwner.AWaitingAcquireTakesTheLeaseAsSoonAsItIsReleased` | lake#536: an acquire waiting on a held lease answers within 1 s of the release, with a higher fence; a write with the released fence is refused |
 | `WorkspaceStoreHandoff.ASuccessorTakesEachLeaseBeforeTheRootAndItsFirstRequestsNeedNoOpen` | lake#536: two lake servers on one volume and one fake Zetta (10 ms a request, 30 s TTL): the successor's pre-open waits while the predecessor holds both workspaces; once the predecessor begins to drain (still owning the root) the successor takes both leases with higher fences, before the root; the first commit to each workspace answers in under 5 s and takes no lease (no open); a write with the predecessor's fence is refused |
 | `WorkspaceStoreHandoff.AServingPredecessorKeepsAWorkspaceItNeverOpenedWhileTheSuccessorPreopens` | lake#536: before the predecessor drains, the successor takes no free lease, and the predecessor serves a workspace it had never opened |
@@ -656,3 +771,6 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreHandoff.AnUnreadyWorkspaceDoesNotHoldUpTheOthersRepositories` | lake#536: with one workspace's Zetta not ready, another's repositories are opened within 3 s of the root |
 | `WorkspaceStoreHandoff.AStaleDrainAnnouncementIsIgnored` | lake#536: an earlier owner's announcement and a copy of the record with another token are ignored; the successor takes no free lease, and removes the marker once it owns the root |
 | `WorkspaceStoreHandoff.IndexWorkTheDrainDropsIsRebuiltByTheSuccessor` | lake#536: a rebuild and a pending commit dropped by the drain: the manifest is removed, and the successor's rebuilt index holds every commit |
+| `WorkspaceStoreBackend.ACommitAsksForOneDurableRequestAndKeepsItsJournalRemoval` | lake#535: liquid one-file commits that each checkpoint send no fsync until lake's sync, which sends one `:barrier`; an idle sync sends nothing; after a crash `LIQUID_JOURNAL` stays removed and the reopened head is the last commit |
+| `WorkspaceStoreOwner.ALiquidCloseSyncsWhatTheBackendHolds` | lake#535: liquid's close (backend let go of, grant revoked) still syncs what the backend holds with one `:barrier`; a crash after it keeps every object |
+| `WorkspaceStoreBackend.AStagedObjectRemovedAfterItsPublicationSendsOnlyThePublication` | lake#535: a staged object published and then removed sends only the publication; with two held keys after the staging, everything is sent; a crash keeps a prefix |
