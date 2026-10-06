@@ -178,6 +178,13 @@ public:
         drop_nth_ = nth;
         drop_count_ = count;
     }
+    // The next `count` requests whose URL contains `fragment` get no answer (a search index write
+    // failing while the store's own writes go through).
+    void drop_matching(std::string fragment, int count) {
+        std::lock_guard lock(mutex_);
+        drop_fragment_ = std::move(fragment);
+        drop_matching_ = count;
+    }
     // Another process takes the bucket's lease, as a successor does once the holder's lease ran
     // out: the fence rises and the old holder's writes are refused from now on.
     std::uint64_t take_over(const std::string& endpoint, const std::string& holder,
@@ -397,6 +404,10 @@ private:
         }
         if (drop_ > 0) {
             --drop_;
+            return {0, {}, "connection reset by the test"};
+        }
+        if (drop_matching_ > 0 && !drop_fragment_.empty() && request.url.find(drop_fragment_) != std::string::npos) {
+            --drop_matching_;
             return {0, {}, "connection reset by the test"};
         }
         if (loss_percent_ != 0) {
@@ -639,6 +650,8 @@ private:
     std::vector<std::string> applied_;
     int most_writes_in_flight_ = 0;
     std::string drop_method_;
+    std::string drop_fragment_;
+    int drop_matching_ = 0;
     int drop_nth_ = 0;
     int drop_count_ = 0;
     bool keep_bodies_ = true;

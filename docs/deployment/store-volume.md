@@ -25,7 +25,10 @@ hand the root over (see [The hand-off](#the-hand-off)).
 ## One process per store root
 
 **What.** Lake takes an exclusive `flock` on `$LAKE_STORE_ROOT/.lake-owner.lock` before it opens
-anything under the root, and writes the owner's pid, host, node and start time into the file.
+anything under the root, and writes the owner's pid, host, node, start time and a random token into the file (the token
+lets a drain announcement name exactly this lock, lake#536). A lake that cannot write its record
+refuses to own the root (the start fails), so a stale record and an old announcement can never
+match a live owner.
 Each customer store is also opened with libliquid's `store_options::exclusive_owner`, which holds
 liquid's own lock on `<customer>/store/store.lock` until the store is closed (liquid#321). The
 root lock is always taken first, so the per-store locks are never contended between lake
@@ -112,7 +115,10 @@ reachable while it waits.
    answered, not refused; it waits for the hand-off. Once a pod has reported Ready through a
    wait, it stays Ready through the open that follows, so readiness does not flap.
 4. **Stop** (SIGTERM, or `ApiServer::stop`): `/readyz` answers `503`, every response closes its
-   connection, and requests still held for the root are answered. Lake then waits up to
+   connection, and requests still held for the root are answered. At the same moment each
+   workspace store is handed over: new requests to it answer `503` with `Retry-After: 1`, and its
+   lease is released as soon as the requests admitted to it are done (lake#536,
+   [Workspace stores](#workspace-stores-lake380)). Lake then waits up to
    `LAKE_DRAIN_SECONDS` (default 20) for the requests it has accepted to finish, stops the
    listener, closes every customer store (releasing liquid's store locks), releases
    `.lake-owner.lock`, logs `{"event":"store_owner","state":"released",...}` on stderr and exits 0.
@@ -135,9 +141,14 @@ reachable while it waits.
 2. The Service adds B. Requests that reach B wait.
 3. The Deployment deletes A. A leaves the endpoints and sleeps 15 s in preStop while it keeps
    serving what was already routed to it.
-4. A gets SIGTERM, drains (at most 20 s), closes its stores and releases the root.
-5. B takes the root within one retry (at most 100 ms), opens the stores, and answers the requests
-   it held.
+4. A gets SIGTERM. It refuses new workspace store requests (`503`, `Retry-After: 1`) and releases
+   each workspace store's lease once that store's admitted requests are done, after it announced
+   its drain in `<root>/.lake-owner.draining`. B's pre-open, which takes no lease before that
+   announcement (A may still need any of them), takes each one at once and opens the store while A
+   finishes draining. A drains (at most 20 s), closes its other stores and releases the
+   root.
+5. B takes the root within one retry (at most 100 ms), opens the space stores and the pre-opened
+   workspaces' repositories, and answers the requests it held.
 
 A request that reaches B in step 2 waits for at most preStop + drain, about 35 s in the worst
 case, and is answered. No request is refused. `LAKE_STORE_OWNER_WAIT_SECONDS` (90) outlasts
@@ -187,16 +198,31 @@ space stores (read-only for a switched workspace's repositories, never removed b
 search indexes, the registry and the instance's transparency data, all still under
 `.lake-owner.lock`.
 
-The hand-off above becomes per workspace for those stores. A workspace store is opened by the first
-request that needs it, not at start, after `.lake-owner.lock` is held. The open acquires the
-bucket's lease, waiting up to `LAKE_STORE_OWNER_WAIT_SECONDS` for a predecessor to release it, with
-lake's store mutex given up so requests for other workspaces proceed. Lake renews the lease every
-third of `LAKE_WORKSPACE_STORE_LEASE_SECONDS` (default 30) and releases it on drain, after the last
-request and before it releases the root. A lease lost while running (a successor took it, or no
+The hand-off above becomes per workspace for those stores (lake#536,
+[workspace-store.md](../architecture/workspace-store.md#rollout-hand-off-lake536)). A starting lake
+opens every running switched workspace's store in the background without waiting for
+`.lake-owner.lock` to be handed over (the store is guarded by its own lease and fence), and the
+workspace's
+repositories once the lock is held. It takes no lease until the lock's owner has announced its
+drain (`<root>/.lake-owner.draining`, matching the lock file's record) or it holds the lock, so a
+predecessor that still serves keeps every workspace it may need. With
+`LAKE_WORKSPACE_STORE_PREOPEN=false`, or for a store the
+pre-open could not open, the first request that needs it opens it. The open acquires the bucket's
+lease, waiting up to `LAKE_STORE_OWNER_WAIT_SECONDS` for a predecessor to release it (Zetta wakes
+the wait on the release), with lake's store mutex given up so requests for other workspaces
+proceed. Lake renews the lease every third of `LAKE_WORKSPACE_STORE_LEASE_SECONDS` (default 30).
+On SIGTERM it stops admitting requests to each workspace store (`503`, `Retry-After: 1`), and
+settles the store and releases its lease as soon as the requests admitted before have finished, all
+stores at once, without waiting for the drain of unrelated requests; a store still busy at the drain
+deadline is closed with the rest, before the root is released. A lease lost while running (a successor took it, or no
 renewal was accepted in time) closes that store and answers its workspace's requests
 `503 store_unavailable` until the lease is free again; Zetta refuses every write carrying the old
 fence. `spec.rollout.overlapOnSharedStore` covers workspace stores unchanged: the predecessor's
 release lets the successor's waiting acquire answer.
+
+The root's wait still includes the predecessor's preStop `sleep 15` (the operator's setting): on
+dev on 2026-10-06 the successor waited 23.7 s for the root. A shorter preStop shortens every
+rollout's root hand-off; that is an operator change.
 
 ## Verify
 

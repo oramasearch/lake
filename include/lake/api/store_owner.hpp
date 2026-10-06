@@ -53,6 +53,17 @@ public:
     }
     void release() noexcept;
 
+    // lake#536: the owner announces that it is draining. It writes its own lock record to
+    // <root>/.lake-owner.draining, after it stopped opening workspace stores, so a successor may
+    // take a free workspace store lease before the root is handed over. The record carries a
+    // random token, so the marker names this lock and no later or earlier one.
+    bool announce_draining(const std::filesystem::path& store_root) const noexcept;
+    // True when the root's current owner announced that it is draining: the marker holds the
+    // same record as the lock file. A marker an earlier owner left never matches.
+    static bool owner_is_draining(const std::filesystem::path& store_root) noexcept;
+    // Removed by the next owner once it holds the lock.
+    static void clear_draining(const std::filesystem::path& store_root) noexcept;
+
 private:
     explicit StoreOwnerLock(int descriptor) noexcept : descriptor_(descriptor) {}
 

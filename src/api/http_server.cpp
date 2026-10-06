@@ -4249,8 +4249,13 @@ private:
         }
         return slot;
     }
-    // A request's way into a lane (see Admission).
+    // A request's way into a lane (see Admission). Once lake drains (lake#536), a workspace's
+    // lane admits no new request: the workspace store is about to release its lease, and the
+    // retry lands on the successor that takes it.
     SyncStoreResult<LaneLock> admit(const std::string& name) {
+        if (name.starts_with("w:") && draining_.load()) {
+            return std::unexpected(stopping_error());
+        }
         auto lane = lane_of(name);
         if (lane->moving.load() != 0) {
             return std::unexpected(SyncStoreError{
@@ -5347,6 +5352,11 @@ private:
                 return {{}, std::unexpected(route.error())};
             }
             const std::string name = *route ? "w:" + **route : "s:" + customer_id;
+            // Lake's own work stays out of a workspace's lane once lake drains (lake#536), so it
+            // never holds off the store's release.
+            if (lake_work && *route && draining_.load()) {
+                return {{}, std::unexpected(stopping_error())};
+            }
             SyncStoreResult<LaneLock> lane = lake_work ? SyncStoreResult<LaneLock>(hold(name)) : admit(name);
             if (!lane) {
                 return {{}, std::unexpected(lane.error())};
@@ -5396,9 +5406,11 @@ private:
     // the space's quota and a data key may be created in it while it is empty. A switched
     // workspace's store must already exist with its key; anything else is refused, never served
     // as an empty store. The open acquires the bucket's lease, waiting (bounded) for a
-    // predecessor to release it, as lake#479 waits for the root.
+    // predecessor to release it, as lake#479 waits for the root. `wait` replaces that bound (the
+    // pre-open waits in short attempts). Once lake drains, no store is opened again (lake#536).
     SyncStoreResult<WorkspaceStore*> open_workspace(const std::string& customer_id,
-                                                    const std::string& workspace_id, bool create) {
+                                                    const std::string& workspace_id, bool create,
+                                                    std::optional<std::chrono::milliseconds> wait = {}) {
         WorkspaceStoreConfig config;
         bool reacquire = false;
         {
@@ -5440,6 +5452,18 @@ private:
             }
             discard_workspace(workspace_id);
         }
+        // Counted before the drain check, so the drain's announcement (wait_for_opens) never
+        // misses an open that passed the check: either this sees the drain, or the drain sees it.
+        opening_.fetch_add(1);
+        struct Opening {
+            std::atomic<int>& count;
+            ~Opening() {
+                count.fetch_sub(1);
+            }
+        } opening{opening_};
+        if (draining_.load()) {
+            return std::unexpected(stopping_error());
+        }
         const auto endpoint = config.endpoint(customer_id, workspace_id);
         if (!endpoint) {
             return std::unexpected(endpoint.error());
@@ -5464,7 +5488,7 @@ private:
         liquid::store_options options;
         options.backend = output->backend;
         options.owner = output->owner;
-        options.owner_wait = reacquire ? std::chrono::milliseconds(0) : owner_wait_;
+        options.owner_wait = reacquire ? std::chrono::milliseconds(0) : wait.value_or(owner_wait_);
         auto store = liquid::runtime::block_on(liquid::store::open(
             std::filesystem::path(root_) / "workspaces" / workspace_id, std::move(options)));
         if (!store) {
@@ -5936,6 +5960,9 @@ public:
             return std::unexpected(SyncStoreError{"invalid_input", "invalid workspace location"});
         }
         LaneLock lane;
+        if (lake_work && draining_.load()) {
+            return std::unexpected(stopping_error());
+        }
         if (only_if_open || lake_work) {
             lane = hold("w:" + workspace_id);
         } else {
@@ -6032,6 +6059,10 @@ public:
         if (!path_component_is_safe(customer_id) || !path_component_is_safe(workspace_id)) {
             return std::unexpected(SyncStoreError{"invalid_input", "invalid workspace location"});
         }
+        // The operator's copy and verify are lake work: refused once lake drains (lake#536).
+        if (draining_.load()) {
+            return std::unexpected(stopping_error());
+        }
         // Copy and verify mark only the workspace's lane as moving. The space's lane is taken for
         // this one repository and not marked, so the space's other workspaces wait at most one
         // repository's copy instead of being refused; only the switch holds it throughout.
@@ -6053,6 +6084,9 @@ public:
         // are held throughout and never given up.
         if (!path_component_is_safe(customer_id) || !path_component_is_safe(workspace_id)) {
             return std::unexpected(SyncStoreError{"invalid_input", "invalid workspace location"});
+        }
+        if (draining_.load()) {
+            return std::unexpected(stopping_error());
         }
         Moving moving_workspace(lane_of("w:" + workspace_id));
         Moving moving_space(lane_of("s:" + customer_id));
@@ -6298,6 +6332,17 @@ public:
         // The lane waits for an open in progress (one waiting for the bucket lease included), so
         // a deletion that races an open still releases the lease the open took.
         auto workspace_lane = hold("w:" + workspace_id);
+        auto closed = close_workspace_store_locked(workspace_id);
+        if (!closed) {
+            return std::unexpected(closed.error());
+        }
+        return {};
+    }
+
+    // Closes the workspace's store, settling it and releasing its lease (unless the lease was
+    // lost), after evicting its repositories; the caller holds the workspace's lane. True when a
+    // store was open.
+    SyncStoreResult<bool> close_workspace_store_locked(const std::string& workspace_id) {
         std::unique_ptr<WorkspaceStore> store;
         std::vector<std::unique_ptr<RepositoryState>> evicted;
         {
@@ -6312,7 +6357,7 @@ public:
             }
             const auto found = workspace_stores_.find(workspace_id);
             if (found == workspace_stores_.end()) {
-                return {};
+                return false;
             }
             store = std::move(found->second);
             workspace_stores_.erase(found);
@@ -6322,7 +6367,7 @@ public:
         if (!closed) {
             return std::unexpected(error_of(closed.error()));
         }
-        return {};
+        return true;
     }
 
     SyncStoreResult<WorkspaceStoreProvision>
@@ -6446,6 +6491,11 @@ public:
         if (!id) {
             return std::unexpected(SyncStoreError{"corrupt", "not a store object", object});
         }
+        // A request's blob operation, though it holds the lane: once lake drains it is refused
+        // like an admission, so it never waits on, or reopens, a store being handed off.
+        if (draining_.load()) {
+            return std::unexpected(stopping_error());
+        }
         auto lane = hold("w:" + workspace_id);
         auto workspace = open_workspace(customer_id, workspace_id, false);
         if (!workspace) {
@@ -6464,6 +6514,9 @@ public:
     SyncStoreResult<std::shared_ptr<void>> admit_workspace_stream(const std::string& workspace_id) override {
         if (!path_component_is_safe(workspace_id)) {
             return std::unexpected(SyncStoreError{"invalid_input", "invalid workspace location"});
+        }
+        if (draining_.load()) {
+            return std::unexpected(stopping_error());
         }
         auto lane = lane_of("w:" + workspace_id);
         if (lane->moving.load() != 0) {
@@ -6487,6 +6540,11 @@ public:
         const auto id = liquid::parse_digest(object);
         if (!id) {
             return false;
+        }
+        // A request's blob operation, though it holds the lane: once lake drains it is refused
+        // like an admission, so it never waits on, or reopens, a store being handed off.
+        if (draining_.load()) {
+            return std::unexpected(stopping_error());
         }
         auto lane = hold("w:" + workspace_id);
         auto workspace = open_workspace(customer_id, workspace_id, false);
@@ -6559,6 +6617,263 @@ public:
             }
         }
     }
+
+    // ---- The rollout hand-off of workspace stores (lake#536) ----------------------------------
+
+    // The drain has begun: a workspace's lane admits no new request, no image pull starts, and
+    // no workspace store is opened again, so a lease once released stays released.
+    void begin_drain() {
+        draining_.store(true);
+    }
+    // A new server's store starts undrained (a server object is started once, but say so).
+    void reset_drain() {
+        draining_.store(false);
+    }
+
+    // Waits until no open_workspace is in progress, or `deadline`. After begin_drain no new one
+    // starts, so once this answers true no store of this process takes a lease again. True when
+    // none is in progress.
+    bool wait_for_opens(std::chrono::steady_clock::time_point deadline) {
+        while (opening_.load() != 0) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return true;
+    }
+
+    // Runs `job(0..count-1)` on at most `width` threads at once: bounded however many workspaces
+    // an instance has, since each liquid block_on starts runners of its own.
+    static void run_bounded(std::size_t count, std::size_t width, const std::function<void(std::size_t)>& job) {
+        std::atomic<std::size_t> next{0};
+        std::vector<lake::Thread> workers;
+        const std::size_t threads = std::min(count, width);
+        workers.reserve(threads);
+        for (std::size_t worker = 0; worker < threads; ++worker) {
+            workers.emplace_back([&next, count, &job] {
+                for (std::size_t index = next.fetch_add(1); index < count; index = next.fetch_add(1)) {
+                    job(index);
+                }
+            });
+        }
+    }
+    static constexpr std::size_t handoff_width = 8;
+
+    struct WorkspaceRelease {
+        std::string workspace_id;
+        // A store was open and is closed now; its lease is released unless it had been lost.
+        bool closed = false;
+        // Why it is still open (requests still in its lane at the deadline), or why closing failed.
+        std::string error;
+        // Its search index manifest was removed for the next process to rebuild.
+        bool index_invalidated = false;
+        // From the call until its lane was free, and how long the settle and release took.
+        std::chrono::milliseconds waited{0};
+        std::chrono::milliseconds closing{0};
+    };
+
+    // Closes every open workspace store as soon as the requests admitted to its lane before the
+    // drain (and the image pulls started before it) have left, eight stores at a time, so one slow
+    // settle (bounded by the owner's budget) never holds up the others. It sweeps again until no
+    // store is left, so a store an open already in progress inserts after a sweep is released
+    // too. A store whose lane is still in use at `deadline` stays open for close().
+    //
+    // `stale_indexes`: workspaces whose search index is behind what this process knew (a rebuild
+    // or a retry the drain dropped). Their index manifest is removed under the lane and the lease
+    // before the store closes, so the next process rebuilds the index instead of serving it stale.
+    std::vector<WorkspaceRelease> release_workspace_stores(std::chrono::steady_clock::time_point deadline,
+                                                           const std::set<std::string>& stale_indexes = {}) {
+        std::vector<WorkspaceRelease> output;
+        std::set<std::string> left_open;
+        for (;;) {
+            std::vector<std::string> open;
+            {
+                std::lock_guard maps(mutex_);
+                for (const auto& [workspace_id, store] : workspace_stores_) {
+                    if (!left_open.contains(workspace_id)) {
+                        open.push_back(workspace_id);
+                    }
+                }
+            }
+            if (open.empty()) {
+                break;
+            }
+            std::vector<WorkspaceRelease> sweep(open.size());
+            run_bounded(open.size(), handoff_width, [this, &open, &sweep, deadline, &stale_indexes](std::size_t index) {
+                sweep[index] = release_workspace_store(open[index], deadline, stale_indexes.contains(open[index]));
+            });
+            for (WorkspaceRelease& release : sweep) {
+                if (!release.closed && !release.error.empty()) {
+                    left_open.insert(release.workspace_id);
+                }
+                output.push_back(std::move(release));
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                break;
+            }
+        }
+        return output;
+    }
+
+    // Opens a switched workspace's store ahead of its first request (lake#536), waiting at most
+    // `wait` for its lease. Lake's own work: it holds the lane without admission, so a request
+    // that arrives meanwhile waits for this open and then uses it. False when it was open.
+    SyncStoreResult<bool> preopen_workspace(const std::string& customer_id,
+                                            const std::string& workspace_id,
+                                            std::chrono::milliseconds wait) {
+        if (!path_component_is_safe(customer_id) || !path_component_is_safe(workspace_id)) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid workspace location"});
+        }
+        if (draining_.load()) {
+            return std::unexpected(stopping_error());
+        }
+        auto lane = hold("w:" + workspace_id);
+        {
+            std::lock_guard maps(mutex_);
+            const auto found = workspace_stores_.find(workspace_id);
+            if (found != workspace_stores_.end() && found->second->usable()) {
+                return false;
+            }
+        }
+        // Checked again under the lane before every attempt: a workspace deleted, stopped or not
+        // switched since the pass listed it is not opened (a deletion closes under this lane).
+        const auto serving = serving_workspaces(customer_id);
+        if (!serving) {
+            return std::unexpected(serving.error());
+        }
+        if (std::ranges::find(*serving, workspace_id) == serving->end()) {
+            return std::unexpected(SyncStoreError{
+                "not_found", "the workspace is no longer a running switched workspace"});
+        }
+        auto opened = open_workspace(customer_id, workspace_id, false, wait);
+        if (!opened) {
+            return std::unexpected(opened.error());
+        }
+        return true;
+    }
+
+    // Opens a pre-opened workspace store's repositories (lake#536), each under the lane on its
+    // own, so the first request to one does not pay for reading its state, and a request for
+    // another waits for one repository at most. The caller owns the store root (a repository is
+    // named by its path under it). A repository that does not open is left to its first request.
+    // Answers how many are open.
+    std::size_t preopen_repositories(const std::string& customer_id, const std::string& workspace_id,
+                                     const std::vector<std::string>& repository_ids) {
+        std::size_t opened = 0;
+        for (const std::string& repository_id : repository_ids) {
+            if (draining_.load()) {
+                break;
+            }
+            if (!path_component_is_safe(customer_id) || !path_component_is_safe(repository_id)) {
+                continue;
+            }
+            auto lane = hold("w:" + workspace_id);
+            const auto route = workspace_route(customer_id, repository_id);
+            if (!route || !*route || **route != workspace_id) {
+                continue;
+            }
+            if (open_repository(customer_id, repository_id, *route)) {
+                ++opened;
+            }
+        }
+        return opened;
+    }
+
+    // A space's switched workspaces that are running, the ones the pre-open opens.
+    SyncStoreResult<std::vector<std::string>> serving_workspaces(const std::string& customer_id) {
+        WorkspaceStoreConfig config;
+        {
+            std::lock_guard maps(mutex_);
+            config = workspace_config_;
+        }
+        std::vector<std::string> output;
+        if (!config.switched || !config.endpoint || !config.transport) {
+            return output;
+        }
+        auto listed = config.switched(customer_id);
+        if (!listed) {
+            return std::unexpected(listed.error());
+        }
+        for (const auto& [workspace_id, serving] : listed->first) {
+            if (serving) {
+                output.push_back(workspace_id);
+            }
+        }
+        return output;
+    }
+
+private:
+    static SyncStoreError stopping_error() {
+        return SyncStoreError{"store_unavailable",
+                              "lake is stopping and hands the workspace store to its successor; retry shortly"};
+    }
+
+    WorkspaceRelease release_workspace_store(const std::string& workspace_id,
+                                             std::chrono::steady_clock::time_point deadline,
+                                             bool stale_index) {
+        WorkspaceRelease output;
+        output.workspace_id = workspace_id;
+        const auto started = std::chrono::steady_clock::now();
+        const auto milliseconds = [](auto duration) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(duration);
+        };
+        auto lane = lane_of("w:" + workspace_id);
+        const auto idle = [&lane] { return lane->occupants.load() == 0 && lane->streams.load() == 0; };
+        for (;;) {
+            if (idle()) {
+                // Lake's own work in the lane (a search job, the deletion pass) is waited for by
+                // trying again, so the deadline holds.
+                std::unique_lock<std::mutex> lock(lane->mutex, std::try_to_lock);
+                if (lock.owns_lock() && idle()) {
+                    LaneLock held(lane, std::move(lock), false);
+                    const auto free = std::chrono::steady_clock::now();
+                    output.waited = milliseconds(free - started);
+                    if (stale_index) {
+                        output.index_invalidated = invalidate_search_index_locked(workspace_id);
+                    }
+                    auto closed = close_workspace_store_locked(workspace_id);
+                    output.closing = milliseconds(std::chrono::steady_clock::now() - free);
+                    if (!closed) {
+                        output.error = closed.error().message;
+                    } else {
+                        output.closed = *closed;
+                    }
+                    return output;
+                }
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                output.waited = milliseconds(std::chrono::steady_clock::now() - started);
+                output.error = "requests were still in its lane at the drain deadline";
+                return output;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
+    // Removes the workspace's search index manifest with the store's client and lease fence; the
+    // caller holds the lane. True when the manifest is gone.
+    bool invalidate_search_index_locked(const std::string& workspace_id) {
+        std::shared_ptr<control::ZettaObjectClient> client;
+        std::uint64_t fence = 0;
+        {
+            std::lock_guard maps(mutex_);
+            const auto found = workspace_stores_.find(workspace_id);
+            if (found == workspace_stores_.end() || !found->second->usable()) {
+                return false;
+            }
+            client = found->second->client;
+            fence = found->second->owner->fence();
+        }
+        const auto removed = liquid::runtime::block_on(
+            client->remove(std::string(search::workspace_index_manifest), fence, true));
+        return removed || removed.error().code == liquid::errc::not_found;
+    }
+
+    // lake#536: set once when lake begins to drain; never cleared (a drained process exits).
+    std::atomic<bool> draining_{false};
+    // open_workspace calls in progress.
+    std::atomic<int> opening_{0};
 };
 
 struct OutboundRequest {
@@ -7142,6 +7457,41 @@ struct ApiServer::Impl {
         }
     }
 
+    // lake#536: no new search or maintenance job starts, and search stops what it is doing at
+    // its next check; the threads are joined by stop_search_jobs and stop_maintenance.
+    // Answers the workspaces whose index jobs it dropped, or whose index search knows to be behind
+    // (Service::unsettled_workspaces): the release makes the next process rebuild them.
+    std::set<std::string> pause_lake_work() {
+        std::set<std::string> stale;
+        if (options.search) {
+            options.search->shutdown();
+        }
+        {
+            std::lock_guard lock(search_jobs_mutex);
+            search_jobs_stopping = true;
+            constexpr std::string_view job_prefix = "search index ";
+            for (const auto& queued : search_jobs) {
+                if (std::get<0>(queued).starts_with(job_prefix)) {
+                    stale.insert(std::get<0>(queued).substr(job_prefix.size()));
+                }
+            }
+            search_jobs.clear();
+        }
+        search_jobs_cv.notify_all();
+        {
+            std::lock_guard lock(maintenance_mutex);
+            maintenance_stopping = true;
+            maintenance_queue.clear();
+        }
+        maintenance_cv.notify_all();
+        if (options.search) {
+            for (std::string& workspace : options.search->unsettled_workspaces()) {
+                stale.insert(std::move(workspace));
+            }
+        }
+        return stale;
+    }
+
     void stop_maintenance() {
         {
             std::lock_guard lock(maintenance_mutex);
@@ -7183,6 +7533,248 @@ struct ApiServer::Impl {
         }
     }
 
+    // lake#536: the drain's first step, at SIGTERM. Stops taking new work (as stop() did), then
+    // hands every workspace store to the successor: no new request is admitted to a workspace's
+    // lane (503 with Retry-After), and each store is settled and its lease released as soon as
+    // the requests admitted before have finished, without waiting for unrelated requests or the
+    // drain deadline. stop() finishes the drain.
+    void begin_drain() {
+        // Called from main's SIGTERM watcher and from stop(); the second waits for the first.
+        std::lock_guard lock(drain_mutex);
+        if (drain_begun.exchange(true)) {
+            return;
+        }
+        drain_started = std::chrono::steady_clock::now();
+        drain_deadline = drain_started + options.drain_timeout;
+        draining.store(true);
+        owner_wait_abandoned.store(true);
+        sync_store.begin_drain();
+        workspace_release_thread = lake::Thread([this] {
+            // Lake's own work leaves the workspace lanes first: search stops (a rebuild stops at
+            // its next repository) and the search and maintenance queues take no new job, and a
+            // workspace lane refuses lake work from now on (LiquidCustomerStores::begin_drain).
+            // Nothing is joined here, so a release waits for the lane's current holder only, never
+            // for the rest of a job; stop() joins both threads.
+            const std::set<std::string> stale_indexes = pause_lake_work();
+            // The successor may take a free workspace lease before it owns the root only once no
+            // workspace store here is opened again: no new open starts after begin_drain, and the
+            // opens already in progress finish (bounded by the drain deadline). A deadline passed
+            // with one still in progress announces nothing; the successor then waits for the root.
+            // store_root_state turns open only after the owner thread stored the lock.
+            const bool settled = sync_store.wait_for_opens(drain_deadline);
+            if (settled && !options.store_root.empty() && store_root_state.load() == StoreRootState::open &&
+                store_owner.held()) {
+                const bool announced = store_owner.announce_draining(options.store_root);
+                log_store_owner({{"state", announced ? "draining_announced" : "draining_not_announced"}});
+            }
+            const auto released = sync_store.release_workspace_stores(drain_deadline, stale_indexes);
+            for (const auto& release : released) {
+                nlohmann::json event{{"scope", "workspace"},
+                                     {"workspace_id", release.workspace_id},
+                                     {"state", release.closed ? "released"
+                                                               : (release.error.empty() ? "not_open" : "still_open")},
+                                     {"waited_ms", release.waited.count()},
+                                     {"closing_ms", release.closing.count()},
+                                     {"index_invalidated", release.index_invalidated}};
+                if (!release.error.empty()) {
+                    event["error"] = release.error;
+                }
+                log_store_owner(std::move(event));
+            }
+        });
+    }
+
+    // lake#536: opens the store of every running switched workspace in the background from
+    // start, so the first request after a rollout does not pay for the open.
+    //
+    // Before this process owns the store root it takes no free lease: a predecessor that still
+    // serves may need any workspace's store (one it never opened, one it reopens after a failed
+    // write). It attempts an open only once the root's owner has announced that it is draining
+    // (StoreOwnerLock::announce_draining, written once no open of its own is in progress and none
+    // can start), or once it owns the root. A predecessor from before lake#536 never announces, so
+    // then the opens start with the root. One poller reads the announcement every 250 ms for all
+    // the openers. Each attempt waits up to 5 s for the lease (Zetta's acquire wakes on the
+    // release); attempts go on until store_owner_wait has passed, the drain begins, or the root
+    // could not be owned. At most 8 stores open at once.
+    //
+    // The repositories of each opened store are opened by a second set of workers, which start
+    // when the root is owned: stores opened before then are taken in turn, and a store that opens
+    // later is taken as soon as it opens, so one workspace that is slow to open (an unready
+    // workspace Zetta, retried until store_owner_wait) holds up no other workspace's repositories.
+    void preopen_workspace_stores() {
+        if (!options.store || !options.workspaces || options.store_root.empty()) {
+            return;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + options.store_owner_wait;
+        const auto customers = options.store->list_customers(100000);
+        if (!customers) {
+            log_store_owner({{"scope", "workspace"}, {"state", "preopen_failed"},
+                             {"error", customers.error().message}});
+            return;
+        }
+        std::vector<std::pair<std::string, std::string>> targets;
+        for (const control::Customer& customer : *customers) {
+            const auto serving = sync_store.serving_workspaces(customer.id);
+            if (!serving) {
+                continue;
+            }
+            for (const std::string& workspace_id : *serving) {
+                targets.emplace_back(customer.id, workspace_id);
+            }
+        }
+        if (targets.empty()) {
+            return;
+        }
+        PreopenQueue queue;
+        lake::Thread poller([this, &queue] {
+            for (;;) {
+                {
+                    std::lock_guard lock(queue.mutex);
+                    if (queue.stores_done) {
+                        return;
+                    }
+                }
+                if (preopen_stopped()) {
+                    return;
+                }
+                if (store_root_state.load() == StoreRootState::open ||
+                    StoreOwnerLock::owner_is_draining(options.store_root)) {
+                    leases_free_to_take.store(true);
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            }
+        });
+        lake::Thread repositories([this, &queue, &targets] {
+            // Waits for the root, then opens each opened store's repositories as it arrives.
+            while (!preopen_stopped() && store_root_state.load() != StoreRootState::open) {
+                std::unique_lock lock(queue.mutex);
+                queue.changed.wait_for(lock, std::chrono::milliseconds(50));
+            }
+            LiquidCustomerStores::run_bounded(
+                LiquidCustomerStores::handoff_width, LiquidCustomerStores::handoff_width,
+                [this, &queue, &targets](std::size_t) {
+                    for (;;) {
+                        std::size_t index = 0;
+                        {
+                            std::unique_lock lock(queue.mutex);
+                            queue.changed.wait(lock, [&] {
+                                return !queue.opened.empty() || queue.stores_done || preopen_stopped();
+                            });
+                            if (preopen_stopped() || queue.opened.empty()) {
+                                return;
+                            }
+                            index = queue.opened.front();
+                            queue.opened.pop_front();
+                        }
+                        preopen_repositories_of(targets[index].first, targets[index].second);
+                    }
+                });
+        });
+        LiquidCustomerStores::run_bounded(
+            targets.size(), LiquidCustomerStores::handoff_width,
+            [this, &targets, &queue, deadline](std::size_t index) {
+                if (preopen_workspace_store(targets[index].first, targets[index].second, deadline)) {
+                    std::lock_guard lock(queue.mutex);
+                    queue.opened.push_back(index);
+                    queue.changed.notify_all();
+                }
+            });
+        {
+            std::lock_guard lock(queue.mutex);
+            queue.stores_done = true;
+        }
+        queue.changed.notify_all();
+        // The repository workers finish the opened stores (or stop at the drain) and are joined
+        // here; the poller has stopped.
+    }
+
+    struct PreopenQueue {
+        std::mutex mutex;
+        std::condition_variable changed;
+        // Indexes of the opened stores whose repositories are not opened yet.
+        std::deque<std::size_t> opened;
+        bool stores_done = false;
+    };
+
+    void preopen_repositories_of(const std::string& customer_id, const std::string& workspace_id) {
+        const auto started = std::chrono::steady_clock::now();
+        std::vector<std::string> ids;
+        if (const auto listed = options.store->list_repositories(customer_id, 100000, workspace_id)) {
+            for (const control::Repository& repository : *listed) {
+                if (repository.deleted_at.empty()) {
+                    ids.push_back(repository.id);
+                }
+            }
+        }
+        const std::size_t repositories = sync_store.preopen_repositories(customer_id, workspace_id, ids);
+        log_store_owner({{"scope", "workspace"},
+                         {"workspace_id", workspace_id},
+                         {"state", "repositories_preopened"},
+                         {"repositories", repositories},
+                         {"repositories_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                 std::chrono::steady_clock::now() - started)
+                                                 .count()}});
+    }
+
+    // Set by the pre-open's one poller: the root is owned, or its owner announced its drain.
+    std::atomic<bool> leases_free_to_take{false};
+
+    bool preopen_stopped() const {
+        return draining.load() || store_root_state.load() == StoreRootState::failed;
+    }
+
+    // Whether this process may take a free workspace lease now (see preopen_workspace_stores).
+    bool may_take_workspace_leases() const {
+        return leases_free_to_take.load() || store_root_state.load() == StoreRootState::open;
+    }
+
+    // True when the store is open (by this pass or already).
+    bool preopen_workspace_store(const std::string& customer_id, const std::string& workspace_id,
+                                 std::chrono::steady_clock::time_point deadline) {
+        const auto started = std::chrono::steady_clock::now();
+        const auto milliseconds = [](auto duration) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+        };
+        int attempts = 0;
+        while (!preopen_stopped()) {
+            if (!may_take_workspace_leases()) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                continue;
+            }
+            const auto attempt = std::chrono::steady_clock::now();
+            ++attempts;
+            const auto opened = sync_store.preopen_workspace(customer_id, workspace_id, std::chrono::seconds(5));
+            if (opened) {
+                log_store_owner({{"scope", "workspace"},
+                                 {"workspace_id", workspace_id},
+                                 {"state", *opened ? "preopened" : "already_open"},
+                                 {"attempts", attempts},
+                                 {"store_ms", milliseconds(std::chrono::steady_clock::now() - started)}});
+                return true;
+            }
+            // Unavailable is the lease still held elsewhere (after the attempt's wait) or the
+            // workspace Zetta not ready (at once); anything else (the workspace deleted, stopped
+            // or no longer switched) is left to the first request.
+            if (opened.error().code != "store_unavailable" || std::chrono::steady_clock::now() >= deadline) {
+                log_store_owner({{"scope", "workspace"},
+                                 {"workspace_id", workspace_id},
+                                 {"state", "preopen_failed"},
+                                 {"attempts", attempts},
+                                 {"error", opened.error().message}});
+                return false;
+            }
+            while (!preopen_stopped() &&
+                   std::chrono::steady_clock::now() < attempt + std::chrono::seconds(1)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        }
+        return false;
+    }
+
     void prime_workspace_usage() {
         if (!options.store) {
             return;
@@ -7201,8 +7793,17 @@ struct ApiServer::Impl {
     // waited, so it stays Ready through the open that follows.
     std::atomic<bool> store_root_handoff{false};
     std::atomic<bool> owner_wait_abandoned{false};
-    // stop() has begun: new requests close their connection, /readyz answers 503.
+    // The drain has begun (begin_drain, at SIGTERM or from stop()): new requests close their
+    // connection, /readyz answers 503, and workspace stores are handed off (lake#536).
     std::atomic<bool> draining{false};
+    std::atomic<bool> drain_begun{false};
+    std::mutex drain_mutex;
+    std::chrono::steady_clock::time_point drain_started;
+    std::chrono::steady_clock::time_point drain_deadline;
+    // Releases every workspace store's lease as soon as its admitted requests are done.
+    lake::Thread workspace_release_thread;
+    // Opens running switched workspaces' stores ahead of their first request (lake#536).
+    lake::Thread preopen_thread;
     // Route handlers running now (every guarded handler counts itself).
     std::atomic<int> in_flight{0};
     mutable std::mutex store_root_mutex;
@@ -18669,6 +19270,8 @@ struct ApiServer::Impl {
             return;
         }
         store_owner = std::move(*owner);
+        // A predecessor's drain announcement (lake#536) names a lock that is gone now.
+        StoreOwnerLock::clear_draining(options.store_root);
         const auto acquired = std::chrono::steady_clock::now();
         // Open the existing stores and indexes before store-touching requests are admitted.
         const auto warmed = sync_store.warm_metering();
@@ -19210,6 +19813,13 @@ bool ApiServer::start() {
     if (!impl.failure_reason.empty()) {
         return false;
     }
+    // An ApiServer is started once: stop() leaves search shut down, the maintenance and search
+    // threads stopped and its drain begun, none of which start() undoes. A restart is a new
+    // ApiServer on the same options, as main and the tests do (lake#536).
+    if (impl.drain_begun.load()) {
+        impl.failure_reason = "this server was stopped; start a new ApiServer instead";
+        return false;
+    }
 
     impl.options.external_origin = repository_external_origin(impl.options);
     if (!impl.options.external_origin.empty()) {
@@ -19253,6 +19863,8 @@ bool ApiServer::start() {
     impl.store_root_handoff.store(false);
     impl.owner_wait_abandoned.store(false);
     impl.draining.store(false);
+    impl.drain_begun.store(false);
+    impl.sync_store.reset_drain();
 
     CatalogRouter router(impl.get_routes);
     // Every handler is guarded: an exception it throws is logged with the route and request id
@@ -20772,8 +21384,17 @@ bool ApiServer::start() {
     impl.metrics.set_gauge("lake_up", {}, 1.0);
     if (!impl.options.store_root.empty()) {
         impl.owner_thread = lake::Thread([&impl] { impl.own_store_root(); });
+        if (impl.options.preopen_workspace_stores) {
+            impl.preopen_thread = lake::Thread([&impl] { impl.preopen_workspace_stores(); });
+        }
     }
     return true;
+}
+
+void ApiServer::begin_drain() {
+    if (impl_->is_running.load()) {
+        impl_->begin_drain();
+    }
 }
 
 void ApiServer::stop() {
@@ -20781,14 +21402,15 @@ void ApiServer::stop() {
     if (!impl.is_running.exchange(false))
         return;
     impl.metrics.set_gauge("lake_up", {}, 0.0);
-    // Stop taking new work: /readyz answers 503, every response closes its connection, a request
-    // still waiting for the store root is answered, and the owner thread stops waiting.
-    impl.draining.store(true);
-    impl.owner_wait_abandoned.store(true);
+    // Stop taking new work, unless begin_drain() already did at SIGTERM: /readyz answers 503,
+    // every response closes its connection, a request still waiting for the store root is
+    // answered, the owner thread stops waiting, and each workspace store is handed off as soon
+    // as its admitted requests are done (lake#536).
+    impl.begin_drain();
     // Drain: let the requests already accepted finish. The count must read zero twice, so a
     // request between two of its route steps is not taken for finished.
-    const auto drain_started = std::chrono::steady_clock::now();
-    const auto drain_deadline = drain_started + impl.options.drain_timeout;
+    const auto drain_started = impl.drain_started;
+    const auto drain_deadline = impl.drain_deadline;
     int idle_reads = 0;
     while (idle_reads < 2 && std::chrono::steady_clock::now() < drain_deadline) {
         idle_reads = impl.in_flight.load() == 0 ? idle_reads + 1 : 0;
@@ -20803,6 +21425,11 @@ void ApiServer::stop() {
         impl.io_thread.join();
     if (impl.owner_thread.joinable())
         impl.owner_thread.join();
+    // The pre-open stops at the drain; an open in progress finishes, and close() below closes it.
+    if (impl.preopen_thread.joinable())
+        impl.preopen_thread.join();
+    if (impl.workspace_release_thread.joinable())
+        impl.workspace_release_thread.join();
     impl.work_cv.notify_all();
     // In-flight requests have finished: write the repository usage they counted (lake#348) and
     // the workspace audit events they queued (decision 52).

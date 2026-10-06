@@ -127,6 +127,8 @@ public:
 // Where a workspace's index objects live in its store's bucket: `search/<name>`. Liquid never lists
 // or writes under it.
 inline constexpr std::string_view workspace_index_prefix = "search/";
+// The object a workspace's index is loaded from; without it the index is rebuilt.
+inline constexpr std::string_view workspace_index_manifest = "search/manifest.json";
 
 // A workspace's index objects in its store's bucket, through their own client: each object is
 // `LKSIDX1\0` then AES-256-GCM with the workspace's data key (the store's cipher), its associated
@@ -270,6 +272,10 @@ public:
     void shutdown();
     // The workspaces search keeps state for (tests).
     [[nodiscard]] std::vector<std::string> tracked_workspaces() const;
+    // lake#536: the workspaces whose stored index is behind what search knows: a rebuild running
+    // or due, or repositories pending or removed but not applied yet. That knowledge is in memory
+    // only, so a draining lake makes the next process rebuild them (it removes their manifest).
+    [[nodiscard]] std::vector<std::string> unsettled_workspaces() const;
 
 private:
     [[nodiscard]] Result<void> apply_pending(const std::string& customer, const std::string& workspace);

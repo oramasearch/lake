@@ -568,7 +568,8 @@ migration `0068`.
 Tenant image blobs in the workspace store (lake#383 phase B): `test_registry_store.cpp`
 (`RegistryStore.*`, a real lake server with workspace stores on `FakeZettaObjects`) covers push and
 pull of a multi-layer image through a routed, switched workspace (GET and HEAD, ciphertext only,
-nothing in the instance registry, a repeated layer stored once, usage counted once), a chunked
+nothing in the instance registry, a repeated layer stored once, usage counted once), blob requests and
+the copy refused during a drain with the lease never taken again (lake#536), a chunked
 upload and a wrong digest, a 304 MiB layer streamed with the pull's resident growth bounded, a
 blob of another workspace or space refused, the `oci_blobs` copy (plan, copy, rerun, verify with
 SHA-256, missing, corrupt and unswitched blobs unresolved, pulls after the registry files are
@@ -598,7 +599,7 @@ but not the operator's message; `VolumeSchedules.*` the cron grammar and the nev
 trigger, the policy checks and the backfill; `OperatorContract.*` the operator's new workspace and
 snapshot statements.
 `test_workspace_store.cpp` covers lake#380 (the table is in
-`docs/architecture/workspace-store.md#tests`): the encrypted backend, its refusal of a rewrite, tampering, the owner's hand-off and lost lease, and, through a running lake, the
+`docs/architecture/workspace-store.md#tests`): the encrypted backend, its refusal of a rewrite, tampering, the owner's hand-off and lost lease, the rollout hand-off between two lake servers (`WorkspaceStoreHandoff.*`, lake#536), and, through a running lake, the
 move with an interrupted copy, the switch, two workspaces of one space and the lost lease's `503`;
 `WorkspaceStoreRemoval.*` the removal of a space's old store (refusals, a linked space or store
 directory refused, dry run, exactly two directories removed, the instance's directory untouched, switched workspaces still answering, a later

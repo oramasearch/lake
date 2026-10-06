@@ -2,9 +2,11 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <stop_token>
 #include <print>
 #include <string>
@@ -110,6 +112,8 @@ int usage() {
                  "(default 268435456; idle ones are evicted and loaded again on use)");
     std::println("  LAKE_DRAIN_SECONDS bounds the wait for in-flight requests on SIGTERM "
                  "(default 20)");
+    std::println("  LAKE_WORKSPACE_STORE_PREOPEN=false opens workspace stores on first use only "
+                 "(default true: opened in the background from start)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
     return 2;
 }
@@ -129,6 +133,7 @@ int main(int argc, char** argv) {
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
     opts.store_owner_wait = std::chrono::seconds{env_u64("LAKE_STORE_OWNER_WAIT_SECONDS", 90)};
     opts.drain_timeout = std::chrono::seconds{env_u64("LAKE_DRAIN_SECONDS", 20)};
+    opts.preopen_workspace_stores = env_or("LAKE_WORKSPACE_STORE_PREOPEN", "true") != "false";
     opts.workspace_store_lease_ttl =
         std::chrono::seconds{std::max<std::uint64_t>(3, env_u64("LAKE_WORKSPACE_STORE_LEASE_SECONDS", 30))};
     opts.search_memory_bytes = static_cast<std::size_t>(
@@ -406,6 +411,13 @@ int main(int argc, char** argv) {
         bus_loop = lake::Thread([bus = opts.agent_bus,
                                  workspaces = opts.workspaces,
                                  stop = bus_stop.get_token()] {
+            // A pause the stop request ends, so SIGTERM never waits out a sleep (lake#536).
+            const auto pause = [&stop](std::chrono::seconds duration) {
+                std::mutex mutex;
+                std::condition_variable_any woken;
+                std::unique_lock lock(mutex);
+                woken.wait_for(lock, stop, duration, [] { return false; });
+            };
             bool started = false;
             while (!stop.stop_requested()) {
                 if (!started) {
@@ -419,20 +431,32 @@ int main(int argc, char** argv) {
                                 {"event", "agent_bus_unavailable"},
                                 {"error", created ? created->error().message : "transport"}}
                                 .dump());
-                        std::this_thread::sleep_for(std::chrono::seconds(5));
+                        pause(std::chrono::seconds(5));
                         continue;
                     }
                 }
                 auto pumped =
                     liquid::runtime::block_on(bus->pump(std::chrono::seconds(5), workspaces.get()));
                 if (!pumped || !pumped->has_value()) {
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    pause(std::chrono::seconds(2));
                 } else if (**pumped == 0) {
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
+                    pause(std::chrono::seconds(5));
                 }
             }
         });
     }
+    // The owner loop below can be inside a long drain() tick when SIGTERM arrives; this watcher
+    // begins the drain at once, so the workspace stores are handed off without waiting for it
+    // (lake#536).
+    std::stop_source watcher_stop;
+    lake::Thread signal_watcher([&server, stop = watcher_stop.get_token()] {
+        while (!stop.stop_requested() && !stop_requested.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (stop_requested.load()) {
+            server.begin_drain();
+        }
+    });
     auto next_app_cleanup = std::chrono::steady_clock::now();
     int exit_code = 0;
     while (!stop_requested.load()) {
@@ -473,13 +497,19 @@ int main(int argc, char** argv) {
         server.wait_for_work(std::chrono::milliseconds(100));
         server.drain();
     }
+    // SIGTERM: stop taking new work and hand the workspace stores off at once (lake#536), before
+    // anything else winds down; then drain in-flight requests, close the stores and release the
+    // store root (ApiServer::stop, lake#479).
+    watcher_stop.request_stop();
+    signal_watcher.join();
+    server.begin_drain();
+    bus_stop.request_stop();
+    server.stop();
+    // The bus loop needs nothing the server holds; joined after it, so a pump in progress does
+    // not hold up the store root's release.
     if (bus_loop.joinable()) {
-        bus_stop.request_stop();
         bus_loop.join();
     }
-    // SIGTERM: stop accepting, drain in-flight requests, close the stores and release the store
-    // root (ApiServer::stop, lake#479).
-    server.stop();
     if (platform_transport_required || workspaces_configured) {
         lake::control::shutdown_zetta_control_transport();
     }

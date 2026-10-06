@@ -69,6 +69,12 @@ process), the index needs no key of its own, and it goes with the bucket. Liquid
 writes under `search/`. No index content of a switched workspace is written to lake's volume or to
 PostgreSQL.
 
+**Across a rollout (lake#536).** What search knows beyond the stored index is in memory only: a
+rebuild running or due, and repositories pending until it is done or waiting for a retry
+(`Service::unsettled_workspaces`). A draining lake drops those jobs, so before it releases such a
+workspace's store it removes `search/manifest.json` under the store's lease, and the next process
+rebuilds the index from the repositories on its first use.
+
 **Sealed, fenced, and apart from the store's failures.** Search writes its objects through its own
 `ZettaObjectClient` calls (`search::make_sealed_index_objects`), not through liquid's backend: each
 object is `LKSIDX1\0` followed by AES-256-GCM under the workspace's data key (the store's
@@ -315,6 +321,8 @@ build/tests/lake-tests --gtest_also_run_disabled_tests \
 - `customer` stays an input; the decided API (a required `workspace_id`, `/w/<id>/search`) is a
   later change. `rebuild_search_index` as its own capability is not built; `reindex_artifacts` of
   each repository, or a wiped index, rebuilds.
+- A publication whose index write fails leaves the index without that change until the repository
+  is published or reindexed again; nothing retries it (the failure is not recorded as pending).
 - Rollback of a workspace's index objects by the workspace Zetta is not detected, as for the store
   ([lake#522](https://github.com/oramasearch/lake/issues/522)); a rollback reads as an older index.
 

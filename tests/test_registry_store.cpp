@@ -1490,3 +1490,38 @@ TEST(RegistryStore, AClaimedUploadSurvivesARetryableErrorAndTheSweepDuringItsCom
     EXPECT_EQ(still, 1U) << "the sweep measured the claimed upload from its claim";
     EXPECT_EQ(completed.status, 201U) << completed.body;
 }
+
+// lake#536: once lake drains, image blob work for a workspace store is refused and the released
+// lease is never taken again. A pull (GET) and a HEAD are refused at the stream admission
+// (admit_workspace_stream) with 503 and Retry-After; the operator's copy, which roots an unrooted
+// blob through root_workspace_blob (a lane hold without admission), is refused by that path's own
+// drain check.
+TEST(RegistryStore, ADrainingLakeRefusesBlobWorkAndNeverRetakesTheLease) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "drained"));
+    const std::string layer = layer_bytes(70 * 1024, 7);
+    rig.push_image("tenant-one/drained", "v1", R"({"architecture":"amd64","os":"linux"})", {layer});
+    ASSERT_EQ(rig.get_blob("tenant-one/drained", sha256(layer), "HEAD").status, 200U);
+    ASSERT_NO_FATAL_FAILURE(rig.unroot(rig.one, rig.alpha, sha256(layer)));
+    const std::string endpoint = RegistryRig::endpoint(rig.alpha);
+    ASSERT_FALSE(rig.zetta->lease(endpoint).holder.empty());
+
+    rig.server->begin_drain();
+    for (int waited = 0; waited < 300 && !rig.zetta->lease(endpoint).holder.empty(); ++waited) {
+        std::this_thread::sleep_for(10ms);
+    }
+    ASSERT_TRUE(rig.zetta->lease(endpoint).holder.empty()) << "released at the drain";
+    const auto fence = rig.zetta->lease(endpoint).fence;
+    for (const char* method : {"HEAD", "GET"}) {
+        Reply refused = rig.get_blob("tenant-one/drained", sha256(layer), method);
+        EXPECT_EQ(refused.status, 503U) << method << " " << refused.body;
+        EXPECT_EQ(refused.headers["retry-after"], "1") << method;
+    }
+    const json copied = rig.copy("copy");
+    EXPECT_NE(copied.dump().find("lake is stopping"), std::string::npos) << copied.dump();
+    std::this_thread::sleep_for(300ms);
+    EXPECT_TRUE(rig.zetta->lease(endpoint).holder.empty());
+    EXPECT_EQ(rig.zetta->lease(endpoint).fence, fence) << "nothing took the lease again";
+}

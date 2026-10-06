@@ -4,8 +4,13 @@
 predecessor. `ApiServer::start` binds first; its owner thread takes the lock and opens the customer
 stores (each with liquid's `exclusive_owner`), while the `store_root` middleware holds every request
 but probes, metrics and static assets until the root is open and `/readyz` reports the hand-off.
-`stop` drains in-flight requests, closes the stores and releases the lock (lake#467, lake#479,
-[store-volume.md](../../docs/deployment/store-volume.md#the-hand-off)).
+`begin_drain` (at SIGTERM) refuses new workspace store requests and releases each workspace
+store's lease once its admitted requests are done (lake#536), after it writes `.lake-owner.draining`
+(`StoreOwnerLock::announce_draining`), the announcement a successor's pre-open waits for before it
+takes a workspace lease; `stop` drains in-flight requests,
+closes the stores and releases the lock (lake#467, lake#479,
+[store-volume.md](../../docs/deployment/store-volume.md#the-hand-off)). A starting server opens the
+stores and repositories of running switched workspaces in the background (`preopen_workspace_stores`).
 lake#452: `/w/<workspace>` and `/w/<workspace>/` redirect to the workspace's home; the selectors
 label the viewer's personal space *Personal space* and workspaces by name, and wrap onto their own
 row at phone width; `workspace_act create_project` says whether a name is missing or taken;
@@ -257,9 +262,11 @@ verify, switch; lake#380, `docs/api/workspace-store.md`); a switch then drops th
 repositories from the space's search index (`search::Service::drop_switched`, lake#381). `http_server.cpp`'s `LiquidCustomerStores`
 routes a repository to its workspace's store once `workspaces.store_moved_at` is set (failing
 closed), holds one lane per store (`s:<space>`, `w:<workspace>`) with its map lock never held across
-I/O, opens each workspace store on first use, never creates a workspace store, key or repository
+I/O, opens each workspace store ahead of its first request (`preopen_workspace`, lake#536) or on
+first use, never creates a workspace store, key or repository
 except explicitly (`create_repository_content`, the switch), closes and reopens a store whose lease
-was lost or whose write failed, closes them on drain and on workspace
+was lost or whose write failed, closes them on drain (`release_workspace_stores`, each as soon as its
+lane is idle, all at once) and on workspace
 deletion (`WorkspaceContent::close_workspace_store`), measures a switched workspace's storage as
 its bucket's usage, and keeps replication cursors with liquid's cursor API.
 

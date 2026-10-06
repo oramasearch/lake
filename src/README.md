@@ -7,6 +7,10 @@ Ship App source builds receive their base image from `LAKE_APPS_RUNTIME_IMAGE`; 
 that trusted setting through `ServerOptions` to the API request context.
 OCI upload capacity comes from `LAKE_MAX_REGISTRY_BLOB_BYTES`; `main.cpp` passes the byte count to
 the server while the HTTP adapter keeps every non-registry body at 64 MiB.
+On SIGTERM a watcher thread calls `ApiServer::begin_drain` at once, so workspace stores are handed
+to the successor without waiting for the owner loop's tick; the bus loop's pauses end on the stop
+request and the loop is joined after `ApiServer::stop`, so it never holds up the store root's
+release (lake#536). `LAKE_WORKSPACE_STORE_PREOPEN=false` turns the start-up pre-open off.
 
 `api/`, `control/` and `telemetry/` document their registry, storage and instrumentation contracts
 in their own READMEs. Verify changes with the native PostgreSQL-backed static and shared suites.
