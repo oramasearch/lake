@@ -14,8 +14,8 @@ that names no workspace has nowhere to keep its Opportunities and saves none; a 
 ready answers `workspace_not_ready`; deleting a workspace deletes its Opportunities with its Zetta.
 The page reads the Opportunities and the methodology registry concurrently (two calls, one round).
 Lake no longer writes or reads the `opportunities` table; the operator's one-shot
-`copy_workspace_records {"collection": "opportunities"}` moves the old rows (migration
-`0046_opportunity_workspaces`). Verify: `Stores/WorkspaceRecordStores.OpportunitiesStayInTheWorkspaceTheirScanRanIn`,
+`copy_workspace_records {"collection": "opportunities"}` moved the old rows (migration
+`0046_opportunity_workspaces`), and migration `0070_drop_moved_tables` drops the table (lake#311). Verify: `Stores/WorkspaceRecordStores.OpportunitiesStayInTheWorkspaceTheirScanRanIn`,
 `WorkspaceRecords.AnOpportunityStatusChangeRereadsAfterAConcurrentWrite`.
 
 **Updated 2026-09-27 (lake#269):** Discover became **Design → Opportunities** (`/design/opportunities`;

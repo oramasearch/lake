@@ -86,14 +86,6 @@ std::optional<MeteredBuild> build_of(const StoredRecord& record, const std::stri
 
 } // namespace
 
-std::string legacy_metering_usage_id(const std::string& customer_id, const std::string& hour) {
-    return md5_uuid(customer_id + "\n" + hour);
-}
-
-std::string legacy_metered_build_id(const std::string& customer_id, const std::string& result_id) {
-    return md5_uuid(customer_id + "\n" + result_id);
-}
-
 std::optional<std::int64_t> metering_hour_us(std::string_view hour) {
     if (hour.size() != 20 || hour[4] != '-' || hour[7] != '-' || hour[10] != 'T' ||
         hour.substr(13) != ":00:00Z") {
@@ -185,32 +177,6 @@ add_metered_transfer(WorkspaceRecords& records,
         last = written.error(); // another replica added first: reread and add again
     }
     co_return ZettaControlResult<void>(std::unexpected(last));
-}
-
-liquid::runtime::task<ZettaControlResult<bool>>
-copy_metered_transfer(WorkspaceRecords& records, const LegacyMeteringUsage& row) {
-    const auto at_us = metering_hour_us(row.usage.hour);
-    if (row.id.empty() || row.usage.customer_id.empty() || !at_us) {
-        co_return failure<bool>("invalid_input", "the legacy usage row is incomplete");
-    }
-    auto written =
-        settled(co_await records.put(MeteringUsageCodec::collection,
-                                     row.id,
-                                     lookup_of(row.usage.customer_id),
-                                     {{"customer_id", row.usage.customer_id},
-                                      {"hour", row.usage.hour},
-                                      {"transfer_in_bytes", row.usage.transfer_in_bytes},
-                                      {"transfer_out_bytes", row.usage.transfer_out_bytes}},
-                                     RecordCondition{.if_absent = true},
-                                     1,
-                                     *at_us));
-    if (!written) {
-        if (written.error().code == "conflict") {
-            co_return ZettaControlResult<bool>(false);
-        }
-        co_return ZettaControlResult<bool>(std::unexpected(written.error()));
-    }
-    co_return ZettaControlResult<bool>(true);
 }
 
 liquid::runtime::task<ZettaControlResult<bool>> record_metered_build(WorkspaceRecords& records,

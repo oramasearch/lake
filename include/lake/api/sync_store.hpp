@@ -307,6 +307,21 @@ struct WorkspaceStoreTransfer {
     std::vector<std::pair<std::string, std::string>> differences;
 };
 
+// The removal of a space's old store from lake's volume once every workspace of the space is served
+// from its own store (remove_space_store): each directory removed (or, on a dry run, that would be),
+// with the bytes of the regular files under it. `exists` is false for a directory already gone.
+struct SpaceStoreDirectory {
+    std::string path;
+    bool exists = false;
+    std::uint64_t bytes = 0;
+    std::uint64_t files = 0;
+};
+struct SpaceStoreRemoval {
+    std::vector<SpaceStoreDirectory> directories;
+    std::uint64_t bytes = 0;
+    bool removed = false;
+};
+
 // HTTP-free access to the liquid store selected by a repository's customer.
 // The libliquid implementation remains inside the HTTP adapter translation
 // unit.
@@ -468,6 +483,15 @@ public:
     virtual SyncStoreResult<bool> repository_missing_from_workspace_store(const std::string&,
                                                                           const std::string&) {
         return false;
+    }
+    // Removes the space's store on lake's volume (<root>/<space>/store) and its repository
+    // directories (<root>/<space>/repositories). Holds the space's lane, refusing new space-store
+    // requests and waiting for admitted ones, calls `check` under that hold (the caller's
+    // precondition: every workspace switched), closes the store, then deletes the two
+    // directories. A dry run takes no hold, closes nothing and reports what would be removed.
+    virtual SyncStoreResult<SpaceStoreRemoval>
+    remove_space_store(const std::string&, bool, const std::function<SyncStoreResult<void>()>&) {
+        return std::unexpected(SyncStoreError{"unsupported", "space stores are unavailable"});
     }
     // Closes the workspace's store and releases its bucket lease (workspace deletion, drain).
     virtual SyncStoreResult<void> close_workspace_store(const std::string&) {

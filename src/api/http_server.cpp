@@ -5711,6 +5711,148 @@ public:
         return create_in_workspace(customer_id, repository_id, **route, false);
     }
 
+    SyncStoreResult<SpaceStoreRemoval>
+    remove_space_store(const std::string& customer_id, bool dry_run,
+                       const std::function<SyncStoreResult<void>()>& check) override try {
+        // Only <root>/<space>/store and <root>/<space>/repositories, never the instance's own
+        // directory (<root>/<node name>), <root>/workspaces or anything above the space.
+        if (!path_component_is_safe(customer_id) || customer_id == "workspaces") {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid space location"});
+        }
+        if (root_.empty()) {
+            return std::unexpected(
+                SyncStoreError{"store_unavailable", "LAKE_STORE_ROOT is not configured"});
+        }
+        // A real removal refuses new requests for the space's store (503 with Retry-After) and
+        // waits for the admitted ones to finish, so nothing uses the store when it is closed.
+        std::optional<Moving> moving;
+        LaneLock space_lane;
+        if (!dry_run) {
+            moving.emplace(lane_of("s:" + customer_id));
+            space_lane = hold("s:" + customer_id);
+        }
+        if (auto checked = check(); !checked) {
+            return std::unexpected(checked.error());
+        }
+        const std::filesystem::path space = std::filesystem::path(root_) / customer_id;
+        {
+            // The space's own directory must be a directory and not a link: a link would take the
+            // removal outside the store root.
+            std::error_code error;
+            const auto status = std::filesystem::symlink_status(space, error);
+            if (error && error != std::errc::no_such_file_or_directory) {
+                return std::unexpected(SyncStoreError{
+                    "io", "could not inspect " + space.string() + ": " + error.message()});
+            }
+            if (std::filesystem::exists(status) && (std::filesystem::is_symlink(status) ||
+                                                    !std::filesystem::is_directory(status))) {
+                return std::unexpected(SyncStoreError{
+                    "conflict", space.string() + " is not a directory; nothing was removed"});
+            }
+        }
+        SpaceStoreRemoval output;
+        for (const char* name : {"store", "repositories"}) {
+            SpaceStoreDirectory directory;
+            const std::filesystem::path path = space / name;
+            directory.path = path.string();
+            std::error_code error;
+            const auto status = std::filesystem::symlink_status(path, error);
+            if (error && error != std::errc::no_such_file_or_directory) {
+                return std::unexpected(SyncStoreError{"io", "could not inspect " + directory.path + ": " +
+                                                                error.message()});
+            }
+            if (std::filesystem::exists(status)) {
+                // A link would take the removal outside the space's directory.
+                if (!std::filesystem::is_directory(status) || std::filesystem::is_symlink(status)) {
+                    return std::unexpected(SyncStoreError{
+                        "conflict", directory.path + " is not a directory; nothing was removed"});
+                }
+                directory.exists = true;
+                // A dry run holds nothing, so files may come and go while they are counted (an
+                // unswitched workspace's request writing the store): an entry that vanishes or
+                // cannot be read is skipped, and the count is what was there at that moment.
+                std::error_code walk;
+                auto it = std::filesystem::recursive_directory_iterator(
+                    path, std::filesystem::directory_options::skip_permission_denied, walk);
+                for (; !walk && it != std::filesystem::recursive_directory_iterator();
+                     it.increment(walk)) {
+                    std::error_code entry_error;
+                    const auto entry = it->symlink_status(entry_error);
+                    if (entry_error || !std::filesystem::is_regular_file(entry)) {
+                        continue;
+                    }
+                    const auto size = it->file_size(entry_error);
+                    if (entry_error) {
+                        continue;
+                    }
+                    directory.bytes += size;
+                    ++directory.files;
+                }
+                if (walk && walk != std::errc::no_such_file_or_directory) {
+                    if (!dry_run) {
+                        return std::unexpected(SyncStoreError{
+                            "io", "could not measure " + directory.path + ": " + walk.message()});
+                    }
+                }
+            }
+            output.bytes += directory.bytes;
+            output.directories.push_back(std::move(directory));
+        }
+        if (dry_run) {
+            return output;
+        }
+        // Close the store and forget every space-store repository and route of the space; the
+        // next request for one opens (and liquid creates) the space store afresh.
+        std::unique_ptr<liquid::store> store;
+        std::vector<std::unique_ptr<RepositoryState>> evicted;
+        {
+            std::lock_guard maps(mutex_);
+            ++epochs_[customer_id];
+            const std::string prefix = customer_id + "/";
+            for (auto it = routes_.lower_bound(prefix);
+                 it != routes_.end() && it->first.starts_with(prefix);) {
+                it = routes_.erase(it);
+            }
+            for (auto it = repositories_.lower_bound(prefix);
+                 it != repositories_.end() && it->first.starts_with(prefix);) {
+                if (it->second->workspace.empty()) {
+                    evicted.push_back(std::move(it->second));
+                    it = repositories_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            if (const auto found = stores_.find(customer_id); found != stores_.end()) {
+                store = std::move(found->second);
+                stores_.erase(found);
+            }
+            last_space_bytes_.erase(customer_id);
+        }
+        evicted.clear();
+        if (store) {
+            const auto closed = liquid::runtime::block_on(store->close());
+            if (!closed) {
+                return std::unexpected(error_of(closed.error()));
+            }
+            store.reset();
+        }
+        for (const SpaceStoreDirectory& directory : output.directories) {
+            if (!directory.exists) {
+                continue;
+            }
+            std::error_code error;
+            std::filesystem::remove_all(directory.path, error);
+            if (error) {
+                return std::unexpected(SyncStoreError{"io", "could not remove " + directory.path +
+                                                                ": " + error.message()});
+            }
+        }
+        output.removed = true;
+        return output;
+    } catch (const std::filesystem::filesystem_error& error) {
+        return std::unexpected(SyncStoreError{"io", error.what()});
+    }
+
     SyncStoreResult<void> close_workspace_store(const std::string& workspace_id) override {
         // The lane waits for an open in progress (one waiting for the bucket lease included), so
         // a deletion that races an open still releases the lease the open took.

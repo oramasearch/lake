@@ -915,7 +915,6 @@ TEST(ApplicationAuth, KeysAndWebhooksLiveInTheApplicationsWorkspace) {
         EXPECT_EQ(record.dump().find("app-" + first_id), std::string::npos) << "sealed body";
         EXPECT_EQ(record.dump().find("encrypted_seed"), std::string::npos) << "sealed body";
     }
-    EXPECT_TRUE(surface.store.legacy_application_signing_keys("", 5000)->empty());
 
     // The JWKS is anonymous and needs only the application id; the routing pointer names the
     // workspace. A sign-in's token verifies with it.
@@ -985,7 +984,6 @@ TEST(ApplicationAuth, KeysAndWebhooksLiveInTheApplicationsWorkspace) {
         EXPECT_EQ(record.dump().find(secret), std::string::npos) << "sealed secret";
         EXPECT_EQ(record.dump().find("hooks.example.test"), std::string::npos) << "sealed body";
     }
-    EXPECT_TRUE(surface.store.legacy_application_webhooks("", 5000)->empty());
     const auto listed = list_webhooks(first_id, home);
     ASSERT_TRUE(listed.ok) << listed.error.message;
     ASSERT_EQ(listed.value.at("items").size(), 1U);
@@ -1154,7 +1152,6 @@ TEST(ApplicationAuth, SettingsLiveInTheApplicationsWorkspace) {
     EXPECT_TRUE(routing->theme.empty());
     EXPECT_EQ(routing->workspace_id, home);
     EXPECT_EQ(routing->custom_sign_in_domain, "login.client.example.test");
-    EXPECT_TRUE(surface.store.legacy_application_settings("", 5000)->empty());
 
     // Reads fill the settings from the workspace; listing reads each workspace once.
     const auto read = [&](const std::string& id) {
@@ -1468,7 +1465,6 @@ TEST(ApplicationAuth, AuthorizationCodesLiveInTheApplicationsWorkspace) {
                                   std::string("http://theirs-too.test")}) {
         EXPECT_TRUE(surface.records(url, "auth_app_authorization_codes").empty()) << url;
     }
-    EXPECT_TRUE(surface.store.legacy_application_authorization_codes("", 5000)->empty());
     EXPECT_EQ(authorize(first_id, "https://evil.example.test/callback").error.path,
               "/redirect_uri");
 

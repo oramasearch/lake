@@ -8,8 +8,8 @@ workspace, so ownership follows that workspace incarnation: deleting or recreati
 takes its topics and their creators together. Nothing about a topic's creator is kept in lake's
 PostgreSQL. Migration `0037_streams` created `stream_owners`; migration
 `0047_stream_owner_workspaces` records each of its rows against the workspace it names, and the
-operator's `copy_workspace_records` moves them. The table is dropped by a later migration once the
-copy is verified.
+operator's `copy_workspace_records` moved them. The copy was verified on dev, and migration
+`0070_drop_moved_tables` drops the table (lake#311).
 
 **Why the record store and not a topic property.** A topic's settings would be the obvious place,
 but they are the wrong one. Zetta's topics are node-local and best effort, while a record is

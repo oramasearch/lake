@@ -183,21 +183,4 @@ record_agent_task_content(WorkspaceRecords& records, AgentTaskContent event, int
         attempts);
 }
 
-liquid::runtime::task<ZettaControlResult<AgentTaskContent>>
-fill_agent_task_request(WorkspaceRecords& records, std::string task_id, std::string customer_id,
-                        nlohmann::json request, int attempts) {
-    co_return co_await change_content(
-        records, task_id, customer_id,
-        [request = std::move(request)](const std::optional<AgentTaskContent>& current)
-            -> std::optional<AgentTaskContent> {
-            if (!current || !current->request.is_null()) {
-                return std::nullopt;
-            }
-            AgentTaskContent next = *current;
-            next.request = request;
-            return next;
-        },
-        attempts);
-}
-
 } // namespace lake::control

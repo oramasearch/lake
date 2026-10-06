@@ -15,8 +15,8 @@ compute. The summary measures the rest where it lives and names what is still no
 Repository usage lives in the workspace Zetta of the repository's workspace (lake#348, lake#349;
 every repository names one since lake#315, migration `0051`). Lake's PostgreSQL holds none of it.
 Since migration `0053_metering_workspaces` lake no longer writes or reads `metering_usage` or
-`metering_build_records`; the operator's one-shot copy moves their rows (see
-[Cutover](#cutover-lake348-lake349)).
+`metering_build_records`; the operator's one-shot copy moved their rows (see
+[Cutover](#cutover-lake348-lake349)), and migration `0070_drop_moved_tables` drops both tables.
 
 | Measure | Where it lives | Rule |
 |---|---|---|
@@ -183,8 +183,8 @@ storage gauge and compute that the build records hold, so they are neither assig
 its legacy id beside lake's own hourly record (a reader adds both), and with
 `{"collection":"metering_build_records"}` writes each result under the key a usage read uses, so a
 result recorded since the cutover is `already_present`. Rows of a deleted workspace are reported
-and do not block `complete`. Nothing is dropped; a later migration drops both tables once `verify`
-is complete on dev. The runbook is in
+and do not block `complete`. Nothing is dropped by `0053`; the copy was verified on dev, and
+migration `0070_drop_moved_tables` drops both tables (lake#311). The runbook is in
 [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-metering-dev-cluster).
 
 ## How to verify

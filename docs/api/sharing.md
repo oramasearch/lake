@@ -54,8 +54,8 @@ Lake's PostgreSQL keeps only:
   not name their workspace. Each route holds the token digest, link id and workspace id, and no
   path, role, expiry or creator. Migration `0048_drive_share_link_workspaces` and the copy write
   it for each link whose workspace is known. A route is removed with its workspace;
-- the retired `drive_share_links` table, read only by the operator's one-shot copy until a later
-  migration drops it.
+- nothing else: the retired `drive_share_links` table was copied and verified on dev, and
+  migration `0070_drop_moved_tables` drops it (lake#311).
 
 A workspace that is not ready answers `workspace_not_ready` instead of falling back anywhere.
 Deleting a workspace deletes its Zetta and the links in it; their tokens then answer `not_found`.

@@ -18,7 +18,7 @@ rewrote a finished run in place, which Zetta refuses.
 | Packs, index runs, object map, leases, collector state, each repository's `LIQUID_REPO`, journal, sessions and replication cursors | Bucket `lake_store` of the workspace Zetta, one object per liquid key, encrypted |
 | The workspace's data key, wrapped | Object `keys/workspace-v1.wrapped` of the same bucket |
 | Whether the workspace is switched | `workspaces.store_moved_at` (migration `0067`), content-free |
-| The space's store from before the switch | `LAKE_STORE_ROOT/<space>/store`, unchanged and read-only from the switch on; removing it needs Steve's approval |
+| The space's store from before the switch | `LAKE_STORE_ROOT/<space>/store` and `<space>/repositories`, unchanged and read-only from the switch on, until the operator's `remove_space_store` removes both once every workspace of the space is switched ([below](#removing-the-spaces-store)) |
 
 A repository's store is chosen by its `workspace_id`: its workspace's store once `store_moved_at` is
 set, the space's store before. The choice is cached per repository and cleared by the switch.
@@ -297,6 +297,27 @@ belong in the deployment record once a workspace is switched.
   from its store.
 - Data-key rotation; quota resize of an existing bucket.
 
+## Removing the space's store
+
+Once every workspace of a space is switched, nothing is served from the space's store, and the
+operator removes it with `remove_space_store` ([API](../api/workspace-store.md#removing-the-spaces-store)).
+It is refused (`conflict`) while a live workspace of the space has no `store_moved_at`, a
+repository of the space has no workspace, or a live repository belongs to a deleted workspace.
+Under the space's lane, marked as moving so new space-store requests answer 503 at once and the
+admitted ones finish first, it checks that again, closes the space's liquid store and forgets its
+cached repositories and routes, then deletes `<LAKE_STORE_ROOT>/<space>/store` and
+`<LAKE_STORE_ROOT>/<space>/repositories` and nothing else: the instance's directory
+(`<LAKE_STORE_ROOT>/<node name>`, the registry and the log), `<LAKE_STORE_ROOT>/workspaces`, other
+spaces and the space's search index (`<space>/index`, lake#381) stay. The space id must be the UUID
+of an existing space; a symbolic link in place of the space's directory or either of the two is
+refused. A dry run measures the two directories (regular files only, skipping entries that change
+while it counts) and changes nothing.
+
+Switched workspaces keep answering, since a repository identifier under `<space>/repositories` is a
+name in the workspace store, not a path. A workspace created in the space afterwards is not switched,
+so its repositories open the space's store on first use, and liquid creates it empty, as it does for
+a new space; the removal is then refused again until that workspace is moved and switched.
+
 ## Tests
 
 `tests/test_workspace_store.cpp` runs against `FakeZettaObjects` (`tests/zetta_object_fixture.hpp`),
@@ -339,4 +360,8 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreMove.ARestartCountsSwitchedWorkspacesUsageBeforeAnyWrite` | usage primed at start |
 | `WorkspaceStoreMove.ASearchWaitingOnOneSpacesStoreDoesNotHoldSearchInAnother` | search borrows before its lock |
 | `WorkspaceStoreSearch.OnceTheRepositoryStoreLentRepositoriesSearchNeverOpensAStoreItself` | the fallback refuses once a repository store was set |
+| `WorkspaceStoreRemoval.RemovesOnlyTheSpacesStoreOnceEveryWorkspaceIsSwitched` | `remove_space_store`: invalid and unknown spaces refused; refused (dry run too) while a workspace is not switched; a dry run's paths and bytes with nothing removed; the removal of exactly the two directories; the instance's directory and another space untouched; switched workspaces read and written afterwards and after a restart; a repeated removal; central audit; a later unswitched workspace served from a new space store and refusing the removal until it is switched |
+| `WorkspaceStoreRemoval.ALinkedSpaceOrStoreDirectoryIsRefused` | a symbolic link at `<space>/store` and at `<space>` itself is refused with `conflict` (dry run too) and nothing behind it is touched; put back, the removal proceeds |
+| `WorkspaceStoreRemoval.ALiveRepositoryOfADeletedWorkspaceOrAPersonIsRefused` | a live repository of a deleted workspace refuses the removal (dry run too); no bearer and a person are refused |
+| `WorkspaceStoreRemoval.AnUnassignedRepositoryIsRefused` | on PostgreSQL, a repository without a workspace refuses the removal although the space's only workspace is switched |
 | `WorkspaceStoreZetta.TheBackendOnARealZettaHoldsOnlyCiphertextAndItsLatencyIsMeasured` | the same on a real Zetta, and the latency table |

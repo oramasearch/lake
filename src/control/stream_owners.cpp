@@ -34,24 +34,6 @@ std::optional<StreamOwner> StreamOwnerCodec::decode(const StoredRecord& record,
     return owner;
 }
 
-std::string legacy_stream_owner_id(const StreamOwner& owner) {
-    const std::string joined = owner.customer_id + "\n" + owner.workspace_id + "\n" + owner.topic;
-    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-    unsigned int size = 0;
-    if (EVP_Digest(joined.data(), joined.size(), digest.data(), &size, EVP_md5(), nullptr) != 1 ||
-        size != 16) {
-        return {};
-    }
-    std::string id;
-    for (unsigned int index = 0; index < size; ++index) {
-        if (index == 4 || index == 6 || index == 8 || index == 10) {
-            id += '-';
-        }
-        id += std::format("{:02x}", static_cast<unsigned>(digest[index]));
-    }
-    return id;
-}
-
 std::string stream_owner_key(const WorkspaceRecords& records, const std::string& topic) {
     return records.index_of(StreamOwnerCodec::collection, "topic:" + topic);
 }

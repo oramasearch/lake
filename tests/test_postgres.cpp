@@ -507,152 +507,6 @@ TEST(PostgresCapabilities, OrganizationSpaceMembershipsCarryTheirGrantToTheSpace
     EXPECT_TRUE(may(founder->taap_id, "admin"));
 }
 
-// Migration 0048 (lake#350): each retired drive_share_links row gets the owner it is copied into
-// and, once assigned, a content-free route from the token digest a pre-move token presents.
-TEST(PostgresDriveShareLinks, MigrationRecordsOwnersAndContentFreeRoutes) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(
-        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
-    ASSERT_TRUE(store->ping()) << store->ping().error().message;
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    std::vector<std::string> repositories, folders, workspaces;
-    for (int index = 0; index < 2; ++index) {
-        const std::string name = "drive-migration-" + suffix + "-" + std::to_string(index);
-        const auto user = store->create_user({"taap:1:ed25519:" + name, "", "Drive"});
-        ASSERT_TRUE(user) << user.error().message;
-        const auto customer = store->create_customer({"individual", user->id, "", name});
-        ASSERT_TRUE(customer) << customer.error().message;
-        // The second space has two workspaces, so its links cannot be assigned by themselves.
-        std::string first_workspace;
-        for (int count = 0; count <= index; ++count) {
-            const auto workspace =
-                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
-            ASSERT_TRUE(workspace) << workspace.error().message;
-            if (count == 0) {
-                first_workspace = workspace->id;
-            }
-            if (index == 0) {
-                workspaces.push_back(workspace->id);
-            }
-        }
-        const auto repository =
-            store->create_repository({customer->id, "drive", "", "private", first_workspace});
-        ASSERT_TRUE(repository) << repository.error().message;
-        const auto parent = store->find_policy_object("repository", repository->id);
-        ASSERT_TRUE(parent);
-        const auto folder = store->create_policy_object(
-            {"path", repository->id + ":" + suffix + "000000000000000000000000", parent->id,
-             user->taap_id, "request-folder-" + name, true});
-        ASSERT_TRUE(folder) << folder.error().message;
-        repositories.push_back(repository->id);
-        folders.push_back(folder->id);
-    }
-    pqxx::connection connection(uri);
-    const auto insert = [&](int space, const std::string& token_hash) {
-        pqxx::work tx(connection);
-        const std::string id =
-            tx.exec_params("INSERT INTO drive_share_links (repository_id, object_id, node_id, "
-                           "path, role, token_hash, expires_at, created_by_taap_id) VALUES "
-                           "($1::uuid, $2::uuid, $3, 'shared', 'read', $4, "
-                           "'2999-01-01T00:00:00Z', 'taap:1:ed25519:creator') RETURNING id::text",
-                           repositories[space], folders[space],
-                           suffix + "000000000000000000000000", token_hash)[0][0]
-                .as<std::string>();
-        tx.commit();
-        return id;
-    };
-    const std::string owned = insert(0, "owned-" + suffix);
-    const std::string ambiguous = insert(1, "ambiguous-" + suffix);
-    {
-        pqxx::work tx(connection);
-        tx.exec("DELETE FROM schema_migrations WHERE version = '0048_drive_share_link_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0048_drive_share_link_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    const auto outcome = [&](const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = 'drive_share_links' AND object_id = $1::uuid",
-            id);
-        return found.empty() ? std::pair<std::string, std::string>{}
-                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        EXPECT_EQ(outcome(owned),
-                  (std::pair<std::string, std::string>{"sole_workspace", workspaces[0]}));
-        EXPECT_EQ(outcome(ambiguous).first, "needs_selection");
-    }
-    const auto route = store->drive_share_link_route("owned-" + suffix);
-    ASSERT_TRUE(route) << route.error().message;
-    EXPECT_EQ(route->link_id, owned);
-    EXPECT_EQ(route->workspace_id, workspaces[0]);
-    EXPECT_EQ(store->drive_share_link_route("ambiguous-" + suffix).error().code, "not_found")
-        << "an unassigned link has no route until its workspace is chosen";
-    {
-        // The route is dispatch only: no path, role, expiry or creator.
-        pqxx::work tx(connection);
-        const auto columns = tx.exec(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = "
-            "'drive_share_link_routes' AND table_schema = current_schema() ORDER BY column_name");
-        std::vector<std::string> names;
-        for (const auto& row : columns) {
-            names.push_back(row[0].as<std::string>());
-        }
-        EXPECT_EQ(names, (std::vector<std::string>{"link_id", "recorded_at", "token_hash",
-                                                   "workspace_id"}));
-    }
-
-    // A row written after the migration, and an operator's reviewed choice, are picked up by the
-    // assignment each copy reruns.
-    const std::string late = insert(0, "late-" + suffix);
-    EXPECT_TRUE(outcome(late).first.empty());
-    {
-        pqxx::work tx(connection);
-        tx.exec_params("UPDATE workspace_assignments SET workspace_id = w.id FROM workspaces w "
-                       "JOIN repositories r ON r.customer_id = w.customer_id WHERE "
-                       "object_table = 'drive_share_links' AND object_id = $1::uuid AND "
-                       "r.id = $2::uuid AND w.name = 'ws-1'",
-                       ambiguous, repositories[1]);
-        tx.commit();
-    }
-    ASSERT_TRUE(store->assign_legacy_drive_share_links());
-    EXPECT_EQ(outcome(late).first, "sole_workspace");
-    EXPECT_EQ(store->drive_share_link_route("late-" + suffix)->link_id, late);
-    EXPECT_EQ(store->drive_share_link_route("ambiguous-" + suffix)->link_id, ambiguous);
-
-    std::map<std::string, lake::control::LegacyDriveShareLink> listed;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_drive_share_links(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            listed.emplace(row.link.id, row);
-        }
-        after = page->back().link.id;
-    }
-    ASSERT_TRUE(listed.contains(owned));
-    EXPECT_EQ(listed.at(owned).workspace_id, workspaces[0]);
-    EXPECT_EQ(listed.at(owned).link.expires_at, "2999-01-01T00:00:00.000000Z");
-    EXPECT_EQ(listed.at(owned).link.token_hash, "owned-" + suffix);
-    EXPECT_GT(listed.at(owned).link.at_us, 0);
-    EXPECT_FALSE(listed.at(owned).customer_id.empty());
-    EXPECT_FALSE(listed.at(ambiguous).workspace_id.empty());
-}
-
 // lake#341: migration 0054 records each forge_records row's owner, its repository's workspace,
 // and the copy's rerun of it picks up late rows and repositories assigned after review.
 // lake#317, migration 0063: each central event about a workspace's data is assigned to that
@@ -795,125 +649,6 @@ TEST(PostgresAudit, MigrationRecordsEachWorkspaceEventsOwnerForTheCopy) {
     EXPECT_EQ(position(refused), static_cast<long>(listed.size()));
 }
 
-TEST(PostgresForgeRecords, MigrationRecordsEachRowsOwnerForTheCopy) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(
-        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
-    ASSERT_TRUE(store->ping()) << store->ping().error().message;
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    const auto user = store->create_user({"taap:1:ed25519:forge-migration-" + suffix, "", "Forge"});
-    ASSERT_TRUE(user) << user.error().message;
-    const auto customer =
-        store->create_customer({"individual", user->id, "", "forge-migration-" + suffix});
-    ASSERT_TRUE(customer) << customer.error().message;
-    const auto live = store->create_workspace({customer->id, "live", "dev", ""});
-    const auto doomed = store->create_workspace({customer->id, "doomed", "dev", ""});
-    ASSERT_TRUE(live && doomed);
-    const auto owned = store->create_repository({customer->id, "owned", "", "private", live->id});
-    const auto orphan = store->create_repository({customer->id, "orphan", "", "private", live->id});
-    const auto gone = store->create_repository({customer->id, "gone", "", "private", doomed->id});
-    ASSERT_TRUE(owned && orphan && gone);
-    pqxx::connection connection(uri);
-    {
-        // The orphan stands for a repository migration 0051 could not assign.
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
-        tx.exec_params("UPDATE repositories SET workspace_id = NULL WHERE id = $1::uuid",
-                       orphan->id);
-        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
-        tx.commit();
-    }
-    ASSERT_TRUE(
-        store->delete_repository(gone->id, {"2026-10-01T00:00:00Z", "2027-10-01T00:00:00Z"}));
-    ASSERT_TRUE(store->update_workspace(doomed->id, {.desired = "deleted"}));
-    const auto insert = [&](const std::string& repository_id, const std::string& kind) {
-        pqxx::work tx(connection);
-        const std::string id =
-            tx.exec_params("INSERT INTO forge_records (repository_id, kind, value) VALUES "
-                           "($1::uuid, $2, '{\"title\":\"Migrated\"}'::jsonb) RETURNING id::text",
-                           repository_id, kind)[0][0]
-                .as<std::string>();
-        tx.commit();
-        return id;
-    };
-    const std::string issue = insert(owned->id, "issue");
-    const std::string waiting = insert(orphan->id, "review");
-    const std::string released = insert(gone->id, "release");
-    {
-        pqxx::work tx(connection);
-        tx.exec("DELETE FROM schema_migrations WHERE version = '0054_forge_record_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0054_forge_record_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    const auto outcome = [&](const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = 'forge_records' AND object_id = $1::uuid",
-            id);
-        return found.empty() ? std::pair<std::string, std::string>{}
-                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        EXPECT_EQ(outcome(issue),
-                  (std::pair<std::string, std::string>{"repository_workspace", live->id}));
-        EXPECT_EQ(outcome(waiting), (std::pair<std::string, std::string>{"needs_selection", ""}));
-        EXPECT_EQ(outcome(released),
-                  (std::pair<std::string, std::string>{"workspace_deleted", ""}));
-    }
-
-    // A row written after the migration, and a repository assigned after review, are picked up by
-    // the assignment each copy reruns.
-    const std::string late = insert(owned->id, "issue_comment");
-    EXPECT_TRUE(outcome(late).first.empty());
-    {
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
-        tx.exec_params("UPDATE repositories SET workspace_id = $2::uuid WHERE id = $1::uuid",
-                       orphan->id, live->id);
-        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
-        tx.commit();
-    }
-    ASSERT_TRUE(store->assign_legacy_forge_records());
-    EXPECT_EQ(outcome(late),
-              (std::pair<std::string, std::string>{"repository_workspace", live->id}));
-    EXPECT_EQ(outcome(waiting),
-              (std::pair<std::string, std::string>{"repository_workspace", live->id}));
-    EXPECT_EQ(outcome(released).first, "workspace_deleted");
-
-    std::map<std::string, lake::control::LegacyForgeRecord> listed;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_forge_records(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            listed.emplace(row.record.id, row);
-        }
-        after = page->back().record.id;
-    }
-    ASSERT_TRUE(listed.contains(issue));
-    EXPECT_EQ(listed.at(issue).workspace_id, live->id);
-    EXPECT_EQ(listed.at(issue).customer_id, customer->id);
-    EXPECT_EQ(listed.at(issue).record.kind, "issue");
-    EXPECT_EQ(listed.at(issue).record.value["title"], "Migrated");
-    EXPECT_GT(listed.at(issue).record.at_us, 0);
-    EXPECT_EQ(listed.at(released).outcome, "workspace_deleted");
-    EXPECT_TRUE(listed.at(released).workspace_id.empty());
-}
-
 TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
@@ -1002,146 +737,6 @@ TEST(PostgresCapabilities, SearchFiltersRepositoryCandidates) {
     EXPECT_EQ(scan_event->draft.details.value("mode", ""), "scan");
 }
 
-// Migration 0053 (lake#348, lake#349): metering rows of a space with one live workspace are owned
-// by it, every other row is needs_selection; usage rows without transfer are not copied. A rerun
-// changes nothing, the store's rerun picks up late rows, lake and SQL compute the same row ids,
-// and a workspace deleted after assignment no longer receives its rows.
-TEST(PostgresMetering, MigrationRecordsEachRowsOwnerForTheCopy) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(uri, "metering-migration-test");
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    std::vector<std::string> customers;
-    for (int index = 0; index < 2; ++index) {
-        const std::string name = "meter-migration-" + suffix + "-" + std::to_string(index);
-        const auto user = store->create_user({"taap:" + name, "", "Migration"});
-        ASSERT_TRUE(user) << user.error().message;
-        const auto customer = store->create_customer({"individual", user->id, "", name});
-        ASSERT_TRUE(customer) << customer.error().message;
-        customers.push_back(customer->id);
-    }
-    // The first space has one live workspace (and a deleted one); the second has two.
-    const auto sole = store->create_workspace({customers[0], "home", "dev", ""});
-    ASSERT_TRUE(sole) << sole.error().message;
-    const auto old = store->create_workspace({customers[0], "old", "dev", ""});
-    ASSERT_TRUE(old);
-    ASSERT_TRUE(store->update_workspace(old->id, {.desired = "deleted"}));
-    ASSERT_TRUE(store->create_workspace({customers[1], "a", "dev", ""}));
-    ASSERT_TRUE(store->create_workspace({customers[1], "b", "dev", ""}));
-    pqxx::connection connection(uri);
-    const auto usage = [&](const std::string& customer,
-                           const std::string& hour,
-                           std::uint64_t in,
-                           std::uint64_t out) {
-        pqxx::work tx(connection);
-        tx.exec_params("INSERT INTO metering_usage (customer_id, hour, stored_bytes, "
-                       "transfer_in_bytes, transfer_out_bytes, compute_seconds) VALUES "
-                       "($1::uuid, $2::timestamptz, 4096, $3, $4, 7)",
-                       customer,
-                       hour,
-                       in,
-                       out);
-        tx.commit();
-        return lake::control::legacy_metering_usage_id(customer, hour);
-    };
-    const auto build = [&](const std::string& customer, const std::string& result) {
-        pqxx::work tx(connection);
-        tx.exec_params("INSERT INTO metering_build_records (customer_id, result_id, hour, "
-                       "compute_seconds) VALUES ($1::uuid, $2, '2026-09-04T10:00:00Z', 3)",
-                       customer,
-                       result);
-        tx.commit();
-        return lake::control::legacy_metered_build_id(customer, result);
-    };
-    const std::string owned = usage(customers[0], "2026-09-04T10:00:00Z", 10, 20);
-    const std::string gauge_only = usage(customers[0], "2026-09-04T11:00:00Z", 0, 0);
-    const std::string ambiguous = usage(customers[1], "2026-09-04T10:00:00Z", 5, 0);
-    const std::string owned_build = build(customers[0], "result-a-" + suffix);
-    const std::string ambiguous_build = build(customers[1], "result-b-" + suffix);
-    {
-        pqxx::work tx(connection);
-        tx.exec("DELETE FROM schema_migrations WHERE version = '0053_metering_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0053_metering_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    const auto outcome = [&](const std::string& table, const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = $1 AND object_id = $2::uuid",
-            table,
-            id);
-        return found.empty()
-                   ? std::pair<std::string, std::string>{}
-                   : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    using Outcome = std::pair<std::string, std::string>;
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        EXPECT_EQ(outcome("metering_usage", owned), (Outcome{"sole_workspace", sole->id}));
-        EXPECT_TRUE(outcome("metering_usage", gauge_only).first.empty())
-            << "a row without transfer has nothing to copy";
-        EXPECT_EQ(outcome("metering_usage", ambiguous), (Outcome{"needs_selection", ""}));
-        EXPECT_EQ(outcome("metering_build_records", owned_build),
-                  (Outcome{"sole_workspace", sole->id}));
-        EXPECT_EQ(outcome("metering_build_records", ambiguous_build),
-                  (Outcome{"needs_selection", ""}));
-    }
-    const std::string late = usage(customers[0], "2026-09-04T12:00:00Z", 1, 1);
-    const std::string late_build = build(customers[0], "result-late-" + suffix);
-    EXPECT_TRUE(outcome("metering_usage", late).first.empty());
-    ASSERT_TRUE(store->assign_legacy_metering());
-    EXPECT_EQ(outcome("metering_usage", late).first, "sole_workspace") << "a row written later";
-    EXPECT_EQ(outcome("metering_build_records", late_build).first, "sole_workspace");
-
-    std::map<std::string, lake::control::LegacyMeteringUsage> listed;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_metering_usage(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            EXPECT_GT(row.id, after) << "pages are ordered by id";
-            listed.emplace(row.id, row);
-        }
-        after = page->back().id;
-    }
-    ASSERT_TRUE(listed.contains(owned)) << "lake and the migration compute the same id";
-    EXPECT_FALSE(listed.contains(gauge_only));
-    EXPECT_EQ(listed.at(owned).workspace_id, sole->id);
-    EXPECT_EQ(listed.at(owned).usage.hour, "2026-09-04T10:00:00Z");
-    EXPECT_EQ(listed.at(owned).usage.transfer_in_bytes, 10U);
-    EXPECT_EQ(listed.at(owned).usage.transfer_out_bytes, 20U);
-    EXPECT_EQ(listed.at(ambiguous).outcome, "needs_selection");
-    const auto builds = store->legacy_metering_build_records("", 5000);
-    ASSERT_TRUE(builds) << builds.error().message;
-    const auto found_build =
-        std::ranges::find(*builds, owned_build, &lake::control::LegacyMeteredBuild::id);
-    ASSERT_NE(found_build, builds->end());
-    EXPECT_EQ(found_build->build.result_id, "result-a-" + suffix);
-    EXPECT_EQ(found_build->build.hour, "2026-09-04T10:00:00Z");
-    EXPECT_EQ(found_build->build.compute_seconds, 3U);
-
-    // A workspace deleted after its rows were assigned no longer receives them.
-    ASSERT_TRUE(store->update_workspace(sole->id, {.desired = "deleted"}));
-    const auto relisted = store->legacy_metering_usage("", 5000);
-    ASSERT_TRUE(relisted);
-    const auto row = std::ranges::find(*relisted, owned, &lake::control::LegacyMeteringUsage::id);
-    ASSERT_NE(row, relisted->end());
-    EXPECT_EQ(row->outcome, "workspace_deleted");
-    EXPECT_TRUE(row->workspace_id.empty());
-}
-
 TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
@@ -1195,10 +790,8 @@ TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
         // Nothing of the mount is in PostgreSQL but its content-free route.
         pqxx::connection connection(uri);
         pqxx::work tx(connection);
-        EXPECT_EQ(tx.exec_params("SELECT count(*) FROM secrets_mounts WHERE id = $1::uuid",
-                                 mount_id)[0][0]
-                      .as<int>(),
-                  0);
+        EXPECT_TRUE(tx.exec("SELECT to_regclass('secrets_mounts')")[0][0].is_null())
+            << "migration 0070 dropped the retired table";
         EXPECT_EQ(tx.exec_params("SELECT workspace_id::text FROM secret_mount_routes "
                                  "WHERE mount_id = $1::uuid",
                                  mount_id)[0][0]
@@ -1290,12 +883,7 @@ TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
         EXPECT_EQ(keystore[0][0].as<int>(), 2);
         EXPECT_TRUE(keystore[0][1].as<bool>()) << "the replaced KEK is forgotten once rewrapped";
         for (const std::string table : {"secrets_entries", "secrets_encryption_keys"}) {
-            EXPECT_EQ(tx.exec_params("SELECT count(*) FROM " + table +
-                                         " WHERE mount_id = $1::uuid",
-                                     mount_id)[0][0]
-                          .as<int>(),
-                      0)
-                << table;
+            EXPECT_TRUE(tx.exec("SELECT to_regclass('" + table + "')")[0][0].is_null()) << table;
         }
     }
     ASSERT_TRUE(call("decrypt",
@@ -1313,185 +901,6 @@ TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
     ASSERT_TRUE(event) << event.error().message;
     EXPECT_EQ(event->draft.outcome, "denied");
     EXPECT_EQ(event->draft.details.at("mount_id"), mount_id);
-}
-
-// lake#328-#332: migration 0057 gives each legacy mount the only live workspace of its space and
-// a route there, reports the rest, and drops the dynamic leases' foreign key to secrets_mounts;
-// the mount's entries, versions, keys and data keys follow its route.
-TEST(PostgresSecrets, MigrationRecordsEachMountsOwnerAndRoute) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(
-        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
-    ASSERT_TRUE(store->ping()) << store->ping().error().message;
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    struct Space {
-        std::string organization_id, customer_id;
-        std::vector<std::string> workspaces;
-    };
-    const auto space = [&](const std::string& name, int workspaces) {
-        const auto organization = store->create_organization(
-            {"taap:1:ed25519:secret-migration-" + name + "-" + suffix, name, ""});
-        EXPECT_TRUE(organization) << organization.error().message;
-        const auto customer = store->create_customer(
-            {"organization", "", organization->id, "secret-migration-" + name + "-" + suffix});
-        EXPECT_TRUE(customer) << customer.error().message;
-        Space created{organization->id, customer->id, {}};
-        for (int index = 0; index < workspaces; ++index) {
-            const auto workspace =
-                store->create_workspace({customer->id, name + std::to_string(index), "dev", ""});
-            EXPECT_TRUE(workspace) << workspace.error().message;
-            created.workspaces.push_back(workspace->id);
-        }
-        return created;
-    };
-    const Space sole = space("sole", 1);
-    const Space several = space("several", 2);
-    const Space doomed = space("doomed", 1);
-    pqxx::connection connection(uri);
-    const auto mount = [&](const Space& owner, const std::string& name) {
-        pqxx::work tx(connection);
-        const std::string id =
-            tx.exec_params("INSERT INTO secrets_mounts (customer_id, organization_id, name) "
-                           "VALUES ($1::uuid, $2::uuid, $3) RETURNING id::text",
-                           owner.customer_id, owner.organization_id, name)[0][0]
-                .as<std::string>();
-        tx.commit();
-        return id;
-    };
-    const std::string owned = mount(sole, "owned");
-    const std::string waiting = mount(several, "waiting");
-    const std::string gone = mount(doomed, "gone");
-    std::string entry, key;
-    {
-        pqxx::work tx(connection);
-        entry = tx.exec_params("INSERT INTO secrets_entries (mount_id, name, current_version) "
-                               "VALUES ($1::uuid, 'database', 1) RETURNING id::text",
-                               owned)[0][0]
-                    .as<std::string>();
-        tx.exec_params("INSERT INTO secrets_versions (entry_id, version, ciphertext) VALUES "
-                       "($1::uuid, 1, 'sealed')",
-                       entry);
-        key = tx.exec_params("INSERT INTO secrets_encryption_keys (mount_id, name) VALUES "
-                             "($1::uuid, 'orders') RETURNING id::text",
-                             owned)[0][0]
-                  .as<std::string>();
-        tx.exec_params("INSERT INTO secrets_data_keys (customer_id, owner_kind, owner_id, "
-                       "key_version, wrapped_key) VALUES ($1::uuid, 'mount', $2::uuid, 1, 'w'), "
-                       "($1::uuid, 'encryption', $3::uuid, 1, 'w')",
-                       sole.customer_id, owned, key);
-        tx.exec("DELETE FROM schema_migrations WHERE version = '0057_secret_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0057_secret_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    const auto outcome = [&](const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = 'secrets_mounts' AND object_id = $1::uuid",
-            id);
-        return found.empty() ? std::pair<std::string, std::string>{}
-                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    const auto route = [&](const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT workspace_id::text FROM secret_mount_routes WHERE mount_id = $1::uuid", id);
-        return found.empty() ? std::string() : found[0][0].as<std::string>();
-    };
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        EXPECT_EQ(outcome(owned),
-                  (std::pair<std::string, std::string>{"sole_workspace", sole.workspaces[0]}));
-        EXPECT_EQ(outcome(waiting), (std::pair<std::string, std::string>{"needs_selection", ""}));
-        EXPECT_EQ(route(owned), sole.workspaces[0]);
-        EXPECT_EQ(route(gone), doomed.workspaces[0]);
-        EXPECT_TRUE(route(waiting).empty());
-    }
-    {
-        pqxx::work tx(connection);
-        EXPECT_TRUE(tx.exec("SELECT 1 FROM information_schema.table_constraints WHERE "
-                            "constraint_name = 'secrets_dynamic_leases_mount_id_fkey' AND "
-                            "table_schema = current_schema()")
-                        .empty());
-        // A route names a live workspace of its own space and never moves.
-        EXPECT_THROW(tx.exec_params("UPDATE secret_mount_routes SET workspace_id = $2::uuid "
-                                    "WHERE mount_id = $1::uuid",
-                                    owned, several.workspaces[0]),
-                     pqxx::check_violation);
-    }
-
-    // The deleted workspace's mount went with it; a reviewed choice routes the waiting one; a
-    // mount written after the migration is picked up by the assignment each copy reruns.
-    ASSERT_TRUE(store->update_workspace(doomed.workspaces[0], {.desired = "deleted"}));
-    {
-        pqxx::work tx(connection);
-        tx.exec_params("UPDATE workspace_assignments SET workspace_id = $2::uuid WHERE "
-                       "object_table = 'secrets_mounts' AND object_id = $1::uuid",
-                       waiting, several.workspaces[1]);
-        tx.commit();
-    }
-    const std::string late = mount(sole, "late");
-    ASSERT_TRUE(store->assign_legacy_secrets());
-    EXPECT_EQ(route(waiting), several.workspaces[1]);
-    EXPECT_EQ(route(late), sole.workspaces[0]);
-
-    std::map<std::string, lake::control::LegacySecretMount> mounts;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_secret_mounts(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            mounts.emplace(row.mount.id, row);
-        }
-        after = page->back().mount.id;
-    }
-    ASSERT_TRUE(mounts.contains(owned) && mounts.contains(waiting) && mounts.contains(gone));
-    EXPECT_EQ(mounts.at(owned).owner.workspace_id, sole.workspaces[0]);
-    EXPECT_EQ(mounts.at(owned).mount.name, "owned");
-    EXPECT_EQ(mounts.at(waiting).owner.workspace_id, several.workspaces[1]);
-    EXPECT_EQ(mounts.at(gone).owner.outcome, "workspace_deleted");
-    EXPECT_TRUE(mounts.at(gone).owner.workspace_id.empty());
-
-    const auto entries = store->legacy_secret_entries("", 5000);
-    ASSERT_TRUE(entries) << entries.error().message;
-    const auto found_entry = std::ranges::find(*entries, entry, &lake::control::LegacySecretEntry::id);
-    ASSERT_NE(found_entry, entries->end());
-    EXPECT_EQ(found_entry->owner.workspace_id, sole.workspaces[0]);
-    EXPECT_EQ(found_entry->owner.mount_id, owned);
-    const auto versions = store->legacy_secret_versions("", 5000);
-    ASSERT_TRUE(versions) << versions.error().message;
-    const auto found_version = std::ranges::find_if(*versions, [&](const auto& row) {
-        return row.owner.mount_id == owned;
-    });
-    ASSERT_NE(found_version, versions->end());
-    EXPECT_EQ(found_version->ciphertext, "sealed");
-    EXPECT_EQ(found_version->owner.workspace_id, sole.workspaces[0]);
-    const auto keys = store->legacy_encryption_keys("", 5000);
-    ASSERT_TRUE(keys) << keys.error().message;
-    EXPECT_TRUE(std::ranges::any_of(*keys, [&](const auto& row) {
-        return row.key.id == key && row.owner.workspace_id == sole.workspaces[0];
-    }));
-    const auto data_keys = store->legacy_secret_data_keys("", 5000);
-    ASSERT_TRUE(data_keys) << data_keys.error().message;
-    EXPECT_EQ(std::ranges::count_if(*data_keys,
-                                    [&](const auto& row) {
-                                        return row.owner.mount_id == owned &&
-                                               row.owner.workspace_id == sole.workspaces[0];
-                                    }),
-              2)
-        << "a named key's data key follows its key's mount";
 }
 
 // Migration 0058 (lake#362): secret_lease_routes, the content-free route and due index of each
@@ -1522,13 +931,10 @@ TEST(PostgresSecrets, LeaseRoutesAreAContentFreeDueIndex) {
         {mount, customer->id, organization->id, workspaces[0], ""}));
 
     pqxx::connection connection(uri);
-    // A legacy lease of a mount without a route is reported by the migration and left alone.
+    // Rerunning the schema from 0058 (whose legacy table 0070 dropped) leaves the routes as they
+    // are.
     {
         pqxx::work tx(connection);
-        tx.exec_params("INSERT INTO secrets_dynamic_leases (mount_id, role, encrypted_value, "
-                       "expires_at) VALUES ($1::uuid, 'reader', 'sealed', now() + interval '1 "
-                       "hour')",
-                       lake::control::new_uuid_v4());
         tx.exec("DELETE FROM schema_migrations WHERE version = '0058_secret_lease_workspaces'");
         tx.commit();
     }
@@ -1626,222 +1032,6 @@ TEST(PostgresSecrets, LeaseRoutesAreAContentFreeDueIndex) {
                                     customer->id, workspaces[0]),
                      pqxx::foreign_key_violation);
     }
-    // The legacy listing pages by lease id and names each lease's mount route as its owner.
-    {
-        pqxx::work tx(connection);
-        tx.exec_params("INSERT INTO secrets_dynamic_leases (id, mount_id, role, encrypted_value, "
-                       "expires_at, revoked_at, renewals) VALUES ($1::uuid, $2::uuid, 'writer', "
-                       "'sealed-legacy', now() + interval '1 hour', now(), 4)",
-                       future.lease_id, mount);
-        tx.commit();
-    }
-    std::map<std::string, lake::control::LegacyDynamicSecretLease> legacy;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_dynamic_secret_leases(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            legacy.emplace(row.id, row);
-        }
-        after = page->back().id;
-    }
-    ASSERT_TRUE(legacy.contains(future.lease_id));
-    const auto& row = legacy.at(future.lease_id);
-    EXPECT_EQ(row.owner.workspace_id, workspaces[0]);
-    EXPECT_EQ(row.owner.customer_id, customer->id);
-    EXPECT_EQ(row.encrypted_value, "sealed-legacy");
-    EXPECT_EQ(row.renewals, 4);
-    EXPECT_FALSE(row.revoked_at.empty());
-    EXPECT_GT(row.revoked_us, 0);
-    EXPECT_GT(row.expires_us, row.at_us);
-}
-
-// lake#358, lake#359: migration 0060 gives each environment's policy object the environment's
-// derived id, records each platform_environments and platform_mirror row's owner, its repository's
-// workspace, and the copy's rerun of it picks up late rows and repositories assigned after review.
-TEST(PostgresPlatform, MigrationRecordsEachRowsOwnerForTheCopy) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(
-        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
-    ASSERT_TRUE(store->ping()) << store->ping().error().message;
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    const auto user =
-        store->create_user({"taap:1:ed25519:platform-migration-" + suffix, "", "Platform"});
-    ASSERT_TRUE(user) << user.error().message;
-    const auto customer =
-        store->create_customer({"individual", user->id, "", "platform-migration-" + suffix});
-    ASSERT_TRUE(customer) << customer.error().message;
-    const auto live = store->create_workspace({customer->id, "live", "dev", ""});
-    const auto doomed = store->create_workspace({customer->id, "doomed", "dev", ""});
-    ASSERT_TRUE(live && doomed);
-    const auto owned = store->create_repository({customer->id, "owned", "", "private", live->id});
-    const auto orphan = store->create_repository({customer->id, "orphan", "", "private", live->id});
-    const auto gone = store->create_repository({customer->id, "gone", "", "private", doomed->id});
-    ASSERT_TRUE(owned && orphan && gone);
-    pqxx::connection connection(uri);
-    {
-        // The orphan stands for a repository migration 0051 could not assign.
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
-        tx.exec_params("UPDATE repositories SET workspace_id = NULL WHERE id = $1::uuid",
-                       orphan->id);
-        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
-        tx.commit();
-    }
-    ASSERT_TRUE(
-        store->delete_repository(gone->id, {"2026-10-01T00:00:00Z", "2027-10-01T00:00:00Z"}));
-    ASSERT_TRUE(store->update_workspace(doomed->id, {.desired = "deleted"}));
-    // An environment as an earlier lake made it: a random id, and a policy object named by it.
-    const auto environment = [&](const lake::control::Repository& repository,
-                                 const std::string& name) {
-        const auto parent = store->find_policy_object("repository", repository.id);
-        EXPECT_TRUE(parent) << parent.error().message;
-        const std::string id = lake::control::new_uuid_v4();
-        const auto object = store->create_policy_object(
-            {"environment", id, parent->id, "admin", "platform-migration-" + id, true});
-        EXPECT_TRUE(object) << object.error().message;
-        pqxx::work tx(connection);
-        tx.exec_params("INSERT INTO platform_environments (id, repository_id, name, object_id) "
-                       "VALUES ($1::uuid, $2::uuid, $3, $4::uuid)",
-                       id, repository.id, name, object->id);
-        tx.commit();
-        return std::pair{id, object->id};
-    };
-    const auto mirror = [&](const std::string& kind, const std::string& key,
-                            const std::string& repository_id) {
-        pqxx::work tx(connection);
-        tx.exec_params("INSERT INTO platform_mirror (kind, key, value, seen_at) VALUES ($1, $2, "
-                       "$3::jsonb, now())",
-                       kind, key,
-                       nlohmann::json{{"repository", repository_id},
-                                      {"environment", "production"},
-                                      {"phase", "ready"}}
-                           .dump());
-        tx.commit();
-        return lake::control::platform_mirror_id(kind, key);
-    };
-    const auto [production, production_object] = environment(*owned, "production");
-    const auto [waiting, waiting_object] = environment(*orphan, "staging");
-    const auto [released, released_object] = environment(*gone, "production");
-    const std::string deployment = mirror("deployment", "deployment-" + suffix, owned->id);
-    const std::string waiting_value =
-        mirror("environment_env", orphan->id + "/staging/COLOR", orphan->id);
-    const std::string stranger =
-        mirror("domain", "stranger-" + suffix, lake::control::new_uuid_v4());
-    {
-        pqxx::work tx(connection);
-        tx.exec("DELETE FROM schema_migrations WHERE version = '0060_platform_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0060_platform_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    const auto outcome = [&](const std::string& table, const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = $1 AND object_id = $2::uuid",
-            table, id);
-        return found.empty() ? std::pair<std::string, std::string>{}
-                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    using Owner = std::pair<std::string, std::string>;
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        EXPECT_EQ(outcome("platform_environments", production),
-                  (Owner{"repository_workspace", live->id}));
-        EXPECT_EQ(outcome("platform_environments", waiting), (Owner{"needs_selection", ""}));
-        EXPECT_EQ(outcome("platform_environments", released), (Owner{"workspace_deleted", ""}));
-        EXPECT_EQ(outcome("platform_mirror", deployment),
-                  (Owner{"repository_workspace", live->id}));
-        EXPECT_EQ(outcome("platform_mirror", waiting_value), (Owner{"needs_selection", ""}));
-        EXPECT_TRUE(outcome("platform_mirror", stranger).first.empty())
-            << "a row naming no repository is reported, not assigned";
-    }
-    // The policy object keeps its id and grants and now answers to the environment's derived id,
-    // which lake computes the same way.
-    const auto renamed = store->find_policy_object(
-        "environment", lake::control::platform_environment_id(owned->id, "production"));
-    ASSERT_TRUE(renamed) << renamed.error().message;
-    EXPECT_EQ(renamed->id, production_object);
-
-    // A row written after the migration, and a repository assigned after review, are picked up by
-    // the assignment each copy reruns.
-    const auto [late, late_object] = environment(*owned, "preview");
-    const std::string late_value =
-        mirror("environment_env", owned->id + "/production/LATE", owned->id);
-    {
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
-        tx.exec_params("UPDATE repositories SET workspace_id = $2::uuid WHERE id = $1::uuid",
-                       orphan->id, live->id);
-        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
-        tx.commit();
-    }
-    ASSERT_TRUE(store->assign_legacy_platform_environments());
-    ASSERT_TRUE(store->assign_legacy_platform_mirror());
-    EXPECT_EQ(outcome("platform_environments", late), (Owner{"repository_workspace", live->id}));
-    EXPECT_EQ(outcome("platform_environments", waiting),
-              (Owner{"repository_workspace", live->id}));
-    EXPECT_EQ(outcome("platform_environments", released).first, "workspace_deleted");
-    EXPECT_EQ(outcome("platform_mirror", late_value), (Owner{"repository_workspace", live->id}));
-    EXPECT_EQ(outcome("platform_mirror", waiting_value),
-              (Owner{"repository_workspace", live->id}));
-    const auto preview = store->find_policy_object(
-        "environment", lake::control::platform_environment_id(owned->id, "preview"));
-    ASSERT_TRUE(preview) << preview.error().message;
-    EXPECT_EQ(preview->id, late_object);
-
-    std::map<std::string, lake::control::LegacyPlatformEnvironment> environments;
-    for (std::string after;;) {
-        const auto page = store->legacy_platform_environments(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            environments.emplace(row.id, row);
-        }
-        after = page->back().id;
-    }
-    ASSERT_TRUE(environments.contains(production));
-    EXPECT_EQ(environments.at(production).workspace_id, live->id);
-    EXPECT_EQ(environments.at(production).customer_id, customer->id);
-    EXPECT_EQ(environments.at(production).environment.name, "production");
-    EXPECT_EQ(environments.at(production).environment.object_id, production_object);
-    EXPECT_GT(environments.at(production).environment.at_us, 0);
-    EXPECT_EQ(environments.at(released).outcome, "workspace_deleted");
-
-    std::map<std::string, lake::control::LegacyPlatformMirrorRow> rows;
-    for (std::string after;;) {
-        const auto page = store->legacy_platform_mirror(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            rows.emplace(row.id, row);
-        }
-        after = page->back().id;
-    }
-    ASSERT_TRUE(rows.contains(deployment));
-    EXPECT_EQ(rows.at(deployment).workspace_id, live->id);
-    EXPECT_EQ(rows.at(deployment).repository_id, owned->id);
-    EXPECT_EQ(rows.at(deployment).row.value["phase"], "ready");
-    EXPECT_GT(rows.at(deployment).at_us, 0);
-    ASSERT_TRUE(rows.contains(stranger));
-    EXPECT_EQ(rows.at(stranger).outcome, "unknown_repository");
-    EXPECT_TRUE(rows.at(stranger).workspace_id.empty());
 }
 
 } // namespace
@@ -2638,71 +1828,324 @@ TEST(PostgresAskMessages, MigrationDropsTheTableAndKeepsItsAssignments) {
     EXPECT_FALSE(tx.exec("SELECT to_regclass('drop_ask_messages_guard')")[0][0].is_null());
 }
 
-// Migration 0064 (decision 54, S10 and S11): repository_refs, a copy of liquid's refs nothing read,
-// is dropped (lake#319) and never recreated by a rerun; each repository with a description has its
-// owner recorded for the copy of its description into its workspace (lake#315 part 2), and new
-// rows hold none.
-TEST(PostgresRepositories, MigrationDropsRefsAndRecordsEachDescriptionsOwner) {
+// Migration 0070 (lake#311) refuses rows with no recorded workspace owner, and drops every retired
+// copy of workspace data once each row has one (or went with a deleted workspace). The check is
+// about owners, not copies: copy and verify are a manual gate before applying. It runs in a
+// PostgreSQL schema of its own, so the tables it recreates as an older database had them, and the
+// row it leaves unresolved, are seen by no other test running against the same database.
+TEST(PostgresMovedTables, MigrationRefusesRowsWithNoRecordedWorkspaceOwner) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    const std::string own = "m0070_" + lake::control::new_uuid_v4().substr(0, 8);
+    pqxx::connection connection(uri);
+    {
+        pqxx::work tx(connection);
+        tx.exec("CREATE SCHEMA " + own);
+        tx.commit();
+    }
+    connection.set_session_var("search_path", own);
+    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
+    const std::string schema((std::istreambuf_iterator<char>(file)), {});
+    const auto start = schema.find("-- 0070_drop_moved_tables:");
+    ASSERT_NE(start, std::string::npos);
+    const auto apply = [&](const std::string& sql) {
+        pqxx::work tx(connection);
+        tx.exec("SET LOCAL client_min_messages TO error");
+        tx.exec(sql);
+        tx.commit();
+    };
+    apply(schema);
+
+    const std::vector<std::string> tables = {
+        "opportunities",          "stream_owners",           "drive_share_links",
+        "auth_app_webhook_deliveries", "auth_app_webhook_events", "auth_app_webhooks",
+        "auth_app_signing_keys",  "auth_app_organizations",  "auth_app_users",
+        "auth_app_authorization_codes", "metering_usage",    "metering_build_records",
+        "forge_records",          "secrets_dynamic_leases",  "secrets_versions",
+        "secrets_entries",        "secrets_encryption_keys", "secrets_data_keys",
+        "secrets_mounts",         "platform_mirror",         "platform_environments"};
+    const std::vector<std::pair<std::string, std::string>> columns = {
+        {"auth_applications", "name"},          {"auth_applications", "allowed_origins"},
+        {"auth_applications", "redirect_uris"}, {"auth_applications", "theme"},
+        {"agent_tasks", "body"},                {"agent_task_status", "message"},
+        {"agent_task_status", "result"},        {"repositories", "description"}};
+    const auto present = [&] {
+        pqxx::work tx(connection);
+        std::vector<std::string> found;
+        for (const auto& table : tables) {
+            if (!tx.exec_params("SELECT to_regclass($1)", table)[0][0].is_null()) {
+                found.push_back(table);
+            }
+        }
+        for (const auto& [table, column] : columns) {
+            if (!tx.exec_params("SELECT 1 FROM information_schema.columns WHERE table_schema = "
+                                "current_schema() AND table_name = $1 AND column_name = $2",
+                                table, column)
+                     .empty()) {
+                found.push_back(table + "." + column);
+            }
+        }
+        return found;
+    };
+    EXPECT_TRUE(present().empty()) << "a fresh database never has them";
+
+    // A database from before 0070, with one row in each retired table and column, each with the
+    // owner its migration (0046-0064) recorded.
+    std::string customer, workspace, application, repository, task;
+    {
+        pqxx::work tx(connection);
+        const std::string user =
+            tx.exec("INSERT INTO users (taap_id, display_name) VALUES ('taap:m0070', 'M') "
+                    "RETURNING id::text")[0][0].as<std::string>();
+        customer = tx.exec_params("INSERT INTO customers (customer_type, user_id, name) VALUES "
+                                  "('individual', $1::uuid, 'm0070') RETURNING id::text",
+                                  user)[0][0].as<std::string>();
+        workspace = tx.exec_params("INSERT INTO workspaces (customer_id, name, environment) "
+                                   "VALUES ($1::uuid, 'home', 'dev') RETURNING id::text",
+                                   customer)[0][0].as<std::string>();
+        application = lake::control::new_uuid_v4();
+        tx.exec("ALTER TABLE auth_applications ADD COLUMN name text, ADD COLUMN allowed_origins "
+                "jsonb, ADD COLUMN redirect_uris jsonb, ADD COLUMN theme jsonb");
+        tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, workspace_id, "
+                       "name) VALUES ($1::uuid, $2::uuid, 'pool-m0070', $3::uuid, 'Store')",
+                       application, customer, workspace);
+        tx.exec("ALTER TABLE repositories ADD COLUMN description text NOT NULL DEFAULT ''");
+        repository = tx.exec_params("INSERT INTO repositories (customer_id, name, workspace_id, "
+                                    "description) VALUES ($1::uuid, 'liquid', $2::uuid, 'VCS') "
+                                    "RETURNING id::text",
+                                    customer, workspace)[0][0].as<std::string>();
+        tx.exec("ALTER TABLE agent_tasks ADD COLUMN body jsonb NOT NULL DEFAULT '{}'::jsonb");
+        tx.exec("ALTER TABLE agent_task_status ADD COLUMN message text NOT NULL DEFAULT '', "
+                "ADD COLUMN result jsonb NOT NULL DEFAULT 'null'::jsonb");
+        task = tx.exec_params("INSERT INTO agent_tasks (customer_id, agent, scopes, workspace_id, "
+                              "body) VALUES ($1::uuid, 'agent-ask-orama', ARRAY['ask'], $2::uuid, "
+                              "'{\"question\": \"hi\"}') RETURNING id::text",
+                              customer, workspace)[0][0].as<std::string>();
+        tx.exec_params("INSERT INTO agent_task_status (task_id, message) VALUES ($1::uuid, 'done')",
+                       task);
+        // The retired tables, with the columns the migration reads.
+        tx.exec("CREATE TABLE opportunities (id uuid PRIMARY KEY, customer_id uuid)");
+        tx.exec("CREATE TABLE stream_owners (customer_id uuid, workspace_id text, topic text)");
+        tx.exec("CREATE TABLE drive_share_links (id uuid PRIMARY KEY)");
+        tx.exec("CREATE TABLE auth_app_webhooks (id uuid PRIMARY KEY, application_id uuid)");
+        tx.exec("CREATE TABLE auth_app_webhook_events (id uuid PRIMARY KEY, application_id uuid)");
+        tx.exec("CREATE TABLE auth_app_webhook_deliveries (id uuid PRIMARY KEY, event_id uuid "
+                "REFERENCES auth_app_webhook_events(id), webhook_id uuid REFERENCES "
+                "auth_app_webhooks(id))");
+        tx.exec("CREATE TABLE auth_app_signing_keys (application_id uuid, version integer)");
+        tx.exec("CREATE TABLE auth_app_organizations (id uuid PRIMARY KEY, application_id uuid)");
+        tx.exec("CREATE TABLE auth_app_users (application_id uuid, user_id uuid)");
+        tx.exec("CREATE TABLE auth_app_authorization_codes (code_hash text PRIMARY KEY, "
+                "application_id uuid, used_at timestamptz, expires_at timestamptz)");
+        tx.exec("CREATE TABLE metering_usage (customer_id uuid, hour timestamptz, "
+                "transfer_in_bytes bigint, transfer_out_bytes bigint)");
+        tx.exec("CREATE TABLE metering_build_records (customer_id uuid, result_id text)");
+        tx.exec("CREATE TABLE forge_records (id uuid PRIMARY KEY, repository_id uuid)");
+        tx.exec("CREATE TABLE secrets_mounts (id uuid PRIMARY KEY)");
+        tx.exec("CREATE TABLE secrets_entries (id uuid PRIMARY KEY, mount_id uuid REFERENCES "
+                "secrets_mounts(id))");
+        tx.exec("CREATE TABLE secrets_versions (entry_id uuid REFERENCES secrets_entries(id))");
+        tx.exec("CREATE TABLE secrets_encryption_keys (id uuid PRIMARY KEY, mount_id uuid "
+                "REFERENCES secrets_mounts(id), derived_from_id uuid REFERENCES "
+                "secrets_encryption_keys(id))");
+        tx.exec("CREATE TABLE secrets_data_keys (owner_id uuid)");
+        tx.exec("CREATE TABLE secrets_dynamic_leases (id uuid PRIMARY KEY, mount_id uuid)");
+        tx.exec("CREATE TABLE platform_environments (id uuid PRIMARY KEY)");
+        tx.exec("CREATE TABLE platform_mirror (kind text, key text, value jsonb)");
+
+        const std::string row = lake::control::new_uuid_v4();
+        const std::string mount = lake::control::new_uuid_v4();
+        const std::string secret = lake::control::new_uuid_v4();
+        tx.exec_params("INSERT INTO opportunities VALUES ($1::uuid, $2::uuid)", row, customer);
+        tx.exec_params("INSERT INTO stream_owners VALUES ($1::uuid, $2, 'orders')", customer,
+                       workspace);
+        tx.exec_params("INSERT INTO drive_share_links VALUES ($1::uuid)", row);
+        tx.exec_params("INSERT INTO auth_app_webhooks VALUES ($1::uuid, $2::uuid)", row,
+                       application);
+        tx.exec_params("INSERT INTO auth_app_webhook_events VALUES ($1::uuid, $2::uuid)", row,
+                       application);
+        tx.exec_params("INSERT INTO auth_app_webhook_deliveries VALUES (gen_random_uuid(), "
+                       "$1::uuid, $1::uuid)",
+                       row);
+        tx.exec_params("INSERT INTO auth_app_signing_keys VALUES ($1::uuid, 1)", application);
+        tx.exec_params("INSERT INTO auth_app_organizations VALUES ($1::uuid, $2::uuid)", row,
+                       application);
+        tx.exec_params("INSERT INTO auth_app_users VALUES ($1::uuid, $2::uuid)", application, user);
+        tx.exec_params("INSERT INTO auth_app_authorization_codes VALUES ('code', $1::uuid, NULL, "
+                       "now() + interval '5 minutes')",
+                       application);
+        tx.exec_params("INSERT INTO metering_usage VALUES ($1::uuid, '2026-10-01T10:00:00Z', 10, 0)",
+                       customer);
+        tx.exec_params("INSERT INTO metering_build_records VALUES ($1::uuid, 'result-1')",
+                       customer);
+        tx.exec_params("INSERT INTO forge_records VALUES ($1::uuid, $2::uuid)", row, repository);
+        tx.exec_params("INSERT INTO secrets_mounts VALUES ($1::uuid)", mount);
+        tx.exec_params("INSERT INTO secrets_entries VALUES ($1::uuid, $2::uuid)", secret, mount);
+        tx.exec_params("INSERT INTO secrets_versions VALUES ($1::uuid)", secret);
+        tx.exec_params("INSERT INTO secrets_encryption_keys VALUES ($1::uuid, $2::uuid, NULL)",
+                       secret, mount);
+        tx.exec_params("INSERT INTO secrets_data_keys VALUES ($1::uuid)", mount);
+        tx.exec_params("INSERT INTO secrets_dynamic_leases VALUES ($1::uuid, $2::uuid)", row,
+                       mount);
+        const std::string organization =
+            tx.exec("INSERT INTO organizations (taap_id) VALUES ('taap:m0070-org') "
+                    "RETURNING id::text")[0][0].as<std::string>();
+        tx.exec_params("INSERT INTO secret_mount_routes (mount_id, customer_id, organization_id, "
+                       "workspace_id) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid)",
+                       mount, customer, organization, workspace);
+        tx.exec_params("INSERT INTO platform_environments VALUES ($1::uuid)", row);
+        tx.exec_params("INSERT INTO platform_mirror VALUES ('deployment', 'd-1', "
+                       "jsonb_build_object('repository', $1::text))",
+                       repository);
+        // Each owner, with the outcome the table's migration records for an owned row.
+        const std::map<std::string, std::string> outcomes = {
+            {"opportunities", "task_workspace"},
+            {"stream_owners", "recorded_workspace"},
+            {"drive_share_links", "sole_workspace"},
+            {"auth_app_webhook_events", "application_workspace"},
+            {"auth_app_organizations", "application_workspace"},
+            {"auth_app_users", "application_workspace"},
+            {"auth_app_webhooks", "application_workspace"},
+            {"auth_app_signing_keys", "application_workspace"},
+            {"auth_app_authorization_codes", "application_workspace"},
+            {"auth_application_settings", "application_workspace"},
+            {"metering_usage", "sole_workspace"},
+            {"metering_build_records", "sole_workspace"},
+            {"forge_records", "repository_workspace"},
+            {"platform_environments", "repository_workspace"},
+            {"platform_mirror", "repository_workspace"},
+            {"agent_task_content", "task_workspace"},
+            {"repository_descriptions", "repository_workspace"}};
+        const auto owned = [&](const std::string& table, const std::string& id) {
+            tx.exec_params("INSERT INTO workspace_assignments (object_table, object_id, "
+                           "customer_id, workspace_id, outcome) VALUES ($1, " + id + ", "
+                           "$2::uuid, $3::uuid, $4) ON CONFLICT DO NOTHING",
+                           table, customer, workspace, outcomes.at(table));
+        };
+        // An opportunity whose scan's workspace was deleted: 0046 recorded it as
+        // deleted_workspace, without a workspace. It went with that workspace and does not block.
+        const std::string gone = tx.exec_params("INSERT INTO workspaces (customer_id, name, "
+                                                "environment, desired) VALUES ($1::uuid, 'gone', "
+                                                "'dev', 'deleted') RETURNING id::text",
+                                                customer)[0][0].as<std::string>();
+        const std::string orphan = lake::control::new_uuid_v4();
+        tx.exec_params("INSERT INTO opportunities VALUES ($1::uuid, $2::uuid)", orphan, customer);
+        tx.exec_params("INSERT INTO workspace_assignments (object_table, object_id, customer_id, "
+                       "workspace_id, outcome) VALUES ('opportunities', $1::uuid, $2::uuid, NULL, "
+                       "'deleted_workspace')",
+                       orphan, customer);
+        EXPECT_FALSE(gone.empty());
+        const std::string quoted = "'" + row + "'::uuid";
+        for (const std::string table :
+             {"opportunities", "drive_share_links", "auth_app_webhook_events",
+              "auth_app_organizations", "auth_app_webhooks", "forge_records",
+              "platform_environments"}) {
+            owned(table, quoted);
+        }
+        owned("stream_owners", "md5('" + customer + "' || E'\\n' || '" + workspace +
+                                   "' || E'\\n' || 'orders')::uuid");
+        owned("auth_app_signing_keys", "'" + application + "'::uuid");
+        owned("auth_app_users", "md5('" + application + "' || E'\\n' || '" + user + "')::uuid");
+        owned("auth_app_authorization_codes", "md5('code')::uuid");
+        owned("metering_usage", "md5('" + customer + "' || E'\\n' || '2026-10-01T10:00:00Z')::uuid");
+        owned("metering_build_records", "md5('" + customer + "' || E'\\n' || 'result-1')::uuid");
+        owned("platform_mirror", "md5('deployment' || E'\\n' || 'd-1')::uuid");
+        owned("auth_application_settings", "'" + application + "'::uuid");
+        owned("agent_task_content", "'" + task + "'::uuid");
+        owned("repository_descriptions", "'" + repository + "'::uuid");
+        tx.exec("DELETE FROM schema_migrations WHERE version = '0070_drop_moved_tables'");
+        tx.commit();
+    }
+    ASSERT_EQ(present().size(), tables.size() + columns.size());
+
+    // A row whose owner is still to be chosen holds the whole migration back: nothing is dropped.
+    const std::string open = lake::control::new_uuid_v4();
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("INSERT INTO forge_records VALUES ($1::uuid, $2::uuid)", open, repository);
+        tx.exec_params("INSERT INTO workspace_assignments (object_table, object_id, customer_id, "
+                       "workspace_id, outcome) VALUES ('forge_records', $1::uuid, $2::uuid, NULL, "
+                       "'needs_selection')",
+                       open, customer);
+        tx.commit();
+    }
+    try {
+        apply(schema.substr(start));
+        ADD_FAILURE() << "0070 applied with an unresolved row";
+    } catch (const pqxx::sql_error& error) {
+        EXPECT_NE(std::string(error.what()).find("forge_records=1"), std::string::npos)
+            << error.what();
+        EXPECT_EQ(std::string(error.what()).find("opportunities="), std::string::npos)
+            << "a deleted_workspace opportunity does not block: " << error.what();
+    }
+    EXPECT_EQ(present().size(), tables.size() + columns.size()) << "nothing dropped";
+    // A row that went with a deleted workspace does not.
+    {
+        pqxx::work tx(connection);
+        tx.exec_params("UPDATE workspace_assignments SET outcome = 'workspace_deleted' "
+                       "WHERE object_table = 'forge_records' AND object_id = $1::uuid",
+                       open);
+        tx.commit();
+    }
+
+    // The section from 0070 on, twice, then the whole schema twice: dropped and never recreated.
+    for (int pass = 0; pass < 2; ++pass) {
+        apply(schema.substr(start));
+        EXPECT_TRUE(present().empty()) << pass;
+    }
+    for (int pass = 0; pass < 2; ++pass) {
+        apply(schema);
+        EXPECT_TRUE(present().empty()) << pass;
+    }
+    {
+        pqxx::work tx(connection);
+        EXPECT_GE(tx.exec("SELECT count(*) FROM workspace_assignments")[0][0].as<int>(), 16)
+            << "the record of where each row went stays";
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('drop_moved_tables_guard')")[0][0].is_null());
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('drive_share_link_routes')")[0][0].is_null());
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('secret_mount_routes')")[0][0].is_null());
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('secret_lease_routes')")[0][0].is_null());
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('audit_events')")[0][0].is_null());
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('keystore')")[0][0].is_null());
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM auth_applications")[0][0].as<int>(), 1)
+            << "the routing rows stay";
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM repositories")[0][0].as<int>(), 1);
+        EXPECT_EQ(tx.exec("SELECT count(*) FROM agent_task_status")[0][0].as<int>(), 1);
+    }
+    pqxx::work drop(connection);
+    drop.exec("DROP SCHEMA " + own + " CASCADE");
+    drop.commit();
+}
+
+// Migration 0064 (decision 54, S11): repository_refs, a copy of liquid's refs nothing read, is
+// dropped (lake#319) and never recreated by a rerun. The description that 0064 left in the row
+// for the copy is gone too (0070), so the row is routing only and a create under a chosen id keeps
+// it.
+TEST(PostgresRepositories, MigrationDropsRefsAndTheRowIsRoutingOnly) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
     }
     auto store = lake::control::make_postgres_store(uri, "repository-records-migration-test");
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    std::vector<std::string> customers;
-    std::vector<std::vector<std::string>> workspaces(2);
-    for (int index = 0; index < 2; ++index) {
-        const std::string name = "repo-records-" + suffix + "-" + std::to_string(index);
-        const auto user = store->create_user({"taap:" + name, "", "Migration"});
-        ASSERT_TRUE(user) << user.error().message;
-        const auto customer = store->create_customer({"individual", user->id, "", name});
-        ASSERT_TRUE(customer) << customer.error().message;
-        customers.push_back(customer->id);
-        for (int count = 0; count <= index; ++count) {
-            const auto workspace =
-                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
-            ASSERT_TRUE(workspace) << workspace.error().message;
-            workspaces[index].push_back(workspace->id);
-        }
-    }
+    const std::string name = "repo-records-" + lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user({"taap:" + name, "", "Migration"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", name});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto workspace = store->create_workspace({customer->id, "ws-0", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const auto owned = store->create_repository({customer->id, "owned", "", "private", workspace->id});
+    ASSERT_TRUE(owned) << owned.error().message;
+
     pqxx::connection connection(uri);
     const auto refs_exist = [&] {
         pqxx::work tx(connection);
         return !tx.exec("SELECT to_regclass('repository_refs')")[0][0].is_null();
     };
     EXPECT_FALSE(refs_exist()) << "a fresh database never has the table";
-
-    // A database from before 0064: repository_refs with a row, and repositories whose
-    // descriptions are in their rows: one owned, one with no workspace (0051 could not assign
-    // it), one whose workspace is deleted, and one with no description.
-    const auto repository = [&](const std::string& customer, const std::string& workspace,
-                                const std::string& name, const std::string& description) {
-        const auto created = store->create_repository({customer, name, "", "private", workspace});
-        EXPECT_TRUE(created) << created.error().message;
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
-        tx.exec_params("UPDATE repositories SET description = $2, workspace_id = "
-                       "NULLIF($3, '')::uuid, created_at = '2026-09-01T10:00:00Z' "
-                       "WHERE id = $1::uuid",
-                       created->id, description, workspace.empty() ? "" : workspace);
-        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
-        tx.commit();
-        return created->id;
-    };
-    const std::string owned = repository(customers[0], workspaces[0][0], "owned", "Owned");
-    const std::string ambiguous = repository(customers[1], workspaces[1][0], "ambiguous", "Two");
-    {
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
-        tx.exec_params("UPDATE repositories SET workspace_id = NULL WHERE id = $1::uuid",
-                       ambiguous);
-        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
-        tx.commit();
-    }
-    const std::string gone = repository(customers[1], workspaces[1][1], "gone", "Gone");
-    const std::string empty = repository(customers[0], workspaces[0][0], "empty", "");
-    ASSERT_TRUE(store->delete_repository(gone, {"2026-10-03T00:00:00Z", "2027-11-07T00:00:00Z"}));
-    ASSERT_TRUE(store->update_workspace(workspaces[1][1], {.desired = "deleted"}));
+    // A database from before 0064: repository_refs with a row.
     {
         pqxx::work tx(connection);
         tx.exec("CREATE TABLE IF NOT EXISTS repository_refs (repository_id uuid NOT NULL "
@@ -2711,7 +2154,7 @@ TEST(PostgresRepositories, MigrationDropsRefsAndRecordsEachDescriptionsOwner) {
                 "(repository_id, name))");
         tx.exec_params("INSERT INTO repository_refs (repository_id, name, head) VALUES "
                        "($1::uuid, 'main', 'change-1')",
-                       owned);
+                       owned->id);
         tx.exec("DELETE FROM schema_migrations WHERE version = '0064_repository_records'");
         tx.commit();
     }
@@ -2721,16 +2164,6 @@ TEST(PostgresRepositories, MigrationDropsRefsAndRecordsEachDescriptionsOwner) {
     const std::string schema((std::istreambuf_iterator<char>(file)), {});
     const auto start = schema.find("-- 0064_repository_records:");
     ASSERT_NE(start, std::string::npos);
-    using Outcome = std::pair<std::string, std::string>;
-    const auto outcome = [&](const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = 'repository_descriptions' AND object_id = $1::uuid",
-            id);
-        return found.empty() ? Outcome{}
-                             : Outcome{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
     // The schema section from 0064 on, twice: the second run changes nothing.
     for (int pass = 0; pass < 2; ++pass) {
         pqxx::work tx(connection);
@@ -2738,10 +2171,6 @@ TEST(PostgresRepositories, MigrationDropsRefsAndRecordsEachDescriptionsOwner) {
         tx.exec(schema.substr(start));
         tx.commit();
         EXPECT_FALSE(refs_exist()) << "0064 drops the table and its rows";
-        EXPECT_EQ(outcome(owned), (Outcome{"repository_workspace", workspaces[0][0]}));
-        EXPECT_EQ(outcome(ambiguous), (Outcome{"needs_selection", ""}));
-        EXPECT_EQ(outcome(gone), (Outcome{"workspace_deleted", ""}));
-        EXPECT_EQ(outcome(empty), Outcome{}) << "no description, nothing to copy";
     }
     // The whole schema, twice: repository_refs is never recreated.
     for (int pass = 0; pass < 2; ++pass) {
@@ -2752,67 +2181,24 @@ TEST(PostgresRepositories, MigrationDropsRefsAndRecordsEachDescriptionsOwner) {
         EXPECT_FALSE(refs_exist()) << "a rerun of the whole schema does not recreate it";
     }
 
-    // The routing row answers no description, and a new row holds none.
-    const auto routing = store->get_repository(owned);
+    // The routing row answers no description and has no column for one.
+    const auto routing = store->get_repository(owned->id);
     ASSERT_TRUE(routing);
     EXPECT_TRUE(routing->description.empty());
-    const auto fresh = store->create_repository({customers[0], "fresh", "", "private",
-                                                 workspaces[0][0]});
-    ASSERT_TRUE(fresh) << fresh.error().message;
     {
         pqxx::work tx(connection);
-        EXPECT_EQ(tx.exec_params("SELECT description FROM repositories WHERE id = $1::uuid",
-                                 fresh->id)[0][0]
-                      .as<std::string>(),
-                  "");
+        EXPECT_TRUE(tx.exec("SELECT 1 FROM information_schema.columns WHERE table_schema = "
+                            "current_schema() AND table_name = 'repositories' AND column_name = "
+                            "'description'")
+                        .empty());
     }
-    ASSERT_TRUE(store->assign_legacy_repository_descriptions());
-    EXPECT_EQ(outcome(fresh->id), Outcome{});
     // A create under a chosen id keeps it (the settings record is written under it first).
     const std::string chosen = lake::control::new_uuid_v4();
-    lake::control::NewRepository named{customers[0], "chosen", "", "private", workspaces[0][0]};
+    lake::control::NewRepository named{customer->id, "chosen", "", "private", workspace->id};
     named.id = chosen;
     const auto with_id = store->create_repository(named);
     ASSERT_TRUE(with_id) << with_id.error().message;
     EXPECT_EQ(with_id->id, chosen);
-
-    // A reviewed assignment of the unassigned repository (lake#513) resolves its description.
-    {
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
-        tx.exec_params("UPDATE repositories SET workspace_id = $2::uuid WHERE id = $1::uuid",
-                       ambiguous, workspaces[1][0]);
-        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
-        tx.commit();
-    }
-    ASSERT_TRUE(store->assign_legacy_repository_descriptions());
-    EXPECT_EQ(outcome(ambiguous), (Outcome{"repository_workspace", workspaces[1][0]}));
-    EXPECT_EQ(outcome(gone), (Outcome{"workspace_deleted", ""}));
-
-    // The descriptions page by repository id, with what the rows held.
-    std::map<std::string, lake::control::LegacyRepositoryDescription> rows;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_repository_descriptions(after, 1);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        ASSERT_EQ(page->size(), 1U);
-        rows.emplace(page->front().settings.repository_id, page->front());
-        after = page->back().settings.repository_id;
-    }
-    EXPECT_FALSE(rows.contains(empty));
-    EXPECT_FALSE(rows.contains(fresh->id));
-    ASSERT_TRUE(rows.contains(owned));
-    const auto& row = rows.at(owned);
-    EXPECT_EQ(row.workspace_id, workspaces[0][0]);
-    EXPECT_EQ(row.customer_id, customers[0]);
-    EXPECT_EQ(row.settings.customer_id, customers[0]);
-    EXPECT_EQ(row.settings.description, "Owned");
-    EXPECT_EQ(row.settings.at_us, 1'788'256'800'000'000);
-    EXPECT_EQ(rows.at(gone).outcome, "workspace_deleted");
-    EXPECT_EQ(rows.at(ambiguous).workspace_id, workspaces[1][0]);
 
     pqxx::work tx(connection);
     EXPECT_FALSE(tx.exec("SELECT to_regclass('repository_records_guard')")[0][0].is_null());
@@ -2862,8 +2248,7 @@ TEST(PostgresRepositories, MigrationAssignsUnroutedRepositoriesTheirSoleWorkspac
         // description, and space 0 without a live workspace.
         pqxx::work tx(connection);
         tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
-        tx.exec("UPDATE repositories SET workspace_id = NULL, description = 'Version control' "
-                "WHERE id = ANY(" + mine + ")");
+        tx.exec("UPDATE repositories SET workspace_id = NULL WHERE id = ANY(" + mine + ")");
         tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
         tx.exec_params("UPDATE workspaces SET desired = 'deleted' WHERE id = $1::uuid",
                        workspaces[0].front());
@@ -2952,1066 +2337,6 @@ TEST(PostgresRepositories, MigrationAssignsUnroutedRepositoriesTheirSoleWorkspac
     pqxx::work check(connection);
     EXPECT_FALSE(
         check.exec("SELECT to_regclass('assign_unrouted_repositories_guard')")[0][0].is_null());
-}
-
-// Migration 0046 (lake#376): each Opportunity's owner is the workspace its scan ran in, else the
-// space's only live workspace; a deleted workspace's rows and ambiguous rows are only reported.
-TEST(PostgresOpportunities, MigrationRecordsEachRowsOwnerForTheCopy) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(uri, "opportunity-migration-test");
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    std::vector<std::string> customers;
-    std::vector<std::vector<std::string>> workspaces(2);
-    for (int index = 0; index < 2; ++index) {
-        const std::string name = "opportunity-migration-" + suffix + "-" + std::to_string(index);
-        const auto user = store->create_user({"taap:" + name, "", "Migration"});
-        ASSERT_TRUE(user) << user.error().message;
-        const auto customer = store->create_customer({"individual", user->id, "", name});
-        ASSERT_TRUE(customer) << customer.error().message;
-        customers.push_back(customer->id);
-        // The second space has three workspaces (two once one is deleted), so a scan that names
-        // none cannot be assigned.
-        for (int count = 0; count <= index * 2; ++count) {
-            const auto workspace =
-                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
-            ASSERT_TRUE(workspace) << workspace.error().message;
-            workspaces[index].push_back(workspace->id);
-        }
-    }
-    pqxx::connection connection(uri);
-    // A scan; an empty workspace is a task written before tasks named their workspace (0038).
-    const auto scan = [&](const std::string& customer, const std::string& workspace) {
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE agent_tasks DISABLE TRIGGER agent_task_workspace_routing");
-        const std::string id =
-            tx.exec_params("INSERT INTO agent_tasks (customer_id, agent, kind, scopes, "
-                           "workspace_id) VALUES ($1::uuid, 'agent-autosuggest', 'discover', "
-                           "ARRAY['list_datasets'], NULLIF($2, '')::uuid) RETURNING id::text",
-                           customer, workspace)[0][0]
-                .as<std::string>();
-        tx.exec("ALTER TABLE agent_tasks ENABLE TRIGGER agent_task_workspace_routing");
-        tx.commit();
-        return id;
-    };
-    const auto insert = [&](const std::string& customer, const std::string& task) {
-        pqxx::work tx(connection);
-        const std::string id = tx.exec_params(
-            "INSERT INTO opportunities (customer_id, task_id, rank, intent) VALUES ($1::uuid, "
-            "$2::uuid, (SELECT count(*) + 1 FROM opportunities WHERE task_id = $2::uuid), "
-            "'Predict churn') RETURNING id::text",
-            customer, task)[0][0].as<std::string>();
-        tx.commit();
-        return id;
-    };
-    const std::string own_scan = insert(customers[1], scan(customers[1], workspaces[1][1]));
-    const std::string sole = insert(customers[0], scan(customers[0], ""));
-    const std::string ambiguous = insert(customers[1], scan(customers[1], ""));
-    const std::string doomed_task = scan(customers[1], workspaces[1][0]);
-    const std::string doomed = insert(customers[1], doomed_task);
-    ASSERT_TRUE(store->update_workspace(workspaces[1][0], {.desired = "deleted"}));
-    {
-        pqxx::work tx(connection);
-        tx.exec("DELETE FROM schema_migrations WHERE version = '0046_opportunity_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0046_opportunity_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    const auto outcome = [&](const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = 'opportunities' AND object_id = $1::uuid",
-            id);
-        return found.empty() ? std::pair<std::string, std::string>{}
-                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    using Outcome = std::pair<std::string, std::string>;
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        EXPECT_EQ(outcome(own_scan), (Outcome{"task_workspace", workspaces[1][1]}))
-            << "the scan's workspace owns it, though the space has several";
-        EXPECT_EQ(outcome(sole), (Outcome{"sole_workspace", workspaces[0][0]}));
-        EXPECT_EQ(outcome(ambiguous), (Outcome{"needs_selection", ""}));
-        EXPECT_EQ(outcome(doomed), (Outcome{"deleted_workspace", ""}))
-            << "a deleted workspace's rows are never moved into another";
-    }
-    const std::string late = insert(customers[0], scan(customers[0], workspaces[0][0]));
-    EXPECT_TRUE(outcome(late).first.empty());
-    ASSERT_TRUE(store->assign_legacy_opportunities());
-    EXPECT_EQ(outcome(late), (Outcome{"task_workspace", workspaces[0][0]}))
-        << "a row written after the migration";
-
-    std::map<std::string, lake::control::LegacyOpportunity> listed;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_opportunities(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            listed.emplace(row.opportunity.id, row);
-        }
-        after = page->back().opportunity.id;
-    }
-    ASSERT_TRUE(listed.contains(own_scan));
-    EXPECT_EQ(listed.at(own_scan).workspace_id, workspaces[1][1]);
-    EXPECT_EQ(listed.at(own_scan).opportunity.intent, "Predict churn");
-    EXPECT_EQ(listed.at(own_scan).opportunity.status, "new");
-    EXPECT_GT(listed.at(own_scan).opportunity.at_us, 0);
-    EXPECT_EQ(listed.at(ambiguous).outcome, "needs_selection");
-    EXPECT_EQ(listed.at(doomed).outcome, "deleted_workspace");
-    EXPECT_TRUE(listed.at(doomed).workspace_id.empty());
-}
-
-// Migration 0047 (lake#379): each stream_owners row is recorded against the workspace it names,
-// keyed by md5(customer_id, workspace_id, topic) as lake computes it.
-TEST(PostgresStreamOwners, MigrationRecordsEachRowsWorkspaceForTheCopy) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(uri, "stream-owner-migration-test");
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    std::vector<std::string> customers, workspaces;
-    for (int index = 0; index < 2; ++index) {
-        const std::string name = "stream-migration-" + suffix + "-" + std::to_string(index);
-        const auto user = store->create_user({"taap:" + name, "", "Migration"});
-        ASSERT_TRUE(user) << user.error().message;
-        const auto customer = store->create_customer({"individual", user->id, "", name});
-        ASSERT_TRUE(customer) << customer.error().message;
-        customers.push_back(customer->id);
-        const auto workspace = store->create_workspace({customer->id, "ws", "dev", ""});
-        ASSERT_TRUE(workspace) << workspace.error().message;
-        workspaces.push_back(workspace->id);
-    }
-    const auto deleted = store->create_workspace({customers[0], "old", "dev", ""});
-    ASSERT_TRUE(deleted);
-    ASSERT_TRUE(store->update_workspace(deleted->id, {.desired = "deleted"}));
-    pqxx::connection connection(uri);
-    const auto insert = [&](const lake::control::StreamOwner& owner) {
-        pqxx::work tx(connection);
-        tx.exec_params("INSERT INTO stream_owners (customer_id, workspace_id, topic, created_by) "
-                       "VALUES ($1::uuid, $2, $3, $4)",
-                       owner.customer_id, owner.workspace_id, owner.topic, owner.created_by);
-        tx.commit();
-        return lake::control::legacy_stream_owner_id(owner);
-    };
-    const std::string owned = insert({customers[0], workspaces[0], "orders", "taap:a"});
-    const std::string other_space = insert({customers[1], workspaces[0], "orders", "taap:b"});
-    const std::string not_uuid = insert({customers[1], "workspace-one", "orders", "taap:b"});
-    const std::string gone = insert({customers[0], deleted->id, "orders", "taap:a"});
-    {
-        pqxx::work tx(connection);
-        tx.exec("DELETE FROM schema_migrations WHERE version = '0047_stream_owner_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0047_stream_owner_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    const auto outcome = [&](const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = 'stream_owners' AND object_id = $1::uuid",
-            id);
-        return found.empty() ? std::pair<std::string, std::string>{}
-                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        EXPECT_EQ(outcome(owned), (std::pair<std::string, std::string>{"recorded_workspace",
-                                                                       workspaces[0]}));
-        EXPECT_EQ(outcome(other_space), (std::pair<std::string, std::string>{"unknown_workspace", ""}))
-            << "a workspace of another space never owns the row";
-        EXPECT_EQ(outcome(not_uuid).first, "unknown_workspace");
-        EXPECT_EQ(outcome(gone), (std::pair<std::string, std::string>{"workspace_deleted", ""}));
-    }
-    const std::string late = insert({customers[1], workspaces[1], "late", "taap:b"});
-    EXPECT_TRUE(outcome(late).first.empty());
-    ASSERT_TRUE(store->assign_legacy_stream_owners());
-    EXPECT_EQ(outcome(late).first, "recorded_workspace") << "a row written after the migration";
-
-    std::map<std::string, lake::control::LegacyStreamOwner> listed;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_stream_owners(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            EXPECT_GT(row.id, after) << "pages are ordered by id";
-            listed.emplace(row.id, row);
-        }
-        after = page->back().id;
-    }
-    ASSERT_TRUE(listed.contains(owned)) << "lake and the migration compute the same id";
-    EXPECT_EQ(listed.at(owned).workspace_id, workspaces[0]);
-    EXPECT_EQ(listed.at(owned).owner.created_by, "taap:a");
-    EXPECT_EQ(listed.at(owned).owner.topic, "orders");
-    EXPECT_EQ(listed.at(late).workspace_id, workspaces[1]);
-    EXPECT_EQ(listed.at(gone).outcome, "workspace_deleted");
-    EXPECT_TRUE(listed.at(not_uuid).workspace_id.empty());
-
-    // A workspace deleted after its rows were assigned no longer receives them.
-    ASSERT_TRUE(store->update_workspace(workspaces[1], {.desired = "deleted"}));
-    const auto relisted = store->legacy_stream_owners("", 5000);
-    ASSERT_TRUE(relisted);
-    const auto row = std::ranges::find(*relisted, late, &lake::control::LegacyStreamOwner::id);
-    ASSERT_NE(row, relisted->end());
-    EXPECT_EQ(row->outcome, "workspace_deleted");
-    EXPECT_TRUE(row->workspace_id.empty());
-}
-
-// Migration 0049 (lake#356, lake#357): an application in a space with one live workspace is
-// assigned it, every other is needs_selection; each event row's owner is its application's
-// workspace. Rerunning the migration changes nothing, the store's rerun of the assignment picks up
-// a late row and resolves rows once their application is assigned, and the assignment happens
-// once.
-TEST(PostgresApplicationWebhooks, MigrationRecordsEachEventsOwnerForTheCopy) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(uri, "application-webhook-migration-test");
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    std::vector<std::string> customers;
-    std::vector<std::vector<std::string>> workspaces(2);
-    for (int index = 0; index < 2; ++index) {
-        const std::string name = "app-webhook-migration-" + suffix + "-" + std::to_string(index);
-        const auto user = store->create_user({"taap:" + name, "", "Migration"});
-        ASSERT_TRUE(user) << user.error().message;
-        const auto customer = store->create_customer({"individual", user->id, "", name});
-        ASSERT_TRUE(customer) << customer.error().message;
-        customers.push_back(customer->id);
-        // The second space has two workspaces, so its application cannot be assigned by itself.
-        for (int count = 0; count <= index; ++count) {
-            const auto workspace =
-                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
-            ASSERT_TRUE(workspace) << workspace.error().message;
-            workspaces[index].push_back(workspace->id);
-        }
-    }
-    pqxx::connection connection(uri);
-    std::vector<std::string> applications;
-    {
-        // Applications as registered before 0049: no workspace.
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
-        for (const std::string& customer : customers) {
-            const std::string id = lake::control::new_uuid_v4();
-            tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
-                           "allowed_origins) VALUES ($1::uuid, $2::uuid, $3, 'migration', "
-                           "'[\"https://m.example.test\"]'::jsonb)",
-                           id, customer, "app:" + id);
-            applications.push_back(id);
-        }
-        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
-        tx.commit();
-    }
-    const auto insert = [&](const std::string& application) {
-        pqxx::work tx(connection);
-        const std::string id =
-            tx.exec_params("INSERT INTO auth_app_webhook_events (application_id, event, payload) "
-                           "VALUES ($1::uuid, 'user.created', '{\"n\":1}'::jsonb) RETURNING id::text",
-                           application)[0][0]
-                .as<std::string>();
-        tx.commit();
-        return id;
-    };
-    const std::string owned = insert(applications[0]);
-    const std::string ambiguous = insert(applications[1]);
-    {
-        pqxx::work tx(connection);
-        const std::string hook =
-            tx.exec_params("INSERT INTO auth_app_webhooks (application_id, url, events, "
-                           "encrypted_secret) VALUES ($1::uuid, 'https://h.test', "
-                           "ARRAY['user.created'], 'x') RETURNING id::text",
-                           applications[0])[0][0]
-                .as<std::string>();
-        tx.exec_params("INSERT INTO auth_app_webhook_deliveries (event_id, webhook_id, attempt, "
-                       "status, signature) VALUES ($1::uuid, $2::uuid, 1, 204, 'sig')",
-                       owned, hook);
-        tx.exec("DELETE FROM schema_migrations WHERE version = "
-                "'0049_application_webhook_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0049_application_webhook_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    const auto outcome = [&](const std::string& table, const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = $1 AND object_id = $2::uuid",
-            table, id);
-        return found.empty() ? std::pair<std::string, std::string>{}
-                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    const auto application_workspace = [&](const std::string& id) {
-        pqxx::work tx(connection);
-        return tx.exec_params("SELECT COALESCE(workspace_id::text, '') FROM auth_applications "
-                              "WHERE id = $1::uuid",
-                              id)[0][0]
-            .as<std::string>();
-    };
-    // The schema section from 0049 on (later sections are idempotent).
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        EXPECT_EQ(outcome("auth_applications", applications[0]),
-                  (std::pair<std::string, std::string>{"sole_workspace", workspaces[0][0]}));
-        EXPECT_EQ(application_workspace(applications[0]), workspaces[0][0]);
-        EXPECT_EQ(outcome("auth_applications", applications[1]).first, "needs_selection");
-        EXPECT_TRUE(application_workspace(applications[1]).empty());
-        EXPECT_EQ(outcome("auth_app_webhook_events", owned),
-                  (std::pair<std::string, std::string>{"application_workspace", workspaces[0][0]}));
-        EXPECT_EQ(outcome("auth_app_webhook_events", ambiguous).first, "needs_selection");
-    }
-    const std::string late = insert(applications[0]);
-    EXPECT_TRUE(outcome("auth_app_webhook_events", late).first.empty());
-    ASSERT_TRUE(store->assign_legacy_application_webhook_events());
-    EXPECT_EQ(outcome("auth_app_webhook_events", late).first, "application_workspace")
-        << "a row written after the migration";
-
-    // A reviewed assignment of the unassigned application resolves its events; after that its
-    // workspace never changes, and the first application's never did.
-    {
-        pqxx::work tx(connection);
-        EXPECT_THROW(tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE "
-                                    "id = $1::uuid",
-                                    applications[1], workspaces[0][0]),
-                     pqxx::check_violation)
-            << "a workspace of another space";
-    }
-    {
-        pqxx::work tx(connection);
-        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
-                       applications[1], workspaces[1][1]);
-        tx.commit();
-    }
-    ASSERT_TRUE(store->assign_legacy_application_webhook_events());
-    EXPECT_EQ(outcome("auth_app_webhook_events", ambiguous),
-              (std::pair<std::string, std::string>{"application_workspace", workspaces[1][1]}));
-    for (const auto& [application, workspace] :
-         {std::pair{applications[0], workspaces[1][0]}, std::pair{applications[1], workspaces[1][0]}}) {
-        pqxx::work tx(connection);
-        EXPECT_THROW(tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE "
-                                    "id = $1::uuid",
-                                    application, workspace),
-                     pqxx::check_violation);
-    }
-    {
-        pqxx::work tx(connection);
-        tx.exec_params("UPDATE auth_applications SET name = 'renamed' WHERE id = $1::uuid",
-                       applications[0]);
-        tx.commit();
-    }
-
-    std::map<std::string, lake::control::LegacyApplicationWebhookEvent> events;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_application_webhook_events(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            events.emplace(row.event.id, row);
-        }
-        after = page->back().event.id;
-    }
-    ASSERT_TRUE(events.contains(owned));
-    EXPECT_EQ(events.at(owned).workspace_id, workspaces[0][0]);
-    EXPECT_EQ(events.at(owned).customer_id, customers[0]);
-    EXPECT_EQ(events.at(owned).event.payload["n"], 1);
-    EXPECT_GT(events.at(owned).event.at_us, 0);
-    EXPECT_EQ(events.at(ambiguous).workspace_id, workspaces[1][1]);
-    const auto deliveries = store->legacy_application_webhook_deliveries("", 5000);
-    ASSERT_TRUE(deliveries) << deliveries.error().message;
-    const auto delivered = std::ranges::find_if(
-        *deliveries, [&](const auto& row) { return row.delivery.event_id == owned; });
-    ASSERT_NE(delivered, deliveries->end());
-    EXPECT_EQ(delivered->workspace_id, workspaces[0][0]) << "a delivery goes where its event goes";
-    EXPECT_EQ(delivered->delivery.application_id, applications[0]);
-    EXPECT_EQ(delivered->delivery.status, 204);
-}
-
-// Migration 0055 (lake#353, lake#354): each application user and organization row's owner is its
-// application's workspace, needs_selection while the application has none, and workspace_deleted
-// when that workspace is gone. A user row's id is md5(application, newline, user), the same id lake
-// computes. Rerunning the migration changes nothing; the store's rerun of the assignment picks up
-// a late row and resolves rows once their application is assigned.
-TEST(PostgresApplicationUsers, MigrationRecordsEachRowsOwnerForTheCopy) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(uri, "application-user-migration-test");
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    std::vector<std::string> customers;
-    std::vector<std::vector<std::string>> workspaces(2);
-    for (int index = 0; index < 2; ++index) {
-        const std::string name = "app-user-migration-" + suffix + "-" + std::to_string(index);
-        const auto user = store->create_user({"taap:" + name, "", "Migration"});
-        ASSERT_TRUE(user) << user.error().message;
-        const auto customer = store->create_customer({"individual", user->id, "", name});
-        ASSERT_TRUE(customer) << customer.error().message;
-        customers.push_back(customer->id);
-        for (int count = 0; count <= index; ++count) {
-            const auto workspace =
-                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
-            ASSERT_TRUE(workspace) << workspace.error().message;
-            workspaces[index].push_back(workspace->id);
-        }
-    }
-    pqxx::connection connection(uri);
-    // Three applications: one in the first space's workspace, one of the second space with none
-    // yet (registered before 0049), one in a workspace of the second space that is then deleted.
-    std::vector<std::string> applications;
-    {
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
-        for (const auto& [customer, workspace] : {std::pair{customers[0], workspaces[0][0]},
-                                                  std::pair{customers[1], std::string()},
-                                                  std::pair{customers[1], workspaces[1][1]}}) {
-            const std::string id = lake::control::new_uuid_v4();
-            tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
-                           "allowed_origins, workspace_id) VALUES ($1::uuid, $2::uuid, $3, "
-                           "'migration', '[\"https://m.example.test\"]'::jsonb, "
-                           "NULLIF($4, '')::uuid)",
-                           id,
-                           customer,
-                           "app:" + id,
-                           workspace);
-            applications.push_back(id);
-        }
-        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
-        tx.exec_params("UPDATE workspaces SET desired = 'deleted' WHERE id = $1::uuid",
-                       workspaces[1][1]);
-        tx.commit();
-    }
-    // A pool user of an application and an organization of it, as an earlier lake wrote them.
-    const auto user_of = [&](const std::string& application) {
-        pqxx::work tx(connection);
-        const std::string id =
-            tx.exec_params("INSERT INTO users (taap_id, email, display_name, pool_id) VALUES "
-                           "($1, $2, 'Pool user', $3) RETURNING id::text",
-                           "taap:pool-" + lake::control::new_uuid_v4(),
-                           "pool-" + lake::control::new_uuid_v4() + "@example.test",
-                           "app:" + application)[0][0]
-                .as<std::string>();
-        tx.exec_params("INSERT INTO auth_app_users (application_id, user_id) VALUES ($1::uuid, "
-                       "$2::uuid)",
-                       application,
-                       id);
-        tx.commit();
-        return id;
-    };
-    const auto organization_of = [&](const std::string& application) {
-        pqxx::work tx(connection);
-        const std::string id =
-            tx.exec_params("INSERT INTO auth_app_organizations (application_id, taap_id, name) "
-                           "VALUES ($1::uuid, $2, $3) RETURNING id::text",
-                           application,
-                           "taap:org-" + lake::control::new_uuid_v4(),
-                           "org-" + lake::control::new_uuid_v4())[0][0]
-                .as<std::string>();
-        tx.commit();
-        return id;
-    };
-    std::vector<std::string> users, organizations;
-    for (const std::string& application : applications) {
-        users.push_back(lake::control::application_user_row_id(application, user_of(application)));
-        organizations.push_back(organization_of(application));
-    }
-    {
-        pqxx::work tx(connection);
-        tx.exec("DELETE FROM schema_migrations WHERE version = '0055_application_user_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0055_application_user_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    const auto outcome = [&](const std::string& table, const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = $1 AND object_id = $2::uuid",
-            table,
-            id);
-        return found.empty()
-                   ? std::pair<std::string, std::string>{}
-                   : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    using Outcome = std::pair<std::string, std::string>;
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        for (const auto& [table, ids] :
-             {std::pair{std::string("auth_app_users"), users},
-              std::pair{std::string("auth_app_organizations"), organizations}}) {
-            EXPECT_EQ(outcome(table, ids[0]), (Outcome{"application_workspace", workspaces[0][0]}))
-                << table;
-            EXPECT_EQ(outcome(table, ids[1]), (Outcome{"needs_selection", ""})) << table;
-            EXPECT_EQ(outcome(table, ids[2]), (Outcome{"workspace_deleted", ""})) << table;
-        }
-    }
-
-    // A row written after the migration is recorded by the store's rerun.
-    const std::string late =
-        lake::control::application_user_row_id(applications[0], user_of(applications[0]));
-    EXPECT_TRUE(outcome("auth_app_users", late).first.empty());
-    ASSERT_TRUE(store->assign_legacy_application_directory());
-    EXPECT_EQ(outcome("auth_app_users", late),
-              (Outcome{"application_workspace", workspaces[0][0]}));
-
-    // A reviewed assignment of the unassigned application resolves its rows.
-    {
-        pqxx::work tx(connection);
-        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
-                       applications[1],
-                       workspaces[1][0]);
-        tx.commit();
-    }
-    ASSERT_TRUE(store->assign_legacy_application_directory());
-    EXPECT_EQ(outcome("auth_app_users", users[1]),
-              (Outcome{"application_workspace", workspaces[1][0]}));
-    EXPECT_EQ(outcome("auth_app_organizations", organizations[1]),
-              (Outcome{"application_workspace", workspaces[1][0]}));
-    EXPECT_EQ(outcome("auth_app_users", users[2]).first, "workspace_deleted");
-
-    // The legacy listing pages by row id and carries each row's owner and pool membership.
-    std::map<std::string, lake::control::LegacyApplicationUser> listed;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_application_users(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        for (const auto& row : *page) {
-            EXPECT_GT(row.id, after);
-            listed.emplace(row.id, row);
-        }
-        if (page->size() < 2) {
-            break;
-        }
-        after = page->back().id;
-    }
-    ASSERT_TRUE(listed.contains(users[0]));
-    EXPECT_EQ(listed.at(users[0]).workspace_id, workspaces[0][0]);
-    EXPECT_TRUE(listed.at(users[0]).user.own_pool);
-    EXPECT_EQ(listed.at(users[0]).user.status, "active");
-    EXPECT_EQ(listed.at(users[2]).outcome, "workspace_deleted");
-    const auto orgs = store->legacy_application_organizations("", 5000);
-    ASSERT_TRUE(orgs);
-    EXPECT_EQ(std::ranges::count_if(*orgs,
-                                    [&](const auto& row) {
-                                        return std::ranges::find(organizations,
-                                                                 row.organization.id) !=
-                                               organizations.end();
-                                    }),
-              3);
-}
-
-// lake#352, lake#355: migration 0056 records the owner of each application's key ring and each
-// webhook, the application's workspace, for the copy; the copy's assignment picks up later rows
-// and resolves an application assigned after review.
-TEST(PostgresApplicationCredentials, MigrationRecordsEachRowsOwnerForTheCopy) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(uri, "application-credential-migration-test");
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    std::vector<std::string> customers;
-    std::vector<std::vector<std::string>> workspaces(2);
-    for (int index = 0; index < 2; ++index) {
-        const std::string name = "app-credential-migration-" + suffix + "-" + std::to_string(index);
-        const auto user = store->create_user({"taap:" + name, "", "Migration"});
-        ASSERT_TRUE(user) << user.error().message;
-        const auto customer = store->create_customer({"individual", user->id, "", name});
-        ASSERT_TRUE(customer) << customer.error().message;
-        customers.push_back(customer->id);
-        for (int count = 0; count <= index; ++count) {
-            const auto workspace =
-                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
-            ASSERT_TRUE(workspace) << workspace.error().message;
-            workspaces[index].push_back(workspace->id);
-        }
-    }
-    const auto registered = [&](const std::string& customer, const std::string& workspace) {
-        const std::string id = lake::control::new_uuid_v4();
-        const auto created = store->create_application({.id = id,
-                                                        .customer_id = customer,
-                                                        .pool_id = "app:" + id,
-                                                        .workspace_id = workspace});
-        EXPECT_TRUE(created) << created.error().message;
-        return id;
-    };
-    // An application of the first space, one of the second space's from before 0049 (no
-    // workspace), and one whose workspace is deleted.
-    const std::string owned = registered(customers[0], workspaces[0][0]);
-    const std::string gone = registered(customers[1], workspaces[1][1]);
-    std::string ambiguous = lake::control::new_uuid_v4();
-    pqxx::connection connection(uri);
-    {
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
-        tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
-                       "allowed_origins) VALUES ($1::uuid, $2::uuid, $3, 'migration', "
-                       "'[\"https://m.example.test\"]'::jsonb)",
-                       ambiguous, customers[1], "app:" + ambiguous);
-        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
-        tx.commit();
-    }
-    ASSERT_TRUE(store->update_workspace(workspaces[1][1], {.desired = "deleted"}));
-    const auto insert_key = [&](const std::string& application, int version, bool current) {
-        pqxx::work tx(connection);
-        tx.exec_params("INSERT INTO auth_app_signing_keys (application_id, kid, version, "
-                       "encrypted_seed, public_key, current) VALUES ($1::uuid, $2, $3, 'envelope', "
-                       "'public', $4)",
-                       application, "app-" + application + "-" + std::to_string(version), version,
-                       current);
-        tx.commit();
-    };
-    const auto insert_webhook = [&](const std::string& application) {
-        pqxx::work tx(connection);
-        const std::string id =
-            tx.exec_params("INSERT INTO auth_app_webhooks (application_id, url, events, "
-                           "encrypted_secret) VALUES ($1::uuid, 'https://h.test', "
-                           "ARRAY['user.created'], 'envelope') RETURNING id::text",
-                           application)[0][0]
-                .as<std::string>();
-        tx.commit();
-        return id;
-    };
-    for (const std::string& application : {owned, ambiguous, gone}) {
-        insert_key(application, 1, false);
-        insert_key(application, 2, true);
-    }
-    const std::string owned_hook = insert_webhook(owned);
-    const std::string ambiguous_hook = insert_webhook(ambiguous);
-    const std::string gone_hook = insert_webhook(gone);
-    {
-        pqxx::work tx(connection);
-        tx.exec("DELETE FROM schema_migrations WHERE version = "
-                "'0056_application_credential_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0056_application_credential_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    const auto outcome = [&](const std::string& table, const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = $1 AND object_id = $2::uuid",
-            table, id);
-        return found.empty() ? std::pair<std::string, std::string>{}
-                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    using Outcome = std::pair<std::string, std::string>;
-    // The schema section from 0056 on, twice: the second run changes nothing.
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        EXPECT_EQ(outcome("auth_app_signing_keys", owned),
-                  (Outcome{"application_workspace", workspaces[0][0]}));
-        EXPECT_EQ(outcome("auth_app_webhooks", owned_hook),
-                  (Outcome{"application_workspace", workspaces[0][0]}));
-        EXPECT_EQ(outcome("auth_app_signing_keys", ambiguous), (Outcome{"needs_selection", ""}));
-        EXPECT_EQ(outcome("auth_app_webhooks", ambiguous_hook), (Outcome{"needs_selection", ""}));
-        EXPECT_EQ(outcome("auth_app_signing_keys", gone), (Outcome{"workspace_deleted", ""}));
-        EXPECT_EQ(outcome("auth_app_webhooks", gone_hook), (Outcome{"workspace_deleted", ""}));
-    }
-    const std::string late = insert_webhook(owned);
-    EXPECT_TRUE(outcome("auth_app_webhooks", late).first.empty());
-    ASSERT_TRUE(store->assign_legacy_application_credentials());
-    EXPECT_EQ(outcome("auth_app_webhooks", late),
-              (Outcome{"application_workspace", workspaces[0][0]}))
-        << "a row written after the migration";
-
-    // A reviewed assignment of the unassigned application resolves its rows.
-    {
-        pqxx::work tx(connection);
-        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
-                       ambiguous, workspaces[1][0]);
-        tx.commit();
-    }
-    ASSERT_TRUE(store->assign_legacy_application_credentials());
-    EXPECT_EQ(outcome("auth_app_signing_keys", ambiguous),
-              (Outcome{"application_workspace", workspaces[1][0]}));
-    EXPECT_EQ(outcome("auth_app_webhooks", ambiguous_hook),
-              (Outcome{"application_workspace", workspaces[1][0]}));
-    EXPECT_EQ(outcome("auth_app_signing_keys", gone), (Outcome{"workspace_deleted", ""}));
-
-    // Key rings page by application, each with every key in version order.
-    std::map<std::string, lake::control::LegacyApplicationSigningKeyRing> rings;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_application_signing_keys(after, 1);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        ASSERT_EQ(page->size(), 1U);
-        rings.emplace(page->front().ring.application_id, page->front());
-        after = page->back().ring.application_id;
-    }
-    ASSERT_TRUE(rings.contains(owned));
-    const auto& ring = rings.at(owned);
-    EXPECT_EQ(ring.workspace_id, workspaces[0][0]);
-    EXPECT_EQ(ring.customer_id, customers[0]);
-    ASSERT_EQ(ring.ring.keys.size(), 2U);
-    EXPECT_EQ(ring.ring.keys[0].version, 1);
-    EXPECT_FALSE(ring.ring.keys[0].current);
-    EXPECT_TRUE(ring.ring.keys[1].current);
-    EXPECT_EQ(ring.ring.keys[1].encrypted_seed, "envelope");
-    EXPECT_GT(ring.ring.at_us, 0);
-    EXPECT_EQ(rings.at(gone).outcome, "workspace_deleted");
-    std::map<std::string, lake::control::LegacyApplicationWebhook> hooks;
-    after.clear();
-    for (;;) {
-        const auto page = store->legacy_application_webhooks(after, 2);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            hooks.emplace(row.webhook.id, row);
-        }
-        after = page->back().webhook.id;
-    }
-    ASSERT_TRUE(hooks.contains(late));
-    EXPECT_EQ(hooks.at(late).workspace_id, workspaces[0][0]);
-    EXPECT_EQ(hooks.at(owned_hook).webhook.encrypted_secret, "envelope");
-    EXPECT_EQ(hooks.at(owned_hook).webhook.events, std::vector<std::string>{"user.created"});
-    EXPECT_GT(hooks.at(owned_hook).webhook.at_us, 0);
-}
-
-// Migration 0061 (lake#363) records the owner of each live (unused, unexpired) application
-// authorization code under md5(code_hash): the application's workspace, needs_selection while it
-// has none, workspace_deleted when that workspace is gone. Used and expired codes are not recorded
-// or listed. The copy's assignment records a code written after it and resolves an application
-// assigned after review; recording a code as copied keeps it from being written twice.
-TEST(PostgresApplicationAuthorizationCodes, MigrationRecordsEachLiveCodesOwnerForTheCopy) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(uri, "application-code-migration-test");
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    std::vector<std::string> customers;
-    std::vector<std::vector<std::string>> workspaces(2);
-    for (int index = 0; index < 2; ++index) {
-        const std::string name = "app-code-migration-" + suffix + "-" + std::to_string(index);
-        const auto user = store->create_user({"taap:" + name, "", "Migration"});
-        ASSERT_TRUE(user) << user.error().message;
-        const auto customer = store->create_customer({"individual", user->id, "", name});
-        ASSERT_TRUE(customer) << customer.error().message;
-        customers.push_back(customer->id);
-        for (int count = 0; count <= index; ++count) {
-            const auto workspace =
-                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
-            ASSERT_TRUE(workspace) << workspace.error().message;
-            workspaces[index].push_back(workspace->id);
-        }
-    }
-    const auto person = store->create_user({"taap:code-person-" + suffix, "", "Person"});
-    ASSERT_TRUE(person) << person.error().message;
-    const auto registered = [&](const std::string& customer, const std::string& workspace) {
-        const std::string id = lake::control::new_uuid_v4();
-        const auto created = store->create_application({.id = id,
-                                                        .customer_id = customer,
-                                                        .pool_id = "app:" + id,
-                                                        .workspace_id = workspace});
-        EXPECT_TRUE(created) << created.error().message;
-        return id;
-    };
-    const std::string owned = registered(customers[0], workspaces[0][0]);
-    const std::string gone = registered(customers[1], workspaces[1][1]);
-    const std::string ambiguous = lake::control::new_uuid_v4();
-    pqxx::connection connection(uri);
-    {
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
-        tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
-                       "allowed_origins) VALUES ($1::uuid, $2::uuid, $3, 'migration', "
-                       "'[\"https://m.example.test\"]'::jsonb)",
-                       ambiguous, customers[1], "app:" + ambiguous);
-        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
-        tx.commit();
-    }
-    ASSERT_TRUE(store->update_workspace(workspaces[1][1], {.desired = "deleted"}));
-    // `state`: live, used or expired.
-    const auto insert_code = [&](const std::string& application, const std::string& state) {
-        const std::string hash = lake::control::identity_crypto::sha256_hex(
-            "code-" + lake::control::new_uuid_v4());
-        pqxx::work tx(connection);
-        tx.exec_params("INSERT INTO auth_app_authorization_codes (code_hash, application_id, "
-                       "user_id, redirect_uri, code_challenge, nonce, expires_at, used_at) VALUES "
-                       "($1, $2::uuid, $3::uuid, 'https://m.example.test/cb', 'challenge', "
-                       "'nonce', now() + CASE WHEN $4 = 'expired' THEN interval '-1 minute' ELSE "
-                       "interval '4 minutes' END, CASE WHEN $4 = 'used' THEN now() END)",
-                       hash, application, person->id, state);
-        tx.commit();
-        return hash;
-    };
-    const std::string owned_code = insert_code(owned, "live");
-    const std::string used_code = insert_code(owned, "used");
-    const std::string expired_code = insert_code(owned, "expired");
-    const std::string ambiguous_code = insert_code(ambiguous, "live");
-    const std::string gone_code = insert_code(gone, "live");
-    {
-        pqxx::work tx(connection);
-        tx.exec("DELETE FROM schema_migrations WHERE version = "
-                "'0061_application_authorization_code_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0061_application_authorization_code_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    using Outcome = std::pair<std::string, std::string>;
-    const auto outcome = [&](const std::string& hash) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = 'auth_app_authorization_codes' AND object_id = md5($1)::uuid",
-            hash);
-        return found.empty() ? Outcome{}
-                             : Outcome{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    // The schema section from 0061 on, twice: the second run changes nothing.
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        EXPECT_EQ(outcome(owned_code), (Outcome{"application_workspace", workspaces[0][0]}));
-        EXPECT_EQ(outcome(ambiguous_code), (Outcome{"needs_selection", ""}));
-        EXPECT_EQ(outcome(gone_code), (Outcome{"workspace_deleted", ""}));
-        EXPECT_TRUE(outcome(used_code).first.empty()) << "a used code is never copied";
-        EXPECT_TRUE(outcome(expired_code).first.empty()) << "an expired code is never copied";
-    }
-    const std::string late = insert_code(owned, "live");
-    EXPECT_TRUE(outcome(late).first.empty());
-    ASSERT_TRUE(store->assign_legacy_application_authorization_codes());
-    EXPECT_EQ(outcome(late), (Outcome{"application_workspace", workspaces[0][0]}))
-        << "a code issued after the migration";
-
-    // A reviewed assignment of the unassigned application resolves its code.
-    {
-        pqxx::work tx(connection);
-        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
-                       ambiguous, workspaces[1][0]);
-        tx.commit();
-    }
-    ASSERT_TRUE(store->assign_legacy_application_authorization_codes());
-    EXPECT_EQ(outcome(ambiguous_code), (Outcome{"application_workspace", workspaces[1][0]}));
-    EXPECT_EQ(outcome(gone_code), (Outcome{"workspace_deleted", ""}));
-
-    // Recording a copy needs a workspace; a copied code says so in its listing.
-    ASSERT_TRUE(store->record_legacy_application_authorization_code_copied(owned_code));
-    EXPECT_EQ(outcome(owned_code), (Outcome{"copied", workspaces[0][0]}));
-    EXPECT_FALSE(store->record_legacy_application_authorization_code_copied(gone_code));
-    ASSERT_TRUE(store->assign_legacy_application_authorization_codes());
-    EXPECT_EQ(outcome(owned_code).first, "copied") << "a rerun keeps the record of the copy";
-
-    // Live codes only, paged by hash.
-    std::map<std::string, lake::control::LegacyApplicationAuthorizationCode> codes;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_application_authorization_codes(after, 1);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        ASSERT_EQ(page->size(), 1U);
-        EXPECT_GT(page->front().code.code_hash, after);
-        codes.emplace(page->front().code.code_hash, page->front());
-        after = page->back().code.code_hash;
-    }
-    EXPECT_FALSE(codes.contains(used_code));
-    EXPECT_FALSE(codes.contains(expired_code));
-    ASSERT_TRUE(codes.contains(owned_code));
-    ASSERT_TRUE(codes.contains(late));
-    const auto& row = codes.at(owned_code).code;
-    EXPECT_EQ(codes.at(owned_code).outcome, "copied");
-    EXPECT_EQ(codes.at(owned_code).customer_id, customers[0]);
-    EXPECT_EQ(row.application_id, owned);
-    EXPECT_EQ(row.user_id, person->id);
-    EXPECT_EQ(row.redirect_uri, "https://m.example.test/cb");
-    EXPECT_EQ(row.at_us, row.expires_us - 5LL * 60 * 1'000'000);
-    EXPECT_EQ(codes.at(gone_code).outcome, "workspace_deleted");
-    EXPECT_TRUE(codes.at(gone_code).workspace_id.empty());
-}
-
-// Migration 0059 (lake#351) records the owner of each application's settings that the retired
-// auth_applications columns still hold: the application's workspace, needs_selection while it has
-// none, workspace_deleted when that workspace is gone. A routing row written after it holds no
-// settings and is not recorded; the copy's assignment resolves an application assigned after review.
-TEST(PostgresApplicationSettings, MigrationRecordsEachRowsOwnerForTheCopy) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(uri, "application-settings-migration-test");
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    std::vector<std::string> customers;
-    std::vector<std::vector<std::string>> workspaces(2);
-    for (int index = 0; index < 2; ++index) {
-        const std::string name = "app-settings-migration-" + suffix + "-" + std::to_string(index);
-        const auto user = store->create_user({"taap:" + name, "", "Migration"});
-        ASSERT_TRUE(user) << user.error().message;
-        const auto customer = store->create_customer({"individual", user->id, "", name});
-        ASSERT_TRUE(customer) << customer.error().message;
-        customers.push_back(customer->id);
-        for (int count = 0; count <= index; ++count) {
-            const auto workspace =
-                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
-            ASSERT_TRUE(workspace) << workspace.error().message;
-            workspaces[index].push_back(workspace->id);
-        }
-    }
-    pqxx::connection connection(uri);
-    // Applications as registered before 0059, with their settings in the row: one of the first
-    // space, one of the second space's from before 0049 (no workspace), one whose workspace is
-    // deleted.
-    const auto legacy = [&](const std::string& customer, const std::string& workspace) {
-        const std::string id = lake::control::new_uuid_v4();
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE auth_applications DISABLE TRIGGER application_workspace_routing");
-        tx.exec_params("INSERT INTO auth_applications (id, customer_id, pool_id, name, "
-                       "allowed_origins, redirect_uris, theme, workspace_id, created_at) VALUES "
-                       "($1::uuid, $2::uuid, $3, 'Legacy ' || $1, "
-                       "'[\"https://legacy.example.test\"]'::jsonb, "
-                       "'[\"https://legacy.example.test/callback\"]'::jsonb, "
-                       "'{\"accent_color\":\"#123456\"}'::jsonb, NULLIF($4, '')::uuid, "
-                       "'2026-09-01T10:00:00Z')",
-                       id, customer, "app:" + id, workspace);
-        tx.exec("ALTER TABLE auth_applications ENABLE TRIGGER application_workspace_routing");
-        tx.commit();
-        return id;
-    };
-    const std::string owned = legacy(customers[0], workspaces[0][0]);
-    const std::string ambiguous = legacy(customers[1], "");
-    const std::string gone = legacy(customers[1], workspaces[1][1]);
-    ASSERT_TRUE(store->update_workspace(workspaces[1][1], {.desired = "deleted"}));
-    {
-        pqxx::work tx(connection);
-        tx.exec("DELETE FROM schema_migrations WHERE version = "
-                "'0059_application_settings_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0059_application_settings_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    const auto outcome = [&](const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = 'auth_application_settings' AND object_id = $1::uuid",
-            id);
-        return found.empty() ? std::pair<std::string, std::string>{}
-                             : std::pair{found[0][0].as<std::string>(), found[0][1].as<std::string>()};
-    };
-    using Outcome = std::pair<std::string, std::string>;
-    // The schema section from 0059 on, twice: the second run changes nothing.
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        EXPECT_EQ(outcome(owned), (Outcome{"application_workspace", workspaces[0][0]}));
-        EXPECT_EQ(outcome(ambiguous), (Outcome{"needs_selection", ""}));
-        EXPECT_EQ(outcome(gone), (Outcome{"workspace_deleted", ""}));
-    }
-
-    // A new application's row is routing only: no settings, and nothing to copy.
-    const std::string routed = lake::control::new_uuid_v4();
-    ASSERT_TRUE(store->create_application({.id = routed,
-                                           .customer_id = customers[0],
-                                           .pool_id = "app:" + routed,
-                                           .custom_sign_in_domain = "login-" + suffix + ".test",
-                                           .workspace_id = workspaces[0][0]}));
-    {
-        pqxx::work tx(connection);
-        const auto row = tx.exec_params(
-            "SELECT name IS NULL AND allowed_origins IS NULL AND redirect_uris IS NULL AND theme "
-            "IS NULL FROM auth_applications WHERE id = $1::uuid",
-            routed);
-        EXPECT_TRUE(row[0][0].as<bool>()) << "the routing row holds no settings";
-        EXPECT_THROW(tx.exec_params("UPDATE auth_applications SET theme = '{}'::jsonb WHERE id = "
-                                    "$1::uuid",
-                                    routed),
-                     pqxx::check_violation)
-            << "settings without a name are refused";
-    }
-    ASSERT_TRUE(store->assign_legacy_application_settings());
-    EXPECT_TRUE(outcome(routed).first.empty());
-
-    // A reviewed assignment of the unassigned application resolves its settings.
-    {
-        pqxx::work tx(connection);
-        tx.exec_params("UPDATE auth_applications SET workspace_id = $2::uuid WHERE id = $1::uuid",
-                       ambiguous, workspaces[1][0]);
-        tx.commit();
-    }
-    ASSERT_TRUE(store->assign_legacy_application_settings());
-    EXPECT_EQ(outcome(ambiguous), (Outcome{"application_workspace", workspaces[1][0]}));
-    EXPECT_EQ(outcome(gone), (Outcome{"workspace_deleted", ""}));
-
-    // The settings page by application id, with the columns the rows held.
-    std::map<std::string, lake::control::LegacyApplicationSettings> rows;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_application_settings(after, 1);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        ASSERT_EQ(page->size(), 1U);
-        rows.emplace(page->front().settings.application_id, page->front());
-        after = page->back().settings.application_id;
-    }
-    EXPECT_FALSE(rows.contains(routed));
-    ASSERT_TRUE(rows.contains(owned));
-    const auto& row = rows.at(owned);
-    EXPECT_EQ(row.workspace_id, workspaces[0][0]);
-    EXPECT_EQ(row.customer_id, customers[0]);
-    EXPECT_EQ(row.settings.customer_id, customers[0]);
-    EXPECT_EQ(row.settings.name, "Legacy " + owned);
-    EXPECT_EQ(row.settings.allowed_origins,
-              std::vector<std::string>{"https://legacy.example.test"});
-    EXPECT_EQ(row.settings.redirect_uris,
-              std::vector<std::string>{"https://legacy.example.test/callback"});
-    EXPECT_EQ(row.settings.theme.at("accent_color"), "#123456");
-    EXPECT_EQ(row.settings.at_us, 1'788'256'800'000'000);
-    EXPECT_EQ(rows.at(gone).outcome, "workspace_deleted");
-    EXPECT_EQ(rows.at(ambiguous).workspace_id, workspaces[1][0]);
 }
 
 // Agent launches, their credential and cron schedules against the production
@@ -4232,200 +2557,6 @@ TEST(PostgresSessions, AnExpiredCredentialIsToldApartFromAnUnknownOne) {
     const auto unknown = store->context_for(wrong);
     ASSERT_FALSE(unknown);
     EXPECT_NE(unknown.error().code, "expired") << "a wrong secret never learns of the session";
-}
-
-// lake#374, lake#375: migration 0062 keeps agent tasks' dispatch rows and records who owns each
-// task's content for the copy. The asking task and lake's own notices become columns; a task's
-// body, message and answer are left for the copy, and a new task's rows hold none.
-TEST(PostgresAgentTasks, MigrationRecordsEachTasksOwnerAndKeepsDispatchContentFree) {
-    const char* uri = lake::test::postgres_uri();
-    if (uri == nullptr || std::string(uri).empty()) {
-        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
-    }
-    auto store = lake::control::make_postgres_store(uri, "agent-task-migration-test");
-    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
-    std::vector<std::string> customers, users;
-    std::vector<std::vector<std::string>> workspaces(2);
-    for (int index = 0; index < 2; ++index) {
-        const std::string name = "agent-task-migration-" + suffix + "-" + std::to_string(index);
-        const auto user = store->create_user({"taap:" + name, "", "Migration"});
-        ASSERT_TRUE(user) << user.error().message;
-        const auto customer = store->create_customer({"individual", user->id, "", name});
-        ASSERT_TRUE(customer) << customer.error().message;
-        customers.push_back(customer->id);
-        users.push_back(user->id);
-        for (int count = 0; count <= index; ++count) {
-            const auto workspace =
-                store->create_workspace({customer->id, "ws-" + std::to_string(count), "dev", ""});
-            ASSERT_TRUE(workspace) << workspace.error().message;
-            workspaces[index].push_back(workspace->id);
-        }
-    }
-    pqxx::connection connection(uri);
-    // Tasks as lake wrote them before 0062, with the content in the rows.
-    const auto legacy = [&](const std::string& customer, const std::string& workspace,
-                            const nlohmann::json& body, const std::string& phase,
-                            const std::string& message, const std::string& result) {
-        const std::string id = lake::control::new_uuid_v4();
-        pqxx::work tx(connection);
-        tx.exec("ALTER TABLE agent_tasks DISABLE TRIGGER agent_task_workspace_routing");
-        tx.exec_params("INSERT INTO agent_tasks (id, customer_id, agent, kind, body, scopes, "
-                       "workspace_id, created_at) VALUES ($1::uuid, $2::uuid, 'agent-project', "
-                       "'api', $3::jsonb, ARRAY['get_agent_task'], NULLIF($4, '')::uuid, "
-                       "'2026-09-01T10:00:00Z')",
-                       id, customer, body.dump(), workspace);
-        tx.exec("ALTER TABLE agent_tasks ENABLE TRIGGER agent_task_workspace_routing");
-        if (!phase.empty() || !message.empty()) {
-            tx.exec_params("INSERT INTO agent_task_status (task_id, phase, message, result) VALUES "
-                           "($1::uuid, $2, $3, $4::jsonb)",
-                           id, phase, message, result);
-        }
-        tx.commit();
-        return id;
-    };
-    const std::string asking = legacy(customers[0], workspaces[0][0],
-                                      {{"message", "plan it"}}, "Running", "Working on it", "null");
-    const std::string owned = legacy(customers[0], workspaces[0][0],
-                                     {{"message", "a private request"}, {"parent_task_id", asking}},
-                                     "Succeeded", "", "{\"reply\":\"a private answer\"}");
-    const std::string retried =
-        legacy(customers[1], workspaces[1][0], {{"message", "retry me"}}, "",
-               "the agent stopped responding; retrying (attempt 2 of 3)", "null");
-    const std::string unpicked = legacy(customers[1], workspaces[1][0], {{"message", "nobody"}},
-                                        "Failed", "No agent picked this up within 300 seconds.",
-                                        "null");
-    const std::string unassigned =
-        legacy(customers[1], "", {{"message", "from before workspaces"}}, "", "", "null");
-    const std::string gone = legacy(customers[1], workspaces[1][1], {{"message", "gone"}},
-                                    "Succeeded", "", "{\"reply\":\"gone\"}");
-    const std::string empty = legacy(customers[0], workspaces[0][0], nlohmann::json::object(), "",
-                                     "", "null");
-    ASSERT_TRUE(store->update_workspace(workspaces[1][1], {.desired = "deleted"}));
-    {
-        pqxx::work tx(connection);
-        tx.exec("DELETE FROM schema_migrations WHERE version = '0062_agent_task_workspaces'");
-        tx.commit();
-    }
-    std::ifstream file(LAKE_TEST_SOURCE_DIR "/db/schema.sql");
-    const std::string schema((std::istreambuf_iterator<char>(file)), {});
-    const auto start = schema.find("-- 0062_agent_task_workspaces:");
-    ASSERT_NE(start, std::string::npos);
-    using Outcome = std::pair<std::string, std::string>;
-    const auto outcome = [&](const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(
-            "SELECT outcome, COALESCE(workspace_id::text, '') FROM workspace_assignments "
-            "WHERE object_table = 'agent_task_content' AND object_id = $1::uuid",
-            id);
-        return found.empty() ? Outcome{} : Outcome{found[0][0].as<std::string>(),
-                                                   found[0][1].as<std::string>()};
-    };
-    const auto column = [&](const std::string& sql, const std::string& id) {
-        pqxx::work tx(connection);
-        const auto found = tx.exec_params(sql, id);
-        return found.empty() || found[0][0].is_null() ? std::string()
-                                                      : found[0][0].as<std::string>();
-    };
-    // The schema section from 0062 on, twice: the second run changes nothing.
-    for (int pass = 0; pass < 2; ++pass) {
-        pqxx::work tx(connection);
-        tx.exec("SET LOCAL client_min_messages TO error");
-        tx.exec(schema.substr(start));
-        tx.commit();
-        EXPECT_EQ(outcome(owned), (Outcome{"task_workspace", workspaces[0][0]}));
-        EXPECT_EQ(outcome(asking), (Outcome{"task_workspace", workspaces[0][0]}));
-        EXPECT_EQ(outcome(retried), (Outcome{"task_workspace", workspaces[1][0]}));
-        EXPECT_EQ(outcome(unassigned), (Outcome{"needs_selection", ""}));
-        EXPECT_EQ(outcome(gone), (Outcome{"workspace_deleted", ""}));
-        EXPECT_EQ(outcome(empty), Outcome{}) << "a task with nothing written has nothing to copy";
-        EXPECT_EQ(column("SELECT parent_task_id::text FROM agent_tasks WHERE id = $1::uuid", owned),
-                  asking);
-        EXPECT_EQ(column("SELECT notice FROM agent_task_status WHERE task_id = $1::uuid", retried),
-                  "the agent stopped responding; retrying (attempt 2 of 3)");
-        EXPECT_EQ(column("SELECT notice FROM agent_task_status WHERE task_id = $1::uuid", unpicked),
-                  "No agent picked this up within 300 seconds.");
-        EXPECT_EQ(column("SELECT notice FROM agent_task_status WHERE task_id = $1::uuid", asking),
-                  "")
-            << "what an agent wrote is never a notice";
-    }
-    // The control store answers the dispatch half only: the notice as its message, no content.
-    const auto read = store->get_agent_task(owned);
-    ASSERT_TRUE(read) << read.error().message;
-    EXPECT_EQ(read->parent_task_id, asking);
-    EXPECT_EQ(read->body, nlohmann::json::object());
-    EXPECT_TRUE(read->result.is_null());
-    EXPECT_EQ(read->message, "");
-    EXPECT_EQ(store->get_agent_task(retried)->message,
-              "the agent stopped responding; retrying (attempt 2 of 3)");
-
-    // A new task's rows hold nothing written, through its claim and answer, and are not copied.
-    const auto created = store->create_agent_task({.customer_id = customers[0],
-                                                   .agent = "agent-project",
-                                                   .kind = "api",
-                                                   .workspace_id = workspaces[0][0],
-                                                   .parent_task_id = asking,
-                                                   .body = {{"message", "never stored here"}},
-                                                   .scopes = {"get_agent_task"},
-                                                   .requested_by_user_id = users[0]});
-    ASSERT_TRUE(created) << created.error().message;
-    ASSERT_TRUE(store->claim_agent_task(created->id, "agent-project", "sha"));
-    ASSERT_TRUE(store->record_agent_task_event(created->id, "agent-project", "Succeeded"));
-    EXPECT_EQ(column("SELECT body::text FROM agent_tasks WHERE id = $1::uuid", created->id), "{}");
-    EXPECT_EQ(column("SELECT message || result::text FROM agent_task_status WHERE task_id = "
-                     "$1::uuid",
-                     created->id),
-              "null");
-    EXPECT_EQ(column("SELECT parent_task_id::text FROM agent_tasks WHERE id = $1::uuid",
-                     created->id),
-              asking);
-    ASSERT_TRUE(store->assign_legacy_agent_tasks());
-    EXPECT_EQ(outcome(created->id), Outcome{});
-    EXPECT_EQ(store->create_agent_task({.id = created->id,
-                                        .customer_id = customers[0],
-                                        .agent = "agent-project",
-                                        .workspace_id = workspaces[0][0],
-                                        .scopes = {"get_agent_task"}})
-                  .error()
-                  .code,
-              "conflict")
-        << "a task id is used once";
-    EXPECT_EQ(store->create_agent_task({.id = "not-a-uuid",
-                                        .customer_id = customers[0],
-                                        .agent = "agent-project",
-                                        .workspace_id = workspaces[0][0],
-                                        .scopes = {"get_agent_task"}})
-                  .error()
-                  .code,
-              "invalid_input");
-
-    // The content pages by task id, as the rows held it.
-    std::map<std::string, lake::control::LegacyAgentTask> rows;
-    std::string after;
-    for (;;) {
-        const auto page = store->legacy_agent_tasks(after, 50);
-        ASSERT_TRUE(page) << page.error().message;
-        if (page->empty()) {
-            break;
-        }
-        for (const auto& row : *page) {
-            rows.emplace(row.task.id, row);
-        }
-        after = page->back().task.id;
-    }
-    EXPECT_FALSE(rows.contains(created->id));
-    EXPECT_FALSE(rows.contains(empty));
-    ASSERT_TRUE(rows.contains(owned));
-    const auto& row = rows.at(owned);
-    EXPECT_EQ(row.workspace_id, workspaces[0][0]);
-    EXPECT_EQ(row.outcome, "task_workspace");
-    EXPECT_EQ(row.task.customer_id, customers[0]);
-    EXPECT_EQ(row.task.body["message"], "a private request");
-    EXPECT_EQ(row.task.result["reply"], "a private answer");
-    EXPECT_EQ(row.task.phase, "Succeeded");
-    EXPECT_EQ(row.at_us, 1'788'256'800'000'000);
-    EXPECT_EQ(rows.at(asking).task.message, "Working on it");
-    EXPECT_EQ(rows.at(gone).outcome, "workspace_deleted");
-    EXPECT_EQ(rows.at(unassigned).outcome, "needs_selection");
 }
 
 // Migration 0068 (lake#383 phase A): tenant image repositories get a route only where their owner

@@ -11,8 +11,8 @@ as `WorkspaceDeletionItem`s, with `completed_at` once lake finished the steps ou
 used.
 
 `StreamOwner` is a topic's creator; `stream_owners.hpp` keeps it as a sealed record in the
-topic's workspace Zetta (lake#379), and `Store` keeps only the legacy reads of the retired
-`stream_owners` table, for the copy (`LegacyStreamOwner`). `list_agent_task_stream_scopes` supplies one customer's compact durable task
+topic's workspace Zetta (lake#379); `Store` has no reads of the retired `stream_owners` table,
+which migration `0070` dropped (lake#311). `list_agent_task_stream_scopes` supplies one customer's compact durable task
 and agent scope for the shared Agent events and Agent tasks views.
 `latest_agent_conversation_task` resolves the preceding task for a same-agent, same-kind follow-up.
 `AgentBus::call` carries named
@@ -66,50 +66,45 @@ remove and update of sealed records in one workspace Zetta's record store) and `
 workspace uses; `ask_messages.hpp` is the reference codec. `Store` has no reads of the retired
 `ask_messages` table, which migration `0050` dropped (lake#483). `opportunities.hpp` is the
 first mutable collection (Design → Opportunities, lake#376): derived keys, conditional status
-writes; `Store` keeps only the legacy reads of the retired `opportunities` table
-(`LegacyOpportunity`). See
+writes; the retired `opportunities` table is dropped by migration `0070` with its legacy reads. See
 `docs/architecture/workspace-records.md`. `drive_share_links.hpp` is the drive share link codec
 (lake#350): a mutable record per link keyed by its id and found by repository and folder, and the
 bearer token format `<workspace id>.<link id>.<secret>` that routes a recipient to the workspace.
-`Store` keeps only the content-free route of a pre-move token (`drive_share_link_route`) and the
-legacy reads of `drive_share_links` for the copy (`LegacyDriveShareLink`).
+`Store` keeps only the content-free route of a pre-move token (`drive_share_link_route`); the
+retired `drive_share_links` table and its legacy reads are gone (migration `0070`).
 `forge_records.hpp` is the forge record codec (lake#341): a mutable record per issue, comment,
 review, release, webhook, delivery, export or rule, in the workspace of its repository's workspace,
 keyed by its id and found by repository and kind (`forge_record_lookup`). `ForgeRecord` carries the
-engine and lake revisions; `Store` keeps only the legacy reads of `forge_records` for the copy
-(`LegacyForgeRecord`).
+engine and lake revisions; the retired `forge_records` table and its legacy reads are gone
+(migration `0070`).
 `secret_records.hpp` holds the secrets codecs (lake#328-#332): `lake_secrets_mounts` (a mount keyed
 by its id, and its name claim), `lake_secrets_entries`, `lake_secrets_versions`,
 `lake_secrets_encryption_keys` and `lake_secrets_data_keys`, every name-selected record keyed by a
 blind index (`WorkspaceRecords::index_of`). `secrets.hpp` gives `SecretMount` its `workspace_id`
-and declares `SecretMountRoute`, `WrappedDataKey`, `CustomerKekState` and the `LegacySecret*` rows.
-`Store` keeps for secrets only the content-free routes, the customer KEK (`wrap_secret_data_key`,
-`unwrap_secret_data_key`, `rotate_customer_kek`, `retire_customer_kek`) and the legacy reads for
-the copy. Dynamic leases (lake#362) are `lake_secrets_dynamic_leases` records
+and declares `SecretMountRoute`, `WrappedDataKey` and `CustomerKekState`.
+`Store` keeps for secrets only the content-free routes and the customer KEK
+(`wrap_secret_data_key`, `unwrap_secret_data_key`, `rotate_customer_kek`, `retire_customer_kek`);
+the retired secrets tables, their `LegacySecret*` rows and legacy reads are gone (migration
+`0070`). Dynamic leases (lake#362) are `lake_secrets_dynamic_leases` records
 (`SecretLeaseCodec`, `SecretLeaseRecord`, `to_lease`); `Store` keeps only each lease's content-free
 `SecretLeaseRoute`, which is also the expiry loop's due index (`record_secret_lease_route`,
 `get_secret_lease_route`, `reschedule_secret_lease`, `delete_secret_lease_route`,
-`claim_due_secret_leases`), and `legacy_dynamic_secret_leases` for the copy.
-`unwrap_secret_data_key`, `rotate_customer_kek`, `retire_customer_kek`), dynamic leases (lake#362)
-and the legacy reads for the copy.
+`claim_due_secret_leases`).
 `platform_records.hpp` holds the platform codecs (lake#358, lake#359): `lake_platform_environments`
 (an environment keyed by `platform_environment_id`, written `if_absent`) and `lake_platform_mirror`
 (the last operator-control row per `platform_mirror_id`, replaced only by a newer row at the
 revision read), both found by the repository, and the row order (`platform_row_order`).
 `PlatformEnvironment` and `PlatformMirrorRow` moved into `store.hpp`, and `platform_store.hpp` is
-gone: `Store` keeps only the legacy reads of the two tables for the copy
-(`LegacyPlatformEnvironment`, `LegacyPlatformMirrorRow`). `PlatformService` (`platform.hpp`) reads
+gone, as are the two retired tables and their legacy reads (migration `0070`). `PlatformService` (`platform.hpp`) reads
 and writes through the repository's `WorkspaceRecords`, and its sync takes a
 `PlatformRecordsOpener`.
 `application_webhook_records.hpp` holds the application
 event and delivery-attempt codecs and the claim/settle pair that sends each attempt once
-(lake#356, lake#357); `apps.hpp` gives `Application` its `workspace_id` and declares the
-`LegacyApplicationWebhook*` rows the copy reads. `application_user_records.hpp` holds the codecs of
+(lake#356, lake#357); `apps.hpp` gives `Application` its `workspace_id`. `application_user_records.hpp` holds the codecs of
 an application's users and organizations in the application's workspace (lake#353, lake#354), their
 reads and conditional writes, and the claims (`write_application_claim`,
 `release_application_claim`) that keep a pool user's email and an organization's TAAP identity and
-name unique within the application; `apps.hpp` declares the `LegacyApplicationUser` and
-`LegacyApplicationOrganization` rows the copy reads. `NewPasswordUser::user_id` lets a sign-up
+name unique within the application. `NewPasswordUser::user_id` lets a sign-up
 choose the account id it claimed the email for, and `IssuedSession::created_user` says the store
 created the account.
 
@@ -119,47 +114,40 @@ workspace, and `transfer_repository` is no longer part of `Store`.
 
 `metering.hpp` holds repository usage in workspace Zettas (lake#348, lake#349): the
 `lake_metering_usage` hourly transfer counters, added to with a conditional write, and the
-`lake_metering_build_records` per-result records, written `if_absent`, plus the legacy row ids
-migration `0053` shares. `store.hpp` replaces the metering store methods with
-`assign_legacy_metering` and the two `legacy_metering_*` reads, which serve only the copy.
+`lake_metering_build_records` per-result records, written `if_absent`. `store.hpp` has no
+metering store methods: the retired tables and their legacy reads are gone (migration `0070`).
 `application_credential_records.hpp` holds the application's credentials in its workspace (lake#352,
 lake#355): the key ring codec (one record per application, every key in version order, one
 current; `rotate_application_signing_keys` writes it with `if_revision` and rereads on a conflict)
 and the webhook codec (one record per webhook, written `if_absent`). `apps.hpp` gives
 `ApplicationSigningKey` its `encrypted_seed` and `ApplicationWebhook` its `encrypted_secret` (the
-secrets envelopes kept inside the seal) and declares `ApplicationSigningKeyRing` and the
-`LegacyApplicationSigningKeyRing`/`LegacyApplicationWebhook` rows the copy reads; `store.hpp`
+secrets envelopes kept inside the seal) and declares `ApplicationSigningKeyRing`; `store.hpp`
 declares `encrypt_application_credential`/`decrypt_application_credential`.
 `application_settings_records.hpp` holds an application's settings in its workspace (lake#351):
 the settings codec (one record per application, keyed by it and found by its space;
 `update_application_settings` writes with `if_revision` and rereads on a conflict). `apps.hpp`
-declares `ApplicationSettings`, `apply_settings` and the `LegacyApplicationSettings` rows the copy
-reads, and documents which `Application` fields are routing; `NewApplication` carries routing only.
-`store.hpp` drops `update_application_theme` and declares `assign_legacy_application_settings` and
-`legacy_application_settings`, which serve only the copy.
+declares `ApplicationSettings` and `apply_settings`, and documents which `Application` fields are
+routing; `NewApplication` carries routing only. `store.hpp` drops `update_application_theme`.
 `repository_records.hpp` holds a repository's settings (its description, lake#315 part 2) in its
 workspace: one record per repository, keyed by it and found by its space. `store.hpp` declares
-`RepositorySettings`, `LegacyRepositoryDescription`, `NewRepository::id`, and
-`assign_legacy_repository_descriptions`/`legacy_repository_descriptions` for the copy; it no longer
-declares `RepositoryRef`, `set_repository_ref` or `list_repository_refs` (lake#319).
+`RepositorySettings` and `NewRepository::id`; it no longer declares `RepositoryRef`,
+`set_repository_ref` or `list_repository_refs` (lake#319), nor the legacy reads of the retired
+description column (migration `0070`).
 `application_authorization_codes.hpp` holds an application's one-use authorization codes in its
 workspace (lake#363): the codec (keyed by the blind index of the application and the code hash,
 found by the application, with the five-minute lifetime as the collection's retention),
 `issue_application_authorization_code` (`if_absent`) and `redeem_application_authorization_code`
 (read, then `remove` at the revision read; every refusal of the code is `unauthorized`). `apps.hpp`
-adds the code's instants and revision and the `LegacyApplicationAuthorizationCode` rows the copy
-reads; `store.hpp` replaces `create_/consume_application_authorization_code` with
-`assign_legacy_application_authorization_codes`, `legacy_application_authorization_codes` and
-`record_legacy_application_authorization_code_copied`, which serve only the copy.
+adds the code's instants and revision; `store.hpp` no longer declares
+`create_/consume_application_authorization_code` (the retired table is dropped by `0070`).
 `agent_task_records.hpp` holds what was written for an agent task in its workspace (lake#374,
 lake#375): the codec (one record per task, keyed by it and found by its space) with the request,
 the agent's latest message, its answer and the finished phase. `record_agent_task_content` writes
-an event with `if_revision`, rereads on a conflict and leaves a finished record as it is;
-`fill_agent_task_request` serves the copy. In `store.hpp`, `AgentTask` gains `parent_task_id`, and
+an event with `if_revision`, rereads on a conflict and leaves a finished record as it is. In
+`store.hpp`, `AgentTask` gains `parent_task_id`, and
 the store answers its dispatch half only (an empty `body`, a null `result`, and as `message` only
 lake's notice); `create_agent_task` keeps a caller-made `id`, `record_agent_task_event` takes no
-message or answer, and `assign_legacy_agent_tasks`/`legacy_agent_tasks` (`LegacyAgentTask`) serve
-only the copy.
+message or answer (the retired content columns are dropped by `0070`).
 `workspace_audit.hpp` holds a workspace's audit chain (decision 52, lake#317): the
 `lake_audit_events` collection, chained and copied events, `append_workspace_audit_event`,
 `find_workspace_audit_tail`, `list_workspace_audit` and `verify_workspace_audit`.

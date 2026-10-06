@@ -97,90 +97,75 @@ workspace caller, with engine-decided conditional writes, `busy` retries and a r
 the retired `ask_messages` table was copied and then dropped by migration `0050_drop_ask_messages`
 (lake#483), and its legacy reads went with it. `opportunities.cpp` is the first mutable
 collection (lake#376): a scan's Opportunities keyed by scan and rank and written only if absent,
-status changes conditional on the revision read; `assign_legacy_opportunities` and
-`legacy_opportunities` serve only the copy (migration `0046_opportunity_workspaces`).
+status changes conditional on the revision read; the retired table (migration
+`0046_opportunity_workspaces`) is dropped by `0070_drop_moved_tables` with its legacy reads.
 `stream_owners.cpp` is the second
-(lake#379): one `if_absent` record per topic, keyed by the topic's blind index; the stores keep only
-`assign_legacy_stream_owners` and `legacy_stream_owners` for the copy (migration
-`0047_stream_owner_workspaces`). `drive_share_links.cpp` is the drive share
+(lake#379): one `if_absent` record per topic, keyed by the topic's blind index; the stores hold no
+topic creator (the retired table is dropped by `0070`). `drive_share_links.cpp` is the drive share
 link collection (lake#350); the stores keep only `drive_share_link_route` (the content-free route
-of a pre-move token) and `assign_legacy_drive_share_links`/`legacy_drive_share_links` for the copy
-(migration `0048_drive_share_link_workspaces`). `forge_records.cpp` is the forge record collection
-(lake#341); the stores keep only `assign_legacy_forge_records`/`legacy_forge_records` for the copy
-(migration `0054_forge_record_workspaces`), and no longer write or read `forge_records`.
+of a pre-move token, migration `0048_drive_share_link_workspaces`). `forge_records.cpp` is the
+forge record collection (lake#341); the stores no longer write or read forge records. `0070`
+drops both retired tables.
 `secret_records.cpp` is the secrets collections' codecs (lake#328-#332); the stores no longer hold
 mounts, secrets, keys or data keys. They keep `secret_mount_routes` and the mount's policy objects
 (`create_secret_mount_route`), the customer KEK, which wraps and unwraps data keys without leaving
-the store and keeps the replaced version during a rotation, and
-`assign_legacy_secrets`/`legacy_secret_*` for the copy (migration `0057_secret_workspaces`). Dynamic
+the store and keeps the replaced version during a rotation (migration `0057_secret_workspaces`).
+Dynamic
 leases are records of their mount's workspace (lake#362, `SecretLeaseCodec` here); the stores keep
 only `secret_lease_routes`, the content-free route and due index (migration
 `0058_secret_lease_workspaces`; PostgreSQL claims due rows with `FOR UPDATE SKIP LOCKED` and holds
-them), and `legacy_dynamic_secret_leases` for the copy. A KEK
-rotation still rewraps the retired `secrets_data_keys` rows and the PKI authorities in its
-transaction.
+them). `0070` drops the retired secrets tables, and a KEK rotation now rewraps only the PKI
+authorities in its transaction (workspace data keys are rewrapped in their workspaces).
 `platform_records.cpp` is the platform collections' codecs (lake#358, lake#359), and `platform.cpp`'s
 sync writes each repository's environments and rows into that repository's workspace, creating an
 environment's policy object (external id `platform_environment_id`) on first sight, skipping a
 repository whose rows have not changed since its last write, and marking only that repository
-stale when its workspace cannot be written. The stores keep only
-`assign_legacy_platform_environments`/`legacy_platform_environments` and
-`assign_legacy_platform_mirror`/`legacy_platform_mirror` for the copy (migration
-`0060_platform_workspaces`), and no longer write or read either table.
+stale when its workspace cannot be written. The stores no longer write or read either retired
+table (migration `0060_platform_workspaces`), which `0070` drops.
 `application_webhook_records.cpp` is the next: an application's lifecycle events and its webhook
 delivery attempts in the application's workspace (lake#356, lake#357), each attempt claimed with
 `if_absent` before it is sent and settled with `if_revision`. The stores no longer write or read
-`auth_app_webhook_events` or `auth_app_webhook_deliveries`; `assign_legacy_application_webhook_events`
-and the two `legacy_application_webhook_*` reads serve only the copy (migration
-`0049_application_webhook_workspaces`), and `create_application` stores the application's
-immutable `workspace_id`.
+`auth_app_webhook_events` or `auth_app_webhook_deliveries` (migration
+`0049_application_webhook_workspaces`; `0070` drops both), and `create_application` stores the
+application's immutable `workspace_id`.
 `application_user_records.cpp` follows: an application's users and organizations in the
 application's workspace (lake#353, lake#354), with uniqueness claims beside them. The stores no
 longer write or read `auth_app_users` or `auth_app_organizations`, and session resolution no longer
 joins them; they keep the pool's own part (`revoke_application_user_sessions`,
-`delete_application_user_credentials`), `assign_legacy_application_directory` and the two
-`legacy_application_*` reads for the copy (migration `0055_application_user_workspaces`). A sign-up
+`delete_application_user_credentials`; migration `0055_application_user_workspaces`, and `0070`
+drops both retired tables). A sign-up
 takes the caller's `user_id`, and a sign-up or first OAuth sign-in reports `created_user`.
 Repositories carry the workspace they belong to (migration `0051_repository_workspaces`, lake#315).
 Both stores refuse `create_repository` without a live workspace of the repository's space and
 filter `list_repositories` by an optional workspace; `transfer_repository` is gone from the store
 interface because the routing trigger keeps a repository's space fixed.
 Repository usage lives in workspace Zettas (lake#348, lake#349, `metering.cpp`). Neither store
-writes or reads metering rows any more; `assign_legacy_metering` reruns migration `0053`'s owner
-assignment and `legacy_metering_usage`/`legacy_metering_build_records` page the retired rows for
-the copy (usage rows without transfer are left out).
+writes or reads metering rows any more; `0070` drops the retired tables.
 `application_credential_records.cpp` keeps an application's signing keys and webhooks in its
 workspace (lake#352, lake#355). The stores no longer write or read `auth_app_signing_keys` or
 `auth_app_webhooks`: they envelope and open the credentials with the keystore
 (`encrypt_application_credential`/`decrypt_application_credential`, accepted only for the
-`application.jwt.*` and `application.webhook.*` purposes), and `assign_legacy_application_credentials`
-with the two `legacy_application_*` reads serve only the copy (migration
-`0056_application_credential_workspaces`). `create_application` no longer writes a key.
+`application.jwt.*` and `application.webhook.*` purposes; migration
+`0056_application_credential_workspaces`, and `0070` drops both retired tables).
+`create_application` no longer writes a key.
 `application_settings_records.cpp` keeps an application's settings in its workspace (lake#351).
 The stores write and read only the routing columns of `auth_applications` (`create_application`
-leaves the settings columns NULL, and `update_application_theme` is gone);
-`assign_legacy_application_settings` reruns migration `0059`'s owner assignment and
-`legacy_application_settings` pages the rows that still hold settings, for the copy only.
+has no settings columns since `0070` dropped them, and `update_application_theme` is gone).
 `repository_records.cpp` keeps a repository's description in its workspace (lake#315 part 2): the
 codec, `get`/`create` (`if_absent`)/`update` (`if_revision`, reread on a conflict, `if_absent` for
 a first record) and one listing per space. The stores no longer read `repositories.description`
 (the Postgres columns answer `''`) and refuse one on create; `create_repository` takes an optional
-`NewRepository::id` so the record can be written first. `assign_legacy_repository_descriptions` reruns
-migration `0064`'s owner assignment and `legacy_repository_descriptions` pages the rows that still
-hold a description, for the copy only. `set_repository_ref` and `list_repository_refs` are gone
+`NewRepository::id` so the record can be written first; `0070` drops the retired column.
+`set_repository_ref` and `list_repository_refs` are gone
 with the `repository_refs` table (lake#319).
 `application_authorization_codes.cpp` keeps an application's authorization codes in its workspace
-(lake#363). The stores no longer write or read `auth_app_authorization_codes` except for the copy:
-`assign_legacy_application_authorization_codes` reruns migration `0061`'s owner assignment of live
-codes, `legacy_application_authorization_codes` pages the live codes by hash, and
-`record_legacy_application_authorization_code_copied` marks a code `copied` before it is written.
+(lake#363). The stores no longer write or read `auth_app_authorization_codes`, which `0070`
+drops.
 `agent_task_records.cpp` keeps what was written for an agent task in its workspace (lake#374,
 lake#375). The stores keep only the dispatch half: `create_agent_task` inserts no body (and takes
 the caller's `id` and `parent_task_id`), `record_agent_task_event` moves the phase and clears lake's
 notice, and `fail_agent_task` and the expiry update write lake's text to `agent_task_status.notice`.
-`assign_legacy_agent_tasks` reruns migration `0062`'s owner assignment and `legacy_agent_tasks`
-pages the tasks whose rows still hold content, for the copy only; the memory store's
-`seed_legacy_agent_task` writes such a task for the copy's tests.
+`0070` drops the retired content columns (`body`, `message`, `result`).
 `workspace_audit.cpp` keeps a workspace's audit (decision 52, lake#317): its chain in
 `lake_audit_events`, the n-th event at the blind key of `sequence:<n>` written `if_absent`
 (`append_workspace_audit_event` signs it after the chain's end and passes a place another writer

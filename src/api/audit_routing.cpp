@@ -125,6 +125,8 @@ constexpr std::array central = std::to_array<std::string_view>({
     "register_passkey",
     "register_sso_provider",
     "remove_member",
+    // lake#380: the operator's removal of a space's old store once its workspaces are switched.
+    "remove_space_store",
     "renew_dynamic_secret",
     "renew_timestamp_evidence",
     "replicate_transparency_log",

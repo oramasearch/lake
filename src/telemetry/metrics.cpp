@@ -251,15 +251,6 @@ public:
     delete_repository(const std::string& id, const control::RepositoryDeletion& deletion) override {
         return call("delete_repository", [&] { return store_->delete_repository(id, deletion); });
     }
-    control::Result<void> assign_legacy_repository_descriptions() override {
-        return call("assign_legacy_repository_descriptions",
-                    [&] { return store_->assign_legacy_repository_descriptions(); });
-    }
-    control::Result<std::vector<control::LegacyRepositoryDescription>>
-    legacy_repository_descriptions(const std::string& after_id, int limit) override {
-        return call("legacy_repository_descriptions",
-                    [&] { return store_->legacy_repository_descriptions(after_id, limit); });
-    }
     control::Result<void>
     assign_legacy_audit_events(const std::vector<std::string>& workspace_actions) override {
         return call("assign_legacy_audit_events",
@@ -269,33 +260,6 @@ public:
     legacy_audit_events(const std::string& after_id, int limit) override {
         return call("legacy_audit_events",
                     [&] { return store_->legacy_audit_events(after_id, limit); });
-    }
-    control::Result<void> assign_legacy_forge_records() override {
-        return call("assign_legacy_forge_records",
-                    [&] { return store_->assign_legacy_forge_records(); });
-    }
-    control::Result<std::vector<control::LegacyForgeRecord>>
-    legacy_forge_records(const std::string& after_id, int limit) override {
-        return call("legacy_forge_records",
-                    [&] { return store_->legacy_forge_records(after_id, limit); });
-    }
-    control::Result<void> assign_legacy_platform_environments() override {
-        return call("assign_legacy_platform_environments",
-                    [&] { return store_->assign_legacy_platform_environments(); });
-    }
-    control::Result<std::vector<control::LegacyPlatformEnvironment>>
-    legacy_platform_environments(const std::string& after_id, int limit) override {
-        return call("legacy_platform_environments",
-                    [&] { return store_->legacy_platform_environments(after_id, limit); });
-    }
-    control::Result<void> assign_legacy_platform_mirror() override {
-        return call("assign_legacy_platform_mirror",
-                    [&] { return store_->assign_legacy_platform_mirror(); });
-    }
-    control::Result<std::vector<control::LegacyPlatformMirrorRow>>
-    legacy_platform_mirror(const std::string& after_id, int limit) override {
-        return call("legacy_platform_mirror",
-                    [&] { return store_->legacy_platform_mirror(after_id, limit); });
     }
     control::Result<control::Team> create_team(const control::NewTeam& value) override {
         return call("create_team", [&] { return store_->create_team(value); });
@@ -418,15 +382,6 @@ public:
         return call("get_application_by_domain",
                     [&] { return store_->get_application_by_domain(domain); });
     }
-    control::Result<void> assign_legacy_application_settings() override {
-        return call("assign_legacy_application_settings",
-                    [&] { return store_->assign_legacy_application_settings(); });
-    }
-    control::Result<std::vector<control::LegacyApplicationSettings>>
-    legacy_application_settings(const std::string& after_id, int limit) override {
-        return call("legacy_application_settings",
-                    [&] { return store_->legacy_application_settings(after_id, limit); });
-    }
     control::Result<std::string>
     encrypt_application_credential(const std::string& purpose,
                                    const std::string& plaintext) override {
@@ -451,79 +406,10 @@ public:
             return store_->delete_application_user_credentials(application_id, user_id);
         });
     }
-    control::Result<void> assign_legacy_application_directory() override {
-        return call("assign_legacy_application_directory",
-                    [&] { return store_->assign_legacy_application_directory(); });
-    }
-    control::Result<std::vector<control::LegacyApplicationUser>>
-    legacy_application_users(const std::string& after_id, int limit) override {
-        return call("legacy_application_users",
-                    [&] { return store_->legacy_application_users(after_id, limit); });
-    }
-    control::Result<std::vector<control::LegacyApplicationOrganization>>
-    legacy_application_organizations(const std::string& after_id, int limit) override {
-        return call("legacy_application_organizations",
-                    [&] { return store_->legacy_application_organizations(after_id, limit); });
-    }
-    control::Result<void> assign_legacy_application_credentials() override {
-        return call("assign_legacy_application_credentials",
-                    [&] { return store_->assign_legacy_application_credentials(); });
-    }
-    control::Result<std::vector<control::LegacyApplicationSigningKeyRing>>
-    legacy_application_signing_keys(const std::string& after_application_id, int limit) override {
-        return call("legacy_application_signing_keys", [&] {
-            return store_->legacy_application_signing_keys(after_application_id, limit);
-        });
-    }
-    control::Result<std::vector<control::LegacyApplicationWebhook>>
-    legacy_application_webhooks(const std::string& after_id, int limit) override {
-        return call("legacy_application_webhooks",
-                    [&] { return store_->legacy_application_webhooks(after_id, limit); });
-    }
-    control::Result<void> assign_legacy_application_webhook_events() override {
-        return call("assign_legacy_application_webhook_events",
-                    [&] { return store_->assign_legacy_application_webhook_events(); });
-    }
-    control::Result<std::vector<control::LegacyApplicationWebhookEvent>>
-    legacy_application_webhook_events(const std::string& after_id, int limit) override {
-        return call("legacy_application_webhook_events",
-                    [&] { return store_->legacy_application_webhook_events(after_id, limit); });
-    }
-    control::Result<std::vector<control::LegacyApplicationWebhookDelivery>>
-    legacy_application_webhook_deliveries(const std::string& after_id, int limit) override {
-        return call("legacy_application_webhook_deliveries",
-                    [&] { return store_->legacy_application_webhook_deliveries(after_id, limit); });
-    }
-    control::Result<void> assign_legacy_application_authorization_codes() override {
-        return call("assign_legacy_application_authorization_codes",
-                    [&] { return store_->assign_legacy_application_authorization_codes(); });
-    }
-    control::Result<std::vector<control::LegacyApplicationAuthorizationCode>>
-    legacy_application_authorization_codes(const std::string& after_code_hash,
-                                           int limit) override {
-        return call("legacy_application_authorization_codes", [&] {
-            return store_->legacy_application_authorization_codes(after_code_hash, limit);
-        });
-    }
-    control::Result<void>
-    record_legacy_application_authorization_code_copied(const std::string& code_hash) override {
-        return call("record_legacy_application_authorization_code_copied", [&] {
-            return store_->record_legacy_application_authorization_code_copied(code_hash);
-        });
-    }
     control::Result<control::DriveShareLinkRoute>
     drive_share_link_route(const std::string& token_hash) override {
         return call("drive_share_link_route",
                     [&] { return store_->drive_share_link_route(token_hash); });
-    }
-    control::Result<void> assign_legacy_drive_share_links() override {
-        return call("assign_legacy_drive_share_links",
-                    [&] { return store_->assign_legacy_drive_share_links(); });
-    }
-    control::Result<std::vector<control::LegacyDriveShareLink>>
-    legacy_drive_share_links(const std::string& after_id, int limit) override {
-        return call("legacy_drive_share_links",
-                    [&] { return store_->legacy_drive_share_links(after_id, limit); });
     }
     audit::Result<audit::Identity> current_lake_identity() override {
         return call("current_lake_identity", [&] { return store_->current_lake_identity(); });
@@ -554,19 +440,6 @@ public:
                                                    int days) override {
         return call("set_audit_retention_days",
                     [&] { return store_->set_audit_retention_days(customer_id, days); });
-    }
-    control::Result<void> assign_legacy_metering() override {
-        return call("assign_legacy_metering", [&] { return store_->assign_legacy_metering(); });
-    }
-    control::Result<std::vector<control::LegacyMeteringUsage>>
-    legacy_metering_usage(const std::string& after_id, int limit) override {
-        return call("legacy_metering_usage",
-                    [&] { return store_->legacy_metering_usage(after_id, limit); });
-    }
-    control::Result<std::vector<control::LegacyMeteredBuild>>
-    legacy_metering_build_records(const std::string& after_id, int limit) override {
-        return call("legacy_metering_build_records",
-                    [&] { return store_->legacy_metering_build_records(after_id, limit); });
     }
     control::Result<std::optional<std::uint64_t>>
     storage_quota(const std::string& customer_id) override {
@@ -718,15 +591,6 @@ public:
     control::Result<std::vector<control::Build>>
     list_builds(const std::string& customer_id) override {
         return call("list_builds", [&] { return store_->list_builds(customer_id); });
-    }
-    control::Result<void> assign_legacy_stream_owners() override {
-        return call("assign_legacy_stream_owners",
-                    [&] { return store_->assign_legacy_stream_owners(); });
-    }
-    control::Result<std::vector<control::LegacyStreamOwner>>
-    legacy_stream_owners(const std::string& after_id, int limit) override {
-        return call("legacy_stream_owners",
-                    [&] { return store_->legacy_stream_owners(after_id, limit); });
     }
     control::Result<std::vector<control::AgentTaskStreamScope>>
     list_agent_task_stream_scopes(const std::string& customer_id) override {
@@ -889,24 +753,6 @@ public:
         return call("stale_agent_tasks",
                     [&] { return store_->stale_agent_tasks(republish_after); });
     }
-    control::Result<void> assign_legacy_agent_tasks() override {
-        return call("assign_legacy_agent_tasks",
-                    [&] { return store_->assign_legacy_agent_tasks(); });
-    }
-    control::Result<std::vector<control::LegacyAgentTask>>
-    legacy_agent_tasks(const std::string& after_id, int limit) override {
-        return call("legacy_agent_tasks",
-                    [&] { return store_->legacy_agent_tasks(after_id, limit); });
-    }
-    control::Result<void> assign_legacy_opportunities() override {
-        return call("assign_legacy_opportunities",
-                    [&] { return store_->assign_legacy_opportunities(); });
-    }
-    control::Result<std::vector<control::LegacyOpportunity>>
-    legacy_opportunities(const std::string& after_id, int limit) override {
-        return call("legacy_opportunities",
-                    [&] { return store_->legacy_opportunities(after_id, limit); });
-    }
     control::Result<control::AgentCronSchedule>
     create_agent_cron_schedule(const control::NewAgentCronSchedule& value) override {
         return call("create_agent_cron_schedule",
@@ -1049,39 +895,6 @@ public:
     claim_due_secret_leases(int limit, int hold_seconds) override {
         return call("claim_due_secret_leases",
                     [&] { return store_->claim_due_secret_leases(limit, hold_seconds); });
-    }
-    control::Result<void> assign_legacy_secrets() override {
-        return call("assign_legacy_secrets", [&] { return store_->assign_legacy_secrets(); });
-    }
-    control::Result<std::vector<control::LegacySecretMount>>
-    legacy_secret_mounts(const std::string& after_id, int limit) override {
-        return call("legacy_secret_mounts",
-                    [&] { return store_->legacy_secret_mounts(after_id, limit); });
-    }
-    control::Result<std::vector<control::LegacySecretEntry>>
-    legacy_secret_entries(const std::string& after_id, int limit) override {
-        return call("legacy_secret_entries",
-                    [&] { return store_->legacy_secret_entries(after_id, limit); });
-    }
-    control::Result<std::vector<control::LegacySecretVersion>>
-    legacy_secret_versions(const std::string& after_id, int limit) override {
-        return call("legacy_secret_versions",
-                    [&] { return store_->legacy_secret_versions(after_id, limit); });
-    }
-    control::Result<std::vector<control::LegacyEncryptionKey>>
-    legacy_encryption_keys(const std::string& after_id, int limit) override {
-        return call("legacy_encryption_keys",
-                    [&] { return store_->legacy_encryption_keys(after_id, limit); });
-    }
-    control::Result<std::vector<control::LegacySecretDataKey>>
-    legacy_secret_data_keys(const std::string& after_id, int limit) override {
-        return call("legacy_secret_data_keys",
-                    [&] { return store_->legacy_secret_data_keys(after_id, limit); });
-    }
-    control::Result<std::vector<control::LegacyDynamicSecretLease>>
-    legacy_dynamic_secret_leases(const std::string& after_id, int limit) override {
-        return call("legacy_dynamic_secret_leases",
-                    [&] { return store_->legacy_dynamic_secret_leases(after_id, limit); });
     }
 
     control::Result<control::IssuedSession>

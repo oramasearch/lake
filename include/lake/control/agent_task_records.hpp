@@ -67,10 +67,4 @@ create_agent_task_content(WorkspaceRecords& records, AgentTaskContent content);
 liquid::runtime::task<ZettaControlResult<AgentTaskContent>>
 record_agent_task_content(WorkspaceRecords& records, AgentTaskContent event, int attempts = 5);
 
-// Gives a record without a request the request of its task (the one-shot copy, for a task whose
-// events were recorded before its request was copied). A request already there is kept.
-liquid::runtime::task<ZettaControlResult<AgentTaskContent>>
-fill_agent_task_request(WorkspaceRecords& records, std::string task_id, std::string customer_id,
-                        nlohmann::json request, int attempts = 5);
-
 } // namespace lake::control
