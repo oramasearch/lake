@@ -149,8 +149,6 @@ struct ObjectStoreCounters {
     std::atomic<std::uint64_t> lists{0};
     std::atomic<std::uint64_t> removes{0};
     std::atomic<std::uint64_t> barriers{0};
-    // Barriers that sent anything: each is one round trip, its requests in flight together.
-    std::atomic<std::uint64_t> barrier_rounds{0};
     std::atomic<std::uint64_t> window_hits{0};
     std::atomic<std::uint64_t> window_misses{0};
 };
@@ -230,7 +228,9 @@ public:
     // calls it before it releases the lease, so a closed store leaves nothing unsent. Set by
     // ZettaObjectBackend; the last one constructed over the client is the open store's.
     void set_before_release(std::function<liquid::runtime::task<void>()> settle);
-    liquid::runtime::task<void> before_release() const;
+    // Bounded by `budget`: each request then gets one attempt, cut to the time left, so a drain
+    // with the workspace Zetta unreachable does not stall.
+    liquid::runtime::task<void> before_release(std::chrono::milliseconds budget = std::chrono::seconds(10));
 
 private:
     liquid::runtime::task<ObjectResponse>
@@ -243,6 +243,8 @@ private:
     std::string bucket_;
     std::shared_ptr<ObjectStoreCounters> counters_;
     ObjectRequestObserver observer_;
+    // While set (steady clock, nanoseconds), requests are cut to it and not retried.
+    std::atomic<std::int64_t> deadline_{0};
     mutable std::mutex settle_mutex_;
     std::function<liquid::runtime::task<void>()> settle_;
 };
@@ -297,10 +299,15 @@ struct ZettaObjectBackendOptions {
     std::size_t block_size = 64 * 1024;
     // Complete blocks of buffered appends are sent once at least this much is held.
     std::size_t flush_bytes = 1024 * 1024;
-    // A put of at most this many bytes is held until the next barrier and sent then, with the
-    // barrier's other writes, as one durable PUT (lake#527). A larger put is sent at once.
+    // A put of at most this many bytes is held until the next barrier and sent then, in its place
+    // among the held writes, as one PUT (lake#527). A larger put is sent at once.
     std::size_t deferred_put_bytes = 1024 * 1024;
-    // Requests one barrier keeps in flight at once.
+    // Held writes past either bound are sent at once, without durability (the next barrier then
+    // sends :barrier), so a long interval holds bounded memory.
+    std::size_t held_bytes_limit = 8 * 1024 * 1024;
+    std::size_t held_puts_limit = 256;
+    // Requests one barrier keeps in flight at once: the ordered writes count as one, the removal
+    // of stale tails beside them as one each.
     std::size_t barrier_concurrency = 16;
     // Reads fetch aligned windows of ciphertext this large and keep them.
     std::size_t window_bytes = 4 * 1024 * 1024;
@@ -322,8 +329,9 @@ struct ZettaObjectBackendOptions {
 // its associated data binding the workspace, K, the header, the block's region and index.
 //
 // Appends are buffered and sent as complete blocks once flush_bytes is held, and always before
-// barrier() answers. Small puts and removes are held until barrier() too, which sends everything
-// held at once and durably, so one barrier is one round trip (lake#527). A range rewritten with different bytes is refused with errc::conflict: Zetta
+// barrier() answers. Small puts are held until barrier() too (or until a later write needs them
+// sent), and every write is sent in liquid's issue order, one at a time, durably unless a
+// write since the last barrier went without (lake#527). A range rewritten with different bytes is refused with errc::conflict: Zetta
 // keeps objects append-only (liquid writes each index run once since liquid#332). Reads go through a bounded cache of aligned ciphertext windows keyed by the object
 // version's salt. The backend keeps a directory of the bucket from one listing, maintained by its
 // own writes; that is exact because the owner's fence makes it the only writer.
@@ -371,13 +379,18 @@ private:
     liquid::runtime::task<void> ensure_header(const std::string& key);
     liquid::runtime::task<void> ensure_open_region(const std::string& key);
     struct FlushPlan;
-    struct Ready;
+    struct SendGuard;
     liquid::runtime::task<void> flush_entry(const std::string& key);
+    liquid::runtime::task<void> drain(bool durable);
+    liquid::runtime::task<void> keep_order_before_holding(const std::string& key);
+    // Under mutex_: `key` has a held write of `bytes` (a put when `put`).
+    void hold(const std::string& key, std::uint64_t bytes, bool put);
+    // Under mutex_.
+    bool durable_now() const;
+    void release_plain(Entry& entry);
     // The writes that bring `key` up to date in Zetta, built under mutex_, or nothing.
     liquid::result<std::optional<FlushPlan>> plan_flush(const std::string& key, bool barrier);
     liquid::runtime::task<void> send_plan(FlushPlan plan, bool durable);
-    liquid::runtime::task<void> send_pending_remove(const std::string& key);
-    liquid::runtime::task<void> remove_key(std::string key);
     liquid::runtime::task<void> remove_stale_tail(std::string tail);
     liquid::runtime::task<std::string>
     read_main(const std::string& key, std::uint64_t offset, std::uint64_t size);
@@ -395,15 +408,29 @@ private:
     // Tails that become stale only once the next barrier completes (their replacement is not
     // durable yet); promoted to stale_tails_ when it does.
     std::set<std::string> retiring_tails_;
-    // Keys liquid removed since the last barrier that the bucket still holds: deleted durably at
-    // the next barrier (lake#527).
-    std::set<std::string> pending_removes_;
-    std::set<std::string> flushing_;
+    // Keys with held writes (a small put, buffered appends), in liquid's issue order; each key
+    // once, as the position of its earliest held write (lake#527). A write about a key held before
+    // another key's held write is sent with everything before it first, so the bucket never holds
+    // a later write without an earlier one.
+    std::vector<std::string> queue_;
+    // What is held, bounded by options.held_bytes_limit and held_puts_limit.
+    std::uint64_t held_bytes_ = 0;
+    std::size_t held_puts_ = 0;
+    // The plaintext kept in Entry::durable_plain, in all; at most 1 MiB.
+    std::uint64_t durable_plain_held_ = 0;
+    // One sender at a time, in issue order (SendGuard).
+    bool sending_ = false;
     std::condition_variable flushed_;
     // A write was acknowledged without durability since the last barrier: the next barrier sends
     // Zetta's :barrier too.
     bool dirty_ = false;
 };
+
+// Runs up to `width` of `jobs` at once on the caller's executor (a barrier's ordered writes and
+// its stale-tail removals). After the first failure no further job starts; the answer is the first
+// failure, `locked` (the lease passed on) before any other.
+liquid::runtime::task<void>
+run_object_requests(std::vector<std::function<liquid::runtime::task<void>()>> jobs, std::size_t width);
 
 // Liquid's store_owner over a bucket's lease: acquire waits (in pieces Zetta accepts) up to the
 // open's owner_wait and refuses with errc::locked naming the holder; a renewal thread renews every
@@ -411,9 +438,11 @@ private:
 // grant and calls on_lost. release stops renewing and releases the lease.
 class ZettaStoreOwner final : public liquid::store_owner {
 public:
+    // `settle_budget` bounds the sending of what the store's backend holds before release.
     ZettaStoreOwner(std::shared_ptr<ZettaObjectClient> client,
                     std::chrono::milliseconds ttl = std::chrono::seconds(30),
-                    std::function<void()> on_lost = {});
+                    std::function<void()> on_lost = {},
+                    std::chrono::milliseconds settle_budget = std::chrono::seconds(10));
     ~ZettaStoreOwner() override;
 
     liquid::runtime::task<liquid::owner_grant> acquire(std::string holder,
@@ -436,6 +465,7 @@ private:
     std::shared_ptr<ZettaObjectClient> client_;
     std::chrono::milliseconds ttl_;
     std::function<void()> on_lost_;
+    std::chrono::milliseconds settle_budget_;
     mutable std::mutex mutex_;
     std::condition_variable wake_;
     std::thread renewer_;

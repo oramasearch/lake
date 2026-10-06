@@ -40,8 +40,10 @@ public:
         std::map<std::string, std::string> objects;
         Lease lease;
         std::uint64_t barriers = 0;
-        // What survives a crash (lake#527): the objects as of the last barrier, plus each durable
-        // write (and the writes to its key before it), plus any prefix of each key's other writes.
+        // What survives a crash (lake#527): the bucket's log is one sequence of writes in the
+        // order they were applied; a barrier or a durable write makes everything up to it
+        // durable, and a crash keeps a prefix of the rest (Zetta truncates its log at the first
+        // torn frame). `unsynced` is that rest, each write with its key's value after it.
         std::map<std::string, std::string> durable;
         std::vector<std::pair<std::string, std::optional<std::string>>> unsynced;
     };
@@ -71,28 +73,17 @@ public:
         nodes_[endpoint].buckets[bucket].durable[key] = bytes;
         nodes_[endpoint].buckets[bucket].objects[key] = std::move(bytes);
     }
-    // The workspace Zetta stops at once and starts again (lake#527): each object keeps what the
-    // last barrier and the durable writes made durable, and of each key's other writes since, a
-    // prefix chosen by `seed` (Zetta's log keeps a key's frames in order and truncates at the
-    // first torn one). The lease is kept.
+    // The workspace Zetta stops at once and starts again (lake#527): the bucket keeps what was
+    // durable and a prefix, chosen by `seed`, of the writes applied since (in the order they were
+    // applied). The lease is kept.
     void crash(const std::string& endpoint, std::uint64_t seed) {
         std::lock_guard lock(mutex_);
         std::uint64_t state = seed * 6364136223846793005ULL + 1442695040888963407ULL;
-        const auto next = [&state](std::uint64_t bound) {
-            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
-            return bound == 0 ? 0 : (state >> 33U) % bound;
-        };
         for (auto& [name, bucket] : nodes_[endpoint].buckets) {
-            std::map<std::string, std::vector<std::optional<std::string>>> by_key;
-            for (const auto& [key, after] : bucket.unsynced) {
-                by_key[key].push_back(after);
-            }
-            for (const auto& [key, versions] : by_key) {
-                const std::uint64_t kept = next(versions.size() + 1);
-                if (kept == 0) {
-                    continue;
-                }
-                const auto& value = versions[kept - 1];
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            const std::size_t kept = static_cast<std::size_t>((state >> 33U) % (bucket.unsynced.size() + 1));
+            for (std::size_t index = 0; index < kept; ++index) {
+                const auto& [key, value] = bucket.unsynced[index];
                 if (value) {
                     bucket.durable[key] = *value;
                 } else {
@@ -102,6 +93,16 @@ public:
             bucket.unsynced.clear();
             bucket.objects = bucket.durable;
         }
+    }
+    // Every write applied, as "METHOD key", in the order it was applied.
+    std::vector<std::string> applied() {
+        std::lock_guard lock(mutex_);
+        return applied_;
+    }
+    // The most writes (PUT, PATCH, DELETE, :barrier) one bucket ever had in flight at once.
+    int most_writes_in_flight() {
+        std::lock_guard lock(mutex_);
+        return most_writes_in_flight_;
     }
     Lease lease(const std::string& endpoint, const std::string& bucket = "lake_store") {
         std::lock_guard lock(mutex_);
@@ -145,12 +146,24 @@ public:
         std::lock_guard lock(mutex_);
         fail_after_ = answered;
     }
-    // From now on each request gets no answer with `percent` % probability, drawn from `seed`
-    // (0 stops it): requests in flight together whose answers are lost in any order.
+    // From now on each request is lost before Zetta sees it with `percent` % probability, drawn
+    // from `seed` (0 stops it): nothing is applied and no answer comes.
     void fail_randomly(std::uint64_t seed, unsigned percent) {
         std::lock_guard lock(mutex_);
         loss_state_ = seed * 2862933555777941757ULL + 3037000493ULL;
         loss_percent_ = percent;
+    }
+    // From now on each request is applied and then its answer lost with `percent` % probability,
+    // drawn from `seed` (0 stops it): the caller sees no answer for a write that landed.
+    void lose_answers_randomly(std::uint64_t seed, unsigned percent) {
+        std::lock_guard lock(mutex_);
+        answer_state_ = seed * 2862933555777941757ULL + 3037000493ULL;
+        answer_loss_percent_ = percent;
+    }
+    // The next `count` answers are lost after their request was applied.
+    void lose_next_answers(int count) {
+        std::lock_guard lock(mutex_);
+        lose_answers_ = count;
     }
     // The next `count` requests get no answer (a transport failure).
     void drop_next(int count) {
@@ -226,6 +239,22 @@ public:
                 }
             }
         }
+        const bool write = request.method == "PUT" || request.method == "PATCH" ||
+                           request.method == "DELETE" || request.url.ends_with(":barrier");
+        if (write) {
+            std::lock_guard lock(mutex_);
+            most_writes_in_flight_ = std::max(most_writes_in_flight_, ++writes_in_flight_);
+        }
+        struct Leave {
+            FakeZettaObjects& self;
+            bool write;
+            ~Leave() {
+                if (write) {
+                    std::lock_guard lock(self.mutex_);
+                    --self.writes_in_flight_;
+                }
+            }
+        } leave{*this, write};
         if (latency.count() > 0) {
             std::this_thread::sleep_for(latency);
         }
@@ -237,7 +266,23 @@ public:
             }
             std::this_thread::sleep_for(delay);
         }
-        co_return answer(std::move(request));
+        auto answered = answer(std::move(request));
+        {
+            std::lock_guard lock(mutex_);
+            bool lose = false;
+            if (lose_answers_ > 0) {
+                --lose_answers_;
+                lose = true;
+            }
+            if (answer_loss_percent_ != 0) {
+                answer_state_ = answer_state_ * 6364136223846793005ULL + 1442695040888963407ULL;
+                lose = lose || (answer_state_ >> 33U) % 100 < answer_loss_percent_;
+            }
+            if (lose) {
+                co_return control::ObjectResponse{0, {}, "the answer was lost after the write (test)"};
+            }
+        }
+        co_return answered;
     }
 
 private:
@@ -294,9 +339,10 @@ private:
         }
         return output;
     }
-    // A write was applied: it is durable now when it asked to be (with the writes to its key
-    // before it), otherwise only once a barrier answers.
-    static void record(Bucket& bucket, const std::string& key, bool durable) {
+    // A write was applied: appended to the log; when it asked to be durable, it and everything
+    // before it are.
+    void record(Bucket& bucket, const std::string& key, bool durable, const std::string& method) {
+        applied_.push_back(method + " " + key);
         const auto found = bucket.objects.find(key);
         bucket.unsynced.emplace_back(key, found == bucket.objects.end()
                                               ? std::nullopt
@@ -304,12 +350,14 @@ private:
         if (!durable) {
             return;
         }
-        std::erase_if(bucket.unsynced, [&key](const auto& entry) { return entry.first == key; });
-        if (found == bucket.objects.end()) {
-            bucket.durable.erase(key);
-        } else {
-            bucket.durable[key] = found->second;
+        for (const auto& [written, value] : bucket.unsynced) {
+            if (value) {
+                bucket.durable[written] = *value;
+            } else {
+                bucket.durable.erase(written);
+            }
         }
+        bucket.unsynced.clear();
     }
     std::uint64_t used(const Bucket& bucket) const {
         std::uint64_t total = 0;
@@ -537,7 +585,7 @@ private:
                 return refused(507, "quota_exceeded", "past the bucket's quota");
             }
             bucket.objects[key] = request.body;
-            record(bucket, key, parameters.contains("durable"));
+            record(bucket, key, parameters.contains("durable"), request.method);
             return ok(written);
         }
         if (request.method == "PATCH") {
@@ -548,7 +596,7 @@ private:
                     return refused(507, "quota_exceeded", "past the bucket's quota");
                 }
                 object += request.body;
-                record(bucket, key, parameters.contains("durable"));
+                record(bucket, key, parameters.contains("durable"), request.method);
                 return ok(written);
             }
             if (offset < object.size() && offset + request.body.size() <= object.size() &&
@@ -567,7 +615,7 @@ private:
             if (bucket.objects.erase(key) == 0) {
                 return refused(404, "not_found", "no object " + key);
             }
-            record(bucket, key, parameters.contains("durable"));
+            record(bucket, key, parameters.contains("durable"), request.method);
             return ok(written);
         }
         return refused(404, "not_found", "no route");
@@ -584,6 +632,12 @@ private:
     int fail_after_ = -1;
     std::uint64_t loss_state_ = 0;
     unsigned loss_percent_ = 0;
+    std::uint64_t answer_state_ = 0;
+    unsigned answer_loss_percent_ = 0;
+    int lose_answers_ = 0;
+    int writes_in_flight_ = 0;
+    std::vector<std::string> applied_;
+    int most_writes_in_flight_ = 0;
     std::string drop_method_;
     int drop_nth_ = 0;
     int drop_count_ = 0;
