@@ -184,11 +184,13 @@ Zetta's object routes; `make_zetta_object_transport` uses Zetta's installed clie
 from `LAKE_INSTANCE_KEK`, AES-256-GCM blocks), `ZettaObjectBackend` (liquid's `store_backend`: the
 encrypted block layout, buffered appends, tails, the window cache, the bucket directory, `failed()`,
 and `create_key`, without which a missing data key is never created; since lake#527 every write
-is sent in liquid's issue order, one at a time, small puts and appends held until the barrier
-or a later write needs them, removals at once)
+is sent in liquid's issue order, one at a time, small puts and appends held until a later write
+needs them sent, removals at once; since lake#535 every write goes without durability, liquid's
+`barrier()` sends nothing, and `sync()`/`make_durable()` send what is held and one Zetta
+`:barrier`, which lake runs at the end of each store operation before it answers)
 and `ZettaStoreOwner` (liquid's `store_owner` over the bucket lease, which settles the backend
 before it releases). `ObjectRequestKind`, `ObjectRequestTally` and `ObjectRequestScope` count the
 requests by kind for the process metrics and a request's `Server-Timing`, and
-`run_object_requests` runs a barrier's requests (lake#527). `zetta_workspace.hpp` adds
+`run_object_requests` runs a sync's `:barrier` and stale-tail removals (lake#527). `zetta_workspace.hpp` adds
 `WorkspaceService::endpoint`, and `store.hpp` `Workspace::store_moved_at` and
 `mark_workspace_store_moved` (migration `0067`).

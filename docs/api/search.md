@@ -197,8 +197,10 @@ query corpus. New blob text is added to the customer catalogue once by digest; l
 repositories reuse it. The response names the originating change for every matching path.
 
 On lake's volume the manifest is written to a sibling temporary file, flushed, and renamed over
-`manifest.json`; in a workspace it is one atomic `put` after a barrier. New segments and the blobs
-they add are written before that replacement. A query holds one
+`manifest.json`; in a workspace it is one atomic `put`, sent after the objects it names were each
+answered and followed by one `:barrier` (the bucket's log keeps the order they were sent in, so no
+barrier is needed before it, lake#535). New segments and the blobs they add are written before that
+replacement. A query holds one
 in-memory manifest state while it gathers candidates; publication swaps in the rebuilt state only
 after the replacement succeeds. It consequently observes the previous complete change or the next
 complete change, never a mixture.

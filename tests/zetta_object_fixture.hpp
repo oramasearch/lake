@@ -40,6 +40,9 @@ public:
         std::map<std::string, std::string> objects;
         Lease lease;
         std::uint64_t barriers = 0;
+        // Requests that asked to be durable: each :barrier and each write with ?durable=true
+        // (lake#535). On a real disk each is an fsync.
+        std::uint64_t durable_requests = 0;
         // What survives a crash (lake#527): the bucket's log is one sequence of writes in the
         // order they were applied; a barrier or a durable write makes everything up to it
         // durable, and a crash keeps a prefix of the rest (Zetta truncates its log at the first
@@ -117,6 +120,10 @@ public:
     std::uint64_t barriers(const std::string& endpoint, const std::string& bucket = "lake_store") {
         std::lock_guard lock(mutex_);
         return nodes_[endpoint].buckets[bucket].barriers;
+    }
+    std::uint64_t durable_requests(const std::string& endpoint, const std::string& bucket = "lake_store") {
+        std::lock_guard lock(mutex_);
+        return nodes_[endpoint].buckets[bucket].durable_requests;
     }
     std::uint64_t requests() {
         std::lock_guard lock(mutex_);
@@ -350,6 +357,7 @@ private:
         if (!durable) {
             return;
         }
+        ++bucket.durable_requests;
         for (const auto& [written, value] : bucket.unsynced) {
             if (value) {
                 bucket.durable[written] = *value;
@@ -482,6 +490,7 @@ private:
             }
             if (operation == "barrier") {
                 ++bucket.barriers;
+                ++bucket.durable_requests;
                 bucket.durable = bucket.objects;
                 bucket.unsynced.clear();
                 return ok({{"bucket", name}, {"nodes", 1}});

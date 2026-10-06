@@ -258,8 +258,9 @@ repositories from the space's search index (`search::Service::drop_switched`, la
 routes a repository to its workspace's store once `workspaces.store_moved_at` is set (failing
 closed), holds one lane per store (`s:<space>`, `w:<workspace>`) with its map lock never held across
 I/O, opens each workspace store on first use, never creates a workspace store, key or repository
-except explicitly (`create_repository_content`, the switch), closes and reopens a store whose lease
-was lost or whose write failed, closes them on drain and on workspace
+except explicitly (`create_repository_content`, the switch), makes what a call wrote to a workspace
+store durable before it answers (`StoreDurability`, one Zetta `:barrier` per call, lake#535),
+closes and reopens a store whose lease was lost or whose write failed, closes them on drain and on workspace
 deletion (`WorkspaceContent::close_workspace_store`), measures a switched workspace's storage as
 its bucket's usage, and keeps replication cursors with liquid's cursor API.
 

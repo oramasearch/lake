@@ -227,10 +227,15 @@ public:
                                              std::chrono::milliseconds timeout);
     liquid::runtime::task<void> release(std::string holder, std::uint64_t fence);
 
-    // Sends what a backend over this client holds for the next barrier (lake#527); the owner
-    // calls it before it releases the lease, so a closed store leaves nothing unsent. Set by
-    // ZettaObjectBackend; the last one constructed over the client is the open store's.
-    void set_before_release(std::function<liquid::runtime::task<void>()> settle);
+    // Sends what a backend over this client holds and makes it durable (lake#527, lake#535); the
+    // owner calls it before it releases the lease, so a closed store leaves nothing unsent or
+    // undurable. Set by ZettaObjectBackend; the last one constructed over the client is the open
+    // store's.
+    // `abandon` lets go of what the backend holds without sending it: the owner calls it instead
+    // when the lease was lost or never held.
+    void set_before_release(std::function<liquid::runtime::task<void>()> settle,
+                            std::function<void()> abandon = {});
+    void abandon_before_release();
     // Bounded by `budget`: each request then gets one attempt, cut to the time left, so a drain
     // with the workspace Zetta unreachable does not stall.
     liquid::runtime::task<void> before_release(std::chrono::milliseconds budget = std::chrono::seconds(10));
@@ -248,6 +253,7 @@ private:
     ObjectRequestObserver observer_;
     mutable std::mutex settle_mutex_;
     std::function<liquid::runtime::task<void>()> settle_;
+    std::function<void()> abandon_;
 };
 
 // The workspace's data key (S3): random, 32 bytes, wrapped with AES-256-GCM under
@@ -300,15 +306,15 @@ struct ZettaObjectBackendOptions {
     std::size_t block_size = 64 * 1024;
     // Complete blocks of buffered appends are sent once at least this much is held.
     std::size_t flush_bytes = 1024 * 1024;
-    // A put of at most this many bytes is held until the next barrier and sent then, in its place
+    // A put of at most this many bytes is held until the next sync and sent then, in its place
     // among the held writes, as one PUT (lake#527). A larger put is sent at once.
     std::size_t deferred_put_bytes = 1024 * 1024;
-    // Held writes past either bound are sent at once, without durability (the next barrier then
-    // sends :barrier), so a long interval holds bounded memory.
+    // Held writes past either bound are sent at once (the next sync's :barrier makes them
+    // durable), so a long operation holds bounded memory.
     std::size_t held_bytes_limit = 8 * 1024 * 1024;
     std::size_t held_puts_limit = 256;
-    // Requests one barrier keeps in flight at once: the ordered writes count as one, the removal
-    // of stale tails beside them as one each.
+    // Requests one sync keeps in flight at once after its ordered writes: the :barrier and the
+    // removals of stale tails beside it.
     std::size_t barrier_concurrency = 16;
     // Reads fetch aligned windows of ciphertext this large and keep them.
     std::size_t window_bytes = 4 * 1024 * 1024;
@@ -325,14 +331,16 @@ struct ZettaObjectBackendOptions {
 // Layout: liquid key K is the object K: a 48-byte header (format, key version, block size, the
 // length of the bytes K was created with by `put`, and a random salt), then those bytes as
 // encrypted blocks, then each later complete block of appended bytes. An appended partial block
-// is kept as the object `K.lake-tail-<block>-<salt>`, replaced at each barrier; a tail whose block
+// is kept as the object `K.lake-tail-<block>-<salt>`, replaced as it grows; a tail whose block
 // or salt no longer matches is stale and ignored. Every block is AES-256-GCM with a random nonce,
 // its associated data binding the workspace, K, the header, the block's region and index.
 //
-// Appends are buffered and sent as complete blocks once flush_bytes is held, and always before
-// barrier() answers. Small puts are held until barrier() too (or until a later write needs them
-// sent), and every write is sent in liquid's issue order, one at a time, durably unless a
-// write since the last barrier went without (lake#527). A range rewritten with different bytes is refused with errc::conflict: Zetta
+// Appends are buffered and sent as complete blocks once flush_bytes is held. Small puts are held
+// too, across liquid's barriers, until a later write needs them sent or sync() (lake#527,
+// lake#535). Every write is sent in liquid's issue order, one at a time, without durability, so
+// a crash keeps a prefix of that order; sync() sends what is held and then one Zetta :barrier,
+// and lake calls it (make_durable) at the end of each store operation, before it answers. A range
+// rewritten with different bytes is refused with errc::conflict: Zetta
 // keeps objects append-only (liquid writes each index run once since liquid#332). Reads go through a bounded cache of aligned ciphertext windows keyed by the object
 // version's salt. The backend keeps a directory of the bucket from one listing, maintained by its
 // own writes; that is exact because the owner's fence makes it the only writer.
@@ -352,8 +360,15 @@ public:
     get_range(std::string key, std::uint64_t offset, std::uint64_t size) override;
     liquid::runtime::task<void> remove(std::string key) override;
     liquid::runtime::task<std::vector<liquid::store_backend_entry>> list(std::string prefix) override;
+    // Liquid's barrier: a point in its issue order, which sends nothing (lake#535).
     liquid::runtime::task<void> barrier() override;
     liquid::result<std::shared_ptr<liquid::store_backend>> fenced(std::uint64_t fence) const override;
+    // Sends what this view holds, in issue order, then one :barrier when anything was sent since
+    // the last one: everything issued before it is durable when it answers (lake#535).
+    liquid::runtime::task<void> sync();
+    // sync() on this backend and every view of it. Lake calls it at the end of each operation on
+    // a workspace store, before it answers, so an acknowledged operation is durable.
+    liquid::runtime::task<void> make_durable();
 
     std::optional<std::uint64_t> fence() const {
         return fence_;
@@ -362,9 +377,10 @@ public:
     // A mutation through this backend or any of its views failed: liquid's memory of the store
     // may be ahead of the bucket, so the store must be closed and opened again before more use.
     bool failed() const;
-    // What this view holds for its next barrier: bytes and puts.
+    // What this view holds for its next sync: bytes and puts.
     std::pair<std::uint64_t, std::size_t> held() const;
-    // Barriers every view of this backend: what they hold is sent and durable (lake#527).
+    // Syncs every view of this backend and lets go of them: what they hold is sent and durable
+    // (lake#527, lake#535). The owner's release runs it.
     static liquid::runtime::task<void> settle(std::shared_ptr<Shared> shared);
 
     struct Entry;
@@ -376,6 +392,7 @@ private:
     put_range_impl(std::string key, std::uint64_t offset, std::vector<std::byte> bytes);
     liquid::runtime::task<void> remove_impl(std::string key);
     liquid::runtime::task<void> barrier_impl();
+    liquid::runtime::task<void> sync_impl();
     liquid::result<void> observe(liquid::result<void> outcome, bool tolerated);
     liquid::runtime::task<void> ensure_directory();
     liquid::runtime::task<void> ensure_cipher();
@@ -384,18 +401,20 @@ private:
     struct FlushPlan;
     struct SendGuard;
     liquid::runtime::task<void> flush_entry(const std::string& key);
-    liquid::runtime::task<void> drain(bool durable);
+    liquid::runtime::task<void> drain();
     liquid::runtime::task<void> keep_order_before_holding(const std::string& key);
     // Under mutex_: `key` has a held write of `bytes` (a put when `put`, which replaces what was
     // held for the key); unhold forgets what is held for `key`.
     void hold(const std::string& key, std::uint64_t bytes, bool put);
     void unhold(const std::string& key);
-    // Under mutex_.
-    bool durable_now() const;
+    // Under mutex_: a removal of `key` may drop its held write and send nothing.
+    bool removable_unsent(const std::string& key) const;
     void release_plain(Entry& entry);
+    // Something is held or was sent since the last :barrier: the view needs a sync.
+    bool unsettled() const;
     // The writes that bring `key` up to date in Zetta, built under mutex_, or nothing.
     liquid::result<std::optional<FlushPlan>> plan_flush(const std::string& key, bool barrier);
-    liquid::runtime::task<void> send_plan(FlushPlan plan, bool durable);
+    liquid::runtime::task<void> send_plan(FlushPlan plan);
     liquid::runtime::task<void> remove_stale_tail(std::string tail);
     liquid::runtime::task<std::string>
     read_main(const std::string& key, std::uint64_t offset, std::uint64_t size);
@@ -407,10 +426,10 @@ private:
     mutable std::mutex mutex_;
     bool directory_loaded_ = false;
     std::map<std::string, std::unique_ptr<Entry>> directory_;
-    // Tails no reader needs once the bucket holds what the last barrier acknowledged: removed,
-    // without durability, beside the next barrier's writes.
+    // Tails no reader needs once the bucket holds what the last sync made durable: removed,
+    // without durability, beside the next sync's :barrier.
     std::set<std::string> stale_tails_;
-    // Tails that become stale only once the next barrier completes (their replacement is not
+    // Tails that become stale only once the next sync completes (their replacement is not
     // durable yet); promoted to stale_tails_ when it does.
     std::set<std::string> retiring_tails_;
     // Keys with held writes (a small put, buffered appends), in liquid's issue order; each key
@@ -422,17 +441,16 @@ private:
     std::uint64_t held_bytes_ = 0;
     std::size_t held_puts_ = 0;
     std::map<std::string, std::pair<std::uint64_t, std::size_t>> held_by_key_;
-    // The plaintext kept in Entry::durable_plain, in all; at most 1 MiB.
-    std::uint64_t durable_plain_held_ = 0;
+    // The plaintext kept in Entry::sent_plain, in all; at most 1 MiB.
+    std::uint64_t sent_plain_held_ = 0;
     // One sender at a time, in issue order (SendGuard).
     bool sending_ = false;
     std::condition_variable flushed_;
-    // A write was acknowledged without durability since the last barrier: the next barrier sends
-    // Zetta's :barrier too.
+    // A write was sent since the last :barrier: the next sync sends one.
     bool dirty_ = false;
 };
 
-// Runs up to `width` of `jobs` at once on the caller's executor (a barrier's ordered writes and
+// Runs up to `width` of `jobs` at once on the caller's executor (a sync's :barrier and
 // its stale-tail removals). After the first failure no further job starts; the answer is the first
 // failure, `locked` (the lease passed on) before any other.
 liquid::runtime::task<void>
