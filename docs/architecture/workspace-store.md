@@ -130,18 +130,34 @@ held, in order, and then one Zetta `:barrier`. Before lake#535 every write went 
 disk, 3.1 to 3.4 s per commit); it now pays one.
 
 What "a crash keeps a prefix" covers: a crash of the lake process or of the Zetta process on a
-one-node workspace Zetta (every workspace today). A power loss of the workspace Zetta's node also
-keeps a prefix, except across a segment roll: a later segment's pages can reach the disk while an
-earlier segment's unsynced tail does not, so a later write can survive without an earlier one
-([zetta#1235](https://github.com/oramasearch/zetta/issues/1235)). Lake#535 makes that window
-larger: before, each write was fsynced before the next was sent, so only the writes sent without
-durability (large puts, threshold flushes) were exposed; now every write between two syncs is,
-which is one store operation. The `:barrier` at the end of the operation closes it (it fsyncs every
-segment written since the last one), so what lake acknowledged is never affected, and a roll
-happens once per 64 MiB written, after which Zetta's maintenance fsyncs the rolled segment within
-100 ms. Once zetta#1235 lands (the roll fsyncs the previous segment), a power loss keeps a prefix
-too. With `rf` above 1 each key has its own primary, so Zetta gives no order across keys; the
-`:barrier`'s durability still holds.
+one-node workspace Zetta (every workspace today). A power loss of the workspace Zetta's node does
+not, yet: across a segment roll a later segment's pages can reach the disk while an earlier
+segment's unsynced tail does not, so a later write can survive without an earlier one
+([zetta#1235](https://github.com/oramasearch/zetta/issues/1235)). With `rf` above 1 each key has
+its own primary, so Zetta gives no order across keys; the `:barrier`'s durability still holds.
+
+**Deploy gate: zetta#1235.** Before lake#535 every write was fsynced before the next was sent, so
+only the writes sent without durability (large puts, threshold flushes) were exposed to that
+window. Since lake#535 every write of an operation is, until its `:barrier`, and that loses
+acknowledged data, not only the operation in flight. For example, a checkpoint puts `LIQUID_REPO`
+and later removes `LIQUID_JOURNAL`; if the segment rolls between the two and the node loses power
+before the roll is synced, the removal can survive without the put, and the reopened repository
+falls back to the previous `LIQUID_REPO` with no journal, losing up to a checkpoint interval (64)
+of acknowledged commits. A collection that writes a new pack and then removes the old ones can
+lose objects the same way. The window is short (a roll happens once per 64 MiB written, and Zetta's
+maintenance fsyncs a rolled segment within 100 ms), but it is real, so the order is:
+1. zetta#1235 fixed (a roll fsyncs the previous segment, or a durable request syncs every earlier
+   unsynced segment) and rolled out to every workspace Zetta;
+2. then lake with lake#535.
+With zetta#1235 in place a power loss keeps a prefix of the bucket's log, and every argument below
+holds for it too.
+
+**Not detected: a Zetta restart inside an operation.** If the workspace Zetta restarts (a power
+loss of its node) between two writes of one operation, lake sees only failed or slow requests,
+then answers; the writes before the restart may be gone while the ones after it landed, and
+neither lake nor the final `:barrier` can tell. Before lake#535 each write was durable before the
+next, so a restart lost nothing acknowledged. A boot or incarnation id from Zetta in each answer,
+checked by the backend, would close this: a change within one operation fails it.
 
 Why liquid's barriers need not be durable: a crash keeps a prefix of the issue order, and every
 prefix is a state liquid could have been left in by a crash at the moment that prefix ends, on a
@@ -624,13 +640,18 @@ ranges are two runs):
 | | Requests | durable (fsync) | 0 ms RTT | 5 ms | 10 ms | 2 ms + 30 ms fsync | 10 ms + 30 ms fsync |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | #532 (before) | 80 | 80 | 71 ms | 607 ms | 1,068 ms | 3,371 ms | 4,261 ms |
-| lake#535 | 63 | 1 | 56-60 ms | 473-594 ms | 844-946 ms | 264-369 ms | 895-964 ms |
+| lake#535 | 63 | 1 | 56-60 ms | 473-603 ms | 844-979 ms | 264-369 ms | 895-1,028 ms |
 
 With the dev-like repository (`LAKE_TEST_ZETTA_SEED_COMMITS=40`, 2 ms round trip, 30 ms fsync):
 116 requests and 115 fsyncs, 5.3 s in requests, before; 113 requests and 1 fsync, 0.6 s in
 requests, after. That run also spends about 1.5 s outside requests (2.6 s before), in liquid and
 the backend's own work for a repository of 320 files on a loaded machine; dev's `Server-Timing`
 shows no such share (its store time is the whole commit).
+
+Opening costs one fsync more: a workspace store's open sends one `:barrier` (its view starts
+unsynced), and a repository's open one more when liquid's open wrote something (it rewrites the
+repository's entry point). At dev's figures that is about 32 ms per open, once per process for
+each workspace store and repository, and lake#536's pre-open pays it before the first request.
 
 Through a running lake (`WorkspaceStoreMove.ACommitNamesItsStoreRequestsInServerTimingAndMetrics`,
 fake Zetta) a commit is 56 requests, 70 before: liquid's 48 writes (62 before) and one `:barrier`,
@@ -777,9 +798,12 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreHandoff.ASearchRebuildDoesNotHoldOffTheRelease` | lake#536: a search index rebuild reading eight repositories from a slow workspace Zetta stops at the drain, and the lease is released in under 2.5 s (about 8.5 s when the rebuild runs on) |
 | `RegistryStore.ADrainingLakeRefusesBlobWorkAndNeverRetakesTheLease` | lake#536: after `begin_drain` a blob `HEAD` and `GET` answer `503` with `Retry-After: 1` (stream admission), the operator's copy of an unrooted blob is refused by `root_workspace_blob`, and the released lease is not taken again |
 | `WorkspaceStoreHandoff.TheDrainIsAnnouncedOnlyOnceAnOpenInProgressHasFinished` | lake#536: with an open in progress at the drain, the announcement waits for it (written at once without the count) |
-| `WorkspaceStoreHandoff.AnUnreadyWorkspaceDoesNotHoldUpTheOthersRepositories` | lake#536: with one workspace's Zetta not ready, another's repositories are opened within 3 s of the root |
+| `WorkspaceStoreHandoff.AnUnreadyWorkspaceDoesNotHoldUpTheOthersRepositories` | lake#536: with one workspace's Zetta not ready, another's repositories are opened within 3 s of the root; lake#535: nothing their open wrote is left unsynced |
 | `WorkspaceStoreHandoff.AStaleDrainAnnouncementIsIgnored` | lake#536: an earlier owner's announcement and a copy of the record with another token are ignored; the successor takes no free lease, and removes the marker once it owns the root |
 | `WorkspaceStoreHandoff.IndexWorkTheDrainDropsIsRebuiltByTheSuccessor` | lake#536: a rebuild and a pending commit dropped by the drain: the manifest is removed, and the successor's rebuilt index holds every commit |
 | `WorkspaceStoreBackend.ACommitAsksForOneDurableRequestAndKeepsItsJournalRemoval` | lake#535: liquid one-file commits that each checkpoint send no fsync until lake's sync, which sends one `:barrier`; an idle sync sends nothing; after a crash `LIQUID_JOURNAL` stays removed and the reopened head is the last commit |
+| `WorkspaceStoreBackend.ANewViewsFirstSyncMakesWhatItServesDurable` | lake#535: a write a predecessor sent but never made durable is served by the next view, whose first sync sends `:barrier` (and only the first); a crash after it keeps the write |
+| `WorkspaceStoreMove.AStoreWhoseOpeningBarrierFailsIsNotServed` | lake#535: after a restart, a workspace store whose opening `:barrier` fails serves no read; once Zetta answers, it opens and serves |
+| `WorkspaceStoreOwner.ViewsKeptForAReleaseThatNeverComesAreLetGo` | lake#535: views kept for the owner's release are let go of when the owner goes without one |
 | `WorkspaceStoreOwner.ALiquidCloseSyncsWhatTheBackendHolds` | lake#535: liquid's close (backend let go of, grant revoked) still syncs what the backend holds with one `:barrier`; a crash after it keeps every object |
 | `WorkspaceStoreBackend.AStagedObjectRemovedAfterItsPublicationSendsOnlyThePublication` | lake#535: a staged object published and then removed sends only the publication; with two held keys after the staging, everything is sent; a crash keeps a prefix |

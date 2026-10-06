@@ -5915,7 +5915,10 @@ private:
         if (!created && created.error().code != liquid::errc::already_exists) {
             return std::unexpected(error_of(created.error()));
         }
-        // Durable before the repository's row or the switch is acknowledged (lake#535).
+        // Durable before the creation or the switch is answered (lake#535). The repository's row
+        // was written before this (create_repository_content): a crash between the two leaves a
+        // row whose repository is missing, which is answered `missing_repository` and tombstoned
+        // by the next creation of its name (create_repository_row).
         return StoreDurability((*workspace)->backend).now();
     }
 
