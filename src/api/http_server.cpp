@@ -404,20 +404,10 @@ private:
     boost::http::router<boost::http::route_params> router_;
 };
 
-boost::http::route_task send_text(boost::http::route_params& route,
-                                  boost::http::status status,
-                                  std::string body,
-                                  std::string_view content_type,
-                                  std::string_view cache_control) {
-    namespace http = boost::http;
-    route.status(status);
-    route.res.set(http::field::content_type, content_type);
-    route.res.set(http::field::cache_control, cache_control);
-    if (content_type.starts_with("text/html")) {
-        body = web_ui_workspace_document(std::move(body), workspace_path_id(std::string(route.url.path())));
-        // Only lake frames lake's pages (the Ask Orama panel, lake#258): no clickjacking.
-        route.res.set("Content-Security-Policy", "frame-ancestors 'self'");
-    }
+// The Server-Timing of a response: the request's total, its workspace calls (one entry each, named
+// by Zetta capability, docs/ui/performance.md), and its workspace store requests (lake#527): one
+// `store` entry with their total and count, then one per kind.
+std::string server_timing_of(const boost::http::route_params& route) {
     const auto timing = request_timing(route);
     const auto now = std::chrono::steady_clock::now();
     const double total_ms =
@@ -450,8 +440,43 @@ boost::http::route_task send_text(boost::http::route_params& route,
                                          name,
                                          static_cast<double>(call.nanoseconds) / 1'000'000.0);
         }
+        const control::ObjectRequestTally& store = timing->workspace_calls->store;
+        if (const std::uint64_t requests = store.total_requests(); requests != 0) {
+            server_timing += std::format(", store;dur={:.3f};desc=\"{} requests\"",
+                                         static_cast<double>(store.total_nanoseconds()) / 1'000'000.0,
+                                         requests);
+            for (std::size_t index = 0; index < control::object_request_kinds; ++index) {
+                const std::uint64_t count = store.count[index].load(std::memory_order_relaxed);
+                if (count == 0) {
+                    continue;
+                }
+                server_timing += std::format(
+                    ", store_{};dur={:.3f};desc=\"{}\"",
+                    control::object_request_kind_name(static_cast<control::ObjectRequestKind>(index)),
+                    static_cast<double>(store.nanoseconds[index].load(std::memory_order_relaxed)) /
+                        1'000'000.0,
+                    count);
+            }
+        }
     }
-    route.res.set("Server-Timing", server_timing);
+    return server_timing;
+}
+
+boost::http::route_task send_text(boost::http::route_params& route,
+                                  boost::http::status status,
+                                  std::string body,
+                                  std::string_view content_type,
+                                  std::string_view cache_control) {
+    namespace http = boost::http;
+    route.status(status);
+    route.res.set(http::field::content_type, content_type);
+    route.res.set(http::field::cache_control, cache_control);
+    if (content_type.starts_with("text/html")) {
+        body = web_ui_workspace_document(std::move(body), workspace_path_id(std::string(route.url.path())));
+        // Only lake frames lake's pages (the Ask Orama panel, lake#258): no clickjacking.
+        route.res.set("Content-Security-Policy", "frame-ancestors 'self'");
+    }
+    route.res.set("Server-Timing", server_timing_of(route));
     stamp_response_headers(route, body);
     auto [send_error] = co_await route.send(body);
     if (send_error)
@@ -2751,6 +2776,8 @@ public:
         std::shared_ptr<control::ObjectTransport> transport;
         std::string instance_kek;
         std::chrono::milliseconds lease_ttl{std::chrono::seconds(30)};
+        // Each request to a workspace Zetta's object routes, for the process metrics (lake#527).
+        control::ObjectRequestObserver observer;
     };
 
     void configure_workspace_stores(WorkspaceStoreConfig config) {
@@ -4259,9 +4286,74 @@ private:
         return LaneLock(lane, std::move(lock), false);
     }
 
+    // The requests a workspace store sends while one call holds its lane, added to the call's
+    // ObjectRequestScope when it leaves the lane (lake#527, the request's Server-Timing).
+    class StoreRequests {
+    public:
+        StoreRequests() = default;
+        explicit StoreRequests(std::shared_ptr<control::ObjectStoreCounters> counters)
+            : sink_(control::ObjectRequestScope::current()),
+              counters_(sink_ != nullptr ? std::move(counters) : nullptr) {
+            if (counters_) {
+                snapshot();
+            }
+        }
+        StoreRequests(StoreRequests&& other) noexcept
+            : sink_(std::exchange(other.sink_, nullptr)), counters_(std::move(other.counters_)),
+              count_(other.count_), nanoseconds_(other.nanoseconds_) {}
+        StoreRequests& operator=(StoreRequests&& other) noexcept {
+            if (this != &other) {
+                settle();
+                sink_ = std::exchange(other.sink_, nullptr);
+                counters_ = std::move(other.counters_);
+                count_ = other.count_;
+                nanoseconds_ = other.nanoseconds_;
+            }
+            return *this;
+        }
+        StoreRequests(const StoreRequests&) = delete;
+        StoreRequests& operator=(const StoreRequests&) = delete;
+        ~StoreRequests() {
+            settle();
+        }
+        // The store the call uses once it is open. One this call opened (none before, or a
+        // failed one replaced) is counted from zero: everything it sent so far was this call's.
+        void opened(std::shared_ptr<control::ObjectStoreCounters> counters) {
+            if (sink_ != nullptr && counters && counters != counters_) {
+                if (counters_ && sink_ != nullptr) {
+                    sink_->add_difference(counters_->by_kind, count_, nanoseconds_);
+                }
+                counters_ = std::move(counters);
+                count_.fill(0);
+                nanoseconds_.fill(0);
+            }
+        }
+
+    private:
+        void snapshot() {
+            for (std::size_t index = 0; index < control::object_request_kinds; ++index) {
+                count_[index] = counters_->by_kind.count[index].load(std::memory_order_relaxed);
+                nanoseconds_[index] = counters_->by_kind.nanoseconds[index].load(std::memory_order_relaxed);
+            }
+        }
+        void settle() {
+            if (sink_ != nullptr && counters_) {
+                sink_->add_difference(counters_->by_kind, count_, nanoseconds_);
+            }
+            sink_ = nullptr;
+            counters_.reset();
+        }
+        control::ObjectRequestTally* sink_ = nullptr;
+        std::shared_ptr<control::ObjectStoreCounters> counters_;
+        std::array<std::uint64_t, control::object_request_kinds> count_{};
+        std::array<std::uint64_t, control::object_request_kinds> nanoseconds_{};
+    };
+
     struct Entered {
         LaneLock lane;
         SyncStoreResult<RepositoryState*> state;
+        // Declared after the lane: it settles while the lane is still held.
+        StoreRequests requests;
     };
 
     // A workspace's lane for one blob operation (lake#383 phase B): admitted for a request,
@@ -5262,8 +5354,12 @@ private:
             if (epoch_of(customer_id) != epoch) {
                 continue;
             }
+            StoreRequests requests(*route ? workspace_store_counters(**route) : nullptr);
             auto state = open_repository(customer_id, repository_id, *route);
-            return {std::move(*lane), std::move(state)};
+            if (*route) {
+                requests.opened(workspace_store_counters(**route));
+            }
+            return {std::move(*lane), std::move(state), std::move(requests)};
         }
     }
 
@@ -5351,7 +5447,8 @@ private:
         auto output = std::make_unique<WorkspaceStore>();
         output->customer_id = customer_id;
         output->client = std::make_shared<control::ZettaObjectClient>(
-            config.transport, control::ObjectEndpoint{endpoint->url, endpoint->token});
+            config.transport, control::ObjectEndpoint{endpoint->url, endpoint->token},
+            std::string(control::workspace_store_bucket), nullptr, config.observer);
         if (create) {
             const std::uint64_t quota = config.quota_bytes ? config.quota_bytes(customer_id) : 0;
             const auto bucket = liquid::runtime::block_on(output->client->create_bucket(quota));
@@ -7197,6 +7294,21 @@ struct ApiServer::Impl {
             options.object_transport ? options.object_transport : control::make_zetta_object_transport();
         config.instance_kek = options.instance_kek;
         config.lease_ttl = options.workspace_store_lease_ttl;
+        // Bounded labels only (lake#527): the request's kind and its outcome class, never a
+        // workspace, key or bucket.
+        config.observer = [this](control::ObjectRequestKind kind, int status,
+                                 std::chrono::nanoseconds elapsed) {
+            const std::string name(control::object_request_kind_name(kind));
+            const std::string outcome = status == 0     ? "no_answer"
+                                        : status < 300  ? "ok"
+                                        : status < 500  ? "client_error"
+                                                        : "server_error";
+            metrics.increment_counter("lake_workspace_store_requests_total",
+                                      {{"kind", name}, {"outcome", outcome}});
+            metrics.observe_histogram("lake_workspace_store_request_duration_seconds",
+                                      {{"kind", name}},
+                                      std::chrono::duration<double>(elapsed).count());
+        };
         sync_store.configure_workspace_stores(std::move(config));
     }
 
@@ -18952,6 +19064,8 @@ struct ApiServer::Impl {
         if (status == http::status::service_unavailable) {
             route.res.set(http::field::retry_after, "1");
         }
+        // A repository write names its workspace store requests as a page does (lake#527).
+        route.res.set("Server-Timing", server_timing_of(route));
         stamp_response_headers(route, body);
         auto [send_error] = co_await route.send(body);
         if (send_error)
@@ -19024,6 +19138,7 @@ struct ApiServer::Impl {
         if (!session_id.empty()) {
             route.res.set("Mcp-Session-Id", session_id);
         }
+        route.res.set("Server-Timing", server_timing_of(route));
         stamp_response_headers(route, body);
         auto [send_error] = co_await route.send(body);
         if (send_error)
