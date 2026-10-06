@@ -6665,6 +6665,16 @@ public:
                 return false;
             }
         }
+        // Checked again under the lane before every attempt: a workspace deleted, stopped or not
+        // switched since the pass listed it is not opened (a deletion closes under this lane).
+        const auto serving = serving_workspaces(customer_id);
+        if (!serving) {
+            return std::unexpected(serving.error());
+        }
+        if (std::ranges::find(*serving, workspace_id) == serving->end()) {
+            return std::unexpected(SyncStoreError{
+                "not_found", "the workspace is no longer a running switched workspace"});
+        }
         auto opened = open_workspace(customer_id, workspace_id, false, wait);
         if (!opened) {
             return std::unexpected(opened.error());

@@ -3736,6 +3736,36 @@ TEST(WorkspaceStoreHandoff, MoreWorkspacesThanWorkersAreAllPreopenedBeforeTheRoo
     ASSERT_TRUE(eventually([&] { return rig.server->store_root_open(); }));
 }
 
+// Review 5: a workspace stopped or deleted while the pre-open waits for its lease is never opened:
+// the pre-open checks again, under the lane, before each attempt.
+TEST(WorkspaceStoreHandoff, AWorkspaceStoppedOrDeletedDuringThePreopenIsNotOpened) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    const std::string endpoint_b = "http://" + rig.beta + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
+    rig.server->stop();
+    rig.server.reset();
+    // Another process holds both: the pre-open waits for them in attempts.
+    const auto held_a = rig.zetta->take_over(endpoint_a, "another process");
+    const auto held_b = rig.zetta->take_over(endpoint_b, "another process");
+    rig.options.preopen_workspace_stores = true;
+    ASSERT_NO_FATAL_FAILURE(rig.start());
+    ASSERT_TRUE(rig.store->update_workspace(rig.alpha, {.desired = "stopped"}));
+    const auto deleted = rig.call("POST", "/v1/delete_workspace",
+                                  {{"customer_id", rig.customer_id}, {"workspace_id", rig.beta},
+                                   {"confirm", "beta"}});
+    EXPECT_EQ(deleted.first, 200U) << deleted.second.dump();
+    rig.zetta->release(endpoint_a);
+    rig.zetta->release(endpoint_b);
+    std::this_thread::sleep_for(2500ms);
+    EXPECT_EQ(rig.zetta->lease(endpoint_a).fence, held_a) << "the stopped workspace's lease was taken";
+    EXPECT_TRUE(rig.zetta->lease(endpoint_a).holder.empty());
+    EXPECT_EQ(rig.zetta->lease(endpoint_b).fence, held_b) << "the deleted workspace's lease was taken";
+    EXPECT_TRUE(rig.zetta->lease(endpoint_b).holder.empty());
+}
+
 // A draining lake answers a new workspace store request 503 with Retry-After at once, lets the
 // request it admitted before finish, and releases the store's lease as soon as that request is
 // done: before stop(), not at the drain deadline.
