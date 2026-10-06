@@ -5735,6 +5735,21 @@ public:
             return std::unexpected(checked.error());
         }
         const std::filesystem::path space = std::filesystem::path(root_) / customer_id;
+        {
+            // The space's own directory must be a directory and not a link: a link would take the
+            // removal outside the store root.
+            std::error_code error;
+            const auto status = std::filesystem::symlink_status(space, error);
+            if (error && error != std::errc::no_such_file_or_directory) {
+                return std::unexpected(SyncStoreError{
+                    "io", "could not inspect " + space.string() + ": " + error.message()});
+            }
+            if (std::filesystem::exists(status) && (std::filesystem::is_symlink(status) ||
+                                                    !std::filesystem::is_directory(status))) {
+                return std::unexpected(SyncStoreError{
+                    "conflict", space.string() + " is not a directory; nothing was removed"});
+            }
+        }
         SpaceStoreRemoval output;
         for (const char* name : {"store", "repositories"}) {
             SpaceStoreDirectory directory;
@@ -5753,12 +5768,30 @@ public:
                         "conflict", directory.path + " is not a directory; nothing was removed"});
                 }
                 directory.exists = true;
-                for (auto it = std::filesystem::recursive_directory_iterator(path);
-                     it != std::filesystem::recursive_directory_iterator(); ++it) {
-                    const auto entry = it->symlink_status();
-                    if (std::filesystem::is_regular_file(entry)) {
-                        directory.bytes += it->file_size();
-                        ++directory.files;
+                // A dry run holds nothing, so files may come and go while they are counted (an
+                // unswitched workspace's request writing the store): an entry that vanishes or
+                // cannot be read is skipped, and the count is what was there at that moment.
+                std::error_code walk;
+                auto it = std::filesystem::recursive_directory_iterator(
+                    path, std::filesystem::directory_options::skip_permission_denied, walk);
+                for (; !walk && it != std::filesystem::recursive_directory_iterator();
+                     it.increment(walk)) {
+                    std::error_code entry_error;
+                    const auto entry = it->symlink_status(entry_error);
+                    if (entry_error || !std::filesystem::is_regular_file(entry)) {
+                        continue;
+                    }
+                    const auto size = it->file_size(entry_error);
+                    if (entry_error) {
+                        continue;
+                    }
+                    directory.bytes += size;
+                    ++directory.files;
+                }
+                if (walk && walk != std::errc::no_such_file_or_directory) {
+                    if (!dry_run) {
+                        return std::unexpected(SyncStoreError{
+                            "io", "could not measure " + directory.path + ": " + walk.message()});
                     }
                 }
             }

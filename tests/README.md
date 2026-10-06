@@ -421,10 +421,10 @@ scratch directory and run `zetta --headless --mcp-listen 127.0.0.1:48712 --admin
 `PostgresAskMessages.MigrationDropsTheTableAndKeepsItsAssignments` covers `0050_drop_ask_messages`
 (lake#483): a pre-0050 table with a row is dropped, its `workspace_assignments` row stays, and two
 reruns of the whole schema leave it dropped. The `ask_messages` copy test and the 0045 test went
-with the table. `PostgresMovedTables.MigrationDropsEveryMovedTableOnlyOnceEachRowHasAWorkspace`
+with the table. `PostgresMovedTables.MigrationRefusesRowsWithNoRecordedWorkspaceOwner`
 covers migration `0070_drop_moved_tables` in a PostgreSQL schema of its own (so the tables it
 recreates and the unresolved row it leaves are invisible to tests running in parallel): a fresh
-database has none of the 21 tables or 8 columns; an older one with an owned row in each keeps
+database has none of the 21 tables or 8 columns; an older one with a row in each carrying its migration's owner outcome, plus an opportunity recorded `deleted_workspace` that must not block, keeps
 everything while one row is `needs_selection` (the migration raises and names the table) and drops
 everything once that row's workspace is deleted; two reruns of the section and two of the whole
 schema leave them dropped, and routing rows, routes, `audit_events`, `keystore` and the
@@ -577,8 +577,8 @@ snapshot statements.
 `test_workspace_store.cpp` covers lake#380 (the table is in
 `docs/architecture/workspace-store.md#tests`): the encrypted backend, its refusal of a rewrite, tampering, the owner's hand-off and lost lease, and, through a running lake, the
 move with an interrupted copy, the switch, two workspaces of one space and the lost lease's `503`;
-`WorkspaceStoreRemoval.*` the removal of a space's old store (refusals, dry run, exactly two
-directories removed, the instance's directory untouched, switched workspaces still answering, a later
+`WorkspaceStoreRemoval.*` the removal of a space's old store (refusals, a linked space or store
+directory refused, dry run, exactly two directories removed, the instance's directory untouched, switched workspaces still answering, a later
 unswitched workspace given a new space store).
 `zetta_object_fixture.hpp` is `FakeZettaObjects`, Zetta's object routes in memory. Set
 `LAKE_TEST_ZETTA_BINARY` to a `zetta` built from Zetta dev to run `WorkspaceStoreZetta.*` against it.

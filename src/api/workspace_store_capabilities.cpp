@@ -11,6 +11,7 @@
 // <root>/<space>/repositories) from lake's volume, once every workspace of the space is switched
 // and no repository of the space lacks a workspace. A dry run reports the paths and bytes.
 
+#include <limits>
 #include <map>
 #include <regex>
 #include <string>
@@ -21,6 +22,20 @@
 
 namespace lake::api {
 namespace {
+
+// Every repository of a space (or of one of its workspaces). list_repositories has no cursor, so
+// the limit grows until a page comes back short: nothing is cut off at a fixed size.
+control::Result<std::vector<control::Repository>>
+all_repositories(control::Store& store, const std::string& customer_id,
+                 const std::string& workspace_id = {}) {
+    for (int limit = 1000;; limit = limit > (1 << 28) ? std::numeric_limits<int>::max() : limit * 8) {
+        auto page = store.list_repositories(customer_id, limit, workspace_id);
+        if (!page || static_cast<long long>(page->size()) < limit ||
+            limit == std::numeric_limits<int>::max()) {
+            return page;
+        }
+    }
+}
 
 using json = nlohmann::json;
 
@@ -73,7 +88,7 @@ ApiResult move_workspace_store(const json& input, ApiContext& context) {
         return ApiResult::failure("conflict", "the workspace is deleted");
     }
     const std::string& customer_id = workspace->customer_id;
-    const auto rows = context.store->list_repositories(customer_id, 100000);
+    const auto rows = all_repositories(*context.store, customer_id);
     if (!rows) {
         return ApiResult::failure(rows.error().code, rows.error().message);
     }
@@ -130,7 +145,7 @@ ApiResult move_workspace_store(const json& input, ApiContext& context) {
         // The repositories are listed while the switch holds the workspace's requests and
         // creations, so one created meanwhile is not missed.
         const auto list = [&]() -> SyncStoreResult<std::vector<std::string>> {
-            const auto current = context.store->list_repositories(customer_id, 100000, workspace_id);
+            const auto current = all_repositories(*context.store, customer_id, workspace_id);
             if (!current) {
                 return std::unexpected(SyncStoreError{current.error().code, current.error().message});
             }
@@ -198,7 +213,7 @@ SyncStoreResult<std::vector<std::string>> space_store_blockers(ApiContext& conte
     if (!workspaces) {
         return std::unexpected(SyncStoreError{workspaces.error().code, workspaces.error().message});
     }
-    const auto repositories = context.store->list_repositories(customer_id, 100000);
+    const auto repositories = all_repositories(*context.store, customer_id);
     if (!repositories) {
         return std::unexpected(SyncStoreError{repositories.error().code, repositories.error().message});
     }

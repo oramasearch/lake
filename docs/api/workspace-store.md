@@ -94,7 +94,9 @@ Otherwise it answers `customer_id` (the space) and:
 `exists` is false for a directory already gone, so a repeated removal answers `bytes: 0`.
 
 - **A dry run** reads only: it checks the precondition and measures, takes no hold, closes nothing
-  and removes nothing (`removed: false`).
+  and removes nothing (`removed: false`). Because it holds nothing, a file that appears or vanishes
+  while it counts (an unswitched workspace's request) is skipped rather than answered as `io`, so
+  its bytes are what was there at that moment.
 - **A removal** refuses new requests for the space's store with `503 store_unavailable`
   (`Retry-After`), as a switch does, and waits for the admitted ones under the space's lane. It
   checks the precondition again under that hold, so a workspace created meanwhile is seen, closes
@@ -102,8 +104,11 @@ Otherwise it answers `customer_id` (the space) and:
   repositories and routes, and deletes exactly `<LAKE_STORE_ROOT>/<space>/store` and
   `<LAKE_STORE_ROOT>/<space>/repositories`. It never touches the instance's directory
   (`<LAKE_STORE_ROOT>/<node name>`: the registry, the transparency log), `<LAKE_STORE_ROOT>/workspaces`,
-  another space or anything else under the space's directory. A directory that is a symbolic link
-  or not a directory is refused with `conflict`.
+  another space or anything else under the space's directory. If `<LAKE_STORE_ROOT>/<space>`
+  itself, or either of the two directories, is a symbolic link or not a directory, the call is
+  refused with `conflict` (dry run included) and nothing is removed.
+- The precondition reads every repository of the space: the listing grows until it comes back
+  short, so no fixed limit cuts it off.
 - Switched workspaces are not held: their requests go to their own stores throughout.
 - **A workspace created later** in the space and not switched is served, as any unswitched
   workspace is, from the space's store, which lake opens on first use and liquid creates empty. Its

@@ -309,8 +309,9 @@ cached repositories and routes, then deletes `<LAKE_STORE_ROOT>/<space>/store` a
 `<LAKE_STORE_ROOT>/<space>/repositories` and nothing else: the instance's directory
 (`<LAKE_STORE_ROOT>/<node name>`, the registry and the log), `<LAKE_STORE_ROOT>/workspaces`, other
 spaces and the space's search index (`<space>/index`, lake#381) stay. The space id must be the UUID
-of an existing space; a symbolic link in place of either directory is refused. A dry run measures
-the two directories (regular files only) and changes nothing.
+of an existing space; a symbolic link in place of the space's directory or either of the two is
+refused. A dry run measures the two directories (regular files only, skipping entries that change
+while it counts) and changes nothing.
 
 Switched workspaces keep answering, since a repository identifier under `<space>/repositories` is a
 name in the workspace store, not a path. A workspace created in the space afterwards is not switched,
@@ -360,6 +361,7 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreMove.ASearchWaitingOnOneSpacesStoreDoesNotHoldSearchInAnother` | search borrows before its lock |
 | `WorkspaceStoreSearch.OnceTheRepositoryStoreLentRepositoriesSearchNeverOpensAStoreItself` | the fallback refuses once a repository store was set |
 | `WorkspaceStoreRemoval.RemovesOnlyTheSpacesStoreOnceEveryWorkspaceIsSwitched` | `remove_space_store`: invalid and unknown spaces refused; refused (dry run too) while a workspace is not switched; a dry run's paths and bytes with nothing removed; the removal of exactly the two directories; the instance's directory and another space untouched; switched workspaces read and written afterwards and after a restart; a repeated removal; central audit; a later unswitched workspace served from a new space store and refusing the removal until it is switched |
+| `WorkspaceStoreRemoval.ALinkedSpaceOrStoreDirectoryIsRefused` | a symbolic link at `<space>/store` and at `<space>` itself is refused with `conflict` (dry run too) and nothing behind it is touched; put back, the removal proceeds |
 | `WorkspaceStoreRemoval.ALiveRepositoryOfADeletedWorkspaceOrAPersonIsRefused` | a live repository of a deleted workspace refuses the removal (dry run too); no bearer and a person are refused |
 | `WorkspaceStoreRemoval.AnUnassignedRepositoryIsRefused` | on PostgreSQL, a repository without a workspace refuses the removal although the space's only workspace is switched |
 | `WorkspaceStoreZetta.TheBackendOnARealZettaHoldsOnlyCiphertextAndItsLatencyIsMeasured` | the same on a real Zetta, and the latency table |

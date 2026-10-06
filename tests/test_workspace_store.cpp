@@ -1690,6 +1690,53 @@ TEST(WorkspaceStoreRemoval, RemovesOnlyTheSpacesStoreOnceEveryWorkspaceIsSwitche
     EXPECT_EQ(files_under(instance), instance_before);
 }
 
+// A symbolic link where the space's directory, or its store, should be would take the removal
+// outside the store root: both are refused, dry run included, and nothing behind them is touched.
+TEST(WorkspaceStoreRemoval, ALinkedSpaceOrStoreDirectoryIsRefused) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
+    const auto space = rig.root / rig.customer_id;
+    const auto elsewhere = rig.root / "elsewhere";
+    std::filesystem::create_directories(elsewhere / "store");
+    std::ofstream(elsewhere / "store" / "keep") << "not the space's";
+
+    // <space>/store is a link.
+    const auto real_store = rig.root / "real-store";
+    std::filesystem::rename(space / "store", real_store);
+    std::filesystem::create_directory_symlink(elsewhere / "store", space / "store");
+    for (const bool dry_run : {true, false}) {
+        const auto [status, body] = remove_space(rig, rig.customer_id, dry_run);
+        EXPECT_EQ(status, 409U) << body.dump();
+        EXPECT_EQ(body["error"]["code"], "conflict") << body.dump();
+    }
+    EXPECT_TRUE(std::filesystem::exists(elsewhere / "store" / "keep"));
+    std::filesystem::remove(space / "store");
+    std::filesystem::rename(real_store, space / "store");
+
+    // <space> itself is a link.
+    const auto real_space = rig.root / "real-space";
+    std::filesystem::rename(space, real_space);
+    std::filesystem::create_directory_symlink(elsewhere, space);
+    for (const bool dry_run : {true, false}) {
+        const auto [status, body] = remove_space(rig, rig.customer_id, dry_run);
+        EXPECT_EQ(status, 409U) << body.dump();
+        EXPECT_EQ(body["error"]["code"], "conflict") << body.dump();
+        EXPECT_NE(body["error"]["message"].get<std::string>().find("not a directory"),
+                  std::string::npos)
+            << body.dump();
+    }
+    EXPECT_TRUE(std::filesystem::exists(elsewhere / "store" / "keep"));
+    EXPECT_TRUE(std::filesystem::exists(real_space / "store"));
+    std::filesystem::remove(space);
+    std::filesystem::rename(real_space, space);
+    // Put back, the removal goes ahead.
+    EXPECT_EQ(remove_space(rig, rig.customer_id, false).first, 200U);
+    EXPECT_FALSE(std::filesystem::exists(space / "store"));
+    EXPECT_TRUE(std::filesystem::exists(elsewhere / "store" / "keep"));
+}
+
 // A live repository of a deleted workspace (never moved) keeps the space's store, even when every
 // live workspace is switched; and only the operator removes a space's store.
 TEST(WorkspaceStoreRemoval, ALiveRepositoryOfADeletedWorkspaceOrAPersonIsRefused) {
