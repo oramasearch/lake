@@ -6173,6 +6173,52 @@ public:
         return {};
     }
 
+    SyncStoreResult<WorkspaceStoreProvision>
+    provision_workspace_store(const std::string& customer_id,
+                              const std::string& workspace_id) override {
+        if (!path_component_is_safe(customer_id) || !path_component_is_safe(workspace_id)) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid workspace location"});
+        }
+        WorkspaceStoreConfig config;
+        {
+            std::lock_guard maps(mutex_);
+            config = workspace_config_;
+        }
+        if (!config.endpoint || !config.transport) {
+            return std::unexpected(SyncStoreError{
+                "store_unavailable", "workspace stores are not configured on this lake"});
+        }
+        // Under the workspace's lane: no request opens the store meanwhile.
+        auto lane = hold("w:" + workspace_id);
+        const auto endpoint = config.endpoint(customer_id, workspace_id);
+        if (!endpoint) {
+            return std::unexpected(endpoint.error());
+        }
+        control::ZettaObjectClient client(config.transport,
+                                          control::ObjectEndpoint{endpoint->url, endpoint->token});
+        std::uint64_t objects = 0;
+        if (auto listed = liquid::runtime::block_on(client.list("")); listed) {
+            objects = listed->size();
+        } else if (listed.error().code != liquid::errc::not_found) {
+            return std::unexpected(error_of(listed.error()));
+        }
+        if (objects != 0) {
+            // A store this lake already provisioned (or that opens with its key) is left as it is.
+            if (auto opened = open_workspace(customer_id, workspace_id, false); opened) {
+                return WorkspaceStoreProvision{false, objects};
+            }
+            return std::unexpected(SyncStoreError{
+                "conflict",
+                "the workspace's bucket lake_store holds " + std::to_string(objects) +
+                    " objects but no store that opens; lake will not create a store over them"});
+        }
+        auto created = open_workspace(customer_id, workspace_id, true);
+        if (!created) {
+            return std::unexpected(created.error());
+        }
+        return WorkspaceStoreProvision{true, 0};
+    }
+
     SyncStoreResult<WorkspaceBlob> put_workspace_blob(const std::string& customer_id,
                                                       const std::string& workspace_id,
                                                       const std::filesystem::path& source,

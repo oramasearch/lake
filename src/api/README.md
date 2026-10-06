@@ -407,7 +407,9 @@ recorded with its object; a pull streams it back 4 MiB at a time (`stream_worksp
 manifest takes its blob sizes from the records; a switch creates the store of a workspace with no
 repository; and `copy_workspace_records` gains `oci_blobs` (`workspace_record_capabilities.cpp`),
 which streams each recorded blob from the instance registry into its workspace store and verifies
-it by SHA-256.
+it by SHA-256. `move_workspace_store` gains mode `provision` (`workspace_store_capabilities.cpp`,
+now an asynchronous handler that runs the other modes on the blocking pool), which creates the
+store of a switched workspace that never held anything (`provision_workspace_store`).
 
 `volume_capabilities.cpp` registers the operator's volumes (migration `0069`, operator#259,
 operator#260): `set_workspace_storage` (grow only; a smaller size is `invalid_input` at

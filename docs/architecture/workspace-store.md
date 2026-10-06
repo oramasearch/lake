@@ -23,7 +23,10 @@ rewrote a finished run in place, which Zetta refuses.
 | The space's store from before the switch | `LAKE_STORE_ROOT/<space>/store` and `<space>/repositories`, unchanged and read-only from the switch on, until the operator's `remove_space_store` removes both once every workspace of the space is switched ([below](#removing-the-spaces-store)) |
 
 A switch creates the workspace's store (bucket and data key) even when the workspace has no
-repository, since its tenant images live there (lake#383 phase B).
+repository, since its tenant images live there (lake#383 phase B). A workspace an earlier lake
+switched without one is repaired by `move_workspace_store` mode `provision`, which creates the store
+only for a workspace that never held anything (no repository row but a refused creation's, no
+stored image blob, an absent or empty bucket) and otherwise refuses with `conflict`.
 
 A repository's store is chosen by its `workspace_id`: its workspace's store once `store_moved_at` is
 set, the space's store before. The choice is cached per repository and cleared by the switch.

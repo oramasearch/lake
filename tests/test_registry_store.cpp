@@ -42,6 +42,7 @@
 #include "lake/api/server.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/workspace_store.hpp"
 #include "temporary_directory.hpp"
 #include "workspace_fixture.hpp"
 #include "zetta_object_fixture.hpp"
@@ -749,4 +750,94 @@ TEST(RegistryStore, DeletingAWorkspaceTakesItsImageBlobsWithItsStore) {
     EXPECT_TRUE(rig.instance_blobs().empty());
     // The other workspace's copy of the same layer is its own and stays.
     EXPECT_TRUE(rig.get_blob("tenant-one/kept", sha256(layer)).body == layer);
+}
+
+// move_workspace_store `provision`: a workspace switched before a switch created the store of a
+// workspace without repositories has none, and a switched workspace's store is never created
+// implicitly. Provision creates it only when the workspace never held anything; a repository row
+// or objects in the bucket are a conflict, and a repeated call changes nothing.
+TEST(RegistryStore, ProvisionCreatesTheStoreOnlyOfASwitchedWorkspaceThatNeverHeldAnything) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    // Switched by a lake that did not create the store: store_moved_at set, no bucket.
+    for (const std::string& workspace : {rig.alpha, rig.beta, rig.gamma}) {
+        ASSERT_TRUE(rig.store->mark_workspace_store_moved(workspace));
+    }
+    const auto provision = [&](const std::string& workspace) {
+        return rig.call("move_workspace_store", {{"workspace_id", workspace}, {"mode", "provision"}});
+    };
+    const json refused_create = rig.call("create_repository", {{"customer_id", rig.one},
+                                                                {"name", "before"},
+                                                                {"workspace_id", rig.alpha},
+                                                                {"visibility", "private"}});
+    EXPECT_FALSE(refused_create.value("ok", true)) << refused_create;
+    EXPECT_FALSE(rig.zetta->has_bucket(RegistryRig::endpoint(rig.alpha)));
+
+    const json provisioned = provision(rig.alpha);
+    ASSERT_TRUE(provisioned.value("ok", false)) << provisioned.dump();
+    EXPECT_TRUE(provisioned["value"]["created"].get<bool>());
+    EXPECT_EQ(provisioned["value"]["refused_creations"].size(), 1U)
+        << "the row the refused creation tombstoned held nothing";
+    const auto bucket = rig.zetta->objects(RegistryRig::endpoint(rig.alpha));
+    EXPECT_TRUE(bucket.contains(std::string(lake::control::workspace_store_key_object)));
+
+    // A repeated call changes nothing.
+    const json again = provision(rig.alpha);
+    ASSERT_TRUE(again.value("ok", false)) << again;
+    EXPECT_FALSE(again["value"]["created"].get<bool>());
+    EXPECT_EQ(rig.zetta->objects(RegistryRig::endpoint(rig.alpha)), bucket);
+
+    // The workspace now creates and writes repositories, and holds images.
+    const json created = rig.call("create_repository", {{"customer_id", rig.one},
+                                                         {"name", "after"},
+                                                         {"workspace_id", rig.alpha},
+                                                         {"visibility", "private"}});
+    ASSERT_TRUE(created.value("ok", false)) << created;
+    const std::string repository = created["value"]["id"];
+    const json committed = rig.call(
+        "commit_repository_files",
+        {{"id", repository},
+         {"revision", "main"},
+         {"message", "Add a file"},
+         {"operations", json::array({{{"type", "file"}, {"path", "hello.txt"}, {"content", "aGVsbG8="}}})}});
+    ASSERT_TRUE(committed.value("ok", false)) << committed;
+    const Reply file = exchange(rig.port(), "GET",
+                                "/v1/repository_file?id=" + repository + "&ref=main&path=hello.txt");
+    EXPECT_EQ(file.status, 200U) << file.body;
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "provisioned"));
+    rig.push_image("tenant-one/provisioned", "v1", R"({"provisioned":1})", {layer_bytes(1000, 61)});
+    // The workspace now holds data: provision refuses and changes nothing.
+    const auto holding = rig.zetta->objects(RegistryRig::endpoint(rig.alpha));
+    EXPECT_EQ(provision(rig.alpha)["error"]["code"], "conflict");
+    EXPECT_EQ(rig.zetta->objects(RegistryRig::endpoint(rig.alpha)), holding);
+
+    // Any other repository row, live or tombstoned inside its retention, refuses it.
+    const auto held = rig.store->create_repository({rig.one, "held", "", "private", rig.beta});
+    ASSERT_TRUE(held);
+    json with_repository = provision(rig.beta);
+    EXPECT_EQ(with_repository["error"]["code"], "conflict") << with_repository;
+    EXPECT_NE(with_repository["error"]["message"].get<std::string>().find("held, live"),
+              std::string::npos);
+    ASSERT_TRUE(rig.store->delete_repository(
+        held->id, lake::control::RepositoryDeletion{.deleted_at = "2026-10-01T00:00:00Z",
+                                                    .retention_until = "2026-11-01T00:00:00Z"}));
+    with_repository = provision(rig.beta);
+    EXPECT_EQ(with_repository["error"]["code"], "conflict") << with_repository;
+    EXPECT_NE(with_repository["error"]["message"].get<std::string>().find("held, tombstoned"),
+              std::string::npos);
+    EXPECT_FALSE(rig.zetta->objects(RegistryRig::endpoint(rig.beta))
+                     .contains(std::string(lake::control::workspace_store_key_object)));
+
+    // A bucket that holds objects (a wiped key, a store that held data) refuses it.
+    rig.zetta->set_object(RegistryRig::endpoint(rig.gamma), "packs/pack-1.pack", "left over");
+    const json with_objects = provision(rig.gamma);
+    EXPECT_EQ(with_objects["error"]["code"], "conflict") << with_objects;
+    EXPECT_NE(with_objects["error"]["message"].get<std::string>().find("1 objects"), std::string::npos);
+    EXPECT_EQ(rig.zetta->objects(RegistryRig::endpoint(rig.gamma)).size(), 1U) << "nothing was written";
+
+    // Only the operator provisions.
+    const Reply foreign = exchange(rig.port(), "POST", "/v1/move_workspace_store",
+                                   json{{"workspace_id", rig.alpha}, {"mode", "provision"}}.dump(),
+                                   {{"Content-Type", "application/json"}}, "Bearer not-the-operator");
+    EXPECT_NE(foreign.status, 200U);
 }

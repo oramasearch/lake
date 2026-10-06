@@ -493,7 +493,11 @@ a `lake_oci_blobs` record without `object`, until this copy. These steps are for
 and are not run by this change.
 
 1. Every workspace an image route names is switched (`move_workspace_store`,
-   [workspace-store.md](workspace-store.md)), and lake runs liquid `8955519` or later.
+   [workspace-store.md](workspace-store.md)), and lake runs liquid `8955519` or later. A workspace
+   switched with no repository by an earlier lake has no store (`create_repository` and image
+   pushes there answer `corrupt`): run `move_workspace_store` mode `provision` for it first
+   ([workspace-store.md](../api/workspace-store.md#dev-cutover)); it refuses with `conflict` if the
+   workspace ever held anything.
 2. Deploy the lake image built from this change. Pulls keep working: unmoved blobs are read from the
    instance registry.
 3. Run `POST /v1/copy_workspace_records {"collection":"oci_blobs","mode":"plan"}` with the operator

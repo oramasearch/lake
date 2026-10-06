@@ -572,7 +572,10 @@ nothing in the instance registry, a repeated layer stored once, usage counted on
 upload and a wrong digest, a 304 MiB layer streamed with the pull's resident growth bounded, a
 blob of another workspace or space refused, the `oci_blobs` copy (plan, copy, rerun, verify with
 SHA-256, missing, corrupt and unswitched blobs unresolved, pulls after the registry files are
-removed), instance packages unaffected, and workspace deletion.
+removed), instance packages unaffected, workspace deletion, and `move_workspace_store` `provision`
+(an empty, storeless switched workspace provisioned, then a repository created and committed; a
+refused creation's tombstone not counted; live and retained rows, and a bucket holding objects,
+refused; a repeated call a no-op).
 
 Workspace volumes (migration `0069`, operator#259, operator#260): `test_volumes.cpp`
 (`Stores/Volumes.*`, on the memory store and PostgreSQL) covers growing a workspace's storage, the

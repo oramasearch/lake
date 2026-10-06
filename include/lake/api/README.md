@@ -134,7 +134,8 @@ each routed workspace (`tenant_image_bytes`), replacing the former
 `capabilities.hpp` declares `register_volume_capabilities` (migration `0069`,
 [volumes.md](../../../docs/api/volumes.md)).
 `sync_store.hpp` adds `WorkspaceBlob`, `put_workspace_blob` and `read_workspace_blob` (a tenant
-image blob as an object of its workspace's liquid store, lake#383 phase B), and
+image blob as an object of its workspace's liquid store, lake#383 phase B),
+`WorkspaceStoreProvision` and `provision_workspace_store` (move_workspace_store `provision`), and
 `WorkspaceStoreTransfer` and the `SyncStore` operations of the workspace store
 move (`transfer_to_workspace_store`, `switch_workspace_store`, `create_repository_content`,
 `close_workspace_store`, lake#380); `capabilities.hpp` adds `create_repository_row`;

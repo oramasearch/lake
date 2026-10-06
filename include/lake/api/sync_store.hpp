@@ -329,6 +329,13 @@ struct WorkspaceBlob {
     std::uint64_t size = 0;
 };
 
+// What move_workspace_store `provision` did: `created` the store, or found it already there
+// (`objects` it holds).
+struct WorkspaceStoreProvision {
+    bool created = false;
+    std::uint64_t objects = 0;
+};
+
 // HTTP-free access to the liquid store selected by a repository's customer.
 // The libliquid implementation remains inside the HTTP adapter translation
 // unit.
@@ -503,6 +510,16 @@ public:
     // Closes the workspace's store and releases its bucket lease (workspace deletion, drain).
     virtual SyncStoreResult<void> close_workspace_store(const std::string&) {
         return {};
+    }
+    // The repair of a workspace switched before a switch created the store of a workspace with no
+    // repository (move_workspace_store `provision`): creates its bucket and data key only when the
+    // bucket is absent or empty. A bucket whose store already opens is left as it is (`created`
+    // false); one that holds objects but does not open is `conflict`, naming how many, so a wiped
+    // store of a workspace that held data is never recreated empty. The caller checks that the
+    // workspace is switched and never held a repository or an image blob.
+    virtual SyncStoreResult<WorkspaceStoreProvision> provision_workspace_store(const std::string&,
+                                                                               const std::string&) {
+        return std::unexpected(SyncStoreError{"unsupported", "workspace stores are unavailable"});
     }
     // lake#383 phase B (decision 54 S5): a tenant image's blob in its workspace's liquid store.
     // Streams the file at `source` into the store of a switched workspace and answers the object's

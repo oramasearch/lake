@@ -5,21 +5,28 @@
 // what is missing), `verify` compares every repository in both stores, and `switch` holds the
 // repository requests, copies what arrived since, verifies again and records
 // workspaces.store_moved_at, after which the workspace's repositories are served from its store.
-// The space's store is never written by the move and stays on the volume.
+// The space's store is never written by the move and stays on the volume. `provision` repairs a
+// workspace switched with no repository before a switch created its store (lake#383 phase B): it
+// creates the store only for a workspace that never held anything.
 //
 // remove_space_store then removes a space's old store (<root>/<space>/store and
 // <root>/<space>/repositories) from lake's volume, once every workspace of the space is switched
 // and no repository of the space lacks a workspace. A dry run reports the paths and bytes.
 
+#include <chrono>
+#include <cstdio>
 #include <limits>
 #include <map>
+#include <optional>
 #include <regex>
 #include <string>
 #include <vector>
 
 #include "lake/api/capabilities.hpp"
+#include "lake/control/oci_records.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
+#include "workspace_records_api.hpp"
 
 namespace lake::api {
 namespace {
@@ -320,6 +327,119 @@ ApiResult remove_space_store(const json& input, ApiContext& context) {
                                {"directories", std::move(directories)}});
 }
 
+// A control-store timestamp (`YYYY-MM-DDTHH:MM:SS...` or PostgreSQL's `YYYY-MM-DD HH:MM:SS...`,
+// both UTC) to the second; nullopt for an empty or malformed one.
+std::optional<std::chrono::sys_seconds> instant_of(const std::string& text) {
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    char separator = 0;
+    if (text.size() < 19 ||
+        std::sscanf(text.c_str(), "%4d-%2d-%2d%c%2d:%2d:%2d", &year, &month, &day, &separator,
+                    &hour, &minute, &second) != 7 ||
+        (separator != 'T' && separator != ' ')) {
+        return std::nullopt;
+    }
+    const std::chrono::year_month_day date{std::chrono::year(year), std::chrono::month(month),
+                                           std::chrono::day(day)};
+    if (!date.ok()) {
+        return std::nullopt;
+    }
+    return std::chrono::sys_days(date) + std::chrono::hours(hour) + std::chrono::minutes(minute) +
+           std::chrono::seconds(second);
+}
+
+// `provision`: a workspace switched by a lake that did not yet create the store of a workspace
+// without repositories has no store, and a switched workspace's store is never created implicitly.
+// This creates it only when the workspace never held anything: it is switched, no repository row
+// (live or tombstoned) names it, no image blob record names a store object, and its bucket is
+// absent or empty (a row tombstoned with its retention ended at its deletion is a creation the
+// missing store refused, and does not count). Otherwise `conflict` names what exists, so a wiped store of a workspace that
+// held data is still never recreated empty. A store that already opens is left as it is.
+liquid::runtime::task<ApiResult> provision_workspace_store(const json& input, ApiContext& context) {
+    if (!context.operator_credential) {
+        co_return ApiResult::failure("unauthorized", "operator credential is required");
+    }
+    if (!context.store) {
+        co_return ApiResult::failure("store_unavailable", "no control-plane store is configured");
+    }
+    if (!context.sync_store || !context.workspaces) {
+        co_return ApiResult::failure("store_unavailable",
+                                     "workspace stores are not configured on this lake");
+    }
+    const std::string workspace_id = input.at("workspace_id");
+    context.audit_kind = "workspace_store.move";
+    context.audit_details = {{"workspace_id", workspace_id}, {"mode", "provision"}};
+    const auto workspace = context.store->get_workspace(workspace_id);
+    if (!workspace) {
+        co_return ApiResult::failure(workspace.error().code, workspace.error().message);
+    }
+    if (workspace->desired == "deleted") {
+        co_return ApiResult::failure("conflict", "the workspace is deleted");
+    }
+    if (workspace->store_moved_at.empty()) {
+        co_return ApiResult::failure(
+            "conflict", "the workspace is not switched; its store is created by copy and switch");
+    }
+    const std::string customer_id = workspace->customer_id;
+    const auto repositories = context.store->list_repositories(customer_id, 100000, workspace_id);
+    if (!repositories) {
+        co_return ApiResult::failure(repositories.error().code, repositories.error().message);
+    }
+    // A row tombstoned with its retention ended at its deletion is a creation the missing store
+    // refused (the creation rolls its row back so): it never held content. Any other row, live or
+    // tombstoned, means the store may have held data.
+    json names = json::array();
+    json refused_creations = json::array();
+    for (const control::Repository& repository : *repositories) {
+        const auto deleted = instant_of(repository.deleted_at);
+        const auto retained = instant_of(repository.retention_until);
+        if (deleted && retained && *retained <= *deleted + std::chrono::seconds(2)) {
+            refused_creations.push_back(repository.id);
+            continue;
+        }
+        names.push_back(repository.id + " (" + repository.name +
+                        (repository.deleted_at.empty() ? ", live)" : ", tombstoned)"));
+    }
+    if (!names.empty()) {
+        co_return ApiResult::failure(
+            "conflict", "the workspace has repositories, so its store may have held data and is "
+                        "not recreated empty: " + names.dump());
+    }
+    auto records = workspace_records(context, customer_id, workspace_id);
+    if (!records) {
+        co_return ApiResult::failure(records.error().code, records.error().message);
+    }
+    auto blobs = control::settled(co_await control::list_oci_blobs(*records, customer_id));
+    if (!blobs) {
+        co_return ApiResult::failure(blobs.error().code, blobs.error().message);
+    }
+    std::size_t stored = 0;
+    for (const control::OciBlob& blob : *blobs) {
+        stored += blob.object.empty() ? 0 : 1;
+    }
+    if (stored != 0) {
+        co_return ApiResult::failure(
+            "conflict", "the workspace records " + std::to_string(stored) +
+                            " image blobs in its store, so its store held data and is not "
+                            "recreated empty");
+    }
+    auto provisioned = co_await blocking_call(
+        [&] { return context.sync_store->provision_workspace_store(customer_id, workspace_id); },
+        [](std::string message) -> SyncStoreResult<WorkspaceStoreProvision> {
+            return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+        });
+    if (!provisioned) {
+        co_return sync_failure(provisioned.error());
+    }
+    context.audit_details["created"] = provisioned->created;
+    co_return ApiResult::success({{"workspace_id", workspace_id},
+                                  {"customer_id", customer_id},
+                                  {"mode", "provision"},
+                                  {"store_moved_at", workspace->store_moved_at},
+                                  {"created", provisioned->created},
+                                  {"refused_creations", std::move(refused_creations)},
+                                  {"objects", provisioned->objects}});
+}
+
 } // namespace
 
 void register_workspace_store_capabilities(Registry& registry) {
@@ -360,13 +480,15 @@ void register_workspace_store_capabilities(Registry& registry) {
             "copies only what is missing); `verify` compares every repository in both stores; "
             "`switch` holds repository requests, copies what arrived since, verifies again and "
             "serves the workspace's repositories from its store from then on. The space's store "
-            "is never written and is not removed.",
+            "is never written and is not removed. `provision` creates the store of a switched "
+            "workspace that never held anything (no repository, no stored image blob, an absent "
+            "or empty bucket) and refuses with conflict otherwise; repeated, it changes nothing.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"workspace_id", {{"type", "string"}}},
                            {"mode",
                             {{"type", "string"},
-                             {"enum", json::array({"plan", "copy", "verify", "switch"})}}}}},
+                             {"enum", json::array({"plan", "copy", "verify", "switch", "provision"})}}}}},
                          {"required", json::array({"workspace_id", "mode"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
@@ -374,7 +496,18 @@ void register_workspace_store_capabilities(Registry& registry) {
         .object = "workspace store move",
         .action = "admin",
         .resolve_object = move_object,
-        .handler = move_workspace_store});
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (input.at("mode") == "provision") {
+                co_return co_await provision_workspace_store(input, context);
+            }
+            // Every other mode waits on repository stores: on the blocking pool (lake#380).
+            co_return co_await blocking_call(
+                [&] { return move_workspace_store(input, context); },
+                [](std::string message) {
+                    return ApiResult::failure("store_unavailable", std::move(message));
+                });
+        }});
 }
 
 } // namespace lake::api
