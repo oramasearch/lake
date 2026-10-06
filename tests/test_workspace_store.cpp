@@ -10,7 +10,10 @@
 
 #include <gtest/gtest.h>
 
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -45,6 +48,7 @@
 #include "lake/control/workspace_store.hpp"
 #include "lake/control/zetta_control.hpp"
 #include "lake/search/index.hpp"
+#include "latency_proxy.hpp"
 #include "one_thread_io.hpp"
 #include "postgres_fixture.hpp"
 #include "temporary_directory.hpp"
@@ -2136,6 +2140,107 @@ TEST(WorkspaceStoreMove, ADeletedWorkspaceIsNeverReopenedAndADeleteWaitsForAnOpe
     EXPECT_EQ(rig.zetta->lease(endpoint_a).fence, fence);
 }
 
+// ---- lake#527: a commit's store requests in its Server-Timing and the process metrics ----------
+
+// One request on its own connection; the whole response, headers included.
+std::string raw_exchange(int port, const std::string& method, const std::string& path, const std::string& body) {
+    const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(static_cast<std::uint16_t>(port));
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (::connect(socket_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        ::close(socket_fd);
+        return {};
+    }
+    const std::string request = method + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                                "Authorization: Bearer workspace-store-operator\r\n"
+                                "Content-Type: application/json\r\nConnection: close\r\n"
+                                "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+    std::size_t sent = 0;
+    while (sent < request.size()) {
+        const ssize_t count = ::send(socket_fd, request.data() + sent, request.size() - sent, 0);
+        if (count <= 0) {
+            break;
+        }
+        sent += static_cast<std::size_t>(count);
+    }
+    std::string response;
+    char buffer[4096];
+    for (;;) {
+        const ssize_t count = ::recv(socket_fd, buffer, sizeof(buffer), 0);
+        if (count <= 0) {
+            break;
+        }
+        response.append(buffer, static_cast<std::size_t>(count));
+    }
+    ::close(socket_fd);
+    return response;
+}
+
+std::string header_of(const std::string& response, std::string_view name) {
+    std::string lowered = response.substr(0, response.find("\r\n\r\n"));
+    std::ranges::transform(lowered, lowered.begin(), [](unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+    const std::string prefix = "\r\n" + std::string(name) + ": ";
+    const auto start = lowered.find(prefix);
+    if (start == std::string::npos) {
+        return {};
+    }
+    const auto end = lowered.find("\r\n", start + prefix.size());
+    return response.substr(start + prefix.size(), end - start - prefix.size());
+}
+
+std::uint64_t sum_of(const std::map<std::string, std::uint64_t>& counts) {
+    std::uint64_t total = 0;
+    for (const auto& [ignored, count] : counts) {
+        total += count;
+    }
+    return total;
+}
+
+// A commit_repository_files into a switched workspace names its workspace store requests in
+// Server-Timing (`store`, then one entry per kind), the count is every request the workspace
+// Zetta received for it (nothing else on lake's commit path reaches the store), and the process
+// metrics count them by kind and outcome with no workspace label.
+TEST(WorkspaceStoreMove, ACommitNamesItsStoreRequestsInServerTimingAndMetrics) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_TRUE(written(rig.commit(rig.repo_a, "warm.txt", "the store is open after this")));
+    const json body{{"id", rig.repo_a.id},
+                    {"revision", "main"},
+                    {"message", "One file"},
+                    {"operations", json::array({{{"type", "file"}, {"path", "one.txt"}, {"content", "b25lCg=="}}})}};
+    const std::uint64_t before = sum_of(rig.zetta->requests_by_method());
+    const std::string response = raw_exchange(rig.server->port(), "POST", "/v1/commit_repository_files", body.dump());
+    const std::uint64_t received = sum_of(rig.zetta->requests_by_method()) - before;
+    ASSERT_TRUE(response.starts_with("HTTP/1.1 200")) << response;
+    const std::string timing = header_of(response, "server-timing");
+    ASSERT_FALSE(timing.empty()) << response;
+    const std::string expected = "store;dur=";
+    const auto store = timing.find(expected);
+    ASSERT_NE(store, std::string::npos) << timing;
+    const auto described = timing.find(";desc=\"", store);
+    ASSERT_NE(described, std::string::npos) << timing;
+    const std::uint64_t named = std::stoull(timing.substr(described + 7));
+    EXPECT_GT(named, 0U) << timing;
+    EXPECT_EQ(named, received) << timing;
+    EXPECT_NE(timing.find("store_put;dur="), std::string::npos) << timing;
+    EXPECT_EQ(timing.find("store_barrier;"), std::string::npos)
+        << "a commit's barriers send their writes durably and need no :barrier: " << timing;
+    std::printf("commit_repository_files Server-Timing: %s\n", timing.c_str());
+
+    const std::string metrics = raw_exchange(rig.server->port(), "GET", "/metrics", "");
+    EXPECT_NE(metrics.find("lake_workspace_store_requests_total{kind=\"put\",outcome=\"ok\"}"),
+              std::string::npos);
+    EXPECT_NE(metrics.find("lake_workspace_store_request_duration_seconds_bucket{kind=\"put\""),
+              std::string::npos);
+    EXPECT_EQ(metrics.find("lake_workspace_store_requests_total{kind=\"put\",outcome=\"ok\",workspace"),
+              std::string::npos);
+}
+
 // ---- against a real Zetta --------------------------------------------------------------------
 
 // ---- remove_space_store: the space's old store leaves lake's volume ----------------------
@@ -2409,6 +2514,7 @@ struct RealZetta {
     std::filesystem::path directory;
     std::string url;
     std::string token = "lake-380-zetta-admin";
+    int port = 0;
     bool installed = false;
 
     bool start() {
@@ -2421,6 +2527,7 @@ struct RealZetta {
         std::mt19937 generator(std::random_device{}());
         const int mcp = 20000 + static_cast<int>(generator() % 20000);
         const int cluster = mcp + 1;
+        port = mcp;
         url = "http://127.0.0.1:" + std::to_string(mcp);
         const std::string data = (directory / "data").string();
         const std::string log = (directory / "zetta.log").string();
@@ -2760,6 +2867,310 @@ TEST(WorkspaceStoreZetta, TheSearchIndexOnARealZettaIsSealedReloadsAndIsRebuilt)
     EXPECT_TRUE(search_keys().contains("search/manifest.json"));
     repository = std::unexpected(liquid::error{liquid::errc::not_found, "closed", ""});
     ASSERT_TRUE(liquid::runtime::block_on(store->close()));
+}
+
+// ---- lake#527: what one commit costs on a workspace store -------------------------------------
+
+// Passes every exchange through and keeps "METHOD path?query" of each, for the request trace.
+class TracingTransport final : public lake::control::ObjectTransport {
+public:
+    explicit TracingTransport(std::shared_ptr<lake::control::ObjectTransport> inner) : inner_(std::move(inner)) {}
+
+    liquid::runtime::task<lake::control::ObjectResponse> exchange(lake::control::ObjectRequest request) override {
+        std::string line = request.method + " ";
+        const auto objects = request.url.find("/v1/");
+        line += objects == std::string::npos ? request.url : request.url.substr(objects);
+        {
+            std::lock_guard lock(mutex_);
+            if (recording_) {
+                trace_.push_back(std::move(line));
+            }
+        }
+        co_return co_await inner_->exchange(std::move(request));
+    }
+
+    void record(bool on) {
+        std::lock_guard lock(mutex_);
+        recording_ = on;
+        if (on) {
+            trace_.clear();
+        }
+    }
+    std::vector<std::string> trace() const {
+        std::lock_guard lock(mutex_);
+        return trace_;
+    }
+
+private:
+    std::shared_ptr<lake::control::ObjectTransport> inner_;
+    mutable std::mutex mutex_;
+    bool recording_ = false;
+    std::vector<std::string> trace_;
+};
+
+std::chrono::milliseconds measured_round_trip() {
+    const char* value = std::getenv("LAKE_TEST_ZETTA_RTT_MS");
+    return std::chrono::milliseconds(value != nullptr && *value != '\0' ? std::atoi(value) : 10);
+}
+
+// What lake's commit_repository_files does for one regular file (SyncStore::commit_repository_files):
+// remove the path (absent is fine), write it, cut the change.
+liquid::result<liquid::change_id> commit_one_file(liquid::repository& repository, const std::string& path,
+                                                  std::vector<std::byte> contents) {
+    auto removed = liquid::runtime::block_on(repository.remove(path));
+    if (!removed && removed.error().code != liquid::errc::not_found) {
+        return std::unexpected(removed.error());
+    }
+    auto written = liquid::runtime::block_on(repository.write(path, std::move(contents)));
+    if (!written) {
+        return std::unexpected(written.error());
+    }
+    return liquid::runtime::block_on(repository.cut("one file"));
+}
+
+// One-file commits into a repository of a workspace store on a real Zetta behind a proxy that adds
+// LAKE_TEST_ZETTA_RTT_MS (default 10) of round trip, as the cluster's network does: the requests
+// of each kind one commit sends, and its time. The fourth commit is the steady state (the store
+// and the repository open, the directory and headers known).
+TEST(WorkspaceStoreZetta, AOneFileCommitsRequestsAreCountedAndTimed) {
+    RealZetta zetta;
+    if (!zetta.start()) {
+        GTEST_SKIP() << "set LAKE_TEST_ZETTA_BINARY to a zetta built from origin/dev";
+    }
+    const auto round_trip = measured_round_trip();
+    lake::test::LatencyProxy proxy(zetta.port, round_trip);
+    auto tracing = std::make_shared<TracingTransport>(lake::control::make_zetta_object_transport());
+    const std::string workspace = lake::control::new_uuid_v4();
+    auto client = std::make_shared<ZettaObjectClient>(
+        tracing, ObjectEndpoint{"http://127.0.0.1:" + std::to_string(proxy.port()), zetta.token});
+    ASSERT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
+    auto owner = std::make_shared<ZettaStoreOwner>(client, 30s);
+    liquid::store_options options;
+    options.backend = std::make_shared<ZettaObjectBackend>(
+        client, ZettaObjectBackendOptions{.workspace_id = workspace,
+                                          .instance_kek = std::string(kek),
+                                          .create_key = true});
+    options.owner = owner;
+    auto store = liquid::runtime::block_on(liquid::store::open(zetta.directory / "unused", std::move(options)));
+    ASSERT_TRUE(store) << store.error().message;
+    const auto identifier = zetta.directory / "repositories" / "measured";
+    liquid::repository_options repository_options;
+    repository_options.store = &*store;
+    auto repository = liquid::runtime::block_on(liquid::repository::create(identifier, repository_options));
+    ASSERT_TRUE(repository) << repository.error().message;
+
+    std::printf("\nlake#527: one-file commits on a workspace store, real Zetta, %lld ms round trip\n",
+                static_cast<long long>(round_trip.count()));
+    std::printf("| Commit | ms | requests | barrier rounds | by kind |\n|---|---:|---:|---:|---|\n");
+    double steady_ms = 0;
+    std::uint64_t steady_requests = 0;
+    for (int commit = 1; commit <= 4; ++commit) {
+        lake::control::ObjectRequestTally tally;
+        std::array<std::uint64_t, lake::control::object_request_kinds> count{};
+        std::array<std::uint64_t, lake::control::object_request_kinds> nanoseconds{};
+        for (std::size_t index = 0; index < count.size(); ++index) {
+            count[index] = client->counters()->by_kind.count[index].load();
+            nanoseconds[index] = client->counters()->by_kind.nanoseconds[index].load();
+        }
+        const std::uint64_t rounds_before = client->counters()->barrier_rounds.load();
+        tracing->record(commit == 4);
+        const auto started = std::chrono::steady_clock::now();
+        auto change = commit_one_file(*repository, "notes/file-" + std::to_string(commit) + ".md",
+                                      bytes_of("a small note, commit " + std::to_string(commit) + "\n"));
+        ASSERT_TRUE(change) << change.error().message;
+        const double elapsed = milliseconds_since(started);
+        tally.add_difference(client->counters()->by_kind, count, nanoseconds);
+        tracing->record(false);
+        const std::uint64_t rounds = client->counters()->barrier_rounds.load() - rounds_before;
+        std::printf("| %d | %.0f | %llu | %llu | %s |\n", commit, elapsed,
+                    static_cast<unsigned long long>(tally.total_requests()),
+                    static_cast<unsigned long long>(rounds), tally.summary().c_str());
+        if (commit == 4) {
+            steady_ms = elapsed;
+            steady_requests = tally.total_requests();
+        }
+    }
+    std::printf("\nrequests of the steady-state commit, in order:\n");
+    for (const std::string& line : tracing->trace()) {
+        std::printf("  %s\n", line.c_str());
+    }
+    std::printf("steady state: %.0f ms, %llu requests\n", steady_ms,
+                static_cast<unsigned long long>(steady_requests));
+    ASSERT_TRUE(liquid::runtime::block_on(store->close()));
+}
+
+// ---- lake#527: a crash keeps what the last barrier acknowledged --------------------------------
+
+using ObjectState = std::optional<std::vector<std::byte>>;
+
+bool is_prefix(const std::vector<std::byte>& shorter, const std::vector<std::byte>& longer) {
+    return shorter.size() <= longer.size() && std::equal(shorter.begin(), shorter.end(), longer.begin());
+}
+
+// After a crash an object is one of its states since the last barrier that answered (the first of
+// `history`), or between two of them that differ only by appended bytes (a barrier part way
+// through an append).
+bool allowed_after_crash(const std::vector<ObjectState>& history, const ObjectState& found) {
+    for (const ObjectState& state : history) {
+        if (state == found) {
+            return true;
+        }
+    }
+    if (!found) {
+        return false;
+    }
+    for (std::size_t from = 0; from < history.size(); ++from) {
+        for (std::size_t to = from + 1; to < history.size(); ++to) {
+            if (history[from] && history[to] && is_prefix(*history[from], *found) &&
+                is_prefix(*found, *history[to])) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Random puts (held and sent at once), appends past the flush threshold, conditional creates and
+// removes, with barriers between; then a barrier that the workspace Zetta stops answering part way
+// through, and a crash that keeps an arbitrary prefix of each key's writes since the last barrier
+// it answered. Every object is what that barrier acknowledged, or a later state of it.
+TEST(WorkspaceStoreBackend, ACrashAnywhereKeepsWhatTheLastBarrierAcknowledged) {
+    const std::vector<std::string> keys{"packs/pack-1.pack", "index/run-1.idx", "index/MANIFEST",
+                                        "packs/objects.meta", "repositories/r/LIQUID_REPO",
+                                        "leases/a.lease"};
+    for (std::uint64_t seed = 1; seed <= 200; ++seed) {
+        Rig rig;
+        ZettaObjectBackendOptions options = small_blocks();
+        options.deferred_put_bytes = 2048; // larger puts take the immediate path
+        auto backend = rig.backend(options);
+        std::mt19937_64 random(seed);
+        std::map<std::string, std::vector<ObjectState>> history;
+        std::map<std::string, ObjectState> current;
+        for (const std::string& key : keys) {
+            history[key] = {std::nullopt};
+            current[key] = std::nullopt;
+        }
+        const int steps = 10 + static_cast<int>(random() % 40);
+        for (int step = 0; step < steps; ++step) {
+            const std::string& key = keys[random() % keys.size()];
+            const auto choice = random() % 10;
+            if (choice < 2) {
+                ASSERT_TRUE(liquid::runtime::block_on(backend->barrier())) << seed;
+                for (const std::string& each : keys) {
+                    history[each] = {current[each]};
+                }
+                continue;
+            }
+            if (choice < 5) {
+                // Sometimes the same bytes again, as liquid republishes its index manifest.
+                auto bytes = current[key] && random() % 3 == 0 ? *current[key]
+                                                               : random_bytes(random() % 5000, random());
+                ASSERT_TRUE(liquid::runtime::block_on(backend->put(key, bytes))) << seed;
+                current[key] = std::move(bytes);
+            } else if (choice < 8 && current[key]) {
+                const auto more = random_bytes(1 + random() % 3000, random());
+                ASSERT_TRUE(liquid::runtime::block_on(backend->put_range(key, current[key]->size(), more)))
+                    << seed;
+                current[key]->insert(current[key]->end(), more.begin(), more.end());
+            } else if (current[key]) {
+                ASSERT_TRUE(liquid::runtime::block_on(backend->remove(key))) << seed;
+                current[key] = std::nullopt;
+            } else {
+                auto bytes = random_bytes(random() % 1500, random());
+                ASSERT_TRUE(liquid::runtime::block_on(backend->put_if_absent(key, bytes))) << seed;
+                current[key] = std::move(bytes);
+            }
+            history[key].push_back(current[key]);
+        }
+        // The last barrier: answered, stopped part way, or with answers lost at random (its
+        // requests are in flight together, so any of them may land and any may not).
+        const auto ending = random() % 3;
+        if (ending == 1) {
+            rig.zetta->fail_after(static_cast<int>(random() % 8));
+            static_cast<void>(liquid::runtime::block_on(backend->barrier()));
+        } else if (ending == 2) {
+            rig.zetta->fail_randomly(seed, 70);
+            static_cast<void>(liquid::runtime::block_on(backend->barrier()));
+        }
+        rig.zetta->fail_after(-1);
+        rig.zetta->fail_randomly(0, 0);
+        rig.zetta->crash(rig.endpoint, seed);
+        auto reader = rig.backend(small_blocks(), false);
+        for (const std::string& key : keys) {
+            ObjectState found;
+            auto listed = liquid::runtime::block_on(reader->list(key));
+            ASSERT_TRUE(listed) << seed << " " << listed.error().message;
+            for (const auto& entry : *listed) {
+                if (entry.key == key) {
+                    auto bytes = liquid::runtime::block_on(reader->get_range(key, 0, entry.size));
+                    ASSERT_TRUE(bytes) << seed << " " << key << " " << bytes.error().message;
+                    found = std::move(*bytes);
+                }
+            }
+            EXPECT_TRUE(allowed_after_crash(history[key], found))
+                << "seed " << seed << ": " << key << " holds " << (found ? found->size() : 0)
+                << " bytes (" << (found ? "present" : "absent") << "), acknowledged "
+                << (history[key].front() ? history[key].front()->size() : 0) << " bytes";
+        }
+    }
+}
+
+// The same through liquid: one-file commits as lake makes them, then one the workspace Zetta stops
+// answering part way through, then a crash. The store reopens (a successor with a higher fence)
+// and every commit that was acknowledged reads back.
+TEST(WorkspaceStoreBackend, ACrashMidCommitKeepsEveryAcknowledgedCommit) {
+    for (std::uint64_t seed = 1; seed <= 24; ++seed) {
+        Rig rig;
+        const auto root = lake::test::fixture_path("workspace-store-crash-" + rig.workspace);
+        const auto identifier = root / "repositories" / "crashed";
+        std::mt19937_64 random(seed);
+        std::vector<std::pair<std::string, std::vector<std::byte>>> acknowledged;
+        {
+            std::shared_ptr<ZettaStoreOwner> owner;
+            auto store = liquid::runtime::block_on(liquid::store::open(root, owned(rig, owner)));
+            ASSERT_TRUE(store) << store.error().message;
+            liquid::repository_options options;
+            options.store = &*store;
+            auto repository = liquid::runtime::block_on(liquid::repository::create(identifier, options));
+            ASSERT_TRUE(repository) << repository.error().message;
+            const int commits = 2 + static_cast<int>(seed % 3);
+            for (int commit = 0; commit < commits; ++commit) {
+                const std::string path = "notes/" + std::to_string(commit) + ".md";
+                auto bytes = random_bytes(10 + random() % 3000, random());
+                ASSERT_TRUE(commit_one_file(*repository, path, bytes)) << seed;
+                acknowledged.emplace_back(path, std::move(bytes));
+            }
+            if (seed % 2 == 0) {
+                rig.zetta->fail_after(static_cast<int>(random() % 60));
+            } else {
+                rig.zetta->fail_randomly(seed, 40);
+            }
+            auto bytes = random_bytes(10 + random() % 3000, random());
+            if (commit_one_file(*repository, "notes/interrupted.md", bytes)) {
+                acknowledged.emplace_back("notes/interrupted.md", std::move(bytes));
+            }
+            // The process stops: nothing more reaches the workspace Zetta.
+            rig.zetta->fail_randomly(0, 0);
+            rig.zetta->fail_after(0);
+            owner->stop_renewing();
+        }
+        rig.zetta->fail_after(-1);
+        rig.zetta->crash(rig.endpoint, seed);
+        rig.zetta->expire(rig.endpoint);
+        std::shared_ptr<ZettaStoreOwner> successor;
+        auto store = liquid::runtime::block_on(liquid::store::open(root, owned(rig, successor)));
+        ASSERT_TRUE(store) << "seed " << seed << ": " << store.error().message;
+        liquid::repository_options options;
+        options.store = &*store;
+        auto repository = liquid::runtime::block_on(liquid::repository::open(identifier, options));
+        ASSERT_TRUE(repository) << "seed " << seed << ": " << repository.error().message;
+        for (const auto& [path, bytes] : acknowledged) {
+            auto read_back = liquid::runtime::block_on(repository->read(path));
+            ASSERT_TRUE(read_back) << "seed " << seed << ": " << path << ": " << read_back.error().message;
+            EXPECT_EQ(*read_back, bytes) << "seed " << seed << ": " << path;
+        }
+        ASSERT_TRUE(liquid::runtime::block_on(store->close()));
+    }
 }
 
 } // namespace

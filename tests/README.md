@@ -613,3 +613,11 @@ alone, a first push that does not wait for the rebuild, pushes beside searches, 
 background rebuild queue, backoff, release snapshots, write-once runs and eviction.
 `zetta_object_fixture.hpp` is `FakeZettaObjects`, Zetta's object routes in memory. Set
 `LAKE_TEST_ZETTA_BINARY` to a `zetta` built from Zetta dev to run `WorkspaceStoreZetta.*` against it.
+move with an interrupted copy, the switch, two workspaces of one space and the lost lease's `503`.
+`zetta_object_fixture.hpp` is `FakeZettaObjects`, Zetta's object routes in memory. It models
+durability (lake#527): a barrier or a `durable=true` write makes writes durable, `crash` keeps an
+arbitrary prefix of each key's other writes, and `fail_after` and `fail_randomly` stop answering
+part way or lose answers at random. Set `LAKE_TEST_ZETTA_BINARY` to a `zetta` built from Zetta dev
+to run `WorkspaceStoreZetta.*` against it; `latency_proxy.hpp` (`LatencyProxy`) puts a loopback
+round trip in front of it, `LAKE_TEST_ZETTA_RTT_MS` (default 10) for
+`WorkspaceStoreZetta.AOneFileCommitsRequestsAreCountedAndTimed`.

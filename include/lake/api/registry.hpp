@@ -18,6 +18,7 @@
 
 #include "lake/api/sync_store.hpp"
 #include "lake/control/policy.hpp"
+#include "lake/control/workspace_store.hpp"
 #include "lake/transparency/checkpoint.hpp"
 #include "lake/transparency/timestamps.hpp"
 
@@ -210,6 +211,9 @@ struct WorkspaceCallTiming {
     };
     mutable std::mutex calls_mutex;
     std::vector<Call> calls;
+    // The request's workspace store requests by kind (lake#527), added by the capability calls
+    // that ran under an ObjectRequestScope on it.
+    control::ObjectRequestTally store;
 
     void record(std::string capability, std::int64_t elapsed) {
         std::lock_guard lock(calls_mutex);

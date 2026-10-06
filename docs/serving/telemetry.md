@@ -43,6 +43,15 @@ The exported metric families are:
   gauge `lake_request_series_pending`: requests on their way to their workspaces' `lake_requests`
   series, written by the owner loop every ten seconds ([below](#the-workspace-request-series),
   lake#384)
+- `lake_workspace_store_requests_total{kind,outcome}` and
+  `lake_workspace_store_request_duration_seconds{kind}`: each request lake sends to a workspace
+  Zetta's object routes for a switched workspace's repository store, one count per attempt
+  (lake#527, [workspace store](../architecture/workspace-store.md#requests-and-latency-lake527)).
+  `kind` is `put`, `put_if_absent`, `patch`, `barrier`, `get`, `ranged_get`, `list`, `delete`,
+  `lease_acquire`, `lease_renew`, `lease_release`, `usage` or `create_bucket`; `outcome` is `ok`,
+  `client_error`, `server_error` or `no_answer`. There is no workspace, bucket or key label. A
+  request's own share is in its `Server-Timing` (`store`, `store_<kind>`,
+  [performance](../ui/performance.md#reading-server-timing))
 - `lake_workspace_deletions_completed_total` and `lake_workspace_deletion_errors_total`: the owner
   loop's pass, every minute, that finishes workspace deletions left pending (tenant image tags,
   search segments, central audit events); an error also logs `lake: workspace deletion pending`

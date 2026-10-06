@@ -935,6 +935,22 @@ std::vector<std::shared_ptr<const Capability>> Registry::list() const {
     return entries_;
 }
 
+namespace {
+// Attributes the workspace store requests a synchronous handler sends on this thread to its HTTP
+// request's Server-Timing (lake#527); a call without one leaves any enclosing scope in place.
+class StoreRequestScope {
+public:
+    explicit StoreRequestScope(const ApiContext& context) {
+        if (context.workspace_call_timing) {
+            scope_.emplace(&context.workspace_call_timing->store);
+        }
+    }
+
+private:
+    std::optional<control::ObjectRequestScope> scope_;
+};
+} // namespace
+
 ApiResult
 Registry::call(const std::string& name, const nlohmann::json& input, ApiContext& context) const {
     context.registry = this;
@@ -964,6 +980,7 @@ Registry::call(const std::string& name, const nlohmann::json& input, ApiContext&
         const auto start = std::chrono::steady_clock::now();
         try {
             if (capability->handler) {
+                const StoreRequestScope scope(context);
                 state.result = capability->handler(call_input, context);
             } else {
                 state.result =
@@ -1020,8 +1037,10 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
                 }
             } else if (capability->handler && waits_on_repository_store(*capability)) {
                 const CapabilityHandler& handler = capability->handler;
-                auto completed = co_await run_blocking(
-                    [&handler, &call_input, &context] { return handler(call_input, context); });
+                auto completed = co_await run_blocking([&handler, &call_input, &context] {
+                    const StoreRequestScope scope(context);
+                    return handler(call_input, context);
+                });
                 state.result = completed ? std::move(*completed)
                                          : ApiResult::failure("store_error", completed.error().message);
             } else if (capability->handler) {

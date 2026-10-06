@@ -40,6 +40,10 @@ public:
         std::map<std::string, std::string> objects;
         Lease lease;
         std::uint64_t barriers = 0;
+        // What survives a crash (lake#527): the objects as of the last barrier, plus each durable
+        // write (and the writes to its key before it), plus any prefix of each key's other writes.
+        std::map<std::string, std::string> durable;
+        std::vector<std::pair<std::string, std::optional<std::string>>> unsynced;
     };
     struct Node {
         std::string token;
@@ -64,7 +68,40 @@ public:
     void set_object(const std::string& endpoint, const std::string& key, std::string bytes,
                     const std::string& bucket = "lake_store") {
         std::lock_guard lock(mutex_);
+        nodes_[endpoint].buckets[bucket].durable[key] = bytes;
         nodes_[endpoint].buckets[bucket].objects[key] = std::move(bytes);
+    }
+    // The workspace Zetta stops at once and starts again (lake#527): each object keeps what the
+    // last barrier and the durable writes made durable, and of each key's other writes since, a
+    // prefix chosen by `seed` (Zetta's log keeps a key's frames in order and truncates at the
+    // first torn one). The lease is kept.
+    void crash(const std::string& endpoint, std::uint64_t seed) {
+        std::lock_guard lock(mutex_);
+        std::uint64_t state = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        const auto next = [&state](std::uint64_t bound) {
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            return bound == 0 ? 0 : (state >> 33U) % bound;
+        };
+        for (auto& [name, bucket] : nodes_[endpoint].buckets) {
+            std::map<std::string, std::vector<std::optional<std::string>>> by_key;
+            for (const auto& [key, after] : bucket.unsynced) {
+                by_key[key].push_back(after);
+            }
+            for (const auto& [key, versions] : by_key) {
+                const std::uint64_t kept = next(versions.size() + 1);
+                if (kept == 0) {
+                    continue;
+                }
+                const auto& value = versions[kept - 1];
+                if (value) {
+                    bucket.durable[key] = *value;
+                } else {
+                    bucket.durable.erase(key);
+                }
+            }
+            bucket.unsynced.clear();
+            bucket.objects = bucket.durable;
+        }
     }
     Lease lease(const std::string& endpoint, const std::string& bucket = "lake_store") {
         std::lock_guard lock(mutex_);
@@ -101,6 +138,19 @@ public:
     void keep_bodies(bool keep) {
         std::lock_guard lock(mutex_);
         keep_bodies_ = keep;
+    }
+    // After the next `answered` requests, every request gets no answer until called with -1: a
+    // workspace Zetta that stopped part way through a sequence of writes.
+    void fail_after(int answered) {
+        std::lock_guard lock(mutex_);
+        fail_after_ = answered;
+    }
+    // From now on each request gets no answer with `percent` % probability, drawn from `seed`
+    // (0 stops it): requests in flight together whose answers are lost in any order.
+    void fail_randomly(std::uint64_t seed, unsigned percent) {
+        std::lock_guard lock(mutex_);
+        loss_state_ = seed * 2862933555777941757ULL + 3037000493ULL;
+        loss_percent_ = percent;
     }
     // The next `count` requests get no answer (a transport failure).
     void drop_next(int count) {
@@ -148,11 +198,14 @@ public:
     void clear_bucket(const std::string& endpoint, const std::string& bucket = "lake_store") {
         std::lock_guard lock(mutex_);
         nodes_[endpoint].buckets[bucket].objects.clear();
+        nodes_[endpoint].buckets[bucket].durable.clear();
+        nodes_[endpoint].buckets[bucket].unsynced.clear();
     }
     void erase_object(const std::string& endpoint, const std::string& key,
                       const std::string& bucket = "lake_store") {
         std::lock_guard lock(mutex_);
         nodes_[endpoint].buckets[bucket].objects.erase(key);
+        nodes_[endpoint].buckets[bucket].durable.erase(key);
     }
     // Added to every exchange, to stand in for a network.
     void set_latency(std::chrono::microseconds latency) {
@@ -241,6 +294,23 @@ private:
         }
         return output;
     }
+    // A write was applied: it is durable now when it asked to be (with the writes to its key
+    // before it), otherwise only once a barrier answers.
+    static void record(Bucket& bucket, const std::string& key, bool durable) {
+        const auto found = bucket.objects.find(key);
+        bucket.unsynced.emplace_back(key, found == bucket.objects.end()
+                                              ? std::nullopt
+                                              : std::optional<std::string>(found->second));
+        if (!durable) {
+            return;
+        }
+        std::erase_if(bucket.unsynced, [&key](const auto& entry) { return entry.first == key; });
+        if (found == bucket.objects.end()) {
+            bucket.durable.erase(key);
+        } else {
+            bucket.durable[key] = found->second;
+        }
+    }
     std::uint64_t used(const Bucket& bucket) const {
         std::uint64_t total = 0;
         for (const auto& [key, bytes] : bucket.objects) {
@@ -280,6 +350,18 @@ private:
         if (drop_ > 0) {
             --drop_;
             return {0, {}, "connection reset by the test"};
+        }
+        if (loss_percent_ != 0) {
+            loss_state_ = loss_state_ * 6364136223846793005ULL + 1442695040888963407ULL;
+            if ((loss_state_ >> 33U) % 100 < loss_percent_) {
+                return {0, {}, "the answer was lost (test)"};
+            }
+        }
+        if (fail_after_ == 0) {
+            return {0, {}, "the workspace Zetta stopped (test)"};
+        }
+        if (fail_after_ > 0) {
+            --fail_after_;
         }
         const std::size_t scheme = request.url.find("://");
         const std::size_t path_start = request.url.find('/', scheme + 3);
@@ -352,6 +434,8 @@ private:
             }
             if (operation == "barrier") {
                 ++bucket.barriers;
+                bucket.durable = bucket.objects;
+                bucket.unsynced.clear();
                 return ok({{"bucket", name}, {"nodes", 1}});
             }
             if (operation == "usage") {
@@ -453,6 +537,7 @@ private:
                 return refused(507, "quota_exceeded", "past the bucket's quota");
             }
             bucket.objects[key] = request.body;
+            record(bucket, key, parameters.contains("durable"));
             return ok(written);
         }
         if (request.method == "PATCH") {
@@ -463,6 +548,7 @@ private:
                     return refused(507, "quota_exceeded", "past the bucket's quota");
                 }
                 object += request.body;
+                record(bucket, key, parameters.contains("durable"));
                 return ok(written);
             }
             if (offset < object.size() && offset + request.body.size() <= object.size() &&
@@ -481,6 +567,7 @@ private:
             if (bucket.objects.erase(key) == 0) {
                 return refused(404, "not_found", "no object " + key);
             }
+            record(bucket, key, parameters.contains("durable"));
             return ok(written);
         }
         return refused(404, "not_found", "no route");
@@ -494,6 +581,9 @@ private:
     std::map<std::string, std::uint64_t> by_method_;
     std::vector<std::string> bodies_;
     int drop_ = 0;
+    int fail_after_ = -1;
+    std::uint64_t loss_state_ = 0;
+    unsigned loss_percent_ = 0;
     std::string drop_method_;
     int drop_nth_ = 0;
     int drop_count_ = 0;

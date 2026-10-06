@@ -40,6 +40,14 @@ workspace capabilities, including the app-detail page's event section.
 - `zetta_<capability>` is one workspace call, named by the Zetta capability it called
   (`zetta_list_models`, `zetta_sql` for a `workspace_sql` read), with its own duration. There is one
   entry per call, in completion order, so a slow page names the engine read it waited on.
+- `store` (lake#527) is the request's traffic to a switched workspace's repository store (its
+  liquid store in the workspace Zetta, [workspace-store.md](../architecture/workspace-store.md)):
+  the summed duration and, as its description, the number of object requests. Then one
+  `store_<kind>` entry per kind sent (`put`, `put_if_absent`, `patch`, `barrier`, `get`,
+  `ranged_get`, `list`, `delete`, `lease_acquire`, `lease_release`, `create_bucket`), its duration
+  and count. They appear only when the request reached a workspace store. REST (`/v1/<capability>`)
+  and MCP responses carry the same header as pages, so a repository write such as
+  `commit_repository_files` names its store requests.
 
 An example header is:
 

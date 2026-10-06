@@ -70,8 +70,75 @@ struct ObjectEndpoint {
     std::string token;
 };
 
+// The kinds of request lake sends to a workspace Zetta's object routes (lake#527). A bounded set:
+// it is the `kind` label of lake_workspace_store_requests_total and of the Server-Timing entries.
+enum class ObjectRequestKind : std::uint8_t {
+    put,           // PUT, replacing
+    put_if_absent, // PUT ?if_absent=true
+    patch,         // PATCH ?offset= (an append)
+    barrier,       // POST :barrier
+    get,           // GET of a whole object
+    ranged_get,    // GET with Range
+    list,          // GET of the bucket listing, one page
+    remove,        // DELETE
+    lease_acquire, // POST :acquire
+    lease_renew,   // POST :renew
+    lease_release, // POST :release
+    usage,         // GET :usage
+    create_bucket, // POST create_bucket
+};
+inline constexpr std::size_t object_request_kinds = 13;
+std::string_view object_request_kind_name(ObjectRequestKind kind);
+
+// Requests by kind: how many, and how long they took (each attempt of a retried request counts).
+struct ObjectRequestTally {
+    std::array<std::atomic<std::uint64_t>, object_request_kinds> count{};
+    std::array<std::atomic<std::uint64_t>, object_request_kinds> nanoseconds{};
+
+    void add(ObjectRequestKind kind, std::uint64_t elapsed) {
+        count[static_cast<std::size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
+        nanoseconds[static_cast<std::size_t>(kind)].fetch_add(elapsed, std::memory_order_relaxed);
+    }
+    std::uint64_t requests(ObjectRequestKind kind) const {
+        return count[static_cast<std::size_t>(kind)].load(std::memory_order_relaxed);
+    }
+    // Adds `later - earlier` of each kind but the lease renewal and usage, which run on their own
+    // threads beside the calls.
+    void add_difference(const ObjectRequestTally& later,
+                        const std::array<std::uint64_t, object_request_kinds>& earlier_count,
+                        const std::array<std::uint64_t, object_request_kinds>& earlier_nanoseconds);
+    std::uint64_t total_requests() const;
+    std::uint64_t total_nanoseconds() const;
+    // "put=3 patch=1 barrier=2" for the kinds with requests, in the enum's order.
+    std::string summary() const;
+};
+
+// While alive, this thread's capability call collects into `tally` the workspace store requests
+// of the store calls it makes. Lake opens one around each capability call (Registry::call, and
+// call_async's blocking-pool call). The requests themselves are not attributed by thread (liquid
+// runs parts of a store call on its own pool); the repository store adds, when a call leaves a
+// workspace store's lane, the requests that store sent while the call held the lane, which only
+// that call can have sent (lease renewals and usage reads excepted, and not counted).
+class ObjectRequestScope {
+public:
+    explicit ObjectRequestScope(ObjectRequestTally* tally);
+    ~ObjectRequestScope();
+    ObjectRequestScope(const ObjectRequestScope&) = delete;
+    ObjectRequestScope& operator=(const ObjectRequestScope&) = delete;
+    static ObjectRequestTally* current();
+
+private:
+    ObjectRequestTally* previous_;
+};
+
+// Called once per request attempt with its kind, Zetta's status (0 when no answer came) and its
+// duration; lake records it as process metrics with bounded labels.
+using ObjectRequestObserver =
+    std::function<void(ObjectRequestKind kind, int status, std::chrono::nanoseconds elapsed)>;
+
 // Cumulative counters for one workspace store, read by tests and the latency measurement.
 struct ObjectStoreCounters {
+    ObjectRequestTally by_kind;
     std::atomic<std::uint64_t> requests{0};
     std::atomic<std::uint64_t> request_nanoseconds{0};
     std::atomic<std::uint64_t> bytes_sent{0};
@@ -82,6 +149,8 @@ struct ObjectStoreCounters {
     std::atomic<std::uint64_t> lists{0};
     std::atomic<std::uint64_t> removes{0};
     std::atomic<std::uint64_t> barriers{0};
+    // Barriers that sent anything: each is one round trip, its requests in flight together.
+    std::atomic<std::uint64_t> barrier_rounds{0};
     std::atomic<std::uint64_t> window_hits{0};
     std::atomic<std::uint64_t> window_misses{0};
 };
@@ -113,7 +182,8 @@ public:
     ZettaObjectClient(std::shared_ptr<ObjectTransport> transport,
                       ObjectEndpoint endpoint,
                       std::string bucket = std::string(workspace_store_bucket),
-                      std::shared_ptr<ObjectStoreCounters> counters = {});
+                      std::shared_ptr<ObjectStoreCounters> counters = {},
+                      ObjectRequestObserver observer = {});
 
     const std::string& bucket() const {
         return bucket_;
@@ -125,16 +195,23 @@ public:
     // create_bucket {bucket, quota_bytes}: idempotent for an identical definition. A zero quota
     // leaves the bucket without one. An existing bucket with another quota is accepted as is.
     liquid::runtime::task<void> create_bucket(std::uint64_t quota_bytes);
-    liquid::runtime::task<void>
-    put(std::string key, std::string bytes, std::optional<std::uint64_t> fence, bool if_absent);
+    // `durable`: Zetta fsyncs the write before it answers (`?durable=true`), so an acknowledged
+    // durable write needs no barrier.
+    liquid::runtime::task<void> put(std::string key,
+                                    std::string bytes,
+                                    std::optional<std::uint64_t> fence,
+                                    bool if_absent,
+                                    bool durable = false);
     liquid::runtime::task<void> append(std::string key,
                                        std::uint64_t offset,
                                        std::string bytes,
-                                       std::optional<std::uint64_t> fence);
+                                       std::optional<std::uint64_t> fence,
+                                       bool durable = false);
     // Exactly [offset, offset + size); size 0 answers an empty string without a request.
     liquid::runtime::task<std::string> get(std::string key, std::uint64_t offset, std::uint64_t size);
     liquid::runtime::task<std::string> get_all(std::string key);
-    liquid::runtime::task<void> remove(std::string key, std::optional<std::uint64_t> fence);
+    liquid::runtime::task<void>
+    remove(std::string key, std::optional<std::uint64_t> fence, bool durable = false);
     // Every key under prefix with its size, by key, following next_after.
     liquid::runtime::task<std::vector<ObjectListEntry>> list(std::string prefix);
     liquid::runtime::task<void> barrier();
@@ -149,8 +226,15 @@ public:
                                              std::chrono::milliseconds timeout);
     liquid::runtime::task<void> release(std::string holder, std::uint64_t fence);
 
+    // Sends what a backend over this client holds for the next barrier (lake#527); the owner
+    // calls it before it releases the lease, so a closed store leaves nothing unsent. Set by
+    // ZettaObjectBackend; the last one constructed over the client is the open store's.
+    void set_before_release(std::function<liquid::runtime::task<void>()> settle);
+    liquid::runtime::task<void> before_release() const;
+
 private:
-    liquid::runtime::task<ObjectResponse> send(ObjectRequest request, bool idempotent);
+    liquid::runtime::task<ObjectResponse>
+    send(ObjectRequest request, bool idempotent, ObjectRequestKind kind);
     std::string object_url(std::string_view key) const;
     std::string bucket_url(std::string_view suffix) const;
 
@@ -158,6 +242,9 @@ private:
     ObjectEndpoint endpoint_;
     std::string bucket_;
     std::shared_ptr<ObjectStoreCounters> counters_;
+    ObjectRequestObserver observer_;
+    mutable std::mutex settle_mutex_;
+    std::function<liquid::runtime::task<void>()> settle_;
 };
 
 // The workspace's data key (S3): random, 32 bytes, wrapped with AES-256-GCM under
@@ -210,6 +297,11 @@ struct ZettaObjectBackendOptions {
     std::size_t block_size = 64 * 1024;
     // Complete blocks of buffered appends are sent once at least this much is held.
     std::size_t flush_bytes = 1024 * 1024;
+    // A put of at most this many bytes is held until the next barrier and sent then, with the
+    // barrier's other writes, as one durable PUT (lake#527). A larger put is sent at once.
+    std::size_t deferred_put_bytes = 1024 * 1024;
+    // Requests one barrier keeps in flight at once.
+    std::size_t barrier_concurrency = 16;
     // Reads fetch aligned windows of ciphertext this large and keep them.
     std::size_t window_bytes = 4 * 1024 * 1024;
     // The window cache's bound, per workspace store.
@@ -230,7 +322,8 @@ struct ZettaObjectBackendOptions {
 // its associated data binding the workspace, K, the header, the block's region and index.
 //
 // Appends are buffered and sent as complete blocks once flush_bytes is held, and always before
-// barrier() answers. A range rewritten with different bytes is refused with errc::conflict: Zetta
+// barrier() answers. Small puts and removes are held until barrier() too, which sends everything
+// held at once and durably, so one barrier is one round trip (lake#527). A range rewritten with different bytes is refused with errc::conflict: Zetta
 // keeps objects append-only (liquid writes each index run once since liquid#332). Reads go through a bounded cache of aligned ciphertext windows keyed by the object
 // version's salt. The backend keeps a directory of the bucket from one listing, maintained by its
 // own writes; that is exact because the owner's fence makes it the only writer.
@@ -260,6 +353,8 @@ public:
     // A mutation through this backend or any of its views failed: liquid's memory of the store
     // may be ahead of the bucket, so the store must be closed and opened again before more use.
     bool failed() const;
+    // Barriers every view of this backend: what they hold is sent and durable (lake#527).
+    static liquid::runtime::task<void> settle(std::shared_ptr<Shared> shared);
 
     struct Entry;
 
@@ -275,22 +370,38 @@ private:
     liquid::runtime::task<void> ensure_cipher();
     liquid::runtime::task<void> ensure_header(const std::string& key);
     liquid::runtime::task<void> ensure_open_region(const std::string& key);
-    liquid::runtime::task<void> flush_entry(const std::string& key, bool barrier);
-    liquid::runtime::task<void> flush_entry_once(const std::string& key, bool barrier);
+    struct FlushPlan;
+    struct Ready;
+    liquid::runtime::task<void> flush_entry(const std::string& key);
+    // The writes that bring `key` up to date in Zetta, built under mutex_, or nothing.
+    liquid::result<std::optional<FlushPlan>> plan_flush(const std::string& key, bool barrier);
+    liquid::runtime::task<void> send_plan(FlushPlan plan, bool durable);
+    liquid::runtime::task<void> send_pending_remove(const std::string& key);
+    liquid::runtime::task<void> remove_key(std::string key);
+    liquid::runtime::task<void> remove_stale_tail(std::string tail);
     liquid::runtime::task<std::string>
     read_main(const std::string& key, std::uint64_t offset, std::uint64_t size);
     liquid::runtime::task<std::vector<std::byte>>
     read_plain(const std::string& key, std::uint64_t offset, std::uint64_t size);
-    liquid::runtime::task<void> remove_stale_tails();
 
     std::shared_ptr<Shared> shared_;
     std::optional<std::uint64_t> fence_;
     std::mutex mutex_;
     bool directory_loaded_ = false;
     std::map<std::string, std::unique_ptr<Entry>> directory_;
+    // Tails no reader needs once the bucket holds what the last barrier acknowledged: removed,
+    // without durability, beside the next barrier's writes.
     std::set<std::string> stale_tails_;
+    // Tails that become stale only once the next barrier completes (their replacement is not
+    // durable yet); promoted to stale_tails_ when it does.
+    std::set<std::string> retiring_tails_;
+    // Keys liquid removed since the last barrier that the bucket still holds: deleted durably at
+    // the next barrier (lake#527).
+    std::set<std::string> pending_removes_;
     std::set<std::string> flushing_;
     std::condition_variable flushed_;
+    // A write was acknowledged without durability since the last barrier: the next barrier sends
+    // Zetta's :barrier too.
     bool dirty_ = false;
 };
 
