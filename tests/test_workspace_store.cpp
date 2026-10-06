@@ -3993,16 +3993,21 @@ TEST(WorkspaceStoreHandoff, AnUnreadyWorkspaceDoesNotHoldUpTheOthersRepositories
     rig.server->begin_drain();
     ASSERT_TRUE(eventually([&] { return rig.zetta->lease(endpoint_a).fence > old_fence; }));
     rig.server->stop();
+    // Counted before the successor can own the root: its repository pre-open can start as soon
+    // as it does, before store_root_open() is seen here.
+    const auto writes = rig.zetta->applied().size();
     rig.server = std::move(successor);
     ASSERT_TRUE(eventually([&] { return rig.server->store_root_open(); }));
     // Opening a repository writes its entry point again: alpha's repository is opened within
     // seconds, while beta is still being retried.
-    const auto writes = rig.zetta->applied().size();
     EXPECT_TRUE(eventually([&] {
         const auto applied = rig.zetta->applied();
         return std::any_of(applied.begin() + static_cast<std::ptrdiff_t>(writes), applied.end(),
                            [](const std::string& write) { return write.ends_with("/LIQUID_REPO"); });
     }, 3s)) << "alpha's repositories waited for beta";
+    // What the pre-open's repository open wrote is durable, with no request after it (lake#535).
+    EXPECT_TRUE(eventually([&] { return rig.zetta->unsynced(endpoint_a) == 0; }, 3s))
+        << rig.zetta->unsynced(endpoint_a) << " writes left unsynced";
 }
 
 // Final review 3: an announcement left from an earlier owner, or one copied from an older record,

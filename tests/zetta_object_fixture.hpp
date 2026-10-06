@@ -121,6 +121,11 @@ public:
         std::lock_guard lock(mutex_);
         return nodes_[endpoint].buckets[bucket].barriers;
     }
+    // Writes applied since the bucket was last made durable (lake#535).
+    std::size_t unsynced(const std::string& endpoint, const std::string& bucket = "lake_store") {
+        std::lock_guard lock(mutex_);
+        return nodes_[endpoint].buckets[bucket].unsynced.size();
+    }
     std::uint64_t durable_requests(const std::string& endpoint, const std::string& bucket = "lake_store") {
         std::lock_guard lock(mutex_);
         return nodes_[endpoint].buckets[bucket].durable_requests;

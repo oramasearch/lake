@@ -5667,6 +5667,12 @@ private:
                 }
                 return std::unexpected(error_of(opened.error()));
             }
+            // Liquid's open may recover the repository's state (a journal replayed, a checkpoint
+            // finished): durable before the repository serves anything, also when nothing else
+            // syncs after it (the pre-open, lake#536).
+            if (auto durable = liquid::runtime::block_on((*workspace)->backend->make_durable()); !durable) {
+                return std::unexpected(error_of(durable.error()));
+            }
             auto state = std::make_unique<RepositoryState>();
             state->subject = std::make_unique<liquid::repository>(std::move(*opened));
             state->objects = (*workspace)->store.get();

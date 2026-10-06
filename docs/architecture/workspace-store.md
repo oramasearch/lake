@@ -183,6 +183,8 @@ records anything about the operation elsewhere (a repository row, a switch, an i
   failed, or it stopped first. They are served from then on, so every fenced view starts as needing
   a `:barrier`, and lake syncs right after it opens a workspace store, before serving anything; a
   store whose `:barrier` fails then is closed and not served. That is one fsync per open.
+  Opening a repository syncs too: liquid's open may recover its state (replay a journal, finish a
+  checkpoint), and the pre-open (lake#536) opens repositories with no request after it.
 - **Where lake syncs.** Every repository call on a workspace store (`enter_repository`) syncs when
   it leaves the store's lane, while the request's `Server-Timing` still counts it. The calls that
   write (commit, push, chunk upload, LFS staging, conflict resolution, restore, provenance,
