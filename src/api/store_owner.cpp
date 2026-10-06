@@ -4,6 +4,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <format>
 #include <fstream>
@@ -134,9 +135,15 @@ std::expected<StoreOwnerLock, std::string> StoreOwnerLock::acquire(
                                               {"token", token}}
                                    .dump() +
                                "\n";
-    // The record only names the holder in a refusal; failing to write it does not weaken the lock.
-    if (::ftruncate(descriptor, 0) == 0) {
-        static_cast<void>(::pwrite(descriptor, record.data(), record.size(), 0));
+    // The record names the holder in a refusal and is what a drain announcement must match
+    // (lake#536): an owner whose record could not be written would leave the previous owner's
+    // there, which an old announcement could match, so it refuses to own the root instead.
+    if (::ftruncate(descriptor, 0) != 0 || token.empty() ||
+        ::pwrite(descriptor, record.data(), record.size(), 0) != static_cast<ssize_t>(record.size())) {
+        const int write_error = errno;
+        lock.release();
+        return std::unexpected(std::format("could not write the store owner record to {}: {}", path.string(),
+                                           token.empty() ? "no random token" : std::strerror(write_error)));
     }
     return lock;
 }
@@ -213,6 +220,16 @@ bool StoreOwnerLock::owner_is_draining(const std::filesystem::path& store_root) 
 void StoreOwnerLock::clear_draining(const std::filesystem::path& store_root) noexcept {
     std::error_code error;
     std::filesystem::remove(draining_path(store_root), error);
+    if (error) {
+        // A marker left behind never matches a later owner's record (its token differs); the
+        // failure is logged so a volume that refuses removals is noticed.
+        std::fprintf(stderr, "%s\n",
+                     nlohmann::json{{"event", "store_owner"},
+                                    {"state", "draining_marker_not_removed"},
+                                    {"error", error.message()}}
+                         .dump()
+                         .c_str());
+    }
 }
 
 void StoreOwnerLock::release() noexcept {

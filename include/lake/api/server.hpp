@@ -192,7 +192,8 @@ public:
     ApiServer(const ApiServer&) = delete;
     ApiServer& operator=(const ApiServer&) = delete;
 
-    // Bind + start serving on the io thread. False on failure (see reason()).
+    // Bind + start serving on the io thread. False on failure (see reason()). A server is started
+    // once: after stop() it refuses, and a restart is a new ApiServer.
     bool start();
     // The drain's first step, called at SIGTERM before the owning loop winds down (lake#536):
     // stops taking new work and hands each workspace store to the successor as soon as its

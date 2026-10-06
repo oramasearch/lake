@@ -26,7 +26,9 @@ hand the root over (see [The hand-off](#the-hand-off)).
 
 **What.** Lake takes an exclusive `flock` on `$LAKE_STORE_ROOT/.lake-owner.lock` before it opens
 anything under the root, and writes the owner's pid, host, node, start time and a random token into the file (the token
-lets a drain announcement name exactly this lock, lake#536).
+lets a drain announcement name exactly this lock, lake#536). A lake that cannot write its record
+refuses to own the root (the start fails), so a stale record and an old announcement can never
+match a live owner.
 Each customer store is also opened with libliquid's `store_options::exclusive_owner`, which holds
 liquid's own lock on `<customer>/store/store.lock` until the store is closed (liquid#321). The
 root lock is always taken first, so the per-store locks are never contended between lake

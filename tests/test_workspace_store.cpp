@@ -26,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <print>
@@ -44,6 +45,7 @@
 #include "audit_test_support.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/store_owner.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/workspace_store.hpp"
@@ -3809,6 +3811,11 @@ TEST(WorkspaceStoreHandoff, ADrainingLakeRefusesNewStoreRequestsFinishesAdmitted
         rig.call("GET", "/v1/search?query=admitted&workspace_id=" + rig.alpha);
     EXPECT_NE(searched_status, 200U) << searched_body.dump();
     EXPECT_EQ(rig.commit(rig.repo_a, "late.txt", "late").first, 503U);
+    // The operator's copy, verify and switch are refused too, like lake's other work.
+    for (const char* mode : {"copy", "verify", "switch"}) {
+        const auto [moved_status, moved_body] = rig.move(rig.beta, mode);
+        EXPECT_EQ(moved_status, 503U) << mode << " " << moved_body.dump();
+    }
     std::this_thread::sleep_for(300ms);
     EXPECT_TRUE(rig.zetta->lease(endpoint_a).holder.empty());
     EXPECT_EQ(rig.zetta->lease(endpoint_a).fence, released_fence);
@@ -3859,6 +3866,151 @@ TEST(WorkspaceStoreHandoff, ASearchRebuildDoesNotHoldOffTheRelease) {
     EXPECT_LT(released, 2500ms) << "the rebuild held the lane off";
     rig.zetta->hang(endpoint_a, 0ms);
     rig.server->stop();
+}
+
+// Final review 1: the drain announcement waits for an open already in progress here, so a
+// successor never takes a lease this process is still about to take.
+TEST(WorkspaceStoreHandoff, TheDrainIsAnnouncedOnlyOnceAnOpenInProgressHasFinished) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_EQ(rig.commit(rig.repo_a, "first.txt", "alpha").first, 200U);
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    ASSERT_TRUE(rig.zetta->lease(endpoint_a).holder.empty());
+    // The open's reads are slow, so it is still in progress when the drain begins.
+    rig.zetta->hang(endpoint_a, 60ms, "/lake_store/");
+    std::pair<unsigned, json> admitted;
+    std::thread writer([&] { admitted = rig.commit(rig.repo_a, "admitted.txt", "admitted"); });
+    ASSERT_TRUE(eventually([&] { return !rig.zetta->lease(endpoint_a).holder.empty(); }));
+    rig.server->begin_drain();
+    std::this_thread::sleep_for(100ms);
+    EXPECT_FALSE(lake::api::StoreOwnerLock::owner_is_draining(rig.root)) << "announced during an open";
+    writer.join();
+    EXPECT_EQ(admitted.first, 200U) << admitted.second.dump();
+    rig.zetta->hang(endpoint_a, 0ms);
+    EXPECT_TRUE(eventually([&] { return lake::api::StoreOwnerLock::owner_is_draining(rig.root); }));
+    EXPECT_TRUE(eventually([&] { return rig.zetta->lease(endpoint_a).holder.empty(); }));
+}
+
+// Final review 2: a workspace whose Zetta is not ready (retried until store_owner_wait) holds up
+// no other workspace: alpha's repositories are opened as soon as the root is owned.
+TEST(WorkspaceStoreHandoff, AnUnreadyWorkspaceDoesNotHoldUpTheOthersRepositories) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
+    ASSERT_EQ(rig.commit(rig.repo_a, "first.txt", "alpha").first, 200U);
+    rig.workspaces->status(rig.beta, "Pending");
+    const auto old_fence = rig.zetta->lease(endpoint_a).fence;
+    auto successor = start_successor(rig);
+    rig.server->begin_drain();
+    ASSERT_TRUE(eventually([&] { return rig.zetta->lease(endpoint_a).fence > old_fence; }));
+    rig.server->stop();
+    rig.server = std::move(successor);
+    ASSERT_TRUE(eventually([&] { return rig.server->store_root_open(); }));
+    // Opening a repository writes its entry point again: alpha's repository is opened within
+    // seconds, while beta is still being retried.
+    const auto writes = rig.zetta->applied().size();
+    EXPECT_TRUE(eventually([&] {
+        const auto applied = rig.zetta->applied();
+        return std::any_of(applied.begin() + static_cast<std::ptrdiff_t>(writes), applied.end(),
+                           [](const std::string& write) { return write.ends_with("/LIQUID_REPO"); });
+    }, 3s)) << "alpha's repositories waited for beta";
+}
+
+// Final review 3: an announcement left from an earlier owner, or one copied from an older record,
+// is ignored while the live owner is not draining: the successor takes no free lease.
+TEST(WorkspaceStoreHandoff, AStaleDrainAnnouncementIsIgnored) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_b = "http://" + rig.beta + ".test";
+    ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
+    const auto lock = lake::api::StoreOwnerLock::lock_path(rig.root);
+    const auto marker = rig.root / ".lake-owner.draining";
+    const auto read_file = [](const std::filesystem::path& path) {
+        std::ifstream input(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    // An earlier owner's real announcement, left behind (its drain ends with this restart).
+    rig.server->begin_drain();
+    ASSERT_TRUE(eventually([&] { return lake::api::StoreOwnerLock::owner_is_draining(rig.root); }));
+    const std::string earlier = read_file(marker);
+    rig.server->stop();
+    rig.server.reset();
+    ASSERT_NO_FATAL_FAILURE(rig.start());
+    ASSERT_TRUE(rig.zetta->lease(endpoint_b).holder.empty());
+    const auto free_fence = rig.zetta->lease(endpoint_b).fence;
+    // The live owner's record with another token: what a copy of an older record looks like.
+    std::string copied = read_file(lock);
+    const auto token = copied.find("\"token\":\"");
+    ASSERT_NE(token, std::string::npos) << copied;
+    copied.replace(token + 9, 4, "0000");
+    for (const std::string& stale : {earlier, copied}) {
+        {
+            std::ofstream output(marker, std::ios::binary | std::ios::trunc);
+            output << stale;
+        }
+        EXPECT_FALSE(lake::api::StoreOwnerLock::owner_is_draining(rig.root));
+    }
+    auto successor = start_successor(rig);
+    std::this_thread::sleep_for(1500ms);
+    EXPECT_EQ(rig.zetta->lease(endpoint_b).fence, free_fence) << "the successor took a free lease";
+    EXPECT_EQ(rig.commit(rig.repo_b, "still-served.txt", "owner").first, 200U);
+    rig.server->stop();
+    rig.server = std::move(successor);
+    ASSERT_TRUE(eventually([&] { return rig.server->store_root_open(); }));
+    EXPECT_FALSE(std::filesystem::exists(marker)) << "the new owner removes the announcement";
+}
+
+// Final review 6: index work the drain drops is not lost. A rebuild in progress, and a commit
+// left pending until it finishes, are dropped by the drain (search state is in memory); the
+// drain removes the workspace's index manifest under its lease, and the successor rebuilds the
+// index from the repositories, which then holds every commit.
+TEST(WorkspaceStoreHandoff, IndexWorkTheDrainDropsIsRebuiltByTheSuccessor) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    std::vector<lake::control::Repository> repositories;
+    for (int index = 0; index < 6; ++index) {
+        const auto created = rig.create(rig.alpha, "indexed-" + std::to_string(index));
+        ASSERT_TRUE(created);
+        ASSERT_EQ(rig.commit(*created, "README.md", "first " + std::string(alpha_term)).first, 200U);
+        repositories.push_back(*created);
+    }
+    // The index is damaged; a new process rebuilds it slowly on the next search.
+    for (const auto& [key, bytes] : search_objects(*rig.zetta, endpoint_a)) {
+        if (key.starts_with("search/runs/")) {
+            auto damaged = bytes;
+            damaged[damaged.size() - 5] = static_cast<char>(damaged[damaged.size() - 5] ^ 0x01);
+            rig.zetta->set_object(endpoint_a, key, damaged);
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    rig.tree(repositories.front());
+    rig.zetta->hang(endpoint_a, 150ms, "/lake_store/");
+    const auto requests = rig.zetta->requests_to(endpoint_a);
+    ASSERT_EQ(rig.call("GET", "/v1/search?query=" + std::string(alpha_term) + "&workspace_id=" + rig.alpha).first, 200U);
+    ASSERT_TRUE(eventually([&] { return rig.zetta->requests_to(endpoint_a) > requests + 3; }));
+    // A commit while the index is being rebuilt is pending until the rebuild is done.
+    ASSERT_EQ(rig.commit(repositories.back(), "later.txt", "second laterterm").first, 200U);
+
+    auto successor = start_successor(rig);
+    rig.server->begin_drain();
+    EXPECT_TRUE(eventually([&] { return !search_objects(*rig.zetta, endpoint_a).contains("search/manifest.json"); }))
+        << "the index left behind is removed for the successor to rebuild";
+    rig.zetta->hang(endpoint_a, 0ms);
+    rig.server->stop();
+    rig.server = std::move(successor);
+    ASSERT_TRUE(eventually([&] { return rig.server->store_root_open(); }));
+    EXPECT_TRUE(eventually([&] {
+        return searched(rig, "laterterm&workspace_id=" + rig.alpha)["value"]["items"].size() == 1U &&
+               searched(rig, std::string(alpha_term) + "&workspace_id=" + rig.alpha)["value"]["items"].size() ==
+                   repositories.size();
+    })) << "the successor's index holds every commit";
+    EXPECT_TRUE(search_objects(*rig.zetta, endpoint_a).contains("search/manifest.json"));
 }
 
 } // namespace

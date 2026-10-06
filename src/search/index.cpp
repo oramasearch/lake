@@ -588,6 +588,9 @@ private:
 
 constexpr std::string_view blobs_file = "blobs.json";
 constexpr std::string_view manifest_file = "manifest.json";
+static_assert(workspace_index_manifest.substr(0, workspace_index_prefix.size()) == workspace_index_prefix &&
+                  workspace_index_manifest.substr(workspace_index_prefix.size()) == manifest_file,
+              "workspace_index_manifest is manifest_file under workspace_index_prefix");
 constexpr std::string_view artifacts_file = "artifacts.json";
 
 } // namespace
@@ -1981,6 +1984,24 @@ void Service::schedule_rebuild(const std::string& customer, const std::string& w
 
 void Service::shutdown() {
     impl_->stopping.store(true);
+}
+
+std::vector<std::string> Service::unsettled_workspaces() const {
+    std::vector<std::pair<std::string, std::shared_ptr<Impl::IndexState>>> states;
+    {
+        std::lock_guard lock(impl_->mutex);
+        for (const auto& [workspace, state] : impl_->workspaces) {
+            states.emplace_back(workspace, state);
+        }
+    }
+    std::vector<std::string> output;
+    for (const auto& [workspace, state] : states) {
+        std::lock_guard held(state->mutex);
+        if (state->building || !state->pending.empty() || !state->removed.empty()) {
+            output.push_back(workspace);
+        }
+    }
+    return output;
 }
 
 std::vector<std::string> Service::tracked_workspaces() const {
