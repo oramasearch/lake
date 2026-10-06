@@ -33,13 +33,18 @@
 #include <liquid/repository.hpp>
 #include <liquid/store.hpp>
 #include <nlohmann/json.hpp>
+#include <pqxx/pqxx>
 
+#include "audit_test_support.hpp"
+#include "lake/api/capabilities.hpp"
 #include "lake/api/server.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/postgres_store.hpp"
 #include "lake/control/workspace_store.hpp"
 #include "lake/control/zetta_control.hpp"
 #include "lake/search/index.hpp"
 #include "one_thread_io.hpp"
+#include "postgres_fixture.hpp"
 #include "temporary_directory.hpp"
 #include "workspace_fixture.hpp"
 #include "zetta_object_fixture.hpp"
@@ -1552,6 +1557,225 @@ TEST(WorkspaceStoreMove, ADeletedWorkspaceIsNeverReopenedAndADeleteWaitsForAnOpe
 }
 
 // ---- against a real Zetta --------------------------------------------------------------------
+
+// ---- remove_space_store: the space's old store leaves lake's volume ----------------------
+
+std::pair<unsigned, json> remove_space(MoveRig& rig, const std::string& customer_id, bool dry_run) {
+    return rig.call("POST", "/v1/remove_space_store", {{"customer_id", customer_id}, {"dry_run", dry_run}});
+}
+
+// The capability refuses while a workspace is not switched (dry run included), reports the
+// directories and their bytes on a dry run without touching them, removes exactly the space's
+// store and repository directories, leaves the instance's directory and other spaces alone, keeps
+// the switched workspaces answering (also after a restart), and is audited centrally. A workspace
+// created afterwards and not switched gets a new, empty space store on first use, and the removal
+// is refused again until it is switched.
+TEST(WorkspaceStoreRemoval, RemovesOnlyTheSpacesStoreOnceEveryWorkspaceIsSwitched) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const auto space = rig.root / rig.customer_id;
+    // The instance's own directory (the registry, the log) sits beside the spaces.
+    const auto instance = rig.root / rig.options.node_name;
+    std::filesystem::create_directories(instance / "registry");
+    std::ofstream(instance / "registry" / "blob") << "instance registry bytes";
+    std::filesystem::create_directories(instance / "log");
+    std::ofstream(instance / "log" / "entries") << "instance log bytes";
+    const auto instance_before = files_under(instance);
+    const auto other_before = files_under(rig.root / rig.other_customer_id);
+    EXPECT_EQ(rig.tree(rig.repo_a), (std::vector<std::string>{"README.md", "data", "data/blob.bin"}));
+
+    // Not a space, the instance's directory, a path and an unknown space are refused.
+    for (const std::string& bad : {std::string("lake"), std::string("../" + rig.customer_id),
+                                   std::string("workspaces")}) {
+        const auto [status, body] = remove_space(rig, bad, true);
+        EXPECT_EQ(status, 400U) << bad << " " << body.dump();
+        EXPECT_EQ(body["error"]["code"], "invalid_input") << body.dump();
+    }
+    EXPECT_EQ(remove_space(rig, lake::control::new_uuid_v4(), true).first, 404U);
+
+    // Refused, dry run included, while any workspace of the space is not switched.
+    for (const bool dry_run : {true, false}) {
+        const auto [status, body] = remove_space(rig, rig.customer_id, dry_run);
+        EXPECT_EQ(status, 409U) << body.dump();
+        EXPECT_EQ(body["error"]["code"], "conflict");
+        EXPECT_NE(body["error"]["message"].get<std::string>().find(rig.alpha), std::string::npos);
+    }
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    {
+        const auto [status, body] = remove_space(rig, rig.customer_id, false);
+        EXPECT_EQ(status, 409U) << "beta is not switched yet: " << body.dump();
+        EXPECT_NE(body["error"]["message"].get<std::string>().find(rig.beta), std::string::npos);
+    }
+    EXPECT_TRUE(std::filesystem::exists(space / "store"));
+    ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
+
+    // A dry run reports both directories and their bytes, and changes nothing.
+    const auto store_before = files_under(space / "store");
+    std::uintmax_t expected = 0;
+    for (const auto& directory : {space / "store", space / "repositories"}) {
+        for (const auto& [name, size] : files_under(directory)) {
+            expected += size;
+        }
+    }
+    const auto [dry_status, dry] = remove_space(rig, rig.customer_id, true);
+    ASSERT_EQ(dry_status, 200U) << dry.dump();
+    EXPECT_TRUE(dry["value"]["dry_run"].get<bool>());
+    EXPECT_FALSE(dry["value"]["removed"].get<bool>());
+    EXPECT_EQ(dry["value"]["bytes"].get<std::uintmax_t>(), expected);
+    EXPECT_GT(expected, 2'000'000U);
+    ASSERT_EQ(dry["value"]["directories"].size(), 2U);
+    EXPECT_EQ(dry["value"]["directories"][0]["path"], (space / "store").string());
+    EXPECT_EQ(dry["value"]["directories"][1]["path"], (space / "repositories").string());
+    EXPECT_TRUE(dry["value"]["directories"][0]["exists"].get<bool>());
+    EXPECT_EQ(files_under(space / "store"), store_before) << "a dry run removes nothing";
+
+    // The removal: exactly the two directories go.
+    const auto [removed_status, removed] = remove_space(rig, rig.customer_id, false);
+    ASSERT_EQ(removed_status, 200U) << removed.dump();
+    EXPECT_TRUE(removed["value"]["removed"].get<bool>());
+    EXPECT_EQ(removed["value"]["bytes"].get<std::uintmax_t>(), expected);
+    EXPECT_FALSE(std::filesystem::exists(space / "store"));
+    EXPECT_FALSE(std::filesystem::exists(space / "repositories"));
+    EXPECT_EQ(files_under(instance), instance_before) << "the instance's directory is untouched";
+    EXPECT_EQ(files_under(rig.root / rig.other_customer_id), other_before) << "another space is untouched";
+
+    // The switched workspaces still answer, read and write.
+    EXPECT_EQ(rig.tree(rig.repo_a), (std::vector<std::string>{"README.md", "data", "data/blob.bin"}));
+    EXPECT_EQ(rig.tree(rig.repo_b), (std::vector<std::string>{"README.md"}));
+    EXPECT_EQ(rig.tree(rig.repo_c), (std::vector<std::string>{"README.md"}));
+    if (written(rig.commit(rig.repo_a, "after-removal.txt", "written after the removal"))) {
+        EXPECT_EQ(rig.tree(rig.repo_a), (std::vector<std::string>{"README.md", "after-removal.txt", "data",
+                                                                  "data/blob.bin"}));
+    }
+    EXPECT_FALSE(std::filesystem::exists(space / "store")) << "a switched workspace never reopens it";
+    // Again: nothing is left, nothing is removed.
+    const auto [again_status, again] = remove_space(rig, rig.customer_id, false);
+    ASSERT_EQ(again_status, 200U) << again.dump();
+    EXPECT_EQ(again["value"]["bytes"], 0U);
+    EXPECT_FALSE(again["value"]["directories"][0]["exists"].get<bool>());
+    // A new process on the same volume serves the switched workspaces as before.
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    EXPECT_EQ(rig.tree(rig.repo_b), (std::vector<std::string>{"README.md"}));
+
+    // Every call is one central audit event.
+    const auto events = lake::test::audit_events(*rig.store, {.limit = 500});
+    ASSERT_TRUE(events) << events.error().message;
+    int successes = 0;
+    int refusals = 0;
+    for (const auto& event : *events) {
+        if (event.draft.action == "remove_space_store") {
+            successes += event.draft.outcome == "success";
+            refusals += event.draft.outcome != "success";
+        }
+    }
+    EXPECT_EQ(successes, 3);
+    EXPECT_GE(refusals, 3);
+
+    // A workspace created afterwards and not switched yet gets a new, empty space store on first
+    // use, and the removal is refused again until it is switched.
+    const std::string delta = rig.workspaces->create(rig.customer_id, "delta");
+    rig.zetta->add_node("http://" + delta + ".test", "token-" + delta);
+    const auto fresh = rig.create(delta, "delta-source");
+    ASSERT_TRUE(fresh);
+    if (written(rig.commit(*fresh, "delta.txt", "in a new space store"))) {
+        EXPECT_EQ(rig.tree(*fresh), (std::vector<std::string>{"delta.txt"}));
+    }
+    EXPECT_TRUE(std::filesystem::exists(space / "store"));
+    EXPECT_EQ(remove_space(rig, rig.customer_id, true).first, 409U);
+    ASSERT_EQ(rig.move(delta, "copy").first, 200U);
+    ASSERT_EQ(rig.move(delta, "switch").first, 200U);
+    ASSERT_EQ(remove_space(rig, rig.customer_id, false).first, 200U);
+    EXPECT_FALSE(std::filesystem::exists(space / "store"));
+    EXPECT_EQ(rig.tree(*fresh), (std::vector<std::string>{"delta.txt"}));
+    EXPECT_EQ(files_under(instance), instance_before);
+}
+
+// A live repository of a deleted workspace (never moved) keeps the space's store, even when every
+// live workspace is switched; and only the operator removes a space's store.
+TEST(WorkspaceStoreRemoval, ALiveRepositoryOfADeletedWorkspaceOrAPersonIsRefused) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string gone = rig.workspaces->create(rig.customer_id, "gone");
+    const auto stranded = rig.store->create_repository({rig.customer_id, "stranded", "", "private", gone});
+    ASSERT_TRUE(stranded) << stranded.error().message;
+    ASSERT_TRUE(rig.store->update_workspace(gone, {.desired = "deleted"}));
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
+    for (const bool dry_run : {true, false}) {
+        const auto [status, body] = remove_space(rig, rig.customer_id, dry_run);
+        EXPECT_EQ(status, 409U) << body.dump();
+        EXPECT_NE(body["error"]["message"].get<std::string>().find(stranded->id), std::string::npos)
+            << body.dump();
+    }
+    EXPECT_TRUE(std::filesystem::exists(rig.root / rig.customer_id / "store"));
+
+    // Without the operator bearer, and as the space's owner through the registry.
+    const auto unauthenticated = lake::test::http_request(
+        {.url = "http://127.0.0.1:" + std::to_string(rig.server->port()),
+         .method = "POST",
+         .suffix = "/v1/remove_space_store",
+         .headers = {{"Content-Type", "application/json"}},
+         .body = bytes_of(json{{"customer_id", rig.customer_id}}.dump())});
+    ASSERT_TRUE(unauthenticated);
+    EXPECT_EQ(unauthenticated->status, 401U);
+    lake::api::Registry registry;
+    lake::api::register_workspace_store_capabilities(registry);
+    lake::api::ApiContext context;
+    context.store = rig.store.get();
+    context.authorized = true;
+    context.acting_identity = "taap:workspace-store";
+    context.operator_credential = false;
+    context.instance_kek = std::string(kek);
+    const auto person = registry.call("remove_space_store", {{"customer_id", rig.customer_id}}, context);
+    ASSERT_FALSE(person.ok);
+    EXPECT_EQ(person.error.code, "unauthorized");
+    EXPECT_TRUE(std::filesystem::exists(rig.root / rig.customer_id / "store"));
+}
+
+// A repository of the space without a workspace (left so by migration 0051 until lake#513) keeps
+// the space's store although its only workspace is switched. PostgreSQL, where such a row exists.
+TEST(WorkspaceStoreRemoval, AnUnassignedRepositoryIsRefused) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || *uri == '\0') {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    auto store = lake::control::make_postgres_store(uri, std::string(kek));
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user({"taap:space-removal-" + suffix, "", "Removal"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "space-removal-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto workspace = store->create_workspace({customer->id, "main", "dev", ""});
+    ASSERT_TRUE(workspace) << workspace.error().message;
+    const auto loose = store->create_repository({customer->id, "loose", "", "private", workspace->id});
+    ASSERT_TRUE(loose) << loose.error().message;
+    ASSERT_TRUE(store->mark_workspace_store_moved(workspace->id));
+    {
+        // What a pre-0051 row looks like; the routing trigger is off only inside this transaction.
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        tx.exec("ALTER TABLE repositories DISABLE TRIGGER repository_workspace_routing");
+        tx.exec_params("UPDATE repositories SET workspace_id = NULL WHERE id = $1::uuid", loose->id);
+        tx.exec("ALTER TABLE repositories ENABLE TRIGGER repository_workspace_routing");
+        tx.commit();
+    }
+    lake::api::Registry registry;
+    lake::api::register_workspace_store_capabilities(registry);
+    lake::api::ApiContext context;
+    context.store = store.get();
+    context.authorized = true;
+    context.acting_identity = "admin";
+    context.operator_credential = true;
+    context.instance_kek = std::string(kek);
+    for (const bool dry_run : {true, false}) {
+        const auto refused = registry.call("remove_space_store",
+                                           {{"customer_id", customer->id}, {"dry_run", dry_run}}, context);
+        ASSERT_FALSE(refused.ok);
+        EXPECT_EQ(refused.error.code, "conflict");
+        EXPECT_NE(refused.error.message.find(loose->id), std::string::npos) << refused.error.message;
+        EXPECT_NE(refused.error.message.find("has no workspace"), std::string::npos);
+    }
+}
 
 struct RealZetta {
     pid_t pid = -1;

@@ -37,7 +37,8 @@ A transfer report has `repository_id`, `absent` (the space store never held it: 
 **What the move does not do.**
 
 - It never writes the space's store, and never removes it. The store stays on the volume read-only
-  after the switch; removing it needs Steve's approval.
+  after the switch; [`remove_space_store`](#removing-the-spaces-store) removes it once every
+  workspace of the space is switched.
 - An interrupted `copy` leaves no `LIQUID_REPO` for the repository in the workspace store, and lake
   reopens the workspace store before the next use, which liquid's recovery requires. Run `copy`
   again.
@@ -59,6 +60,60 @@ A transfer report has `repository_id`, `absent` (the space store never held it: 
 `mode`): it is an operator action on the instance, classified central in
 `src/api/audit_routing.cpp`.
 
+## Removing the space's store
+
+`remove_space_store` is an operator capability too (operator bearer only; every other caller is
+`unauthorized`). It removes a space's old store from lake's volume once nothing is served from it.
+
+```json
+POST /v1/remove_space_store
+{"customer_id": "<space uuid>", "dry_run": true | false}
+```
+
+`dry_run` defaults to `false`. `customer_id` must be the UUID of an existing space (`invalid_input`
+at `/customer_id` for anything else, including the instance's own directory name, `workspaces` or a
+path; `not_found` for an unknown space).
+
+It answers `409 conflict`, removing nothing, dry run included, while the space's store is still
+needed. The message names each of:
+
+- a workspace of the space that is not deleted and has no `store_moved_at`;
+- a repository of the space without a workspace, live or tombstoned (lake#513 assigns them);
+- a live repository of a deleted workspace (a deleted workspace is never switched, so its live
+  repositories were never moved).
+
+Otherwise it answers `customer_id` (the space) and:
+
+```json
+{"dry_run": false, "removed": true, "bytes": 123456,
+ "directories": [{"path": "<LAKE_STORE_ROOT>/<space>/store", "exists": true, "bytes": 120000, "files": 42},
+                 {"path": "<LAKE_STORE_ROOT>/<space>/repositories", "exists": true, "bytes": 3456, "files": 12}]}
+```
+
+`bytes` and `files` count the regular files under each directory (what the volume gets back);
+`exists` is false for a directory already gone, so a repeated removal answers `bytes: 0`.
+
+- **A dry run** reads only: it checks the precondition and measures, takes no hold, closes nothing
+  and removes nothing (`removed: false`).
+- **A removal** refuses new requests for the space's store with `503 store_unavailable`
+  (`Retry-After`), as a switch does, and waits for the admitted ones under the space's lane. It
+  checks the precondition again under that hold, so a workspace created meanwhile is seen, closes
+  the space store (releasing liquid's owner lock), forgets the space's open space-store
+  repositories and routes, and deletes exactly `<LAKE_STORE_ROOT>/<space>/store` and
+  `<LAKE_STORE_ROOT>/<space>/repositories`. It never touches the instance's directory
+  (`<LAKE_STORE_ROOT>/<node name>`: the registry, the transparency log), `<LAKE_STORE_ROOT>/workspaces`,
+  another space or anything else under the space's directory. A directory that is a symbolic link
+  or not a directory is refused with `conflict`.
+- Switched workspaces are not held: their requests go to their own stores throughout.
+- **A workspace created later** in the space and not switched is served, as any unswitched
+  workspace is, from the space's store, which lake opens on first use and liquid creates empty. Its
+  repositories are new, so nothing is lost; the space store then exists again and
+  `remove_space_store` is refused until that workspace is moved and switched too.
+
+**Audit.** Each call is one central audit event (`workspace_store.remove_space_store`, details
+`customer_id`, `dry_run`, and on success `bytes` and `removed`), classified central in
+`src/api/audit_routing.cpp`.
+
 ## Dev cutover
 
 1. Deploy an image with this change and liquid `8955519` or later, and Zetta with the object capability on every
@@ -66,4 +121,6 @@ A transfer report has `repository_id`, `absent` (the space store never held it: 
 2. Snapshot `lake-prod-store` and each workspace Zetta's volume.
 3. For each workspace: `plan`, then `copy`, then `verify` until `complete`, then `switch`.
 4. Check the workspace's repository pages, a `liquid pull`, and a push; `store_moved_at` is set.
-5. Leave `LAKE_STORE_ROOT/<space>/store` in place.
+5. Leave `LAKE_STORE_ROOT/<space>/store` in place until every workspace of the space is switched
+   and Steve approves removing it; then run `remove_space_store` with `dry_run: true`, check the
+   paths and bytes, and run it again with `dry_run: false`.

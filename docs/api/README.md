@@ -5,7 +5,8 @@ lake#452: [services.md](services.md) documents `list_services`' shared `status` 
 [workspaces.md](workspaces.md) the two `create_project` name refusals.
 
 lake#380: [workspace-store.md](workspace-store.md) documents the operator's `move_workspace_store`
-(plan, copy, verify, switch); [sync.md](sync.md) and [replication.md](replication.md) where a
+(plan, copy, verify, switch) and `remove_space_store` (the space's old store, once every workspace
+is switched); [sync.md](sync.md) and [replication.md](replication.md) where a
 switched workspace's repositories and replication cursors live; [metering.md](metering.md) how its
 storage is measured.
 

@@ -231,7 +231,7 @@ the workspace and see only its stores (lake#465). See `docs/api/storage.md`.
 
 `registry.cpp` runs the synchronous handlers of capabilities that wait on a repository store
 (repository, Drive, model and dataset objects, search, `replicate_repository`,
-`move_workspace_store`, `delete_workspace`) on a 32-thread pool, and `run_blocking` /
+`move_workspace_store`, `remove_space_store`, `delete_workspace`) on a 32-thread pool, and `run_blocking` /
 `blocking_call` (`registry.hpp`, `capabilities.hpp`) run asynchronous handlers' store calls there,
 so a slow workspace Zetta holds up only its own requests (lake#380). `LiquidCustomerStores` admits
 at most four requests per store lane and refuses a moving lane with 503; it lends repositories to
@@ -241,7 +241,9 @@ start-up usage priming and the deletion pass on a maintenance thread, and closes
 the blocking pool at shutdown (`close_execution_context`).
 `create_repository_row` (`capabilities.cpp`) creates every repository row through
 `SyncStore::create_repository_content`. `workspace_store_capabilities.cpp` registers the operator-only `move_workspace_store` (plan, copy,
-verify, switch; lake#380, `docs/api/workspace-store.md`). `http_server.cpp`'s `LiquidCustomerStores`
+verify, switch; lake#380, `docs/api/workspace-store.md`) and `remove_space_store`, which removes a
+space's old store (`<root>/<space>/store` and `<space>/repositories`, nothing else) under its lane
+once every workspace of the space is switched, with a dry run that reports paths and bytes. `http_server.cpp`'s `LiquidCustomerStores`
 routes a repository to its workspace's store once `workspaces.store_moved_at` is set (failing
 closed), holds one lane per store (`s:<space>`, `w:<workspace>`) with its map lock never held across
 I/O, opens each workspace store on first use, never creates a workspace store, key or repository

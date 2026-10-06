@@ -6,7 +6,13 @@
 // repository requests, copies what arrived since, verifies again and records
 // workspaces.store_moved_at, after which the workspace's repositories are served from its store.
 // The space's store is never written by the move and stays on the volume.
+//
+// remove_space_store then removes a space's old store (<root>/<space>/store and
+// <root>/<space>/repositories) from lake's volume, once every workspace of the space is switched
+// and no repository of the space lacks a workspace. A dry run reports the paths and bytes.
 
+#include <map>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -177,9 +183,144 @@ ApiResult move_workspace_store(const json& input, ApiContext& context) {
     return ApiResult::success(std::move(output));
 }
 
+bool is_uuid(const std::string& value) {
+    static const std::regex pattern(
+        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
+    return std::regex_match(value, pattern);
+}
+
+// What still needs the space's store: a live workspace not switched yet, a repository without a
+// workspace (live or tombstoned), and a live repository of a deleted workspace (never moved, since
+// a deleted workspace is not switched). Empty when the store may go.
+SyncStoreResult<std::vector<std::string>> space_store_blockers(ApiContext& context,
+                                                               const std::string& customer_id) {
+    const auto workspaces = context.store->list_workspaces(customer_id);
+    if (!workspaces) {
+        return std::unexpected(SyncStoreError{workspaces.error().code, workspaces.error().message});
+    }
+    const auto repositories = context.store->list_repositories(customer_id, 100000);
+    if (!repositories) {
+        return std::unexpected(SyncStoreError{repositories.error().code, repositories.error().message});
+    }
+    std::vector<std::string> blockers;
+    std::map<std::string, const control::Workspace*> by_id;
+    for (const control::Workspace& workspace : *workspaces) {
+        by_id.emplace(workspace.id, &workspace);
+        if (workspace.desired != "deleted" && workspace.store_moved_at.empty()) {
+            blockers.push_back("workspace " + workspace.id + " (" + workspace.name +
+                               ") is not switched to its own store");
+        }
+    }
+    for (const control::Repository& repository : *repositories) {
+        if (repository.workspace_id.empty()) {
+            blockers.push_back("repository " + repository.id + " (" + repository.name +
+                               ") has no workspace");
+            continue;
+        }
+        const auto found = by_id.find(repository.workspace_id);
+        const bool deleted = found == by_id.end() || found->second->desired == "deleted";
+        if (deleted && repository.deleted_at.empty()) {
+            blockers.push_back("repository " + repository.id + " (" + repository.name +
+                               ") is live in a deleted workspace");
+        }
+    }
+    return blockers;
+}
+
+ApiResult remove_space_store(const json& input, ApiContext& context) {
+    if (!context.operator_credential) {
+        return ApiResult::failure("unauthorized", "operator credential is required");
+    }
+    if (!context.store) {
+        return ApiResult::failure("store_unavailable", "no control-plane store is configured");
+    }
+    const std::string customer_id = input.at("customer_id");
+    const bool dry_run = input.value("dry_run", false);
+    context.audit_kind = "workspace_store.remove_space_store";
+    context.audit_details = {{"customer_id", customer_id}, {"dry_run", dry_run}};
+    // The space id names a directory directly under the store root: only a UUID, never the
+    // instance's own directory.
+    if (!is_uuid(customer_id) || customer_id == context.node_name) {
+        return ApiResult::failure("invalid_input", "customer_id must be a space's UUID", "/customer_id");
+    }
+    if (const auto customer = context.store->get_customer(customer_id); !customer) {
+        return ApiResult::failure(customer.error().code, customer.error().message, "/customer_id");
+    }
+    // Checked first without any hold (so a refusal never waits on the space's lane), then again
+    // under the hold, where a workspace created meanwhile is seen.
+    const auto check = [&]() -> SyncStoreResult<void> {
+        auto found = space_store_blockers(context, customer_id);
+        if (!found) {
+            return std::unexpected(found.error());
+        }
+        const std::vector<std::string>& blockers = *found;
+        if (!blockers.empty()) {
+            std::string message = "the space's store is still needed; nothing was removed:";
+            for (std::size_t index = 0; index < blockers.size() && index < 20; ++index) {
+                message += (index == 0 ? " " : "; ") + blockers[index];
+            }
+            if (blockers.size() > 20) {
+                message += "; and " + std::to_string(blockers.size() - 20) + " more";
+            }
+            return std::unexpected(SyncStoreError{"conflict", message});
+        }
+        return {};
+    };
+    if (auto checked = check(); !checked) {
+        return sync_failure(checked.error());
+    }
+    if (!context.sync_store) {
+        return ApiResult::failure("store_unavailable", "space stores are not configured on this lake");
+    }
+    auto removal = context.sync_store->remove_space_store(customer_id, dry_run, check);
+    if (!removal) {
+        return sync_failure(removal.error());
+    }
+    json directories = json::array();
+    for (const SpaceStoreDirectory& directory : removal->directories) {
+        directories.push_back({{"path", directory.path},
+                               {"exists", directory.exists},
+                               {"bytes", directory.bytes},
+                               {"files", directory.files}});
+    }
+    context.audit_details["bytes"] = removal->bytes;
+    context.audit_details["removed"] = removal->removed;
+    return ApiResult::success({{"customer_id", customer_id},
+                               {"dry_run", dry_run},
+                               {"removed", removal->removed},
+                               {"bytes", removal->bytes},
+                               {"directories", std::move(directories)}});
+}
+
 } // namespace
 
 void register_workspace_store_capabilities(Registry& registry) {
+    registry.add(Capability{
+        .name = "remove_space_store",
+        .title = "Remove a space's old store from lake's volume",
+        .description =
+            "Operator only (lake#380). Removes a space's liquid store from lake's volume "
+            "(`<LAKE_STORE_ROOT>/<space>/store` and `<space>/repositories`) once every live "
+            "workspace of the space is switched to its own store, no repository of the space lacks "
+            "a workspace and no live repository belongs to a deleted workspace; otherwise "
+            "`conflict`, removing nothing. It refuses the space store's requests and waits for "
+            "the running ones, closes the store and deletes the two directories, never anything "
+            "else. `dry_run` reports the directories and bytes without removing or closing "
+            "anything. A space store is created again, empty, if a workspace of the space that is "
+            "not switched later uses it.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"customer_id", {{"type", "string"}}},
+                           {"dry_run", {{"type", "boolean"}}}}},
+                         {"required", json::array({"customer_id"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Action,
+        .object = "space store removal",
+        .action = "admin",
+        .resolve_object = move_object,
+        .handler = remove_space_store});
+
     registry.add(Capability{
         .name = "move_workspace_store",
         .title = "Move a workspace's repositories into its own store",

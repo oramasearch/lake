@@ -29,6 +29,8 @@ bool waits_on_repository_store(const Capability& capability) {
     return object.starts_with("repository") || object.find("drive") != std::string_view::npos ||
            object == "model" ||
            object == "dataset" || object == "workspace store move" ||
+           // Removing a space's store waits on the space's lane (lake#380).
+           object == "space store removal" ||
            capability.name == "replicate_repository" ||
            // Deleting a workspace closes its store, waiting on its lane.
            capability.name == "delete_workspace";
