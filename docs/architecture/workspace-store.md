@@ -232,7 +232,9 @@ records anything about the operation elsewhere (a repository row, a switch, an i
   own renewal lost the lease (lake#535; before, the revoked grant read as a lost lease and the
   settling never ran on liquid's close, which cost nothing while liquid's barriers sent
   everything). After a takeover the settling's writes are refused as fenced and land nothing; a
-  lease lost to the renewal lets go of the views without sending. This settling is bounded
+  lease lost to the renewal lets go of the views without sending. The views are kept only while an
+  owner is attached to the client, and the owner lets go of them when it is destroyed without a
+  release, so a view and the backend's state never keep each other alive. This settling is bounded
   (10 s by default): each of its requests gets one attempt, cut to the time left, so a drain with
   the workspace Zetta unreachable does not stall. Only the settling's requests are cut; other users
   of the client (search) keep their timeouts. A lost lease or a failed store is closed without it;

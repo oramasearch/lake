@@ -236,6 +236,10 @@ public:
     void set_before_release(std::function<liquid::runtime::task<void>()> settle,
                             std::function<void()> abandon = {});
     void abandon_before_release();
+    // A ZettaStoreOwner over this client will settle or abandon what its backend keeps; without
+    // one, a backend lets go of its views when it is destroyed.
+    void set_owned(bool owned);
+    bool owned() const;
     // Bounded by `budget`: each request then gets one attempt, cut to the time left, so a drain
     // with the workspace Zetta unreachable does not stall.
     liquid::runtime::task<void> before_release(std::chrono::milliseconds budget = std::chrono::seconds(10));
@@ -254,6 +258,7 @@ private:
     mutable std::mutex settle_mutex_;
     std::function<liquid::runtime::task<void>()> settle_;
     std::function<void()> abandon_;
+    std::atomic<bool> owned_{false};
 };
 
 // The workspace's data key (S3): random, 32 bytes, wrapped with AES-256-GCM under

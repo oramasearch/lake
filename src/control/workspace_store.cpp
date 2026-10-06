@@ -373,6 +373,14 @@ void ZettaObjectClient::set_before_release(std::function<liquid::runtime::task<v
     abandon_ = std::move(abandon);
 }
 
+void ZettaObjectClient::set_owned(bool owned) {
+    owned_.store(owned);
+}
+
+bool ZettaObjectClient::owned() const {
+    return owned_.load();
+}
+
 void ZettaObjectClient::abandon_before_release() {
     std::function<void()> abandon;
     {
@@ -1188,11 +1196,14 @@ ZettaObjectBackend::~ZettaObjectBackend() {
     // still holds writes or needs its :barrier (lake#535): liquid's close lets go of the backend
     // before it releases the owner, and the owner's release syncs them, or abandons them when the
     // lease is lost.
+    // Kept only while an owner will come to settle or abandon them; otherwise the views and
+    // Shared would keep each other alive.
     if (!fence_ && shared_) {
         std::vector<std::shared_ptr<ZettaObjectBackend>> views;
         {
             std::lock_guard lock(shared_->views_mutex);
-            if (std::ranges::none_of(shared_->views, [](const auto& view) { return view->unsettled(); })) {
+            if (!shared_->client->owned() ||
+                std::ranges::none_of(shared_->views, [](const auto& view) { return view->unsettled(); })) {
                 views.swap(shared_->views);
             }
         }
@@ -2681,10 +2692,16 @@ ZettaStoreOwner::ZettaStoreOwner(std::shared_ptr<ZettaObjectClient> client,
                                  std::function<void()> on_lost,
                                  std::chrono::milliseconds settle_budget)
     : client_(std::move(client)), ttl_(ttl), on_lost_(std::move(on_lost)),
-      settle_budget_(settle_budget) {}
+      settle_budget_(settle_budget) {
+    client_->set_owned(true);
+}
 
 ZettaStoreOwner::~ZettaStoreOwner() {
     stop_thread();
+    // Views the backend kept for a release that never came (a store dropped without close) are
+    // let go of, so they do not keep their backend's state alive (lake#535).
+    client_->abandon_before_release();
+    client_->set_owned(false);
 }
 
 bool ZettaStoreOwner::held() const {

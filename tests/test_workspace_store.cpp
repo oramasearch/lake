@@ -4278,4 +4278,26 @@ TEST(WorkspaceStoreMove, AStoreWhoseOpeningBarrierFailsIsNotServed) {
     EXPECT_TRUE(written(rig.commit(rig.repo_a, "after.txt", "served again")));
 }
 
+// lake#535 review E: views a backend keeps for its owner's release are let go of when the owner
+// goes without a release, so they do not keep the backend's state alive.
+TEST(WorkspaceStoreOwner, ViewsKeptForAReleaseThatNeverComesAreLetGo) {
+    Rig rig;
+    auto client = rig.client();
+    ASSERT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
+    auto owner = std::make_shared<ZettaStoreOwner>(client, 30s);
+    ZettaObjectBackendOptions options = small_blocks();
+    options.workspace_id = rig.workspace;
+    options.instance_kek = std::string(kek);
+    options.create_key = true;
+    auto root = std::make_shared<ZettaObjectBackend>(client, options);
+    auto view = std::static_pointer_cast<ZettaObjectBackend>(*root->fenced(1));
+    ASSERT_TRUE(liquid::runtime::block_on(view->put("objects/held", bytes_of("held"))));
+    std::weak_ptr<ZettaObjectBackend> watched = view;
+    view.reset();
+    root.reset();
+    EXPECT_FALSE(watched.expired()) << "kept for the owner's release";
+    owner.reset();
+    EXPECT_TRUE(watched.expired()) << "let go of with the owner";
+}
+
 } // namespace
