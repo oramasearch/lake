@@ -235,15 +235,26 @@ the workspace and see only its stores (lake#465). See `docs/api/storage.md`.
 `blocking_call` (`registry.hpp`, `capabilities.hpp`) run asynchronous handlers' store calls there,
 so a slow workspace Zetta holds up only its own requests (lake#380). `LiquidCustomerStores` admits
 at most four requests per store lane and refuses a moving lane with 503; it lends repositories to
-search (`lend_repository`) and tells search which repositories a workspace store serves
-(`served_by_workspace`), which search skips until lake#381. The server runs the usage refresh, the
-start-up usage priming and the deletion pass on a maintenance thread, and closes its io_context to
+search (`lend_repository`), and a switched workspace's search index objects with them or alone
+(`lend_workspace`), under the workspace store's lane, sealed with the store's data key and fenced
+by its lease (`search_objects_of`, lake#381), with the room the bucket quota leaves for them
+(`search_index_budget`); `lend_repositories_to_search` wires them into `search::WorkspaceAccess`,
+with release tags read from forge records and rebuilds queued on search's own worker
+(`schedule_search_job`, beside the maintenance thread). The
+`search` capability resolves the caller's scope first (`search_scope`, `capabilities.cpp`);
+`delete_repository` and `commit_repository_files` keep the index in step. The `/search` page runs
+`search` through `call_async`. The
+server runs the usage refresh, the start-up usage priming, the start-up purge of switched
+workspaces from the space search indexes (`purge_space_search_indexes`) and the deletion pass on a
+maintenance thread, and closes its io_context to
 the blocking pool at shutdown (`close_execution_context`).
 `create_repository_row` (`capabilities.cpp`) creates every repository row through
 `SyncStore::create_repository_content`. `workspace_store_capabilities.cpp` registers the operator-only `move_workspace_store` (plan, copy,
 verify, switch; lake#380, `docs/api/workspace-store.md`) and `remove_space_store`, which removes a
 space's old store (`<root>/<space>/store` and `<space>/repositories`, nothing else) under its lane
 once every workspace of the space is switched, with a dry run that reports paths and bytes. `http_server.cpp`'s `LiquidCustomerStores`
+verify, switch; lake#380, `docs/api/workspace-store.md`); a switch then drops the switched
+repositories from the space's search index (`search::Service::drop_switched`, lake#381). `http_server.cpp`'s `LiquidCustomerStores`
 routes a repository to its workspace's store once `workspaces.store_moved_at` is set (failing
 closed), holds one lane per store (`s:<space>`, `w:<workspace>`) with its map lock never held across
 I/O, opens each workspace store on first use, never creates a workspace store, key or repository
@@ -300,8 +311,8 @@ cascades to the workspace's repositories, apps, unfinished builds and tenant ima
 `workspace_deletion.cpp` computes the dry run (`workspace_deletion_plan`) and the workspace's image
 repositories, `Store::delete_workspace_cascade` is the one transaction, and
 `finish_workspace_deletion` removes what lives outside PostgreSQL through the injected
-`WorkspaceContent` (the instance registry's tags and the search segments, both gated on owning the
-store root in `http_server.cpp`) and records one central audit event per destroyed object, once
+`WorkspaceContent` (the instance registry's tags, the space index's search segments, both gated on
+owning the store root in `http_server.cpp`, and the workspace's own search index, lake#381) and records one central audit event per destroyed object, once
 each. `ApiServer::drain` resumes unfinished deletions every minute. See
 [workspaces.md](../../docs/api/workspaces.md#deletion). `http_server.cpp`'s `/repository/create` form and
 hub `/api/repos/create` (body `workspace_id` or `X-Lake-Workspace-Id`) pass the workspace, and

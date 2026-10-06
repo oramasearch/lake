@@ -580,5 +580,13 @@ move with an interrupted copy, the switch, two workspaces of one space and the l
 `WorkspaceStoreRemoval.*` the removal of a space's old store (refusals, a linked space or store
 directory refused, dry run, exactly two directories removed, the instance's directory untouched, switched workspaces still answering, a later
 unswitched workspace given a new space store).
+move with an interrupted copy, the switch, two workspaces of one space and the lost lease's `503`.
+Its `WorkspaceStoreSearch.*` cover lake#381 through a running lake: sealed per-workspace search
+indexes beside each store, the switch's drop from the space index, reload after a restart, a
+non-operator caller who never makes search open another space's workspace, rebuild of a wiped,
+partial or tampered index with and without a restart, a failed index write that leaves the store
+alone, a first push that does not wait for the rebuild, pushes beside searches, and deletion;
+`test_search.cpp`'s `SearchWorkspaces.*` cover the same index on in-memory objects, with the
+background rebuild queue, backoff, release snapshots, write-once runs and eviction.
 `zetta_object_fixture.hpp` is `FakeZettaObjects`, Zetta's object routes in memory. Set
 `LAKE_TEST_ZETTA_BINARY` to a `zetta` built from Zetta dev to run `WorkspaceStoreZetta.*` against it.

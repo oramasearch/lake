@@ -1,4 +1,5 @@
 #include "lake/api/capabilities.hpp"
+#include "lake/search/index.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -770,6 +771,15 @@ void register_model_capabilities(Registry& registry) {
             context.audit_kind = "repository.commit";
             context.audit_object = "repository/" + repository->id;
             context.audit_details = {{"revision", *committed}};
+            // The search index follows the commit as it follows a push (lake#381); a failure is
+            // recorded and never fails the commit.
+            if (context.search) {
+                const auto indexed =
+                    context.search->reindex_artifacts(repository->customer_id, repository->id);
+                if (!indexed) {
+                    context.audit_details["search_index"] = indexed.error().message;
+                }
+            }
             return ApiResult::success({{"commitOid", *committed}});
         }));
 

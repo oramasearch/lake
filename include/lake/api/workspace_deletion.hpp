@@ -52,11 +52,16 @@ struct WorkspaceContent {
     // A blob's bytes (a manifest's document) and its size; the error says why it is missing.
     std::function<std::expected<std::string, std::string>(const std::string& digest)> read_blob;
     std::function<std::optional<std::uint64_t>(const std::string& digest)> blob_size;
-    // Drops one repository's search segments (lake#381 moves them beside the workspace store).
-    // Unset: ApiContext::search is used directly.
+    // Drops what the space's search index on lake's volume holds of one repository. Unset:
+    // ApiContext::search is used directly.
     std::function<std::expected<void, std::string>(const std::string& customer_id,
                                                    const std::string& repository_id)>
         drop_repository_index;
+    // lake#381: forgets the workspace's search index and removes its objects from the workspace
+    // Zetta while lake has the workspace's store open; otherwise they go with the workspace Zetta,
+    // as its store does. Runs before close_workspace_store. Unset: ApiContext::search is used.
+    std::function<std::expected<void, std::string>(const std::string& workspace_id)>
+        drop_workspace_index;
     // lake#380: closes the workspace's liquid store and releases its bucket lease before the
     // deletion is reported complete. Unset until repositories move into the workspace Zetta; the
     // operator deleting the workspace's namespace and volume then destroys the bytes.

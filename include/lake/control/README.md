@@ -8,7 +8,8 @@ the operator's workspace observation in tests (lake#452).
 `workspace_deletions` (migration `0065`): repositories, apps, builds and tenant image repositories
 as `WorkspaceDeletionItem`s, with `completed_at` once lake finished the steps outside PostgreSQL.
 `search::Service::drop_repository` removes a destroyed repository's segments and the blobs only it
-used.
+used from its space's index; `search::Service::drop_workspace` removes a deleted workspace's own
+search index (lake#381).
 
 `StreamOwner` is a topic's creator; `stream_owners.hpp` keeps it as a sealed record in the
 topic's workspace Zetta (lake#379); `Store` has no reads of the retired `stream_owners` table,

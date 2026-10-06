@@ -361,8 +361,28 @@ ForgeTask<ApiResult> create_release(const json& input, ApiContext& context) {
             co_return ApiResult::failure(published.error().code, published.error().message);
         }
     }
-    co_return settled_result(
-        co_await create_record(*forge, "release", std::move(value), context));
+    auto created = co_await create_record(*forge, "release", std::move(value), context);
+    // lake#381: published again once the release record exists. A workspace index being built
+    // meanwhile records the repository as pending and reads this record when it applies it, so
+    // the snapshot is not lost between the build's reading of the releases and its end. The same
+    // tag and change is a no-op otherwise.
+    if (context.search && created && created->ok) {
+        const auto republished = co_await blocking_call(
+            [&] {
+                return context.search->publish(
+                    search::Publish{repository.customer_id, repository.id,
+                                    input.at("tag").get<std::string>(),
+                                    input.at("change_id").get<std::string>(),
+                                    search::PublicationKind::TagSnapshot});
+            },
+            [](std::string message) -> search::Result<void> {
+                return std::unexpected(search::Error{"store_unavailable", std::move(message)});
+            });
+        if (!republished) {
+            context.audit_details["search_index"] = republished.error().message;
+        }
+    }
+    co_return settled_result(std::move(created));
 }
 
 std::string webhook_signature(std::string_view secret, std::string_view payload) {

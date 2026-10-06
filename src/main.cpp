@@ -106,6 +106,8 @@ int usage() {
                  "the store root (default 90)");
     std::println("  LAKE_WORKSPACE_STORE_LEASE_SECONDS is a workspace store's bucket lease "
                  "(default 30; renewed every third)");
+    std::println("  LAKE_SEARCH_MEMORY_BYTES bounds the workspace search indexes kept loaded "
+                 "(default 268435456; idle ones are evicted and loaded again on use)");
     std::println("  LAKE_DRAIN_SECONDS bounds the wait for in-flight requests on SIGTERM "
                  "(default 20)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
@@ -129,6 +131,8 @@ int main(int argc, char** argv) {
     opts.drain_timeout = std::chrono::seconds{env_u64("LAKE_DRAIN_SECONDS", 20)};
     opts.workspace_store_lease_ttl =
         std::chrono::seconds{std::max<std::uint64_t>(3, env_u64("LAKE_WORKSPACE_STORE_LEASE_SECONDS", 30))};
+    opts.search_memory_bytes = static_cast<std::size_t>(
+        std::max<std::uint64_t>(1024ULL * 1024ULL, env_u64("LAKE_SEARCH_MEMORY_BYTES", 256ULL * 1024ULL * 1024ULL)));
     opts.public_host = env_or("LAKE_PUBLIC_HOST", "");
     opts.external_origin = env_or("LAKE_EXTERNAL_ORIGIN", "");
     opts.apps_wildcard = env_or("LAKE_APPS_WILDCARD", "");

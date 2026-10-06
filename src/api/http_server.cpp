@@ -9,6 +9,7 @@
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/request_recorder.hpp"
 #include "lake/api/server.hpp"
+#include "forge_records_api.hpp"
 #include "lake/thread.hpp"
 
 #include "lake/control/agents.hpp"
@@ -4025,10 +4026,16 @@ private:
         std::shared_ptr<control::ZettaObjectBackend> backend;
         std::shared_ptr<control::ZettaStoreOwner> owner;
         std::unique_ptr<liquid::store> store;
+        // The workspace's data key, as search seals its index objects with it (lake#381), read
+        // once per open store.
+        std::shared_ptr<const control::WorkspaceStoreCipher> search_cipher;
+        // Set when Zetta refused a search index write as fenced: the lease is another holder's.
+        // A failed search write never fails the store otherwise.
+        std::shared_ptr<std::atomic<bool>> search_fenced = std::make_shared<std::atomic<bool>>(false);
 
         // A store whose lease was lost, or one a write failed on, is closed and opened again.
         bool usable() const {
-            return !owner->lost() && !backend->failed();
+            return !owner->lost() && !backend->failed() && !search_fenced->load();
         }
     };
 
@@ -5051,10 +5058,63 @@ private:
         return route;
     }
 
+    // The workspace's data key for its search index (lake#381): unwrapped from the store's key
+    // object under LAKE_INSTANCE_KEK, once per open store. The caller holds the workspace's lane.
+    SyncStoreResult<std::shared_ptr<const control::WorkspaceStoreCipher>>
+    search_cipher_of(WorkspaceStore& store, const std::string& workspace_id) {
+        {
+            std::lock_guard maps(mutex_);
+            if (store.search_cipher) {
+                return store.search_cipher;
+            }
+        }
+        std::string kek;
+        {
+            std::lock_guard maps(mutex_);
+            kek = workspace_config_.instance_kek;
+        }
+        auto document = liquid::runtime::block_on(
+            store.client->get_all(std::string(control::workspace_store_key_object)));
+        if (!document) {
+            return std::unexpected(error_of(document.error()));
+        }
+        auto wrapping = control::WorkspaceStoreCipher::wrapping_key(kek, workspace_id);
+        if (!wrapping) {
+            return std::unexpected(error_of(wrapping.error()));
+        }
+        auto unwrapped = control::WorkspaceStoreCipher::unwrap(*wrapping, workspace_id, *document);
+        std::ranges::fill(*wrapping, 0);
+        if (!unwrapped) {
+            return std::unexpected(error_of(unwrapped.error()));
+        }
+        auto cipher = std::make_shared<const control::WorkspaceStoreCipher>(
+            workspace_id, unwrapped->first, unwrapped->second);
+        std::ranges::fill(unwrapped->second, 0);
+        std::lock_guard maps(mutex_);
+        store.search_cipher = cipher;
+        return store.search_cipher;
+    }
+
+    // The index objects of an open workspace store, sealed with its data key and fenced by its
+    // lease. The caller holds the workspace's lane.
+    SyncStoreResult<std::shared_ptr<search::IndexObjects>>
+    search_objects_of(WorkspaceStore& store, const std::string& workspace_id) {
+        auto cipher = search_cipher_of(store, workspace_id);
+        if (!cipher) {
+            return std::unexpected(cipher.error());
+        }
+        std::shared_ptr<std::atomic<bool>> fenced = store.search_fenced;
+        return search::make_sealed_index_objects(store.client, *cipher, store.owner->fence(),
+                                                 [fenced] { fenced->store(true); });
+    }
+
     // Takes the lane of the store that serves the repository and opens it there. A switch of the
     // repository's space between the route and the lane starts it again, so a request held by a
     // switch is answered from the store the switch chose.
-    Entered enter_repository(const std::string& customer_id, const std::string& repository_id) {
+    // `lake_work`: lake's own work (a search index rebuild, lake#381) waits for the lane instead of
+    // being refused admission when requests fill it.
+    Entered enter_repository(const std::string& customer_id, const std::string& repository_id,
+                             bool lake_work = false) {
         if (!path_component_is_safe(customer_id) || !path_component_is_safe(repository_id)) {
             return {{}, std::unexpected(SyncStoreError{"invalid_input", "invalid repository location"})};
         }
@@ -5064,7 +5124,8 @@ private:
             if (!route) {
                 return {{}, std::unexpected(route.error())};
             }
-            auto lane = admit(*route ? "w:" + **route : "s:" + customer_id);
+            const std::string name = *route ? "w:" + **route : "s:" + customer_id;
+            SyncStoreResult<LaneLock> lane = lake_work ? SyncStoreResult<LaneLock>(hold(name)) : admit(name);
             if (!lane) {
                 return {{}, std::unexpected(lane.error())};
             }
@@ -5370,6 +5431,8 @@ private:
     std::map<std::string, std::uint64_t> epochs_;
     std::set<std::string> lost_workspaces_;
     std::map<std::string, std::uint64_t> last_usage_;
+    // Bytes search indexes wrote since each workspace's usage was last read (lake#381).
+    std::map<std::string, std::uint64_t> search_spent_;
     std::map<std::string, std::uint64_t> last_space_bytes_;
     // Switched workspaces whose usage a write has counted: workspace -> its space.
     std::map<std::string, std::string> usage_targets_;
@@ -5548,6 +5611,8 @@ public:
             if (usage) {
                 std::lock_guard maps(mutex_);
                 last_usage_[workspace_id] = usage->bytes;
+                // The reading includes what search wrote before it.
+                search_spent_.erase(workspace_id);
             }
         }
     }
@@ -5572,23 +5637,164 @@ public:
         return std::unexpected(entered.state.error());
     }
 
-    // Whether a workspace store serves the repository. A repository whose route cannot be read
-    // counts as served by one, so search never indexes it centrally by mistake.
-    bool served_by_workspace(const std::string& customer_id, const std::string& repository_id) {
-        const auto route = workspace_route(customer_id, repository_id);
-        return !route || route->has_value();
+    // The workspace whose own store serves the repository, or nothing for its space's store.
+    SyncStoreResult<std::optional<std::string>> route_of(const std::string& customer_id,
+                                                         const std::string& repository_id) {
+        return workspace_route(customer_id, repository_id);
     }
 
+    // What search borrows: the repository, and for one served by a workspace store, its index
+    // objects and the store's fence (lake#381). `hold` keeps the store's lane.
+    struct LentRepository {
+        std::shared_ptr<void> hold;
+        liquid::repository* repository = nullptr;
+        std::string workspace;
+        std::shared_ptr<search::IndexObjects> search_objects;
+        std::uint64_t fence = 0;
+    };
+
     // Lends search the repository from the store that serves it, under that store's lane and on
-    // the one open instance (lake#380): `first` holds the lane until search lets go.
-    SyncStoreResult<std::pair<std::shared_ptr<void>, liquid::repository*>>
-    lend_repository(const std::string& customer_id, const std::string& repository_id) {
-        auto entered = std::make_shared<Entered>(enter_repository(customer_id, repository_id));
+    // the one open instance (lake#380).
+    SyncStoreResult<LentRepository> lend_repository(const std::string& customer_id,
+                                                    const std::string& repository_id,
+                                                    bool lake_work = false) {
+        auto entered =
+            std::make_shared<Entered>(enter_repository(customer_id, repository_id, lake_work));
         if (!entered->state) {
             return std::unexpected(entered->state.error());
         }
-        liquid::repository* repository = (*entered->state)->subject.get();
-        return std::pair<std::shared_ptr<void>, liquid::repository*>{entered, repository};
+        LentRepository output;
+        output.repository = (*entered->state)->subject.get();
+        output.workspace = (*entered->state)->workspace;
+        if (!output.workspace.empty()) {
+            WorkspaceStore* store = nullptr;
+            {
+                std::lock_guard maps(mutex_);
+                const auto found = workspace_stores_.find(output.workspace);
+                if (found != workspace_stores_.end() && found->second->usable()) {
+                    store = found->second.get();
+                }
+            }
+            if (store == nullptr) {
+                return std::unexpected(SyncStoreError{
+                    "store_unavailable", "the workspace store closed while search borrowed it; retry"});
+            }
+            auto objects = search_objects_of(*store, output.workspace);
+            if (!objects) {
+                return std::unexpected(objects.error());
+            }
+            output.search_objects = *objects;
+            output.fence = store->owner->fence();
+        }
+        output.hold = std::move(entered);
+        return output;
+    }
+
+    struct LentWorkspace {
+        std::shared_ptr<void> hold;
+        std::string customer_id;
+        std::shared_ptr<search::IndexObjects> search_objects;
+        std::uint64_t fence = 0;
+    };
+
+    // Lends search a workspace's index objects under the workspace store's lane, opening the
+    // store on first use (lake#381). With `only_if_open` (a workspace deletion) nothing is opened:
+    // a store lake does not have open lends nothing.
+    SyncStoreResult<std::optional<LentWorkspace>> lend_workspace(const std::string& customer_id,
+                                                                 const std::string& workspace_id,
+                                                                 bool only_if_open,
+                                                                 bool lake_work = false) {
+        if (!path_component_is_safe(workspace_id) ||
+            (!customer_id.empty() && !path_component_is_safe(customer_id))) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid workspace location"});
+        }
+        LaneLock lane;
+        if (only_if_open || lake_work) {
+            lane = hold("w:" + workspace_id);
+        } else {
+            auto admitted = admit("w:" + workspace_id);
+            if (!admitted) {
+                return std::unexpected(admitted.error());
+            }
+            lane = std::move(*admitted);
+        }
+        WorkspaceStore* store = nullptr;
+        if (only_if_open) {
+            std::lock_guard maps(mutex_);
+            const auto found = workspace_stores_.find(workspace_id);
+            if (found == workspace_stores_.end() || !found->second->usable()) {
+                return std::optional<LentWorkspace>{};
+            }
+            store = found->second.get();
+        } else {
+            auto opened = open_workspace(customer_id, workspace_id, false);
+            if (!opened) {
+                return std::unexpected(opened.error());
+            }
+            store = *opened;
+        }
+        LentWorkspace output;
+        output.customer_id = store->customer_id;
+        auto objects = search_objects_of(*store, workspace_id);
+        if (!objects) {
+            return std::unexpected(objects.error());
+        }
+        output.search_objects = *objects;
+        output.fence = store->owner->fence();
+        output.hold = std::make_shared<LaneLock>(std::move(lane));
+        return std::optional<LentWorkspace>{std::move(output)};
+    }
+
+    // How many more bytes a workspace's search index may add (lake#381): the space's quota less
+    // the space's stored bytes as the push quota check counts them (its store on lake's volume while
+    // any workspace is not switched, plus every switched workspace's last bucket usage), less what
+    // search wrote since those readings, less a tenth of the quota kept for liquid's own writes. A
+    // usage not read yet counts as no room. Nothing when there is no quota. Never a network call.
+    std::optional<std::uint64_t> search_index_budget(const std::string& customer_id,
+                                                     const std::string&) {
+        WorkspaceStoreConfig config;
+        {
+            std::lock_guard maps(mutex_);
+            config = workspace_config_;
+        }
+        const std::uint64_t quota = config.quota_bytes ? config.quota_bytes(customer_id) : 0;
+        if (quota == 0) {
+            return std::nullopt;
+        }
+        if (!config.switched) {
+            return 0;
+        }
+        const auto listed = config.switched(customer_id);
+        if (!listed) {
+            return 0;
+        }
+        std::uint64_t total = 0;
+        std::lock_guard maps(mutex_);
+        if (listed->second) {
+            const auto space = last_space_bytes_.find(customer_id);
+            if (space == last_space_bytes_.end()) {
+                return 0;
+            }
+            total += space->second;
+        }
+        for (const auto& [workspace_id, serving] : listed->first) {
+            const auto usage = last_usage_.find(workspace_id);
+            if (usage == last_usage_.end()) {
+                return 0;
+            }
+            total += usage->second;
+            if (const auto spent = search_spent_.find(workspace_id); spent != search_spent_.end()) {
+                total += spent->second;
+            }
+        }
+        const std::uint64_t reserved = total + quota / 10;
+        return quota > reserved ? quota - reserved : 0;
+    }
+
+    // Bytes a workspace's search index wrote since its bucket usage was last read.
+    void search_index_spent(const std::string& workspace_id, std::uint64_t bytes) {
+        std::lock_guard maps(mutex_);
+        search_spent_[workspace_id] += bytes;
     }
 
     SyncStoreResult<WorkspaceStoreTransfer>
@@ -6348,6 +6554,17 @@ struct ApiServer::Impl {
             }
             return {};
         },
+        .drop_workspace_index = [this](const std::string& workspace_id)
+            -> std::expected<void, std::string> {
+            if (!options.search) {
+                return {};
+            }
+            const auto dropped = options.search->drop_workspace(workspace_id);
+            if (!dropped) {
+                return std::unexpected(dropped.error().message);
+            }
+            return {};
+        },
         // lake#380: the workspace's own store is closed and its bucket lease released before the
         // deletion is reported; the workspace Zetta's deletion destroys its bytes.
         .close_workspace_store = [this](const std::string& workspace_id)
@@ -6430,6 +6647,67 @@ struct ApiServer::Impl {
         }
     }
 
+    // lake#381: search index rebuilds and their retries run on this thread of their own. A job is
+    // named; one whose name is queued already is not queued again; a job may be due later.
+    std::mutex search_jobs_mutex;
+    std::condition_variable search_jobs_cv;
+    std::deque<std::tuple<std::string, std::chrono::steady_clock::time_point, std::function<void()>>>
+        search_jobs;
+    bool search_jobs_stopping = false;
+    lake::Thread search_jobs_thread;
+
+    void schedule_search_job(std::string name, std::chrono::milliseconds delay, std::function<void()> job) {
+        std::lock_guard lock(search_jobs_mutex);
+        if (search_jobs_stopping ||
+            std::ranges::any_of(search_jobs, [&](const auto& queued) { return std::get<0>(queued) == name; })) {
+            return;
+        }
+        search_jobs.emplace_back(std::move(name), std::chrono::steady_clock::now() + delay, std::move(job));
+        search_jobs_cv.notify_all();
+    }
+
+    void run_search_jobs() {
+        for (;;) {
+            std::function<void()> job;
+            {
+                std::unique_lock lock(search_jobs_mutex);
+                for (;;) {
+                    if (search_jobs_stopping) {
+                        return;
+                    }
+                    if (search_jobs.empty()) {
+                        search_jobs_cv.wait(lock);
+                        continue;
+                    }
+                    const auto next = std::ranges::min_element(
+                        search_jobs, {}, [](const auto& queued) { return std::get<1>(queued); });
+                    if (std::get<1>(*next) <= std::chrono::steady_clock::now()) {
+                        job = std::move(std::get<2>(*next));
+                        search_jobs.erase(next);
+                        break;
+                    }
+                    search_jobs_cv.wait_until(lock, std::get<1>(*next));
+                }
+            }
+            job();
+        }
+    }
+
+    void stop_search_jobs() {
+        if (options.search) {
+            options.search->shutdown();
+        }
+        {
+            std::lock_guard lock(search_jobs_mutex);
+            search_jobs_stopping = true;
+            search_jobs.clear();
+        }
+        search_jobs_cv.notify_all();
+        if (search_jobs_thread.joinable()) {
+            search_jobs_thread.join();
+        }
+    }
+
     void stop_maintenance() {
         {
             std::lock_guard lock(maintenance_mutex);
@@ -6439,6 +6717,35 @@ struct ApiServer::Impl {
         maintenance_cv.notify_all();
         if (maintenance_thread.joinable()) {
             maintenance_thread.join();
+        }
+    }
+
+    // lake#381: each space's search index on lake's volume drops what it holds of repositories now
+    // served by a workspace store (their index is rebuilt beside that store), once at start.
+    void purge_space_search_indexes() {
+        if (!options.search || options.store_root.empty()) {
+            return;
+        }
+        std::error_code error;
+        const std::filesystem::path root(options.store_root);
+        if (!std::filesystem::exists(root, error)) {
+            return;
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(root, error)) {
+            if (!entry.is_directory() || !std::filesystem::exists(entry.path() / "index", error)) {
+                continue;
+            }
+            const std::string customer_id = entry.path().filename().string();
+            const auto dropped = options.search->drop_switched(customer_id);
+            if (!dropped) {
+                std::println(stderr, "search index purge {}: {}", customer_id, dropped.error().message);
+            } else if (*dropped > 0 || !std::filesystem::exists(entry.path() / "index", error)) {
+                std::println(stderr, "search index purge {}: dropped {} repositories of switched workspaces{}",
+                             customer_id, *dropped,
+                             std::filesystem::exists(entry.path() / "index", error)
+                                 ? ""
+                                 : "; the space index is empty and was removed");
+            }
         }
     }
 
@@ -6563,20 +6870,207 @@ struct ApiServer::Impl {
             return;
         }
         options.search->set_repository_access(
-            [this](const std::string& customer_id, const std::string& repository_id)
+            [this](const std::string& customer_id, const std::string& repository_id, bool lake_work)
                 -> search::Result<search::BorrowedRepository> {
-                auto lent = sync_store.lend_repository(customer_id, repository_id);
+                auto lent = sync_store.lend_repository(customer_id, repository_id, lake_work);
                 if (!lent) {
                     return std::unexpected(search::Error{lent.error().code, lent.error().message});
                 }
-                return search::BorrowedRepository{std::move(lent->first), lent->second};
+                search::BorrowedRepository output{lent->hold, lent->repository, std::nullopt};
+                if (!lent->workspace.empty()) {
+                    output.workspace = workspace_index(customer_id, lent->workspace,
+                                                       lent->search_objects, lent->fence);
+                }
+                return output;
             });
-        // Until lake#381 puts the index beside the workspace store, a switched workspace's
-        // repositories are neither indexed on lake's volume nor returned.
-        options.search->set_workspace_served(
-            [this](const std::string& customer_id, const std::string& repository_id) {
-                return sync_store.served_by_workspace(customer_id, repository_id);
+        // lake#381: a switched workspace's index lives beside its store, in its workspace Zetta.
+        search::WorkspaceAccess access;
+        access.lend = [this](const std::string& customer_id, const std::string& workspace_id,
+                             bool lake_work) -> search::Result<search::BorrowedWorkspace> {
+            std::string customer = customer_id;
+            if (options.store) {
+                const auto workspace = options.store->get_workspace(workspace_id);
+                if (!workspace) {
+                    return std::unexpected(
+                        search::Error{workspace.error().code, workspace.error().message});
+                }
+                if (!customer.empty() && workspace->customer_id != customer) {
+                    return std::unexpected(
+                        search::Error{"invalid_input", "the workspace is not in this space"});
+                }
+                if (workspace->store_moved_at.empty() || workspace->desired == "deleted") {
+                    return std::unexpected(search::Error{
+                        "invalid_input", "the workspace's repositories are not served from its "
+                                         "own store, so it has no index of its own"});
+                }
+                customer = workspace->customer_id;
+            }
+            auto lent = sync_store.lend_workspace(customer, workspace_id, false, lake_work);
+            if (!lent) {
+                return std::unexpected(search::Error{lent.error().code, lent.error().message});
+            }
+            return search::BorrowedWorkspace{
+                (*lent)->hold,
+                workspace_index(customer, workspace_id, (*lent)->search_objects, (*lent)->fence)};
+        };
+        access.lend_if_open = [this](const std::string& workspace_id)
+            -> search::Result<std::optional<search::BorrowedWorkspace>> {
+            auto lent = sync_store.lend_workspace("", workspace_id, true);
+            if (!lent) {
+                return std::unexpected(search::Error{lent.error().code, lent.error().message});
+            }
+            if (!*lent) {
+                return std::optional<search::BorrowedWorkspace>{};
+            }
+            return std::optional<search::BorrowedWorkspace>{search::BorrowedWorkspace{
+                (*lent)->hold, workspace_index((*lent)->customer_id, workspace_id,
+                                               (*lent)->search_objects, (*lent)->fence)}};
+        };
+        access.switched = [this](const std::string& customer_id)
+            -> search::Result<std::vector<std::pair<std::string, std::string>>> {
+            std::vector<std::pair<std::string, std::string>> output;
+            if (!options.store) {
+                return output;
+            }
+            std::vector<std::string> customers;
+            if (customer_id.empty()) {
+                // No cursor: a full page is refused rather than taken for every space.
+                constexpr int page = 100'000;
+                const auto listed = options.store->list_customers(page);
+                if (!listed) {
+                    return std::unexpected(search::Error{listed.error().code, listed.error().message});
+                }
+                if (listed->size() >= static_cast<std::size_t>(page)) {
+                    return std::unexpected(search::Error{
+                        "unsupported", "too many spaces to search them all; name a customer"});
+                }
+                for (const control::Customer& customer : *listed) {
+                    customers.push_back(customer.id);
+                }
+            } else {
+                customers.push_back(customer_id);
+            }
+            for (const std::string& customer : customers) {
+                const auto rows = options.store->list_workspaces(customer);
+                if (!rows) {
+                    return std::unexpected(search::Error{rows.error().code, rows.error().message});
+                }
+                for (const control::Workspace& workspace : *rows) {
+                    if (!workspace.store_moved_at.empty() && workspace.desired != "deleted") {
+                        output.emplace_back(customer, workspace.id);
+                    }
+                }
+            }
+            return output;
+        };
+        access.route = [this](const std::string& customer_id, const std::string& repository_id)
+            -> search::Result<std::optional<std::string>> {
+            std::string customer = customer_id;
+            if (customer.empty() && options.store) {
+                const auto repository = options.store->get_repository(repository_id);
+                if (!repository) {
+                    return std::unexpected(
+                        search::Error{repository.error().code, repository.error().message});
+                }
+                customer = repository->customer_id;
+            }
+            auto route = sync_store.route_of(customer, repository_id);
+            if (!route) {
+                return std::unexpected(search::Error{route.error().code, route.error().message});
+            }
+            return *route;
+        };
+        // A rebuild never runs inside a request: it runs on search's own worker, never on the
+        // maintenance thread, so the usage refresh and the deletion pass never wait on one.
+        access.schedule = [this](const std::string& customer_id, const std::string& workspace_id,
+                                 std::chrono::milliseconds delay) {
+            schedule_search_job("search index " + workspace_id, delay, [this, customer_id, workspace_id] {
+                const auto rebuilt = options.search->rebuild_workspace(customer_id, workspace_id);
+                if (!rebuilt) {
+                    metrics.increment_counter("lake_search_rebuild_errors_total");
+                    std::println(stderr, "lake: search index {}: {}", workspace_id,
+                                 rebuilt.error().message);
+                }
             });
+        };
+        options.search->set_workspace_access(std::move(access));
+        options.search->set_memory_bound(options.search_memory_bytes);
+    }
+
+    // One workspace's index as search sees it.
+    search::WorkspaceIndex workspace_index(const std::string& customer_id,
+                                           const std::string& workspace_id,
+                                           std::shared_ptr<search::IndexObjects> objects,
+                                           std::uint64_t fence) {
+        search::WorkspaceIndex index;
+        index.customer = customer_id;
+        index.workspace = workspace_id;
+        index.generation = fence;
+        index.objects = std::move(objects);
+        index.repositories = [this, customer_id, workspace_id]()
+            -> search::Result<std::vector<std::string>> {
+            if (!options.store) {
+                return std::vector<std::string>{};
+            }
+            // The store has no cursor for this list: a full page is refused rather than taken
+            // for the whole, so a rebuild never sweeps away the objects of repositories past it.
+            constexpr int page = 100'000;
+            const auto rows = options.store->list_repositories(customer_id, page, workspace_id);
+            if (!rows) {
+                return std::unexpected(search::Error{rows.error().code, rows.error().message});
+            }
+            if (rows->size() >= static_cast<std::size_t>(page)) {
+                return std::unexpected(search::Error{
+                    "unsupported", "the workspace has too many repositories to rebuild its index in one listing"});
+            }
+            std::vector<std::string> output;
+            for (const control::Repository& repository : *rows) {
+                if (repository.deleted_at.empty() && repository.workspace_id == workspace_id) {
+                    output.push_back(repository.id);
+                }
+            }
+            return output;
+        };
+        // Releases are forge records in the workspace's Zetta (lake#341); a rebuild reads them
+        // on the maintenance thread.
+        index.tags = [this](const std::string& repository_id)
+            -> search::Result<std::vector<std::pair<std::string, std::string>>> {
+            std::vector<std::pair<std::string, std::string>> output;
+            if (!options.store || !options.workspaces) {
+                return output;
+            }
+            const auto repository = options.store->get_repository(repository_id);
+            if (!repository) {
+                return std::unexpected(search::Error{repository.error().code, repository.error().message});
+            }
+            ApiContext context;
+            context.store = options.store.get();
+            context.workspaces = options.workspaces.get();
+            context.instance_kek = options.instance_kek;
+            auto forge = RepositoryForge::open(context, *repository);
+            if (!forge) {
+                return std::unexpected(search::Error{forge.error().code, forge.error().message});
+            }
+            auto releases = control::settled(liquid::runtime::block_on(forge->list("release", 0)));
+            if (!releases) {
+                return std::unexpected(search::Error{releases.error().code, releases.error().message});
+            }
+            for (const control::ForgeRecord& release : *releases) {
+                const std::string tag = release.value.value("tag", std::string());
+                const std::string change = release.value.value("change_id", std::string());
+                if (!tag.empty() && !change.empty()) {
+                    output.emplace_back(tag, change);
+                }
+            }
+            return output;
+        };
+        index.write_budget = [this, customer_id, workspace_id]() {
+            return sync_store.search_index_budget(customer_id, workspace_id);
+        };
+        index.spent = [this, workspace_id](std::uint64_t bytes) {
+            sync_store.search_index_spent(workspace_id, bytes);
+        };
+        return index;
     }
 
     explicit Impl(ServerOptions opts)
@@ -16469,12 +16963,15 @@ struct ApiServer::Impl {
             offset = newline + 1;
         }
         ApiContext context = context_for(route);
-        const ApiResult result = registry.call("commit_repository_files",
-                                               {{"id", repository->id},
-                                                {"revision", route_value(route, "revision")},
-                                                {"message", message},
-                                                {"operations", std::move(operations)}},
-                                               context);
+        // The commit and its search index update (lake#381) wait on the repository's store, so
+        // they run on the asynchronous registry path, off the server thread.
+        const ApiResult result = unwrap(co_await registry.call_async(
+            "commit_repository_files",
+            {{"id", repository->id},
+             {"revision", route_value(route, "revision")},
+             {"message", message},
+             {"operations", std::move(operations)}},
+            context));
         if (!result.ok) {
             co_return co_await send_hub_result(route, result);
         }
@@ -16741,7 +17238,7 @@ struct ApiServer::Impl {
     boost::http::route_task serve_search_page(boost::http::route_params& route) {
         ApiContext context = context_for(route);
         if (!context.authorized) {
-            return redirect(route, "/sign-in");
+            co_return co_await redirect(route, "/sign-in");
         }
         const search::Query query{.text = query_value(route, "query"),
                                   .customer = query_value(route, "customer"),
@@ -16749,7 +17246,8 @@ struct ApiServer::Impl {
                                   .ref = query_value(route, "ref"),
                                   .limit = 100,
                                   .change = query_value(route, "change"),
-                                  .history = query_value(route, "history") == "1"};
+                                  .history = query_value(route, "history") == "1",
+                                  .workspace = query_value(route, "workspace_id")};
         search::QueryResult search_result;
         if (!query.text.empty()) {
             nlohmann::json input{{"query", query.text}, {"limit", query.limit}};
@@ -16768,9 +17266,15 @@ struct ApiServer::Impl {
             if (query.history) {
                 input["history"] = true;
             }
-            const ApiResult result = registry.call("search", input, context);
+            if (!query.workspace.empty()) {
+                input["workspace_id"] = query.workspace;
+            }
+            // Search reads workspace indexes under their stores' lanes and may rebuild one
+            // (lake#381), so it runs on the asynchronous registry path, off the server thread.
+            const ApiResult result =
+                unwrap(co_await registry.call_async("search", input, context));
             if (!result.ok) {
-                return serve_page_error(route, result);
+                co_return co_await serve_page_error(route, result);
             }
             const std::string mode = result.value.value("mode", "hot");
             search_result.mode = mode == "scan"       ? search::QueryMode::Scan
@@ -16790,14 +17294,15 @@ struct ApiServer::Impl {
                     .artifact_version = item.value("artifact_version", ""),
                     .digest = item.value("digest", ""),
                     .line = item.value("line", std::size_t{0}),
+                    .workspace = item.value("workspace_id", ""),
                 });
             }
         }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_search(query, search_result, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_search(query, search_result, viewer_for(context)),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_metering_page(boost::http::route_params& route) {
@@ -17379,6 +17884,7 @@ struct ApiServer::Impl {
             std::println(stderr, "metering warmup: {}", warmed.error().message);
         }
         schedule_maintenance("workspace usage priming", [this] { prime_workspace_usage(); });
+        schedule_maintenance("space search index purge", [this] { purge_space_search_indexes(); });
         store_root_state.store(StoreRootState::open);
         const auto milliseconds = [](auto duration) {
             return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
@@ -19466,6 +19972,7 @@ bool ApiServer::start() {
     impl.server->start();
     impl.io_thread = lake::Thread([&impl] { impl.io_context.run(); });
     impl.maintenance_thread = lake::Thread([&impl] { impl.run_maintenance(); });
+    impl.search_jobs_thread = lake::Thread([&impl] { impl.run_search_jobs(); });
     impl.is_running.store(true);
     impl.metrics.set_gauge("lake_up", {}, 1.0);
     if (!impl.options.store_root.empty()) {
@@ -19510,6 +20017,7 @@ void ApiServer::stop() {
     // In-flight requests have finished: close every store (releasing liquid's per-store owner
     // locks), then the root lock, so the next owner opens a store nobody is writing.
     // A maintenance job in progress finishes (its Zetta calls are bounded); queued ones are dropped.
+    impl.stop_search_jobs();
     impl.stop_maintenance();
     const bool owned = impl.store_owner.held();
     if (impl.options.search) {
