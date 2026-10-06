@@ -4,7 +4,8 @@
 repository, has a constrained kind, and retains a versioned JSON object as its value. Since
 lake#341 every record lives in the workspace Zetta of its repository's workspace
 ([where they live](#where-forge-records-live)); migration `0012_forge_export_import` created the
-retired PostgreSQL table `forge_records`, which only the operator's one-shot copy still reads.
+retired PostgreSQL table `forge_records`, which the operator's one-shot copy moved and migration
+`0070_drop_moved_tables` drops (lake#311).
 
 **Why.** A review anchor is an evolving value: it initially holds `{change, path, line, column}`.
 When an author rebases a reviewed change as a rewritten candidate, Liquid maps that cursor through

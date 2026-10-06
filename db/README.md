@@ -280,3 +280,20 @@ workspace's own encrypted store in its workspace Zetta. Nothing else moves into 
 guard is `workspace_store_guard`; the latest guard stays `workspace_volumes_guard`, and the operator
 must vendor this schema before rollout. See
 [workspace-store.md](../docs/architecture/workspace-store.md).
+
+Migration `0070_drop_moved_tables` (lake#311) drops the retired copies of workspace data whose
+one-shot copy was run and verified on dev: the tables `opportunities`, `stream_owners`,
+`drive_share_links`, the six `auth_app_*` tables (signing keys, users, organizations, webhooks,
+webhook events and deliveries), `auth_app_authorization_codes`, `metering_usage`,
+`metering_build_records`, `forge_records`, the five `secrets_*` tables of `0009` and
+`secrets_dynamic_leases`, `platform_environments` and `platform_mirror`; and the columns
+`auth_applications.name`, `allowed_origins`, `redirect_uris` and `theme`, `agent_tasks.body`,
+`agent_task_status.message` and `result`, and `repositories.description`. A first block refuses the
+whole migration (`RAISE EXCEPTION`, nothing dropped) while any row of them has no workspace to have
+been copied into, by the rule `copy_workspace_records` `verify` applied. Their `CREATE`s and columns
+are removed from the earlier sections and the earlier migration blocks run only while they exist, so
+a rerun never recreates them. Routing rows, routes, policy objects, `keystore`, `audit_events` and
+the `workspace_assignments` record stay. The latest guard is `drop_moved_tables_guard`; the operator
+must vendor this schema, drop the four `CREATE TABLE IF NOT EXISTS secrets_*` entries from
+`TestLakeSchemaMatchesVendoredSource` and add the guard to its rehearsal query before rollout. See
+[schema.md](../docs/control-plane/schema.md#drop-moved-tables-migration).

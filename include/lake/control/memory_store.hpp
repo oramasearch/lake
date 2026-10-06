@@ -40,39 +40,11 @@ public:
                                                  const std::string& visibility) override;
     Result<Repository> delete_repository(const std::string& id,
                                          const RepositoryDeletion& deletion) override;
-    Result<void> assign_legacy_repository_descriptions() override;
-    Result<std::vector<LegacyRepositoryDescription>>
-    legacy_repository_descriptions(const std::string& after_id, int limit) override;
-    // Test support: the description a repository row held before migration 0064.
-    void seed_legacy_repository_description(const std::string& repository_id,
-                                            std::string description, std::int64_t at_us);
     Result<void>
     assign_legacy_audit_events(const std::vector<std::string>& workspace_actions) override;
     Result<std::vector<LegacyAuditEvent>> legacy_audit_events(const std::string& after_id,
                                                               int limit) override;
-    Result<void> assign_legacy_forge_records() override;
-    Result<std::vector<LegacyForgeRecord>> legacy_forge_records(const std::string& after_id,
-                                                                int limit) override;
-    // A row of the retired forge_records table, as an earlier lake wrote it (tests of the copy).
-    void seed_legacy_forge_record(ForgeRecord record);
-    Result<void> assign_legacy_platform_environments() override;
-    Result<std::vector<LegacyPlatformEnvironment>>
-    legacy_platform_environments(const std::string& after_id, int limit) override;
-    Result<void> assign_legacy_platform_mirror() override;
-    Result<std::vector<LegacyPlatformMirrorRow>> legacy_platform_mirror(const std::string& after_id,
-                                                                        int limit) override;
-    // An environment of the retired platform_environments table, as an earlier lake made it: a
-    // random id and a policy object under the repository named by that id (tests of the copy).
-    Result<PlatformEnvironment> seed_legacy_platform_environment(const std::string& repository_id,
-                                                                 const std::string& name);
-    // A row of the retired platform_mirror table (tests of the copy).
-    void seed_legacy_platform_mirror_row(PlatformMirrorRow row);
     Result<DriveShareLinkRoute> drive_share_link_route(const std::string& token_hash) override;
-    Result<void> assign_legacy_drive_share_links() override;
-    Result<std::vector<LegacyDriveShareLink>>
-    legacy_drive_share_links(const std::string& after_id, int limit) override;
-    // A row of the retired drive_share_links table, as an earlier lake wrote it (tests of the copy).
-    void seed_legacy_drive_share_link(DriveShareLink link);
     Result<Team> create_team(const NewTeam&) override;
     Result<std::vector<Team>> list_teams(const std::string& organization_id, int limit) override;
     Result<Team> get_team(const std::string& id) override;
@@ -118,11 +90,6 @@ public:
     Result<Application> get_application_by_pool(const std::string& pool_id) override;
     Result<Application>
     get_application_by_domain(const std::string& custom_sign_in_domain) override;
-    Result<void> assign_legacy_application_settings() override;
-    Result<std::vector<LegacyApplicationSettings>>
-    legacy_application_settings(const std::string& after_id, int limit) override;
-    // Test support: the settings an application's row held before migration 0059.
-    void seed_legacy_application_settings(ApplicationSettings settings);
     Result<std::string> encrypt_application_credential(const std::string& purpose,
                                                        const std::string& plaintext) override;
     Result<std::string> decrypt_application_credential(const std::string& purpose,
@@ -131,41 +98,6 @@ public:
                                                  const std::string& user_id) override;
     Result<void> delete_application_user_credentials(const std::string& application_id,
                                                      const std::string& user_id) override;
-    Result<void> assign_legacy_application_directory() override;
-    Result<std::vector<LegacyApplicationUser>> legacy_application_users(const std::string& after_id,
-                                                                        int limit) override;
-    Result<std::vector<LegacyApplicationOrganization>>
-    legacy_application_organizations(const std::string& after_id, int limit) override;
-    // Tests: rows of the retired tables as an earlier lake wrote them (instant and owner kept).
-    void seed_legacy_application_user(ApplicationUser user);
-    void seed_legacy_application_organization(ApplicationOrganization organization);
-    Result<void> assign_legacy_application_credentials() override;
-    Result<std::vector<LegacyApplicationSigningKeyRing>>
-    legacy_application_signing_keys(const std::string& after_application_id, int limit) override;
-    Result<std::vector<LegacyApplicationWebhook>>
-    legacy_application_webhooks(const std::string& after_id, int limit) override;
-    // Tests: rows of the retired tables as an earlier lake wrote them (the key's seed and the
-    // webhook's secret are enveloped here, as that lake did).
-    void seed_legacy_application_signing_key(ApplicationSigningKey key);
-    void seed_legacy_application_webhook(ApplicationWebhook webhook);
-    Result<void> assign_legacy_application_webhook_events() override;
-    Result<std::vector<LegacyApplicationWebhookEvent>>
-    legacy_application_webhook_events(const std::string& after_id, int limit) override;
-    Result<std::vector<LegacyApplicationWebhookDelivery>>
-    legacy_application_webhook_deliveries(const std::string& after_id, int limit) override;
-    // Tests: rows of the retired tables as an earlier lake wrote them (id, instant and owner kept).
-    void seed_legacy_application_webhook_event(ApplicationWebhookEvent event);
-    void seed_legacy_application_webhook_delivery(ApplicationWebhookDelivery delivery);
-    Result<void> assign_legacy_application_authorization_codes() override;
-    Result<std::vector<LegacyApplicationAuthorizationCode>>
-    legacy_application_authorization_codes(const std::string& after_code_hash,
-                                           int limit) override;
-    Result<void>
-    record_legacy_application_authorization_code_copied(const std::string& code_hash) override;
-    // Tests: a code of the retired table as an earlier lake wrote it (`expires_us` and a used
-    // flag kept; only an unused, unexpired code is listed).
-    void seed_legacy_application_authorization_code(ApplicationAuthorizationCode code,
-                                                    bool used = false);
     audit::Result<audit::Identity> current_lake_identity() override;
     audit::Result<audit::Identity> lake_identity_by_taap_id(const std::string& taap_id) override;
     audit::Result<void> create_lake_identity(const audit::Identity& identity) override;
@@ -175,14 +107,6 @@ public:
     Result<audit::Event> latest_audit_event() override;
     Result<std::vector<audit::Event>> list_audit_events(const audit::Filter& filter) override;
     Result<void> set_audit_retention_days(const std::string& customer_id, int days) override;
-    Result<void> assign_legacy_metering() override;
-    Result<std::vector<LegacyMeteringUsage>> legacy_metering_usage(const std::string& after_id,
-                                                                   int limit) override;
-    Result<std::vector<LegacyMeteredBuild>>
-    legacy_metering_build_records(const std::string& after_id, int limit) override;
-    // Rows of the retired metering tables, as an earlier lake wrote them (tests of the copy).
-    void seed_legacy_metering_usage(MeteringUsage usage);
-    void seed_legacy_metered_build(MeteredBuild build);
     Result<std::optional<std::uint64_t>> storage_quota(const std::string& customer_id) override;
     Result<std::vector<Workspace>> list_workspaces(const std::string& customer_id) override;
     Result<Workspace> get_workspace(const std::string& id) override;
@@ -253,11 +177,6 @@ public:
                                     std::string message,
                                     std::int64_t observed_generation);
     Result<std::vector<Build>> list_builds(const std::string& customer_id) override;
-    Result<void> assign_legacy_stream_owners() override;
-    Result<std::vector<LegacyStreamOwner>> legacy_stream_owners(const std::string& after_id,
-                                                                int limit) override;
-    // A row of the retired stream_owners table, as an earlier lake wrote it (tests of the copy).
-    void seed_legacy_stream_owner(StreamOwner owner);
     Result<std::vector<AgentTaskStreamScope>>
     list_agent_task_stream_scopes(const std::string& customer_id) override;
     Result<Build> get_build(const std::string& id) override;
@@ -345,18 +264,6 @@ public:
     Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) override;
     // Moves a task's clocks back, so tests reach a deadline without waiting for it.
     void age_agent_task(const std::string& id, std::chrono::seconds by);
-    Result<void> assign_legacy_opportunities() override;
-    Result<std::vector<LegacyOpportunity>> legacy_opportunities(const std::string& after_id,
-                                                                int limit) override;
-    // A row of the retired opportunities table, as an earlier lake wrote it (tests of the copy).
-    void seed_legacy_opportunity(Opportunity opportunity);
-    Result<void> assign_legacy_agent_tasks() override;
-    Result<std::vector<LegacyAgentTask>> legacy_agent_tasks(const std::string& after_id,
-                                                            int limit) override;
-    // A task as an earlier lake wrote it, with its body, message, result and phase in the retired
-    // content columns (tests of the copy, lake#374), created at `at_us` (0: now). Its dispatch
-    // half is a task like any other.
-    void seed_legacy_agent_task(AgentTask task, std::int64_t at_us = 0);
     // Sets a task's dispatch status directly; tests and local demos call it. What the agent wrote
     // is a record in the task's workspace (control/agent_task_records.hpp).
     Result<void> set_agent_task_status(const std::string& id,
@@ -419,31 +326,6 @@ public:
     Result<void> delete_secret_lease_route(const std::string& lease_id) override;
     Result<std::vector<SecretLeaseRoute>> claim_due_secret_leases(int limit,
                                                                   int hold_seconds) override;
-    Result<void> assign_legacy_secrets() override;
-    Result<std::vector<LegacySecretMount>> legacy_secret_mounts(const std::string& after_id,
-                                                                int limit) override;
-    Result<std::vector<LegacySecretEntry>> legacy_secret_entries(const std::string& after_id,
-                                                                 int limit) override;
-    Result<std::vector<LegacySecretVersion>> legacy_secret_versions(const std::string& after_id,
-                                                                    int limit) override;
-    Result<std::vector<LegacyEncryptionKey>> legacy_encryption_keys(const std::string& after_id,
-                                                                    int limit) override;
-    Result<std::vector<LegacySecretDataKey>> legacy_secret_data_keys(const std::string& after_id,
-                                                                     int limit) override;
-    Result<std::vector<LegacyDynamicSecretLease>>
-    legacy_dynamic_secret_leases(const std::string& after_id, int limit) override;
-    // Rows of the retired secrets tables, as an earlier lake wrote them (tests of the copy). A
-    // data key is given raw and wrapped here by the customer's current KEK, as 0009 wrapped it.
-    void seed_legacy_secret_mount(SecretMount mount);
-    void seed_legacy_secret_entry(LegacySecretEntry entry);
-    void seed_legacy_secret_version(LegacySecretVersion version);
-    void seed_legacy_encryption_key(LegacyEncryptionKey key);
-    Result<void> seed_legacy_secret_data_key(LegacySecretDataKey key, const std::string& raw_key);
-    // A secrets_dynamic_leases row; its owner follows its mount's route.
-    void seed_legacy_dynamic_secret_lease(LegacyDynamicSecretLease lease);
-    // An operator's reviewed choice for a mount migration 0057 left as needs_selection.
-    void select_legacy_secret_mount_workspace(const std::string& mount_id,
-                                              const std::string& workspace_id);
     Result<IssuedSession> sign_up_password(const NewPasswordUser&) override;
     Result<IssuedSession> sign_in_password(const PasswordSignIn&) override;
     Result<IssuedSession> sign_in_taap(const TaapSignIn&) override;
@@ -548,18 +430,8 @@ private:
     std::vector<Organization> organizations_;
     std::vector<Customer> customers_;
     std::vector<Repository> repositories_; // routing rows: no description (lake#315 part 2)
-    // Descriptions the retired repositories.description column held (seeded by tests), with the
-    // row's creation instant, and their owners: repository id -> workspace, outcome (0064).
-    std::map<std::string, std::pair<std::string, std::int64_t>> legacy_repository_descriptions_;
-    std::map<std::string, std::pair<std::string, std::string>>
-        legacy_repository_description_assignments_;
-    std::vector<ForgeRecord> legacy_forge_records_;
-    // Legacy forge record id -> (workspace, outcome), as migration 0054 records them.
-    std::map<std::string, std::pair<std::string, std::string>> legacy_forge_assignments_;
     // Audit event id -> (workspace, outcome), as workspace_assignments holds them (lake#317).
     std::map<std::string, std::pair<std::string, std::string>> legacy_audit_assignments_;
-    std::vector<DriveShareLink> legacy_drive_share_links_;
-    std::map<std::string, std::pair<std::string, std::string>> legacy_drive_share_assignments_; // workspace, outcome
     std::map<std::string, DriveShareLinkRoute> drive_share_link_routes_; // by token digest
     std::vector<Team> teams_;
     std::vector<Membership> memberships_;
@@ -567,44 +439,11 @@ private:
     std::vector<PolicyObject> policy_objects_;
     std::vector<Grant> grants_;
     std::vector<Application> applications_; // routing rows: no settings (lake#351)
-    // Settings the retired auth_applications columns held (seeded by tests), and their owners:
-    // application id -> workspace, outcome (migration 0059).
-    std::vector<ApplicationSettings> legacy_application_settings_;
-    std::map<std::string, std::pair<std::string, std::string>>
-        legacy_application_settings_assignments_;
-    std::vector<ApplicationSigningKey> application_signing_keys_; // retired rows (0056)
     // The envelope's data key per credential purpose, as the keystore table holds them.
     std::map<std::string, std::string> application_credential_keys_;
-    // Retired rows' owners: "auth_app_signing_keys\n<application>" or
-    // "auth_app_webhooks\n<webhook>" -> workspace, outcome (migration 0056).
-    std::map<std::string, std::pair<std::string, std::string>> legacy_application_credential_assignments_;
-    // Rows of the retired auth_app_users and auth_app_organizations tables (seeded by tests), and
-    // their owners: row id -> workspace, outcome (migration 0055).
-    std::vector<ApplicationUser> legacy_application_users_;
-    std::vector<ApplicationOrganization> legacy_application_organizations_;
-    std::map<std::string, std::pair<std::string, std::string>>
-        legacy_application_directory_assignments_;
-    std::vector<ApplicationWebhook> application_webhooks_; // retired rows (0056)
-    std::vector<ApplicationWebhookEvent> application_webhook_events_;
-    std::vector<ApplicationWebhookDelivery> application_webhook_deliveries_;
-    // Retired rows' owners: event id -> workspace, outcome (migration 0049).
-    std::map<std::string, std::pair<std::string, std::string>> legacy_application_event_assignments_;
-    // Retired auth_app_authorization_codes rows (0061) and their owners: code hash -> workspace,
-    // outcome.
-    struct ApplicationAuthorizationCodeRecord {
-        ApplicationAuthorizationCode code;
-        bool used = false;
-    };
-    std::vector<ApplicationAuthorizationCodeRecord> application_authorization_codes_;
-    std::map<std::string, std::pair<std::string, std::string>>
-        legacy_application_code_assignments_;
     std::vector<audit::Identity> identities_;
     std::vector<audit::Event> audit_events_;
     std::vector<std::pair<std::string, int>> audit_retentions_;
-    std::vector<MeteringUsage> legacy_metering_usage_;
-    std::vector<MeteredBuild> legacy_metered_builds_;
-    std::map<std::string, std::pair<std::string, std::string>>
-        legacy_metering_assignments_; // workspace, outcome
     std::map<std::string, std::uint64_t> storage_quotas_;
     std::vector<ManagedService> services_;
     std::vector<Workspace> workspaces_;
@@ -623,8 +462,6 @@ private:
     };
     std::vector<WebAppAuthorizationCodeRecord> web_app_authorization_codes_;
     std::vector<Build> builds_;
-    std::vector<StreamOwner> legacy_stream_owners_;
-    std::map<std::string, std::pair<std::string, std::string>> legacy_stream_assignments_; // workspace, outcome
     std::vector<ManagedStore> stores_;
     std::vector<PkiAuthorityRecord> pki_authorities_;
     std::vector<PkiCallerRecord> pki_callers_;
@@ -639,10 +476,6 @@ private:
         std::chrono::steady_clock::time_point created, published, started, lease_until;
     };
     std::map<std::string, TaskClock> agent_task_clocks_;
-    std::vector<LegacyAgentTask> legacy_agent_task_content_; // body, message, result and phase
-    std::map<std::string, std::pair<std::string, std::string>> legacy_agent_task_assignments_;
-    std::vector<Opportunity> legacy_opportunities_;
-    std::map<std::string, std::pair<std::string, std::string>> legacy_opportunity_assignments_; // workspace, outcome
     std::vector<PkiRecoveryCeremonyRecord> pki_recovery_ceremonies_;
     std::map<std::string, std::vector<PkiRecoveryShareEvidence>> pki_recovery_evidence_;
     struct CustomerKekRecord {
@@ -656,14 +489,6 @@ private:
     std::vector<CustomerKekRecord> customer_keks_;
     std::vector<SecretMountRoute> secret_mount_routes_;
     std::vector<SecretLeaseRoute> secret_lease_routes_;
-    std::vector<LegacyDynamicSecretLease> legacy_dynamic_secret_leases_;
-    std::vector<LegacySecretMount> legacy_secret_mounts_;
-    std::vector<LegacySecretEntry> legacy_secret_entries_;
-    std::vector<LegacySecretVersion> legacy_secret_versions_;
-    std::vector<LegacyEncryptionKey> legacy_encryption_keys_;
-    std::vector<LegacySecretDataKey> legacy_secret_data_keys_;
-    // mount id -> (workspace id, outcome), as migration 0057 records them.
-    std::map<std::string, std::pair<std::string, std::string>> legacy_secret_assignments_;
     struct PasswordCredential {
         std::string user_id, pool_id, email, password, totp_secret;
         std::vector<std::string> recovery_hashes;
@@ -710,11 +535,6 @@ private:
     std::vector<RecoveryDelivery> recovery_deliveries_;
     std::vector<RecoveryNotification> recovery_notifications_;
     std::vector<RecoveryContact> recovery_contacts_;
-    // The retired platform tables and their recorded owners (migration 0060): row id ->
-    // (workspace, outcome).
-    std::vector<PlatformEnvironment> legacy_platform_environments_;
-    std::vector<PlatformMirrorRow> legacy_platform_mirror_;
-    std::map<std::string, std::pair<std::string, std::string>> legacy_platform_assignments_;
     std::vector<SsoProvider> sso_providers_;
     std::vector<std::pair<std::string, std::string>> sso_scim_tokens_;
     std::vector<std::pair<std::string, std::string>> sso_oidc_secrets_;

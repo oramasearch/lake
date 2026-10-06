@@ -66,16 +66,6 @@ struct RepositorySettings {
     std::int64_t lake_revision = 0;
 };
 
-// The description of a repository row from before migration 0064, with its recorded owner
-// (workspace_assignments, object_table `repository_descriptions`), for the one-shot copy.
-// `settings.at_us` is the row's creation instant.
-struct LegacyRepositoryDescription {
-    RepositorySettings settings;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
-};
-
 struct RepositoryDeletion {
     std::string deleted_at, retention_until;
 };
@@ -101,12 +91,6 @@ struct LegacyAuditEvent {
     std::string workspace_id;
     std::string outcome; // event_workspace | workspace_deleted
 };
-struct LegacyForgeRecord {
-    ForgeRecord record;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
-};
 // A repository's runtime environment (docs/api/platform.md). It lives in the workspace Zetta of the
 // repository's workspace (lake#358, control/platform_records.hpp); its id is
 // platform_environment_id(repository, name) and names its `environment` policy object, which stays
@@ -130,30 +114,6 @@ struct PlatformMirrorRow {
     std::int64_t revision = 0;      // the workspace engine's revision (conditional writes)
     std::int64_t lake_revision = 1; // lake's revision inside the seal
 };
-// A row of the retired platform_environments table (migration 0060) with its recorded owner: its
-// repository's workspace, or empty with the reason it is not copied (`needs_selection` while the
-// repository has no workspace, `workspace_deleted` when that workspace is gone). `id` is the row's
-// own id, which workspace_assignments names; `environment.id` is the same legacy id, and the copy
-// writes the record under the derived one.
-struct LegacyPlatformEnvironment {
-    std::string id;
-    PlatformEnvironment environment;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
-};
-// A row of the retired platform_mirror table (migration 0060). `id` is md5(kind, newline, key) as
-// a UUID (platform_mirror_id), which SQL computes the same way. `outcome` is also
-// `unknown_repository` for a row naming no repository lake has.
-struct LegacyPlatformMirrorRow {
-    std::string id;
-    PlatformMirrorRow row;
-    std::int64_t at_us = 0; // seen_at in microseconds since the Unix epoch
-    std::string repository_id;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
-};
 // A drive share link (docs/api/sharing.md). It lives in the workspace Zetta of the workspace that
 // holds it (lake#350, control/drive_share_links.hpp); the control store keeps only its synthetic
 // `share-link:<id>` grant, the content-free route of a link made before the move, and the retired
@@ -164,14 +124,6 @@ struct DriveShareLink {
     std::int64_t at_us = 0;         // created_at in microseconds since the Unix epoch
     std::int64_t revision = 0;      // the workspace engine's revision (conditional writes)
     std::int64_t lake_revision = 1; // lake's revision inside the seal
-};
-// A row of the retired drive_share_links table with its recorded owner (migration 0048): the
-// workspace it is copied into, or empty with the reason it is not (`needs_selection`).
-struct LegacyDriveShareLink {
-    DriveShareLink link;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
 };
 // Where a link made before lake#350 lives: content-free dispatch from its token digest to its
 // workspace and record key (drive_share_link_routes).
@@ -745,17 +697,6 @@ struct AgentTask {
     std::string lease_until;
     bool retry_notice_pending = false;
 };
-// A task of the retired content columns (agent_tasks.body, agent_task_status.message and
-// result), with its recorded owner (migration 0062): `task` carries its body, message, result and
-// phase as an earlier lake wrote them, and `at_us` its creation instant. `workspace_id` is the
-// live workspace it is copied into, or empty with the reason it is not: `needs_selection` (the
-// task names no workspace) or `workspace_deleted` (its record went with that workspace).
-struct LegacyAgentTask {
-    AgentTask task;
-    std::int64_t at_us = 0;
-    std::string workspace_id;
-    std::string outcome;
-};
 struct AgentTaskStreamScope {
     std::string id, agent, finished_at;
     std::string workspace_id;
@@ -771,16 +712,6 @@ struct StaleAgentTasks {
 // the one-shot copy.
 struct StreamOwner {
     std::string customer_id, workspace_id, topic, created_by;
-};
-// A row of the retired stream_owners table with its recorded owner (migration 0047). `id` is the
-// row's stable identity, md5(customer_id, workspace_id, topic) as a UUID, which pages the copy.
-// `workspace_id` is the live workspace it is copied into, or empty with the reason it is not:
-// `workspace_deleted` (the topic went with that workspace incarnation) or `unknown_workspace`.
-struct LegacyStreamOwner {
-    std::string id;
-    StreamOwner owner;
-    std::string workspace_id;
-    std::string outcome;
 };
 
 // One Opportunity Auto-Suggest recommended (or declined, status not_yet), kept across scans. It
@@ -805,14 +736,6 @@ struct AskMessage {
     nlohmann::json payload = nullptr; // proposals, reads and delegations of an assistant message
     std::string created_at;
     std::int64_t at_us = 0; // created_at in microseconds since the Unix epoch
-};
-// A row of the retired opportunities table with its recorded owner (migration 0046): the
-// workspace it is copied into, or empty with the reason it is not (`needs_selection`,
-// `deleted_workspace`).
-struct LegacyOpportunity {
-    Opportunity opportunity;
-    std::string workspace_id;
-    std::string outcome;
 };
 struct NewManagedStore {
     std::string customer_id, type, provider, name, created_by_taap_id;
@@ -1123,23 +1046,6 @@ struct MeteredBuild {
     std::string repository_id;
 };
 
-// A row of the retired metering_usage or metering_build_records table with its recorded owner
-// (migration 0053). `id` is the row's stable identity, md5 of the customer and the hour (usage) or
-// the result id (builds) as a UUID, which pages the copy. `workspace_id` is the live workspace it
-// is copied into, or empty with the reason it is not (`needs_selection`, `workspace_deleted`).
-struct LegacyMeteringUsage {
-    std::string id;
-    MeteringUsage usage;
-    std::string workspace_id;
-    std::string outcome;
-};
-struct LegacyMeteredBuild {
-    std::string id;
-    MeteredBuild build;
-    std::string workspace_id;
-    std::string outcome;
-};
-
 nlohmann::json to_json(const User&);
 nlohmann::json to_json(const Organization&);
 nlohmann::json to_json(const Customer&);
@@ -1198,18 +1104,6 @@ public:
                                                          const std::string& visibility) = 0;
     virtual Result<Repository> delete_repository(const std::string& id,
                                                  const RepositoryDeletion& deletion) = 0;
-    // The descriptions of the repository rows from before migration 0064 (lake#315 part 2), for
-    // the one-shot copy into workspace Zettas only. Assigning records each unassigned row's owner
-    // in workspace_assignments (object_table `repository_descriptions`), as the migration does,
-    // and resolves needs_selection rows whose repository has since been assigned a live workspace.
-    // Only rows that hold a description are listed, by id, oldest id first.
-    virtual Result<void> assign_legacy_repository_descriptions() = 0;
-    virtual Result<std::vector<LegacyRepositoryDescription>>
-    legacy_repository_descriptions(const std::string& after_id, int limit) = 0;
-    // The retired forge_records table (lake#341), for the one-shot copy into workspace Zettas
-    // only. Assigning records each unassigned row's owner in workspace_assignments, as migration
-    // 0054 does, for rows written after it, and resolves needs_selection rows whose repository has
-    // since been assigned a workspace. Listing pages by id, oldest id first.
     // The central audit events about a workspace's data (decision 52, lake#317), for the
     // one-shot copy into workspace Zettas only. Assigning records the workspace of each event
     // whose action is one of `workspace_actions` and that was not refused for want of authority,
@@ -1219,30 +1113,9 @@ public:
     assign_legacy_audit_events(const std::vector<std::string>& workspace_actions) = 0;
     virtual Result<std::vector<LegacyAuditEvent>> legacy_audit_events(const std::string& after_id,
                                                                       int limit) = 0;
-    virtual Result<void> assign_legacy_forge_records() = 0;
-    virtual Result<std::vector<LegacyForgeRecord>>
-    legacy_forge_records(const std::string& after_id, int limit) = 0;
-    // The retired platform_environments and platform_mirror tables (lake#358, lake#359), for the
-    // one-shot copy into workspace Zettas only. Assigning records each unassigned row's owner in
-    // workspace_assignments, as migration 0060 does, for rows an earlier lake wrote after it, and
-    // resolves needs_selection rows whose repository has since been assigned a workspace;
-    // assigning environments also gives each environment's policy object its derived external id.
-    // Listing pages by row id, oldest id first.
-    virtual Result<void> assign_legacy_platform_environments() = 0;
-    virtual Result<std::vector<LegacyPlatformEnvironment>>
-    legacy_platform_environments(const std::string& after_id, int limit) = 0;
-    virtual Result<void> assign_legacy_platform_mirror() = 0;
-    virtual Result<std::vector<LegacyPlatformMirrorRow>>
-    legacy_platform_mirror(const std::string& after_id, int limit) = 0;
     // Drive share links live in workspace Zettas (lake#350). The control store answers only the
     // route of a link made before the move, from its token digest; `not_found` otherwise.
     virtual Result<DriveShareLinkRoute> drive_share_link_route(const std::string& token_hash) = 0;
-    // The retired drive_share_links table, for the one-shot copy into workspace Zettas only.
-    // Assigning records each unassigned row's owner in workspace_assignments and the route of each
-    // assigned row, as migration 0048 does, for rows written after it; listing pages by id.
-    virtual Result<void> assign_legacy_drive_share_links() = 0;
-    virtual Result<std::vector<LegacyDriveShareLink>>
-    legacy_drive_share_links(const std::string& after_id, int limit) = 0;
 
     virtual Result<Team> create_team(const NewTeam&) = 0;
     virtual Result<std::vector<Team>> list_teams(const std::string& organization_id, int limit) = 0;
@@ -1299,15 +1172,6 @@ public:
     virtual Result<Application> get_application_by_pool(const std::string& pool_id) = 0;
     virtual Result<Application>
     get_application_by_domain(const std::string& custom_sign_in_domain) = 0;
-    // The settings columns of the retired auth_applications rows (migration 0059), for the one-shot
-    // copy into workspace Zettas only. Assigning records each unassigned row's owner in
-    // workspace_assignments (object_table `auth_application_settings`), as the migration does, for
-    // rows written after it, and resolves needs_selection rows whose application has since been
-    // assigned a live workspace. Only rows that still hold settings are listed, by id, oldest id
-    // first.
-    virtual Result<void> assign_legacy_application_settings() = 0;
-    virtual Result<std::vector<LegacyApplicationSettings>>
-    legacy_application_settings(const std::string& after_id, int limit) = 0;
     // The secrets subsystem's envelope for an application credential (lake#352, lake#355): a data
     // key per purpose, wrapped by LAKE_INSTANCE_KEK, encrypts the value with AES-256-GCM. Only the
     // purposes `application.jwt.<application id>` and `application.webhook.<webhook id>` are
@@ -1326,48 +1190,6 @@ public:
                                                          const std::string& user_id) = 0;
     virtual Result<void> delete_application_user_credentials(const std::string& application_id,
                                                              const std::string& user_id) = 0;
-    // The retired auth_app_users and auth_app_organizations tables (migration 0055). Assigning
-    // records each unassigned row's owner in workspace_assignments, as the migration does, for rows
-    // written after it, and resolves needs_selection rows whose application has since been assigned
-    // a workspace. Listing pages by row id, oldest id first.
-    virtual Result<void> assign_legacy_application_directory() = 0;
-    virtual Result<std::vector<LegacyApplicationUser>>
-    legacy_application_users(const std::string& after_id, int limit) = 0;
-    virtual Result<std::vector<LegacyApplicationOrganization>>
-    legacy_application_organizations(const std::string& after_id, int limit) = 0;
-    // The retired auth_app_signing_keys and auth_app_webhooks tables (lake#352, lake#355), for the
-    // one-shot copy into workspace Zettas only. Assigning records each unassigned key ring's (one
-    // per application) and webhook's owner in workspace_assignments, as migration 0056 does, for
-    // rows written after it, and resolves needs_selection rows whose application has since been
-    // assigned a workspace. Key rings page by application id, webhooks by id, oldest id first.
-    virtual Result<void> assign_legacy_application_credentials() = 0;
-    virtual Result<std::vector<LegacyApplicationSigningKeyRing>>
-    legacy_application_signing_keys(const std::string& after_application_id, int limit) = 0;
-    virtual Result<std::vector<LegacyApplicationWebhook>>
-    legacy_application_webhooks(const std::string& after_id, int limit) = 0;
-    // The retired auth_app_webhook_events and auth_app_webhook_deliveries tables (lake#356,
-    // lake#357), for the one-shot copy into workspace Zettas only. Assigning records each
-    // unassigned event's owner in workspace_assignments, as migration 0049 does, for rows written
-    // after it, and resolves needs_selection events whose application has since been assigned a
-    // workspace. Listing pages by id, oldest id first; a delivery's owner is its event's.
-    virtual Result<void> assign_legacy_application_webhook_events() = 0;
-    virtual Result<std::vector<LegacyApplicationWebhookEvent>>
-    legacy_application_webhook_events(const std::string& after_id, int limit) = 0;
-    virtual Result<std::vector<LegacyApplicationWebhookDelivery>>
-    legacy_application_webhook_deliveries(const std::string& after_id, int limit) = 0;
-    // The retired auth_app_authorization_codes table (lake#363), for the one-shot copy into
-    // workspace Zettas only: codes are issued and redeemed in the application's workspace
-    // (control/application_authorization_codes.hpp). Assigning records the owner of each live
-    // (unused, unexpired) code not yet recorded, as migration 0061 does, and resolves
-    // needs_selection rows whose application has since been assigned a workspace. Listing returns
-    // only live codes, paged by code hash.
-    // Recording a code as copied (outcome `copied`, before it is written) keeps the copy from
-    // ever writing it again, so a code redeemed in the workspace cannot be made redeemable twice.
-    virtual Result<void> assign_legacy_application_authorization_codes() = 0;
-    virtual Result<std::vector<LegacyApplicationAuthorizationCode>>
-    legacy_application_authorization_codes(const std::string& after_code_hash, int limit) = 0;
-    virtual Result<void>
-    record_legacy_application_authorization_code_copied(const std::string& code_hash) = 0;
 
     virtual audit::Result<audit::Identity> current_lake_identity() = 0;
     virtual audit::Result<audit::Identity> lake_identity_by_taap_id(const std::string& taap_id) = 0;
@@ -1380,13 +1202,6 @@ public:
     virtual Result<std::vector<audit::Event>> list_audit_events(const audit::Filter& filter) = 0;
     virtual Result<void> set_audit_retention_days(const std::string& customer_id, int days) = 0;
 
-    // The retired metering tables (lake#348, lake#349): migration 0053's owner assignment, rerun
-    // before each copy for rows an older replica wrote, and the rows a page at a time by id.
-    virtual Result<void> assign_legacy_metering() = 0;
-    virtual Result<std::vector<LegacyMeteringUsage>>
-    legacy_metering_usage(const std::string& after_id, int limit) = 0;
-    virtual Result<std::vector<LegacyMeteredBuild>>
-    legacy_metering_build_records(const std::string& after_id, int limit) = 0;
     virtual Result<std::optional<std::uint64_t>> storage_quota(const std::string& customer_id) = 0;
     virtual Result<std::vector<Workspace>> list_workspaces(const std::string& customer_id) = 0;
     virtual Result<Workspace> get_workspace(const std::string& id) = 0;
@@ -1476,12 +1291,6 @@ public:
     // In-cluster image builds (docs/control-plane/builds.md). Lake inserts desired rows; the
     // operator writes status and the hashes of the three credentials it owns.
     virtual Result<std::vector<Build>> list_builds(const std::string& customer_id) = 0;
-    // The retired stream_owners table (lake#379), for the one-shot copy into workspace Zettas only.
-    // Assigning records each unassigned row's owner in workspace_assignments, as migration 0047
-    // does, for rows written after it; listing pages by the row id, oldest id first.
-    virtual Result<void> assign_legacy_stream_owners() = 0;
-    virtual Result<std::vector<LegacyStreamOwner>> legacy_stream_owners(const std::string& after_id,
-                                                                        int limit) = 0;
     virtual Result<std::vector<AgentTaskStreamScope>>
     list_agent_task_stream_scopes(const std::string& customer_id) = 0;
     virtual Result<Build> get_build(const std::string& id) = 0;
@@ -1568,19 +1377,6 @@ public:
     virtual Result<void> fail_agent_task(const std::string& id, const std::string& notice) = 0;
     virtual Result<void> mark_agent_task_published(const std::string& id) = 0;
     virtual Result<StaleAgentTasks> stale_agent_tasks(std::chrono::seconds republish_after) = 0;
-    // The retired content columns of agent_tasks and agent_task_status (lake#374, lake#375), for
-    // the one-shot copy into workspace Zettas only. Assigning records the owner of each task with
-    // content that has none yet in workspace_assignments, as migration 0062 does, for rows an
-    // earlier lake wrote after it; listing pages by task id, oldest id first.
-    virtual Result<void> assign_legacy_agent_tasks() = 0;
-    virtual Result<std::vector<LegacyAgentTask>> legacy_agent_tasks(const std::string& after_id,
-                                                                    int limit) = 0;
-    // The retired opportunities table (lake#376), for the one-shot copy into workspace Zettas
-    // only. Assigning records each unassigned row's owner in workspace_assignments, as migration
-    // 0046 does, for rows written after it; listing pages by id, oldest id first.
-    virtual Result<void> assign_legacy_opportunities() = 0;
-    virtual Result<std::vector<LegacyOpportunity>> legacy_opportunities(const std::string& after_id,
-                                                                        int limit) = 0;
     virtual Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                     std::uint64_t quota_bytes) = 0;
 
@@ -1673,23 +1469,6 @@ public:
     // that stops leaves them to be taken again once the hold passes.
     virtual Result<std::vector<SecretLeaseRoute>> claim_due_secret_leases(int limit,
                                                                           int hold_seconds) = 0;
-
-    // The retired secrets tables, for the one-shot copy only. assign_legacy_secrets records each
-    // legacy mount's owner (migration 0057's rule) and the route of every assigned mount; the
-    // listings page by row id.
-    virtual Result<void> assign_legacy_secrets() = 0;
-    virtual Result<std::vector<LegacySecretMount>> legacy_secret_mounts(const std::string& after_id,
-                                                                        int limit) = 0;
-    virtual Result<std::vector<LegacySecretEntry>> legacy_secret_entries(const std::string& after_id,
-                                                                         int limit) = 0;
-    virtual Result<std::vector<LegacySecretVersion>>
-    legacy_secret_versions(const std::string& after_id, int limit) = 0;
-    virtual Result<std::vector<LegacyEncryptionKey>>
-    legacy_encryption_keys(const std::string& after_id, int limit) = 0;
-    virtual Result<std::vector<LegacySecretDataKey>>
-    legacy_secret_data_keys(const std::string& after_id, int limit) = 0;
-    virtual Result<std::vector<LegacyDynamicSecretLease>>
-    legacy_dynamic_secret_leases(const std::string& after_id, int limit) = 0;
 
     // Identity core. All bearer and cookie values are resolved here on every
     // request so a revoked session or device is rejected immediately.

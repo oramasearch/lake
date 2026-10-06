@@ -105,8 +105,10 @@ own: its reads carry `stale_since` until a later sync writes it, and the service
 row naming a repository Lake does not have belongs to no workspace and is skipped.
 
 The retired PostgreSQL tables `platform_environments` and `platform_mirror` (migration
-`0019_platform`) are read only by the one-shot copy; migration `0060_platform_workspaces` records
-each row's owner and gives each environment's policy object its derived id. The cutover is in
+`0019_platform`) were read only by the one-shot copy; migration `0060_platform_workspaces` records
+each row's owner and gives each environment's policy object its derived id. The copy was verified
+on dev, and migration `0070_drop_moved_tables` drops both tables (lake#311); the environments'
+policy objects stay. The cutover is in
 [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-platform-environments-and-mirror-dev-cluster).
 
 ## Loki-compatible logs

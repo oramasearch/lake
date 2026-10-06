@@ -253,7 +253,8 @@ under another key, in another workspace or of another space does not open.
   `workspace_deleted`. The operator's
   `copy_workspace_records` collection `repositories` copies each description with the row's
   creation instant and verifies it; a description changed since (a later lake revision) is
-  accepted. A later migration drops the column once `verify` is complete on dev. Steps:
+  accepted. The copy was verified on dev, and migration `0070_drop_moved_tables` drops the column
+  (lake#311); `copy_workspace_records` no longer accepts `repositories`. Steps:
   [cutover runbook](../architecture/workspace-records.md#cutover-runbook-repository-descriptions-dev-cluster).
 
 `repository_refs`, the table that copied each liquid ref after a push, a replication and a `refs`

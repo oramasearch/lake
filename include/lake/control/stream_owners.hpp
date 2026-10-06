@@ -27,10 +27,6 @@ struct StreamOwnerCodec {
                                              const std::string& workspace_id);
 };
 
-// The identity of a row of the retired stream_owners table: md5 of customer_id, workspace_id and
-// topic joined by newlines, as a UUID (migration 0047 computes the same in SQL).
-std::string legacy_stream_owner_id(const StreamOwner& owner);
-
 // The record key of a topic's ownership in one workspace.
 std::string stream_owner_key(const WorkspaceRecords& records, const std::string& topic);
 

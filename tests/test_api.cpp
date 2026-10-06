@@ -6579,11 +6579,8 @@ TEST(PostgresSync, PushAndPullUsePostgresControlPlane) {
     {
         pqxx::connection connection(database_uri);
         pqxx::work tx(connection);
-        EXPECT_EQ(tx.exec_params("SELECT count(*) FROM metering_usage WHERE customer_id = "
-                                 "$1::uuid",
-                                 customer->id)[0][0]
-                      .as<int>(),
-                  0);
+        EXPECT_TRUE(tx.exec("SELECT to_regclass('metering_usage')")[0][0].is_null())
+            << "migration 0070 dropped the retired table";
     }
     const json written = response_json(http_get(server.port(),
                                                 "/v1/metering_usage?customer_id=" + customer->id,

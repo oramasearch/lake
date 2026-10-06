@@ -49,24 +49,6 @@ std::string application_claims_lookup(const std::string& application_id) {
     return "application:" + application_id + "\nclaims";
 }
 
-std::string application_user_row_id(const std::string& application_id, const std::string& user_id) {
-    const std::string joined = application_id + "\n" + user_id;
-    std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
-    unsigned int size = 0;
-    if (EVP_Digest(joined.data(), joined.size(), digest.data(), &size, EVP_md5(), nullptr) != 1 ||
-        size != 16) {
-        return {};
-    }
-    std::string id;
-    for (unsigned int index = 0; index < size; ++index) {
-        if (index == 4 || index == 6 || index == 8 || index == 10) {
-            id += '-';
-        }
-        id += std::format("{:02x}", static_cast<unsigned>(digest[index]));
-    }
-    return id;
-}
-
 std::string application_user_key(const WorkspaceRecords& records,
                                  const std::string& application_id,
                                  const std::string& user_id) {

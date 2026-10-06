@@ -43,11 +43,6 @@ struct MeteredTransfer {
     std::uint64_t transfer_out_bytes = 0;
 };
 
-// The identities of rows of the retired tables: md5 of the customer and the hour, or of the
-// customer and the result id, joined by a newline, as a UUID (migration 0053 computes the same).
-std::string legacy_metering_usage_id(const std::string& customer_id, const std::string& hour);
-std::string legacy_metered_build_id(const std::string& customer_id, const std::string& result_id);
-
 // Microseconds since the Unix epoch of an hour "YYYY-MM-DDTHH:00:00Z"; nullopt for anything else.
 std::optional<std::int64_t> metering_hour_us(std::string_view hour);
 
@@ -61,11 +56,6 @@ add_metered_transfer(WorkspaceRecords& records,
                      std::uint64_t transfer_in_bytes,
                      std::uint64_t transfer_out_bytes,
                      int attempts = 8);
-
-// Writes a retired metering_usage row's transfer under its legacy id, `if_absent`. True when
-// written, false when a record with that id is already there.
-liquid::runtime::task<ZettaControlResult<bool>>
-copy_metered_transfer(WorkspaceRecords& records, const LegacyMeteringUsage& row);
 
 // Records a build result's compute once: `if_absent` under the blind key of its result id. True
 // when written, false when the result was already recorded.

@@ -250,11 +250,8 @@ spaces with two workspaces each, sealed records only at the repository's workspa
 sync writing nothing, an older row never replacing a newer one, a stale revision, one environment
 created once by two writers, least privilege without a workspace call, missing, malformed and
 unknown ids, a workspace that is not ready (only that repository stale), a repository without a
-workspace and workspace deletion; `TheOneShotCopyMovesPlatformEnvironmentsAndTheMirror` the copy of
-both collections in both stores (the memory store seeds legacy rows with
-`seed_legacy_platform_environment` and `seed_legacy_platform_mirror_row`), including a grant on an
-old policy object still deciding and no phase audited twice; and
-`PostgresPlatform.MigrationRecordsEachRowsOwnerForTheCopy` migration `0060_platform_workspaces`.
+workspace and workspace deletion. The copy's test and the `0060` migration test went with the
+retired tables (migration `0070`).
 
 `test_web_apps.cpp` proves Ship App policy isolation, validation, desired-state generations,
 reserved platform and configured names, direct-zone default hosts, app/replica quotas,
@@ -424,50 +421,44 @@ scratch directory and run `zetta --headless --mcp-listen 127.0.0.1:48712 --admin
 `PostgresAskMessages.MigrationDropsTheTableAndKeepsItsAssignments` covers `0050_drop_ask_messages`
 (lake#483): a pre-0050 table with a row is dropped, its `workspace_assignments` row stays, and two
 reruns of the whole schema leave it dropped. The `ask_messages` copy test and the 0045 test went
-with the table.
+with the table. `PostgresMovedTables.MigrationDropsEveryMovedTableOnlyOnceEachRowHasAWorkspace`
+covers migration `0070_drop_moved_tables` in a PostgreSQL schema of its own (so the tables it
+recreates and the unresolved row it leaves are invisible to tests running in parallel): a fresh
+database has none of the 21 tables or 8 columns; an older one with an owned row in each keeps
+everything while one row is `needs_selection` (the migration raises and names the table) and drops
+everything once that row's workspace is deleted; two reruns of the section and two of the whole
+schema leave them dropped, and routing rows, routes, `audit_events`, `keystore` and the
+`workspace_assignments` record stay. The copy and migration tests of every collection `0070`
+dropped went with their tables; the tests that checked a retired table held nothing now check that
+it does not exist.
 Design → Opportunities (lake#376): `Stores/WorkspaceRecordStores.OpportunitiesStayInTheWorkspaceTheirScanRanIn`
 (two spaces with two workspaces each, the scan's workspace only, a second settle writing nothing,
 foreign and missing/malformed/unknown ids, a workspace that is not ready, workspace deletion),
 `WorkspaceRecords.AnOpportunityStatusChangeRereadsAfterAConcurrentWrite` (derived keys and a raced
-conditional write), `Stores/WorkspaceRecordStores.TheOneShotCopyMovesEachOpportunityToItsScansWorkspace`
-and `PostgresOpportunities.MigrationRecordsEachRowsOwnerForTheCopy` (`0046_opportunity_workspaces`).
-`Stores/WorkspaceRecordStores.TheOneShotCopyMovesEachTopicCreatorIntoItsWorkspace` copies the
-retired `stream_owners` rows (lake#379), and `PostgresStreamOwners.MigrationRecordsEachRowsWorkspaceForTheCopy`
-covers `0047_stream_owner_workspaces`.
-`Stores/WorkspaceRecordStores.TheOneShotCopyMovesDriveShareLinksAndRoutesTheirTokens` copies retired
-drive share links and checks their routes (lake#350), and
-`PostgresDriveShareLinks.MigrationRecordsOwnersAndContentFreeRoutes` covers
-`0048_drive_share_link_workspaces`. `Drive.ShareLinksLiveOnlyInTheWorkspaceThatHoldsThem` covers
+conditional write). `Drive.ShareLinksLiveOnlyInTheWorkspaceThatHoldsThem` covers
 two spaces with two workspaces each, missing/unknown/foreign `workspace_id`, least-privilege
 callers, forged and moved tokens, a workspace that is not ready, revocation and workspace deletion.
 `workspace_fixture.hpp` (`RecordWorkspaces`) gives a test store Ready workspaces whose records live
 in `RecordTables`, over the memory or PostgreSQL store.
 Application events and delivery attempts (lake#356, lake#357): `test_apps.cpp` covers two spaces,
 two workspaces in one, missing, malformed, unknown and foreign `workspace_id`, least privilege, a
-workspace that is not ready, deletion, and an attempt claimed by another caller not being sent;
-`WorkspaceRecordStores.TheOneShotCopyMovesApplicationEventsAndTheirDeliveries` the copy in both
-stores; `PostgresApplicationWebhooks.MigrationRecordsEachEventsOwnerForTheCopy` migration
-`0049_application_webhook_workspaces`. `stream_fixture.hpp`'s `ready_workspace` makes a Ready
+workspace that is not ready, deletion, and an attempt claimed by another caller not being sent. `stream_fixture.hpp`'s `ready_workspace` makes a Ready
 workspace over either store for tests that sign into an application pool.
 Application users and organizations (lake#353, lake#354):
 `ApplicationAuth.UsersAndOrganizationsLiveInTheApplicationsWorkspace` covers two spaces, two
 workspaces in one, sealed records and claims at the application's endpoint only, duplicate emails,
 TAAP identities and names, fresh and abandoned claims, a sign-up completed at the next sign-in, an
 account that is not a user, suspension, deletion, renames, missing, malformed, unknown and foreign
-`workspace_id`, least privilege, a workspace that is not ready and workspace deletion;
-`WorkspaceRecordStores.TheOneShotCopyMovesApplicationUsersAndOrganizations` the copy in both
-stores; `PostgresApplicationUsers.MigrationRecordsEachRowsOwnerForTheCopy` migration
-`0055_application_user_workspaces`. The identity capabilities are asynchronous, so tests call them
+`workspace_id`, least privilege, a workspace that is not ready and workspace deletion. The identity capabilities are asynchronous, so tests call them
 through `call_async`.
 
 Repository usage in workspace Zettas (lake#348, lake#349): `test_workspace_records.cpp`'s
 `RepositoryUsageStaysInEachRepositorysWorkspace` covers `MeteringRecorder` across two spaces with
 two workspaces each (nothing written on the request path, merged counters, a second replica's
 conditional increment, not-ready, deleted and unknown workspaces, a repository without a workspace, the
-bound, build records once), and `TheOneShotCopyMovesMeteringIntoEachSpacesWorkspace` the copy.
-`PostgresMetering.MigrationRecordsEachRowsOwnerForTheCopy` covers `0053_metering_workspaces`, and
-`PostgresSync.PushAndPullUsePostgresControlPlane` a real push and pull flushed into the
-repository's workspace, nothing in PostgreSQL, and the flush on stop.
+bound, build records once), and `PostgresSync.PushAndPullUsePostgresControlPlane` a real push and
+pull flushed into the repository's workspace, no metering table in PostgreSQL, and the flush on
+stop.
 
 The audit split by subject (decision 52, lake#317): `test_workspace_records.cpp`'s
 `AuditEventsAboutAWorkspaceLiveInItsOwnChain` covers the `AuditRecorder` and the readers across two
@@ -488,19 +479,15 @@ Forge records in workspace Zettas (lake#341): `test_workspace_records.cpp`'s
 only at their own endpoint, other repositories' and workspaces' ids, a record copied elsewhere,
 conditional updates, least privilege, missing and unknown `repository_id`, a repository without a
 workspace, a workspace that is not ready and workspace deletion, for the capabilities and for
-`load_branch_protection`; `TheOneShotCopyMovesForgeRecordsIntoTheirRepositorysWorkspace` the copy
-in both stores; `PostgresForgeRecords.MigrationRecordsEachRowsOwnerForTheCopy` migration
-`0054_forge_record_workspaces`. The forge, export, GitHub import and branch protection tests in
+`load_branch_protection`. The forge, export, GitHub import and branch protection tests in
 `test_api.cpp` give `Surface` a Ready workspace (`Surface::workspace`), and the sync and forge
 scenario servers a `RecordWorkspaces`; `RecordWorkspaces::forge` writes a forge record the way lake
 does. `Surface`'s KEK is hexadecimal, as `LAKE_INSTANCE_KEK` is.
 Application signing keys and webhooks (lake#352, lake#355): `test_apps.cpp`
 (`KeysAndWebhooksLiveInTheApplicationsWorkspace`, `AConcurrentRotationIsRereadNotLost`) covers two
 spaces with two workspaces each, the anonymous JWKS, missing, malformed, unknown and foreign
-`workspace_id`, least privilege, rotation and a raced rotation, not ready and deletion;
-`WorkspaceRecordStores.TheOneShotCopyMovesApplicationKeysAndWebhooks` the copy in both stores;
-`PostgresApplicationCredentials.MigrationRecordsEachRowsOwnerForTheCopy` migration
-`0056_application_credential_workspaces`. `stream_fixture.hpp`'s `seed_application_signing_key`
+`workspace_id`, least privilege, rotation and a raced rotation, not ready and deletion.
+`stream_fixture.hpp`'s `seed_application_signing_key`
 writes the first key ring of an application a test creates directly in a store.
 
 Secrets in workspace Zettas (lake#328-#332): `test_secrets.cpp` runs the capability contract on a
@@ -509,54 +496,39 @@ rotation finished after a workspace was not ready, leases, denial). `test_worksp
 `SecretsLiveInTheirMountsWorkspace` covers two spaces with two workspaces each, sealed records only
 at their own endpoint and none in PostgreSQL, missing, malformed, unknown and foreign ids, another
 space's person, a record copied elsewhere, a workspace not ready, KEK rotation across workspaces and
-workspace deletion; `TheOneShotCopyMovesSecretsIntoTheirMountsWorkspace` the copy of the five
-collections in both stores (the memory store seeds legacy rows with `seed_legacy_secret_*`);
-`PostgresSecrets.MigrationRecordsEachMountsOwnerAndRoute` migration `0057_secret_workspaces`. The
-identity exit scenario and the Postgres secrets round trip give their mount a Ready workspace.
+workspace deletion, and no retired secrets table in PostgreSQL. The identity exit scenario and the Postgres secrets round trip give their mount a Ready workspace.
 Dynamic leases (lake#362): `test_secrets.cpp` covers a lease's sealed record and content-free
 route, renewal and revocation, a renewal racing a revocation or an expiry (the record fixture's
 `before_put` lands the other writer's change between the read and the conditional write), the
 expiry pass reading only the workspaces of due leases, holds, not-ready and deleted workspaces, and
-the server tick. `test_workspace_records.cpp`'s `DynamicLeasesLiveInTheirMountsWorkspace` and
-`TheOneShotCopyMovesDynamicLeasesIntoTheirMountsWorkspace` cover two spaces with two workspaces
-each and the copy in both stores (`seed_legacy_dynamic_secret_lease`);
-`PostgresSecrets.LeaseRoutesAreAContentFreeDueIndex` migration `0058_secret_lease_workspaces`.
+the server tick. `test_workspace_records.cpp`'s `DynamicLeasesLiveInTheirMountsWorkspace` covers
+two spaces with two workspaces each; `PostgresSecrets.LeaseRoutesAreAContentFreeDueIndex` migration
+`0058_secret_lease_workspaces` rerun and the due index.
 Repository descriptions and refs (lake#315 part 2, lake#319): `test_workspace_records.cpp`
-(`RepositoryDescriptionsLiveInTheirWorkspace`, `TheOneShotCopyMovesRepositoryDescriptions`) covers
-two spaces with two workspaces each, sealed records and empty routing rows, reads and one
-`list_records` per workspace, missing, malformed, unknown and foreign `workspace_id`, a refused
-create leaving nothing, least privilege, a raced change, a moved record, not ready, deletion and the
-copy in both stores; `PostgresRepositories.MigrationDropsRefsAndRecordsEachDescriptionsOwner`
-migration `0064_repository_records`. The sync tests in `test_api.cpp` and the forge scenario read
+(`RepositoryDescriptionsLiveInTheirWorkspace`) covers two spaces with two workspaces each, sealed
+records and routing rows without a description column, reads and one `list_records` per workspace,
+missing, malformed, unknown and foreign `workspace_id`, a refused create leaving nothing, least
+privilege, a raced change, a moved record, not ready and deletion;
+`PostgresRepositories.MigrationDropsRefsAndTheRowIsRoutingOnly` migration `0064_repository_records`. The sync tests in `test_api.cpp` and the forge scenario read
 refs through the `refs` capability (`served_refs`, `ref_head`), since lake keeps no copy, and
 `PagePerformance` holds `/repositories` at one `list_records`.
 Application settings (lake#351): `test_apps.cpp`
 (`SettingsLiveInTheApplicationsWorkspace`) covers two spaces with two workspaces each, sealed
 records and empty routing rows, reads and listings from the workspace, the theme with missing,
 malformed, unknown and foreign `workspace_id` and a raced change, origins checked from the record,
-least privilege, a moved record not opening, not ready and deletion;
-`WorkspaceRecordStores.TheOneShotCopyMovesApplicationSettings` the copy in both stores;
-`PostgresApplicationSettings.MigrationRecordsEachRowsOwnerForTheCopy` migration
-`0059_application_settings_workspaces`. `stream_fixture.hpp`'s `seed_application_settings` writes
+least privilege, a moved record not opening, not ready and deletion. `stream_fixture.hpp`'s `seed_application_settings` writes
 the settings of an application a test creates directly in a store, and `test_webauthn.cpp` calls
 the passkey ceremonies asynchronously.
 Application authorization codes (lake#363): `test_apps.cpp`
 (`AuthorizationCodesLiveInTheApplicationsWorkspace`) covers two spaces with two workspaces each,
 sealed records under blind keys, retention, one redemption, racing exchanges (through
 `record_fixture.hpp`'s `before_delete`, a delete landing between a read and a conditional delete),
-expiry, missing, malformed and unknown `application_id`, least privilege, not ready and deletion;
-`WorkspaceRecordStores.TheOneShotCopyMovesLiveApplicationAuthorizationCodes` the copy in both
-stores (`seed_legacy_application_authorization_code`);
-`PostgresApplicationAuthorizationCodes.MigrationRecordsEachLiveCodesOwnerForTheCopy` migration
-`0061_application_authorization_code_workspaces`.
+expiry, missing, malformed and unknown `application_id`, least privilege, not ready and deletion.
 Agent tasks (lake#374, lake#375): `test_workspace_records.cpp`'s
 `AnAgentTaskKeepsItsFirstAnswerAndRereadsARacedEvent` covers the record (sealed, written once, a raced
-write reread, the first answer kept, another key or space not opening, a request filled in), and
-`AgentTasksKeepWhatWasWrittenInTheirOwnWorkspace` and
-`TheOneShotCopyMovesAgentTaskContentIntoEachTasksWorkspace` cover two spaces with two workspaces
-each and the copy in both stores (`seed_legacy_agent_task`);
-`PostgresAgentTasks.MigrationRecordsEachTasksOwnerAndKeepsDispatchContentFree` migration
-`0062_agent_task_workspaces`. `stream_fixture.hpp`'s `seed_agent_task_request`,
+write reread, the first answer kept, another key or space not opening, a task without a record
+answered), and `AgentTasksKeepWhatWasWrittenInTheirOwnWorkspace` covers two spaces with two
+workspaces each and dispatch rows without content columns. `stream_fixture.hpp`'s `seed_agent_task_request`,
 `seed_agent_task_answer` and `agent_task_content` write and read a task's record for tests that
 create or finish tasks directly in a store; `AgentRuns::task` and `HttpResponseIsolation`'s
 `assembled_task` read a task from both halves, and `test_instance_kek` gives memory-store tests a

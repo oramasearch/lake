@@ -67,7 +67,8 @@ to another workspace or to the lake Zetta.
   the issuer host of its tokens); `workspace_id` (`0049`); `created_at` and `updated_at`. None of
   these is the application's configuration body. A new application's row leaves `name`,
   `allowed_origins`, `redirect_uris` and `theme` NULL (migration `0059`); a row registered before
-  holds them only until the operator's copy, and a later migration drops the four columns.
+  held them until the operator's copy, and migration `0070_drop_moved_tables` drops the four
+  columns (lake#311).
 - **Registration.** `register_application` writes the settings into the chosen workspace with
   `if_absent`, beside the first key ring, before the routing row; a registration refused afterwards
   (a custom host already taken) takes both records back out.
@@ -88,9 +89,10 @@ to another workspace or to the lake Zetta.
 - **Not ready, deletion.** A workspace that is not ready answers `workspace_not_ready`; a legacy
   application without a workspace the same. Deleting the workspace deletes the settings with its
   Zetta, and the application then answers an error instead of reading anything elsewhere.
-- **Before the copy.** An application registered before this change has its settings only in its
-  retired columns until the operator's copy runs: its pages and `get_application` answer
-  `not_found`, and its cross-origin sign-ins are refused (cutover:
+- **Before the copy.** An application registered before this change had its settings only in its
+  retired columns until the operator's copy ran: its pages and `get_application` answered
+  `not_found`, and its cross-origin sign-ins were refused (cutover, done on dev before migration
+  `0070_drop_moved_tables` dropped the columns:
   [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-application-settings-dev-cluster)).
 
 ### Where users and organizations live (lake#353, lake#354)
@@ -143,9 +145,10 @@ is lake's own account of the person (the `users` row, the pool's credentials and
 - **Workspace not ready, or deleted.** A workspace that is not ready refuses every read, write and
   sign-in of its applications with `workspace_not_ready`. Deleting a workspace deletes its Zetta
   with the users and organizations of its applications, whose sign-ins then fail.
-- **Cutover.** Users from before the move are in the workspace only once the operator's one-shot copy
-  (`copy_workspace_records`, migration `0055_application_user_workspaces`) has run; until then their
-  sign-ins are refused as not users of the application. The runbook is in
+- **Cutover.** Users from before the move were in the workspace only once the operator's one-shot
+  copy (`copy_workspace_records`, migration `0055_application_user_workspaces`) had run; until then
+  their sign-ins were refused as not users of the application. The copy was verified on dev, and
+  migration `0070_drop_moved_tables` drops `auth_app_users` and `auth_app_organizations`. The runbook is in
   [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-application-users-and-organizations-dev-cluster).
 
 ## Hosted pages and HTTP routes
@@ -247,9 +250,9 @@ different table: it is multitenancy and stays central.)
   malformed one is refused at `/application_id`. An application without a workspace, or whose
   workspace is not ready, answers `workspace_not_ready`; a deleted workspace takes its codes with
   it.
-- **Before the copy.** A code issued in the five minutes before the deploy is in the retired table
-  until the operator's copy writes it into the workspace; until then its exchange is refused
-  (cutover:
+- **Before the copy.** A code issued in the five minutes before the deploy was in the retired table
+  until the operator's copy wrote it into the workspace; until then its exchange was refused
+  (cutover, done on dev before migration `0070_drop_moved_tables` dropped the table:
   [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-application-authorization-codes-dev-cluster)).
 
 ## Lifecycle webhooks
@@ -340,9 +343,9 @@ lake Zetta.
   answers `workspace_not_ready`: no token is issued, no JWKS is served and no webhook is created.
 - **Deletion.** Deleting the workspace deletes the application's keys and webhooks with its Zetta;
   its JWKS and sign-ins then fail rather than read anything elsewhere.
-- **Before the copy.** An application registered before this change has its keys and webhooks only
-  in the retired tables until the operator's copy runs, so its sign-ins fail and its JWKS is empty
-  until then (cutover:
+- **Before the copy.** An application registered before this change had its keys and webhooks only
+  in the retired tables until the operator's copy ran, so its sign-ins failed and its JWKS was empty
+  until then (cutover, done on dev before migration `0070_drop_moved_tables` dropped the tables:
   [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-application-keys-and-webhooks-dev-cluster)).
 
 ## ApplicationAgent and Ship Apps

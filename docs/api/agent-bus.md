@@ -188,7 +188,9 @@ the claim reply and the pages answer exactly as before.
   tasks' records with it.
 
 Migration `0062_agent_task_workspaces` adds the two columns, records each task's owner for the
-one-shot copy, and drops nothing. The copy and the cutover are in
+one-shot copy, and drops nothing. The copy was verified on dev, and migration
+`0070_drop_moved_tables` drops `agent_tasks.body`, `agent_task_status.message` and
+`agent_task_status.result` (lake#311); both tables stay as the dispatch rows. The copy and the cutover are in
 [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-agent-tasks-dev-cluster).
 
 ## What the bus loses, the store recovers

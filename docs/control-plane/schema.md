@@ -114,7 +114,7 @@ disablement revoke all prior recovery rows. `identity_mfa_guard` is the migratio
 
 The five `secrets_*` tables below are retired by `0057_secret_workspaces` (lake#328-#332): mounts,
 secrets, versions, named keys and data keys live in the workspace Zetta of each mount's route, and
-these tables are read only by the one-shot copy until a later migration drops them. See
+[`0070_drop_moved_tables`](#drop-moved-tables-migration) drops these tables, so a fresh database never has them. See
 [0057](#secret-workspaces-migration-0057_secret_workspaces).
 
 | Table | Purpose |
@@ -135,7 +135,8 @@ the child secret object.
 Static values use one mount data key and associated data containing mount, name and version.
 Named encryption keys have one data-key row per version. Customer-KEK rotation locks the customer
 KEK and all of its data-key rows, rewraps those rows and updates the KEK in one transaction. It
-does not update `secrets_versions`.
+does not update `secrets_versions`. (Since `0057` the data keys are workspace records, and since
+`0070` a rotation rewraps the workspace data keys and the PKI authorities only.)
 
 ## Secret workspaces (migration `0057_secret_workspaces`)
 
@@ -148,15 +149,16 @@ does not update `secrets_versions`.
 | `secret_workspaces_guard` | Guard table for migration `0057_secret_workspaces`. |
 
 Nothing is dropped. Lake reads and writes secrets only in workspace records
-([secrets.md](../api/secrets.md#where-secrets-live-lake328-332)); a customer KEK rotation still
-rewraps the retired `secrets_data_keys` rows in its transaction so the one-shot copy can read them.
+([secrets.md](../api/secrets.md#where-secrets-live-lake328-332)). Until `0070` dropped them, a
+customer KEK rotation also rewrapped the retired `secrets_data_keys` rows so the one-shot copy could
+read them.
 
 ## Secret lease workspaces (migration `0058_secret_lease_workspaces`)
 
 | Table or change | Purpose |
 |---|---|
 | `secret_lease_routes` | One row per dynamic lease (lake#362): its mount (foreign key to `secret_mount_routes`), space and workspace (`enforce_workspace_routing`: a live workspace of the same space, never changed), and `due_at`, when the expiry loop must next look at it (NULL once the lease is revoked or expired in its workspace; partial index `secret_lease_routes_due_idx`). Content-free dispatch; no role, value or ciphertext. |
-| `secrets_dynamic_leases` | Retired: leases live in `lake_secrets_dynamic_leases` in their mount's workspace Zetta, and the table is read only by the one-shot copy until a later migration drops it. The migration reports each lease whose mount has no route. |
+| `secrets_dynamic_leases` | Retired: leases live in `lake_secrets_dynamic_leases` in their mount's workspace Zetta, and [`0070_drop_moved_tables`](#drop-moved-tables-migration) drops the table. The migration reports each lease whose mount has no route. |
 | `secret_lease_workspaces_guard` | Guard table for migration `0058_secret_lease_workspaces`. |
 
 Nothing is dropped. See [secrets.md](../api/secrets.md#where-leases-live-lake362).
@@ -197,7 +199,7 @@ never stores an unwrapped repository key. The API and security consequences are 
 
 | Table | Purpose |
 |---|---|
-| `forge_records` | Retired by `0054_forge_record_workspaces` (lake#341): forge records live in the workspace Zetta of their repository's workspace, and this table is read only by the one-shot copy until a later migration drops it. It held the versioned, repository-owned issue, review, release, webhook, branch-protection, export, and GitHub-import facts. |
+| `forge_records` | Retired by `0054_forge_record_workspaces` (lake#341): forge records live in the workspace Zetta of their repository's workspace, and [`0070_drop_moved_tables`](#drop-moved-tables-migration) drops this table. It held the versioned, repository-owned issue, review, release, webhook, branch-protection, export, and GitHub-import facts. |
 | `forge_guard` | Guard table for the migration. |
 
 The `value` column is a JSON object with a versioned application shape. This deliberately keeps a
@@ -227,7 +229,7 @@ The migration follows forge/export/import migration `0012`.
 
 | Table | Purpose |
 |---|---|
-| `metering_usage` | Retired by `0053_metering_workspaces` (lake#348): repository transfer lives in the repository's workspace Zetta, and this table is read only by the one-shot copy until a later migration drops it. It held one row per customer and UTC hour: a unique-stored-bytes gauge and transfer and compute counters. |
+| `metering_usage` | Retired by `0053_metering_workspaces` (lake#348): repository transfer lives in the repository's workspace Zetta, and [`0070_drop_moved_tables`](#drop-moved-tables-migration) drops this table. It held one row per customer and UTC hour: a unique-stored-bytes gauge and transfer and compute counters. |
 | `metering_build_records` | Retired by `0053_metering_workspaces` (lake#349): build records live in the repository's workspace Zetta. It was the customer/result idempotency ledger that added a build's rounded compute seconds to its hour once. |
 | `metering_guard` | Guard table for this migration. |
 
@@ -248,7 +250,7 @@ deferred to the wave-level operator migration pull request.
 
 | Table | Purpose |
 |---|---|
-| `drive_share_links` | Retired by `0048_drive_share_link_workspaces` (lake#350): links live in the workspace Zetta that holds them, and this table is read only by the one-shot copy until a later migration drops it. It held the folder object, stable liquid node id, path, role, HMAC token digest, expiry, creator, and optional revocation for a bearer link. |
+| `drive_share_links` | Retired by `0048_drive_share_link_workspaces` (lake#350): links live in the workspace Zetta that holds them, and [`0070_drop_moved_tables`](#drop-moved-tables-migration) drops this table. It held the folder object, stable liquid node id, path, role, HMAC token digest, expiry, creator, and optional revocation for a bearer link. |
 | `drive_guard` | Guard table for this migration. |
 
 Direct recipient shares remain ordinary `grants`; the link row adds expiry and revocation to a
@@ -261,12 +263,16 @@ stored. The migration follows metering migration `0014`.
 |---|---|
 | `auth_applications` | Registration, isolated pool, exact origins and redirects, custom host, and theme. Split by `0059`: the row stays as content-free routing (id, space, pool, custom host, workspace), and the origins, redirects, name and theme live in the application's workspace Zetta. |
 | `auth_app_signing_keys` | Per-application Ed25519 public keys and encrypted signing seeds, including rotation state. Retired by `0056`: each application's keys live in its workspace Zetta. |
-| `auth_app_users` | Pool membership and active or suspended status for application users. Retired by `0055_application_user_workspaces` (lake#353): users live in the application's workspace Zetta, and this table is read only by the one-shot copy until a later migration drops it. |
+| `auth_app_users` | Pool membership and active or suspended status for application users. Retired by `0055_application_user_workspaces` (lake#353): users live in the application's workspace Zetta, and [`0070_drop_moved_tables`](#drop-moved-tables-migration) drops this table. |
 | `auth_app_organizations` | Application-facing organization profiles and metadata. Retired by `0055` (lake#354), with the users. |
 | `auth_app_webhooks` | Event filters, destination, enabled state, and encrypted signing secret. Retired by `0056`: webhooks live in the application's workspace Zetta. |
 | `auth_app_webhook_events` | Immutable lifecycle event payloads. Retired by `0049`: events live in the application's workspace Zetta. |
 | `auth_app_webhook_deliveries` | Every delivery attempt, outcome, signature, and error. Retired by `0049`, with the events. |
 | `auth_app_guard` | Guard table for this migration. |
+
+[`0070_drop_moved_tables`](#drop-moved-tables-migration) drops the six `auth_app_*` tables above and
+the four settings columns of `auth_applications` (`name`, `allowed_origins`, `redirect_uris`,
+`theme`, with their checks), so a fresh database never has them; the routing row stays.
 
 `users.pool_id` scopes password, OAuth, passkey, session, and MFA lookup. The migration replaces
 the former global credential indexes with pool-qualified indexes and creates an `application`
@@ -288,7 +294,8 @@ authentication migration `0016`.
 ## Platform mirror (migration `0019_platform`)
 
 Both tables are retired by [`0060_platform_workspaces`](#platform-workspaces-migration-0060_platform_workspaces)
-(lake#358, lake#359): lake no longer writes or reads them.
+(lake#358, lake#359): lake no longer writes or reads them, and
+[`0070_drop_moved_tables`](#drop-moved-tables-migration) drops them.
 
 | Table | Purpose |
 |---|---|
@@ -325,7 +332,8 @@ about a workspace's data go to that workspace's own chain, `lake_audit_events` i
 | `audit_workspaces_guard` | Guard table for migration `0063_audit_workspaces`. |
 
 Nothing is dropped and `audit_events` stays append-only; the one-shot copy puts each assigned event
-in its workspace as it is.
+in its workspace as it is. `0070` leaves audit alone: the split copied events rather than moving a
+table, and the central chain keeps every row so it still verifies.
 
 ## Repository records (migration `0064_repository_records`)
 
@@ -336,7 +344,7 @@ repository moves to its workspace, and the unused copy of liquid's refs goes
 | Table or change | Purpose |
 |---|---|
 | `repository_refs` | **Dropped** (lake#319). A copy of each liquid ref, written after a push, a replication and a `refs` read, that nothing read; the liquid repository is the authority. Its `CREATE` (0006) is gone, so a rerun never recreates it. Nothing is copied. |
-| `repositories.description` | No longer written or read by lake (lake#315 part 2): the description is the repository's sealed record in `lake_repositories` of its workspace Zetta. New rows leave it `''`. Read only by the one-shot copy until a later migration drops the column. |
+| `repositories.description` | No longer written or read by lake (lake#315 part 2): the description is the repository's sealed record in `lake_repositories` of its workspace Zetta. New rows leave it `''`. Dropped by [`0070_drop_moved_tables`](#drop-moved-tables-migration). |
 | `workspace_assignments` (`repository_descriptions`) | The owner of each repository that holds a description, for the copy: `repository_workspace`, `needs_selection` while it has no workspace (resolved by the copy once it has one; `0066`, lake#513, assigns it), or `workspace_deleted`. Unassigned rows are reported with `RAISE WARNING`. |
 | `repository_records_guard` | Guard table for migration `0064_repository_records`. |
 
@@ -410,9 +418,9 @@ these tables with the statements `tests/test_operator_contract.cpp` copies.
 | Table or change | Purpose |
 |---|---|
 | `identity_taap_assertions` | One-use digest ledger binding each accepted liquid-key sign-in assertion to its lake user and pool. |
-| `auth_app_authorization_codes` | Five-minute application code hashes with exact redirect, PKCE S256 challenge, nonce, user, and one-use timestamp. Retired by `0061` (lake#363): codes are issued and redeemed in the application's workspace Zetta, and this table is read only by the one-shot copy until a later migration drops it. |
+| `auth_app_authorization_codes` | Five-minute application code hashes with exact redirect, PKCE S256 challenge, nonce, user, and one-use timestamp. Retired by `0061` (lake#363): codes are issued and redeemed in the application's workspace Zetta, and [`0070_drop_moved_tables`](#drop-moved-tables-migration) drops this table. |
 | `pki_certificates.revoked_at` and `agent` profile | Immediate agent-certificate status plus rotation linkage through the existing `renewed_from_id`. |
-| `secrets_dynamic_leases` | Encrypted generated credential, role, bounded expiry, revocation, and renewal count for each mount lease. Since 0057 the value is sealed with the mount data key read from the mount's workspace; retired by `0058_secret_lease_workspaces` (lake#362), when leases moved into that workspace. |
+| `secrets_dynamic_leases` | Encrypted generated credential, role, bounded expiry, revocation, and renewal count for each mount lease. Since 0057 the value is sealed with the mount data key read from the mount's workspace; retired by `0058_secret_lease_workspaces` (lake#362), when leases moved into that workspace, and dropped by `0070`. |
 | `identity_exit_guard` | Guard table for migration `0020_identity_exit`. |
 
 Dynamic-secret ciphertext uses the existing mount/customer key hierarchy. Authorization codes and
@@ -743,6 +751,45 @@ Job reapplies this file from the top, the table's original `CREATE` (from `0030`
 of the table left, and `copy_workspace_records` no longer accepts `ask_messages`. Idempotent; guard
 `drop_ask_messages_guard`. The operator vendors it and selects that guard.
 
+## Drop moved tables migration
+
+`0070_drop_moved_tables` (lake#311, decision 54) drops every retired copy of workspace data whose
+one-shot copy was run and verified on dev: the tables `opportunities`, `stream_owners`,
+`drive_share_links`, `auth_app_webhook_deliveries`, `auth_app_webhook_events`, `auth_app_webhooks`,
+`auth_app_signing_keys`, `auth_app_organizations`, `auth_app_users`,
+`auth_app_authorization_codes`, `metering_usage`, `metering_build_records`, `forge_records`,
+`secrets_dynamic_leases`, `secrets_versions`, `secrets_entries`, `secrets_encryption_keys`,
+`secrets_data_keys`, `secrets_mounts`, `platform_mirror` and `platform_environments`; and the
+columns `auth_applications.name`, `allowed_origins`, `redirect_uris`, `theme` (with
+`auth_applications_settings_check`), `agent_tasks.body`, `agent_task_status.message` and `result`,
+and `repositories.description`. Each is dropped with `DROP TABLE IF EXISTS` or
+`DROP COLUMN IF EXISTS`.
+
+Before dropping anything, one block counts, per table, the rows still present that have no
+workspace to have been copied into: no `workspace_assignments` row with a `workspace_id`, and an
+outcome other than `workspace_deleted` (for the secrets tables, a mount without a route). Mirror
+rows naming no repository, expired codes and usage rows without transfer are not counted, as the
+copy did not count them. If any table has one, it raises
+`0070_drop_moved_tables: rows without a workspace copy: <table>=<count>, ...` and the schema
+transaction rolls back with nothing dropped; resolve or delete those rows, rerun the copy and apply
+again.
+
+What stays: the routing rows (`auth_applications`, `repositories`, `agent_tasks`,
+`agent_task_status`), `drive_share_link_routes`, `secret_mount_routes`, `secret_lease_routes`, every
+policy object (environments, secret mounts and secrets), `keystore`, `audit_events` and
+`audit_retention` (decision 52: nothing of the central chain is removed), agent sessions and SSO
+logs (decision 53), the operator's desired state (decision 51), and the `workspace_assignments` rows
+the earlier migrations recorded. The tables' original `CREATE`s and the dropped columns are removed
+from the earlier sections, and the earlier migration blocks that read them run only while they
+exist, so a fresh database never has them and a rerun never recreates them. Lake has no reader of
+any of them left; `copy_workspace_records` accepts only `audit_events` and `oci_tags`. Idempotent;
+guard `drop_moved_tables_guard`.
+
+The operator vendors this schema and selects `drop_moved_tables_guard`. Its
+`TestLakeSchemaMatchesVendoredSource` lists `CREATE TABLE IF NOT EXISTS secrets_mounts`,
+`secrets_versions`, `secrets_encryption_keys` and `secrets_data_keys` among the statements the
+schema must contain; those four entries go, and its Postgres rehearsal query needs the new guard.
+
 ## Repository workspaces migration
 
 `0051_repository_workspaces` adds `repositories.workspace_id` (references `workspaces`, index
@@ -781,7 +828,7 @@ NULL until `move_workspace_store` switches the workspace: from then on its repos
 from its own encrypted liquid store in bucket `lake_store` of its workspace Zetta
 ([`../architecture/workspace-store.md`](../architecture/workspace-store.md)). The column is the only
 thing PostgreSQL keeps about that store; the operator does not read it. Idempotent; guard
-`workspace_store_guard`; the latest guard is `workspace_volumes_guard` (migration `0069`), which the operator selects.
+`workspace_store_guard`; the latest guard is `drop_moved_tables_guard` (migration `0070`), which the operator selects.
 
 ## Metering workspaces migration
 
@@ -887,7 +934,7 @@ cutover:
 
 ## Agent task workspaces migration
 
-`0062_agent_task_workspaces` (lake#374, lake#375) moves what was written for an agent task, its
+`0062_agent_task_workspaces` (lake#374, lake#375; [`0070`](#drop-moved-tables-migration) drops the three content columns) moves what was written for an agent task, its
 request `body`, the agent's `message` and its `result`, into one sealed record of the workspace
 Zetta of the task's workspace (`agent_tasks.workspace_id`, `0038`). `agent_tasks` and
 `agent_task_status` stay as the content-free dispatch rows the agent bus, the claim and its lease

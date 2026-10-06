@@ -16,8 +16,13 @@ and the per-workspace `lake_requests` series, [PR #521](https://github.com/orama
 no migration); lake#383 phase A (the tenant image route table and manifests and tags as
 workspace records, migration `0068`, [PR #523](https://github.com/oramasearch/lake/pull/523));
 lake#514's cascade (migration `0065`); and lake#380, the workspace store and its move
-(migration `0067`, [workspace-store.md](workspace-store.md); not switched on dev; needs liquid
-`8955519` or later). Everything else here is not implemented yet. This page plans the moves that
+(migration `0067`, [workspace-store.md](workspace-store.md); every workspace on dev is switched;
+needs liquid `8955519` or later). With every workspace switched, the records' retired tables and
+columns are dropped by migration `0070_drop_moved_tables` (lake#311,
+[schema.md](../control-plane/schema.md#drop-moved-tables-migration)), and the operator's
+`remove_space_store` removes a space's old store from lake's volume once every workspace of the
+space is switched ([workspace-store.md](workspace-store.md)); neither has run on dev yet.
+Everything else here is not implemented yet. This page plans the moves that
 [workspace records](workspace-records.md) does not cover: the bytes on lake's store volume
 (liquid stores, search indexes, the registry, the transparency log), the two repository tables
 that sit beside them, and lake's operational telemetry. It states what each item is today, what it

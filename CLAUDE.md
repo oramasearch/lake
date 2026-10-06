@@ -46,13 +46,9 @@ Lake's records move into workspace Zettas through one mechanism,
 `lake_*` collections in each workspace Zetta's keyed record store (zetta#1231, Zetta dev with
 #1233 or later), an operator one-shot copy and verification, and a per-table checklist. Ask Orama conversations are the first collection (lake#370,
 migration `0045`); Design → Opportunities are the first mutable one (lake#376, migration `0046`).
-Each PostgreSQL table stays until a later migration drops it after the copy is verified on dev.
-migration `0045`) and topic creators the second (lake#379, migration `0047`); each PostgreSQL
-table stays until a later migration drops it after the copy is verified on dev.
-migration `0045`); the PostgreSQL table stays until a later migration drops it after the copy is
-verified on dev. Drive share links are the first mutable collection (lake#350, migration `0048`): their bearer
+Topic creators follow (lake#379, migration `0047`). Drive share links are the first mutable collection (lake#350, migration `0048`): their bearer
 token names its workspace, and only a content-free route for pre-move tokens stays central.
-migration `0045`); application lifecycle events and webhook delivery attempts follow (lake#356,
+Application lifecycle events and webhook delivery attempts follow (lake#356,
 lake#357, migration `0049`, in the application's workspace), and its signing keys and webhooks with
 their secrets (lake#352, lake#355, migration `0056`: one key ring per application rotated by one
 conditional write; seeds and secrets stay secrets envelopes inside the seal; the anonymous JWKS
@@ -62,8 +58,15 @@ origins, redirect URIs and theme are one sealed record in the application's work
 workspace). Its one-use authorization codes follow (lake#363, migration `0061`): issued `if_absent`
 in the application's workspace, redeemed once by a delete at the revision read (the relying party's
 exchange finds the workspace from the routing row), and expired by the collection's five-minute
-retention. Each PostgreSQL table stays until a
-later migration drops it after the copy is verified on dev.
+retention.
+Every retired table and content column was copied and verified on dev, and migration
+`0070_drop_moved_tables` (lake#311) drops them: `opportunities`, `stream_owners`,
+`drive_share_links`, the `auth_app_*` tables, `metering_*`, `forge_records`, the `secrets_*` tables,
+`platform_*`, and the content columns of `auth_applications`, `agent_tasks`/`agent_task_status` and
+`repositories`. A first block refuses the whole migration while any of their rows has no workspace
+to have been copied into; audit, routing rows, routes and `keystore` stay.
+`copy_workspace_records` now accepts only `audit_events` and `oci_tags`. See
+`docs/control-plane/schema.md#drop-moved-tables-migration`.
 Repository usage follows (lake#348, lake#349, migration `0053`): exact hourly transfer counters and
 one build record per result in the repository's workspace Zetta, written from a bounded in-process
 buffer the owner loop flushes every five seconds and on drain, never on the sync path; repository

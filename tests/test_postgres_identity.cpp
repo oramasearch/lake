@@ -361,11 +361,15 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
     {
         pqxx::connection connection(uri);
         pqxx::work tx(connection);
-        const auto row = tx.exec_params(
-            "SELECT name IS NULL AND allowed_origins IS NULL AND redirect_uris IS NULL AND theme "
-            "IS NULL FROM auth_applications WHERE id = $1::uuid",
-            application_id);
-        EXPECT_TRUE(row[0][0].as<bool>());
+        // The routing row has no settings columns (migration 0070 dropped them).
+        EXPECT_EQ(tx.exec_params("SELECT count(*) FROM auth_applications WHERE id = $1::uuid",
+                                 application_id)[0][0]
+                      .as<int>(),
+                  1);
+        EXPECT_TRUE(tx.exec("SELECT 1 FROM information_schema.columns WHERE table_schema = "
+                            "current_schema() AND table_name = 'auth_applications' AND "
+                            "column_name IN ('name', 'allowed_origins', 'redirect_uris', 'theme')")
+                        .empty());
     }
     EXPECT_TRUE(call("rotate_application_signing_key",
                      {{"application_id", application_id}, {"workspace_id", workspace_id}})
@@ -459,18 +463,13 @@ TEST(PostgresApplications, CapabilitiesPersistKeysUsersOrganizationsAndWebhooks)
                      pqxx::check_violation);
     }
     {
-        // Nothing of its events, keys or webhooks is written to the retired tables (lake#352,
-        // lake#355): they are in its workspace Zetta, sealed.
+        // Its events, keys and webhooks are in its workspace Zetta, sealed (lake#352, lake#355);
+        // migration 0070 dropped the retired tables.
         pqxx::connection connection(uri);
         pqxx::work tx(connection);
         for (const std::string table :
              {"auth_app_webhook_events", "auth_app_signing_keys", "auth_app_webhooks"}) {
-            EXPECT_EQ(tx.exec_params("SELECT count(*) FROM " + table +
-                                         " WHERE application_id = $1::uuid",
-                                     application_id)[0][0]
-                          .as<int>(),
-                      0)
-                << table;
+            EXPECT_TRUE(tx.exec("SELECT to_regclass('" + table + "')")[0][0].is_null()) << table;
         }
         EXPECT_EQ(zetta->records["http://postgres-app-" + suffix + ".test"]
                       .rows("auth_app_signing_keys")

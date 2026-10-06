@@ -98,10 +98,13 @@ exactly one live workspace that workspace (`sole_workspace`) and its route, and 
 mount as `needs_selection`. A mount's entries, versions, keys and data keys go where it goes and
 have no assignment rows of their own. It also keeps the previous customer KEK in `keystore`
 (`previous_wrapped_key`, `previous_version`) and drops `secrets_dynamic_leases`' foreign key to
-`secrets_mounts`. Nothing is dropped. The five 0009 tables are read only by the one-shot copy,
+`secrets_mounts`. Nothing is dropped. The five 0009 tables were read only by the one-shot copy,
 `copy_workspace_records` with collection `secrets_mounts`, `secrets_data_keys`,
-`secrets_encryption_keys`, `secrets_entries` or `secrets_versions`; verify compares data keys by
-unwrapping both sides, so a KEK rotation after the copy is not a difference. The dev cutover is in
+`secrets_encryption_keys`, `secrets_entries` or `secrets_versions`; verify compared data keys by
+unwrapping both sides, so a KEK rotation after the copy was not a difference. The copy was
+verified on dev, and migration `0070_drop_moved_tables` drops the five tables (lake#311); the
+collections are no longer accepted, and a customer KEK rotation rewraps only the workspace data
+keys and the PKI authorities. `secret_mount_routes` and the `secret` policy objects stay. The dev cutover is in
 [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-secrets-dev-cluster).
 
 The operator does not read secrets: `LakeSealedSecret` with a `lake` source asks lake over HTTP
@@ -175,9 +178,10 @@ Migration `0058_secret_lease_workspaces` adds `secret_lease_routes` (immutable w
 `enforce_workspace_routing`, a foreign key to the mount's route, a partial index on `due_at`) and
 reports each legacy lease whose mount has no route. A lease follows its mount: it has no assignment
 rows of its own. Nothing is dropped. `copy_workspace_records` with collection
-`secrets_dynamic_leases` writes each lease's route (due at its expiry, or at once if revoked) and
-then its record, copying the ciphertext unopened; verify accepts later renewals, revocations and
-expiries. The dev cutover is in
+`secrets_dynamic_leases` wrote each lease's route (due at its expiry, or at once if revoked) and
+then its record, copying the ciphertext unopened; verify accepted later renewals, revocations and
+expiries. The copy was verified on dev, and migration `0070_drop_moved_tables` drops
+`secrets_dynamic_leases`; `secret_lease_routes` stays. The dev cutover is in
 [workspace-records.md](../architecture/workspace-records.md#cutover-runbook-dynamic-leases-dev-cluster).
 
 ## What the exit scenario proves

@@ -53,10 +53,6 @@ struct ApplicationOrganizationCodec {
 std::string application_directory_lookup(const std::string& application_id);
 std::string application_claims_lookup(const std::string& application_id);
 
-// The id of a retired auth_app_users row: md5(application id, newline, user id) as a UUID, the
-// same value migration 0055 records in workspace_assignments.
-std::string application_user_row_id(const std::string& application_id, const std::string& user_id);
-
 // The record key of a user of an application in `records`' workspace.
 std::string application_user_key(const WorkspaceRecords& records,
                                  const std::string& application_id,

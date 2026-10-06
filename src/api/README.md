@@ -253,9 +253,12 @@ its bucket's usage, and keeps replication cursors with liquid's cursor API.
 `workspace_records_api.hpp` opens one workspace's records through `call_workspace`, so record
 calls are owner-checked, refused when the workspace is not ready and named in Server-Timing.
 `workspace_record_capabilities.cpp` registers the operator-only `copy_workspace_records` (plan,
-copy, verify) for each retired table still to be dropped: `opportunities`, `stream_owners`,
-`drive_share_links` and the application webhook events and deliveries. `ask_messages` left the
-list when migration `0050` dropped its table (lake#483). Ask Orama and the Agent Factory
+copy, verify). It accepts only `audit_events` and `oci_tags` now: `ask_messages` left the list when
+migration `0050` dropped its table (lake#483), and every other collection this page says it copies
+(`opportunities`, `stream_owners`, `drive_share_links`, the application tables, metering, forge
+records, secrets, leases, the platform tables, application settings, authorization codes, agent
+task content and repository descriptions) left it, with its copier and the store's legacy reads,
+when migration `0070_drop_moved_tables` dropped its source (lake#311). Ask Orama and the Agent Factory
 (`http_server.cpp`) and `get_ask_conversation` read and write conversations in the page's or
 input's workspace. `settle_discover`, `list_opportunities`, `dismiss_opportunity` and
 `create_projects_from_opportunities` keep Design → Opportunities in the workspace the scan ran in

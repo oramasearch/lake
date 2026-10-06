@@ -53,16 +53,6 @@ struct ApplicationSettings {
     std::int64_t lake_revision = 0;
 };
 
-// The settings columns of a retired auth_applications row (migration 0059), with its recorded owner,
-// for the one-shot copy only: the application's workspace, or empty with the reason it is not
-// (`needs_selection`, `workspace_deleted`).
-struct LegacyApplicationSettings {
-    ApplicationSettings settings;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
-};
-
 // The application with `settings` filled in from its workspace record.
 void apply_settings(Application& application, const ApplicationSettings& settings);
 
@@ -138,23 +128,6 @@ struct ApplicationOrganization {
     std::int64_t lake_revision = 0;
 };
 
-// Rows of the retired auth_app_users and auth_app_organizations tables with their recorded owner
-// (migration 0055), for the one-shot copy only. A user row's `id` is md5(application id, newline,
-// user id) as a UUID, since the table has no id column.
-struct LegacyApplicationUser {
-    std::string id;
-    ApplicationUser user;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
-};
-struct LegacyApplicationOrganization {
-    ApplicationOrganization organization;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
-};
-
 struct NewApplicationOrganization {
     std::string application_id;
     std::string taap_id;
@@ -207,39 +180,6 @@ struct ApplicationWebhookDelivery {
     std::int64_t at_us = 0;
 };
 
-// Rows of the retired auth_app_webhook_events and auth_app_webhook_deliveries tables with their
-// recorded owner (migration 0049), for the one-shot copy only: the workspace each is copied into,
-// or empty with the reason it is not (`needs_selection`). A delivery's owner is its event's.
-struct LegacyApplicationWebhookEvent {
-    ApplicationWebhookEvent event;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
-};
-struct LegacyApplicationWebhookDelivery {
-    ApplicationWebhookDelivery delivery;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
-};
-
-// Rows of the retired auth_app_signing_keys and auth_app_webhooks tables with their recorded owner
-// (migration 0056), for the one-shot copy only. A key ring is every key row of one application;
-// its owner, like each webhook's, is the application's workspace, or empty with the reason it is
-// not (`needs_selection`). Credentials stay the envelopes the table held.
-struct LegacyApplicationSigningKeyRing {
-    ApplicationSigningKeyRing ring;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
-};
-struct LegacyApplicationWebhook {
-    ApplicationWebhook webhook;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
-};
-
 // A one-use OIDC authorization code of an application (lake#363): issued to a signed-in user and
 // redeemed once by the relying party's backend within five minutes. It lives in the workspace Zetta
 // of the application's workspace, keyed by the blind index of its hash; the code itself is never
@@ -255,17 +195,6 @@ struct ApplicationAuthorizationCode {
     std::int64_t at_us = 0;
     std::int64_t expires_us = 0;
     std::int64_t revision = 0;
-};
-
-// A live (unused, unexpired) row of the retired auth_app_authorization_codes table with its
-// recorded owner (migration 0061), for the one-shot copy only: the application's workspace
-// (`application_workspace`, or `copied` once the copy has written it), or empty with the reason it
-// is not (`needs_selection`, `workspace_deleted`).
-struct LegacyApplicationAuthorizationCode {
-    ApplicationAuthorizationCode code;
-    std::string customer_id;
-    std::string workspace_id;
-    std::string outcome;
 };
 
 namespace apps {
