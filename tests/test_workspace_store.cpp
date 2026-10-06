@@ -162,6 +162,11 @@ TEST(WorkspaceStoreBackend, RangesRoundTripAcrossBlocksTailsAndReopen) {
     auto backend = rig.backend(small_blocks());
     const auto whole = with_marker(random_bytes(3000, 1), 100);
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/whole", whole)));
+    // A small put is held until the barrier (lake#527) and read back from memory meanwhile.
+    EXPECT_FALSE(rig.zetta->objects(rig.endpoint).contains("objects/whole"));
+    EXPECT_EQ(read(*backend, "objects/whole", 0, 3000), whole);
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    EXPECT_TRUE(rig.zetta->objects(rig.endpoint).contains("objects/whole"));
     EXPECT_EQ(read(*backend, "objects/whole", 0, 3000), whole);
     EXPECT_EQ(read(*backend, "objects/whole", 1000, 1100),
               std::vector<std::byte>(whole.begin() + 1000, whole.begin() + 2100));
@@ -191,7 +196,9 @@ TEST(WorkspaceStoreBackend, RangesRoundTripAcrossBlocksTailsAndReopen) {
     }));
     append(2500, 4);
     ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
-    // Exactly one current tail is kept.
+    // The replaced tail is removed beside the next barrier's writes, once its replacement is
+    // durable; then exactly one current tail is kept.
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
     const auto after = rig.zetta->objects(rig.endpoint);
     EXPECT_EQ(std::ranges::count_if(after, [](const auto& object) {
                   return object.first.starts_with("packs/pack-1.pack.lake-tail-");
@@ -234,6 +241,9 @@ TEST(WorkspaceStoreBackend, RangesRoundTripAcrossBlocksTailsAndReopen) {
     ASSERT_TRUE(liquid::runtime::block_on(fourth->put_if_absent("objects/fresh", bytes_of("fresh"))));
     EXPECT_EQ(read(*fourth, "objects/fresh", 0, 5), bytes_of("fresh"));
     ASSERT_TRUE(liquid::runtime::block_on(fourth->remove("packs/pack-1.pack")));
+    // The removal is sent at the barrier, and the object's tails beside the barrier after it.
+    ASSERT_TRUE(liquid::runtime::block_on(fourth->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(fourth->barrier()));
     const auto removed = rig.zetta->objects(rig.endpoint);
     EXPECT_FALSE(std::ranges::any_of(removed, [](const auto& object) {
         return object.first.starts_with("packs/pack-1.pack");
@@ -282,6 +292,7 @@ TEST(WorkspaceStoreBackend, TamperingMovedBlocksAndAnotherWorkspacesKeyAreRefuse
     const auto contents = random_bytes(4000, 21);
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", contents)));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/b", contents)));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
     const auto stored = rig.zetta->objects(rig.endpoint);
 
     // One flipped bit in a block.
@@ -310,6 +321,7 @@ TEST(WorkspaceStoreBackend, TamperingMovedBlocksAndAnotherWorkspacesKeyAreRefuse
     Rig other;
     auto foreign = other.backend(small_blocks());
     ASSERT_TRUE(liquid::runtime::block_on(foreign->put("objects/own", bytes_of("own"))));
+    ASSERT_TRUE(liquid::runtime::block_on(foreign->barrier()));
     other.zetta->set_object(other.endpoint, "objects/a", stored.at("objects/a"));
     auto other_reader = other.backend(small_blocks());
     const auto copied = liquid::runtime::block_on(other_reader->get_range("objects/a", 0, 10));
@@ -497,10 +509,14 @@ TEST(WorkspaceStoreBackend, ATransientFailureIsRetriedAndAPersistentOneIsUnavail
     Rig rig;
     auto backend = rig.backend(small_blocks());
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/x", random_bytes(10, 70))));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    // A small put is sent by the barrier (lake#527), which retries it.
     rig.zetta->drop_next(2);
     EXPECT_TRUE(liquid::runtime::block_on(backend->put("objects/y", random_bytes(10, 71))));
+    EXPECT_TRUE(liquid::runtime::block_on(backend->barrier()));
     rig.zetta->drop_next(10);
-    const auto failed = liquid::runtime::block_on(backend->put("objects/z", random_bytes(10, 72)));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/z", random_bytes(10, 72))));
+    const auto failed = liquid::runtime::block_on(backend->barrier());
     ASSERT_FALSE(failed);
     EXPECT_EQ(failed.error().code, liquid::errc::unavailable);
 }
@@ -776,10 +792,11 @@ TEST(WorkspaceStoreMove, PlanCopyInterruptedVerifySwitchServeFromTheWorkspaceAnd
     EXPECT_FALSE(plan["value"]["blocked"].get<bool>());
     EXPECT_TRUE(plan["value"]["store_moved_at"].is_null());
 
-    // The copy is interrupted part way: the second append and its three retries get no answer.
-    rig.zetta->drop_on("PATCH", 2, 4);
+    // The copy is interrupted part way: after twenty requests the workspace Zetta answers none.
+    rig.zetta->fail_after(20);
     const auto [interrupted_status, interrupted] = rig.move(rig.alpha, "copy");
     EXPECT_NE(interrupted_status, 200U) << interrupted.dump();
+    rig.zetta->fail_after(-1);
     const auto partial = rig.zetta->objects(endpoint_a);
     EXPECT_FALSE(partial.contains(hash_key(rig.root / rig.customer_id / "repositories" / rig.repo_a.id) +
                                   "/LIQUID_REPO"))
@@ -907,6 +924,7 @@ TEST(WorkspaceStoreBackend, AMissingKeyIsCreatedOnlyForANewStoreInAnEmptyBucket)
     // too, and its objects are left as they were.
     auto creator = rig.backend(small_blocks());
     ASSERT_TRUE(liquid::runtime::block_on(creator->put("objects/a", bytes_of("a"))));
+    ASSERT_TRUE(liquid::runtime::block_on(creator->barrier()));
     rig.zetta->erase_object(rig.endpoint, std::string(lake::control::workspace_store_key_object));
     const auto before = rig.zetta->objects(rig.endpoint);
     auto over = rig.backend(small_blocks(), true);
@@ -943,6 +961,10 @@ TEST(WorkspaceStoreBackend, TailRollbackDeletionTruncationAndACrashBeforeTheTail
         ASSERT_TRUE(liquid::runtime::block_on(writer.put_range("packs/pack-1.pack", grown.size(), part)));
         grown.insert(grown.end(), part.begin(), part.end());
     };
+    // An object created and barriered empty, so what follows is appended (an object created and
+    // filled in one interval is one PUT, with no tail).
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, {})));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
     append(*backend, 1500, 91); // one appended block and a tail of 476 bytes
     ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
     const auto first = rig.zetta->objects(rig.endpoint);
@@ -984,6 +1006,8 @@ TEST(WorkspaceStoreBackend, TailRollbackDeletionTruncationAndACrashBeforeTheTail
     Rig crash;
     auto writer = crash.backend(small_blocks());
     std::vector<std::byte> bytes = random_bytes(1500, 93);
+    ASSERT_TRUE(liquid::runtime::block_on(writer->put_range("packs/pack-2.pack", 0, {})));
+    ASSERT_TRUE(liquid::runtime::block_on(writer->barrier()));
     ASSERT_TRUE(liquid::runtime::block_on(writer->put_range("packs/pack-2.pack", 0, bytes)));
     ASSERT_TRUE(liquid::runtime::block_on(writer->barrier())); // acknowledged: 1,500 bytes
     const auto more = random_bytes(1000, 94);                  // completes block 1, tail of 452
@@ -1002,6 +1026,8 @@ TEST(WorkspaceStoreBackend, TailRollbackDeletionTruncationAndACrashBeforeTheTail
 TEST(WorkspaceStoreBackend, TailsThatAreNotCurrentAreRemovedAfterOpen) {
     Rig rig;
     auto backend = rig.backend(small_blocks());
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, {})));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, random_bytes(1500, 95))));
     ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
     const std::string current = tail_of(rig.zetta->objects(rig.endpoint), "packs/pack-1.pack");
@@ -2218,6 +2244,7 @@ TEST(WorkspaceStoreMove, ACommitNamesItsStoreRequestsInServerTimingAndMetrics) {
                     {"message", "One file"},
                     {"operations", json::array({{{"type", "file"}, {"path", "one.txt"}, {"content", "b25lCg=="}}})}};
     const std::uint64_t before = sum_of(rig.zetta->requests_by_method());
+    const std::size_t applied_before = rig.zetta->applied().size();
     const std::string response = raw_exchange(rig.server->port(), "POST", "/v1/commit_repository_files", body.dump());
     const std::uint64_t received = sum_of(rig.zetta->requests_by_method()) - before;
     ASSERT_TRUE(response.starts_with("HTTP/1.1 200")) << response;
@@ -2232,8 +2259,17 @@ TEST(WorkspaceStoreMove, ACommitNamesItsStoreRequestsInServerTimingAndMetrics) {
     EXPECT_GT(named, 0U) << timing;
     EXPECT_EQ(named, received) << timing;
     EXPECT_NE(timing.find("store_put;dur="), std::string::npos) << timing;
-    EXPECT_EQ(timing.find("store_barrier;"), std::string::npos)
-        << "a commit's barriers send their writes durably and need no :barrier: " << timing;
+    // Liquid's writes need no :barrier (each is durable as it is sent); since lake#381 the search
+    // index's own writes for the commit go to the same bucket and end with its own :barrier.
+    std::size_t index_writes = 0;
+    std::size_t store_writes = 0;
+    const auto applied = rig.zetta->applied();
+    for (std::size_t index = applied_before; index < applied.size(); ++index) {
+        const std::string key = applied[index].substr(applied[index].find(' ') + 1);
+        (key.starts_with(lake::search::workspace_index_prefix) ? index_writes : store_writes) += 1;
+    }
+    std::printf("commit writes: %zu to the repository store, %zu to the search index\n", store_writes,
+                index_writes);
     std::printf("commit_repository_files Server-Timing: %s\n", timing.c_str());
 
     const std::string metrics = raw_exchange(rig.server->port(), "GET", "/metrics", "");

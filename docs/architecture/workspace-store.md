@@ -379,9 +379,9 @@ store and repository open, directory and headers known):
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | Before lake#527 | 180 | 77 | 0 | 68 | 35 | 0 | 180 | 169 ms | not measured | 2,537 ms |
 | An interval sent concurrently (#532 `0362c6c`, withdrawn) | 80 | 55 | 0 | 0 | 25 | 0 | 57 | 75 ms | 421-429 ms | 753-771 ms |
-| In issue order (#532 now) | 80 | 55 | 0 | 0 | 25 | 0 | 80 | 74-106 ms | 671-707 ms | 1,023-1,073 ms |
+| In issue order (#532 now) | 80 | 55 | 0 | 0 | 25 | 0 | 80 | 63-106 ms | 671-707 ms | 1,023-1,228 ms |
 
-The two #532 rows were measured on the same machine under the same load (a load average about 10,
+The two #532 rows were measured on the same machine under the same load (a load average of 5 to 10,
 from other builds), twice each; the first row's 10 ms figure is from an earlier, quieter run. The
 sequential rounds are counted by the test's transport: a request sent while none is in flight
 starts a round.
@@ -389,11 +389,13 @@ starts a round.
 Before, every request was its own round trip. Per liquid object a commit stores (about eight for
 one file: the blob, its directory documents, the change, the journal), liquid wrote its pack tail,
 staged and published the object map, wrote an index run and published the index manifest twice,
-with a barrier after each step: about fifteen requests, six of them `:barrier`. The lake commit
-path adds no store request of its own:
-`WorkspaceStoreMove.ACommitNamesItsStoreRequestsInServerTimingAndMetrics` checks that the
-`Server-Timing` count of a commit through a running lake equals what the workspace Zetta received
-(the search reindex, metering and audit do not reach the store; the store is not reopened).
+with a barrier after each step: about fifteen requests, six of them `:barrier`. Through a running
+lake, `WorkspaceStoreMove.ACommitNamesItsStoreRequestsInServerTimingAndMetrics` checks that the
+`Server-Timing` count of a commit equals what the workspace Zetta received. Metering and audit do
+not reach the store, and the store is not reopened. Since lake#381 the commit's search reindex
+writes its index objects to the same bucket, outside liquid's backend: in that test 6 writes and
+2 `:barrier`s of the commit's 70 requests (the other 62 are liquid's). Those writes keep their own
+order and barrier (`SealedIndexObjects`); the held writes and ordering here do not apply to them.
 
 What changed: no `:barrier` (each write durable as it is sent); an object created in one interval
 is one PUT with no tail (an index run was a PUT, a tail PUT and later two DELETEs); the repeated
