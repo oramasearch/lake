@@ -185,6 +185,10 @@ liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,
     }
     std::map<std::string, std::uint64_t> sizes;
     std::set<std::string> failed;
+    std::set<std::string> listed;
+    // Blobs whose bytes are objects of a workspace's liquid store (lake#383 phase B): that store's
+    // usage already counts them, so they are not counted again here.
+    std::set<std::string> stored;
     for (const control::OciRepositoryRoute& route : *routes) {
         if (failed.contains(route.workspace_id)) {
             continue;
@@ -195,6 +199,20 @@ liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,
             result.unmeasured.push_back("Container images in workspace " + route.workspace_id +
                                         ": " + records.error().message);
             continue;
+        }
+        if (listed.insert(route.workspace_id).second) {
+            auto blobs = control::settled(co_await control::list_oci_blobs(*records, customer_id));
+            if (!blobs) {
+                failed.insert(route.workspace_id);
+                result.unmeasured.push_back("Container images in workspace " + route.workspace_id +
+                                            ": " + blobs.error().message);
+                continue;
+            }
+            for (const control::OciBlob& blob : *blobs) {
+                if (!blob.object.empty()) {
+                    stored.insert(blob.digest);
+                }
+            }
         }
         auto tags = control::settled(
             co_await control::list_oci_tags(*records, customer_id, route.name));
@@ -212,7 +230,7 @@ liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,
         }
     }
     for (const auto& [digest, size] : sizes) {
-        result.bytes += size;
+        (stored.contains(digest) ? result.stored_bytes : result.bytes) += size;
     }
     co_return result;
 }

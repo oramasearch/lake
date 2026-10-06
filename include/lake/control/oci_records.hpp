@@ -15,8 +15,8 @@ namespace lake::control {
 // A tenant image's manifests and tags (lake#383 phase A, decision 54 S4-S6,
 // docs/api/registry.md#where-a-tenant-image-lives), kept in the workspace Zetta of the
 // repository's route (oci_repository_routes) as sealed records
-// (docs/architecture/workspace-records.md). Blobs stay in the instance registry until phase B
-// (lake#380) moves them into the workspace store.
+// (docs/architecture/workspace-records.md). Since phase B a blob's bytes are an object in the
+// workspace's liquid store (lake#380), found through its lake_oci_blobs record.
 //
 // lake_oci_manifests: one record per manifest of the space, keyed by the blind index of its
 // digest and found by the space (`customer:<id>`). It is content-addressed, so it is written
@@ -30,11 +30,17 @@ namespace lake::control {
 // protocol expects. Each tag carries what its manifest references, so a blob read and a size count
 // need only the tags, and says whether the one-shot copy wrote it (`copied`).
 //
-// lake_oci_blobs: one record per blob the space pushed into this workspace (phase A keeps the
-// bytes in the instance registry), keyed by the blind index of its digest and written `if_absent`
-// when an upload into one of the workspace's repositories completes, or by the copy. A manifest
-// pushed into the workspace may reference only blobs recorded here, so a space never publishes
-// another space's (or another workspace's) layer by knowing its digest.
+// lake_oci_blobs: one record per blob the space pushed into this workspace, keyed by the blind
+// index of its digest and written `if_absent` when an upload into one of the workspace's
+// repositories completes, or by a copy. A manifest pushed into the workspace may reference only
+// blobs recorded here, so a space never publishes another space's (or another workspace's) layer
+// by knowing its digest. Since phase B (decision 54 S5) the record also maps the OCI digest to the
+// blob's identity in the workspace's liquid store (`object`, a liquid digest): the store is
+// encrypted and liquid addresses an object by its own hash, so the SHA-256 a client sends finds it
+// only through this record. A record without `object` was written before phase B, or while the
+// workspace was still served from its space's store: its bytes are in the instance registry until
+// copy_workspace_records (`oci_blobs`) names its object, and once it does it is read only from
+// the workspace store.
 
 // A digest a manifest references (its config or a layer), with the size the registry holds.
 struct OciReference {
@@ -80,6 +86,11 @@ struct OciBlob {
     std::string customer_id;
     std::string digest;
     std::uint64_t size = 0;
+    // The blob's identity in the workspace's liquid store (a liquid digest, `blake3:<hex>`);
+    // empty while its bytes are in the instance registry.
+    std::string object;
+    std::int64_t revision = 0;
+    std::int64_t lake_revision = 1;
 };
 
 struct OciBlobCodec {
@@ -133,6 +144,21 @@ liquid::runtime::task<ZettaControlResult<void>> record_oci_blob(WorkspaceRecords
 // Whether the space pushed the blob into this workspace.
 liquid::runtime::task<ZettaControlResult<bool>>
 has_oci_blob(WorkspaceRecords& records, std::string customer_id, std::string digest);
+
+// The space's record of one blob in this workspace; nullopt when it has none.
+liquid::runtime::task<ZettaControlResult<std::optional<OciBlob>>>
+get_oci_blob(WorkspaceRecords& records, std::string customer_id, std::string digest);
+
+// Records a blob whose bytes are now the store object `blob.object` (lake#383 phase B): a new
+// record is written `if_absent`; one without an object (its bytes were in the instance registry)
+// gains it at the revision read; one that already names an object keeps it, since the object holds
+// the same bytes. Answers the record as stored.
+liquid::runtime::task<ZettaControlResult<OciBlob>> store_oci_blob(WorkspaceRecords& records,
+                                                                  OciBlob blob);
+
+// Every blob record of the space in this workspace, by digest.
+liquid::runtime::task<ZettaControlResult<std::vector<OciBlob>>>
+list_oci_blobs(WorkspaceRecords& records, std::string customer_id);
 
 // Every tag of a repository, by tag.
 liquid::runtime::task<ZettaControlResult<std::vector<OciTag>>>

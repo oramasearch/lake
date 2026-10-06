@@ -565,6 +565,15 @@ tests run tenant pushes against routed workspaces; `WorkspaceRecords.ImageTagsMo
 the codecs and a raced tag move; `PostgresImageRoutes.MigrationRoutesUnambiguousImagesOnly`
 migration `0068`.
 
+Tenant image blobs in the workspace store (lake#383 phase B): `test_registry_store.cpp`
+(`RegistryStore.*`, a real lake server with workspace stores on `FakeZettaObjects`) covers push and
+pull of a multi-layer image through a routed, switched workspace (GET and HEAD, ciphertext only,
+nothing in the instance registry, a repeated layer stored once, usage counted once), a chunked
+upload and a wrong digest, a 304 MiB layer streamed with the pull's resident growth bounded, a
+blob of another workspace or space refused, the `oci_blobs` copy (plan, copy, rerun, verify with
+SHA-256, missing, corrupt and unswitched blobs unresolved, pulls after the registry files are
+removed), instance packages unaffected, and workspace deletion.
+
 Workspace volumes (migration `0069`, operator#259, operator#260): `test_volumes.cpp`
 (`Stores/Volumes.*`, on the memory store and PostgreSQL) covers growing a workspace's storage, the
 refused decrease, unknown and deleted workspaces, callers who are not the operator, central audit,

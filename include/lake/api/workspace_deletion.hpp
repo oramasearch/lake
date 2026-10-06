@@ -2,9 +2,11 @@
 
 #include <cstddef>
 #include <expected>
+#include <filesystem>
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -52,6 +54,12 @@ struct WorkspaceContent {
     // A blob's bytes (a manifest's document) and its size; the error says why it is missing.
     std::function<std::expected<std::string, std::string>(const std::string& digest)> read_blob;
     std::function<std::optional<std::uint64_t>(const std::string& digest)> blob_size;
+    // lake#383 phase B, the copy of tenant blobs into their workspace stores
+    // (copy_workspace_records, collection oci_blobs): the instance registry's file of a blob
+    // (nullopt when it holds none), and every digest the instance's own one-component OCI
+    // repositories use, which stay in the instance registry whatever moves.
+    std::function<std::optional<std::filesystem::path>(const std::string& digest)> blob_file;
+    std::function<std::set<std::string>()> instance_digests;
     // Drops what the space's search index on lake's volume holds of one repository. Unset:
     // ApiContext::search is used directly.
     std::function<std::expected<void, std::string>(const std::string& customer_id,

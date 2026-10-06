@@ -15,6 +15,7 @@ lake#382 (the log stays with the instance; no migration); lake#384 (route patter
 and the per-workspace `lake_requests` series, [PR #521](https://github.com/oramasearch/lake/pull/521),
 no migration); lake#383 phase A (the tenant image route table and manifests and tags as
 workspace records, migration `0068`, [PR #523](https://github.com/oramasearch/lake/pull/523));
+lake#383 phase B (tenant image blobs in the workspace's liquid store, no migration);
 lake#514's cascade (migration `0065`); and lake#380, the workspace store and its move
 (migration `0067`, [workspace-store.md](workspace-store.md); every workspace on dev is switched;
 needs liquid `8955519` or later). With every workspace switched, the records' retired tables and
@@ -63,7 +64,7 @@ except S12, where Steve chose cascade over refusal.
 | #380 `<customer>/store` | Liquid objects and history of every repository, Drive, model and dataset | 18.3 MB in 2 customer stores, 10 repositories | workspace | One liquid store per workspace in the workspace Zetta's object capability. **Implemented** ([workspace-store.md](workspace-store.md), migration `0067`); each workspace is switched by `move_workspace_store`, and `remove_space_store` removes the space's old store once all its workspaces are |
 | #381 `<customer>/index` | Search catalogue, segments and manifest | none written | workspace | Sealed objects beside the workspace store; rebuilt. **Implemented** (no migration; `search/` objects in bucket `lake_store`) |
 | #382 transparency, TUF, timestamps | The instance's log, trust metadata and evidence | none written | instance | Stays with the instance. **Done** (no migration) |
-| #383 registry | OCI, npm, Python and debug artifacts | 561 MB: 38 blobs, 7 manifests, one space | split | Tenant images to the workspace store; instance registry stays. Phase A **done** (routes, manifests and tags as records, migration `0068`); blobs wait for phase B |
+| #383 registry | OCI, npm, Python and debug artifacts | 561 MB: 38 blobs, 7 manifests, one space | split | Tenant images to the workspace store; instance registry stays. Phase A **done** (routes, manifests and tags as records, migration `0068`); phase B **done** in the source tree (blobs as objects of the workspace's liquid store, `copy_workspace_records` collection `oci_blobs`, no migration); the old tenant files in `prod/registry` are removed later, with approval |
 | #384 metrics and request logs | Process counters and stdout lines | nothing kept (no Prometheus or Loki on the cluster) | instance | Stays; plus a per-workspace request series. **Done** ([PR #521](https://github.com/oramasearch/lake/pull/521)) |
 
 ## What is on dev
@@ -437,9 +438,46 @@ and a manifest may reference only blobs recorded in its workspace.
 The copy is `copy_workspace_records` (collection `oci_tags`), not `move_workspace_store`: `copy`
 (never `plan` or `verify`) routes what is unambiguous (route, then the one workspace whose apps or builds use the name, then the
 space's only live workspace), reports the rest, and writes and verifies each manifest and tag.
-Phase B moves the blobs into the workspace store (`lake_oci_blobs` then maps each digest to the
-stored identity; uploads in `lake_uploads`) after lake#380. Not done
-in phase A: counting registry requests in a workspace's `lake_requests` series (#384).
+Not done in phase A: counting registry requests in a workspace's `lake_requests` series (#384).
+
+**Phase B done** (no migration). A tenant blob is an object of its workspace's liquid store, and
+the S5 design choice for its address is a **mapping record**: liquid addresses an object only by
+its own hash in the store's algorithm (BLAKE3 for a workspace store; `put_file`, `put` and `read`
+take no other identity, and the SHA-256 put is private to liquid's repository), and the store is
+encrypted below liquid, so the OCI digest cannot be the store's key. `lake_oci_blobs` therefore
+gains `object`, the liquid digest of the blob, beside its SHA-256 digest and size; it is written
+`if_absent` by an upload, or gains `object` at the revision read when the copy moves a blob that
+phase A recorded.
+
+- **Uploads.** Monolithic and chunked uploads are still staged as one file under
+  `registry/uploads/` on lake's volume, not in a `lake_uploads` bucket: liquid's only streaming
+  write is `put_file` from a local file, so a bucket would still need a local file at completion.
+  At completion into a switched workspace lake checks the SHA-256 in windows, streams the file
+  into the workspace store with `put_file` under the workspace's lane on the blocking pool, after
+  the space's storage quota (`507 DENIED` past it), writes the record and removes the staged file.
+  A workspace not switched yet keeps phase A (bytes in `registry/blobs/`, a record without
+  `object`).
+- **Pulls.** A blob is served when a tag of the repository references it **and** the workspace's
+  `lake_oci_blobs` records it. A record naming an object is streamed from the store in 4 MiB
+  windows (the first read admitted to the lane before any header, later reads waiting for it),
+  never from the instance registry; a store that lost it is `500`. A record without `object` is
+  read from the instance registry until the copy names its object.
+- **Manifests** take each referenced blob's size from its record, not from the instance registry.
+- **Usage** counts a blob in a workspace store once, in that store's bucket usage
+  (`repositories_bytes`); `images_bytes` keeps manifests and blobs still in the instance registry,
+  and `images_in_workspace_stores_bytes` reports the rest.
+- **Copy.** `copy_workspace_records` collection `oci_blobs` (not `move_workspace_store`): each
+  record of each routed workspace, `plan` writing nothing, `copy` checking the registry file's
+  SHA-256 and streaming it into the store, `verify` reading every object back and comparing its
+  SHA-256 and size, and listing in `instance_paths` the registry files that are then removable.
+  Unresolved: `workspace_not_switched`, `blob_missing`, `blob_corrupt`. Nothing is removed from
+  the instance registry.
+- **Deletion** (#514): the workspace's store is closed with its lease, and the blobs go with its
+  Zetta.
+- A switch of a workspace with no repository now creates its store, since its images need one.
+- Not done: lake runs no liquid collector on workspace stores; before one runs it must treat
+  `lake_oci_blobs` objects as roots. Unreferenced instance blobs, and abandoned staged uploads,
+  stay on the volume.
 
 ### lake#384: Prometheus metrics and request logs
 

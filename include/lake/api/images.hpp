@@ -19,7 +19,8 @@
 // belongs to one workspace, found through the content-free central route oci_repository_routes,
 // and its manifests and tags are sealed records in that workspace's Zetta
 // (control/oci_records.hpp). npm, Python, debuginfod and legacy one-component OCI repositories stay
-// with the instance. Blobs stay in the instance registry until phase B (lake#380).
+// with the instance. Since phase B a tenant blob is an object of its workspace's liquid store
+// (lake#380), found through its lake_oci_blobs record.
 namespace lake::api {
 
 // `<space>/<name>` split at its first `/`; nullopt for a one-component (instance) repository.
@@ -57,10 +58,14 @@ ImageOwner legacy_image_owner(control::Store& store, const control::Customer& cu
                               const std::string& name, bool write);
 
 // The unique bytes a space's tenant images hold, each manifest and referenced blob counted once
-// (docs/api/metering.md), read from the tags in each routed workspace (one list per repository).
-// `unmeasured` names each workspace that could not be read.
+// (docs/api/metering.md), read from the tags in each routed workspace (one list per repository,
+// and one list of its blob records per workspace). `bytes` is what the images add to the space's
+// storage: their manifests and the blobs still in the instance registry. `stored_bytes` is the
+// blobs that are objects of a workspace's liquid store (lake#383 phase B), already counted in that
+// store's usage and so not again. `unmeasured` names each workspace that could not be read.
 struct ImageBytes {
     std::uint64_t bytes = 0;
+    std::uint64_t stored_bytes = 0;
     std::vector<std::string> unmeasured;
 };
 liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,

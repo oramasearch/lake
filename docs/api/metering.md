@@ -87,7 +87,8 @@ workspace Zetta, and lake's control store keeps none of them. It carries no pric
 | Field | Rule |
 |---|---|
 | `storage.repositories_bytes` | Repository storage, measured now (above). |
-| `storage.images_bytes` | Unique bytes of the space's tenant images (`<space handle>/...`, build cache under `<space>/cache/` included): every manifest a tag points to, plus its config and layers, each digest once across all tags and repositories of the space. Read from the tags in each routed workspace (lake#383, [registry.md](registry.md#where-a-tenant-image-lives)), one read per repository; a workspace that cannot be read is named in `not_measured`. `null` when the lake has no workspaces. |
+| `storage.images_bytes` | Unique bytes of the space's tenant images (`<space handle>/...`, build cache under `<space>/cache/` included): every manifest a tag points to, plus its config and layers, each digest once across all tags and repositories of the space. Read from the tags in each routed workspace (lake#383, [registry.md](registry.md#where-a-tenant-image-lives)), one read per repository; a workspace that cannot be read is named in `not_measured`. `null` when the lake has no workspaces. A blob that is an object of a workspace's liquid store (lake#383 phase B) is already in that store's usage, part of `repositories_bytes`, so it is left out here: `images_bytes` is the manifests and the blobs still in the instance registry. |
+| `storage.images_in_workspace_stores_bytes` | The tenant image blobs held in workspace stores, each digest once: reported, not added to `total_bytes` again. `null` when the lake has no workspaces. |
 | `storage.workspace_data_bytes` | The sum of `size_bytes` from Zetta `list_datasets` in each of the customer's workspaces (the on-disk row chunks of every dataset). |
 | `storage.total_bytes` | The three above added. |
 | `compute.repository_build_seconds` | The sum of `compute_seconds` in the returned hourly rows. |

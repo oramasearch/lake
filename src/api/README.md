@@ -49,7 +49,7 @@ script fills them in, and `?inline=1` renders Agents and Indexes in place withou
 Startup warms existing repository indexes for Metering without
 caching usage. `metering_capabilities.cpp` is asynchronous: its summary reads every workspace's
 datasets, runs, and repository transfer and build records concurrently (lake#348, lake#349), and
-image bytes are counted from the tags in each routed workspace (`tenant_image_bytes`, lake#383). `metering_recorder.cpp` is the `MeteringRecorder`: the sync capabilities in
+image bytes are counted from the tags in each routed workspace (`tenant_image_bytes`, lake#383), leaving out blobs already in a workspace store (`images_in_workspace_stores_bytes`, phase B). `metering_recorder.cpp` is the `MeteringRecorder`: the sync capabilities in
 `capabilities.cpp` add each request's bytes to it without I/O, `ApiServer::drain` flushes it to the
 workspace Zettas every `metering_flush_interval`, and `ApiServer::stop` flushes it once more after
 in-flight requests finish. Contracts and regression proof: [page performance](../../docs/ui/performance.md)
@@ -397,9 +397,17 @@ which writes a route only for the copy, never for plan or verify) and the image 
 own target from its workspace, a workload credential reaches only its own workspace, an upload
 records its blob in the workspace (`lake_oci_blobs`) and a manifest may reference only recorded
 blobs, routes that cannot be read answer 503, manifests and tags are read and
-written as workspace records, blobs stay in the instance registry, and Ship → Packages lists the
-selected space's images through `list_image_repositories`. `copy_workspace_records` gains `oci_tags`,
-reading the instance registry's tenant pointers through `WorkspaceContent`.
+written as workspace records, and Ship → Packages lists the selected space's images through
+`list_image_repositories`. `copy_workspace_records` gains `oci_tags`, reading the instance
+registry's tenant pointers through `WorkspaceContent`. Since phase B (decision 54 S5) an upload
+completed into a switched workspace is checked and streamed into its liquid store
+(`finish_tenant_upload`, `LiquidCustomerStores::put_workspace_blob`, off the server thread) and
+recorded with its object; a pull streams it back 4 MiB at a time (`stream_workspace_blob`,
+`read_workspace_blob`); a record without an object is still read from the instance registry; a
+manifest takes its blob sizes from the records; a switch creates the store of a workspace with no
+repository; and `copy_workspace_records` gains `oci_blobs` (`workspace_record_capabilities.cpp`),
+which streams each recorded blob from the instance registry into its workspace store and verifies
+it by SHA-256.
 
 `volume_capabilities.cpp` registers the operator's volumes (migration `0069`, operator#259,
 operator#260): `set_workspace_storage` (grow only; a smaller size is `invalid_input` at

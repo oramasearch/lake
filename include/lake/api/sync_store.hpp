@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <functional>
 #include <optional>
 #include <span>
@@ -322,6 +323,12 @@ struct SpaceStoreRemoval {
     bool removed = false;
 };
 
+// A tenant image's blob as an object of its workspace's liquid store (lake#383 phase B).
+struct WorkspaceBlob {
+    std::string object; // the liquid identity, `blake3:<hex>`
+    std::uint64_t size = 0;
+};
+
 // HTTP-free access to the liquid store selected by a repository's customer.
 // The libliquid implementation remains inside the HTTP adapter translation
 // unit.
@@ -496,6 +503,29 @@ public:
     // Closes the workspace's store and releases its bucket lease (workspace deletion, drain).
     virtual SyncStoreResult<void> close_workspace_store(const std::string&) {
         return {};
+    }
+    // lake#383 phase B (decision 54 S5): a tenant image's blob in its workspace's liquid store.
+    // Streams the file at `source` into the store of a switched workspace and answers the object's
+    // liquid identity and size; the space's storage quota is checked first (`busy`, rule
+    // `storage_quota`). `admitted`: a request entering the workspace's lane (refused at once when
+    // the lane is full or moving); otherwise lake's own work (the copy), which waits for it.
+    virtual SyncStoreResult<WorkspaceBlob> put_workspace_blob(const std::string&,
+                                                              const std::string&,
+                                                              const std::filesystem::path&,
+                                                              bool) {
+        return std::unexpected(SyncStoreError{"unsupported", "workspace stores are unavailable"});
+    }
+    // Reads up to `into.size()` bytes of the object at `offset`, under the workspace's lane for
+    // this one read; answers how many it read. A read of a blob the store does not hold is
+    // `not_found`. `admitted` as for put_workspace_blob: a pull is admitted once, for its first
+    // read, and its later reads wait for the lane rather than cut the layer off part way.
+    virtual SyncStoreResult<std::uint64_t> read_workspace_blob(const std::string&,
+                                                               const std::string&,
+                                                               const std::string&,
+                                                               std::uint64_t,
+                                                               std::span<std::byte>,
+                                                               bool) {
+        return std::unexpected(SyncStoreError{"unsupported", "workspace stores are unavailable"});
     }
     virtual SyncStoreResult<RepositoryReplicationReport> replicate_from(const std::string&,
                                                                         const std::string&,
