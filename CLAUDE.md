@@ -63,8 +63,8 @@ Every retired table and content column was copied and verified on dev, and migra
 `0070_drop_moved_tables` (lake#311) drops them: `opportunities`, `stream_owners`,
 `drive_share_links`, the `auth_app_*` tables, `metering_*`, `forge_records`, the `secrets_*` tables,
 `platform_*`, and the content columns of `auth_applications`, `agent_tasks`/`agent_task_status` and
-`repositories`. A first block refuses the whole migration while any of their rows has no workspace
-to have been copied into; audit, routing rows, routes and `keystore` stay.
+`repositories`. A first block refuses rows with no recorded workspace owner (copy and verify, with
+an image built before `0070` such as `20261005a`, are a manual gate before applying it); audit, routing rows, routes and `keystore` stay.
 `copy_workspace_records` now accepts only `audit_events` and `oci_tags`. See
 `docs/control-plane/schema.md#drop-moved-tables-migration`.
 Repository usage follows (lake#348, lake#349, migration `0053`): exact hourly transfer counters and

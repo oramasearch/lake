@@ -754,7 +754,7 @@ of the table left, and `copy_workspace_records` no longer accepts `ask_messages`
 ## Drop moved tables migration
 
 `0070_drop_moved_tables` (lake#311, decision 54) drops every retired copy of workspace data whose
-one-shot copy was run and verified on dev: the tables `opportunities`, `stream_owners`,
+one-shot copy was reported run and verified on dev: the tables `opportunities`, `stream_owners`,
 `drive_share_links`, `auth_app_webhook_deliveries`, `auth_app_webhook_events`, `auth_app_webhooks`,
 `auth_app_signing_keys`, `auth_app_organizations`, `auth_app_users`,
 `auth_app_authorization_codes`, `metering_usage`, `metering_build_records`, `forge_records`,
@@ -765,14 +765,15 @@ columns `auth_applications.name`, `allowed_origins`, `redirect_uris`, `theme` (w
 and `repositories.description`. Each is dropped with `DROP TABLE IF EXISTS` or
 `DROP COLUMN IF EXISTS`.
 
-Before dropping anything, one block counts, per table, the rows still present that have no
-workspace to have been copied into: no `workspace_assignments` row with a `workspace_id`, and an
-outcome other than `workspace_deleted` (for the secrets tables, a mount without a route). Mirror
-rows naming no repository, expired codes and usage rows without transfer are not counted, as the
-copy did not count them. If any table has one, it raises
-`0070_drop_moved_tables: rows without a workspace copy: <table>=<count>, ...` and the schema
-transaction rolls back with nothing dropped; resolve or delete those rows, rerun the copy and apply
-again.
+Before dropping anything, one block refuses rows with no recorded workspace owner: it counts, per
+table, the rows still present with no `workspace_assignments` row naming a workspace, unless the
+outcome says the workspace was deleted (`workspace_deleted`, or `deleted_workspace` as `0046`
+spelled it); for the secrets tables, a mount without a route. Mirror rows naming no repository,
+expired codes and usage rows without transfer are not counted. If any table has one, it raises
+`0070_drop_moved_tables: rows without a recorded workspace owner: <table>=<count>, ...` and the
+schema transaction rolls back with nothing dropped. The check proves an owner was recorded, not that
+a copy ran: `copy_workspace_records` `plan`, `copy` and `verify` are a manual gate before applying.
+When it refuses, nothing is dropped. Either run `copy_workspace_records` `plan`, `copy` and `verify` for each table named with the previous lake image (`oramasearch/lake:20261005a`, the image on dev when this was written, or any image built before `0070`), resolve its unresolved rows and apply the schema again; or, on a development environment and only with the owner's approval (it destroys data), delete the named rows and apply again.
 
 What stays: the routing rows (`auth_applications`, `repositories`, `agent_tasks`,
 `agent_task_status`), `drive_share_link_routes`, `secret_mount_routes`, `secret_lease_routes`, every

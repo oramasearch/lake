@@ -3483,8 +3483,8 @@ INSERT INTO schema_migrations (version) VALUES ('0069_workspace_volumes')
 -- ---------------------------------------------------------------------------------------------
 -- 0070_drop_moved_tables: the retired copies of workspace data are dropped (lake#311, decision 54).
 -- Each moved into the workspace Zetta of its owner through the operator's one-shot copy
--- (copy_workspace_records, docs/architecture/workspace-records.md), which was run and verified on
--- dev for every collection below before this migration, and lake reads and writes none of them:
+-- (copy_workspace_records, docs/architecture/workspace-records.md), which the coordinator reports
+-- was run and verified on dev for every collection below, and lake reads and writes none of them:
 --   opportunities (0046, lake#376); stream_owners (0047, lake#379); drive_share_links (0048,
 --   lake#350; drive_share_link_routes stays); auth_app_webhook_events and
 --   auth_app_webhook_deliveries (0049, lake#356, lake#357); metering_usage and
@@ -3505,12 +3505,17 @@ INSERT INTO schema_migrations (version) VALUES ('0069_workspace_volumes')
 -- stay: they are the record of where each row went.
 --
 -- The first block refuses the whole migration while any row of a table about to be dropped has
--- no workspace to have been copied into: a needs_selection or unknown_workspace owner, or none
--- recorded, by the same rule copy_workspace_records `verify` applies (rows that went with a
--- deleted workspace, links to no repository and expired codes do not count). Resolve or delete
--- such rows, rerun the copy, and apply again. Every statement is idempotent and the earlier
--- CREATEs and migration blocks no longer make these tables or columns, so a rerun of this file
--- leaves them dropped.
+-- no recorded workspace owner: no workspace_assignments row with a workspace, unless its outcome
+-- says the workspace was deleted (workspace_deleted, or deleted_workspace as 0046 spelled it).
+-- Mirror rows naming no repository, expired codes and usage rows without transfer do not count;
+-- for the secrets tables, a mount without a route counts. The check proves an owner was
+-- recorded, not that a copy ran: copy_workspace_records plan, copy and verify, with a lake image
+-- built before this migration, are a manual gate before applying it. When it refuses, either run
+-- that copy for each table named with the previous image (oramasearch/lake:20261005a), resolving
+-- its unresolved rows, and apply again; or, on a development environment and only with the
+-- owner's approval, delete the named rows and apply again. Every statement is idempotent and the
+-- earlier CREATEs and migration blocks no longer make these tables or columns, so a rerun of this
+-- file leaves them dropped.
 -- ---------------------------------------------------------------------------------------------
 DO $$
 DECLARE
@@ -3521,7 +3526,8 @@ BEGIN
         SELECT count(*) INTO n FROM opportunities o
             LEFT JOIN workspace_assignments a ON a.object_table = 'opportunities'
                  AND a.object_id = o.id
-            WHERE a.workspace_id IS NULL;
+            WHERE a.workspace_id IS NULL
+              AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('opportunities=%s', n); END IF;
     END IF;
     IF to_regclass('stream_owners') IS NOT NULL THEN
@@ -3529,21 +3535,22 @@ BEGIN
             LEFT JOIN workspace_assignments a ON a.object_table = 'stream_owners'
                  AND a.object_id = md5(s.customer_id::text || E'\n' || s.workspace_id || E'\n' ||
                                        s.topic)::uuid
-            WHERE a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+            WHERE a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('stream_owners=%s', n); END IF;
     END IF;
     IF to_regclass('drive_share_links') IS NOT NULL THEN
         SELECT count(*) INTO n FROM drive_share_links l
             LEFT JOIN workspace_assignments a ON a.object_table = 'drive_share_links'
                  AND a.object_id = l.id
-            WHERE a.workspace_id IS NULL;
+            WHERE a.workspace_id IS NULL
+              AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('drive_share_links=%s', n); END IF;
     END IF;
     IF to_regclass('auth_app_webhook_events') IS NOT NULL THEN
         SELECT count(*) INTO n FROM auth_app_webhook_events e
             LEFT JOIN workspace_assignments a ON a.object_table = 'auth_app_webhook_events'
                  AND a.object_id = e.id
-            WHERE a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+            WHERE a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('auth_app_webhook_events=%s', n); END IF;
     END IF;
     IF to_regclass('metering_usage') IS NOT NULL THEN
@@ -3552,49 +3559,49 @@ BEGIN
                  AND a.object_id = md5(m.customer_id::text || E'\n' ||
                      to_char(m.hour AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))::uuid
             WHERE (m.transfer_in_bytes > 0 OR m.transfer_out_bytes > 0)
-              AND a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+              AND a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('metering_usage=%s', n); END IF;
     END IF;
     IF to_regclass('metering_build_records') IS NOT NULL THEN
         SELECT count(*) INTO n FROM metering_build_records b
             LEFT JOIN workspace_assignments a ON a.object_table = 'metering_build_records'
                  AND a.object_id = md5(b.customer_id::text || E'\n' || b.result_id)::uuid
-            WHERE a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+            WHERE a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('metering_build_records=%s', n); END IF;
     END IF;
     IF to_regclass('forge_records') IS NOT NULL THEN
         SELECT count(*) INTO n FROM forge_records f
             LEFT JOIN workspace_assignments a ON a.object_table = 'forge_records'
                  AND a.object_id = f.id
-            WHERE a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+            WHERE a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('forge_records=%s', n); END IF;
     END IF;
     IF to_regclass('auth_app_users') IS NOT NULL THEN
         SELECT count(*) INTO n FROM auth_app_users u
             LEFT JOIN workspace_assignments a ON a.object_table = 'auth_app_users'
                  AND a.object_id = md5(u.application_id::text || E'\n' || u.user_id::text)::uuid
-            WHERE a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+            WHERE a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('auth_app_users=%s', n); END IF;
     END IF;
     IF to_regclass('auth_app_organizations') IS NOT NULL THEN
         SELECT count(*) INTO n FROM auth_app_organizations o
             LEFT JOIN workspace_assignments a ON a.object_table = 'auth_app_organizations'
                  AND a.object_id = o.id
-            WHERE a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+            WHERE a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('auth_app_organizations=%s', n); END IF;
     END IF;
     IF to_regclass('auth_app_signing_keys') IS NOT NULL THEN
         SELECT count(DISTINCT k.application_id) INTO n FROM auth_app_signing_keys k
             LEFT JOIN workspace_assignments a ON a.object_table = 'auth_app_signing_keys'
                  AND a.object_id = k.application_id
-            WHERE a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+            WHERE a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('auth_app_signing_keys=%s', n); END IF;
     END IF;
     IF to_regclass('auth_app_webhooks') IS NOT NULL THEN
         SELECT count(*) INTO n FROM auth_app_webhooks h
             LEFT JOIN workspace_assignments a ON a.object_table = 'auth_app_webhooks'
                  AND a.object_id = h.id
-            WHERE a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+            WHERE a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('auth_app_webhooks=%s', n); END IF;
     END IF;
     IF to_regclass('auth_app_authorization_codes') IS NOT NULL THEN
@@ -3602,7 +3609,7 @@ BEGIN
             LEFT JOIN workspace_assignments a ON a.object_table = 'auth_app_authorization_codes'
                  AND a.object_id = md5(c.code_hash)::uuid
             WHERE c.used_at IS NULL AND c.expires_at > now()
-              AND a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+              AND a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN
             open_rows := open_rows || format('auth_app_authorization_codes=%s', n);
         END IF;
@@ -3613,7 +3620,7 @@ BEGIN
             LEFT JOIN workspace_assignments a ON a.object_table = 'secrets_mounts'
                  AND a.object_id = m.id
             WHERE NOT EXISTS (SELECT 1 FROM secret_mount_routes r WHERE r.mount_id = m.id)
-              AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+              AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('secrets_mounts=%s', n); END IF;
     END IF;
     IF to_regclass('secrets_dynamic_leases') IS NOT NULL THEN
@@ -3621,14 +3628,14 @@ BEGIN
             LEFT JOIN workspace_assignments a ON a.object_table = 'secrets_mounts'
                  AND a.object_id = l.mount_id
             WHERE NOT EXISTS (SELECT 1 FROM secret_mount_routes r WHERE r.mount_id = l.mount_id)
-              AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+              AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('secrets_dynamic_leases=%s', n); END IF;
     END IF;
     IF to_regclass('platform_environments') IS NOT NULL THEN
         SELECT count(*) INTO n FROM platform_environments e
             LEFT JOIN workspace_assignments a ON a.object_table = 'platform_environments'
                  AND a.object_id = e.id
-            WHERE a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+            WHERE a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('platform_environments=%s', n); END IF;
     END IF;
     IF to_regclass('platform_mirror') IS NOT NULL THEN
@@ -3637,7 +3644,7 @@ BEGIN
             JOIN repositories r ON r.id::text = m.value->>'repository'
             LEFT JOIN workspace_assignments a ON a.object_table = 'platform_mirror'
                  AND a.object_id = md5(m.kind || E'\n' || m.key)::uuid
-            WHERE a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+            WHERE a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('platform_mirror=%s', n); END IF;
     END IF;
     IF EXISTS (SELECT 1 FROM information_schema.columns
@@ -3647,7 +3654,7 @@ BEGIN
             LEFT JOIN workspace_assignments a ON a.object_table = 'auth_application_settings'
                  AND a.object_id = p.id
             WHERE p.name IS NOT NULL
-              AND a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+              AND a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('auth_application_settings=%s', n); END IF;
     END IF;
     IF EXISTS (SELECT 1 FROM information_schema.columns
@@ -3659,7 +3666,7 @@ BEGIN
                  AND a.object_id = t.id
             WHERE (t.body <> '{}'::jsonb OR COALESCE(ts.message, '') <> ''
                    OR COALESCE(ts.result, 'null'::jsonb) <> 'null'::jsonb)
-              AND a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+              AND a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('agent_task_content=%s', n); END IF;
     END IF;
     IF EXISTS (SELECT 1 FROM information_schema.columns
@@ -3669,15 +3676,19 @@ BEGIN
             LEFT JOIN workspace_assignments a ON a.object_table = 'repository_descriptions'
                  AND a.object_id = r.id
             WHERE r.description <> ''
-              AND a.workspace_id IS NULL AND a.outcome IS DISTINCT FROM 'workspace_deleted';
+              AND a.workspace_id IS NULL AND COALESCE(a.outcome, '') NOT IN ('workspace_deleted', 'deleted_workspace');
         IF n > 0 THEN open_rows := open_rows || format('repository_descriptions=%s', n); END IF;
     END IF;
     IF cardinality(open_rows) > 0 THEN
-        RAISE EXCEPTION '0070_drop_moved_tables: rows without a workspace copy: %',
+        RAISE EXCEPTION '0070_drop_moved_tables: rows without a recorded workspace owner: %',
             array_to_string(open_rows, ', ')
-            USING HINT = 'Run copy_workspace_records plan for each collection named, resolve or '
-                         'delete its unresolved rows, run copy and verify, then apply the schema '
-                         'again. Nothing was dropped.';
+            USING HINT = 'Nothing was dropped. This lake no longer has the copier: either run '
+                         'copy_workspace_records plan, copy and verify for each collection named '
+                         'with the previous lake image (oramasearch/lake:20261005a or any image '
+                         'built before migration 0070), resolve its unresolved rows, and apply '
+                         'the schema again; or, on a development environment and only with the '
+                         'owner''s approval (it destroys data), delete the named rows and apply '
+                         'the schema again.';
     END IF;
 END $$;
 

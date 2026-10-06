@@ -1828,11 +1828,12 @@ TEST(PostgresAskMessages, MigrationDropsTheTableAndKeepsItsAssignments) {
     EXPECT_FALSE(tx.exec("SELECT to_regclass('drop_ask_messages_guard')")[0][0].is_null());
 }
 
-// Migration 0070 (lake#311): every retired copy of workspace data is dropped once each of its rows
-// has a workspace to have been copied into, and never while one has none. It runs in a PostgreSQL
-// schema of its own, so the tables it recreates as an older database had them, and the row it
-// leaves unresolved, are seen by no other test running against the same database.
-TEST(PostgresMovedTables, MigrationDropsEveryMovedTableOnlyOnceEachRowHasAWorkspace) {
+// Migration 0070 (lake#311) refuses rows with no recorded workspace owner, and drops every retired
+// copy of workspace data once each row has one (or went with a deleted workspace). The check is
+// about owners, not copies: copy and verify are a manual gate before applying. It runs in a
+// PostgreSQL schema of its own, so the tables it recreates as an older database had them, and the
+// row it leaves unresolved, are seen by no other test running against the same database.
+TEST(PostgresMovedTables, MigrationRefusesRowsWithNoRecordedWorkspaceOwner) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
@@ -1890,8 +1891,8 @@ TEST(PostgresMovedTables, MigrationDropsEveryMovedTableOnlyOnceEachRowHasAWorksp
     };
     EXPECT_TRUE(present().empty()) << "a fresh database never has them";
 
-    // A database from before 0070, with one row in each retired table and column, each copied:
-    // its owner recorded with a workspace.
+    // A database from before 0070, with one row in each retired table and column, each with the
+    // owner its migration (0046-0064) recorded.
     std::string customer, workspace, application, repository, task;
     {
         pqxx::work tx(connection);
@@ -1998,13 +1999,44 @@ TEST(PostgresMovedTables, MigrationDropsEveryMovedTableOnlyOnceEachRowHasAWorksp
         tx.exec_params("INSERT INTO platform_mirror VALUES ('deployment', 'd-1', "
                        "jsonb_build_object('repository', $1::text))",
                        repository);
-        // Each owner, as the copy recorded it.
+        // Each owner, with the outcome the table's migration records for an owned row.
+        const std::map<std::string, std::string> outcomes = {
+            {"opportunities", "task_workspace"},
+            {"stream_owners", "recorded_workspace"},
+            {"drive_share_links", "sole_workspace"},
+            {"auth_app_webhook_events", "application_workspace"},
+            {"auth_app_organizations", "application_workspace"},
+            {"auth_app_users", "application_workspace"},
+            {"auth_app_webhooks", "application_workspace"},
+            {"auth_app_signing_keys", "application_workspace"},
+            {"auth_app_authorization_codes", "application_workspace"},
+            {"auth_application_settings", "application_workspace"},
+            {"metering_usage", "sole_workspace"},
+            {"metering_build_records", "sole_workspace"},
+            {"forge_records", "repository_workspace"},
+            {"platform_environments", "repository_workspace"},
+            {"platform_mirror", "repository_workspace"},
+            {"agent_task_content", "task_workspace"},
+            {"repository_descriptions", "repository_workspace"}};
         const auto owned = [&](const std::string& table, const std::string& id) {
             tx.exec_params("INSERT INTO workspace_assignments (object_table, object_id, "
                            "customer_id, workspace_id, outcome) VALUES ($1, " + id + ", "
-                           "$2::uuid, $3::uuid, 'copied') ON CONFLICT DO NOTHING",
-                           table, customer, workspace);
+                           "$2::uuid, $3::uuid, $4) ON CONFLICT DO NOTHING",
+                           table, customer, workspace, outcomes.at(table));
         };
+        // An opportunity whose scan's workspace was deleted: 0046 recorded it as
+        // deleted_workspace, without a workspace. It went with that workspace and does not block.
+        const std::string gone = tx.exec_params("INSERT INTO workspaces (customer_id, name, "
+                                                "environment, desired) VALUES ($1::uuid, 'gone', "
+                                                "'dev', 'deleted') RETURNING id::text",
+                                                customer)[0][0].as<std::string>();
+        const std::string orphan = lake::control::new_uuid_v4();
+        tx.exec_params("INSERT INTO opportunities VALUES ($1::uuid, $2::uuid)", orphan, customer);
+        tx.exec_params("INSERT INTO workspace_assignments (object_table, object_id, customer_id, "
+                       "workspace_id, outcome) VALUES ('opportunities', $1::uuid, $2::uuid, NULL, "
+                       "'deleted_workspace')",
+                       orphan, customer);
+        EXPECT_FALSE(gone.empty());
         const std::string quoted = "'" + row + "'::uuid";
         for (const std::string table :
              {"opportunities", "drive_share_links", "auth_app_webhook_events",
@@ -2045,6 +2077,8 @@ TEST(PostgresMovedTables, MigrationDropsEveryMovedTableOnlyOnceEachRowHasAWorksp
     } catch (const pqxx::sql_error& error) {
         EXPECT_NE(std::string(error.what()).find("forge_records=1"), std::string::npos)
             << error.what();
+        EXPECT_EQ(std::string(error.what()).find("opportunities="), std::string::npos)
+            << "a deleted_workspace opportunity does not block: " << error.what();
     }
     EXPECT_EQ(present().size(), tables.size() + columns.size()) << "nothing dropped";
     // A row that went with a deleted workspace does not.
