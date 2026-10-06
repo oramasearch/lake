@@ -380,7 +380,7 @@ liquid::runtime::task<ApiResult> provision_workspace_store(const json& input, Ap
                 return std::unexpected(
                     ApiResult::failure(workspace.error().code, workspace.error().message));
             }
-            auto listed = context.store->list_repositories(workspace->customer_id, 100000,
+            auto listed = all_repositories(*context.store, workspace->customer_id,
                                                            workspace_id);
             if (!listed) {
                 return std::unexpected(ApiResult::failure(listed.error().code, listed.error().message));
