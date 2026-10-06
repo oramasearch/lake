@@ -124,13 +124,22 @@ its completed answer; the identity capabilities and hosted pages use them.
 `images.hpp` declares the tenant image helpers of lake#383 phase A (splitting `<space>/<name>`,
 a build target's image, the legacy owner rule, the image byte count) and `register_image_capabilities`.
 `WorkspaceContent` (`workspace_deletion.hpp`) also exposes the instance registry's legacy tenant
-tags and blob reads for the one-shot copy. `metering_usage` counts image bytes from the tags in
+tags and blob reads for the one-shot copy, and since lake#383 phase B the registry's file of a
+blob (`blob_file`) and the digests the instance's own repositories use (`instance_digests`) for
+the `oci_blobs` copy. `ImageBytes::stored_bytes` is the image blobs already counted in a workspace
+store's usage. `metering_usage` counts image bytes from the tags in
 each routed workspace (`tenant_image_bytes`), replacing the former
 `ApiContext::registry_space_bytes` callable. See [metering.md](../../../docs/api/metering.md).
 
 `capabilities.hpp` declares `register_volume_capabilities` (migration `0069`,
 [volumes.md](../../../docs/api/volumes.md)).
-`sync_store.hpp` adds `WorkspaceStoreTransfer` and the `SyncStore` operations of the workspace store
+`sync_store.hpp` adds `WorkspaceBlob`, `put_workspace_blob` and `read_workspace_blob` (a tenant
+image blob as an object of its workspace's liquid store, lake#383 phase B),
+`WorkspaceStoreProvision` and `provision_workspace_store` (move_workspace_store `provision`),
+`admit_workspace_stream` and `workspace_blob_present`, and
+`WorkspaceStoreTransfer` and the `SyncStore` operations of the workspace store
 move (`transfer_to_workspace_store`, `switch_workspace_store`, `create_repository_content`,
 `close_workspace_store`, lake#380); `capabilities.hpp` adds `create_repository_row`;
-`server.hpp` adds `ServerOptions::object_transport` and `workspace_store_lease_ttl`.
+`server.hpp` adds `ServerOptions::object_transport` and `workspace_store_lease_ttl`, and
+`registry_upload_max_age` (lake#383 phase B: abandoned OCI uploads are removed after it) and
+`registry_stream_idle_timeout` (a pull whose client takes no bytes for it is ended).

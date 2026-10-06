@@ -664,12 +664,15 @@ void register_metering_capabilities(Registry& registry) {
                 not_measured.push_back(line);
             }
             // Tenant images (lake#383): what the tags in each routed workspace name, each digest
-            // once. Blobs are still sized in the instance registry until phase B.
+            // once. A blob in a workspace's liquid store (phase B) is already in that store's
+            // usage, part of repositories_bytes, so it is reported but not added again.
             std::optional<std::uint64_t> image_bytes;
+            std::optional<std::uint64_t> image_store_bytes;
             if (context.workspaces) {
                 auto images = co_await tenant_image_bytes(context, customer_id);
                 if (images) {
                     image_bytes = images->bytes;
+                    image_store_bytes = images->stored_bytes;
                     for (const std::string& line : images->unmeasured) {
                         not_measured.push_back(line);
                     }
@@ -723,6 +726,8 @@ void register_metering_capabilities(Registry& registry) {
             json summary{{"storage",
                           {{"repositories_bytes", *stored_bytes},
                            {"images_bytes", image_bytes ? json(*image_bytes) : json(nullptr)},
+                           {"images_in_workspace_stores_bytes",
+                            image_store_bytes ? json(*image_store_bytes) : json(nullptr)},
                            {"workspace_data_bytes", workspace_bytes},
                            {"total_bytes", total_bytes}}},
                          {"compute",

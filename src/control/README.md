@@ -180,7 +180,8 @@ the copy only.
 phase A): the codecs (manifests, tags marked `copied` when the copy wrote them, and the blobs a
 workspace received), a manifest put `if_absent` (a conflict answers the stored bytes, which a
 digest fixes), a tag set `if_absent` or at the revision read (reread on a conflict), a copied tag
-created only where none exists, and one listing per repository. The stores keep
+created only where none exists, and one listing per repository; since phase B a blob record
+names its store object (`store_oci_blob`, `get_oci_blob`, `list_oci_blobs`). The stores keep
 `oci_repository_routes` (migration `0068`): a route is created only for a live workspace of the
 space, answered again for the same workspace, a `conflict` for another, and deleted in
 `delete_workspace_cascade`, which lists each as an image in state `routed`, or by

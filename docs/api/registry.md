@@ -21,8 +21,10 @@ LAKE_STORE_ROOT/<instance>/registry/debug/
 
 Since lake#383 phase A, `manifests/` holds only the instance's one-component OCI repositories, and
 what it still holds of tenant repositories waits for the one-shot copy and is not served (see
-[below](#where-a-tenant-image-lives)). `blobs/` holds every blob, tenant blobs included, until
-phase B.
+[below](#where-a-tenant-image-lives)). Since phase B a tenant blob pushed into a switched workspace
+goes into that workspace's liquid store, never into `blobs/`; `blobs/` keeps the instance's blobs
+and the tenant blobs pushed before, until the copy moves them and a later, approved step removes
+the files.
 
 Writes use a sibling temporary file followed by rename. OCI upload sessions are staged separately;
 completion recalculates SHA-256 and refuses bytes that do not match the requested digest. A
@@ -72,13 +74,53 @@ as a named exception: one instance-wide namespace with public reads.
   the last one (last writer wins, as OCI expects). A tag carries its manifest's references, so a
   blob read and the image byte count read only the tags; a blob `GET` lists every tag of its
   repository.
-- **Blobs stay in the instance registry** (`blobs/`) until phase B
-  ([lake#380](https://github.com/oramasearch/lake/issues/380)) moves them into the workspace's
-  liquid store. Each blob an upload into one of a workspace's repositories completes is recorded in
-  `lake_oci_blobs` of that workspace, and a manifest pushed into the workspace may reference only
-  blobs recorded there (otherwise OCI `400 MANIFEST_BLOB_UNKNOWN`), so knowing another space's or
-  another workspace's digest does not publish its layer. A tenant blob is served only when a tag
-  of the requested repository references it.
+- **Blobs are objects of the workspace's liquid store** (phase B, decision 54 S5;
+  [lake#380](https://github.com/oramasearch/lake/issues/380), [workspace-store.md](../architecture/workspace-store.md)).
+  Liquid names an object by its own hash (BLAKE3 in a workspace store) and the store is encrypted
+  below liquid, so the SHA-256 a client sends finds the blob through its record: `lake_oci_blobs`
+  holds, per blob the space pushed into the workspace, its digest, size and `object` (the liquid
+  digest). An upload (monolithic or chunked) is staged as one file under `registry/uploads/`. At
+  completion into a switched workspace lake first moves that file, under the registry's lock, to
+  `registry/claimed/<upload>-<random>`, so a PATCH to the same upload can no longer reach it (it is
+  `400 BLOB_UPLOAD_INVALID`); it then checks the claimed file's SHA-256, streams it into the store
+  (`put_file`, which reads it in windows) off the server thread under the workspace's lane, checks
+  that the stored object has the size it hashed, records it and removes the file. The space's
+  storage quota is checked first (OCI `507 DENIED` past it), except for a re-push of an object the
+  store already holds, which adds nothing. Bytes that are not their digest, or that the quota
+  refuses, are removed; after any other failure (an unavailable or busy store, a record that
+  cannot be written) the claimed file goes back under its upload id, so the client may retry the
+  same completion. A claim restarts the file's age. Uploads untouched for `registry_upload_max_age`
+  (24 hours) are removed by the maintenance thread, which lists them without the registry's lock and
+  takes it briefly per file. A
+  workspace not yet switched (`move_workspace_store`) keeps phase A: the bytes go to `blobs/` and
+  the record has no `object`.
+- **A correct push repairs a record.** A liquid object's identity is the hash of its bytes, so a
+  record that names another object than the one a verified push just stored names other bytes (or
+  none the store holds): the push rewrites it at the revision read. If the old object was rooted, the
+  record keeps it in `superseded`: liquid's lease API cannot release a root by its object, so those
+  roots wait for [liquid#342](https://github.com/oramasearch/liquid/issues/342).
+- **Image blobs are liquid roots.** Nothing in liquid refers to an image blob; only its record
+  does. Each stored blob is rooted with a liquid lease for a century (`store::lease_root`), so a
+  liquid collection of the workspace store keeps it. The record says so (`rooted`), and a re-push
+  of an object its record already names as rooted adds no second lease; the copy roots, once, an
+  object in place that was stored before lake rooted image blobs (`rooted` in its answer). A durable pin API is
+  [liquid#342](https://github.com/oramasearch/liquid/issues/342). A manifest pushed into the workspace may reference only blobs recorded
+  there (otherwise OCI `400 MANIFEST_BLOB_UNKNOWN`), with the sizes the records hold, so knowing
+  another space's or another workspace's digest does not publish its layer.
+- **Pulls stream from the store.** A tenant blob is served only when a tag of the requested
+  repository references it and the workspace's `lake_oci_blobs` records it. A record that names an
+  object is read only from the workspace's store, 1 MiB at a time. A pull holds one of its
+  workspace's eight stream slots for its whole stream; they are apart from the lane's admissions,
+  so pulls never lock pushes, git or the repository API of the workspace out. At most 24 pulls run
+  in the process (fewer than the server's 32 workers, and at most 24 MiB of buffers). Past either
+  limit a pull is OCI `503 UNAVAILABLE` with `Retry-After` and `Connection: close` before any
+  header is sent, so a refused client does not keep a worker
+  ([lake#534](https://github.com/oramasearch/lake/issues/534)). Each window takes the lane only for
+  its one read; a read that fails part way, or a client that takes no bytes for
+  `registry_stream_idle_timeout` (60 s), ends the connection and frees the slot. HEAD checks that the store holds the object. A store that lost an object its record
+  names is `500` to GET and HEAD, never answered from the instance registry; a push of the blob
+  repairs it. A record without `object` (pushed before phase B, or before its workspace was
+  switched) is streamed from `blobs/`, also in windows, until the copy below names its object.
 - **Workload credentials stay in their workspace.** A build pushes and reads only repositories
   routed to its own workspace, so a build cannot pull a base or cache image of another workspace
   of its space; an app pull token reads only its app's repository, only when the route names the
@@ -91,7 +133,8 @@ as a named exception: one instance-wide namespace with public reads.
   workspace that cannot be read lists its repositories with `tags_unavailable`. Ship → Packages
   shows the tenant images of one space, the selected one, from it.
 - Usage counts a space's image bytes from the tags in each routed workspace, each digest once
-  ([metering.md](metering.md)).
+  ([metering.md](metering.md)); a blob in a workspace store is counted in that store's usage, not
+  again.
 
 Tags written before the split stay in `manifests/` until the operator's one-shot copy
 (`copy_workspace_records`, collection `oci_tags`) moves each into its workspace. Each run finds the
@@ -105,6 +148,23 @@ which does not block completion), records the manifest's blobs, writes the manif
 newer and is kept and accepted. Until a tag is copied, its repository answers `404`. The cutover
 steps are in
 [workspace records](../architecture/workspace-records.md#cutover-runbook-tenant-images-dev-cluster).
+
+Blobs written to `blobs/` before phase B move with collection `oci_blobs`: every `lake_oci_blobs`
+record of every workspace an image route names, ordered by `<workspace>/<digest>`. `plan` writes
+nothing; `copy` checks the registry file's SHA-256, streams it into the workspace's store and
+names the object in the record (at the revision read), and a rerun copies nothing twice; `verify`
+reads each object back in windows and compares its SHA-256 and size, and lists in
+`instance_paths` the registry files the verified copies leave behind, leaving out any digest the
+instance's own repositories use, a record not yet copied still needs, or a legacy tenant tag not
+yet in its workspace still needs. The list is given only when every routed workspace's records
+were read and every legacy tenant tag is in its workspace (otherwise `instance_paths` is null and
+`instance_paths_withheld` says why). A legacy tag of a space that no longer exists (`unknown_space`)
+never withholds it; its digests count as needed only where a record references them too. It is **advisory**: the later removal step must check each
+path again against the records and the instance's repositories of its own time. Unresolved, each blocking
+completion: `workspace_not_switched` (switch the workspace first), `blob_missing` (the registry no
+longer holds the file) and `blob_corrupt` (its bytes are not the digest). Nothing is removed from
+the instance registry; removing `instance_paths`, the tenant pointers under
+`manifests/<space>/` and their manifest documents in `blobs/` is a later step that needs approval.
 
 ## The Packages page
 
@@ -130,11 +190,13 @@ requests to tenant paths are refused. The administrator bearer remains valid acr
 
 Deleting a workspace removes its tenant images (lake#514, [workspaces.md](workspaces.md#deletion)):
 the cascade transaction deletes its routes, and their manifest and tag records go with its Zetta
-(lake#383). Whatever the instance registry still holds for the workspace from before the split
-(the tags of `<space>/<name>` and `<space>/cache/<name>` for each of its apps and each image its
-builds target, unless another live workspace of the space uses the name) is removed too. Pulls of
-those repositories then answer 404. Blobs stay on the volume until phase B, since other manifests
-may reference them and the registry has no collection yet.
+(lake#383). Its blobs go with its liquid store: the deletion closes the store and releases its
+lease, and the workspace Zetta's deletion destroys the bytes. Whatever the instance registry still
+holds for the workspace from before the split (the tags of `<space>/<name>` and
+`<space>/cache/<name>` for each of its apps and each image its builds target, unless another live
+workspace of the space uses the name) is removed too. Pulls of those repositories then answer 404.
+Blobs from before phase B stay on the volume, since other manifests may reference them and the
+registry has no collection yet.
 
 An app pull token is accepted only as HTTP Basic user `app`, with the token as its password. Lake
 re-hashes it against the current app row and allows manifest and blob `GET`/`HEAD` only for the
@@ -191,6 +253,19 @@ the operator, foreign layers refused, an app without a workspace, and unreadable
 and its cache while the old workspace's build keeps pushing, and
 `PostgresImageRoutes.MigrationRoutesUnambiguousImagesOnly` migration `0068`.
 
+Phase B is `tests/test_registry_store.cpp`, a real lake server with workspace stores on
+`FakeZettaObjects`: `RegistryStore.AMultiLayerImageLivesInItsWorkspaceStoreAndPullsByteIdentical`
+(push and pull of a three-layer image, GET and HEAD, only ciphertext in the bucket, nothing in
+`blobs/` or `uploads/`, a repeated layer stored once, usage counted once),
+`RegistryStore.AChunkedUploadLandsInTheStoreAndAWrongDigestIsRefused`,
+`RegistryStore.ALargeLayerIsStreamedNeverHeldWhole` (a 304 MiB layer pulled while the resident set
+grows by far less than the layer),
+`RegistryStore.ABlobOfAnotherWorkspaceOrSpaceIsRefused`,
+`RegistryStore.TheCopyMovesInstanceBlobsIntoTheirStoresAndVerifiesThem` (plan, copy, rerun,
+verify, a missing, a corrupt and an unswitched blob unresolved, and pulls after the registry files
+are gone), `RegistryStore.InstancePackagesStayInTheInstanceRegistry` and
+`RegistryStore.DeletingAWorkspaceTakesItsImageBlobsWithItsStore`.
+
 `RegistryProtocols.NpmPublishesAndInstallsWithTheRealClient` runs the host `npm` binary to publish
 and then install a fixture package through Lake. If npm is unavailable, the same test exercises
 metadata and attachment publication directly. `RegistryProtocols.PythonPackagePublishesAndInstallsWithPip`
@@ -205,7 +280,7 @@ three through debuginfod paths and compares exact bytes.
 
 ```sh
 cmake --build build -j 6
-./build/tests/lake-tests --gtest_filter='RegistryProtocols.*:Stores/TenantImages.*'
+./build/tests/lake-tests --gtest_filter='RegistryProtocols.*:Stores/TenantImages.*:RegistryStore.*'
 ```
 
 The executable tests require no container daemon or external registry. They use loopback HTTP and

@@ -15,7 +15,7 @@ the registry renders it everywhere, but only the operator credential passes.
 
 ```json
 POST /v1/move_workspace_store
-{"workspace_id": "<uuid>", "mode": "plan" | "copy" | "verify" | "switch"}
+{"workspace_id": "<uuid>", "mode": "plan" | "copy" | "verify" | "switch" | "provision"}
 ```
 
 Every answer carries `workspace_id`, `customer_id`, `mode`, `store_moved_at` (null until the switch)
@@ -27,6 +27,7 @@ and `unassigned`: the repositories of the space without a workspace. Any unassig
 | `plan` | Reads only. Lists the workspace's repositories, live and tombstoned, with `logical_bytes` and `unique_bytes` of their refs (`size_error` when a size cannot be read). | `repositories`, `blocked` |
 | `copy` | Copies each repository with liquid's `repository::transfer` (liquid#328): every reachable object keeping its digest, its lease records, then its state keys with `LIQUID_REPO` last. A rerun copies only what is missing. Refused once the workspace is switched. | `repositories` (one transfer report each), `complete` |
 | `verify` | Writes nothing. Compares every reachable object and every state key in both stores. | `repositories` with `differences`, `complete` |
+| `provision` | Repairs a workspace switched before a switch created the store of a workspace with no repository (lake#383 phase B), which has `store_moved_at` but no store, so `create_repository` there answers `corrupt`. Creates its bucket and data key only when **all** hold: the workspace is switched; no repository row names it, live or tombstoned (a row tombstoned with its retention ended at its deletion, which is how a creation the missing store refused rolls back, does not count and is listed in `refused_creations`); no `lake_oci_blobs` record names a store object; and its bucket `lake_store` is absent or empty. Otherwise `409 conflict` naming what exists (the repositories, the count of stored image blobs, or the count of objects in the bucket), and nothing is written. A bucket whose store already opens with its key is left as it is (`created: false`), so a repeated call is a no-op. Not `unassigned`-blocked. | `created`, `objects`, `refused_creations` |
 | `switch` | Refuses the workspace's and its space's repository requests and repository creation in the workspace with `503 store_unavailable` (`Retry-After`) while it runs, lists the workspace's repositories under that hold, copies what arrived since `copy`, verifies each repository again, creates in the workspace store each one the space store never held, and only when all are complete sets `workspaces.store_moved_at`; from then on the workspace's repositories are served from its store. Requests for other workspaces' stores are not held. A repeated switch answers `switched: true` and changes nothing. A completed switch then drops from the space's search index on lake's volume what it holds of the switched repositories (lake#381); the workspace's own index is built beside its store on its first search. | `repositories`, `switched`, `store_moved_at`, `space_index_repositories_dropped` (or `space_index_error`) |
 
 A transfer report has `repository_id`, `absent` (the space store never held it: nothing to copy),
@@ -58,8 +59,12 @@ A transfer report has `repository_id`, `absent` (the space store never held it: 
 - liquid's sync client does not yet retry a `503` with `Retry-After` (liquid#340): rerun a
   `liquid push` or `pull` refused during a move.
 
+`provision` never weakens the rule above: a switched workspace whose store held data (it has a
+repository row, a stored image blob, or objects in its bucket) is still never given a new empty
+store; only one that never held anything is.
+
 **Audit.** Each call is one central audit event (`workspace_store.move`, details `workspace_id` and
-`mode`): it is an operator action on the instance, classified central in
+`mode`, and `created` for `provision`): it is an operator action on the instance, classified central in
 `src/api/audit_routing.cpp`.
 
 ## Removing the space's store
@@ -131,3 +136,10 @@ Otherwise it answers `customer_id` (the space) and:
 5. Leave `LAKE_STORE_ROOT/<space>/store` in place until every workspace of the space is switched
    and Steve approves removing it; then run `remove_space_store` with `dry_run: true`, check the
    paths and bytes, and run it again with `dry_run: false`.
+
+**A workspace switched with no repository before lake#383 phase B** (on dev
+`787217d6-ec44-403b-b60d-2dc7cc066f6f`) has no store: `create_repository` there answers
+`corrupt: … no bucket 'lake_store'`, and the refused creation leaves its row tombstoned with its
+retention ended. Repair it once with `move_workspace_store` mode `provision` for that workspace (operator
+bearer), check `created: true`, then create a repository there and commit to it. A `409 conflict`
+means the workspace held something: do not work around it; find out what its store held.

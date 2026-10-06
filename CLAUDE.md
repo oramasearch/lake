@@ -148,9 +148,13 @@ repository (`<space>/<name>`, `<space>/cache/<name>`) is routed by the content-f
 from its workspace or by `create_image_repository` with an explicit `workspace_id`; never changed;
 deleted with the workspace or by the operator's `unroute_image_repository`), and its manifests and tags are sealed `lake_oci_manifests`/`lake_oci_tags` records in
 that workspace's Zetta, so image addresses do not change. npm, Python, debuginfod and one-component
-OCI stay with the instance. Blobs stay in the instance registry until phase B (after lake#380);
-`copy_workspace_records` (`oci_tags`) moves the tags written before. See
-`docs/api/registry.md#where-a-tenant-image-lives`.
+OCI stay with the instance. `copy_workspace_records` (`oci_tags`) moves the tags written before.
+Phase B (decision 54 S5, no migration): a tenant blob uploaded into a switched workspace is an
+object of that workspace's liquid store, mapped from its SHA-256 by its `lake_oci_blobs` record
+(liquid addresses objects by its own hash, under encryption), and pulls stream it 4 MiB at a time;
+blobs pushed before stay in the instance registry, still served from there, until
+`copy_workspace_records` (`oci_blobs`) copies and verifies them; lake removes nothing from the
+instance registry. See `docs/api/registry.md#where-a-tenant-image-lives`.
 The operator gets its volumes (decision 54 S13, operator#259, operator#260, migration `0069`):
 `workspaces.storage_gi` (default 5, never decreasing, refused by a trigger) is the desired size of
 each workspace Zetta volume, with the operator's observed size, phase and message on the row;

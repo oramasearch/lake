@@ -50,6 +50,13 @@ struct ServerOptions {
     // Maximum completed OCI blob size. The HTTP parser admits this much so registry upload
     // handlers can stream it; every other request body retains the 64 MiB adapter limit.
     std::uint64_t max_registry_blob_bytes = std::uint64_t{4} * 1024 * 1024 * 1024;
+    // OCI uploads (staged or claimed by a completion) untouched for this long are removed by the
+    // maintenance thread (lake#383 phase B), checked every ten minutes or every max age, whichever
+    // is shorter.
+    std::chrono::seconds registry_upload_max_age{std::chrono::hours(24)};
+    // An image pull whose client takes no bytes for this long is ended, releasing its stream slot
+    // (lake#383 phase B).
+    std::chrono::milliseconds registry_stream_idle_timeout{std::chrono::seconds(60)};
     // Public hostname used in OAuth callbacks, as the WebAuthn RP ID, and as
     // the HTTPS repository-command origin when external_origin is unset.
     std::string public_host;

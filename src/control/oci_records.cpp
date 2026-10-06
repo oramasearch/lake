@@ -268,7 +268,17 @@ std::string OciBlobCodec::lookup(const OciBlob& blob) {
 }
 
 nlohmann::json OciBlobCodec::encode(const OciBlob& blob) {
-    return {{"customer_id", blob.customer_id}, {"digest", blob.digest}, {"size", blob.size}};
+    nlohmann::json body{{"customer_id", blob.customer_id}, {"digest", blob.digest}, {"size", blob.size}};
+    if (!blob.object.empty()) {
+        body["object"] = blob.object;
+    }
+    if (blob.rooted) {
+        body["rooted"] = true;
+    }
+    if (!blob.superseded.empty()) {
+        body["superseded"] = blob.superseded;
+    }
+    return body;
 }
 
 std::optional<OciBlob> OciBlobCodec::decode(const StoredRecord& record) {
@@ -277,10 +287,22 @@ std::optional<OciBlob> OciBlobCodec::decode(const StoredRecord& record) {
     }
     OciBlob blob{record.body.value("customer_id", std::string()),
                  record.body.value("digest", std::string()),
-                 record.body.value("size", std::uint64_t{0})};
+                 record.body.value("size", std::uint64_t{0}),
+                 record.body.value("object", std::string())};
     if (blob.customer_id.empty() || blob.digest.empty()) {
         return std::nullopt;
     }
+    blob.rooted = record.body.value("rooted", false);
+    if (const auto superseded = record.body.find("superseded");
+        superseded != record.body.end() && superseded->is_array()) {
+        for (const nlohmann::json& object : *superseded) {
+            if (object.is_string()) {
+                blob.superseded.push_back(object.get<std::string>());
+            }
+        }
+    }
+    blob.revision = record.revision;
+    blob.lake_revision = record.lake_revision;
     return blob;
 }
 
@@ -299,18 +321,96 @@ liquid::runtime::task<ZettaControlResult<void>> record_oci_blob(WorkspaceRecords
 
 liquid::runtime::task<ZettaControlResult<bool>>
 has_oci_blob(WorkspaceRecords& records, std::string customer_id, std::string digest) {
+    auto blob = settled(co_await get_oci_blob(records, std::move(customer_id), std::move(digest)));
+    if (!blob) {
+        co_return failed<bool>(blob.error());
+    }
+    co_return ZettaControlResult<bool>(blob->has_value());
+}
+
+liquid::runtime::task<ZettaControlResult<std::optional<OciBlob>>>
+get_oci_blob(WorkspaceRecords& records, std::string customer_id, std::string digest) {
+    using Found = std::optional<OciBlob>;
     const std::string key =
         records.index_of(OciBlobCodec::collection, manifest_name(customer_id, digest));
     auto stored = settled(co_await records.get(OciBlobCodec::collection, key));
     if (!stored) {
-        co_return failed<bool>(stored.error());
+        co_return failed<Found>(stored.error());
     }
     if (!*stored) {
-        co_return ZettaControlResult<bool>(false);
+        co_return ZettaControlResult<Found>(Found{});
     }
-    const auto blob = OciBlobCodec::decode(**stored);
-    co_return ZettaControlResult<bool>(blob && blob->customer_id == customer_id &&
-                                       blob->digest == digest);
+    auto blob = OciBlobCodec::decode(**stored);
+    if (!blob || blob->customer_id != customer_id || blob->digest != digest) {
+        co_return ZettaControlResult<Found>(Found{});
+    }
+    co_return ZettaControlResult<Found>(std::move(blob));
+}
+
+liquid::runtime::task<ZettaControlResult<OciBlob>> store_oci_blob(WorkspaceRecords& records,
+                                                                  OciBlob blob) {
+    const std::string key =
+        records.index_of(OciBlobCodec::collection, manifest_name(blob.customer_id, blob.digest));
+    ZettaControlError last{"conflict", "the image blob record kept changing"};
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        auto found = settled(co_await get_oci_blob(records, blob.customer_id, blob.digest));
+        if (!found) {
+            co_return failed<OciBlob>(found.error());
+        }
+        if (*found && (*found)->object == blob.object && (*found)->size == blob.size &&
+            ((*found)->rooted || !blob.rooted)) {
+            co_return ZettaControlResult<OciBlob>(std::move(**found));
+        }
+        const bool absent = !*found;
+        if (!absent) {
+            blob.superseded = (*found)->superseded;
+            if ((*found)->object == blob.object) {
+                blob.rooted = blob.rooted || (*found)->rooted;
+            } else if (!(*found)->object.empty() && (*found)->rooted &&
+                       std::ranges::find(blob.superseded, (*found)->object) == blob.superseded.end()) {
+                blob.superseded.push_back((*found)->object);
+            }
+        }
+        auto written = settled(co_await records.put(
+            OciBlobCodec::collection, key, OciBlobCodec::lookup(blob), OciBlobCodec::encode(blob),
+            absent ? RecordCondition{.if_absent = true}
+                   : RecordCondition{.if_revision = (*found)->revision},
+            absent ? 1 : (*found)->lake_revision + 1));
+        if (written) {
+            auto decoded = OciBlobCodec::decode(*written);
+            if (!decoded) {
+                co_return failed<OciBlob>(
+                    ZettaControlError{"store_error", "the stored image blob record did not decode"});
+            }
+            co_return ZettaControlResult<OciBlob>(std::move(*decoded));
+        }
+        if (written.error().code != "conflict") {
+            co_return failed<OciBlob>(written.error());
+        }
+        last = written.error(); // written meanwhile: reread
+    }
+    co_return failed<OciBlob>(last);
+}
+
+liquid::runtime::task<ZettaControlResult<std::vector<OciBlob>>>
+list_oci_blobs(WorkspaceRecords& records, std::string customer_id) {
+    using Blobs = std::vector<OciBlob>;
+    auto stored = settled(
+        co_await records.list(OciBlobCodec::collection, "customer:" + customer_id));
+    if (!stored) {
+        co_return failed<Blobs>(stored.error());
+    }
+    Blobs blobs;
+    for (const StoredRecord& record : *stored) {
+        auto decoded = OciBlobCodec::decode(record);
+        if (decoded && decoded->customer_id == customer_id &&
+            record.id == records.index_of(OciBlobCodec::collection,
+                                          manifest_name(customer_id, decoded->digest))) {
+            blobs.push_back(std::move(*decoded));
+        }
+    }
+    std::ranges::sort(blobs, {}, &OciBlob::digest);
+    co_return ZettaControlResult<Blobs>(std::move(blobs));
 }
 
 liquid::runtime::task<ZettaControlResult<std::vector<OciTag>>>

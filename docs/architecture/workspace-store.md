@@ -16,10 +16,17 @@ rewrote a finished run in place, which Zetta refuses.
 | Piece | Where |
 |---|---|
 | Packs, index runs, object map, leases, collector state, each repository's `LIQUID_REPO`, journal, sessions and replication cursors | Bucket `lake_store` of the workspace Zetta, one object per liquid key, encrypted |
+| Tenant image blobs (lake#383 phase B) | Objects of the same liquid store, not in any repository; each found through its `lake_oci_blobs` record (SHA-256 digest to liquid digest), [registry.md](../api/registry.md#where-a-tenant-image-lives) |
 | The workspace's data key, wrapped | Object `keys/workspace-v1.wrapped` of the same bucket |
 | The workspace's search index (lake#381): manifest, write-once blob runs, segments, artifact members | Objects `search/<name>` of the same bucket, sealed with the workspace's data key and fenced by the store's lease through search's own client calls, never by liquid ([search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)) |
 | Whether the workspace is switched | `workspaces.store_moved_at` (migration `0067`), content-free |
 | The space's store from before the switch | `LAKE_STORE_ROOT/<space>/store` and `<space>/repositories`, unchanged and read-only from the switch on, until the operator's `remove_space_store` removes both once every workspace of the space is switched ([below](#removing-the-spaces-store)) |
+
+A switch creates the workspace's store (bucket and data key) even when the workspace has no
+repository, since its tenant images live there (lake#383 phase B). A workspace an earlier lake
+switched without one is repaired by `move_workspace_store` mode `provision`, which creates the store
+only for a workspace that never held anything (no repository row but a refused creation's, no
+stored image blob, an absent or empty bucket) and otherwise refuses with `conflict`.
 
 A repository's store is chosen by its `workspace_id`: its workspace's store once `store_moved_at` is
 set, the space's store before. The choice is cached per repository and cleared by the switch.
@@ -266,6 +273,12 @@ contract asks.
   a write past it `507`, which liquid sees as `busy`. An existing bucket keeps its quota. The quota
   does not yet follow `workspaces.storage_gi` (migration `0069`, the desired size of the workspace
   Zetta's volume); raising `storage_gi` ahead of use is a follow-up.
+- Tenant image blobs are objects of the store, so they count in its bucket usage like any other
+  write, and an upload checks the space's quota before it writes (`507` past it). Metering reports
+  them as `images_in_workspace_stores_bytes`, not again in `images_bytes`.
+- Lake runs no liquid collector on workspace stores, but one would keep image blobs: each is
+  rooted by a liquid lease for a century when it is stored (a durable pin is
+  [liquid#342](https://github.com/oramasearch/liquid/issues/342)).
 - Deleting a workspace removes its search index objects (when its store is open) and then closes its
   store and releases its lease before the deletion is reported
   (`WorkspaceContent::close_workspace_store`), waiting for an open in progress on the workspace's
@@ -296,6 +309,19 @@ Zetta `:barrier` (an fsync), each put and remove a request (per small put about 
 and 5 removes). Seeding the window cache with the bytes each put and append sends removed the
 read-backs (781 reads down to 185). The numbers for the dev repositories through a deployed lake
 belong in the deployment record once a workspace is switched.
+
+## Image blobs (lake#383 phase B)
+
+`put_workspace_blob`, `admit_workspace_stream`, `workspace_blob_present` and `read_workspace_blob`
+(`SyncStore`) are the registry's only way into a workspace store. A put streams a claimed upload
+into the store with liquid's `put_file` under the workspace's lane, admitted for a push (refused at
+once when the lane is full or moving) and held for the copy; it holds the lane, and liquid's
+mutation lock, for the whole put, so the workspace's other requests wait for a large layer, and it
+roots the new object with a lease (once per object its record names). A pull takes one of the
+workspace's eight stream slots for its whole stream, apart from the lane's four admissions, so
+pulls never refuse the workspace's pushes, git or repository requests; it does not hold the lane,
+and each window (1 MiB) takes the lane only for its read. At most 24 pulls run in the process,
+below the server's 32 workers, and a client that takes no bytes for 60 s loses its stream. Nothing here changes `ZettaObjectBackend`.
 
 ## Not yet
 

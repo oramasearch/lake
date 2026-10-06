@@ -565,6 +565,29 @@ tests run tenant pushes against routed workspaces; `WorkspaceRecords.ImageTagsMo
 the codecs and a raced tag move; `PostgresImageRoutes.MigrationRoutesUnambiguousImagesOnly`
 migration `0068`.
 
+Tenant image blobs in the workspace store (lake#383 phase B): `test_registry_store.cpp`
+(`RegistryStore.*`, a real lake server with workspace stores on `FakeZettaObjects`) covers push and
+pull of a multi-layer image through a routed, switched workspace (GET and HEAD, ciphertext only,
+nothing in the instance registry, a repeated layer stored once, usage counted once), a chunked
+upload and a wrong digest, a 304 MiB layer streamed with the pull's resident growth bounded, a
+blob of another workspace or space refused, the `oci_blobs` copy (plan, copy, rerun, verify with
+SHA-256, missing, corrupt and unswitched blobs unresolved, pulls after the registry files are
+removed), instance packages unaffected, workspace deletion, and `move_workspace_store` `provision`
+(an empty, storeless switched workspace provisioned, then a repository created and committed; a
+refused creation's tombstone not counted; live and retained rows, and a bucket holding objects,
+refused; a repeated call a no-op, also after a restart; a workspace whose records name stored image
+blobs refused; a person's token refused `403`). The review's cases: a PATCH during a completion
+refused and the stored bytes unchanged, a record naming a missing or another object (`500` to GET
+and HEAD, repaired by a push, the old object kept in `superseded`), forty stalled pulls holding at
+most the workspace's eight stream slots while
+another workspace answers, `instance_paths` without a shared instance digest and withheld for an
+unreadable workspace or an uncopied legacy tag, the quota counting only new bytes (`507`, nothing
+staged left), the upload sweep, usage per workspace, and a liquid collection keeping image blobs.
+The second review's: eight pulls in flight while a push to the workspace succeeds, a ninth refused
+with `Connection: close`, stalled readers ended by the idle timeout; the global cap of 24 pulls
+with another workspace still answering; one root per object and the copy rooting older objects; a
+claimed upload kept for a retry after a store error and not swept during its completion.
+
 Workspace volumes (migration `0069`, operator#259, operator#260): `test_volumes.cpp`
 (`Stores/Volumes.*`, on the memory store and PostgreSQL) covers growing a workspace's storage, the
 refused decrease, unknown and deleted workspaces, callers who are not the operator, central audit,
