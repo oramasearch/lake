@@ -284,42 +284,51 @@ liquid store and holds file text in the clear.
 
 **Classification.** Workspace: it is repository content.
 
-**Done (S8).** A switched workspace's catalogue, segments, artifact members and manifest are the
-objects `search/<file>` in its store's bucket `lake_store`, beside the store:
+**Done (S8).** A switched workspace's manifest, blob runs, segments and artifact members are the
+objects `search/<name>` in its store's bucket `lake_store`, beside the store:
 
 - **Where.** A prefix in `lake_store`, not a bucket `lake_search` as first planned: one lease and
   fence then cover the store and its index (a second bucket would need a lease of its own or take
-  writes from any process), no key of its own is needed, and the index counts in the workspace's
-  usage and quota and goes with the bucket. Liquid never lists or writes under `search/`.
-- **Sealing.** Each object is written through a view of the workspace store's `ZettaObjectBackend`,
-  so it is encrypted with the workspace's data key exactly as the store's objects are, its key bound
-  in the associated data, rather than with the record seal key the plan first named. File text is
-  never plaintext in the Zetta; nothing of a switched workspace's index is on lake's volume or in
-  PostgreSQL.
+  writes from any process), no key of its own is needed, and the index goes with the bucket. It
+  counts in the bucket's quota, and search writes only within the room left after a tenth of the
+  quota kept for liquid, stopping indexing rather than failing a push. Liquid never lists or writes
+  under `search/`.
+- **Sealing.** Each object is AES-256-GCM under the workspace's data key (the store's cipher), its
+  associated data binding the workspace and the object's name, written through search's own client
+  calls with the store's lease fence, rather than with the record seal key the plan first named. A
+  failed index write never fails the store. File text is never plaintext in the Zetta; nothing of a
+  switched workspace's index is on lake's volume or in PostgreSQL.
+- **Blobs once.** Blob text is in write-once runs (one new run per commit, holding only new blobs),
+  compacted when more than half of their bytes are unreferenced; no catalogue is rewritten whole.
 - **Writes.** Under the workspace store's lane, lent with the repository (`lend_repository`), and
   with the store's lease fence; the manifest is replaced by one atomic `put` after a barrier, so the
   lost-update row in [store-volume.md](../deployment/store-volume.md) no longer applies to a
   switched workspace.
 - **Loading.** On a workspace's first search, and again under a new fence; idle workspaces are
   evicted under `LAKE_SEARCH_MEMORY_BYTES` (default 256 MiB).
-- **Rebuilt, not copied.** A missing, partial or unreadable index is rebuilt from the workspace's
-  repositories (branch tips and artifacts), on first use or by `reindex_artifacts`; nothing is copied
-  from the space's index.
+- **Rebuilt, not copied.** A switch, or a missing, partial or unreadable index, queues a rebuild on
+  lake's maintenance thread, never inside a request: it reads each repository's branch tips, release
+  snapshots (from the release records) and artifacts one repository at a time under the lane, and
+  writes without the lane. Searches answer `building_workspaces` meanwhile; writes are applied after
+  it. A failure backs off from 15 s to 10 min. Nothing is copied from the space's index.
+- **Scope.** The `search` capability decides which spaces and workspaces the caller may reach before
+  anything is lent, opened or rebuilt.
 - **The space's index.** A switch, and every start, drops from it what it holds of switched
   workspaces' repositories and the history-scan blobs no segment references, and removes the
   directory once empty.
 - **Cascade (#514).** Deleting a workspace removes its `search/` objects while lake has its store
-  open; otherwise they go with the workspace Zetta.
+  open; otherwise they go with the workspace Zetta. A failed removal is logged and never holds the
+  deletion up. Deleting a repository removes it from its workspace's index.
 - **API.** `search` keeps `customer` and gains an optional `workspace_id`; a space-wide search reads
   the space's index and each switched workspace's, and lists the workspaces it could not read in
   `skipped_workspaces`. The required `workspace_id` and the `/w/<id>/` path are not done.
 
-**Migration.** None. On dev, a workspace's index is built on its first search after the deployment;
+**Migration.** None. On dev, a switched workspace's index is built on the maintenance thread after
+its first search following the deployment;
 whatever `<space>/index` holds of switched workspaces is removed at start (on 2026-10-03 no
 `<customer>/index` existed on dev).
 
-**Not done.** A rebuild does not republish tag snapshots of releases created before a switch or a
-wipe; the decided `rebuild_search_index` capability and the required `workspace_id` input;
+**Not done.** The decided `rebuild_search_index` capability and the required `workspace_id` input;
 rollback detection ([lake#522](https://github.com/oramasearch/lake/issues/522)).
 
 ### lake#382: transparency log, TUF and timestamp evidence

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <ctime>
 #include <optional>
+#include <print>
 #include <map>
 #include <set>
 #include <string_view>
@@ -366,17 +367,22 @@ std::expected<void, std::string> finish_workspace_deletion(const ApiContext& con
             return recorded;
         }
     }
-    // The workspace's search index (lake#381) goes before its store closes.
+    // The workspace's search index (lake#381) goes before its store closes. It is derived data
+    // that the workspace Zetta's deletion destroys anyway, so a failure to remove it is logged and
+    // never holds the deletion up.
     if (context.workspace_content && context.workspace_content->drop_workspace_index) {
         const auto dropped = context.workspace_content->drop_workspace_index(deletion.workspace_id);
         if (!dropped) {
-            return std::unexpected("could not drop the workspace's search index: " + dropped.error());
+            std::println(stderr, "lake: workspace deletion {}: search index left to the workspace "
+                                 "Zetta's deletion: {}",
+                         deletion.workspace_id, dropped.error());
         }
     } else if (context.search) {
         const auto dropped = context.search->drop_workspace(deletion.workspace_id);
         if (!dropped) {
-            return std::unexpected("could not drop the workspace's search index: " +
-                                   dropped.error().message);
+            std::println(stderr, "lake: workspace deletion {}: search index left to the workspace "
+                                 "Zetta's deletion: {}",
+                         deletion.workspace_id, dropped.error().message);
         }
     }
     if (context.workspace_content && context.workspace_content->close_workspace_store) {

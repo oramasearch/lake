@@ -179,13 +179,16 @@ runs); no workspace is switched on dev, and the copy's snapshot
 precondition is not enforced (the move does not wait on the `0069` snapshot state yet). See `docs/architecture/workspace-store.md` and
 `docs/api/workspace-store.md`.
 A switched workspace's search index lives beside its store (decision 54 S8, lake#381, no migration):
-the catalogue, segments, artifact members and manifest are `search/` objects in bucket `lake_store`,
-written through a view of the store's backend (sealed with the workspace's data key, fenced by its
-lease) under the store's lane; loaded on first search, evicted when idle under
-`LAKE_SEARCH_MEMORY_BYTES`, and rebuilt from the repositories when missing or unreadable, never
-copied. A switch and every start drop switched workspaces from the space index on lake's volume, and
-a workspace deletion removes its index objects. `search` gains an optional `workspace_id`; the
-interim skip of switched workspaces is gone. See `docs/api/search.md`.
+the manifest, write-once blob runs, segments and artifact members are `search/` objects in bucket
+`lake_store`, sealed with the workspace's data key and fenced by the store's lease through search's
+own client calls (a failed index write never fails the store), written under the store's lane and
+within the bucket quota's room. Loaded on first search, evicted when idle under
+`LAKE_SEARCH_MEMORY_BYTES`; a missing or unreadable index is rebuilt on lake's maintenance thread
+(releases from their records), never inside a request and never copied, and answers
+`building_workspaces` meanwhile. `search` decides the caller's spaces and workspaces before any
+workspace is opened. A switch and every start drop switched workspaces from the space index on
+lake's volume; deleting a repository or a workspace removes it from the index. `search` gains an
+optional `workspace_id`; the interim skip of switched workspaces is gone. See `docs/api/search.md`.
 
 ## Historical status — superseded 2026-09-08
 

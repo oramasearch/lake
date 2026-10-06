@@ -17,7 +17,7 @@ rewrote a finished run in place, which Zetta refuses.
 |---|---|
 | Packs, index runs, object map, leases, collector state, each repository's `LIQUID_REPO`, journal, sessions and replication cursors | Bucket `lake_store` of the workspace Zetta, one object per liquid key, encrypted |
 | The workspace's data key, wrapped | Object `keys/workspace-v1.wrapped` of the same bucket |
-| The workspace's search index (lake#381): catalogue, segments, artifact members, manifest | Objects `search/<file>` of the same bucket, written through the store's backend (so encrypted and fenced the same way), never by liquid ([search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)) |
+| The workspace's search index (lake#381): manifest, write-once blob runs, segments, artifact members | Objects `search/<name>` of the same bucket, sealed with the workspace's data key and fenced by the store's lease through search's own client calls, never by liquid ([search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)) |
 | Whether the workspace is switched | `workspaces.store_moved_at` (migration `0067`), content-free |
 | The space's store from before the switch | `LAKE_STORE_ROOT/<space>/store` and `<space>/repositories`, unchanged and read-only from the switch on, until the operator's `remove_space_store` removes both once every workspace of the space is switched ([below](#removing-the-spaces-store)) |
 
@@ -194,12 +194,17 @@ maps of open stores is never held across store I/O, a network call or a wait.
   store's lane holds up no search in another space.
 - **A switched workspace's search index** (lake#381) is kept beside its store as `search/` objects in
   the same bucket. The repository store lends it with a repository, or alone
-  (`LiquidCustomerStores::lend_workspace`), under the workspace's lane, through a view of the
-  store's backend fenced by its lease (`WorkspaceStore::search_objects`, made once per open store),
-  so publish, reindex and history scans write it under the lane and the lease, and a lost lease
-  stops them as it stops the store. Search's own map lock is never held across a lane wait or I/O.
-  It is loaded on first use, evicted when idle under `LAKE_SEARCH_MEMORY_BYTES`, and rebuilt from
-  the repositories when missing or unreadable ([search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)).
+  (`LiquidCustomerStores::lend_workspace`), under the workspace's lane: objects sealed with the
+  store's data key (`WorkspaceStore::search_cipher`, unwrapped once per open store) and written with
+  the store's client and lease fence (`search::make_sealed_index_objects`), so publish, reindex and
+  history scans write it under the lane and the lease. A failed index write does not mark the store
+  failed; Zetta refusing one as `fenced` marks it unusable (`WorkspaceStore::search_fenced`), as a
+  lost lease does. Index bytes count in the bucket's quota, and search writes only within the room
+  left after a tenth of the quota kept for liquid (`search_index_budget`). Search's own map lock is
+  never held across a lane wait or I/O. It is loaded on first use, evicted when idle under
+  `LAKE_SEARCH_MEMORY_BYTES`, and rebuilt on the maintenance thread when missing or unreadable,
+  reading one repository at a time under the lane and writing without it
+  ([search.md](../api/search.md#where-the-index-lives-lake381-decision-54-s8)).
 - **Zetta's HTTP client** (`install_native_http_transport`) is safe from many threads at once: one
   dedicated thread runs every exchange, callers post to it and wait on an event, and its shared TLS
   context cache is locked.
@@ -357,9 +362,12 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreMove.ACopyDoesNotRefuseTheSpacesOtherWorkspaces` | a copy marks only the workspace's lane |
 | `WorkspaceStoreMove.ACopyIntoADroppedBucketFailsInsteadOfReportingAbsent` | a dropped bucket fails the copy instead of answering `absent` |
 | `WorkspaceStoreSearch.TwoWorkspacesOfASpaceKeepSealedIndexesBesideTheirStoresAndARestartReloadsThem` | the switch drops the space index's copy; two workspaces' indexes apart, sealed in their buckets, nothing on lake's volume; a restart reloads without rewriting |
-| `WorkspaceStoreSearch.AWipedWorkspaceIndexIsRebuiltNotServedEmpty` | a wiped index, a lost segment and a tampered catalogue are rebuilt from the store |
-| `WorkspaceStoreSearch.PushesAndSearchesInOneWorkspaceRunSideBySide` | pushes, commits, reindexes and searches in one workspace at once; every push indexed; a restart reloads whole |
-| `WorkspaceStoreSearch.DeletingAWorkspaceRemovesItsIndexObjects` | the deletion removes the `search/` objects |
+| `WorkspaceStoreSearch.AWipedOrTamperedWorkspaceIndexIsRebuiltNotServedEmpty` | a wiped index, lost runs and a tampered run are rebuilt, with and without a restart |
+| `WorkspaceStoreSearch.PushesAndSearchesInOneWorkspaceRunSideBySide` | pushes, commits, reindexes and searches in one workspace at once, 503s bounded; every push indexed; a restart reloads whole |
+| `WorkspaceStoreSearch.ASearchNeverOpensAWorkspaceItsCallerCannotRead` | a non-operator caller in two spaces: no lend, lease change or index write in the other space's workspace; one answer for another space's workspace and an unknown one |
+| `WorkspaceStoreSearch.AFailedSearchWriteDoesNotFailTheWorkspaceStore` | an unanswered index write leaves the store's lease and holder as they were |
+| `WorkspaceStoreSearch.TheFirstPushAfterASwitchDoesNotWaitForTheIndex` | a slow rebuild holds up neither the first push nor a search |
+| `WorkspaceStoreSearch.DeletingAWorkspaceRemovesItsIndexObjectsAndACleanupFailureDoesNotHoldItUp` | the deletion removes the `search/` objects, and completes when their removal fails |
 | `WorkspaceStoreMove.ARowLeftWithoutItsRepositoryIsCleanedUpByTheNextCreate` | an orphaned row is tombstoned by the next creation of its name |
 | `WorkspaceStoreMove.ARestartCountsSwitchedWorkspacesUsageBeforeAnyWrite` | usage primed at start |
 | `WorkspaceStoreMove.ASearchWaitingOnOneSpacesStoreDoesNotHoldSearchInAnother` | search borrows before its lock |

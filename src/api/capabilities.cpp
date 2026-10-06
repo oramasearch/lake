@@ -647,6 +647,7 @@ json search_output_schema() {
              {{"mode", {{"type", "string"}}},
               {"scanned_changes", {{"type", "integer"}}},
               {"skipped_workspaces", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+              {"building_workspaces", {{"type", "array"}, {"items", {{"type", "string"}}}}},
               {"items", {{"type", "array"}, {"items", search_schema()}}}}}};
 }
 
@@ -671,6 +672,7 @@ ApiResult search_result(search::Result<search::QueryResult> result) {
     return ApiResult::success({{"mode", search::to_string(result->mode)},
                                {"scanned_changes", result->scanned_changes},
                                {"skipped_workspaces", result->skipped_workspaces},
+                               {"building_workspaces", result->building_workspaces},
                                {"items", std::move(values)}});
 }
 
@@ -3822,8 +3824,18 @@ void register_repository_capabilities(Registry& registry) {
                                     .deleted_at = timestamp_after(std::chrono::seconds::zero()),
                                     .retention_until = timestamp_after(std::chrono::days{30}),
                                 };
-                                return one_result(
-                                    ctx.store->delete_repository(in.at("id"), deletion));
+                                auto deleted = ctx.store->delete_repository(in.at("id"), deletion);
+                                // lake#381: the repository leaves its workspace's search index
+                                // (and its space's); a failure is recorded, never undoes the
+                                // deletion.
+                                if (deleted && ctx.search) {
+                                    const auto forgotten = ctx.search->forget_repository(
+                                        deleted->customer_id, deleted->workspace_id, deleted->id);
+                                    if (!forgotten) {
+                                        ctx.audit_details["search_index"] = forgotten.error().message;
+                                    }
+                                }
+                                return one_result(std::move(deleted));
                             }});
     const json sync_repository_input = {
         {"type", "object"},
@@ -5098,6 +5110,105 @@ void register_policy_capabilities(Registry& registry) {
         }});
 }
 
+// What one search may read (lake#381), decided before search lends, opens or rebuilds any
+// workspace: the operator reads every space; anyone else names a space, a workspace or a
+// repository, or is limited to their own spaces, and only spaces they may read have their switched
+// workspaces opened. A named workspace that does not exist, is not switched, or is not readable
+// answers one `invalid_input`, so its existence elsewhere is not revealed.
+std::expected<search::Query, ApiError> search_scope(const json& input, ApiContext& context) {
+    search::Query query{input.at("query").get<std::string>(),
+                        input.value("customer", ""),
+                        input.value("repository", ""),
+                        input.value("ref", ""),
+                        limit_of(input),
+                        input.value("change", ""),
+                        input.value("history", false),
+                        input.value("workspace_id", "")};
+    const bool operator_principal =
+        context.operator_credential || context.acting_identity == "admin";
+    control::AuthorizationCache cache;
+    const auto space_readable = [&](const std::string& customer_id) {
+        const auto object = context.store->find_policy_object("customer", customer_id);
+        if (!object) {
+            return false;
+        }
+        const auto decision = control::authorize(*context.store, context.acting_identity, object->id,
+                                                 "read", cache);
+        return decision && decision->allowed;
+    };
+    const ApiError not_searchable{
+        "invalid_input", "workspace_id must name a workspace Zetta in this space",
+        "/workspace_id"};
+    if (!query.workspace.empty()) {
+        const auto workspace = context.store->get_workspace(query.workspace);
+        if (!workspace || workspace->desired == "deleted" || workspace->store_moved_at.empty() ||
+            (!query.customer.empty() && workspace->customer_id != query.customer) ||
+            (!operator_principal && !space_readable(workspace->customer_id))) {
+            return std::unexpected(not_searchable);
+        }
+        query.customer = workspace->customer_id;
+        if (!operator_principal) {
+            query.spaces = std::set<std::string>{workspace->customer_id};
+        }
+        return query;
+    }
+    if (operator_principal) {
+        return query;
+    }
+    if (!query.repository.empty()) {
+        // A repository search reaches the repository's own index only when the caller may read
+        // the repository.
+        const auto object = context.store->find_policy_object("repository", query.repository);
+        const auto repository = context.store->get_repository(query.repository);
+        bool readable = false;
+        if (object && (!repository || query.customer.empty() ||
+                       repository->customer_id == query.customer)) {
+            const auto decision = control::authorize(*context.store, context.acting_identity,
+                                                     object->id, "read", cache);
+            readable = decision && decision->allowed;
+        }
+        // Without a repository row it can only be in its space's store; the space must be named.
+        if (!readable || (!repository && query.customer.empty())) {
+            return std::unexpected(ApiError{"invalid_input",
+                                            "repository does not name a repository you can search",
+                                            "/repository"});
+        }
+        if (repository) {
+            query.customer = repository->customer_id;
+        }
+        query.spaces = std::set<std::string>{};
+        if (space_readable(query.customer)) {
+            query.spaces->insert(query.customer);
+        }
+        return query;
+    }
+    std::set<std::string> spaces;
+    if (!query.customer.empty()) {
+        if (space_readable(query.customer)) {
+            spaces.insert(query.customer);
+        }
+    } else if (!context.acting_user_id.empty()) {
+        constexpr int page = 10'000;
+        const auto customers = context.store->list_customers(page, context.acting_user_id);
+        if (!customers) {
+            return std::unexpected(ApiError{customers.error().code, customers.error().message, {}});
+        }
+        if (customers->size() >= static_cast<std::size_t>(page)) {
+            // No cursor for this list: refused rather than searched in part.
+            return std::unexpected(ApiError{"invalid_input",
+                                            "too many spaces to search them all; name a customer",
+                                            "/customer"});
+        }
+        for (const control::Customer& customer : *customers) {
+            if (space_readable(customer.id)) {
+                spaces.insert(customer.id);
+            }
+        }
+    }
+    query.spaces = std::move(spaces);
+    return query;
+}
+
 void register_search_capability(Registry& registry) {
     registry.add(Capability{
         .name = "search",
@@ -5132,16 +5243,12 @@ void register_search_capability(Registry& registry) {
             if (!context.store) {
                 return no_store();
             }
-            auto result = context.search->query(search::Query{input.at("query").get<std::string>(),
-                                                              input.value("customer", ""),
-                                                              input.value("repository", ""),
-                                                              input.value("ref", ""),
-                                                              limit_of(input),
-                                                              input.value("change", ""),
-                                                              input.value("history", false),
-                                                              input.value("workspace_id", "")},
-                                                context.acting_identity,
-                                                *context.store);
+            auto scope = search_scope(input, context);
+            if (!scope) {
+                return ApiResult::failure(scope.error().code, scope.error().message,
+                                          scope.error().path);
+            }
+            auto result = context.search->query(*scope, context.acting_identity, *context.store);
             if (result) {
                 context.audit_object =
                     input.value("repository", "").empty()

@@ -236,9 +236,13 @@ the workspace and see only its stores (lake#465). See `docs/api/storage.md`.
 so a slow workspace Zetta holds up only its own requests (lake#380). `LiquidCustomerStores` admits
 at most four requests per store lane and refuses a moving lane with 503; it lends repositories to
 search (`lend_repository`), and a switched workspace's search index objects with them or alone
-(`lend_workspace`, `open_lent_repository`), under the workspace store's lane through a fenced view
-of its backend (`WorkspaceStore::search_objects`, lake#381); `lend_repositories_to_search` wires
-them into `search::WorkspaceAccess`. The `/search` page runs `search` through `call_async`. The
+(`lend_workspace`), under the workspace store's lane, sealed with the store's data key and fenced
+by its lease (`search_objects_of`, lake#381), with the room the bucket quota leaves for them
+(`search_index_budget`); `lend_repositories_to_search` wires them into `search::WorkspaceAccess`,
+with release tags read from forge records and rebuilds queued on the maintenance thread. The
+`search` capability resolves the caller's scope first (`search_scope`, `capabilities.cpp`);
+`delete_repository` and `commit_repository_files` keep the index in step. The `/search` page runs
+`search` through `call_async`. The
 server runs the usage refresh, the start-up usage priming, the start-up purge of switched
 workspaces from the space search indexes (`purge_space_search_indexes`) and the deletion pass on a
 maintenance thread, and closes its io_context to

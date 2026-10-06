@@ -7,12 +7,15 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace lake::control {
 class Store;
+class ZettaObjectClient;
+class WorkspaceStoreCipher;
 }
 
 namespace liquid {
@@ -51,8 +54,13 @@ struct Query {
     int limit = 20;
     std::string change;
     bool history = false;
-    // Narrows the search to one workspace's index (lake#381).
+    // Narrows the search to one workspace's index (lake#381). The caller has checked that the
+    // principal may search it and set `customer` to its space.
     std::string workspace;
+    // The spaces whose switched workspaces a space-wide search may open (and, with `customer`
+    // empty, whose indexes on lake's volume it reads); nothing: every space (the operator). A
+    // workspace outside them is never lent, opened or rebuilt for this query.
+    std::optional<std::set<std::string>> spaces;
 };
 
 struct Hit {
@@ -93,18 +101,21 @@ struct QueryResult {
     std::vector<Hit> items;
     // Workspaces a space-wide search could not read (stopped, or their store unavailable).
     std::vector<std::string> skipped_workspaces;
+    // Workspaces whose index is being built (after a switch, or because it was lost): they answer
+    // nothing until it is ready, and are not waited for.
+    std::vector<std::string> building_workspaces;
 };
 
-// The objects of one workspace's search index (lake#381, decision 54 S8): kept beside the
-// workspace's liquid store in its workspace Zetta and sealed with the workspace's data key by the
-// workspace store. Names are plain file names (`manifest.json`, `blobs.json`, ...).
+// The objects of one workspace's search index (lake#381, decision 54 S8), kept beside the
+// workspace's liquid store in its workspace Zetta. Names are plain names (`manifest.json`,
+// `runs/<id>.json`, ...).
 class IndexObjects {
 public:
     virtual ~IndexObjects() = default;
     // Nothing when the object is absent.
     virtual Result<std::optional<std::string>> get(const std::string& name) = 0;
-    // Replaces the object atomically.
-    virtual Result<void> put(const std::string& name, std::string bytes) = 0;
+    // Replaces the object atomically; with `once`, refuses (`conflict`) an object that exists.
+    virtual Result<void> put(const std::string& name, std::string bytes, bool once = false) = 0;
     // Removing an absent object is a success.
     virtual Result<void> remove(const std::string& name) = 0;
     virtual Result<std::vector<std::string>> list() = 0;
@@ -116,26 +127,35 @@ public:
 // or writes under it.
 inline constexpr std::string_view workspace_index_prefix = "search/";
 
-// The index objects of a workspace store, written through `backend`: a view of the workspace
-// store's own backend fenced by its lease, so they are sealed with the workspace's data key like
-// every object of the store and every write carries the lease's fence. `sync` makes what was put
-// durable (Zetta's `:barrier`); the view's own barrier is never called, so the view never removes
-// an object outside `search/`.
-std::shared_ptr<IndexObjects> make_store_index_objects(std::shared_ptr<liquid::store_backend> backend,
-                                                       std::function<Result<void>()> sync);
+// A workspace's index objects in its store's bucket, through their own client: each object is
+// `LKSIDX1\0` then AES-256-GCM with the workspace's data key (the store's cipher), its associated
+// data binding the workspace and the object's name. Every write carries `fence`, the store's lease
+// fence. A failure here never marks the store failed; a write refused as fenced calls `on_lost`,
+// since the store's lease has passed to another holder.
+std::shared_ptr<IndexObjects>
+make_sealed_index_objects(std::shared_ptr<control::ZettaObjectClient> client,
+                          std::shared_ptr<const control::WorkspaceStoreCipher> cipher,
+                          std::uint64_t fence,
+                          std::function<void()> on_lost);
 
-// One workspace's index as lent by lake's repository store, valid while the lender's hold (the
-// workspace store's lane) is kept.
+// One workspace's index as lent by lake's repository store.
 struct WorkspaceIndex {
     std::string customer;
     std::string workspace;
     // The workspace store's lease fence: an index loaded under another fence is loaded again.
     std::uint64_t generation = 0;
+    // Safe to use after the lend's hold is let go (they hold their own client and key).
     std::shared_ptr<IndexObjects> objects;
-    // The workspace's live repositories, which a rebuild indexes.
+    // The workspace's live repositories, which a rebuild indexes. Fails rather than answer a
+    // partial list.
     std::function<Result<std::vector<std::string>>()> repositories;
-    // A repository of the workspace, opened under the hold already taken.
-    std::function<Result<liquid::repository*>(const std::string& repository)> open;
+    // A repository's releases as (tag, change), from its release records; a rebuild republishes
+    // their snapshots.
+    std::function<Result<std::vector<std::pair<std::string, std::string>>>(const std::string& repository)>
+        tags;
+    // How many more bytes the index may add to the workspace's bucket, so it never takes the room
+    // liquid's own writes need under the bucket quota; nothing: no quota.
+    std::function<std::optional<std::uint64_t>()> write_budget;
 };
 
 // A repository lent to search by lake's repository store (lake#380): `hold` keeps the store's
@@ -170,6 +190,9 @@ struct WorkspaceAccess {
     std::function<Result<std::optional<std::string>>(const std::string& customer,
                                                      const std::string& repository)>
         route;
+    // Runs Service::rebuild_workspace later, off every request path (lake's maintenance thread).
+    // Unset: it runs at once, on the calling thread, after search let go of every lane and lock.
+    std::function<void(const std::string& customer, const std::string& workspace)> schedule;
 };
 
 class Service {
@@ -214,7 +237,18 @@ public:
     // Forgets a workspace's index and removes its objects when lake has the workspace's store
     // open (a workspace deletion, lake#514); otherwise they go with the workspace Zetta.
     [[nodiscard]] Result<void> drop_workspace(const std::string& workspace);
-    // Rebuilds a workspace's index from its repositories, replacing what it holds.
+    // Removes one repository from its workspace's index, and from its space's index (a repository
+    // deletion). A workspace that is not switched, or whose index is being built, has nothing to
+    // remove.
+    [[nodiscard]] Result<void> forget_repository(const std::string& customer,
+                                                 const std::string& workspace,
+                                                 const std::string& repository);
+    // Marks a workspace's index as being built and schedules its rebuild (a switch).
+    void schedule_rebuild(const std::string& customer, const std::string& workspace);
+    // Rebuilds a workspace's index from its repositories, replacing what it holds. Each repository
+    // is read under its store's lane, one at a time; the index is written without holding the lane.
+    // Repositories written meanwhile are indexed again afterwards. A failure is retried on the
+    // workspace's next use after a growing delay.
     [[nodiscard]] Result<void> rebuild_workspace(const std::string& customer, const std::string& workspace);
 
 private:

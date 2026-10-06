@@ -10,8 +10,8 @@ a result that the capability would reject.
 | Input | Meaning |
 |---|---|
 | `query` | Required. Plain text is ranked BM25F; quoted text is an exact substring; `/expression/` is an ECMAScript regex. |
-| `customer` | Optional space id. Searches the space's index on lake's volume and the index of each of its switched workspaces. Empty searches every space. |
-| `workspace_id` | Optional. Searches only that switched workspace's index (lake#381). An unswitched or deleted workspace is `invalid_input`. |
+| `customer` | Optional space id. Searches the space's index on lake's volume and, when the caller may read the space, the index of each of its switched workspaces. Empty: every space for the operator, the caller's own spaces for anyone else. |
+| `workspace_id` | Optional. Searches only that switched workspace's index (lake#381). A workspace that does not exist, is not switched, is deleted or is in a space the caller cannot read answers the same `invalid_input` (`workspace_id must name a workspace Zetta in this space`). |
 | `repository` | Optional repository id. |
 | `ref` | Optional branch or tag name. An immutable tag snapshot takes precedence over a branch with the same name. |
 | `change` | Optional exact change digest. Requires `customer` and `repository`, cannot be combined with `ref` or `history`, and uses scan mode. |
@@ -20,11 +20,13 @@ a result that the capability would reject.
 | artifact scope | Append `in:artifact:<name>[@<version>]` to `query`. The name is a build output path and the version is its immutable result digest. This scope cannot be combined with `ref`, `change`, or `history`. |
 
 The value is
-`{mode,scanned_changes,skipped_workspaces,items:[{customer,repository,path,change,snippet,score,artifact,artifact_version,digest,line,workspace_id}]}`.
+`{mode,scanned_changes,skipped_workspaces,building_workspaces,items:[{customer,repository,path,change,snippet,score,artifact,artifact_version,digest,line,workspace_id}]}`.
 `workspace_id` names the workspace whose index answered a hit (empty for the space's index on lake's
 volume). `skipped_workspaces` lists the switched workspaces a space-wide search could not read
 (stopped, its store unavailable or moving); a search that names a workspace or a repository fails
-instead. `mode` explains which corpus answered the request:
+instead. `building_workspaces` lists the workspaces whose index is being built (after a switch, or
+because it was lost): they answer nothing yet, and the search does not wait for them or take their
+store's lane. `mode` explains which corpus answered the request:
 
 | Mode | Corpus |
 |---|---|
@@ -55,56 +57,95 @@ A repository's index is kept beside the store that serves it:
 
 | Repository served by | Index | Format |
 |---|---|---|
-| A switched workspace's store (`workspaces.store_moved_at` set) | Objects `search/<file>` in bucket `lake_store` of the workspace Zetta, beside its liquid store | Sealed with the workspace's data key by the workspace store's backend (below) |
+| A switched workspace's store (`workspaces.store_moved_at` set) | Objects `search/<name>` in bucket `lake_store` of the workspace Zetta, beside its liquid store | Sealed with the workspace's data key (below); blobs in write-once runs |
 | Its space's store on lake's volume | `<root>/<space>/index/` | Plain files (below) |
 
-**Beside the workspace store.** A switched workspace's catalogue, segments, artifact members and
-manifest are the same documents as below, kept as the objects `search/blobs.json`,
-`search/segment-….json`, `search/artifacts.json` and `search/manifest.json` in the workspace store's
-own bucket. They are written through a view of the store's `ZettaObjectBackend`
-(`search::make_store_index_objects`), so each is encrypted with the workspace's data key exactly as
-the store's objects are ([workspace-store.md](../architecture/workspace-store.md#encryption-below-liquid-s3);
-the associated data binds the object's key, so a segment cannot be moved under another name), and
-every write carries the store's lease fence: the lake that owns the store is the only writer of its
-index, and the manifest is replaced with one atomic `put`. Liquid never lists or writes under
-`search/`. A prefix in the store's bucket rather than a bucket of its own: one lease and fence cover
+**Beside the workspace store.** A switched workspace's index is the objects `search/manifest.json`
+(replaced atomically), `search/runs/<id>.json` (blob text, each run written once with
+`if_absent`), `search/segments/<id>.json` and `search/artifacts/<id>.json` (written once, named by the
+manifest). A prefix in the store's bucket rather than a bucket of its own: one lease and fence cover
 the store and its index (a second bucket would need its own lease, or would take writes from any
-process), the index needs no key of its own, it counts in the workspace's usage and quota, and it
-goes with the bucket. No index content of a switched workspace is written to lake's volume or to
+process), the index needs no key of its own, and it goes with the bucket. Liquid never lists or
+writes under `search/`. No index content of a switched workspace is written to lake's volume or to
 PostgreSQL.
 
-**Lent, never opened.** Search reaches a workspace's index only through lake's repository store
+**Sealed, fenced, and apart from the store's failures.** Search writes its objects through its own
+`ZettaObjectClient` calls (`search::make_sealed_index_objects`), not through liquid's backend: each
+object is `LKSIDX1\0` followed by AES-256-GCM under the workspace's data key (the store's
+`WorkspaceStoreCipher`, unwrapped once per open store from `keys/workspace-v1.wrapped`), its
+associated data binding the workspace and the object's name, so an object cannot be moved under
+another name or read under another workspace's key. Every write carries the store's lease fence. A
+failed index write is the search's failure only: it never marks the workspace store failed, so the
+store is not reopened; only Zetta refusing an index write as `fenced` (the lease is another holder's)
+marks the store unusable, as a lost lease does.
+
+**Writes once, not whole.** A commit writes the new segments and one new run holding only the blobs
+no run has, then replaces the manifest; runs, segments and artifact objects the manifest no longer
+names are removed after it. When more than half of the runs' bytes are unreferenced (and they hold
+over 1 MiB), the live blobs are written into one new run and the old runs removed. A push therefore
+writes the text it added, not the workspace's whole text.
+
+**Room for the repositories.** Index bytes share the workspace bucket's quota (the space's storage
+quota) with the liquid store. Before a commit, search checks that what it is about to write fits in
+the quota less the bucket's last known usage and a tenth of the quota kept for liquid; otherwise it
+writes nothing and answers `busy` ("indexing is stopped"), which a push or commit records in its
+audit details and never fails on. Liquid's own writes are therefore never refused because of the
+index (to within the ten-second staleness of the usage reading).
+
+**Who can make search open a workspace.** The `search` capability decides the scope before search
+lends, opens or rebuilds anything (`search_scope`). The operator reads every space. Anyone else
+names a `customer`, a `workspace_id` or a `repository`, or is limited to their own spaces; a space's
+switched workspaces are opened only when the caller may read the space (`read` on its `customer`
+policy object), a named workspace only then too, and a repository's workspace only when the caller
+may read the repository. A space the caller cannot read is still searched on lake's volume, hit by
+hit through the policy filter, without opening its workspaces. `skipped_workspaces` and
+`building_workspaces` only ever name workspaces in the scope.
+
+**Lent under the lane.** Search reaches a workspace's index through lake's repository store
 (`search::WorkspaceAccess`): it lends the index objects under the workspace store's lane, opening the
 store on first use, and lends a repository together with its workspace's index. Publish,
-`reindex_artifacts` and history scans of a workspace repository therefore write its index under the
-same lane as the repository's own writes. Search takes a lane before any lock of its own and never
-holds its map lock across I/O or a lane wait; each index has its own lock.
+`reindex_artifacts` (run by every push and every `commit_repository_files`) and history scans of a
+workspace repository update its index under the same lane as the repository's own writes. Lock
+order: a store's lane, then an index's lock, then search's map lock, which is only held briefly and
+never across I/O or a lane wait.
 
 **Loaded on first use, evicted when idle.** A workspace's index is loaded into memory on its first
-use, and again when the store is owned under another lease fence (another lake may have written it).
-Loaded workspace indexes are bounded by `LAKE_SEARCH_MEMORY_BYTES` (default 256 MiB, estimated from
-their text and occurrences): after each use the least recently used idle ones are evicted, and loaded
-again from their objects when next used. The one used last is kept.
+use, and again when the store is owned under another lease fence. Loaded workspace indexes are
+bounded by `LAKE_SEARCH_MEMORY_BYTES` (default 256 MiB, estimated from their text and occurrences):
+after each use the least recently used idle ones are evicted and loaded again from their objects
+when next used. The one used last, one in use, one being built and one with writes waiting are kept.
 
-**Rebuilt, never copied.** An index with no manifest (never written, or wiped), one missing a segment
-its manifest names, or one that does not authenticate or parse is rebuilt from the workspace's
-repositories: each live repository's branch tips as its references name them and its published
-artifacts, written in one pass that also removes every other `search/` object. It is never served
-empty and nothing is copied from the space's index. In a workspace index, `reindex_artifacts`
-(which a push runs) also publishes the repository's branch tips again, so the index follows every
-push; tag snapshots stay as their release published them. Releases created before an index was wiped
-are not republished by a rebuild (see Not yet).
+**Rebuilt off the request path, never copied.** An index with no manifest (never written, or wiped),
+one missing a run, segment or artifact object its manifest names, one naming a blob it holds no text
+for, or one that does not authenticate or parse is never served: it is marked as building and its
+rebuild is queued on lake's maintenance thread (a switch queues it at once). Meanwhile searches list
+the workspace in `building_workspaces` without taking its lane, and publish, reindex, push and
+commit only record the repository as pending.
+- The rebuild reads each live repository of the workspace under the store's lane, one repository at
+  a time (so a push waits at most one repository's read): its branch tips as its references name
+  them, its release snapshots from its release records (`create_release`'s forge records, lake#341),
+  and its published artifacts. It writes the index without holding any lane, in one pass that also
+  removes every other `search/` object, then indexes the pending repositories again.
+- A failed rebuild is not retried on every request: the workspace answers `building` for a delay that
+  grows from 15 s to 10 min, and the next use after it queues the rebuild again.
+- The repository list has no cursor in the control store; a workspace with 100,000 repositories or
+  more is refused rather than rebuilt from a partial list, so a rebuild never sweeps the objects of
+  repositories past a limit.
+Nothing is copied from the space's index.
 
 **The space's index keeps nothing of a switched workspace.** A switch drops from the space's index on
 lake's volume every repository the switched workspace's store now serves, and the history-scan blobs
-no segment references; lake does the same for every space at start, and removes a space's index
-directory once it holds nothing. The `move_workspace_store` switch reports the count as
-`space_index_repositories_dropped`. A hit from the space's index for a repository a workspace store
-serves is never returned.
+no segment references; lake does the same for every space at start, removes leftover `.tmp-*`
+files, and removes a space's index directory once it holds nothing. The `move_workspace_store`
+switch reports the count as `space_index_repositories_dropped`, or `space_index_error` when the
+pruning write failed. A hit from the space's index for a repository a workspace store serves is
+never returned.
 
-**Deletion.** Deleting a workspace (lake#514) forgets its index and removes its `search/` objects
-while lake has the workspace's store open; otherwise they go with the workspace Zetta, as its store
-does.
+**Deletion.** Deleting a repository removes it from its workspace's index and its space's
+(`forget_repository`; a failure is recorded in the deletion's audit details). Deleting a workspace
+(lake#514) forgets its index and removes its `search/` objects while lake has the workspace's store
+open; otherwise they go with the workspace Zetta, as its store does. A failure to remove them is
+logged and never holds the deletion up.
 
 ## Index and publication format
 
@@ -208,14 +249,22 @@ ctest --test-dir build --output-on-failure
 `Search.*` covers deduplication across repositories, reload from the persisted manifest, atomic
 publication, immutable tag-only results, a matching change among 1,000 scanned changes, batched
 filtering, substring/regex matching, and ranked order. `SearchWorkspaces.*` cover workspace indexes
-on in-memory objects: two workspaces with separate indexes, a reopened service loading them without
-writing, a wiped index or a missing segment rebuilt, an on-demand rebuild removing stale objects,
-reindex following a moved branch, eviction under the memory bound and reload, and dropping a
-workspace. `WorkspaceStoreSearch.*` (`tests/test_workspace_store.cpp`) run them through a lake server
-on the fake Zetta object routes: two workspaces of one space with sealed indexes and no term in the
-clear in either bucket or on lake's volume, the switch dropping the space index's copy, a restart
-reloading without rewriting, a wiped, partly lost or tampered index rebuilt, pushes, commits and
-searches side by side in one workspace, and a deletion removing the index objects.
+on in-memory objects: two workspaces with separate indexes, a first search answering `building`
+without rebuilding inline, a reopened service loading them without writing, a space-wide search that
+never lends a workspace outside its permitted spaces, a wiped index and a manifest whose runs,
+segments or artifact members are gone rebuilt (without a restart), a failed rebuild backing off, a
+rebuild republishing release snapshots, runs written once and not rewritten by a push, reindex
+following a moved branch, eviction and reload, a deleted repository leaving the index, a history scan
+naming another workspace refused, and dropping a workspace. `WorkspaceStoreSearch.*`
+(`tests/test_workspace_store.cpp`) run through a lake server on the fake Zetta object routes: sealed
+indexes of two workspaces with no term in the clear in either bucket or on lake's volume, the switch
+dropping the space index's copy, a restart reloading without rewriting, a deleted repository leaving
+the index; a non-operator caller in two spaces who never makes search touch the other space's
+workspace and gets one answer for another space's workspace and an unknown one; a wiped, partly
+lost or tampered index rebuilt with and without a restart; a failed index write leaving the store's
+lease and holder as they were; the first push after a switch not waiting for a slow rebuild; pushes,
+commits and searches side by side with 503s bounded; and a deletion removing the index objects and
+not held up when their removal fails.
 `WorkspaceStoreZetta.TheSearchIndexOnARealZettaIsSealedReloadsAndIsRebuilt` does the sealing, reload
 and rebuild against a real Zetta when `LAKE_TEST_ZETTA_BINARY` names one. The Postgres fixture invokes the registered
 capability for hot and exact-change scan requests and proves that a real policy-store batch hides a
@@ -241,9 +290,6 @@ build/tests/lake-tests --gtest_also_run_disabled_tests \
 
 ## Not yet
 
-- A rebuild republishes branch tips and artifacts, not tag snapshots: a release's snapshot lives in
-  the index from its creation, and one created before its workspace was switched or its index wiped
-  is not republished from the release records.
 - `customer` stays an input; the decided API (a required `workspace_id`, `/w/<id>/search`) is a
   later change. `rebuild_search_index` as its own capability is not built; `reindex_artifacts` of
   each repository, or a wiped index, rebuilds.

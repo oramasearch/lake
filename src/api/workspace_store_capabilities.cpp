@@ -177,8 +177,10 @@ ApiResult move_workspace_store(const json& input, ApiContext& context) {
         output["switched"] = true;
         output["store_moved_at"] = moved_at;
         // lake#381: the space's index on lake's volume keeps nothing of the switched workspace;
-        // its own index is rebuilt from its store on first use.
+        // its own index is rebuilt from its store on lake's maintenance thread, never inside a
+        // request.
         if (context.search) {
+            context.search->schedule_rebuild(customer_id, workspace_id);
             const auto dropped = context.search->drop_switched(customer_id);
             if (dropped) {
                 output["space_index_repositories_dropped"] = *dropped;

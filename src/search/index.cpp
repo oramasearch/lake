@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <format>
+#include <random>
 #include <cctype>
 #include <fstream>
 #include <iterator>
@@ -23,6 +26,7 @@
 #include <oramacore/index.hpp>
 
 #include "lake/control/policy.hpp"
+#include "lake/control/workspace_store.hpp"
 
 namespace lake::search {
 namespace {
@@ -317,16 +321,24 @@ bool is_indexable_text(std::span<const std::byte> bytes) {
     return true;
 }
 
-// Where one index keeps its files: a directory on lake's volume (a space's index) or the objects
-// beside a workspace's store (lake#381).
+std::string random_name() {
+    static thread_local std::mt19937_64 generator(std::random_device{}());
+    return std::format("{:016x}{:016x}", generator(), generator());
+}
+
+// Where one index keeps its files: a directory on lake's volume (a space's index, one blob
+// catalogue `blobs.json` replaced whole) or the objects beside a workspace's store (lake#381:
+// blobs in write-once runs, every object named by the manifest).
 class Storage {
 public:
     virtual ~Storage() = default;
     virtual Result<std::optional<std::string>> read(const std::string& name) = 0;
-    virtual Result<void> write(const std::string& name, const std::string& bytes) = 0;
+    virtual Result<void> write(const std::string& name, const std::string& bytes, bool once) = 0;
     virtual Result<void> remove(const std::string& name) = 0;
     virtual Result<std::vector<std::string>> list() = 0;
     virtual Result<void> sync() = 0;
+    // Whether blobs are kept in write-once runs (a workspace's objects) rather than one catalogue.
+    [[nodiscard]] virtual bool runs() const = 0;
 };
 
 class DirectoryStorage final : public Storage {
@@ -342,7 +354,7 @@ public:
             std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>())};
     }
 
-    Result<void> write(const std::string& name, const std::string& bytes) override {
+    Result<void> write(const std::string& name, const std::string& bytes, bool) override {
         const std::filesystem::path path = directory_ / name;
         std::error_code error;
         std::filesystem::create_directories(directory_, error);
@@ -361,6 +373,7 @@ public:
             output << bytes;
             output.flush();
             if (!output) {
+                std::filesystem::remove(temporary, error);
                 return std::unexpected(Error{"store_error", "could not finish index file"});
             }
         }
@@ -401,6 +414,27 @@ public:
         return {};
     }
 
+    bool runs() const override {
+        return false;
+    }
+
+    // Temporary files a write left behind when its process stopped.
+    void remove_temporaries() {
+        std::error_code error;
+        if (!std::filesystem::exists(directory_, error)) {
+            return;
+        }
+        std::vector<std::filesystem::path> stale;
+        for (const auto& entry : std::filesystem::directory_iterator(directory_, error)) {
+            if (entry.path().filename().string().find(".tmp-") != std::string::npos) {
+                stale.push_back(entry.path());
+            }
+        }
+        for (const auto& path : stale) {
+            std::filesystem::remove(path, error);
+        }
+    }
+
     // Removes the directory once the index holds nothing.
     void remove_directory() {
         std::error_code ignored;
@@ -418,8 +452,8 @@ public:
     Result<std::optional<std::string>> read(const std::string& name) override {
         return objects_->get(name);
     }
-    Result<void> write(const std::string& name, const std::string& bytes) override {
-        return objects_->put(name, bytes);
+    Result<void> write(const std::string& name, const std::string& bytes, bool once) override {
+        return objects_->put(name, bytes, once);
     }
     Result<void> remove(const std::string& name) override {
         return objects_->remove(name);
@@ -430,45 +464,53 @@ public:
     Result<void> sync() override {
         return objects_->sync();
     }
+    bool runs() const override {
+        return true;
+    }
 
 private:
     std::shared_ptr<IndexObjects> objects_;
 };
 
-// A workspace's search index objects (lake#381): keys `search/<name>` in the workspace store's
-// bucket `lake_store`, written through a view of the store's own ZettaObjectBackend, so they are
-// sealed with the workspace's data key and every write carries the store's lease fence. Liquid
-// never lists or writes under `search/`.
-class StoreIndexObjects final : public IndexObjects {
+constexpr std::string_view sealed_magic{"LKSIDX1\0", 8};
+
+class SealedIndexObjects final : public IndexObjects {
 public:
-    StoreIndexObjects(std::shared_ptr<liquid::store_backend> backend, std::function<Result<void>()> sync)
-        : backend_(std::move(backend)), sync_(std::move(sync)) {}
+    SealedIndexObjects(std::shared_ptr<control::ZettaObjectClient> client,
+                       std::shared_ptr<const control::WorkspaceStoreCipher> cipher,
+                       std::uint64_t fence,
+                       std::function<void()> on_lost)
+        : client_(std::move(client)), cipher_(std::move(cipher)), fence_(fence),
+          on_lost_(std::move(on_lost)) {}
 
     Result<std::optional<std::string>> get(const std::string& name) override {
-        const std::string key = std::string(workspace_index_prefix) + name;
-        auto listed = liquid::runtime::block_on(backend_->list(key));
-        if (!listed) {
-            return std::unexpected(error_of(listed.error()));
-        }
-        const auto found = std::ranges::find(*listed, key, &liquid::store_backend_entry::key);
-        if (found == listed->end()) {
-            return std::optional<std::string>{};
-        }
-        auto bytes = liquid::runtime::block_on(backend_->get_range(key, 0, found->size));
+        auto bytes = liquid::runtime::block_on(client_->get_all(key(name)));
         if (!bytes) {
             if (bytes.error().code == liquid::errc::not_found) {
                 return std::optional<std::string>{};
             }
             return std::unexpected(error_of(bytes.error()));
         }
+        if (!bytes->starts_with(sealed_magic)) {
+            return std::unexpected(Error{"corrupt", "index object " + name + " is not sealed"});
+        }
+        auto plain = cipher_->open(associated(name), std::string_view(*bytes).substr(sealed_magic.size()));
+        if (!plain) {
+            return std::unexpected(Error{"corrupt", "index object " + name + ": " + plain.error().message});
+        }
         return std::optional<std::string>{
-            std::string(reinterpret_cast<const char*>(bytes->data()), bytes->size())};
+            std::string(reinterpret_cast<const char*>(plain->data()), plain->size())};
     }
 
-    Result<void> put(const std::string& name, std::string bytes) override {
-        const auto* data = reinterpret_cast<const std::byte*>(bytes.data());
-        auto written = liquid::runtime::block_on(backend_->put(
-            std::string(workspace_index_prefix) + name, std::vector<std::byte>(data, data + bytes.size())));
+    Result<void> put(const std::string& name, std::string bytes, bool once) override {
+        auto sealed = cipher_->seal(
+            associated(name),
+            std::span(reinterpret_cast<const std::byte*>(bytes.data()), bytes.size()));
+        if (!sealed) {
+            return std::unexpected(error_of(sealed.error()));
+        }
+        auto written = liquid::runtime::block_on(
+            client_->put(key(name), std::string(sealed_magic) + *sealed, fence_, once));
         if (!written) {
             return std::unexpected(error_of(written.error()));
         }
@@ -476,7 +518,7 @@ public:
     }
 
     Result<void> remove(const std::string& name) override {
-        auto removed = liquid::runtime::block_on(backend_->remove(std::string(workspace_index_prefix) + name));
+        auto removed = liquid::runtime::block_on(client_->remove(key(name), fence_));
         if (!removed && removed.error().code != liquid::errc::not_found) {
             return std::unexpected(error_of(removed.error()));
         }
@@ -484,12 +526,12 @@ public:
     }
 
     Result<std::vector<std::string>> list() override {
-        auto listed = liquid::runtime::block_on(backend_->list(std::string(workspace_index_prefix)));
+        auto listed = liquid::runtime::block_on(client_->list(std::string(workspace_index_prefix)));
         if (!listed) {
             return std::unexpected(error_of(listed.error()));
         }
         std::vector<std::string> output;
-        for (const liquid::store_backend_entry& entry : *listed) {
+        for (const control::ObjectListEntry& entry : *listed) {
             if (entry.key.starts_with(workspace_index_prefix)) {
                 output.push_back(entry.key.substr(workspace_index_prefix.size()));
             }
@@ -498,19 +540,40 @@ public:
     }
 
     Result<void> sync() override {
-        return sync_ ? sync_() : Result<void>{};
+        auto synced = liquid::runtime::block_on(client_->barrier());
+        if (!synced) {
+            return std::unexpected(error_of(synced.error()));
+        }
+        return {};
     }
 
 private:
-    static Error error_of(const liquid::error& error) {
+    static std::string key(const std::string& name) {
+        return std::string(workspace_index_prefix) + name;
+    }
+
+    std::string associated(const std::string& name) const {
+        return "lake/search-index/v1/" + cipher_->workspace_id() + "/" + name;
+    }
+
+    Error error_of(const liquid::error& error) const {
         if (error.code == liquid::errc::locked) {
+            // Zetta refused the write as fenced: the store's lease is someone else's now.
+            if (on_lost_) {
+                on_lost_();
+            }
             return {"store_unavailable", error.message};
+        }
+        if (error.code == liquid::errc::busy) {
+            return {"busy", error.message};
         }
         return {std::string(liquid::to_string(error.code)), error.message};
     }
 
-    std::shared_ptr<liquid::store_backend> backend_;
-    std::function<Result<void>()> sync_;
+    std::shared_ptr<control::ZettaObjectClient> client_;
+    std::shared_ptr<const control::WorkspaceStoreCipher> cipher_;
+    std::uint64_t fence_ = 0;
+    std::function<void()> on_lost_;
 };
 
 constexpr std::string_view blobs_file = "blobs.json";
@@ -518,6 +581,15 @@ constexpr std::string_view manifest_file = "manifest.json";
 constexpr std::string_view artifacts_file = "artifacts.json";
 
 } // namespace
+
+std::shared_ptr<IndexObjects>
+make_sealed_index_objects(std::shared_ptr<control::ZettaObjectClient> client,
+                          std::shared_ptr<const control::WorkspaceStoreCipher> cipher,
+                          std::uint64_t fence,
+                          std::function<void()> on_lost) {
+    return std::make_shared<SealedIndexObjects>(std::move(client), std::move(cipher), fence,
+                                                std::move(on_lost));
+}
 
 std::string_view to_string(QueryMode mode) {
     switch (mode) {
@@ -541,24 +613,41 @@ struct Service::Impl {
         std::unordered_map<std::string, std::vector<TrigramPosting>> trigram_index;
         std::vector<std::string> blob_documents;
         oramacore::index::MemoryIndex blob_index{{{"content", {1.0, 0.75}}}};
-        // Blobs added since the catalogue was last written.
+        // Blobs added since the catalogue was last written (a space's index).
         bool blobs_added = false;
+        // A workspace's index: the run that holds each blob, the bytes of each run, and the
+        // artifact members' object.
+        std::map<std::string, std::string> blob_run;
+        std::map<std::string, std::uint64_t> run_bytes;
+        std::string artifacts_object;
         // Approximate memory of the loaded index.
         std::size_t bytes = 0;
     };
 
-    // One index: a space's on lake's volume, or a workspace's beside its store. Its mutex is taken
-    // after any store lane and after Impl::mutex is released, never the other way round.
+    // One index: a space's on lake's volume, or a workspace's beside its store.
+    //
+    // Lock order: a store's lane (through a lend), then an index's mutex, then Impl::mutex, which
+    // is only ever held briefly (its maps, the configuration) and never across I/O or a lane wait.
+    // trim() holds Impl::mutex and only try-locks an index's mutex, so it never waits on one.
     struct IndexState {
         std::mutex mutex;
         bool loaded = false;
         std::uint64_t generation = 0;
         CustomerState data;
+        // A workspace's index being built: it answers nothing, and writes to it are remembered in
+        // `pending` and applied once it is ready.
+        bool building = false;
+        std::set<std::string> pending;
+        // After a failed rebuild, none is scheduled again before this.
+        std::chrono::steady_clock::time_point retry_after{};
+        std::chrono::seconds backoff{0};
+        std::string last_error;
     };
 
+    enum class Readiness { Ready, Building, Schedule };
+
     std::filesystem::path root;
-    // Guards the maps and the configuration below, and nothing else: never held across I/O, a
-    // store lane or an index's mutex wait.
+    // Guards the maps and the configuration below, and nothing else.
     mutable std::mutex mutex;
     std::map<std::string, std::shared_ptr<IndexState>> spaces;
     std::map<std::string, std::shared_ptr<IndexState>> workspaces;
@@ -790,10 +879,13 @@ struct Service::Impl {
         return segment;
     }
 
-    [[nodiscard]] static std::string blobs_text(const CustomerState& state) {
+    [[nodiscard]] static std::string blobs_text(const CustomerState& state,
+                                                const std::set<std::string>* only = nullptr) {
         json blobs = json::object();
         for (const auto& [digest, record] : state.blobs) {
-            blobs[digest] = {{"content", record.content}};
+            if (only == nullptr || only->contains(digest)) {
+                blobs[digest] = {{"content", record.content}};
+            }
         }
         return blobs.dump();
     }
@@ -817,16 +909,16 @@ struct Service::Impl {
         return value.dump();
     }
 
-    [[nodiscard]] static std::string manifest_text(const std::map<std::string, Segment>& active) {
-        json manifest{{"version", 2}, {"active", json::array()}};
+    [[nodiscard]] static json manifest_active(const std::map<std::string, Segment>& active) {
+        json entries = json::array();
         for (const auto& [slot, segment] : active) {
-            manifest["active"].push_back({{"repository", segment.repository},
-                                          {"ref", segment.ref},
-                                          {"change", segment.change},
-                                          {"kind", publication_kind_name(segment.kind)},
-                                          {"segment", segment.file}});
+            entries.push_back({{"repository", segment.repository},
+                               {"ref", segment.ref},
+                               {"change", segment.change},
+                               {"kind", publication_kind_name(segment.kind)},
+                               {"segment", segment.file}});
         }
-        return manifest.dump();
+        return entries;
     }
 
     [[nodiscard]] static std::string segment_text(const Segment& segment) {
@@ -842,77 +934,193 @@ struct Service::Impl {
         return value.dump();
     }
 
-    // Publishes the next state of an index: new segments and the blobs they add first, then the
-    // manifest (one atomic replacement), then what nothing references any more. A failure before
-    // the manifest leaves the previous state whole. `sweep` also removes every other object of the
-    // index (a rebuild).
+    // The blobs an index's segments and indexed artifact members name.
+    [[nodiscard]] static std::set<std::string>
+    referenced_blobs(const std::map<std::string, Segment>& active,
+                     const std::map<std::string, ArtifactSegment>& artifacts) {
+        std::set<std::string> referenced;
+        for (const auto& [slot, segment] : active) {
+            for (const Occurrence& occurrence : segment.occurrences) {
+                referenced.insert(occurrence.blob);
+            }
+        }
+        for (const auto& [key, artifact] : artifacts) {
+            for (const Occurrence& member : artifact.members) {
+                if (member.indexed) {
+                    referenced.insert(member.blob);
+                }
+            }
+        }
+        return referenced;
+    }
+
+    // Publishes the next state of an index. New segments and the blobs they add are written
+    // first, then the manifest (one atomic replacement), then what nothing references any more is
+    // removed. A failure before the manifest leaves the previous state whole. `sweep` also removes
+    // every other object of the index (a rebuild). `budget`: the bytes the index may add (a
+    // workspace's quota room); a commit that needs more writes nothing and answers `busy`.
+    //
+    // In a workspace's objects, blobs are written once, in a new run per commit holding only the
+    // blobs no run has; the manifest names the runs. When more than half of the runs' bytes are
+    // unreferenced, the live blobs are written into one new run and the old runs removed.
     [[nodiscard]] static Result<void> commit(Storage& storage,
                                              CustomerState& state,
                                              std::map<std::string, Segment> next_active,
                                              std::map<std::string, ArtifactSegment> next_artifacts,
                                              bool artifacts_changed,
-                                             bool sweep) {
-        std::set<std::string> keep{std::string(blobs_file), std::string(manifest_file),
-                                   std::string(artifacts_file)};
+                                             bool sweep,
+                                             std::optional<std::uint64_t> budget = std::nullopt) {
+        const std::set<std::string> referenced = referenced_blobs(next_active, next_artifacts);
+        std::set<std::string> keep{std::string(manifest_file)};
+        std::vector<std::pair<std::string, std::string>> writes; // name, bytes; written once
         for (auto& [slot, segment] : next_active) {
             if (segment.file.empty()) {
-                segment.file = segment_name(segment);
-                const auto written = storage.write(segment.file, segment_text(segment));
-                if (!written) {
-                    return written;
-                }
+                segment.file = storage.runs() ? "segments/" + random_name() + ".json" : segment_name(segment);
+                writes.emplace_back(segment.file, segment_text(segment));
             }
             keep.insert(segment.file);
         }
-        if (state.blobs_added || sweep) {
-            const auto written = storage.write(std::string(blobs_file), blobs_text(state));
-            if (!written) {
+        std::string next_artifacts_object = state.artifacts_object;
+        std::map<std::string, std::string> next_blob_run;
+        std::map<std::string, std::uint64_t> next_run_bytes;
+        if (storage.runs()) {
+            if (artifacts_changed || sweep || next_artifacts_object.empty()) {
+                next_artifacts_object = "artifacts/" + random_name() + ".json";
+                writes.emplace_back(next_artifacts_object, artifacts_text(next_artifacts));
+            }
+            keep.insert(next_artifacts_object);
+            // Live bytes per existing run, and the blobs no run holds.
+            std::map<std::string, std::uint64_t> live;
+            std::set<std::string> unplaced;
+            std::uint64_t total = 0;
+            std::uint64_t alive = 0;
+            for (const std::string& digest : referenced) {
+                const auto blob = state.blobs.find(digest);
+                if (blob == state.blobs.end()) {
+                    return std::unexpected(Error{"corrupt", "the index names blob " + digest +
+                                                                " but holds no text for it"});
+                }
+                const auto run = sweep ? state.blob_run.end() : state.blob_run.find(digest);
+                if (run == state.blob_run.end()) {
+                    unplaced.insert(digest);
+                } else {
+                    live[run->second] += blob->second.content.size();
+                }
+            }
+            for (const auto& [run, bytes] : live) {
+                total += state.run_bytes.at(run);
+                alive += bytes;
+            }
+            const bool compact = !sweep && total > 1024 * 1024 && alive * 2 < total;
+            std::set<std::string> placed_in_new = unplaced;
+            if (compact) {
+                placed_in_new = referenced;
+            } else {
+                for (const std::string& digest : referenced) {
+                    if (!unplaced.contains(digest)) {
+                        const std::string& run = state.blob_run.at(digest);
+                        next_blob_run[digest] = run;
+                        next_run_bytes[run] = state.run_bytes.at(run);
+                        keep.insert(run);
+                    }
+                }
+            }
+            if (!placed_in_new.empty()) {
+                const std::string run = "runs/" + random_name() + ".json";
+                std::uint64_t bytes = 0;
+                for (const std::string& digest : placed_in_new) {
+                    next_blob_run[digest] = run;
+                    bytes += state.blobs.at(digest).content.size();
+                }
+                next_run_bytes[run] = bytes;
+                writes.emplace_back(run, blobs_text(state, &placed_in_new));
+                keep.insert(run);
+            }
+        }
+        if (budget) {
+            std::uint64_t adding = 0;
+            for (const auto& [name, bytes] : writes) {
+                adding += bytes.size();
+            }
+            if (adding > *budget) {
+                return std::unexpected(Error{
+                    "busy", std::format("the workspace's storage quota leaves no room for {} more "
+                                        "bytes of its search index; indexing is stopped so the "
+                                        "repositories' own writes keep their room",
+                                        adding)});
+            }
+        }
+        for (const auto& [name, bytes] : writes) {
+            if (const auto written = storage.write(name, bytes, storage.runs()); !written) {
                 return written;
             }
         }
-        if (artifacts_changed || sweep) {
-            const auto written = storage.write(std::string(artifacts_file), artifacts_text(next_artifacts));
-            if (!written) {
-                return written;
+        if (!storage.runs()) {
+            if (state.blobs_added || sweep) {
+                if (const auto written = storage.write(std::string(blobs_file), blobs_text(state), false);
+                    !written) {
+                    return written;
+                }
             }
+            if (artifacts_changed || sweep) {
+                if (const auto written = storage.write(std::string(artifacts_file),
+                                                       artifacts_text(next_artifacts), false);
+                    !written) {
+                    return written;
+                }
+            }
+            keep.insert(std::string(blobs_file));
+            keep.insert(std::string(artifacts_file));
         }
         if (const auto synced = storage.sync(); !synced) {
             return synced;
         }
-        if (const auto published = storage.write(std::string(manifest_file), manifest_text(next_active));
+        json manifest{{"version", storage.runs() ? 3 : 2}, {"active", manifest_active(next_active)}};
+        if (storage.runs()) {
+            std::set<std::string> runs;
+            for (const auto& [digest, run] : next_blob_run) {
+                runs.insert(run);
+            }
+            manifest["runs"] = runs;
+            manifest["artifacts"] = next_artifacts_object;
+        }
+        if (const auto published = storage.write(std::string(manifest_file), manifest.dump(), false);
             !published) {
             return published;
         }
         if (const auto synced = storage.sync(); !synced) {
             return synced;
         }
-        state.blobs_added = false;
+        // The manifest is replaced: what follows only removes what it no longer names.
         std::set<std::string> dropped;
         for (const auto& [slot, segment] : state.active) {
             if (!keep.contains(segment.file)) {
                 dropped.insert(segment.file);
             }
         }
+        for (const auto& [run, bytes] : state.run_bytes) {
+            if (!keep.contains(run)) {
+                dropped.insert(run);
+            }
+        }
+        if (!state.artifacts_object.empty() && !keep.contains(state.artifacts_object)) {
+            dropped.insert(state.artifacts_object);
+        }
         state.active = std::move(next_active);
         state.artifacts = std::move(next_artifacts);
-        // Blobs nothing references any more go after the manifest stops naming them.
-        std::set<std::string> referenced;
-        for (const auto& [slot, segment] : state.active) {
-            for (const Occurrence& occurrence : segment.occurrences) {
-                referenced.insert(occurrence.blob);
-            }
-        }
-        for (const auto& [key, artifact] : state.artifacts) {
-            for (const Occurrence& member : artifact.members) {
-                referenced.insert(member.blob);
-            }
-        }
+        state.artifacts_object = next_artifacts_object;
+        state.blob_run = std::move(next_blob_run);
+        state.run_bytes = std::move(next_run_bytes);
         const std::size_t before = state.blobs.size();
         std::erase_if(state.blobs, [&](const auto& item) { return !referenced.contains(item.first); });
-        if (state.blobs.size() != before) {
-            const auto written = storage.write(std::string(blobs_file), blobs_text(state));
-            if (!written) {
+        state.blobs_added = false;
+        Result<void> outcome;
+        if (!storage.runs() && state.blobs.size() != before) {
+            // The catalogue on lake's volume is pruned in place; a failure is reported, and the
+            // next commit writes it again.
+            if (auto written = storage.write(std::string(blobs_file), blobs_text(state), false); !written) {
                 state.blobs_added = true;
+                outcome = std::unexpected(written.error());
             }
         }
         build_memory(state);
@@ -929,63 +1137,104 @@ struct Service::Impl {
         for (const std::string& file : dropped) {
             static_cast<void>(storage.remove(file));
         }
-        return {};
+        return outcome;
     }
 
-    // Reads an index. False when it has no manifest (never written, or wiped).
+    // Reads an index. False when it has no manifest (never written, or wiped). A blob, run or
+    // segment the manifest names that is not there is `corrupt`.
     [[nodiscard]] static Result<bool> load_data(Storage& storage, CustomerState& state) {
-        const auto blob_value = storage.read(std::string(blobs_file));
-        if (!blob_value) {
-            return std::unexpected(blob_value.error());
-        }
-        if (*blob_value) {
-            const json blobs = json::parse(**blob_value);
-            for (auto item = blobs.begin(); item != blobs.end(); ++item) {
-                state.blobs.emplace(item.key(),
-                                    BlobRecord{item.value().at("content").get<std::string>()});
-            }
-        }
         const auto manifest_value = storage.read(std::string(manifest_file));
         if (!manifest_value) {
             return std::unexpected(manifest_value.error());
         }
-        if (*manifest_value) {
-            const json manifest = json::parse(**manifest_value);
-            for (const json& active : manifest.at("active")) {
-                const std::string file = active.at("segment").get<std::string>();
-                const auto segment_bytes = storage.read(file);
-                if (!segment_bytes) {
-                    return std::unexpected(segment_bytes.error());
+        if (!*manifest_value) {
+            return false;
+        }
+        const json manifest = json::parse(**manifest_value);
+        const auto parse_blobs = [&](const std::string& text, const std::string& run) {
+            const json blobs = json::parse(text);
+            std::uint64_t bytes = 0;
+            for (auto item = blobs.begin(); item != blobs.end(); ++item) {
+                std::string content = item.value().at("content").get<std::string>();
+                bytes += content.size();
+                if (!run.empty()) {
+                    state.blob_run[item.key()] = run;
                 }
-                if (!*segment_bytes) {
-                    return std::unexpected(
-                        Error{"not_found", "index segment " + file + " named by the manifest is absent"});
-                }
-                const json segment_value = json::parse(**segment_bytes);
-                Segment segment;
-                segment.repository = segment_value.at("repository").get<std::string>();
-                segment.ref = segment_value.at("ref").get<std::string>();
-                segment.change = segment_value.at("change").get<std::string>();
-                segment.kind = publication_kind(segment_value);
-                segment.file = file;
-                for (const json& value : segment_value.at("occurrences")) {
-                    segment.occurrences.push_back(Occurrence{segment.repository,
-                                                             segment.ref,
-                                                             segment.change,
-                                                             value.at("path").get<std::string>(),
-                                                             value.at("blob").get<std::string>(),
-                                                             segment.kind});
-                }
-                state.active.emplace(slot_key(segment.kind, segment.repository, segment.ref),
-                                     std::move(segment));
+                state.blobs.emplace(item.key(), BlobRecord{std::move(content)});
             }
+            if (!run.empty()) {
+                state.run_bytes[run] = bytes;
+            }
+        };
+        std::optional<std::string> artifacts_text_value;
+        if (storage.runs()) {
+            for (const json& run : manifest.value("runs", json::array())) {
+                const std::string name = run.get<std::string>();
+                const auto bytes = storage.read(name);
+                if (!bytes) {
+                    return std::unexpected(bytes.error());
+                }
+                if (!*bytes) {
+                    return std::unexpected(Error{"corrupt", "blob run " + name + " named by the manifest is absent"});
+                }
+                parse_blobs(**bytes, name);
+            }
+            state.artifacts_object = manifest.value("artifacts", std::string());
+            if (!state.artifacts_object.empty()) {
+                const auto bytes = storage.read(state.artifacts_object);
+                if (!bytes) {
+                    return std::unexpected(bytes.error());
+                }
+                if (!*bytes) {
+                    return std::unexpected(Error{"corrupt", "artifact members " + state.artifacts_object +
+                                                                " named by the manifest are absent"});
+                }
+                artifacts_text_value = **bytes;
+            }
+        } else {
+            const auto blob_value = storage.read(std::string(blobs_file));
+            if (!blob_value) {
+                return std::unexpected(blob_value.error());
+            }
+            if (*blob_value) {
+                parse_blobs(**blob_value, "");
+            }
+            const auto artifacts_value = storage.read(std::string(artifacts_file));
+            if (!artifacts_value) {
+                return std::unexpected(artifacts_value.error());
+            }
+            artifacts_text_value = *artifacts_value;
         }
-        const auto artifacts_value = storage.read(std::string(artifacts_file));
-        if (!artifacts_value) {
-            return std::unexpected(artifacts_value.error());
+        for (const json& active : manifest.at("active")) {
+            const std::string file = active.at("segment").get<std::string>();
+            const auto segment_bytes = storage.read(file);
+            if (!segment_bytes) {
+                return std::unexpected(segment_bytes.error());
+            }
+            if (!*segment_bytes) {
+                return std::unexpected(
+                    Error{"corrupt", "index segment " + file + " named by the manifest is absent"});
+            }
+            const json segment_value = json::parse(**segment_bytes);
+            Segment segment;
+            segment.repository = segment_value.at("repository").get<std::string>();
+            segment.ref = segment_value.at("ref").get<std::string>();
+            segment.change = segment_value.at("change").get<std::string>();
+            segment.kind = publication_kind(segment_value);
+            segment.file = file;
+            for (const json& value : segment_value.at("occurrences")) {
+                segment.occurrences.push_back(Occurrence{segment.repository,
+                                                         segment.ref,
+                                                         segment.change,
+                                                         value.at("path").get<std::string>(),
+                                                         value.at("blob").get<std::string>(),
+                                                         segment.kind});
+            }
+            state.active.emplace(slot_key(segment.kind, segment.repository, segment.ref),
+                                 std::move(segment));
         }
-        if (*artifacts_value) {
-            const json artifacts = json::parse(**artifacts_value);
+        if (artifacts_text_value) {
+            const json artifacts = json::parse(*artifacts_text_value);
             for (const json& value : artifacts.value("artifacts", json::array())) {
                 ArtifactSegment segment{.repository = value.at("repository").get<std::string>(),
                                         .artifact = value.at("artifact").get<std::string>(),
@@ -1006,8 +1255,14 @@ struct Service::Impl {
                 state.artifacts.emplace(artifact_key(segment), std::move(segment));
             }
         }
+        for (const std::string& digest : referenced_blobs(state.active, state.artifacts)) {
+            if (!state.blobs.contains(digest)) {
+                return std::unexpected(
+                    Error{"corrupt", "the index names blob " + digest + " but holds no text for it"});
+            }
+        }
         build_memory(state);
-        return manifest_value->has_value();
+        return true;
     }
 
     // Replaces the slot of one publication in `next_active`. A tag snapshot never moves.
@@ -1079,6 +1334,33 @@ struct Service::Impl {
         return {};
     }
 
+    // A repository's release snapshots, from its release records.
+    [[nodiscard]] static Result<void> publish_tags(liquid::repository& opened,
+                                                   CustomerState& state,
+                                                   const WorkspaceIndex& index,
+                                                   const std::string& repository,
+                                                   std::map<std::string, Segment>& next_active) {
+        if (!index.tags) {
+            return {};
+        }
+        const auto tags = index.tags(repository);
+        if (!tags) {
+            return std::unexpected(tags.error());
+        }
+        for (const auto& [tag, change] : *tags) {
+            const auto published = publish_into(
+                opened, state, Publish{"", repository, tag, change, PublicationKind::TagSnapshot},
+                next_active);
+            // A release naming a change the store does not hold, or a conflicting duplicate, is
+            // left out rather than failing the whole index.
+            if (!published && published.error().code != "not_found" &&
+                published.error().code != "conflict" && published.error().code != "invalid_input") {
+                return std::unexpected(published.error());
+            }
+        }
+        return {};
+    }
+
     // Decomposes every published artifact of one repository into `next_artifacts`.
     [[nodiscard]] static Result<ReindexResult>
     reindex_into(liquid::repository& opened,
@@ -1136,57 +1418,17 @@ struct Service::Impl {
         return result;
     }
 
-    // Rebuilds a workspace's index from its repositories (lake#381: rebuilt, never copied).
-    // The caller holds the workspace's lane (through `index`) and the state's mutex.
-    [[nodiscard]] static Result<void> rebuild_workspace(IndexState& state, const WorkspaceIndex& index) {
-        if (!index.repositories || !index.open) {
-            return std::unexpected(
-                Error{"store_unavailable", "the workspace's repositories cannot be read to rebuild its index"});
-        }
-        const auto repositories = index.repositories();
-        if (!repositories) {
-            return std::unexpected(repositories.error());
-        }
-        CustomerState fresh;
-        std::map<std::string, Segment> active;
-        std::map<std::string, ArtifactSegment> artifacts;
-        for (const std::string& repository : *repositories) {
-            auto opened = index.open(repository);
-            if (!opened && opened.error().code == "not_found") {
-                continue;
-            }
-            if (!opened) {
-                return std::unexpected(Error{opened.error().code,
-                                             "could not rebuild the search index of repository " +
-                                                 repository + ": " + opened.error().message});
-            }
-            if (const auto published = publish_refs(**opened, fresh, repository, active); !published) {
-                return std::unexpected(published.error());
-            }
-            if (const auto reindexed = reindex_into(**opened, fresh, repository, artifacts); !reindexed) {
-                return std::unexpected(reindexed.error());
-            }
-        }
-        ObjectStorage storage(index.objects);
-        if (const auto committed =
-                commit(storage, fresh, std::move(active), std::move(artifacts), true, true);
-            !committed) {
-            return committed;
-        }
-        state.data = std::move(fresh);
-        state.loaded = true;
-        state.generation = index.generation;
-        return {};
-    }
-
     // Loads a workspace's index on its first use, and again when its store is owned under another
     // fence (another process may have written it since). An index without a manifest (never
-    // written, or wiped), one missing a segment its manifest names, or one that does not read back
-    // (`corrupt`, unparseable) is rebuilt from the repositories, never served empty: it is derived
-    // data. A store that cannot be read is an error.
-    [[nodiscard]] static Result<void> ensure_workspace(IndexState& state, const WorkspaceIndex& index) {
+    // written, or wiped), one missing an object its manifest names, or one that does not read back
+    // (`corrupt`, unparseable) is not served: it answers Schedule (its rebuild is to be scheduled
+    // once the caller let go of its lane) or Building. The caller holds the state's mutex.
+    [[nodiscard]] static Result<Readiness> ensure_workspace(IndexState& state, const WorkspaceIndex& index) {
+        if (state.building) {
+            return Readiness::Building;
+        }
         if (state.loaded && state.generation == index.generation) {
-            return {};
+            return Readiness::Ready;
         }
         state.loaded = false;
         state.data = CustomerState{};
@@ -1198,41 +1440,52 @@ struct Service::Impl {
             loaded = std::unexpected(Error{"corrupt", error.what()});
         }
         if (!loaded && loaded.error().code != "not_found" && loaded.error().code != "corrupt") {
+            state.data = CustomerState{};
             return std::unexpected(loaded.error());
         }
-        if (!loaded || !*loaded) {
-            state.data = CustomerState{};
-            return rebuild_workspace(state, index);
+        if (loaded && *loaded) {
+            state.loaded = true;
+            state.generation = index.generation;
+            return Readiness::Ready;
         }
-        state.loaded = true;
-        state.generation = index.generation;
-        return {};
+        state.data = CustomerState{};
+        if (std::chrono::steady_clock::now() < state.retry_after) {
+            return Readiness::Building;
+        }
+        state.building = true;
+        return Readiness::Schedule;
+    }
+
+    // Runs or queues a workspace's rebuild. Never called with a lane or an index's mutex held.
+    void schedule(const std::string& customer, const std::string& workspace, Service& service) {
+        const WorkspaceAccess config = workspace_config();
+        if (config.schedule) {
+            config.schedule(customer, workspace);
+            return;
+        }
+        static_cast<void>(service.rebuild_workspace(customer, workspace));
     }
 
     // Drops from a space's index every repository a workspace store serves now, and the blobs
-    // no segment references (history scans keep them; they cannot be told apart by repository),
-    // so the index on lake's volume keeps nothing of a switched workspace (lake#381). A repository
-    // whose route cannot be read is kept, and left out of results. Answers how many repositories
-    // were dropped.
+    // no segment references (history scans keep them), so the index on lake's volume keeps nothing
+    // of a switched workspace (lake#381). A repository whose route cannot be read is kept, and left
+    // out of results. Answers how many repositories were dropped.
     [[nodiscard]] Result<std::size_t> purge_switched(const std::string& customer, IndexState& state) {
         const WorkspaceAccess config = workspace_config();
+        DirectoryStorage storage(index_path(customer));
+        storage.remove_temporaries();
         if (!config.route) {
             return std::size_t{0};
         }
         std::set<std::string> repositories;
-        std::set<std::string> referenced;
         for (const auto& [slot, segment] : state.data.active) {
             repositories.insert(segment.repository);
-            for (const Occurrence& occurrence : segment.occurrences) {
-                referenced.insert(occurrence.blob);
-            }
         }
         for (const auto& [key, artifact] : state.data.artifacts) {
             repositories.insert(artifact.repository);
-            for (const Occurrence& member : artifact.members) {
-                referenced.insert(member.blob);
-            }
         }
+        const std::set<std::string> referenced =
+            referenced_blobs(state.data.active, state.data.artifacts);
         std::set<std::string> moved;
         for (const std::string& repository : repositories) {
             const auto route = config.route(customer, repository);
@@ -1250,7 +1503,6 @@ struct Service::Impl {
         auto next_artifacts = state.data.artifacts;
         std::erase_if(next_artifacts,
                       [&](const auto& item) { return moved.contains(item.second.repository); });
-        DirectoryStorage storage(index_path(customer));
         if (const auto committed =
                 commit(storage, state.data, std::move(next_active), std::move(next_artifacts), true, false);
             !committed) {
@@ -1273,6 +1525,7 @@ struct Service::Impl {
             DirectoryStorage storage(index_path(customer));
             const auto loaded = load_data(storage, state.data);
             if (!loaded) {
+                state.data = CustomerState{};
                 return std::unexpected(loaded.error());
             }
         }
@@ -1285,7 +1538,7 @@ struct Service::Impl {
     }
 
     // Evicts idle workspace indexes, least recently used first, while those loaded exceed the
-    // bound. One in use (its mutex held) and the one used last are kept.
+    // bound. One in use (its mutex held), one being built and the one used last are kept.
     void trim() {
         std::vector<std::shared_ptr<IndexState>> evicted;
         std::lock_guard lock(mutex);
@@ -1311,7 +1564,8 @@ struct Service::Impl {
                 continue;
             }
             std::unique_lock held(found->second->mutex, std::try_to_lock);
-            if (!held) {
+            if (!held || found->second->building || !found->second->pending.empty() ||
+                std::chrono::steady_clock::now() < found->second->retry_after) {
                 continue;
             }
             total -= std::min(total, found->second->data.bytes);
@@ -1327,8 +1581,8 @@ struct Service::Impl {
         std::size_t changes = 0;
     };
 
-    // `opened` was borrowed before any index's mutex was taken, so search never waits on a
-    // store's lane while holding one.
+    // `opened` was borrowed before any index's mutex was taken. A space's index keeps the blobs a
+    // scan read (on lake's volume); a workspace's keeps them in memory only until its next commit.
     [[nodiscard]] static Result<ScanOutput>
     scan(const Query& query, CustomerState& state, liquid::repository* opened, Storage& storage) {
         std::vector<liquid::change_id> changes;
@@ -1371,9 +1625,11 @@ struct Service::Impl {
                                       std::make_move_iterator(segment->occurrences.end()));
         }
         if (state.blobs_added) {
-            const auto saved = storage.write(std::string(blobs_file), blobs_text(state));
-            if (!saved) {
-                return std::unexpected(saved.error());
+            if (!storage.runs()) {
+                const auto saved = storage.write(std::string(blobs_file), blobs_text(state), false);
+                if (!saved) {
+                    return std::unexpected(saved.error());
+                }
             }
             state.blobs_added = false;
             build_memory(state);
@@ -1552,12 +1808,42 @@ struct Service::Impl {
         }
         return output;
     }
-};
 
-std::shared_ptr<IndexObjects> make_store_index_objects(std::shared_ptr<liquid::store_backend> backend,
-                                                       std::function<Result<void>()> sync) {
-    return std::make_shared<StoreIndexObjects>(std::move(backend), std::move(sync));
-}
+    // One repository of a workspace, refreshed in its index: branch tips, artifacts and (with
+    // `tags`) release snapshots. The caller holds the repository's lend and the state's mutex.
+    [[nodiscard]] static Result<ReindexResult> refresh_repository(IndexState& state,
+                                                                  const WorkspaceIndex& index,
+                                                                  liquid::repository& opened,
+                                                                  const std::string& repository,
+                                                                  bool tags) {
+        auto next_active = state.data.active;
+        if (const auto published = publish_refs(opened, state.data, repository, next_active); !published) {
+            return std::unexpected(published.error());
+        }
+        if (tags) {
+            if (const auto tagged = publish_tags(opened, state.data, index, repository, next_active);
+                !tagged) {
+                return std::unexpected(tagged.error());
+            }
+        }
+        auto next_artifacts = state.data.artifacts;
+        auto reindexed = reindex_into(opened, state.data, repository, next_artifacts);
+        if (!reindexed) {
+            return std::unexpected(reindexed.error());
+        }
+        ObjectStorage storage(index.objects);
+        const auto budget = index.write_budget ? index.write_budget() : std::nullopt;
+        if (const auto committed = commit(storage, state.data, std::move(next_active),
+                                          std::move(next_artifacts), true, false, budget);
+            !committed) {
+            // What is in memory may be ahead of the objects: read them again on next use.
+            state.loaded = false;
+            state.data = CustomerState{};
+            return std::unexpected(committed.error());
+        }
+        return *reindexed;
+    }
+};
 
 Service::Service(std::filesystem::path store_root)
     : impl_(std::make_shared<Impl>(std::move(store_root))) {}
@@ -1615,6 +1901,139 @@ std::vector<std::string> Service::loaded_workspaces() const {
     return output;
 }
 
+void Service::schedule_rebuild(const std::string& customer, const std::string& workspace) {
+    {
+        const auto state = impl_->workspace_state(workspace);
+        std::lock_guard held(state->mutex);
+        state->building = true;
+        state->loaded = false;
+        state->data = Impl::CustomerState{};
+        state->retry_after = {};
+    }
+    impl_->schedule(customer, workspace, *this);
+}
+
+Result<void> Service::rebuild_workspace(const std::string& customer, const std::string& workspace) {
+    const auto state = impl_->workspace_state(workspace);
+    const auto failed = [&](Error error) -> Result<void> {
+        std::lock_guard held(state->mutex);
+        state->building = false;
+        state->loaded = false;
+        state->data = Impl::CustomerState{};
+        state->backoff = std::min<std::chrono::seconds>(
+            std::chrono::minutes(10), std::max<std::chrono::seconds>(std::chrono::seconds(15), state->backoff * 2));
+        state->retry_after = std::chrono::steady_clock::now() + state->backoff;
+        state->last_error = error.message;
+        return std::unexpected(std::move(error));
+    };
+    try {
+        {
+            std::lock_guard held(state->mutex);
+            state->building = true;
+            state->loaded = false;
+            state->data = Impl::CustomerState{};
+        }
+        const WorkspaceAccess config = impl_->workspace_config();
+        if (!config.lend) {
+            return failed(Error{"unsupported", "workspace indexes are not configured"});
+        }
+        // The lend is held only to take the index's objects and the store's fence.
+        WorkspaceIndex index;
+        {
+            auto lent = config.lend(customer, workspace);
+            if (!lent) {
+                return failed(lent.error());
+            }
+            index = lent->index;
+        }
+        if (!index.repositories) {
+            return failed(Error{"store_unavailable", "the workspace's repositories cannot be listed"});
+        }
+        const auto repositories = index.repositories();
+        if (!repositories) {
+            return failed(repositories.error());
+        }
+        Impl::CustomerState fresh;
+        std::map<std::string, Segment> active;
+        std::map<std::string, ArtifactSegment> artifacts;
+        // Each repository is read under its own store's lane, one at a time, so a push to the
+        // workspace waits at most one repository's read.
+        for (const std::string& repository : *repositories) {
+            auto borrowed = impl_->borrow(index.customer.empty() ? customer : index.customer, repository);
+            if (!borrowed) {
+                if (borrowed.error().code == "not_found") {
+                    continue;
+                }
+                return failed(Error{borrowed.error().code, "could not rebuild the search index of repository " +
+                                                               repository + ": " + borrowed.error().message});
+            }
+            if (!borrowed->workspace || borrowed->workspace->workspace != workspace) {
+                continue;
+            }
+            if (const auto published =
+                    Impl::publish_refs(*borrowed->repository, fresh, repository, active);
+                !published) {
+                return failed(published.error());
+            }
+            if (const auto tagged =
+                    Impl::publish_tags(*borrowed->repository, fresh, index, repository, active);
+                !tagged) {
+                return failed(tagged.error());
+            }
+            if (const auto reindexed =
+                    Impl::reindex_into(*borrowed->repository, fresh, repository, artifacts);
+                !reindexed) {
+                return failed(reindexed.error());
+            }
+        }
+        // The index is written without any lane: its objects carry the fence taken above, and a
+        // write to this workspace's index meanwhile is remembered in `pending`.
+        ObjectStorage storage(index.objects);
+        const auto budget = index.write_budget ? index.write_budget() : std::nullopt;
+        if (const auto committed = Impl::commit(storage, fresh, std::move(active), std::move(artifacts),
+                                                true, true, budget);
+            !committed) {
+            return failed(committed.error());
+        }
+        std::set<std::string> pending;
+        {
+            std::lock_guard held(state->mutex);
+            state->data = std::move(fresh);
+            state->loaded = true;
+            state->generation = index.generation;
+            state->building = false;
+            state->backoff = std::chrono::seconds(0);
+            state->retry_after = {};
+            state->last_error.clear();
+            pending.swap(state->pending);
+        }
+        // Repositories written while the index was built are indexed again.
+        for (const std::string& repository : pending) {
+            auto borrowed = impl_->borrow(index.customer.empty() ? customer : index.customer, repository);
+            if (!borrowed || !borrowed->workspace || borrowed->workspace->workspace != workspace) {
+                continue;
+            }
+            std::lock_guard held(state->mutex);
+            if (const auto ensured = Impl::ensure_workspace(*state, *borrowed->workspace);
+                !ensured || *ensured != Impl::Readiness::Ready) {
+                if (ensured && *ensured == Impl::Readiness::Schedule) {
+                    state->building = false;
+                }
+                state->pending.insert(repository);
+                continue;
+            }
+            if (!Impl::refresh_repository(*state, *borrowed->workspace, *borrowed->repository,
+                                          repository, true)) {
+                state->pending.insert(repository);
+            }
+        }
+        impl_->trim();
+        return {};
+    } catch (const std::exception& error) {
+        return failed(Error{"store_error", error.what()});
+    }
+}
+
 Result<void> Service::publish(const Publish& publication) {
     try {
         if (publication.customer.empty() || publication.repository.empty() ||
@@ -1622,17 +2041,55 @@ Result<void> Service::publish(const Publish& publication) {
             return std::unexpected(
                 Error{"invalid_input", "customer, repository, ref and change are required"});
         }
-        auto borrowed = impl_->borrow(publication.customer, publication.repository);
-        if (!borrowed) {
-            return std::unexpected(borrowed.error());
-        }
-        liquid::repository* opened = borrowed->repository;
-        if (borrowed->workspace) {
-            const WorkspaceIndex& index = *borrowed->workspace;
-            const auto state = impl_->workspace_state(index.workspace);
-            {
+        std::optional<std::string> to_schedule;
+        {
+            auto borrowed = impl_->borrow(publication.customer, publication.repository);
+            if (!borrowed) {
+                return std::unexpected(borrowed.error());
+            }
+            liquid::repository* opened = borrowed->repository;
+            if (borrowed->workspace) {
+                const WorkspaceIndex& index = *borrowed->workspace;
+                const auto state = impl_->workspace_state(index.workspace);
+                {
+                    std::lock_guard held(state->mutex);
+                    const auto ready = Impl::ensure_workspace(*state, index);
+                    if (!ready) {
+                        return std::unexpected(ready.error());
+                    }
+                    if (*ready != Impl::Readiness::Ready) {
+                        // The rebuild reads this repository's releases, or indexes it again
+                        // once it is done.
+                        state->pending.insert(publication.repository);
+                        if (*ready == Impl::Readiness::Schedule) {
+                            to_schedule = index.workspace;
+                        }
+                    } else {
+                        auto next_active = state->data.active;
+                        const auto changed =
+                            Impl::publish_into(*opened, state->data, publication, next_active);
+                        if (!changed) {
+                            return std::unexpected(changed.error());
+                        }
+                        if (*changed) {
+                            ObjectStorage storage(index.objects);
+                            const auto budget =
+                                index.write_budget ? index.write_budget() : std::nullopt;
+                            if (const auto committed =
+                                    Impl::commit(storage, state->data, std::move(next_active),
+                                                 state->data.artifacts, false, false, budget);
+                                !committed) {
+                                state->loaded = false;
+                                state->data = Impl::CustomerState{};
+                                return committed;
+                            }
+                        }
+                    }
+                }
+            } else {
+                const auto state = impl_->space_state(publication.customer);
                 std::lock_guard held(state->mutex);
-                if (const auto ensured = Impl::ensure_workspace(*state, index); !ensured) {
+                if (const auto ensured = impl_->ensure_space(publication.customer, *state); !ensured) {
                     return ensured;
                 }
                 auto next_active = state->data.active;
@@ -1640,36 +2097,20 @@ Result<void> Service::publish(const Publish& publication) {
                 if (!changed) {
                     return std::unexpected(changed.error());
                 }
-                if (*changed) {
-                    ObjectStorage storage(index.objects);
-                    if (const auto committed = Impl::commit(storage, state->data, std::move(next_active),
-                                                            state->data.artifacts, false, false);
-                        !committed) {
-                        state->loaded = false;
-                        return committed;
-                    }
+                if (!*changed) {
+                    return {};
                 }
+                DirectoryStorage storage(impl_->index_path(publication.customer));
+                return Impl::commit(storage, state->data, std::move(next_active), state->data.artifacts,
+                                    false, false);
             }
-            impl_->trim();
-            // What the space's index held of it from before the switch goes.
-            return drop_repository(publication.customer, publication.repository);
         }
-        const auto state = impl_->space_state(publication.customer);
-        std::lock_guard held(state->mutex);
-        if (const auto ensured = impl_->ensure_space(publication.customer, *state); !ensured) {
-            return ensured;
+        if (to_schedule) {
+            impl_->schedule(publication.customer, *to_schedule, *this);
         }
-        auto next_active = state->data.active;
-        const auto changed = Impl::publish_into(*opened, state->data, publication, next_active);
-        if (!changed) {
-            return std::unexpected(changed.error());
-        }
-        if (!*changed) {
-            return {};
-        }
-        DirectoryStorage storage(impl_->index_path(publication.customer));
-        return Impl::commit(storage, state->data, std::move(next_active), state->data.artifacts,
-                            false, false);
+        impl_->trim();
+        // What the space's index held of it from before the switch goes.
+        return drop_repository(publication.customer, publication.repository);
     } catch (const std::exception& error) {
         return std::unexpected(Error{"store_error", error.what()});
     }
@@ -1710,6 +2151,64 @@ Result<void> Service::drop_repository(const std::string& customer, const std::st
     }
 }
 
+Result<void> Service::forget_repository(const std::string& customer,
+                                        const std::string& workspace,
+                                        const std::string& repository) {
+    try {
+        if (const auto dropped = drop_repository(customer, repository); !dropped) {
+            return dropped;
+        }
+        const WorkspaceAccess config = impl_->workspace_config();
+        if (workspace.empty() || !config.lend) {
+            return {};
+        }
+        std::optional<std::string> to_schedule;
+        {
+            auto lent = config.lend(customer, workspace);
+            if (!lent) {
+                // A workspace that is not switched has no index of its own.
+                return lent.error().code == "invalid_input" ? Result<void>{}
+                                                            : Result<void>(std::unexpected(lent.error()));
+            }
+            const auto state = impl_->workspace_state(workspace);
+            std::lock_guard held(state->mutex);
+            state->pending.erase(repository);
+            const auto ready = Impl::ensure_workspace(*state, lent->index);
+            if (!ready) {
+                return std::unexpected(ready.error());
+            }
+            if (*ready == Impl::Readiness::Schedule) {
+                to_schedule = workspace;
+            }
+            if (*ready == Impl::Readiness::Ready) {
+                auto next_active = state->data.active;
+                std::erase_if(next_active,
+                              [&](const auto& item) { return item.second.repository == repository; });
+                auto next_artifacts = state->data.artifacts;
+                std::erase_if(next_artifacts,
+                              [&](const auto& item) { return item.second.repository == repository; });
+                if (next_active.size() != state->data.active.size() ||
+                    next_artifacts.size() != state->data.artifacts.size()) {
+                    ObjectStorage storage(lent->index.objects);
+                    if (const auto committed = Impl::commit(storage, state->data, std::move(next_active),
+                                                            std::move(next_artifacts), true, false);
+                        !committed) {
+                        state->loaded = false;
+                        state->data = Impl::CustomerState{};
+                        return committed;
+                    }
+                }
+            }
+        }
+        if (to_schedule) {
+            impl_->schedule(customer, *to_schedule, *this);
+        }
+        return {};
+    } catch (const std::exception& error) {
+        return std::unexpected(Error{"store_error", error.what()});
+    }
+}
+
 Result<std::size_t> Service::drop_switched(const std::string& customer) {
     try {
         if (customer.empty()) {
@@ -1724,6 +2223,7 @@ Result<std::size_t> Service::drop_switched(const std::string& customer) {
                 DirectoryStorage storage(impl_->index_path(customer));
                 const auto loaded = Impl::load_data(storage, state->data);
                 if (!loaded) {
+                    state->data = Impl::CustomerState{};
                     return std::unexpected(loaded.error());
                 }
             }
@@ -1740,15 +2240,6 @@ Result<void> Service::drop_workspace(const std::string& workspace) {
         if (workspace.empty()) {
             return std::unexpected(Error{"invalid_input", "workspace is required"});
         }
-        const WorkspaceAccess config = impl_->workspace_config();
-        std::optional<BorrowedWorkspace> borrowed;
-        if (config.lend_if_open) {
-            auto lent = config.lend_if_open(workspace);
-            if (!lent) {
-                return std::unexpected(lent.error());
-            }
-            borrowed = std::move(*lent);
-        }
         std::shared_ptr<Impl::IndexState> state;
         {
             std::lock_guard lock(impl_->mutex);
@@ -1761,47 +2252,30 @@ Result<void> Service::drop_workspace(const std::string& workspace) {
         if (state) {
             std::lock_guard held(state->mutex);
             state->loaded = false;
+            state->pending.clear();
             state->data = Impl::CustomerState{};
         }
-        if (!borrowed) {
+        const WorkspaceAccess config = impl_->workspace_config();
+        if (!config.lend_if_open) {
             return {};
         }
-        const auto listed = borrowed->index.objects->list();
+        auto lent = config.lend_if_open(workspace);
+        if (!lent) {
+            return std::unexpected(lent.error());
+        }
+        if (!*lent) {
+            return {};
+        }
+        const auto listed = (*lent)->index.objects->list();
         if (!listed) {
             return std::unexpected(listed.error());
         }
         for (const std::string& name : *listed) {
-            if (const auto removed = borrowed->index.objects->remove(name); !removed) {
+            if (const auto removed = (*lent)->index.objects->remove(name); !removed) {
                 return removed;
             }
         }
-        return borrowed->index.objects->sync();
-    } catch (const std::exception& error) {
-        return std::unexpected(Error{"store_error", error.what()});
-    }
-}
-
-Result<void> Service::rebuild_workspace(const std::string& customer, const std::string& workspace) {
-    try {
-        const WorkspaceAccess config = impl_->workspace_config();
-        if (!config.lend) {
-            return std::unexpected(Error{"unsupported", "workspace indexes are not configured"});
-        }
-        auto borrowed = config.lend(customer, workspace);
-        if (!borrowed) {
-            return std::unexpected(borrowed.error());
-        }
-        const auto state = impl_->workspace_state(workspace);
-        {
-            std::lock_guard held(state->mutex);
-            state->loaded = false;
-            state->data = Impl::CustomerState{};
-            if (const auto rebuilt = Impl::rebuild_workspace(*state, borrowed->index); !rebuilt) {
-                return rebuilt;
-            }
-        }
-        impl_->trim();
-        return {};
+        return (*lent)->index.objects->sync();
     } catch (const std::exception& error) {
         return std::unexpected(Error{"store_error", error.what()});
     }
@@ -1813,65 +2287,68 @@ Result<ReindexResult> Service::reindex_artifacts(const std::string& customer,
         if (customer.empty() || repository.empty()) {
             return std::unexpected(Error{"invalid_input", "customer and repository are required"});
         }
-        auto borrowed = impl_->borrow(customer, repository);
-        if (!borrowed) {
-            return std::unexpected(borrowed.error());
-        }
-        liquid::repository* opened = borrowed->repository;
-        if (borrowed->workspace) {
-            // In a workspace's index, reindexing a repository also publishes its branch tips again
-            // as its references name them now, so the index follows every push (lake#381).
-            const WorkspaceIndex& index = *borrowed->workspace;
-            const auto state = impl_->workspace_state(index.workspace);
-            ReindexResult result;
-            {
+        std::optional<std::string> to_schedule;
+        ReindexResult result;
+        {
+            auto borrowed = impl_->borrow(customer, repository);
+            if (!borrowed) {
+                return std::unexpected(borrowed.error());
+            }
+            liquid::repository* opened = borrowed->repository;
+            if (!borrowed->workspace) {
+                const auto state = impl_->space_state(customer);
                 std::lock_guard held(state->mutex);
-                if (const auto ensured = Impl::ensure_workspace(*state, index); !ensured) {
+                if (const auto ensured = impl_->ensure_space(customer, *state); !ensured) {
                     return std::unexpected(ensured.error());
-                }
-                auto next_active = state->data.active;
-                if (const auto published =
-                        Impl::publish_refs(*opened, state->data, repository, next_active);
-                    !published) {
-                    return std::unexpected(published.error());
                 }
                 auto next_artifacts = state->data.artifacts;
                 auto reindexed = Impl::reindex_into(*opened, state->data, repository, next_artifacts);
                 if (!reindexed) {
                     return std::unexpected(reindexed.error());
                 }
-                result = *reindexed;
-                ObjectStorage storage(index.objects);
-                if (const auto committed = Impl::commit(storage, state->data, std::move(next_active),
+                DirectoryStorage storage(impl_->index_path(customer));
+                if (const auto committed = Impl::commit(storage, state->data, state->data.active,
                                                         std::move(next_artifacts), true, false);
                     !committed) {
-                    state->loaded = false;
                     return std::unexpected(committed.error());
                 }
+                return *reindexed;
             }
-            impl_->trim();
-            if (const auto dropped = drop_repository(customer, repository); !dropped) {
-                return std::unexpected(dropped.error());
+            // In a workspace's index, reindexing a repository also publishes its branch tips again
+            // as its references name them now, so the index follows every push (lake#381).
+            const WorkspaceIndex& index = *borrowed->workspace;
+            const auto state = impl_->workspace_state(index.workspace);
+            std::lock_guard held(state->mutex);
+            const auto ready = Impl::ensure_workspace(*state, index);
+            if (!ready) {
+                return std::unexpected(ready.error());
             }
-            return result;
+            if (*ready != Impl::Readiness::Ready) {
+                // Never rebuilt inside a request: the rebuild runs off the request path and
+                // indexes this repository again once it is done.
+                state->pending.insert(repository);
+                if (*ready == Impl::Readiness::Schedule) {
+                    to_schedule = index.workspace;
+                }
+            } else {
+                auto refreshed = Impl::refresh_repository(*state, index, *opened, repository, false);
+                if (!refreshed) {
+                    return std::unexpected(refreshed.error());
+                }
+                result = *refreshed;
+            }
         }
-        const auto state = impl_->space_state(customer);
-        std::lock_guard held(state->mutex);
-        if (const auto ensured = impl_->ensure_space(customer, *state); !ensured) {
-            return std::unexpected(ensured.error());
+        if (to_schedule) {
+            impl_->schedule(customer, *to_schedule, *this);
+            return std::unexpected(Error{"store_unavailable",
+                                         "the workspace's search index is being built; it will "
+                                         "include this repository"});
         }
-        auto next_artifacts = state->data.artifacts;
-        auto result = Impl::reindex_into(*opened, state->data, repository, next_artifacts);
-        if (!result) {
-            return std::unexpected(result.error());
+        impl_->trim();
+        if (const auto dropped = drop_repository(customer, repository); !dropped) {
+            return std::unexpected(dropped.error());
         }
-        DirectoryStorage storage(impl_->index_path(customer));
-        if (const auto committed = Impl::commit(storage, state->data, state->data.active,
-                                                std::move(next_artifacts), true, false);
-            !committed) {
-            return std::unexpected(committed.error());
-        }
-        return *result;
+        return result;
     } catch (const std::exception& error) {
         return std::unexpected(Error{"store_error", error.what()});
     }
@@ -1882,20 +2359,6 @@ Result<std::vector<ArtifactMember>> Service::artifact_members(const std::string&
                                                               const std::string& version) const {
     try {
         const WorkspaceAccess config = impl_->workspace_config();
-        std::optional<BorrowedWorkspace> borrowed;
-        if (config.route && config.lend) {
-            const auto route = config.route(customer, repository);
-            if (!route) {
-                return std::unexpected(route.error());
-            }
-            if (*route) {
-                auto lent = config.lend(customer, **route);
-                if (!lent) {
-                    return std::unexpected(lent.error());
-                }
-                borrowed = std::move(*lent);
-            }
-        }
         std::vector<ArtifactMember> output;
         const auto read = [&](const Impl::CustomerState& state) {
             for (const auto& [key, segment] : state.artifacts) {
@@ -1912,14 +2375,41 @@ Result<std::vector<ArtifactMember>> Service::artifact_members(const std::string&
                 }
             }
         };
-        if (borrowed) {
-            const auto state = impl_->workspace_state(borrowed->index.workspace);
+        std::optional<std::string> route;
+        if (config.route && config.lend) {
+            const auto routed = config.route(customer, repository);
+            if (!routed) {
+                return std::unexpected(routed.error());
+            }
+            route = *routed;
+        }
+        if (route) {
+            // Members of a workspace whose index is being built are not listed yet.
+            const auto state = impl_->workspace_state(*route);
             {
                 std::lock_guard held(state->mutex);
-                if (const auto ensured = Impl::ensure_workspace(*state, borrowed->index); !ensured) {
-                    return std::unexpected(ensured.error());
+                if (state->building) {
+                    return output;
                 }
-                read(state->data);
+            }
+            bool schedule = false;
+            {
+                auto lent = config.lend(customer, *route);
+                if (!lent) {
+                    return std::unexpected(lent.error());
+                }
+                std::lock_guard held(state->mutex);
+                const auto ready = Impl::ensure_workspace(*state, lent->index);
+                if (!ready) {
+                    return std::unexpected(ready.error());
+                }
+                if (*ready == Impl::Readiness::Ready) {
+                    read(state->data);
+                }
+                schedule = *ready == Impl::Readiness::Schedule;
+            }
+            if (schedule) {
+                impl_->schedule(customer, *route, const_cast<Service&>(*this));
             }
             impl_->trim();
         } else {
@@ -1981,15 +2471,20 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                                               : QueryMode::Hot;
         std::vector<Hit> hits;
         const WorkspaceAccess config = impl_->workspace_config();
+        const auto permitted = [&](const std::string& space) {
+            return !query.spaces || query.spaces->contains(space);
+        };
+        const Error not_searchable{"invalid_input",
+                                   "workspace_id must name a workspace Zetta in this space"};
 
         // Which indexes the query reads: one workspace's, a repository's own, or a space's (or
-        // every space's) index on lake's volume with each of its switched workspaces' indexes.
+        // every permitted space's) index on lake's volume with each of its switched workspaces'.
         std::vector<std::pair<std::string, std::string>> workspaces; // (space, workspace)
         bool read_spaces = true;
         bool named = false; // the workspace was named or follows from the repository
         if (!query.workspace.empty()) {
-            if (!config.lend) {
-                return std::unexpected(Error{"unsupported", "workspace indexes are not configured"});
+            if (!config.lend || (query.spaces && !permitted(query.customer))) {
+                return std::unexpected(not_searchable);
             }
             workspaces.emplace_back(query.customer, query.workspace);
             read_spaces = false;
@@ -2005,11 +2500,28 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                 named = true;
             }
         } else if (config.switched) {
-            const auto listed = config.switched(query.customer);
-            if (!listed) {
-                return std::unexpected(listed.error());
+            std::vector<std::string> customers;
+            if (!query.customer.empty()) {
+                customers.push_back(query.customer);
+            } else if (query.spaces) {
+                customers.assign(query.spaces->begin(), query.spaces->end());
+            } else {
+                customers.emplace_back();
             }
-            workspaces = *listed;
+            for (const std::string& customer : customers) {
+                if (!customer.empty() && !permitted(customer)) {
+                    continue;
+                }
+                const auto listed = config.switched(customer);
+                if (!listed) {
+                    return std::unexpected(listed.error());
+                }
+                for (const auto& entry : *listed) {
+                    if (permitted(entry.first)) {
+                        workspaces.push_back(entry);
+                    }
+                }
+            }
         }
 
         // A repository a workspace store serves is never answered from a space's index.
@@ -2052,9 +2564,16 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                 Impl::collect(query, matcher, query.customer, "", state->data, &scanned->occurrences,
                               [](const std::string&) { return false; }, output, hits);
             } else {
-                const std::vector<std::string> customers =
-                    query.customer.empty() ? impl_->space_directories()
-                                           : std::vector<std::string>{query.customer};
+                std::vector<std::string> customers;
+                if (!query.customer.empty()) {
+                    customers.push_back(query.customer);
+                } else {
+                    for (const std::string& customer : impl_->space_directories()) {
+                        if (permitted(customer)) {
+                            customers.push_back(customer);
+                        }
+                    }
+                }
                 for (const std::string& customer : customers) {
                     const auto state = impl_->space_state(customer);
                     std::lock_guard held(state->mutex);
@@ -2067,7 +2586,17 @@ Service::query(const Query& query, const std::string& principal, control::Store&
             }
         }
 
+        std::vector<std::pair<std::string, std::string>> to_schedule;
         for (const auto& [customer, workspace] : workspaces) {
+            // An index being built is not waited for, and its store's lane is not taken.
+            const auto state = impl_->workspace_state(workspace);
+            {
+                std::lock_guard held(state->mutex);
+                if (state->building || (!state->loaded && std::chrono::steady_clock::now() < state->retry_after)) {
+                    output.building_workspaces.push_back(workspace);
+                    continue;
+                }
+            }
             // The workspace's lane is taken before its index's mutex, and no index's mutex is
             // held while waiting on it.
             std::optional<BorrowedRepository> scanned_repository;
@@ -2077,16 +2606,19 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                 if (!borrowed) {
                     return std::unexpected(borrowed.error());
                 }
-                if (!borrowed->workspace) {
-                    return std::unexpected(Error{"store_unavailable",
-                                                 "the repository's store changed during the search; retry"});
+                if (!borrowed->workspace || borrowed->workspace->workspace != workspace) {
+                    return std::unexpected(Error{
+                        "invalid_input", "the repository is not served by that workspace's store"});
                 }
                 scanned_repository = std::move(*borrowed);
             } else {
                 auto borrowed = config.lend(customer, workspace);
                 if (!borrowed) {
                     if (named) {
-                        return std::unexpected(borrowed.error());
+                        return std::unexpected(borrowed.error().code == "invalid_input" ||
+                                                       borrowed.error().code == "not_found"
+                                                   ? not_searchable
+                                                   : borrowed.error());
                     }
                     output.skipped_workspaces.push_back(workspace);
                     continue;
@@ -2098,14 +2630,21 @@ Service::query(const Query& query, const std::string& principal, control::Store&
             const std::string space = !index.customer.empty() ? index.customer
                                       : customer.empty()      ? query.customer
                                                               : customer;
-            const auto state = impl_->workspace_state(index.workspace);
             {
                 std::lock_guard held(state->mutex);
-                if (const auto ensured = Impl::ensure_workspace(*state, index); !ensured) {
+                const auto ready = Impl::ensure_workspace(*state, index);
+                if (!ready) {
                     if (named) {
-                        return std::unexpected(ensured.error());
+                        return std::unexpected(ready.error());
                     }
                     output.skipped_workspaces.push_back(workspace);
+                    continue;
+                }
+                if (*ready != Impl::Readiness::Ready) {
+                    output.building_workspaces.push_back(workspace);
+                    if (*ready == Impl::Readiness::Schedule) {
+                        to_schedule.emplace_back(space, workspace);
+                    }
                     continue;
                 }
                 if (scanned_repository) {
@@ -2124,8 +2663,11 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                                   [](const std::string&) { return false; }, output, hits);
                 }
             }
-            impl_->trim();
         }
+        for (const auto& [customer, workspace] : to_schedule) {
+            impl_->schedule(customer, workspace, const_cast<Service&>(*this));
+        }
+        impl_->trim();
 
         // Every candidate is authorized in one batch, after every index and lane is let go.
         std::vector<std::string> candidate_objects;
