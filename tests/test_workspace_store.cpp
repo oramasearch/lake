@@ -1065,6 +1065,11 @@ TEST(WorkspaceStoreMove, AWipedOrIncompleteWorkspaceStoreIsRefusedNeverServedEmp
         }
         std::this_thread::sleep_for(50ms);
     }
+    {
+        const auto [status, body] = rig.call("GET", "/v1/search?query=readme&workspace_id=" + rig.alpha);
+        ASSERT_EQ(status, 200U) << body.dump();
+        ASSERT_TRUE(body["value"]["building_workspaces"].empty()) << "the rebuild did not finish: " << body.dump();
+    }
     ASSERT_NO_FATAL_FAILURE(rig.restart());
 
     // The repository's state is gone from the workspace store: a read is refused as corrupt and
@@ -1541,59 +1546,66 @@ TEST(WorkspaceStoreSearch, ASearchNeverOpensAWorkspaceItsCallerCannotRead) {
     const auto alpha_text = rig.create(rig.alpha, "alpha-text");
     ASSERT_TRUE(alpha_text);
     ASSERT_EQ(rig.commit(*alpha_text, "README.md", "shared381 alpha").first, 200U);
-    // Let the switches' rebuilds finish.
+    // Both indexes are built, then a restart closes every store: any later touch of gamma's
+    // Zetta would be a new request to it.
     EXPECT_EQ(searched(rig, "shared381&customer=" + rig.customer_id)["value"]["items"].size(), 1U);
     EXPECT_EQ(searched(rig, "gamma&workspace_id=" + rig.gamma)["value"]["items"].size(), 1U);
-    const auto gamma_requests = [&] {
-        std::size_t total = 0;
-        for (const auto& [key, bytes] : search_objects(*rig.zetta, endpoint_gamma)) {
-            total += bytes.size();
-        }
-        return total;
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    const auto token_for = [&](const std::string& taap, const std::string& email) {
+        const auto user = rig.store->create_user({taap, email, "Searcher"});
+        EXPECT_TRUE(user);
+        const auto token = rig.store->create_token({user->id, "lake", "search", "test", {"*"}, 300, false});
+        EXPECT_TRUE(token) << token.error().message;
+        return std::pair{*user, token->secret};
     };
-    // A person who may read the first space, and nothing of the other.
-    const auto user = rig.store->create_user({"taap:1:ed25519:search-reader", "reader@example.test", "Reader"});
-    ASSERT_TRUE(user);
     const auto space = rig.store->find_policy_object("customer", rig.customer_id);
     ASSERT_TRUE(space);
-    ASSERT_TRUE(rig.store->create_grant({user->taap_id, space->id, "read", "sha512-256:search", "admin", "grant"}));
-    const auto token = rig.store->create_token({user->id, "lake", "search", "test", {"*"}, 300, false});
-    ASSERT_TRUE(token) << token.error().message;
-    const std::string bearer = token->secret;
+    // The first space's owner (granted as sign-up provisioning grants it; the in-memory store does
+    // not provision), and a person granted read on it who owns no space.
+    const auto owner = rig.store->get_customer(rig.customer_id);
+    ASSERT_TRUE(owner);
+    const auto owner_user = rig.store->get_user(owner->user_id);
+    ASSERT_TRUE(owner_user);
+    ASSERT_TRUE(rig.store->create_grant({owner_user->taap_id, space->id, "read", "sha512-256:owner", "admin", "grant"}));
+    const auto owner_token = rig.store->create_token({owner_user->id, "lake", "search", "test", {"*"}, 300, false});
+    ASSERT_TRUE(owner_token) << owner_token.error().message;
+    const auto [grantee, grantee_token] = token_for("taap:1:ed25519:search-grantee", "grantee@example.test");
+    ASSERT_TRUE(rig.store->create_grant({grantee.taap_id, space->id, "read", "sha512-256:grantee", "admin", "grant"}));
+    const std::uint64_t gamma_requests = rig.zetta->requests_to(endpoint_gamma);
     const std::uint64_t gamma_fence = rig.zetta->lease(endpoint_gamma).fence;
-    const auto gamma_bytes = gamma_requests();
 
-    // Their own space answers.
-    const auto own = searched(rig, "shared381&customer=" + rig.customer_id, bearer);
-    EXPECT_EQ(own["value"]["items"].size(), 1U) << own.dump();
-    // Without a customer: their own spaces only, and no other workspace is named anywhere.
-    const auto [mine_status, mine] = rig.call("GET", "/v1/search?query=shared381", nullptr, bearer);
-    ASSERT_EQ(mine_status, 200U) << mine.dump();
-    EXPECT_EQ(mine.dump().find(rig.gamma), std::string::npos) << mine.dump();
-    // The other space by name: its index on the volume may be read (hits are filtered), its
-    // workspaces are not opened.
-    const auto [other_status, other] =
-        rig.call("GET", "/v1/search?query=gamma&customer=" + rig.other_customer_id, nullptr, bearer);
-    ASSERT_EQ(other_status, 200U) << other.dump();
-    EXPECT_TRUE(other["value"]["items"].empty());
-    EXPECT_EQ(other.dump().find(rig.gamma), std::string::npos) << other.dump();
-    // Another space's workspace and a workspace that does not exist answer the same.
-    const auto [named_status, named] =
-        rig.call("GET", "/v1/search?query=gamma&workspace_id=" + rig.gamma, nullptr, bearer);
-    const auto [unknown_status, unknown] = rig.call(
-        "GET", "/v1/search?query=gamma&workspace_id=" + lake::control::new_uuid_v4(), nullptr, bearer);
-    EXPECT_EQ(named_status, 400U) << named.dump();
-    EXPECT_EQ(named_status, unknown_status);
-    EXPECT_EQ(named["error"], unknown["error"]);
-    // The other space's repository by id: refused before its workspace is reached.
-    const auto [repository_status, repository] = rig.call(
-        "GET", "/v1/search?query=gamma&repository=" + rig.repo_c.id, nullptr, bearer);
-    EXPECT_EQ(repository_status, 400U) << repository.dump();
-    // Nothing of gamma's store was touched by any of it.
+    for (const std::string& bearer : {owner_token->secret, grantee_token}) {
+        // Without a customer: the spaces the caller may read, owned or granted.
+        const auto mine = searched(rig, "shared381", bearer);
+        EXPECT_EQ(mine["value"]["items"].size(), 1U) << mine.dump();
+        EXPECT_EQ(mine.dump().find(rig.gamma), std::string::npos) << mine.dump();
+        EXPECT_EQ(searched(rig, "shared381&customer=" + rig.customer_id, bearer)["value"]["items"].size(), 1U);
+        // The other space by name: its index on the volume is read hit by hit; its workspaces are
+        // not opened.
+        const auto [other_status, other] =
+            rig.call("GET", "/v1/search?query=gamma&customer=" + rig.other_customer_id, nullptr, bearer);
+        ASSERT_EQ(other_status, 200U) << other.dump();
+        EXPECT_TRUE(other["value"]["items"].empty());
+        EXPECT_EQ(other.dump().find(rig.gamma), std::string::npos) << other.dump();
+        // Another space's workspace and a workspace that does not exist answer the same.
+        const auto [named_status, named] =
+            rig.call("GET", "/v1/search?query=gamma&workspace_id=" + rig.gamma, nullptr, bearer);
+        const auto [unknown_status, unknown] = rig.call(
+            "GET", "/v1/search?query=gamma&workspace_id=" + lake::control::new_uuid_v4(), nullptr, bearer);
+        EXPECT_EQ(named_status, 400U) << named.dump();
+        EXPECT_EQ(named_status, unknown_status);
+        EXPECT_EQ(named["error"], unknown["error"]);
+        // The other space's repository by id: refused before its workspace is reached.
+        const auto [repository_status, repository] = rig.call(
+            "GET", "/v1/search?query=gamma&repository=" + rig.repo_c.id, nullptr, bearer);
+        EXPECT_EQ(repository_status, 400U) << repository.dump();
+    }
+    // Not one request reached gamma's Zetta.
+    EXPECT_EQ(rig.zetta->requests_to(endpoint_gamma), gamma_requests);
     EXPECT_EQ(rig.zetta->lease(endpoint_gamma).fence, gamma_fence);
-    EXPECT_EQ(gamma_requests(), gamma_bytes);
     // The operator still reaches it.
     EXPECT_EQ(searched(rig, "gamma&workspace_id=" + rig.gamma)["value"]["items"].size(), 1U);
+    EXPECT_GT(rig.zetta->requests_to(endpoint_gamma), gamma_requests);
 }
 
 TEST(WorkspaceStoreSearch, AWipedOrTamperedWorkspaceIndexIsRebuiltNotServedEmpty) {
@@ -1815,11 +1827,222 @@ TEST(WorkspaceStoreSearch, DeletingAWorkspaceRemovesItsIndexObjectsAndACleanupFa
     EXPECT_TRUE(beta["value"]["deletion"].value("completed", false)) << beta.dump();
 }
 
+// The space's stored bytes as lake's quota check counts them (metering_usage).
+std::uint64_t space_bytes(MoveRig& rig) {
+    const auto [status, body] = rig.call("GET", "/v1/metering_usage?customer_id=" + rig.customer_id);
+    EXPECT_EQ(status, 200U) << body.dump();
+    const std::string text = body.dump();
+    const auto at = text.find("\"repositories_bytes\":");
+    EXPECT_NE(at, std::string::npos) << text;
+    return at == std::string::npos ? 0 : std::stoull(text.substr(at + std::string("\"repositories_bytes\":").size()));
+}
+
+// Runs lake's periodic work (as its main loop does; the usage refresh is due every 10 s) until a
+// usage reading counts at least `bytes`, for at most 15 s.
+std::uint64_t space_bytes_reaching(MoveRig& rig, std::uint64_t bytes) {
+    const auto started = std::chrono::steady_clock::now();
+    rig.server->drain();
+    std::uint64_t counted = space_bytes(rig);
+    while (counted < bytes && std::chrono::steady_clock::now() - started < 15s) {
+        std::this_thread::sleep_for(100ms);
+        rig.server->drain();
+        counted = space_bytes(rig);
+    }
+    return counted;
+}
+
+// Runs lake's periodic work until the next usage reading changes what is counted (at most 15 s).
+std::uint64_t next_space_bytes(MoveRig& rig) {
+    const std::uint64_t current = space_bytes(rig);
+    const auto started = std::chrono::steady_clock::now();
+    std::uint64_t counted = current;
+    while (counted == current && std::chrono::steady_clock::now() - started < 15s) {
+        rig.server->drain();
+        std::this_thread::sleep_for(100ms);
+        counted = space_bytes(rig);
+    }
+    return counted;
+}
+
+std::string letters(std::size_t size, std::uint64_t seed) {
+    std::mt19937_64 generator(seed);
+    std::string output;
+    for (std::size_t index = 0; index < size; ++index) {
+        output += static_cast<char>('a' + generator() % 26);
+        if (index % 60 == 59) {
+            output += '\n';
+        }
+    }
+    return output;
+}
+
+std::uint64_t search_bytes(lake::test::FakeZettaObjects& zetta, const std::string& endpoint) {
+    std::uint64_t total = 0;
+    for (const auto& [key, bytes] : search_objects(zetta, endpoint)) {
+        total += bytes.size();
+    }
+    return total;
+}
+
+// lake#381 review A: the index's room is the space's, as lake's quota check counts it.
+TEST(WorkspaceStoreSearch, TheIndexBudgetCountsTheWholeSpaceAndWhatItWroteSinceTheLastReading) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_b = "http://" + rig.beta + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U); // alpha holds about 2 MiB
+    ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
+    const auto text = rig.create(rig.beta, "beta-text");
+    ASSERT_TRUE(text);
+    ASSERT_EQ(rig.commit(*text, "seed.txt", "seedterm381").first, 200U);
+    ASSERT_EQ(searched(rig, "seedterm381&workspace_id=" + rig.beta)["value"]["items"].size(), 1U);
+    // Lake's periodic work runs only when the test drives it, so no usage reading happens between
+    // the steps below unless the test asks for one.
+    const std::uint64_t total = next_space_bytes(rig);
+    ASSERT_GT(total, 2'000'000U);
+
+    // Room for beta's own bucket, none for the space: the commit lands, its index does not.
+    ASSERT_TRUE(rig.store->set_storage_quota(rig.customer_id, total * 100 / 95));
+    ASSERT_EQ(rig.commit(*text, "space.txt", "spaceterm381 " + letters(2000, 1)).first, 200U);
+    EXPECT_TRUE(searched(rig, "spaceterm381&workspace_id=" + rig.beta)["value"]["items"].empty())
+        << "the index counted only its own bucket";
+    EXPECT_EQ(searched(rig, "seedterm381&workspace_id=" + rig.beta)["value"]["items"].size(), 1U);
+
+    // Measure one commit's index bytes without a quota.
+    ASSERT_TRUE(rig.store->set_storage_quota(rig.customer_id, 1ULL << 40));
+    const std::uint64_t before = search_bytes(*rig.zetta, endpoint_b);
+    ASSERT_EQ(rig.commit(*text, "one.txt", "oneterm381 " + letters(40'000, 2)).first, 200U);
+    ASSERT_EQ(searched(rig, "oneterm381&workspace_id=" + rig.beta)["value"]["items"].size(), 1U);
+    const std::uint64_t one = search_bytes(*rig.zetta, endpoint_b) - before;
+    ASSERT_GT(one, 40'000U);
+    // Once a usage reading includes it, leave room for one more such commit and a half.
+    const std::uint64_t counted = next_space_bytes(rig);
+    ASSERT_GT(counted, 2'000'000U);
+    ASSERT_TRUE(rig.store->set_storage_quota(rig.customer_id, (counted + one * 3 / 2) * 10 / 9));
+    ASSERT_EQ(rig.commit(*text, "two.txt", "twoterm381 " + letters(40'000, 3)).first, 200U);
+    ASSERT_EQ(rig.commit(*text, "three.txt", "threeterm381 " + letters(40'000, 4)).first, 200U);
+    EXPECT_EQ(searched(rig, "twoterm381&workspace_id=" + rig.beta)["value"]["items"].size(), 1U);
+    EXPECT_TRUE(searched(rig, "threeterm381&workspace_id=" + rig.beta)["value"]["items"].empty())
+        << "two commits within one usage reading each spent the whole room";
+}
+
+// lake#381 review B: rebuilds have their own worker.
+TEST(WorkspaceStoreSearch, AUsageRefreshDoesNotWaitForARebuild) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
+    const auto text = rig.create(rig.beta, "beta-text");
+    ASSERT_TRUE(text);
+    ASSERT_EQ(searched(rig, "readme&workspace_id=" + rig.alpha)["value"]["items"].size(), 1U);
+    const std::uint64_t before = space_bytes_reaching(rig, 2'000'000);
+    // Alpha's index is lost and its rebuild crawls: every index object takes 5 s.
+    rig.options.search->set_memory_bound(1);
+    ASSERT_EQ(searched(rig, "readme&workspace_id=" + rig.beta)["value"]["items"].size(), 1U);
+    for (const auto& [key, bytes] : search_objects(*rig.zetta, endpoint_a)) {
+        rig.zetta->erase_object(endpoint_a, key);
+    }
+    rig.zetta->hang(endpoint_a, 5s, "/search/");
+    const auto [status, body] = rig.call("GET", "/v1/search?query=readme&workspace_id=" + rig.alpha);
+    ASSERT_EQ(status, 200U) << body.dump();
+    ASSERT_EQ(body["value"]["building_workspaces"], json::array({rig.alpha})) << body.dump();
+    // A megabyte lands in beta; the usage refresh counts it while alpha's rebuild still runs.
+    ASSERT_EQ(rig.commit(*text, "large.txt", letters(1'200'000, 5)).first, 200U);
+    const std::uint64_t after = space_bytes_reaching(rig, before + 1'000'000);
+    EXPECT_GE(after, before + 1'000'000) << "the usage refresh waited for the rebuild";
+    rig.zetta->hang(endpoint_a, 0ms, "/search/");
+}
+
+// lake#381 review F: the Hugging Face upload's commit and index update are off the server thread.
+TEST(WorkspaceStoreSearch, AHubUploadDoesNotHoldTheServerThread) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    const auto model = rig.create(rig.alpha, "hub-model");
+    ASSERT_TRUE(model);
+    ASSERT_EQ(rig.commit(*model, "README.md", "hubterm381").first, 200U);
+    ASSERT_EQ(searched(rig, "hubterm381&workspace_id=" + rig.alpha)["value"]["items"].size(), 1U);
+    // The upload's index update takes seconds.
+    rig.zetta->hang(endpoint_a, 1500ms, "/search/");
+    const std::string config = "{\"hidden\":8}";
+    std::string encoded;
+    {
+        static constexpr std::string_view alphabet =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::size_t index = 0;
+        for (; index + 2 < config.size(); index += 3) {
+            const unsigned value = (static_cast<unsigned char>(config[index]) << 16U) |
+                                   (static_cast<unsigned char>(config[index + 1]) << 8U) |
+                                   static_cast<unsigned char>(config[index + 2]);
+            for (int shift = 18; shift >= 0; shift -= 6) {
+                encoded += alphabet[(value >> shift) & 63U];
+            }
+        }
+        if (index < config.size()) {
+            unsigned value = static_cast<unsigned char>(config[index]) << 16U;
+            if (index + 1 < config.size()) {
+                value |= static_cast<unsigned char>(config[index + 1]) << 8U;
+            }
+            encoded += alphabet[(value >> 18U) & 63U];
+            encoded += alphabet[(value >> 12U) & 63U];
+            encoded += index + 1 < config.size() ? alphabet[(value >> 6U) & 63U] : '=';
+            encoded += '=';
+        }
+    }
+    const std::string commit_body =
+        json({{"key", "header"}, {"value", {{"summary", "upload"}}}}).dump() + "\n" +
+        json({{"key", "file"},
+              {"value", {{"path", "config.json"}, {"content", encoded}, {"encoding", "base64"}}}})
+            .dump() +
+        "\n";
+    std::atomic<unsigned> uploaded{0};
+    std::thread uploader([&] {
+        const auto* bytes = reinterpret_cast<const std::byte*>(commit_body.data());
+        const auto response = lake::test::http_request(
+            {.url = "http://127.0.0.1:" + std::to_string(rig.server->port()),
+             .method = "POST",
+             .suffix = "/api/models/" + model->id + "/commit/main",
+             .headers = {{"Authorization", "Bearer workspace-store-operator"},
+                         {"Content-Type", "application/x-ndjson"}},
+             .body = std::vector<std::byte>(bytes, bytes + commit_body.size())});
+        uploaded.store(response ? response->status : 0U);
+    });
+    std::this_thread::sleep_for(500ms);
+    const auto started = std::chrono::steady_clock::now();
+    const auto [status, body] = rig.call("GET", "/v1/server_info");
+    const auto took = std::chrono::steady_clock::now() - started;
+    const bool still_uploading = uploaded.load() == 0;
+    uploader.join();
+    rig.zetta->hang(endpoint_a, 0ms, "/search/");
+    EXPECT_EQ(status, 200U) << body.dump();
+    EXPECT_TRUE(still_uploading) << "the upload finished before the check";
+    EXPECT_LT(took, 1s) << "the upload held the server thread";
+    EXPECT_EQ(uploaded.load(), 200U);
+}
+
+// lake#381 review nit: a write-once index object retried after Zetta took it is a success.
+TEST(WorkspaceStoreSearch, AWriteOnceIndexPutRetriedWithTheSameContentSucceeds) {
+    Rig rig;
+    auto client = rig.client();
+    ASSERT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
+    lake::control::WorkspaceStoreCipher::Key key{};
+    key.fill(7);
+    const auto cipher = std::make_shared<const lake::control::WorkspaceStoreCipher>(rig.workspace, 1, key);
+    const auto objects = lake::search::make_sealed_index_objects(client, cipher, 0, {});
+    ASSERT_TRUE(objects->put("runs/one.json", "{\"a\":1}", true));
+    EXPECT_TRUE(objects->put("runs/one.json", "{\"a\":1}", true)) << "a retry of the same put";
+    const auto different = objects->put("runs/one.json", "{\"a\":2}", true);
+    ASSERT_FALSE(different);
+    EXPECT_EQ(objects->get("runs/one.json")->value(), "{\"a\":1}");
+    EXPECT_FALSE(holds_text(rig.zetta->objects(rig.endpoint), "\"a\"")) << "sealed";
+}
+
 TEST(WorkspaceStoreSearch, OnceTheRepositoryStoreLentRepositoriesSearchNeverOpensAStoreItself) {
     const auto root = lake::test::fixture_path("workspace-store-search-" + lake::control::new_uuid_v4());
     std::filesystem::create_directories(root / "space" / "store");
     lake::search::Service service(root);
-    service.set_repository_access([](const std::string&, const std::string&)
+    service.set_repository_access([](const std::string&, const std::string&, bool)
                                       -> lake::search::Result<lake::search::BorrowedRepository> {
         return std::unexpected(lake::search::Error{"store_unavailable", "lent store refused"});
     });
@@ -2465,13 +2688,13 @@ TEST(WorkspaceStoreZetta, TheSearchIndexOnARealZettaIsSealedReloadsAndIsRebuilt)
         return output;
     };
     const auto configure = [&](lake::search::Service& service) {
-        service.set_repository_access([&](const std::string&, const std::string&)
+        service.set_repository_access([&](const std::string&, const std::string&, bool)
                                           -> lake::search::Result<lake::search::BorrowedRepository> {
             return lake::search::BorrowedRepository{std::make_shared<std::unique_lock<std::mutex>>(lane),
                                                     &*repository, index()};
         });
         lake::search::WorkspaceAccess access;
-        access.lend = [&](const std::string&, const std::string&)
+        access.lend = [&](const std::string&, const std::string&, bool)
             -> lake::search::Result<lake::search::BorrowedWorkspace> {
             return lake::search::BorrowedWorkspace{std::make_shared<std::unique_lock<std::mutex>>(lane),
                                                    index()};

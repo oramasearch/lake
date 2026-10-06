@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -131,7 +132,9 @@ inline constexpr std::string_view workspace_index_prefix = "search/";
 // `LKSIDX1\0` then AES-256-GCM with the workspace's data key (the store's cipher), its associated
 // data binding the workspace and the object's name. Every write carries `fence`, the store's lease
 // fence. A failure here never marks the store failed; a write refused as fenced calls `on_lost`,
-// since the store's lease has passed to another holder.
+// since the store's lease has passed to another holder. Objects carry no key version: a rotated
+// data key makes them unreadable (`corrupt`), and the index is rebuilt. A write-once put retried
+// after Zetta already took it (`already_exists` with the same content) is a success.
 std::shared_ptr<IndexObjects>
 make_sealed_index_objects(std::shared_ptr<control::ZettaObjectClient> client,
                           std::shared_ptr<const control::WorkspaceStoreCipher> cipher,
@@ -156,6 +159,9 @@ struct WorkspaceIndex {
     // How many more bytes the index may add to the workspace's bucket, so it never takes the room
     // liquid's own writes need under the bucket quota; nothing: no quota.
     std::function<std::optional<std::uint64_t>()> write_budget;
+    // Told how many bytes each commit wrote, so commits between two usage readings do not each
+    // spend the whole budget.
+    std::function<void(std::uint64_t)> spent;
 };
 
 // A repository lent to search by lake's repository store (lake#380): `hold` keeps the store's
@@ -167,8 +173,10 @@ struct BorrowedRepository {
     // workspace's, lent under the same hold.
     std::optional<WorkspaceIndex> workspace;
 };
-using RepositoryAccess =
-    std::function<Result<BorrowedRepository>(const std::string& customer, const std::string& repository)>;
+// `lake_work`: lake's own work (a rebuild) takes the store's lane without admission, waiting for it,
+// rather than being refused when the lane is busy with requests.
+using RepositoryAccess = std::function<Result<BorrowedRepository>(
+    const std::string& customer, const std::string& repository, bool lake_work)>;
 
 struct BorrowedWorkspace {
     std::shared_ptr<void> hold;
@@ -178,7 +186,8 @@ struct BorrowedWorkspace {
 // How search reaches workspace indexes (lake#381). Every member is set by the server.
 struct WorkspaceAccess {
     // Lends a workspace's index under its store's lane; `customer` may be empty (looked up).
-    std::function<Result<BorrowedWorkspace>(const std::string& customer, const std::string& workspace)>
+    std::function<Result<BorrowedWorkspace>(const std::string& customer, const std::string& workspace,
+                                            bool lake_work)>
         lend;
     // The same, but only when lake has the workspace's store open already (workspace deletion).
     std::function<Result<std::optional<BorrowedWorkspace>>(const std::string& workspace)> lend_if_open;
@@ -190,9 +199,12 @@ struct WorkspaceAccess {
     std::function<Result<std::optional<std::string>>(const std::string& customer,
                                                      const std::string& repository)>
         route;
-    // Runs Service::rebuild_workspace later, off every request path (lake's maintenance thread).
-    // Unset: it runs at once, on the calling thread, after search let go of every lane and lock.
-    std::function<void(const std::string& customer, const std::string& workspace)> schedule;
+    // Runs Service::rebuild_workspace after `delay`, off every request path (lake's search index
+    // worker). Unset: it runs at once, on the calling thread, after search let go of every lane and
+    // lock (a delayed retry is then left to the workspace's next use).
+    std::function<void(const std::string& customer, const std::string& workspace,
+                       std::chrono::milliseconds delay)>
+        schedule;
 };
 
 class Service {
@@ -245,13 +257,23 @@ public:
                                                  const std::string& repository);
     // Marks a workspace's index as being built and schedules its rebuild (a switch).
     void schedule_rebuild(const std::string& customer, const std::string& workspace);
-    // Rebuilds a workspace's index from its repositories, replacing what it holds. Each repository
-    // is read under its store's lane, one at a time; the index is written without holding the lane.
-    // Repositories written meanwhile are indexed again afterwards. A failure is retried on the
-    // workspace's next use after a growing delay.
+    // The scheduled job for a workspace's index. While the index is missing or being built, it
+    // rebuilds it from the repositories: each read under its store's lane (lake's own work, not
+    // admitted), one at a time, and the index written without holding a lane. Repositories written
+    // meanwhile are indexed again afterwards, and ones deleted meanwhile are left out. With the
+    // index ready, it applies only the writes and deletions still pending. A failed rebuild is
+    // retried on the workspace's next use after a growing delay (kept in memory only: a restarted
+    // lake tries again at once).
     [[nodiscard]] Result<void> rebuild_workspace(const std::string& customer, const std::string& workspace);
+    // Stops scheduling and running rebuilds (the server is stopping); one in progress stops at its
+    // next repository. set_workspace_access starts them again.
+    void shutdown();
+    // The workspaces search keeps state for (tests).
+    [[nodiscard]] std::vector<std::string> tracked_workspaces() const;
 
 private:
+    [[nodiscard]] Result<void> apply_pending(const std::string& customer, const std::string& workspace);
+
     struct Impl;
     std::shared_ptr<Impl> impl_;
 };

@@ -10,7 +10,7 @@ a result that the capability would reject.
 | Input | Meaning |
 |---|---|
 | `query` | Required. Plain text is ranked BM25F; quoted text is an exact substring; `/expression/` is an ECMAScript regex. |
-| `customer` | Optional space id. Searches the space's index on lake's volume and, when the caller may read the space, the index of each of its switched workspaces. Empty: every space for the operator, the caller's own spaces for anyone else. |
+| `customer` | Optional space id. Searches the space's index on lake's volume and, when the caller may read the space, the index of each of its switched workspaces. Empty: every space for the operator, and for anyone else every space the caller may read. |
 | `workspace_id` | Optional. Searches only that switched workspace's index (lake#381). A workspace that does not exist, is not switched, is deleted or is in a space the caller cannot read answers the same `invalid_input` (`workspace_id must name a workspace Zetta in this space`). |
 | `repository` | Optional repository id. |
 | `ref` | Optional branch or tag name. An immutable tag snapshot takes precedence over a branch with the same name. |
@@ -74,10 +74,13 @@ PostgreSQL.
 object is `LKSIDX1\0` followed by AES-256-GCM under the workspace's data key (the store's
 `WorkspaceStoreCipher`, unwrapped once per open store from `keys/workspace-v1.wrapped`), its
 associated data binding the workspace and the object's name, so an object cannot be moved under
-another name or read under another workspace's key. Every write carries the store's lease fence. A
-failed index write is the search's failure only: it never marks the workspace store failed, so the
-store is not reopened; only Zetta refusing an index write as `fenced` (the lease is another holder's)
-marks the store unusable, as a lost lease does.
+another name or read under another workspace's key. Objects carry no key version: once data-key
+rotation exists, a rotated key makes them unreadable and the index is rebuilt. Every write carries
+the store's lease fence. A failed index write is the search's failure only: it never marks the
+workspace store failed, so the store is not reopened; only Zetta refusing an index write as
+`fenced` (the lease is another holder's) marks the store unusable, as a lost lease does. A
+write-once put retried after Zetta took its first attempt (`already_exists` with the same content)
+counts as written.
 
 **Writes once, not whole.** A commit writes the new segments and one new run holding only the blobs
 no run has, then replaces the manifest; runs, segments and artifact objects the manifest no longer
@@ -85,18 +88,21 @@ names are removed after it. When more than half of the runs' bytes are unreferen
 over 1 MiB), the live blobs are written into one new run and the old runs removed. A push therefore
 writes the text it added, not the workspace's whole text.
 
-**Room for the repositories.** Index bytes share the workspace bucket's quota (the space's storage
-quota) with the liquid store. Before a commit, search checks that what it is about to write fits in
-the quota less the bucket's last known usage and a tenth of the quota kept for liquid; otherwise it
-writes nothing and answers `busy` ("indexing is stopped"), which a push or commit records in its
-audit details and never fails on. Liquid's own writes are therefore never refused because of the
-index (to within the ten-second staleness of the usage reading).
+**Room for the repositories.** Index bytes count in the space's storage quota with the
+repositories. Before a commit, search checks that what it is about to write fits in the quota less
+the space's stored bytes as lake's push quota check counts them (the space's store on lake's volume
+while any workspace is not switched, plus every switched workspace's last bucket usage), less what
+search indexes wrote since those readings, less a tenth of the quota kept for liquid. A usage not
+read yet counts as no room. Otherwise it writes nothing and answers `busy` ("indexing is stopped"),
+which a push or commit records in its audit details and never fails on.
 
 **Who can make search open a workspace.** The `search` capability decides the scope before search
 lends, opens or rebuilds anything (`search_scope`). The operator reads every space. Anyone else
-names a `customer`, a `workspace_id` or a `repository`, or is limited to their own spaces; a space's
-switched workspaces are opened only when the caller may read the space (`read` on its `customer`
-policy object), a named workspace only then too, and a repository's workspace only when the caller
+names a `customer`, a `workspace_id` or a `repository`, or is limited to the spaces they may read:
+every space filtered by `read` through the policy engine, as the dashboard lists "my spaces", so
+ownership, membership, grants and organization roles count, for a person, an agent or a service
+token alike. A space's switched workspaces are opened only when the caller may read the space
+(`read` on its `customer` policy object), a named workspace only then too, and a repository's workspace only when the caller
 may read the repository. A space the caller cannot read is still searched on lake's volume, hit by
 hit through the policy filter, without opening its workspaces. `skipped_workspaces` and
 `building_workspaces` only ever name workspaces in the scope.
@@ -104,8 +110,11 @@ hit through the policy filter, without opening its workspaces. `skipped_workspac
 **Lent under the lane.** Search reaches a workspace's index through lake's repository store
 (`search::WorkspaceAccess`): it lends the index objects under the workspace store's lane, opening the
 store on first use, and lends a repository together with its workspace's index. Publish,
-`reindex_artifacts` (run by every push and every `commit_repository_files`) and history scans of a
-workspace repository update its index under the same lane as the repository's own writes. Lock
+`reindex_artifacts` (run by every push and every `commit_repository_files`, including the Hugging
+Face upload route, which runs it off the server thread) and history scans of a workspace repository
+update its index under the same lane as the repository's own writes. A release is published to the
+index before its record is written and again after, so a build that read the releases before the
+record existed applies it afterwards. Deleting a repository removes it from the index. Lock
 order: a store's lane, then an index's lock, then search's map lock, which is only held briefly and
 never across I/O or a lane wait.
 
@@ -118,16 +127,24 @@ when next used. The one used last, one in use, one being built and one with writ
 **Rebuilt off the request path, never copied.** An index with no manifest (never written, or wiped),
 one missing a run, segment or artifact object its manifest names, one naming a blob it holds no text
 for, or one that does not authenticate or parse is never served: it is marked as building and its
-rebuild is queued on lake's maintenance thread (a switch queues it at once). Meanwhile searches list
+rebuild is queued on search's own worker thread, never on lake's maintenance thread (a switch
+queues it at once), so the usage refresh and the deletion pass never wait on a rebuild. Objects of
+an index its manifest does not name (left by a commit that stopped before its manifest) are removed
+whenever the index is loaded. Meanwhile searches list
 the workspace in `building_workspaces` without taking its lane, and publish, reindex, push and
 commit only record the repository as pending.
 - The rebuild reads each live repository of the workspace under the store's lane, one repository at
-  a time (so a push waits at most one repository's read): its branch tips as its references name
+  a time (so a push waits at most one repository's read), as lake's own work: it waits for the lane
+  rather than being refused admission when requests fill it. its branch tips as its references name
   them, its release snapshots from its release records (`create_release`'s forge records, lake#341),
   and its published artifacts. It writes the index without holding any lane, in one pass that also
-  removes every other `search/` object, then indexes the pending repositories again.
+  removes every other `search/` object, then indexes the pending repositories again and removes the
+  ones deleted meanwhile (they are also left out of what it writes). A pending repository that
+  cannot be read or a deletion that cannot reach the index is kept and tried again after 15 s on the
+  worker.
 - A failed rebuild is not retried on every request: the workspace answers `building` for a delay that
-  grows from 15 s to 10 min, and the next use after it queues the rebuild again.
+  grows from 15 s to 10 min, and the next use after it queues the rebuild again. The delay is kept in
+  memory only, by decision: a restarted lake tries again at once, which a restart is usually for.
 - The repository list has no cursor in the control store; a workspace with 100,000 repositories or
   more is refused rather than rebuilt from a partial list, so a rebuild never sweeps the objects of
   repositories past a limit.
@@ -255,7 +272,10 @@ never lends a workspace outside its permitted spaces, a wiped index and a manife
 segments or artifact members are gone rebuilt (without a restart), a failed rebuild backing off, a
 rebuild republishing release snapshots, runs written once and not rewritten by a push, reindex
 following a moved branch, eviction and reload, a deleted repository leaving the index, a history scan
-naming another workspace refused, and dropping a workspace. `WorkspaceStoreSearch.*`
+naming another workspace refused, a rebuild that waits for a busy lane rather than being refused,
+writes and deletions during a rebuild applied after it (a refused re-index kept and retried), a
+deletion that cannot reach the index retried, orphan objects swept on load, a dropped workspace
+keeping no state, and dropping a workspace. `WorkspaceStoreSearch.*`
 (`tests/test_workspace_store.cpp`) run through a lake server on the fake Zetta object routes: sealed
 indexes of two workspaces with no term in the clear in either bucket or on lake's volume, the switch
 dropping the space index's copy, a restart reloading without rewriting, a deleted repository leaving
@@ -264,7 +284,9 @@ workspace and gets one answer for another space's workspace and an unknown one; 
 lost or tampered index rebuilt with and without a restart; a failed index write leaving the store's
 lease and holder as they were; the first push after a switch not waiting for a slow rebuild; pushes,
 commits and searches side by side with 503s bounded; and a deletion removing the index objects and
-not held up when their removal fails.
+not held up when their removal fails; the index's room counted against the whole space and what it
+wrote since the last usage reading; a usage refresh not waiting on a slow rebuild; a Hugging Face
+upload not holding the server thread; and a write-once put retried with the same content.
 `WorkspaceStoreZetta.TheSearchIndexOnARealZettaIsSealedReloadsAndIsRebuilt` does the sealing, reload
 and rebuild against a real Zetta when `LAKE_TEST_ZETTA_BINARY` names one. The Postgres fixture invokes the registered
 capability for hot and exact-change scan requests and proves that a real policy-store batch hides a

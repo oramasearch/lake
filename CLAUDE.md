@@ -182,8 +182,8 @@ A switched workspace's search index lives beside its store (decision 54 S8, lake
 the manifest, write-once blob runs, segments and artifact members are `search/` objects in bucket
 `lake_store`, sealed with the workspace's data key and fenced by the store's lease through search's
 own client calls (a failed index write never fails the store), written under the store's lane and
-within the bucket quota's room. Loaded on first search, evicted when idle under
-`LAKE_SEARCH_MEMORY_BYTES`; a missing or unreadable index is rebuilt on lake's maintenance thread
+within the room the space's quota leaves after a tenth kept for the repositories. Loaded on first search, evicted when idle under
+`LAKE_SEARCH_MEMORY_BYTES`; a missing or unreadable index is rebuilt on search's own worker thread
 (releases from their records), never inside a request and never copied, and answers
 `building_workspaces` meanwhile. `search` decides the caller's spaces and workspaces before any
 workspace is opened. A switch and every start drop switched workspaces from the space index on

@@ -5112,7 +5112,7 @@ void register_policy_capabilities(Registry& registry) {
 
 // What one search may read (lake#381), decided before search lends, opens or rebuilds any
 // workspace: the operator reads every space; anyone else names a space, a workspace or a
-// repository, or is limited to their own spaces, and only spaces they may read have their switched
+// repository, or is limited to the spaces they may read, and only those spaces have their switched
 // workspaces opened. A named workspace that does not exist, is not switched, or is not readable
 // answers one `invalid_input`, so its existence elsewhere is not revealed.
 std::expected<search::Query, ApiError> search_scope(const json& input, ApiContext& context) {
@@ -5187,9 +5187,12 @@ std::expected<search::Query, ApiError> search_scope(const json& input, ApiContex
         if (space_readable(query.customer)) {
             spaces.insert(query.customer);
         }
-    } else if (!context.acting_user_id.empty()) {
-        constexpr int page = 10'000;
-        const auto customers = context.store->list_customers(page, context.acting_user_id);
+    } else {
+        // The spaces the caller may read, as the dashboard lists them: every space filtered by
+        // `read` through the policy engine, so ownership, membership, grants and organization
+        // roles all count, for a person, an agent or a service token alike.
+        constexpr int page = 100'000;
+        const auto customers = context.store->list_customers(page);
         if (!customers) {
             return std::unexpected(ApiError{customers.error().code, customers.error().message, {}});
         }
@@ -5199,9 +5202,23 @@ std::expected<search::Query, ApiError> search_scope(const json& input, ApiContex
                                             "too many spaces to search them all; name a customer",
                                             "/customer"});
         }
+        std::vector<std::string> objects;
+        std::map<std::string, std::string> space_of_object;
         for (const control::Customer& customer : *customers) {
-            if (space_readable(customer.id)) {
-                spaces.insert(customer.id);
+            const auto object = context.store->find_policy_object("customer", customer.id);
+            if (object) {
+                objects.push_back(object->id);
+                space_of_object.emplace(object->id, customer.id);
+            }
+        }
+        const auto decisions =
+            control::authorize_batch(*context.store, context.acting_identity, objects, "read", cache);
+        if (!decisions) {
+            return std::unexpected(ApiError{decisions.error().code, decisions.error().message, {}});
+        }
+        for (const auto& [object, decision] : *decisions) {
+            if (decision.allowed && space_of_object.contains(object)) {
+                spaces.insert(space_of_object.at(object));
             }
         }
     }

@@ -290,8 +290,8 @@ objects `search/<name>` in its store's bucket `lake_store`, beside the store:
 - **Where.** A prefix in `lake_store`, not a bucket `lake_search` as first planned: one lease and
   fence then cover the store and its index (a second bucket would need a lease of its own or take
   writes from any process), no key of its own is needed, and the index goes with the bucket. It
-  counts in the bucket's quota, and search writes only within the room left after a tenth of the
-  quota kept for liquid, stopping indexing rather than failing a push. Liquid never lists or writes
+  counts in the space's quota, and search writes only within the room the space's stored bytes leave
+  after a tenth of the quota kept for liquid, stopping indexing rather than failing a push. Liquid never lists or writes
   under `search/`.
 - **Sealing.** Each object is AES-256-GCM under the workspace's data key (the store's cipher), its
   associated data binding the workspace and the object's name, written through search's own client
@@ -307,7 +307,7 @@ objects `search/<name>` in its store's bucket `lake_store`, beside the store:
 - **Loading.** On a workspace's first search, and again under a new fence; idle workspaces are
   evicted under `LAKE_SEARCH_MEMORY_BYTES` (default 256 MiB).
 - **Rebuilt, not copied.** A switch, or a missing, partial or unreadable index, queues a rebuild on
-  lake's maintenance thread, never inside a request: it reads each repository's branch tips, release
+  search's own worker thread, never inside a request or on the maintenance thread: it reads each repository's branch tips, release
   snapshots (from the release records) and artifacts one repository at a time under the lane, and
   writes without the lane. Searches answer `building_workspaces` meanwhile; writes are applied after
   it. A failure backs off from 15 s to 10 min. Nothing is copied from the space's index.

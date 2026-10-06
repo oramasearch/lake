@@ -605,6 +605,13 @@ struct Workspaces {
     std::map<std::string, std::unique_ptr<liquid::repository>> repositories;
     std::map<std::string, std::vector<std::pair<std::string, std::string>>> releases;
     std::map<std::string, int> lends;
+    // A workspace's lane full of requests: admission is refused, lake's own work still waits.
+    std::set<std::string> busy;
+    // Borrows of a repository refused this many more times, and lends of a workspace.
+    std::map<std::string, int> refuse_borrow;
+    std::map<std::string, int> fail_lend;
+    // Called by the index's write budget, which a rebuild reads just before it writes.
+    std::function<void()> before_commit;
     std::vector<std::pair<std::string, std::string>> queued;
     std::mutex queue_mutex;
 
@@ -666,38 +673,65 @@ struct Workspaces {
             -> lake::search::Result<std::vector<std::pair<std::string, std::string>>> {
             return releases[repository];
         };
+        output.write_budget = [this]() -> std::optional<std::uint64_t> {
+            if (before_commit) {
+                auto hook = std::move(before_commit);
+                before_commit = nullptr;
+                hook();
+            }
+            return std::nullopt;
+        };
         return output;
     }
 
-    std::shared_ptr<void> hold(const std::string& workspace) {
+    lake::search::Result<std::shared_ptr<void>> hold(const std::string& workspace, bool lake_work) {
+        if (!lake_work && busy.contains(workspace)) {
+            return std::unexpected(lake::search::Error{"store_unavailable", "the store is busy"});
+        }
         ++lends[workspace];
-        return std::make_shared<std::unique_lock<std::mutex>>(*lanes.at(workspace));
+        return std::shared_ptr<void>(std::make_shared<std::unique_lock<std::mutex>>(*lanes.at(workspace)));
     }
 
     void configure(lake::search::Service& service) {
         service.set_repository_access(
-            [this](const std::string&, const std::string& repository)
+            [this](const std::string&, const std::string& repository, bool lake_work)
                 -> lake::search::Result<lake::search::BorrowedRepository> {
                 if (!workspace_of.contains(repository)) {
                     return std::unexpected(lake::search::Error{"not_found", "no repository"});
                 }
+                if (refuse_borrow[repository] > 0) {
+                    --refuse_borrow[repository];
+                    return std::unexpected(lake::search::Error{"store_unavailable", "refused"});
+                }
                 const std::string workspace = workspace_of.at(repository);
-                return lake::search::BorrowedRepository{hold(workspace),
-                                                        repositories.at(repository).get(),
+                auto held = hold(workspace, lake_work);
+                if (!held) {
+                    return std::unexpected(held.error());
+                }
+                return lake::search::BorrowedRepository{*held, repositories.at(repository).get(),
                                                         index(workspace)};
             });
         lake::search::WorkspaceAccess access;
-        access.lend = [this](const std::string& customer, const std::string& workspace)
+        access.lend = [this](const std::string& customer, const std::string& workspace, bool lake_work)
             -> lake::search::Result<lake::search::BorrowedWorkspace> {
             if (!objects.contains(workspace) || (!customer.empty() && space_of.at(workspace) != customer)) {
                 return std::unexpected(lake::search::Error{"invalid_input", "no such workspace"});
             }
-            return lake::search::BorrowedWorkspace{hold(workspace), index(workspace)};
+            if (fail_lend[workspace] > 0) {
+                --fail_lend[workspace];
+                return std::unexpected(lake::search::Error{"store_unavailable", "the workspace Zetta is away"});
+            }
+            auto held = hold(workspace, lake_work);
+            if (!held) {
+                return std::unexpected(held.error());
+            }
+            return lake::search::BorrowedWorkspace{*held, index(workspace)};
         };
         access.lend_if_open = [this](const std::string& workspace)
             -> lake::search::Result<std::optional<lake::search::BorrowedWorkspace>> {
+            auto held = hold(workspace, true);
             return std::optional<lake::search::BorrowedWorkspace>{
-                lake::search::BorrowedWorkspace{hold(workspace), index(workspace)}};
+                lake::search::BorrowedWorkspace{*held, index(workspace)}};
         };
         access.switched = [this](const std::string& customer)
             -> lake::search::Result<std::vector<std::pair<std::string, std::string>>> {
@@ -713,15 +747,16 @@ struct Workspaces {
             -> lake::search::Result<std::optional<std::string>> {
             return std::optional<std::string>{workspace_of.at(repository)};
         };
-        access.schedule = [this](const std::string& customer, const std::string& workspace) {
+        access.schedule = [this](const std::string& customer, const std::string& workspace,
+                                 std::chrono::milliseconds) {
             std::lock_guard lock(queue_mutex);
             queued.emplace_back(customer, workspace);
         };
         service.set_workspace_access(std::move(access));
     }
 
-    // Runs the queued rebuilds, as lake's maintenance thread does.
-    void drain(lake::search::Service& service) {
+    // Runs the queued jobs, as lake's search index worker does (a retry's delay is not waited).
+    void drain(lake::search::Service& service, bool expect_success = true) {
         std::vector<std::pair<std::string, std::string>> jobs;
         {
             std::lock_guard lock(queue_mutex);
@@ -729,7 +764,9 @@ struct Workspaces {
         }
         for (const auto& [customer, workspace] : jobs) {
             const auto rebuilt = service.rebuild_workspace(customer, workspace);
-            EXPECT_TRUE(rebuilt) << rebuilt.error().message;
+            if (expect_success) {
+                EXPECT_TRUE(rebuilt) << rebuilt.error().message;
+            }
         }
     }
 
@@ -888,7 +925,8 @@ TEST(SearchWorkspaces, AWipedOrPartlyLostWorkspaceIndexIsRebuiltNotServedEmpty) 
     }
     // A rebuild on demand replaces the index and removes what it no longer names.
     fixture.objects["ws-one"]->put("segments/stale.json", "{}", false);
-    ASSERT_TRUE(service.rebuild_workspace("space", "ws-one"));
+    service.schedule_rebuild("space", "ws-one");
+    fixture.drain(service);
     EXPECT_FALSE(fixture.objects["ws-one"]->snapshot().contains("segments/stale.json"));
 }
 
@@ -1014,6 +1052,95 @@ TEST(SearchWorkspaces, AHistoryScanNamingAWorkspaceReadsThatWorkspaceOnly) {
     const auto elsewhere = service.query(scan, "admin", control);
     ASSERT_FALSE(elsewhere);
     EXPECT_EQ(elsewhere.error().code, "invalid_input") << "not a retry: the repository is not there";
+}
+
+TEST(SearchWorkspaces, ARebuildIsLakesOwnWorkAndWaitsForABusyLane) {
+    Workspaces fixture;
+    fixture.add("repo-one", "ws-one", {{"one.txt", "busyterm token"}});
+    lake::control::InMemoryStore control;
+    lake::search::Service service(fixture.root);
+    fixture.configure(service);
+    ASSERT_TRUE(service.query(Workspaces::in("busyterm", "ws-one"), "admin", control));
+    // Requests fill the workspace's lane: a request is refused admission, the rebuild is not.
+    fixture.busy.insert("ws-one");
+    fixture.drain(service);
+    EXPECT_TRUE(fixture.objects["ws-one"]->snapshot().contains("manifest.json"))
+        << "the rebuild was refused admission and backed off";
+    fixture.busy.clear();
+    EXPECT_EQ(service.query(Workspaces::in("busyterm", "ws-one"), "admin", control)->items.size(), 1U);
+}
+
+TEST(SearchWorkspaces, WritesAndDeletionsDuringARebuildAreAppliedAfterIt) {
+    Workspaces fixture;
+    fixture.add("repo-one", "ws-one", {{"one.txt", "keptterm token"}});
+    fixture.add("repo-gone", "ws-one", {{"gone.txt", "goneterm token"}});
+    lake::control::InMemoryStore control;
+    lake::search::Service service(fixture.root);
+    fixture.configure(service);
+    ASSERT_TRUE(service.query(Workspaces::in("keptterm", "ws-one"), "admin", control));
+    // While the rebuild is about to write: repo-one is pushed to, and repo-gone is deleted. The
+    // pushed repository's first re-index borrow is refused.
+    fixture.before_commit = [&] {
+        fixture.advance("repo-one", "late.txt", "lateterm token");
+        static_cast<void>(service.reindex_artifacts("space", "repo-one"));
+        fixture.workspace_of.erase("repo-gone");
+        ASSERT_TRUE(service.forget_repository("space", "ws-one", "repo-gone"));
+        fixture.refuse_borrow["repo-one"] = 1;
+    };
+    fixture.drain(service, false);
+    EXPECT_TRUE(service.query(Workspaces::in("goneterm", "ws-one"), "admin", control)->items.empty())
+        << "a repository deleted during the build came back";
+    // The refused re-index is kept and retried, not dropped.
+    ASSERT_FALSE(fixture.queued.empty()) << "no retry was queued";
+    fixture.drain(service);
+    EXPECT_EQ(service.query(Workspaces::in("lateterm", "ws-one"), "admin", control)->items.size(), 1U);
+    lake::search::Service reopened(fixture.root);
+    fixture.configure(reopened);
+    EXPECT_TRUE(reopened.query(Workspaces::in("goneterm", "ws-one"), "admin", control)->items.empty());
+    EXPECT_EQ(reopened.query(Workspaces::in("lateterm", "ws-one"), "admin", control)->items.size(), 1U);
+}
+
+TEST(SearchWorkspaces, ADeletionThatCannotReachTheIndexIsRetried) {
+    Workspaces fixture;
+    fixture.add("repo-one", "ws-one", {{"one.txt", "stayterm token"}});
+    fixture.add("repo-gone", "ws-one", {{"gone.txt", "goneterm token"}});
+    lake::control::InMemoryStore control;
+    lake::search::Service service(fixture.root);
+    fixture.configure(service);
+    ASSERT_EQ(fixture.ready(service, Workspaces::in("goneterm", "ws-one"), control).items.size(), 1U);
+    fixture.fail_lend["ws-one"] = 1;
+    EXPECT_FALSE(service.forget_repository("space", "ws-one", "repo-gone"));
+    ASSERT_FALSE(fixture.queued.empty()) << "the removal was only reported, not retried";
+    fixture.workspace_of.erase("repo-gone");
+    fixture.drain(service);
+    EXPECT_TRUE(service.query(Workspaces::in("goneterm", "ws-one"), "admin", control)->items.empty());
+    EXPECT_EQ(service.query(Workspaces::in("stayterm", "ws-one"), "admin", control)->items.size(), 1U);
+}
+
+TEST(SearchWorkspaces, OrphanObjectsAreSweptOnLoadAndADroppedWorkspaceKeepsNoState) {
+    Workspaces fixture;
+    fixture.add("repo-one", "ws-one", {{"one.txt", "orphanterm token"}});
+    lake::control::InMemoryStore control;
+    {
+        lake::search::Service service(fixture.root);
+        fixture.configure(service);
+        ASSERT_EQ(fixture.ready(service, Workspaces::in("orphanterm", "ws-one"), control).items.size(), 1U);
+    }
+    // A commit that stopped before its manifest left objects nothing names.
+    fixture.objects["ws-one"]->put("runs/orphan.json", "{}", true);
+    fixture.objects["ws-one"]->put("segments/orphan.json", "{}", true);
+    lake::search::Service service(fixture.root);
+    fixture.configure(service);
+    ASSERT_EQ(service.query(Workspaces::in("orphanterm", "ws-one"), "admin", control)->items.size(), 1U);
+    EXPECT_FALSE(fixture.objects["ws-one"]->snapshot().contains("runs/orphan.json"));
+    EXPECT_FALSE(fixture.objects["ws-one"]->snapshot().contains("segments/orphan.json"));
+    // A deleted workspace's state goes, and a job queued for it before does not bring it back.
+    service.schedule_rebuild("space", "ws-one");
+    ASSERT_TRUE(service.drop_workspace("ws-one"));
+    fixture.drain(service, false);
+    const auto tracked = service.tracked_workspaces();
+    EXPECT_TRUE(std::ranges::find(tracked, "ws-one") == tracked.end());
+    EXPECT_TRUE(fixture.objects["ws-one"]->snapshot().empty()) << "a dropped workspace was rebuilt";
 }
 
 TEST(SearchBenchmark, DISABLED_BuildAndQueryTenThousandFiles) {

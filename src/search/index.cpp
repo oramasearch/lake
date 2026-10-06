@@ -512,6 +512,13 @@ public:
         auto written = liquid::runtime::block_on(
             client_->put(key(name), std::string(sealed_magic) + *sealed, fence_, once));
         if (!written) {
+            // A retried write-once put whose first attempt Zetta took: the same content is there.
+            if (once && written.error().code == liquid::errc::already_exists) {
+                const auto present = get(name);
+                if (present && *present && **present == bytes) {
+                    return {};
+                }
+            }
             return std::unexpected(error_of(written.error()));
         }
         return {};
@@ -638,6 +645,9 @@ struct Service::Impl {
         // `pending` and applied once it is ready.
         bool building = false;
         std::set<std::string> pending;
+        // Repositories deleted while the index was being built or while it could not be reached:
+        // left out of the build, and removed from the index once it is ready.
+        std::set<std::string> removed;
         // After a failed rebuild, none is scheduled again before this.
         std::chrono::steady_clock::time_point retry_after{};
         std::chrono::seconds backoff{0};
@@ -658,6 +668,9 @@ struct Service::Impl {
     // Once lake's repository store has lent repositories, search never opens a store itself.
     bool access_configured = false;
     WorkspaceAccess workspace_access;
+    // Deleted workspaces: no state is kept for them again.
+    std::set<std::string> dropped;
+    std::atomic<bool> stopping{false};
 
     explicit Impl(std::filesystem::path value) : root(std::move(value)) {}
 
@@ -677,6 +690,9 @@ struct Service::Impl {
 
     [[nodiscard]] std::shared_ptr<IndexState> workspace_state(const std::string& workspace) {
         std::lock_guard lock(mutex);
+        if (dropped.contains(workspace)) {
+            return std::make_shared<IndexState>();
+        }
         auto& slot = workspaces[workspace];
         if (!slot) {
             slot = std::make_shared<IndexState>();
@@ -692,7 +708,8 @@ struct Service::Impl {
     // The repository from lake's repository store when one is set; otherwise opened here, on a
     // store instance of its own.
     [[nodiscard]] Result<BorrowedRepository> borrow(const std::string& customer,
-                                                    const std::string& repository) const {
+                                                    const std::string& repository,
+                                                    bool lake_work = false) const {
         RepositoryAccess lend;
         bool configured = false;
         {
@@ -701,7 +718,7 @@ struct Service::Impl {
             configured = access_configured;
         }
         if (lend) {
-            return lend(customer, repository);
+            return lend(customer, repository, lake_work);
         }
         if (configured) {
             return std::unexpected(Error{
@@ -969,7 +986,8 @@ struct Service::Impl {
                                              std::map<std::string, ArtifactSegment> next_artifacts,
                                              bool artifacts_changed,
                                              bool sweep,
-                                             std::optional<std::uint64_t> budget = std::nullopt) {
+                                             std::optional<std::uint64_t> budget = std::nullopt,
+                                             std::uint64_t* added = nullptr) {
         const std::set<std::string> referenced = referenced_blobs(next_active, next_artifacts);
         std::set<std::string> keep{std::string(manifest_file)};
         std::vector<std::pair<std::string, std::string>> writes; // name, bytes; written once
@@ -1037,11 +1055,14 @@ struct Service::Impl {
                 keep.insert(run);
             }
         }
+        std::uint64_t adding = 0;
+        for (const auto& [name, bytes] : writes) {
+            adding += bytes.size();
+        }
+        if (added != nullptr) {
+            *added = 0;
+        }
         if (budget) {
-            std::uint64_t adding = 0;
-            for (const auto& [name, bytes] : writes) {
-                adding += bytes.size();
-            }
             if (adding > *budget) {
                 return std::unexpected(Error{
                     "busy", std::format("the workspace's storage quota leaves no room for {} more "
@@ -1054,6 +1075,9 @@ struct Service::Impl {
             if (const auto written = storage.write(name, bytes, storage.runs()); !written) {
                 return written;
             }
+        }
+        if (added != nullptr) {
+            *added = adding;
         }
         if (!storage.runs()) {
             if (state.blobs_added || sweep) {
@@ -1446,6 +1470,7 @@ struct Service::Impl {
         if (loaded && *loaded) {
             state.loaded = true;
             state.generation = index.generation;
+            sweep_orphans(storage, state.data);
             return Readiness::Ready;
         }
         state.data = CustomerState{};
@@ -1456,14 +1481,46 @@ struct Service::Impl {
         return Readiness::Schedule;
     }
 
-    // Runs or queues a workspace's rebuild. Never called with a lane or an index's mutex held.
-    void schedule(const std::string& customer, const std::string& workspace, Service& service) {
-        const WorkspaceAccess config = workspace_config();
-        if (config.schedule) {
-            config.schedule(customer, workspace);
+    // Removes the objects of a workspace's index its manifest does not name: left by a commit that
+    // failed before its manifest, or by a process that stopped mid-commit. The caller holds the
+    // state's mutex; no commit of this index runs meanwhile (a rebuild holds `building`, and every
+    // other commit holds the mutex). A failure leaves them for the next load.
+    static void sweep_orphans(Storage& storage, const CustomerState& state) {
+        std::set<std::string> keep{std::string(manifest_file)};
+        for (const auto& [slot, segment] : state.active) {
+            keep.insert(segment.file);
+        }
+        for (const auto& [run, bytes] : state.run_bytes) {
+            keep.insert(run);
+        }
+        if (!state.artifacts_object.empty()) {
+            keep.insert(state.artifacts_object);
+        }
+        const auto listed = storage.list();
+        if (!listed) {
             return;
         }
-        static_cast<void>(service.rebuild_workspace(customer, workspace));
+        for (const std::string& name : *listed) {
+            if (!keep.contains(name)) {
+                static_cast<void>(storage.remove(name));
+            }
+        }
+    }
+
+    // Runs or queues a workspace's index job. Never called with a lane or an index's mutex held.
+    void schedule(const std::string& customer, const std::string& workspace, Service& service,
+                  std::chrono::milliseconds delay = std::chrono::milliseconds(0)) {
+        if (stopping.load()) {
+            return;
+        }
+        const WorkspaceAccess config = workspace_config();
+        if (config.schedule) {
+            config.schedule(customer, workspace, delay);
+            return;
+        }
+        if (delay.count() == 0) {
+            static_cast<void>(service.rebuild_workspace(customer, workspace));
+        }
     }
 
     // Drops from a space's index every repository a workspace store serves now, and the blobs
@@ -1833,9 +1890,13 @@ struct Service::Impl {
         }
         ObjectStorage storage(index.objects);
         const auto budget = index.write_budget ? index.write_budget() : std::nullopt;
-        if (const auto committed = commit(storage, state.data, std::move(next_active),
-                                          std::move(next_artifacts), true, false, budget);
-            !committed) {
+        std::uint64_t added = 0;
+        const auto committed = commit(storage, state.data, std::move(next_active),
+                                      std::move(next_artifacts), true, false, budget, &added);
+        if (index.spent && added > 0) {
+            index.spent(added);
+        }
+        if (!committed) {
             // What is in memory may be ahead of the objects: read them again on next use.
             state.loaded = false;
             state.data = CustomerState{};
@@ -1857,6 +1918,8 @@ void Service::set_repository_access(RepositoryAccess access) {
 void Service::set_workspace_access(WorkspaceAccess access) {
     std::lock_guard lock(impl_->mutex);
     impl_->workspace_access = std::move(access);
+    // A server configuring search starts it again after an earlier server's shutdown().
+    impl_->stopping.store(false);
 }
 
 void Service::set_memory_bound(std::size_t bytes) {
@@ -1913,8 +1976,47 @@ void Service::schedule_rebuild(const std::string& customer, const std::string& w
     impl_->schedule(customer, workspace, *this);
 }
 
+void Service::shutdown() {
+    impl_->stopping.store(true);
+}
+
+std::vector<std::string> Service::tracked_workspaces() const {
+    std::lock_guard lock(impl_->mutex);
+    std::vector<std::string> output;
+    for (const auto& [workspace, state] : impl_->workspaces) {
+        output.push_back(workspace);
+    }
+    return output;
+}
+
+namespace {
+constexpr auto pending_retry = std::chrono::seconds(15);
+}
+
 Result<void> Service::rebuild_workspace(const std::string& customer, const std::string& workspace) {
+    if (impl_->stopping.load()) {
+        return std::unexpected(Error{"store_unavailable", "lake is stopping"});
+    }
+    {
+        std::lock_guard lock(impl_->mutex);
+        if (impl_->dropped.contains(workspace)) {
+            return {};
+        }
+    }
     const auto state = impl_->workspace_state(workspace);
+    bool ready = false;
+    {
+        std::lock_guard held(state->mutex);
+        ready = state->loaded && !state->building;
+        if (!ready) {
+            state->building = true;
+            state->loaded = false;
+            state->data = Impl::CustomerState{};
+        }
+    }
+    if (ready) {
+        return apply_pending(customer, workspace);
+    }
     const auto failed = [&](Error error) -> Result<void> {
         std::lock_guard held(state->mutex);
         state->building = false;
@@ -1927,25 +2029,21 @@ Result<void> Service::rebuild_workspace(const std::string& customer, const std::
         return std::unexpected(std::move(error));
     };
     try {
-        {
-            std::lock_guard held(state->mutex);
-            state->building = true;
-            state->loaded = false;
-            state->data = Impl::CustomerState{};
-        }
         const WorkspaceAccess config = impl_->workspace_config();
         if (!config.lend) {
             return failed(Error{"unsupported", "workspace indexes are not configured"});
         }
-        // The lend is held only to take the index's objects and the store's fence.
+        // The lend is held only to take the index's objects and the store's fence. A rebuild is
+        // lake's own work: it waits for the lane rather than being refused admission.
         WorkspaceIndex index;
         {
-            auto lent = config.lend(customer, workspace);
+            auto lent = config.lend(customer, workspace, true);
             if (!lent) {
                 return failed(lent.error());
             }
             index = lent->index;
         }
+        const std::string space = index.customer.empty() ? customer : index.customer;
         if (!index.repositories) {
             return failed(Error{"store_unavailable", "the workspace's repositories cannot be listed"});
         }
@@ -1959,7 +2057,16 @@ Result<void> Service::rebuild_workspace(const std::string& customer, const std::
         // Each repository is read under its own store's lane, one at a time, so a push to the
         // workspace waits at most one repository's read.
         for (const std::string& repository : *repositories) {
-            auto borrowed = impl_->borrow(index.customer.empty() ? customer : index.customer, repository);
+            if (impl_->stopping.load()) {
+                return failed(Error{"store_unavailable", "lake is stopping"});
+            }
+            {
+                std::lock_guard held(state->mutex);
+                if (state->removed.contains(repository)) {
+                    continue;
+                }
+            }
+            auto borrowed = impl_->borrow(space, repository, true);
             if (!borrowed) {
                 if (borrowed.error().code == "not_found") {
                     continue;
@@ -1986,16 +2093,26 @@ Result<void> Service::rebuild_workspace(const std::string& customer, const std::
                 return failed(reindexed.error());
             }
         }
+        // Repositories deleted while they were read are left out.
+        {
+            std::lock_guard held(state->mutex);
+            std::erase_if(active, [&](const auto& item) { return state->removed.contains(item.second.repository); });
+            std::erase_if(artifacts,
+                          [&](const auto& item) { return state->removed.contains(item.second.repository); });
+        }
         // The index is written without any lane: its objects carry the fence taken above, and a
         // write to this workspace's index meanwhile is remembered in `pending`.
         ObjectStorage storage(index.objects);
         const auto budget = index.write_budget ? index.write_budget() : std::nullopt;
-        if (const auto committed = Impl::commit(storage, fresh, std::move(active), std::move(artifacts),
-                                                true, true, budget);
-            !committed) {
+        std::uint64_t added = 0;
+        const auto committed = Impl::commit(storage, fresh, std::move(active), std::move(artifacts), true,
+                                            true, budget, &added);
+        if (index.spent && added > 0) {
+            index.spent(added);
+        }
+        if (!committed) {
             return failed(committed.error());
         }
-        std::set<std::string> pending;
         {
             std::lock_guard held(state->mutex);
             state->data = std::move(fresh);
@@ -2005,33 +2122,116 @@ Result<void> Service::rebuild_workspace(const std::string& customer, const std::
             state->backoff = std::chrono::seconds(0);
             state->retry_after = {};
             state->last_error.clear();
-            pending.swap(state->pending);
-        }
-        // Repositories written while the index was built are indexed again.
-        for (const std::string& repository : pending) {
-            auto borrowed = impl_->borrow(index.customer.empty() ? customer : index.customer, repository);
-            if (!borrowed || !borrowed->workspace || borrowed->workspace->workspace != workspace) {
-                continue;
-            }
-            std::lock_guard held(state->mutex);
-            if (const auto ensured = Impl::ensure_workspace(*state, *borrowed->workspace);
-                !ensured || *ensured != Impl::Readiness::Ready) {
-                if (ensured && *ensured == Impl::Readiness::Schedule) {
-                    state->building = false;
-                }
-                state->pending.insert(repository);
-                continue;
-            }
-            if (!Impl::refresh_repository(*state, *borrowed->workspace, *borrowed->repository,
-                                          repository, true)) {
-                state->pending.insert(repository);
-            }
         }
         impl_->trim();
-        return {};
+        return apply_pending(customer, workspace);
     } catch (const std::exception& error) {
         return failed(Error{"store_error", error.what()});
     }
+}
+
+// Applies to a ready index what was written or deleted while it was built or unreachable. What
+// cannot be applied now stays pending and is tried again after a delay.
+Result<void> Service::apply_pending(const std::string& customer, const std::string& workspace) {
+    const auto state = impl_->workspace_state(workspace);
+    std::set<std::string> pending;
+    std::set<std::string> removed;
+    {
+        std::lock_guard held(state->mutex);
+        pending.swap(state->pending);
+        removed.swap(state->removed);
+        for (const std::string& repository : removed) {
+            pending.erase(repository);
+        }
+    }
+    if (pending.empty() && removed.empty()) {
+        return {};
+    }
+    const WorkspaceAccess config = impl_->workspace_config();
+    bool retry = false;
+    Error last{"", ""};
+    const auto keep = [&](std::set<std::string>& into, const std::string& repository, Error error) {
+        std::lock_guard held(state->mutex);
+        into.insert(repository);
+        retry = true;
+        last = std::move(error);
+    };
+    if (!removed.empty()) {
+        auto lent = config.lend ? config.lend(customer, workspace, true)
+                                : Result<BorrowedWorkspace>(std::unexpected(Error{"unsupported", "no workspace access"}));
+        if (!lent) {
+            for (const std::string& repository : removed) {
+                keep(state->removed, repository, lent.error());
+            }
+        } else {
+            std::lock_guard held(state->mutex);
+            const auto ready = Impl::ensure_workspace(*state, lent->index);
+            if (ready && *ready == Impl::Readiness::Ready) {
+                auto next_active = state->data.active;
+                std::erase_if(next_active, [&](const auto& item) { return removed.contains(item.second.repository); });
+                auto next_artifacts = state->data.artifacts;
+                std::erase_if(next_artifacts,
+                              [&](const auto& item) { return removed.contains(item.second.repository); });
+                if (next_active.size() != state->data.active.size() ||
+                    next_artifacts.size() != state->data.artifacts.size()) {
+                    ObjectStorage storage(lent->index.objects);
+                    if (const auto committed = Impl::commit(storage, state->data, std::move(next_active),
+                                                            std::move(next_artifacts), true, false);
+                        !committed) {
+                        state->loaded = false;
+                        state->data = Impl::CustomerState{};
+                        state->removed.insert(removed.begin(), removed.end());
+                        retry = true;
+                        last = committed.error();
+                    }
+                }
+            } else {
+                if (ready && *ready == Impl::Readiness::Schedule) {
+                    state->building = false;
+                }
+                state->removed.insert(removed.begin(), removed.end());
+                retry = true;
+                last = ready ? Error{"store_unavailable", "the index is not ready"} : ready.error();
+            }
+        }
+    }
+    for (const std::string& repository : pending) {
+        auto borrowed = impl_->borrow(customer, repository, true);
+        if (!borrowed) {
+            if (borrowed.error().code != "not_found") {
+                keep(state->pending, repository, borrowed.error());
+            }
+            continue;
+        }
+        if (!borrowed->workspace || borrowed->workspace->workspace != workspace) {
+            continue;
+        }
+        std::lock_guard held(state->mutex);
+        const auto ready = Impl::ensure_workspace(*state, *borrowed->workspace);
+        if (!ready || *ready != Impl::Readiness::Ready) {
+            if (ready && *ready == Impl::Readiness::Schedule) {
+                state->building = false;
+            }
+            state->pending.insert(repository);
+            retry = true;
+            last = ready ? Error{"store_unavailable", "the index is not ready"} : ready.error();
+            continue;
+        }
+        if (auto refreshed = Impl::refresh_repository(*state, *borrowed->workspace, *borrowed->repository,
+                                                      repository, true);
+            !refreshed) {
+            state->pending.insert(repository);
+            retry = true;
+            last = refreshed.error();
+        }
+    }
+    impl_->trim();
+    if (retry) {
+        impl_->schedule(customer, workspace, *this,
+                        std::chrono::duration_cast<std::chrono::milliseconds>(pending_retry));
+        return std::unexpected(last);
+    }
+    return {};
 }
 
 Result<void> Service::publish(const Publish& publication) {
@@ -2164,23 +2364,38 @@ Result<void> Service::forget_repository(const std::string& customer,
         }
         std::optional<std::string> to_schedule;
         {
-            auto lent = config.lend(customer, workspace);
+            auto lent = config.lend(customer, workspace, false);
             if (!lent) {
                 // A workspace that is not switched has no index of its own.
-                return lent.error().code == "invalid_input" ? Result<void>{}
-                                                            : Result<void>(std::unexpected(lent.error()));
+                if (lent.error().code == "invalid_input") {
+                    return {};
+                }
+                // Otherwise the removal is kept and tried again later, so the repository never
+                // stays in the index.
+                {
+                    const auto state = impl_->workspace_state(workspace);
+                    std::lock_guard held(state->mutex);
+                    state->removed.insert(repository);
+                    state->pending.erase(repository);
+                }
+                impl_->schedule(customer, workspace, *this,
+                                std::chrono::duration_cast<std::chrono::milliseconds>(pending_retry));
+                return std::unexpected(lent.error());
             }
             const auto state = impl_->workspace_state(workspace);
             std::lock_guard held(state->mutex);
             state->pending.erase(repository);
             const auto ready = Impl::ensure_workspace(*state, lent->index);
             if (!ready) {
-                return std::unexpected(ready.error());
-            }
-            if (*ready == Impl::Readiness::Schedule) {
+                state->removed.insert(repository);
                 to_schedule = workspace;
-            }
-            if (*ready == Impl::Readiness::Ready) {
+            } else if (*ready != Impl::Readiness::Ready) {
+                // A build in progress leaves it out and removes it once it is done.
+                state->removed.insert(repository);
+                if (*ready == Impl::Readiness::Schedule) {
+                    to_schedule = workspace;
+                }
+            } else {
                 auto next_active = state->data.active;
                 std::erase_if(next_active,
                               [&](const auto& item) { return item.second.repository == repository; });
@@ -2195,7 +2410,8 @@ Result<void> Service::forget_repository(const std::string& customer,
                         !committed) {
                         state->loaded = false;
                         state->data = Impl::CustomerState{};
-                        return committed;
+                        state->removed.insert(repository);
+                        to_schedule = workspace;
                     }
                 }
             }
@@ -2243,6 +2459,7 @@ Result<void> Service::drop_workspace(const std::string& workspace) {
         std::shared_ptr<Impl::IndexState> state;
         {
             std::lock_guard lock(impl_->mutex);
+            impl_->dropped.insert(workspace);
             if (const auto found = impl_->workspaces.find(workspace); found != impl_->workspaces.end()) {
                 state = found->second;
                 impl_->workspaces.erase(found);
@@ -2253,6 +2470,7 @@ Result<void> Service::drop_workspace(const std::string& workspace) {
             std::lock_guard held(state->mutex);
             state->loaded = false;
             state->pending.clear();
+            state->removed.clear();
             state->data = Impl::CustomerState{};
         }
         const WorkspaceAccess config = impl_->workspace_config();
@@ -2394,7 +2612,7 @@ Result<std::vector<ArtifactMember>> Service::artifact_members(const std::string&
             }
             bool schedule = false;
             {
-                auto lent = config.lend(customer, *route);
+                auto lent = config.lend(customer, *route, false);
                 if (!lent) {
                     return std::unexpected(lent.error());
                 }
@@ -2612,7 +2830,7 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                 }
                 scanned_repository = std::move(*borrowed);
             } else {
-                auto borrowed = config.lend(customer, workspace);
+                auto borrowed = config.lend(customer, workspace, false);
                 if (!borrowed) {
                     if (named) {
                         return std::unexpected(borrowed.error().code == "invalid_input" ||

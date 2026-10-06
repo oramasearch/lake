@@ -239,7 +239,8 @@ search (`lend_repository`), and a switched workspace's search index objects with
 (`lend_workspace`), under the workspace store's lane, sealed with the store's data key and fenced
 by its lease (`search_objects_of`, lake#381), with the room the bucket quota leaves for them
 (`search_index_budget`); `lend_repositories_to_search` wires them into `search::WorkspaceAccess`,
-with release tags read from forge records and rebuilds queued on the maintenance thread. The
+with release tags read from forge records and rebuilds queued on search's own worker
+(`schedule_search_job`, beside the maintenance thread). The
 `search` capability resolves the caller's scope first (`search_scope`, `capabilities.cpp`);
 `delete_repository` and `commit_repository_files` keep the index in step. The `/search` page runs
 `search` through `call_async`. The

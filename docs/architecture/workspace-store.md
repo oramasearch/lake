@@ -209,6 +209,9 @@ maps of open stores is never held across store I/O, a network call or a wait.
   dedicated thread runs every exchange, callers post to it and wait on an event, and its shared TLS
   context cache is locked.
 
+**Search index worker.** Search index rebuilds and their retries (lake#381) run on a thread of their
+own, never on the maintenance thread, so the usage refresh and the deletion pass never wait on one.
+
 **Maintenance thread.** Work that waits on workspace Zettas or a store's lane runs on its own thread,
 never on the owner loop or the server thread: the usage refresh, the start-up usage priming, and
 the deletion pass (`resume_workspace_deletions`, which closes workspace stores). The owner loop's
@@ -364,7 +367,11 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreSearch.TwoWorkspacesOfASpaceKeepSealedIndexesBesideTheirStoresAndARestartReloadsThem` | the switch drops the space index's copy; two workspaces' indexes apart, sealed in their buckets, nothing on lake's volume; a restart reloads without rewriting |
 | `WorkspaceStoreSearch.AWipedOrTamperedWorkspaceIndexIsRebuiltNotServedEmpty` | a wiped index, lost runs and a tampered run are rebuilt, with and without a restart |
 | `WorkspaceStoreSearch.PushesAndSearchesInOneWorkspaceRunSideBySide` | pushes, commits, reindexes and searches in one workspace at once, 503s bounded; every push indexed; a restart reloads whole |
-| `WorkspaceStoreSearch.ASearchNeverOpensAWorkspaceItsCallerCannotRead` | a non-operator caller in two spaces: no lend, lease change or index write in the other space's workspace; one answer for another space's workspace and an unknown one |
+| `WorkspaceStoreSearch.ASearchNeverOpensAWorkspaceItsCallerCannotRead` | after a restart, an owner and a grantee of one space: their space answers, not one request reaches the other space's workspace Zetta, and another space's workspace and an unknown one get one answer |
+| `WorkspaceStoreSearch.TheIndexBudgetCountsTheWholeSpaceAndWhatItWroteSinceTheLastReading` | the index's room is the space's, less what it wrote since the last usage reading |
+| `WorkspaceStoreSearch.AUsageRefreshDoesNotWaitForARebuild` | the usage refresh runs while a slow rebuild does |
+| `WorkspaceStoreSearch.AHubUploadDoesNotHoldTheServerThread` | a Hugging Face upload's commit and index update run off the server thread |
+| `WorkspaceStoreSearch.AWriteOnceIndexPutRetriedWithTheSameContentSucceeds` | a retried write-once index put with the same content succeeds; other content is refused |
 | `WorkspaceStoreSearch.AFailedSearchWriteDoesNotFailTheWorkspaceStore` | an unanswered index write leaves the store's lease and holder as they were |
 | `WorkspaceStoreSearch.TheFirstPushAfterASwitchDoesNotWaitForTheIndex` | a slow rebuild holds up neither the first push nor a search |
 | `WorkspaceStoreSearch.DeletingAWorkspaceRemovesItsIndexObjectsAndACleanupFailureDoesNotHoldItUp` | the deletion removes the `search/` objects, and completes when their removal fails |

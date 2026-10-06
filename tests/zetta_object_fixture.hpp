@@ -84,6 +84,11 @@ public:
         std::lock_guard lock(mutex_);
         return requests_;
     }
+    // Every request sent to one workspace Zetta.
+    std::uint64_t requests_to(const std::string& endpoint) {
+        std::lock_guard lock(mutex_);
+        return by_endpoint_[endpoint];
+    }
     std::map<std::string, std::uint64_t> requests_by_method() {
         std::lock_guard lock(mutex_);
         return by_method_;
@@ -261,6 +266,11 @@ private:
         std::unique_lock lock(mutex_);
         ++requests_;
         ++by_method_[request.method];
+        for (const auto& [endpoint, node] : nodes_) {
+            if (request.url.starts_with(endpoint + "/")) {
+                ++by_endpoint_[endpoint];
+            }
+        }
         if (keep_bodies_) {
             bodies_.push_back(request.body);
         }
@@ -480,6 +490,7 @@ private:
     std::condition_variable changed_;
     std::map<std::string, Node> nodes_;
     std::uint64_t requests_ = 0;
+    std::map<std::string, std::uint64_t> by_endpoint_;
     std::map<std::string, std::uint64_t> by_method_;
     std::vector<std::string> bodies_;
     int drop_ = 0;
