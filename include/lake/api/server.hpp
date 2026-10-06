@@ -38,8 +38,9 @@ class FederationIssuerPolicy;
 // Store hand-off (lake#479): start() binds and serves at once. When a store root is configured,
 // a separate thread takes the root's owner lock (waiting, bounded, for a predecessor to release
 // it) and opens the customer stores; until then every request except probes, metrics and static
-// assets waits for that open. stop() stops taking new work, drains in-flight requests, closes
-// the stores and releases the owner lock. docs/deployment/store-volume.md has the contract.
+// assets waits for that open. begin_drain() (at SIGTERM) stops taking new work and releases each
+// workspace store's lease once its admitted requests are done; stop() drains in-flight requests,
+// closes the stores and releases the owner lock. docs/deployment/store-volume.md has the contract.
 namespace lake::api {
 
 struct ServerOptions {
@@ -130,8 +131,11 @@ struct ServerOptions {
     // preStop delay plus drain_timeout. See docs/deployment/store-volume.md (lake#479).
     std::chrono::milliseconds store_owner_wait{std::chrono::seconds(90)};
     // How long stop() waits for in-flight requests before it closes the listener and the stores
-    // (LAKE_DRAIN_SECONDS).
+    // (LAKE_DRAIN_SECONDS), counted from begin_drain().
     std::chrono::milliseconds drain_timeout{std::chrono::seconds(20)};
+    // Open every running switched workspace's store in the background from start, so the first
+    // request after a rollout does not pay for the open (lake#536, LAKE_WORKSPACE_STORE_PREOPEN).
+    bool preopen_workspace_stores = true;
     // Transparency-log runtime configuration. The executable obtains this from
     // LAKE_LOG_* environment variables and defaults the deployed mode to
     // witnessed.
@@ -190,6 +194,10 @@ public:
 
     // Bind + start serving on the io thread. False on failure (see reason()).
     bool start();
+    // The drain's first step, called at SIGTERM before the owning loop winds down (lake#536):
+    // stops taking new work and hands each workspace store to the successor as soon as its
+    // admitted requests are done. stop() calls it when it has not run, then finishes the drain.
+    void begin_drain();
     void stop();
     [[nodiscard]] bool running() const;
     // The actual bound port (differs from options when port was 0).

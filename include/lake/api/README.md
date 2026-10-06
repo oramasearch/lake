@@ -27,6 +27,11 @@ the dry-run plan; and the idempotent `finish_workspace_deletion`/`resume_workspa
 `ApiContext::workspace_content` carries it. See
 [workspaces.md](../../../docs/api/workspaces.md#deletion).
 
+`server.hpp`'s `ApiServer::begin_drain` is the drain's first step at SIGTERM, and
+`ServerOptions::preopen_workspace_stores` turns on the start-up pre-open of workspace stores; both
+are the rollout hand-off of workspace stores (lake#536,
+[workspace-store.md](../../../docs/architecture/workspace-store.md#rollout-hand-off-lake536)).
+
 `ApiContext` carries trusted issuer session ID, kind, scopes and expiry from the common credential
 resolver. Token request JSON cannot supply those fields. Keep HTTP and PostgreSQL types out of
 these public headers.

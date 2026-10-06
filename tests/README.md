@@ -598,7 +598,7 @@ but not the operator's message; `VolumeSchedules.*` the cron grammar and the nev
 trigger, the policy checks and the backfill; `OperatorContract.*` the operator's new workspace and
 snapshot statements.
 `test_workspace_store.cpp` covers lake#380 (the table is in
-`docs/architecture/workspace-store.md#tests`): the encrypted backend, its refusal of a rewrite, tampering, the owner's hand-off and lost lease, and, through a running lake, the
+`docs/architecture/workspace-store.md#tests`): the encrypted backend, its refusal of a rewrite, tampering, the owner's hand-off and lost lease, the rollout hand-off between two lake servers (`WorkspaceStoreHandoff.*`, lake#536), and, through a running lake, the
 move with an interrupted copy, the switch, two workspaces of one space and the lost lease's `503`;
 `WorkspaceStoreRemoval.*` the removal of a space's old store (refusals, a linked space or store
 directory refused, dry run, exactly two directories removed, the instance's directory untouched, switched workspaces still answering, a later

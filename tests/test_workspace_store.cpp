@@ -28,6 +28,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <print>
 #include <random>
 #include <set>
 #include <string>
@@ -462,6 +463,36 @@ TEST(WorkspaceStoreOwner, ASuccessorWaitsForTheHolderAndTakesOverWithAHigherFenc
     ASSERT_TRUE(liquid::runtime::block_on((*second)->close()));
 }
 
+// lake#536: the waiting acquire is Zetta's (wait_ms, woken by the release through its lease watch),
+// so a successor takes the lease as soon as it is released, not at the end of a fixed wait or of
+// the holder's TTL, and a writer that still carries the released fence is refused.
+TEST(WorkspaceStoreOwner, AWaitingAcquireTakesTheLeaseAsSoonAsItIsReleased) {
+    Rig rig;
+    const auto root = lake::test::fixture_path("workspace-store-prompt-" + rig.workspace);
+    const auto released_fence = rig.zetta->take_over(rig.endpoint, "predecessor");
+    std::shared_ptr<ZettaStoreOwner> owner;
+    std::optional<liquid::result<liquid::store>> opened;
+    std::chrono::steady_clock::time_point answered;
+    std::thread waiter([&] {
+        opened.emplace(liquid::runtime::block_on(liquid::store::open(root, owned(rig, owner, 30s, 60s))));
+        answered = std::chrono::steady_clock::now();
+    });
+    std::this_thread::sleep_for(500ms);
+    EXPECT_FALSE(opened.has_value());
+    const auto released = std::chrono::steady_clock::now();
+    rig.zetta->release(rig.endpoint);
+    waiter.join();
+    ASSERT_TRUE(opened.has_value());
+    ASSERT_TRUE(*opened) << (*opened).error().message;
+    EXPECT_LT(answered - released, 1s);
+    EXPECT_GT(owner->fence(), released_fence);
+    ZettaObjectClient stale(rig.zetta, ObjectEndpoint{rig.endpoint, "token-" + rig.workspace});
+    const auto refused = liquid::runtime::block_on(stale.put("objects/stale", "late", released_fence, false));
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, liquid::errc::locked);
+    ASSERT_TRUE(liquid::runtime::block_on((*opened)->close()));
+}
+
 TEST(WorkspaceStoreOwner, ALostLeaseRefusesWritesAndTheSuccessorKeepsEveryAcknowledgedObject) {
     Rig rig;
     const auto root = lake::test::fixture_path("workspace-store-lost-" + rig.workspace);
@@ -637,6 +668,9 @@ struct MoveRig {
         options.instance_kek = std::string(kek);
         options.store_root = root.string();
         options.search = std::make_shared<lake::search::Service>(root);
+        // Workspace stores open on first use here, so each test decides when one is opened and
+        // which lease it holds; the WorkspaceStoreHandoff tests turn the pre-open on (lake#536).
+        options.preopen_workspace_stores = false;
         ASSERT_NO_FATAL_FAILURE(start());
     }
 
@@ -3555,6 +3589,138 @@ TEST(WorkspaceStoreBackend, TheSearchIndexsObjectsAreNotLiquids) {
     const auto refused = liquid::runtime::block_on(reopened->put("search/manifest.json", bytes_of("x")));
     ASSERT_FALSE(refused);
     EXPECT_EQ(refused.error().code, liquid::errc::invalid_argument);
+}
+
+// ---- lake#536: the rollout hand-off of workspace stores -----------------------------------------
+
+// Overlapping rollout (decision 49): a successor starts on the same volume and the same workspace
+// Zettas while its predecessor still serves. The predecessor drains and releases each workspace
+// store's lease before it releases the store root; the successor's pre-open takes each lease as
+// soon as it is free (Zetta's acquire wakes on the release), so the first request to each
+// workspace answers within a few seconds, and the predecessor's fence is refused from then on.
+TEST(WorkspaceStoreHandoff, ASuccessorAnswersEachWorkspacesFirstRequestWithinSecondsAndTheOldFenceIsRefused) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    const std::string endpoint_b = "http://" + rig.beta + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "copy").first, 200U);
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_EQ(rig.move(rig.beta, "copy").first, 200U);
+    ASSERT_EQ(rig.move(rig.beta, "switch").first, 200U);
+    for (int index = 0; index < 5; ++index) {
+        ASSERT_EQ(rig.commit(rig.repo_a, "a-" + std::to_string(index) + ".txt", "alpha").first, 200U);
+        ASSERT_EQ(rig.commit(rig.repo_b, "b-" + std::to_string(index) + ".txt", "beta").first, 200U);
+    }
+    const auto old_fence_a = rig.zetta->lease(endpoint_a).fence;
+    const auto old_fence_b = rig.zetta->lease(endpoint_b).fence;
+    ASSERT_FALSE(rig.zetta->lease(endpoint_a).holder.empty());
+    ASSERT_FALSE(rig.zetta->lease(endpoint_b).holder.empty());
+    // Each workspace Zetta request now crosses a network (on dev one costs about 25 ms).
+    rig.zetta->set_latency(10ms);
+
+    auto successor_options = rig.options;
+    successor_options.preopen_workspace_stores = true;
+    successor_options.search = std::make_shared<lake::search::Service>(rig.root);
+    auto successor = std::make_unique<lake::api::ApiServer>(successor_options);
+    ASSERT_TRUE(successor->start()) << successor->reason();
+    std::this_thread::sleep_for(500ms);
+    EXPECT_FALSE(successor->store_root_open()) << "the predecessor still owns the root";
+    EXPECT_EQ(rig.zetta->lease(endpoint_a).fence, old_fence_a) << "the predecessor still holds alpha";
+
+    const auto stopping = std::chrono::steady_clock::now();
+    rig.server->stop();
+    const auto stopped = std::chrono::steady_clock::now();
+    // The predecessor released each lease (never left to run out: the TTL is 30 s).
+    EXPECT_LT(stopped - stopping, 10s);
+    rig.server = std::move(successor);
+    for (int waited = 0; waited < 250 && !rig.server->store_root_open(); ++waited) {
+        std::this_thread::sleep_for(20ms);
+    }
+    ASSERT_TRUE(rig.server->store_root_open());
+    // The pre-open took both leases, with higher fences, without a request.
+    for (int waited = 0; waited < 250 && (rig.zetta->lease(endpoint_a).fence == old_fence_a ||
+                                          rig.zetta->lease(endpoint_b).fence == old_fence_b);
+         ++waited) {
+        std::this_thread::sleep_for(20ms);
+    }
+    EXPECT_GT(rig.zetta->lease(endpoint_a).fence, old_fence_a);
+    EXPECT_GT(rig.zetta->lease(endpoint_b).fence, old_fence_b);
+    std::println("lake#536 hand-off: predecessor stop {} ms, successor root open {} ms after it",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(stopped - stopping).count(),
+                 std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - stopped)
+                     .count());
+
+    for (const auto* repository : {&rig.repo_a, &rig.repo_b}) {
+        const auto endpoint = repository == &rig.repo_a ? endpoint_a : endpoint_b;
+        const auto requests_before = rig.zetta->requests_to(endpoint);
+        const auto started = std::chrono::steady_clock::now();
+        const auto [status, body] = rig.commit(*repository, "after-handoff.txt", "successor");
+        const auto took = std::chrono::steady_clock::now() - started;
+        EXPECT_EQ(status, 200U) << body.dump();
+        // A lease left to run out would cost its 30 s TTL here.
+        EXPECT_LT(took, 5s);
+        const auto first = rig.zetta->requests_to(endpoint) - requests_before;
+        const auto warm_before = rig.zetta->requests_to(endpoint);
+        const auto warm_started = std::chrono::steady_clock::now();
+        EXPECT_EQ(rig.commit(*repository, "warm.txt", "successor").first, 200U);
+        const auto warm_took = std::chrono::steady_clock::now() - warm_started;
+        std::println("lake#536 first request after the hand-off: {} ms, {} requests; the next: {} ms, {} requests",
+                     std::chrono::duration_cast<std::chrono::milliseconds>(took).count(), first,
+                     std::chrono::duration_cast<std::chrono::milliseconds>(warm_took).count(),
+                     rig.zetta->requests_to(endpoint) - warm_before);
+    }
+    rig.zetta->set_latency(0us);
+
+    // Fencing is still the guarantee: a write carrying the predecessor's fence is refused.
+    ZettaObjectClient stale(rig.zetta, ObjectEndpoint{endpoint_a, "token-" + rig.alpha});
+    const auto refused = liquid::runtime::block_on(stale.put("objects/stale", "late write", old_fence_a, false));
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, liquid::errc::locked);
+    EXPECT_FALSE(rig.zetta->objects(endpoint_a).contains("objects/stale"));
+}
+
+// A draining lake answers a new workspace store request 503 with Retry-After at once, lets the
+// request it admitted before finish, and releases the store's lease as soon as that request is
+// done: before stop(), not at the drain deadline.
+TEST(WorkspaceStoreHandoff, ADrainingLakeRefusesNewStoreRequestsFinishesAdmittedOnesAndReleasesTheLease) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "copy").first, 200U);
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_EQ(rig.commit(rig.repo_a, "first.txt", "alpha").first, 200U);
+    ASSERT_FALSE(rig.zetta->lease(endpoint_a).holder.empty());
+
+    // The admitted commit's barriers each take 400 ms, so it is still in the lane when the drain
+    // begins.
+    rig.zetta->hang(endpoint_a, 400ms, ":barrier");
+    std::pair<unsigned, json> admitted;
+    std::thread writer([&] { admitted = rig.commit(rig.repo_a, "admitted.txt", "admitted"); });
+    std::this_thread::sleep_for(150ms);
+    const auto drain_began = std::chrono::steady_clock::now();
+    rig.server->begin_drain();
+
+    const std::string refused = raw_exchange(
+        rig.server->port(), "GET", "/v1/repository_tree?id=" + rig.repo_a.id + "&ref=main", "");
+    EXPECT_TRUE(refused.starts_with("HTTP/1.1 503")) << refused.substr(0, refused.find("\r\n"));
+    EXPECT_EQ(header_of(refused, "retry-after"), "1");
+    EXPECT_NE(refused.find("store_unavailable"), std::string::npos) << refused;
+    EXPECT_LT(std::chrono::steady_clock::now() - drain_began, 1s) << "refused at once, not queued";
+
+    writer.join();
+    EXPECT_EQ(admitted.first, 200U) << admitted.second.dump();
+    rig.zetta->hang(endpoint_a, 0ms);
+    for (int waited = 0; waited < 150 && !rig.zetta->lease(endpoint_a).holder.empty(); ++waited) {
+        std::this_thread::sleep_for(20ms);
+    }
+    EXPECT_TRUE(rig.zetta->lease(endpoint_a).holder.empty()) << "released before stop()";
+    EXPECT_LT(std::chrono::steady_clock::now() - drain_began, 8s) << "well inside the 20 s drain";
+    rig.server->stop();
+    // What the admitted commit wrote is in the bucket; reopened, the repository has it.
+    rig.options.preopen_workspace_stores = false;
+    ASSERT_NO_FATAL_FAILURE(rig.start());
+    const auto paths = rig.tree(rig.repo_a);
+    EXPECT_NE(std::ranges::find(paths, "admitted.txt"), paths.end());
 }
 
 } // namespace

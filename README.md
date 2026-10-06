@@ -91,9 +91,12 @@ token when omitted.
 `--store-root DIR` (default `$LAKE_STORE_ROOT`) is owned by one lake process at a time. A second
 process on the same root serves its probes at once, reports Ready, and holds store-touching
 requests until the owner drains and releases the root (at most `LAKE_STORE_OWNER_WAIT_SECONDS`,
-default 90; it exits 1 naming the owner after that). On SIGTERM lake drains in-flight requests for
-up to `LAKE_DRAIN_SECONDS` (default 20), closes its stores and releases the root. See
-[`docs/deployment/store-volume.md`](docs/deployment/store-volume.md#the-hand-off).
+default 90; it exits 1 naming the owner after that). On SIGTERM lake first hands each workspace
+store over (new requests to it answer `503` with `Retry-After`, and its lease is released as soon as
+the requests it admitted are done, lake#536), then drains in-flight requests for up to
+`LAKE_DRAIN_SECONDS` (default 20), closes its stores and releases the root. A starting lake opens
+every running switched workspace's store in the background (`LAKE_WORKSPACE_STORE_PREOPEN`,
+default true). See [`docs/deployment/store-volume.md`](docs/deployment/store-volume.md#the-hand-off).
 Platform sync uses `LAKE_OPERATOR_ZETTA_URL`, secret bearer `LAKE_OPERATOR_ZETTA_TOKEN`,
 `LAKE_PUBLIC_HOST`, and optional `LAKE_PLATFORM_SYNC_SECONDS` (default 15). Logs use
 `LAKE_LOGS_URL` and optional secret bearer `LAKE_LOGS_TOKEN`; see

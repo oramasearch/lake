@@ -35,6 +35,11 @@ until it owns the root, and on SIGTERM drains, closes its stores (opened with li
 `exclusive_owner`, liquid#322) and releases the lock. It needs liquid at or after `df2ae4d`. The
 operator's `spec.rollout.overlapOnSharedStore` can be turned on only once a deployed image contains
 it. See `docs/deployment/store-volume.md`.
+Workspace stores are handed off per workspace (lake#536): at SIGTERM lake answers new requests to a
+workspace store `503` with `Retry-After` and releases each store's lease once its admitted requests
+finish, and a starting lake pre-opens every running switched workspace's store in the background,
+taking each lease the moment it is released (`LAKE_WORKSPACE_STORE_PREOPEN`). See
+`docs/architecture/workspace-store.md#rollout-hand-off-lake536`.
 
 Agent tasks now have renewable claim leases, two retries and a terminal failure after three
 expiries. Retry notices reach workspace event streams and the working panels. Shared bus

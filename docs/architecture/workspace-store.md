@@ -217,7 +217,10 @@ right after writing it) costs no request. Bytes not yet sent are read from the b
 - `acquire` calls `:acquire {holder, ttl_ms, wait_ms}` in pieces of at most 25 s until the open's
   `owner_wait` (`LAKE_STORE_OWNER_WAIT_SECONDS`) passes, then refuses `locked` naming the holder. The
   holder is liquid's process description plus a random token, so a second open in one process waits
-  like any other.
+  like any other. The wait is Zetta's, not a poll: `acquire_object_lease` registers a lease watch
+  before its attempt and waits on it or the holder's expiry (zetta `docs/data/object-store.md`,
+  "Registry capabilities"), so a release wakes the waiting acquire at once and the successor takes
+  the lease within one request, whatever is left of its piece or of the holder's TTL.
 - A thread renews every third of the TTL (`LAKE_WORKSPACE_STORE_LEASE_SECONDS`, default 30). Each
   renewal is one request that gives up after a third of the TTL, and the lease is counted from when
   the renewal was sent. A renewal refused as fenced, or none accepted before the lease would run
@@ -230,7 +233,9 @@ right after writing it) costs no request. Bytes not yet sent are read from the b
   lake does it when it drains (`ApiServer::stop`), when a workspace is deleted, and when it reopens
   a failed store.
 
-A workspace store opens on the first request that needs it, never at start.
+A running switched workspace's store is opened ahead of its first request, in the background from
+start (the pre-open, [below](#rollout-hand-off-lake536)); any other store, and one the pre-open
+could not open, opens on the first request that needs it.
 
 **Isolation.** Each store has its own lane (`s:<space>` for a space's store, `w:<workspace>` for a
 workspace's), and a request holds only its store's lane for its call; the lock that guards lake's
@@ -286,7 +291,9 @@ the deletion pass (`resume_workspace_deletions`, which closes workspace stores).
 audit, metering and request-series flushes and timestamp renewals are therefore not delayed by a
 Zetta timeout or a switch. A job is skipped when one of its name is already queued.
 
-**Shutdown.** `ApiServer::stop` drains requests, stops the maintenance thread, closes every store,
+**Shutdown.** `ApiServer::begin_drain` (at SIGTERM) hands the workspace stores over first
+([below](#rollout-hand-off-lake536)). `ApiServer::stop` then drains requests, stops the maintenance
+thread, closes every store still open,
 then gives repository-store work still running on the blocking pool the rest of the drain deadline.
 After that it closes its io_context to the pool (`close_execution_context`): a task still running is
 abandoned and posts nothing into the destroyed context. The request that awaited an abandoned task
@@ -298,6 +305,62 @@ is never resumed, so its response and its audit event are lost; the count is log
 `pull` refused during a move or a lease hand-off must be rerun.
 
 `.lake-owner.lock` still covers the volume's instance data and the space stores.
+
+## Rollout hand-off (lake#536)
+
+In an overlapping rollout (decision 49, `spec.rollout.overlapOnSharedStore`) the successor starts
+beside its predecessor on the same volume and the same workspace Zettas, and every workspace store
+passes from one to the other through its bucket lease.
+
+**The predecessor, at SIGTERM** (`ApiServer::begin_drain`, called by a watcher thread the moment the
+signal arrives, before anything else winds down):
+
+1. It stops taking new work as before (`/readyz` 503, connections closed after each response,
+   requests held for the root answered).
+2. A workspace's lane admits no new request: `admit("w:<workspace>")` and a new image pull answer
+   `503 store_unavailable` with `Retry-After: 1` at once ("lake is stopping and hands the workspace
+   store to its successor; retry shortly"), and no workspace store is opened again, so a released
+   lease stays released. A request admitted to the lane before the drain began (holding it or
+   waiting for it) finishes. An in-flight request that had not reached the lane yet is refused like
+   a new one; the retry reaches the successor.
+3. Each open workspace store is closed as soon as its lane is idle (no admitted request, no image
+   pull), every store on a thread of its own (`release_workspace_stores`): the owner settles what
+   the backend holds (bounded, 10 s) and releases the lease. This does not wait for the process's
+   other requests (a long poll, a space store's push) or for the drain deadline; a store whose lane
+   is still in use at the deadline is closed with the rest by `stop()`. Each store logs
+   `{"event":"store_owner","scope":"workspace","state":"released","waited_ms":…,"closing_ms":…}`.
+4. `stop()` then drains the remaining requests, closes the space stores and releases the root, as
+   before ([store-volume.md](../deployment/store-volume.md#the-hand-off)).
+
+**The successor, from start** (`preopen_workspace_stores`, `LAKE_WORKSPACE_STORE_PREOPEN`, default
+on): a background pass lists every space's switched workspaces that are running and opens their
+stores, at most eight at once. It does not wait for the store root: a workspace store is guarded by
+its lease and fence, not by `.lake-owner.lock`, and liquid writes nothing under the root for a
+store on a backend. Each attempt waits up to 5 s for the lease, so the open happens the moment the
+predecessor releases it (Zetta's acquire wakes on the release), which is before the predecessor
+releases the root. Once this process owns the root, the pass opens each workspace's live
+repositories too, each under the lane on its own (a repository is named by its path under the
+root). It holds the lane as lake's own work, so a request that arrives meanwhile waits for the open
+and then uses it. Attempts go on until `LAKE_STORE_OWNER_WAIT_SECONDS`, the drain, or a failed
+root; anything but a held lease or an unready workspace Zetta is left to the first request. Each
+store logs `{"event":"store_owner","scope":"workspace","state":"preopened","attempts":…,"store_ms":…,"repositories":…,"repositories_ms":…}`.
+
+**Fencing stays the guarantee.** Nothing here lets two processes write one store: the predecessor
+closes the store before it releases the lease, and every write it might still send carries its
+fence, which Zetta refuses as `fenced` once the successor's acquire raised it.
+
+**What the 73 s on dev was.** The log lines in lake#536 (`store_owner … waiting … wait_ms 90000`,
+then `handoff … waited_ms 23676`) are the store root's hand-off (`.lake-owner.lock`, lake#479), not a
+workspace lease: the successor waited 23.7 s for the root, which includes the predecessor's 15 s
+preStop. The 73 s commit began after that, at 17:51:22, when the predecessor had already released
+the workspace leases (its renewals on the workspace Zettas stopped at about 17:51:19). The workspace
+Zetta's audit counter shows what the commit did instead: 2,647 requests in 74 s (about 28 ms each,
+one after another), against about 0.2 a second before; the next commits took about 3 s. So the
+time was the cold store: opening it and its repository and reading what the first commit needed into
+an empty window cache. The pre-open moves the store and repository opens off the first request and
+overlaps them with the rest of the root hand-off; the commit's own cold reads remain. With 10 ms a
+request (`WorkspaceStoreHandoff.*`), a pre-opened first commit sent 75 to 101 requests against 55
+to 57 for the next one: the extra are window reads and liquid's first writes after an open.
 
 ## Moving a workspace
 
@@ -547,3 +610,6 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreBackend.ABarrierNeverRemovesATailItJustWrote` | lake#527: a stale tail whose name the barrier writes again survives the barrier |
 | `WorkspaceStoreBackend.TheSearchIndexsObjectsAreNotLiquids` | lake#527: `search/` objects stay out of liquid's directory, and liquid cannot write there |
 | `WorkspaceStoreMove.ACommitNamesItsStoreRequestsInServerTimingAndMetrics` | lake#527: a commit through lake names its store requests in `Server-Timing`, equal to what the workspace Zetta received, and the metrics count them by kind without a workspace label |
+| `WorkspaceStoreOwner.AWaitingAcquireTakesTheLeaseAsSoonAsItIsReleased` | lake#536: an acquire waiting on a held lease answers within 1 s of the release, with a higher fence; a write with the released fence is refused |
+| `WorkspaceStoreHandoff.ASuccessorAnswersEachWorkspacesFirstRequestWithinSecondsAndTheOldFenceIsRefused` | lake#536: two lake servers on one volume and one fake Zetta (10 ms a request, 30 s TTL): the successor's pre-open waits while the predecessor holds both workspaces, takes both leases with higher fences once the predecessor stops, and the first commit to each workspace answers in under 5 s; a write with the predecessor's fence is refused |
+| `WorkspaceStoreHandoff.ADrainingLakeRefusesNewStoreRequestsFinishesAdmittedOnesAndReleasesTheLease` | lake#536: after `begin_drain` a new request to the workspace answers `503` with `Retry-After: 1` at once, the commit admitted before finishes `200`, and the lease is released before `stop()`; the commit reads back after a restart |
