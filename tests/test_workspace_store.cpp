@@ -3768,7 +3768,7 @@ TEST(WorkspaceStoreHandoff, AWorkspaceStoppedOrDeletedDuringThePreopenIsNotOpene
 
 // A draining lake answers a new workspace store request 503 with Retry-After at once, lets the
 // request it admitted before finish, and releases the store's lease as soon as that request is
-// done: before stop(), not at the drain deadline.
+// done: before stop(), not at the drain deadline. Nothing takes the lease again afterwards.
 TEST(WorkspaceStoreHandoff, ADrainingLakeRefusesNewStoreRequestsFinishesAdmittedOnesAndReleasesTheLease) {
     MoveRig rig;
     ASSERT_NO_FATAL_FAILURE(rig.SetUp());
@@ -3779,11 +3779,12 @@ TEST(WorkspaceStoreHandoff, ADrainingLakeRefusesNewStoreRequestsFinishesAdmitted
     ASSERT_FALSE(rig.zetta->lease(endpoint_a).holder.empty());
 
     // The admitted commit's barriers each take 400 ms, so it is still in the lane when the drain
-    // begins.
+    // begins; it has reached the store once the workspace Zetta sees its first request.
     rig.zetta->hang(endpoint_a, 400ms, ":barrier");
+    const auto requests = rig.zetta->requests_to(endpoint_a);
     std::pair<unsigned, json> admitted;
     std::thread writer([&] { admitted = rig.commit(rig.repo_a, "admitted.txt", "admitted"); });
-    std::this_thread::sleep_for(150ms);
+    ASSERT_TRUE(eventually([&] { return rig.zetta->requests_to(endpoint_a) > requests; }));
     const auto drain_began = std::chrono::steady_clock::now();
     rig.server->begin_drain();
 
@@ -3797,17 +3798,67 @@ TEST(WorkspaceStoreHandoff, ADrainingLakeRefusesNewStoreRequestsFinishesAdmitted
     writer.join();
     EXPECT_EQ(admitted.first, 200U) << admitted.second.dump();
     rig.zetta->hang(endpoint_a, 0ms);
-    for (int waited = 0; waited < 150 && !rig.zetta->lease(endpoint_a).holder.empty(); ++waited) {
-        std::this_thread::sleep_for(20ms);
-    }
-    EXPECT_TRUE(rig.zetta->lease(endpoint_a).holder.empty()) << "released before stop()";
+    EXPECT_TRUE(eventually([&] { return rig.zetta->lease(endpoint_a).holder.empty(); }, 3s))
+        << "released before stop()";
     EXPECT_LT(std::chrono::steady_clock::now() - drain_began, 8s) << "well inside the 20 s drain";
+
+    // Nothing takes the lease again: a search (its index is lake work in the lane) and another
+    // request are refused, and the lease stays free.
+    const auto released_fence = rig.zetta->lease(endpoint_a).fence;
+    const auto [searched_status, searched_body] =
+        rig.call("GET", "/v1/search?query=admitted&workspace_id=" + rig.alpha);
+    EXPECT_NE(searched_status, 200U) << searched_body.dump();
+    EXPECT_EQ(rig.commit(rig.repo_a, "late.txt", "late").first, 503U);
+    std::this_thread::sleep_for(300ms);
+    EXPECT_TRUE(rig.zetta->lease(endpoint_a).holder.empty());
+    EXPECT_EQ(rig.zetta->lease(endpoint_a).fence, released_fence);
     rig.server->stop();
     // What the admitted commit wrote is in the bucket; reopened, the repository has it.
     rig.options.preopen_workspace_stores = false;
     ASSERT_NO_FATAL_FAILURE(rig.start());
     const auto paths = rig.tree(rig.repo_a);
     EXPECT_NE(std::ranges::find(paths, "admitted.txt"), paths.end());
+}
+
+// Review 3: a search index rebuild reading the workspace's repositories one after another under
+// its lane does not hold off the release: the drain stops lake's own work in the lane.
+TEST(WorkspaceStoreHandoff, ASearchRebuildDoesNotHoldOffTheRelease) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    std::vector<lake::control::Repository> repositories;
+    for (int index = 0; index < 8; ++index) {
+        const auto created = rig.create(rig.alpha, "rebuilt-" + std::to_string(index));
+        ASSERT_TRUE(created);
+        ASSERT_EQ(rig.commit(*created, "README.md", "rebuild " + std::string(alpha_term)).first, 200U);
+        repositories.push_back(*created);
+    }
+    // A cold store (a new process) whose index is gone: the next search rebuilds it, reading each
+    // repository from a slow workspace Zetta.
+    for (const auto& [key, bytes] : search_objects(*rig.zetta, endpoint_a)) {
+        rig.zetta->erase_object(endpoint_a, key);
+    }
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    // The store is opened first (an open is one uninterruptible step under the lane), then reads
+    // turn slow and the rebuild starts.
+    rig.tree(repositories.front());
+    rig.zetta->hang(endpoint_a, 150ms, "/lake_store/");
+    const auto requests = rig.zetta->requests_to(endpoint_a);
+    const auto [status, body] = rig.call("GET", "/v1/search?query=" + std::string(alpha_term) +
+                                                    "&workspace_id=" + rig.alpha);
+    ASSERT_EQ(status, 200U) << body.dump();
+    // The rebuild is reading repositories.
+    ASSERT_TRUE(eventually([&] { return rig.zetta->requests_to(endpoint_a) > requests + 3; }));
+    const auto drain_began = std::chrono::steady_clock::now();
+    rig.server->begin_drain();
+    EXPECT_TRUE(eventually([&] { return rig.zetta->lease(endpoint_a).holder.empty(); }, 20s));
+    const auto released = std::chrono::steady_clock::now() - drain_began;
+    std::println("lake#536 release during a rebuild: {} ms",
+                 std::chrono::duration_cast<std::chrono::milliseconds>(released).count());
+    EXPECT_LT(released, 2500ms) << "the rebuild held the lane off";
+    rig.zetta->hang(endpoint_a, 0ms);
+    rig.server->stop();
 }
 
 } // namespace

@@ -568,7 +568,8 @@ migration `0068`.
 Tenant image blobs in the workspace store (lake#383 phase B): `test_registry_store.cpp`
 (`RegistryStore.*`, a real lake server with workspace stores on `FakeZettaObjects`) covers push and
 pull of a multi-layer image through a routed, switched workspace (GET and HEAD, ciphertext only,
-nothing in the instance registry, a repeated layer stored once, usage counted once), a chunked
+nothing in the instance registry, a repeated layer stored once, usage counted once), blob requests
+refused `503` during a drain with the lease never taken again (lake#536), a chunked
 upload and a wrong digest, a 304 MiB layer streamed with the pull's resident growth bounded, a
 blob of another workspace or space refused, the `oci_blobs` copy (plan, copy, rerun, verify with
 SHA-256, missing, corrupt and unswitched blobs unresolved, pulls after the registry files are

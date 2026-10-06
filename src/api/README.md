@@ -5,7 +5,9 @@ predecessor. `ApiServer::start` binds first; its owner thread takes the lock and
 stores (each with liquid's `exclusive_owner`), while the `store_root` middleware holds every request
 but probes, metrics and static assets until the root is open and `/readyz` reports the hand-off.
 `begin_drain` (at SIGTERM) refuses new workspace store requests and releases each workspace
-store's lease once its admitted requests are done (lake#536); `stop` drains in-flight requests,
+store's lease once its admitted requests are done (lake#536), after it writes `.lake-owner.draining`
+(`StoreOwnerLock::announce_draining`), the announcement a successor's pre-open waits for before it
+takes a workspace lease; `stop` drains in-flight requests,
 closes the stores and releases the lock (lake#467, lake#479,
 [store-volume.md](../../docs/deployment/store-volume.md#the-hand-off)). A starting server opens the
 stores and repositories of running switched workspaces in the background (`preopen_workspace_stores`).

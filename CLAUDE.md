@@ -38,7 +38,8 @@ it. See `docs/deployment/store-volume.md`.
 Workspace stores are handed off per workspace (lake#536): at SIGTERM lake answers new requests to a
 workspace store `503` with `Retry-After` and releases each store's lease once its admitted requests
 finish, and a starting lake pre-opens every running switched workspace's store in the background,
-taking each lease the moment it is released (`LAKE_WORKSPACE_STORE_PREOPEN`). See
+taking each lease the moment it is released, but only once its predecessor has announced its drain
+in `<root>/.lake-owner.draining` or it owns the root (`LAKE_WORKSPACE_STORE_PREOPEN`). See
 `docs/architecture/workspace-store.md#rollout-hand-off-lake536`.
 
 Agent tasks now have renewable claim leases, two retries and a terminal failure after three

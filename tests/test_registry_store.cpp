@@ -1490,3 +1490,33 @@ TEST(RegistryStore, AClaimedUploadSurvivesARetryableErrorAndTheSweepDuringItsCom
     EXPECT_EQ(still, 1U) << "the sweep measured the claimed upload from its claim";
     EXPECT_EQ(completed.status, 201U) << completed.body;
 }
+
+// lake#536: once lake drains, a blob request for a workspace store (HEAD reaches the store through
+// the lane without admission) is refused 503 with Retry-After, the store's lease is released, and
+// nothing takes it again.
+TEST(RegistryStore, ADrainingLakeRefusesBlobRequestsAndNeverRetakesTheLease) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "drained"));
+    const std::string layer = layer_bytes(70 * 1024, 7);
+    rig.push_image("tenant-one/drained", "v1", R"({"architecture":"amd64","os":"linux"})", {layer});
+    ASSERT_EQ(rig.get_blob("tenant-one/drained", sha256(layer), "HEAD").status, 200U);
+    const std::string endpoint = RegistryRig::endpoint(rig.alpha);
+    ASSERT_FALSE(rig.zetta->lease(endpoint).holder.empty());
+
+    rig.server->begin_drain();
+    for (int waited = 0; waited < 300 && !rig.zetta->lease(endpoint).holder.empty(); ++waited) {
+        std::this_thread::sleep_for(10ms);
+    }
+    ASSERT_TRUE(rig.zetta->lease(endpoint).holder.empty()) << "released at the drain";
+    const auto fence = rig.zetta->lease(endpoint).fence;
+    for (const char* method : {"HEAD", "GET"}) {
+        Reply refused = rig.get_blob("tenant-one/drained", sha256(layer), method);
+        EXPECT_EQ(refused.status, 503U) << method << " " << refused.body;
+        EXPECT_EQ(refused.headers["retry-after"], "1") << method;
+    }
+    std::this_thread::sleep_for(300ms);
+    EXPECT_TRUE(rig.zetta->lease(endpoint).holder.empty());
+    EXPECT_EQ(rig.zetta->lease(endpoint).fence, fence) << "nothing took the lease again";
+}
