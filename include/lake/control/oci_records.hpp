@@ -149,10 +149,12 @@ has_oci_blob(WorkspaceRecords& records, std::string customer_id, std::string dig
 liquid::runtime::task<ZettaControlResult<std::optional<OciBlob>>>
 get_oci_blob(WorkspaceRecords& records, std::string customer_id, std::string digest);
 
-// Records a blob whose bytes are now the store object `blob.object` (lake#383 phase B): a new
-// record is written `if_absent`; one without an object (its bytes were in the instance registry)
-// gains it at the revision read; one that already names an object keeps it, since the object holds
-// the same bytes. Answers the record as stored.
+// Records a blob whose bytes are now the store object `blob.object` (lake#383 phase B), which the
+// caller has checked against the digest: a new record is written `if_absent`; one that names no
+// object (its bytes were in the instance registry) or another object is rewritten at the revision
+// read. A liquid object's identity is the hash of its bytes, so a record naming another object
+// names other bytes, and a correct push repairs it. One that already names this object is kept.
+// Answers the record as stored.
 liquid::runtime::task<ZettaControlResult<OciBlob>> store_oci_blob(WorkspaceRecords& records,
                                                                   OciBlob blob);
 

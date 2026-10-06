@@ -5,6 +5,7 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -523,19 +524,35 @@ public:
     }
     // lake#383 phase B (decision 54 S5): a tenant image's blob in its workspace's liquid store.
     // Streams the file at `source` into the store of a switched workspace and answers the object's
-    // liquid identity and size; the space's storage quota is checked first (`busy`, rule
-    // `storage_quota`). `admitted`: a request entering the workspace's lane (refused at once when
-    // the lane is full or moving); otherwise lake's own work (the copy), which waits for it.
+    // liquid identity and size. The space's storage quota is checked first (`busy`, rule
+    // `storage_quota`), unless `known_object`, the object the workspace already records for the
+    // digest, is in the store: a re-push of it adds nothing. The object is rooted with a liquid
+    // lease, so a liquid collection never removes it. `admitted`: a request entering the
+    // workspace's lane (refused at once when the lane is full or moving); otherwise lake's own
+    // work (the copy), which waits for it.
     virtual SyncStoreResult<WorkspaceBlob> put_workspace_blob(const std::string&,
                                                               const std::string&,
                                                               const std::filesystem::path&,
-                                                              bool) {
+                                                              bool,
+                                                              const std::string& = {}) {
+        return std::unexpected(SyncStoreError{"unsupported", "workspace stores are unavailable"});
+    }
+    // A pull's admission to the workspace's lane, held for its whole stream: it counts as one of
+    // the lane's admitted requests until the handle is released, and is refused at once
+    // (`store_unavailable`) when the lane is full or moving. Its reads then take the lane one
+    // window at a time (read_workspace_blob with `admitted` false).
+    virtual SyncStoreResult<std::shared_ptr<void>> admit_workspace_stream(const std::string&) {
+        return std::unexpected(SyncStoreError{"unsupported", "workspace stores are unavailable"});
+    }
+    // Whether the workspace's store holds the object (a lookup in liquid's object map).
+    virtual SyncStoreResult<bool> workspace_blob_present(const std::string&, const std::string&,
+                                                         const std::string&) {
         return std::unexpected(SyncStoreError{"unsupported", "workspace stores are unavailable"});
     }
     // Reads up to `into.size()` bytes of the object at `offset`, under the workspace's lane for
     // this one read; answers how many it read. A read of a blob the store does not hold is
-    // `not_found`. `admitted` as for put_workspace_blob: a pull is admitted once, for its first
-    // read, and its later reads wait for the lane rather than cut the layer off part way.
+    // `not_found`. `admitted` as for put_workspace_blob; a pull's windows are not admitted
+    // themselves, since its stream holds an admission (admit_workspace_stream).
     virtual SyncStoreResult<std::uint64_t> read_workspace_blob(const std::string&,
                                                                const std::string&,
                                                                const std::string&,

@@ -575,7 +575,13 @@ SHA-256, missing, corrupt and unswitched blobs unresolved, pulls after the regis
 removed), instance packages unaffected, workspace deletion, and `move_workspace_store` `provision`
 (an empty, storeless switched workspace provisioned, then a repository created and committed; a
 refused creation's tombstone not counted; live and retained rows, and a bucket holding objects,
-refused; a repeated call a no-op).
+refused; a repeated call a no-op, also after a restart; a workspace whose records name stored image
+blobs refused; a person's token refused `403`). The review's cases: a PATCH during a completion
+refused and the stored bytes unchanged, a record naming a missing or another object (`500` to GET
+and HEAD, repaired by a push), forty stalled pulls holding at most the lane's four admissions while
+another workspace answers, `instance_paths` without a shared instance digest and withheld for an
+unreadable workspace or an uncopied legacy tag, the quota counting only new bytes (`507`, nothing
+staged left), the upload sweep, usage per workspace, and a liquid collection keeping image blobs.
 
 Workspace volumes (migration `0069`, operator#259, operator#260): `test_volumes.cpp`
 (`Stores/Volumes.*`, on the memory store and PostgreSQL) covers growing a workspace's storage, the

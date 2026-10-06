@@ -30,6 +30,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <random>
 #include <set>
 #include <string>
@@ -42,7 +43,9 @@
 #include "lake/api/server.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/oci_records.hpp"
 #include "lake/control/workspace_store.hpp"
+#include <liquid/store.hpp>
 #include "temporary_directory.hpp"
 #include "workspace_fixture.hpp"
 #include "zetta_object_fixture.hpp"
@@ -235,7 +238,7 @@ struct RegistryRig {
     lake::api::ServerOptions options;
     std::unique_ptr<lake::api::ApiServer> server;
 
-    void SetUp() {
+    void SetUp(const std::function<void(lake::api::ServerOptions&)>& configure = {}) {
         const auto first = store->create_user({"taap:registry-store-one", "", "Registry One"});
         const auto second = store->create_user({"taap:registry-store-two", "", "Registry Two"});
         ASSERT_TRUE(first && second);
@@ -259,12 +262,66 @@ struct RegistryRig {
         options.admin_token = "registry-store-admin";
         options.instance_kek = std::string(kek);
         options.store_root = root.string();
+        if (configure) {
+            configure(options);
+        }
+        ASSERT_NO_FATAL_FAILURE(start());
+    }
+
+    void start() {
         server = std::make_unique<lake::api::ApiServer>(options);
         ASSERT_TRUE(server->start()) << server->reason();
         for (int waited = 0; waited < 200 && !server->store_root_open(); ++waited) {
             std::this_thread::sleep_for(20ms);
         }
         ASSERT_TRUE(server->store_root_open());
+    }
+
+    // A new lake process on the same volume, control store and workspace Zettas.
+    void restart() {
+        server->stop();
+        server.reset();
+        ASSERT_NO_FATAL_FAILURE(start());
+    }
+
+    // The workspace's records, opened as lake opens them (tests reach in to alter a record).
+    lake::control::WorkspaceRecords records_of(const std::string& customer, const std::string& workspace) {
+        auto records = lake::control::WorkspaceRecords::open(
+            [service = workspaces->service, customer, workspace](std::string capability, bool read,
+                                                                 json input) {
+                return service->call(customer, workspace, std::move(capability), read, std::move(input));
+            },
+            workspace, kek);
+        EXPECT_TRUE(records) << records.error().message;
+        return std::move(*records);
+    }
+
+    std::optional<lake::control::OciBlob> blob_record(const std::string& customer,
+                                                      const std::string& workspace,
+                                                      const std::string& digest) {
+        auto records = records_of(customer, workspace);
+        auto found = lake::control::settled(
+            liquid::runtime::block_on(lake::control::get_oci_blob(records, customer, digest)));
+        EXPECT_TRUE(found);
+        return found ? *found : std::nullopt;
+    }
+
+    // Rewrites a blob record to name `object`, as a damaged or wrong record would.
+    void name_object(const std::string& customer, const std::string& workspace,
+                     const std::string& digest, const std::string& object) {
+        auto records = records_of(customer, workspace);
+        auto found = lake::control::settled(
+            liquid::runtime::block_on(lake::control::get_oci_blob(records, customer, digest)));
+        ASSERT_TRUE(found && *found);
+        lake::control::OciBlob blob = **found;
+        blob.object = object;
+        const std::string key = records.index_of(lake::control::OciBlobCodec::collection,
+                                                 "customer:" + customer + "\ndigest:" + digest);
+        auto written = lake::control::settled(liquid::runtime::block_on(records.put(
+            lake::control::OciBlobCodec::collection, key, lake::control::OciBlobCodec::lookup(blob),
+            lake::control::OciBlobCodec::encode(blob),
+            lake::control::RecordCondition{.if_revision = blob.revision}, blob.lake_revision + 1)));
+        ASSERT_TRUE(written) << written.error().message;
     }
 
     ~RegistryRig() {
@@ -397,10 +454,12 @@ struct RegistryRig {
 
     std::size_t staged_uploads() const {
         std::size_t count = 0;
-        std::error_code ignored;
-        for (const auto& entry : std::filesystem::directory_iterator(registry() / "uploads", ignored)) {
-            static_cast<void>(entry);
-            ++count;
+        for (const char* directory : {"uploads", "claimed"}) {
+            std::error_code ignored;
+            for (const auto& entry : std::filesystem::directory_iterator(registry() / directory, ignored)) {
+                static_cast<void>(entry);
+                ++count;
+            }
         }
         return count;
     }
@@ -626,7 +685,9 @@ TEST(RegistryStore, TheCopyMovesInstanceBlobsIntoTheirStoresAndVerifiesThem) {
     const std::string lost = layer_bytes(4000, 33);
     const std::string corrupt = layer_bytes(5000, 34);
     rig.push_image("tenant-one/damaged", "v1", R"({"damaged":1})", {lost, corrupt});
-    rig.push_image("tenant-two/waiting", "v1", R"({"waiting":1})", {layer_bytes(100, 35)});
+    // Another space's image, in a workspace not switched yet, shares one of alpha's layers: its
+    // record still needs the registry's file after alpha's copy is verified.
+    rig.push_image("tenant-two/waiting", "v1", R"({"waiting":1})", {layer_bytes(100, 35), layers[1]});
     // Phase A: every blob is in the instance registry.
     EXPECT_EQ(rig.instance_blobs().size(), 8U);
 
@@ -643,7 +704,7 @@ TEST(RegistryStore, TheCopyMovesInstanceBlobsIntoTheirStoresAndVerifiesThem) {
     const auto bucket_before = rig.zetta->objects(RegistryRig::endpoint(rig.alpha));
     const json plan = rig.copy("plan");
     ASSERT_TRUE(plan.value("ok", false)) << plan;
-    EXPECT_EQ(plan["value"]["rows"], 8U) << plan;
+    EXPECT_EQ(plan["value"]["rows"], 9U) << plan;
     std::map<std::string, std::string> outcomes;
     for (const json& item : plan["value"]["unresolved"]) {
         outcomes[item["id"]] = item["outcome"];
@@ -672,11 +733,13 @@ TEST(RegistryStore, TheCopyMovesInstanceBlobsIntoTheirStoresAndVerifiesThem) {
     for (const json& path : verified["value"]["instance_paths"]) {
         paths.insert(path.get<std::string>());
     }
-    for (const std::string& blob : {config, layers[0], layers[1]}) {
+    for (const std::string& blob : {config, layers[0]}) {
         EXPECT_TRUE(paths.contains((rig.registry() / "blobs" / hex_of(sha256(blob))).string())) << verified;
     }
-    EXPECT_FALSE(paths.contains((rig.registry() / "blobs" / hex_of(sha256(corrupt))).string()))
-        << "a blob not yet copied still needs its file";
+    EXPECT_FALSE(rig.blob_record(rig.one, rig.alpha, sha256(layers[1]))->object.empty())
+        << "alpha's copy of the shared layer is in its store and verified";
+    EXPECT_FALSE(paths.contains((rig.registry() / "blobs" / hex_of(sha256(layers[1]))).string()))
+        << "gamma's record of the same digest is not copied, so the registry's file is still needed";
     EXPECT_FALSE(holds_marker(rig.zetta->objects(RegistryRig::endpoint(rig.alpha))));
 
     // The copy removed nothing; once the registry's files are gone (a later, approved step), the
@@ -686,6 +749,8 @@ TEST(RegistryStore, TheCopyMovesInstanceBlobsIntoTheirStoresAndVerifiesThem) {
         std::filesystem::remove(path);
     }
     EXPECT_EQ(exchange(rig.port(), "GET", "/v2/tenant-one/legacy/manifests/v1").body, legacy.dump());
+    EXPECT_EQ(rig.get_blob("tenant-two/waiting", sha256(layers[1])).body, layers[1])
+        << "gamma still reads the shared layer from the registry";
     for (const std::string& blob : {config, layers[0], layers[1]}) {
         Reply pulled = rig.get_blob("tenant-one/legacy", sha256(blob));
         EXPECT_EQ(pulled.status, 200U);
@@ -781,11 +846,21 @@ TEST(RegistryStore, ProvisionCreatesTheStoreOnlyOfASwitchedWorkspaceThatNeverHel
     const auto bucket = rig.zetta->objects(RegistryRig::endpoint(rig.alpha));
     EXPECT_TRUE(bucket.contains(std::string(lake::control::workspace_store_key_object)));
 
-    // A repeated call changes nothing.
+    // A repeated call changes nothing, in this lake and in the next one (whose store is not open
+    // yet: the bucket holds objects, the store opens with its key, so nothing is created).
     const json again = provision(rig.alpha);
     ASSERT_TRUE(again.value("ok", false)) << again;
     EXPECT_FALSE(again["value"]["created"].get<bool>());
     EXPECT_EQ(rig.zetta->objects(RegistryRig::endpoint(rig.alpha)), bucket);
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    const json reopened = provision(rig.alpha);
+    ASSERT_TRUE(reopened.value("ok", false)) << reopened;
+    EXPECT_FALSE(reopened["value"]["created"].get<bool>());
+    EXPECT_GT(reopened["value"]["objects"].get<std::uint64_t>(), 0U);
+    const auto reopened_bucket = rig.zetta->objects(RegistryRig::endpoint(rig.alpha));
+    EXPECT_EQ(reopened_bucket.at(std::string(lake::control::workspace_store_key_object)),
+              bucket.at(std::string(lake::control::workspace_store_key_object)))
+        << "the data key is the one first created";
 
     // The workspace now creates and writes repositories, and holds images.
     const json created = rig.call("create_repository", {{"customer_id", rig.one},
@@ -835,9 +910,360 @@ TEST(RegistryStore, ProvisionCreatesTheStoreOnlyOfASwitchedWorkspaceThatNeverHel
     EXPECT_NE(with_objects["error"]["message"].get<std::string>().find("1 objects"), std::string::npos);
     EXPECT_EQ(rig.zetta->objects(RegistryRig::endpoint(rig.gamma)).size(), 1U) << "nothing was written";
 
-    // Only the operator provisions.
-    const Reply foreign = exchange(rig.port(), "POST", "/v1/move_workspace_store",
-                                   json{{"workspace_id", rig.alpha}, {"mode", "provision"}}.dump(),
-                                   {{"Content-Type", "application/json"}}, "Bearer not-the-operator");
-    EXPECT_NE(foreign.status, 200U);
+    // A workspace whose records name an image blob in its store held data: refused, though it
+    // has no repository and its bucket is gone.
+    const std::string delta = rig.workspaces->create(rig.two, "delta");
+    rig.zetta->add_node(RegistryRig::endpoint(delta), "token-" + delta);
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(delta));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.two, delta, "kept"));
+    const std::string kept = layer_bytes(2000, 62);
+    rig.push_image("tenant-two/kept", "v1", R"({"kept":1})", {kept});
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    rig.zetta->drop_bucket(RegistryRig::endpoint(delta));
+    const json with_blobs = provision(delta);
+    EXPECT_EQ(with_blobs["error"]["code"], "conflict") << with_blobs;
+    EXPECT_NE(with_blobs["error"]["message"].get<std::string>().find("2 image blobs"),
+              std::string::npos) << with_blobs;
+    EXPECT_FALSE(rig.zetta->has_bucket(RegistryRig::endpoint(delta))) << "nothing was created";
+
+    // Only the operator provisions: a person's token is not the operator credential.
+    const auto user = rig.store->create_user({"taap:registry-store-person", "", "Person"});
+    ASSERT_TRUE(user);
+    const auto token = rig.store->create_token({user->id, "lake", "person", "test", {"*"}, 300, false});
+    ASSERT_TRUE(token) << token.error().message;
+    Reply foreign = exchange(rig.port(), "POST", "/v1/move_workspace_store",
+                             json{{"workspace_id", rig.alpha}, {"mode", "provision"}}.dump(),
+                             {{"Content-Type", "application/json"}}, "Bearer " + token->secret);
+    EXPECT_EQ(foreign.status, 403U) << foreign.body;
+    EXPECT_EQ(json::parse(foreign.body, nullptr, false)["error"]["code"], "unauthorized") << foreign.body;
+}
+
+// ---- review of PR #528 ------------------------------------------------------------------------
+
+// A PATCH to an upload while its completion is checking and storing it cannot reach the bytes:
+// the completion moved them away first, so the PATCH is refused and the stored object is exactly
+// the bytes whose digest was checked. (Before, the PATCH appended to the file between the digest
+// check and the store's read of it, and the record mapped the digest to other bytes for good.)
+TEST(RegistryStore, APatchDuringCompletionCannotChangeTheStoredBytes) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "raced"));
+    const std::string bytes = layer_bytes(3 * 1024 * 1024, 71);
+    Reply started = exchange(rig.port(), "POST", "/v2/tenant-one/raced/blobs/uploads/");
+    ASSERT_EQ(started.status, 202U);
+    const std::string location = started.headers.at("location");
+    Reply patched = exchange(rig.port(), "PATCH", location, bytes,
+                             {{"Content-Type", "application/octet-stream"},
+                              {"Content-Range", "0-" + std::to_string(bytes.size() - 1)}});
+    ASSERT_EQ(patched.status, 202U);
+    // Every request to the workspace's Zetta is slow, so the completion is still storing when the
+    // second PATCH arrives.
+    rig.zetta->hang(RegistryRig::endpoint(rig.alpha), 150ms);
+    Reply completed;
+    std::thread completion([&] {
+        completed = exchange(rig.port(), "PUT", location + "?digest=" + sha256(bytes));
+    });
+    std::this_thread::sleep_for(400ms);
+    const std::string extra = "appended while completing";
+    Reply raced = exchange(rig.port(), "PATCH", location, extra,
+                           {{"Content-Type", "application/octet-stream"},
+                            {"Content-Range", std::to_string(bytes.size()) + "-" +
+                                                  std::to_string(bytes.size() + extra.size() - 1)}});
+    completion.join();
+    rig.zetta->hang(RegistryRig::endpoint(rig.alpha), 0ms);
+    EXPECT_EQ(raced.status, 400U) << "the completing upload is no longer reachable: " << raced.body;
+    EXPECT_EQ(oci_code(raced), "BLOB_UPLOAD_INVALID");
+    ASSERT_EQ(completed.status, 201U) << completed.body;
+    EXPECT_EQ(rig.blob_record(rig.one, rig.alpha, sha256(bytes))->size, bytes.size());
+    const std::string config = R"({"raced":1})";
+    ASSERT_EQ(rig.push_blob("tenant-one/raced", config).status, 201U);
+    ASSERT_EQ(rig.publish("tenant-one/raced", "v1", RegistryRig::manifest(config, {{sha256(bytes), bytes.size()}}))
+                  .status,
+              201U);
+    EXPECT_TRUE(rig.get_blob("tenant-one/raced", sha256(bytes)).body == bytes);
+    EXPECT_EQ(rig.staged_uploads(), 0U);
+}
+
+// A record that names an object the store does not hold answers 500 to GET and HEAD, never 200
+// and never the instance registry; one that names another object's bytes is repaired by a
+// correct push of the blob, as is the missing one.
+TEST(RegistryStore, ARecordNamingAMissingOrWrongObjectIsAnErrorUntilARePushRepairsIt) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "damaged"));
+    const std::string first = layer_bytes(5000, 81);
+    const std::string second = layer_bytes(6000, 82);
+    rig.push_image("tenant-one/damaged", "v1", R"({"damaged":1})", {first, second});
+
+    rig.name_object(rig.one, rig.alpha, sha256(first), "blake3:" + std::string(64, '0'));
+    EXPECT_EQ(rig.get_blob("tenant-one/damaged", sha256(first)).status, 500U);
+    Reply headed = rig.get_blob("tenant-one/damaged", sha256(first), "HEAD");
+    EXPECT_EQ(headed.status, 500U);
+    EXPECT_EQ(rig.push_blob("tenant-one/damaged", first).status, 201U);
+    EXPECT_TRUE(rig.get_blob("tenant-one/damaged", sha256(first)).body == first) << "a re-push repairs it";
+    EXPECT_EQ(rig.get_blob("tenant-one/damaged", sha256(first), "HEAD").status, 200U);
+
+    // A record naming the other layer's object serves the wrong bytes until a push corrects it.
+    const std::string other = rig.blob_record(rig.one, rig.alpha, sha256(second))->object;
+    rig.name_object(rig.one, rig.alpha, sha256(first), other);
+    EXPECT_TRUE(rig.get_blob("tenant-one/damaged", sha256(first)).body == second.substr(0, first.size()));
+    EXPECT_EQ(rig.push_blob("tenant-one/damaged", first).status, 201U);
+    EXPECT_NE(rig.blob_record(rig.one, rig.alpha, sha256(first))->object, other);
+    EXPECT_TRUE(rig.get_blob("tenant-one/damaged", sha256(first)).body == first);
+}
+
+namespace {
+
+// A pull that reads its status line and headers, then stops reading until it is closed.
+struct PausedPull {
+    int socket = -1;
+    unsigned status = 0;
+    ~PausedPull() {
+        if (socket >= 0) {
+            ::close(socket);
+        }
+    }
+};
+
+std::unique_ptr<PausedPull> start_pull(unsigned short port, const std::string& path) {
+    auto pull = std::make_unique<PausedPull>();
+    pull->socket = ::socket(AF_INET, SOCK_STREAM, 0);
+    int small = 4096;
+    ::setsockopt(pull->socket, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    ::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+    if (::connect(pull->socket, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+        return pull;
+    }
+    const std::string request = "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nAuthorization: " +
+                                std::string(admin) + "\r\n\r\n";
+    ::send(pull->socket, request.data(), request.size(), 0);
+    std::string head;
+    char byte = 0;
+    while (head.find("\r\n\r\n") == std::string::npos && ::recv(pull->socket, &byte, 1, 0) == 1) {
+        head += byte;
+    }
+    if (head.size() > 12) {
+        pull->status = static_cast<unsigned>(std::stoul(head.substr(9, 3)));
+    }
+    if (pull->status != 200) {
+        ::close(pull->socket); // a refused pull holds no connection
+        pull->socket = -1;
+    }
+    return pull;
+}
+
+} // namespace
+
+// A pull holds one of its workspace lane's admissions for its whole stream, so pulls that stall
+// (a slow client, a long put holding the lane) never park more of the blocking pool than the lane
+// admits: past that, pulls are refused at once with 503, and other workspaces keep answering.
+// (Before, only a pull's first window was admitted, and its later windows waited for the lane
+// without limit.)
+TEST(RegistryStore, PullsCountAgainstTheLaneForTheirWholeStreamAndOtherWorkspacesAnswer) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.beta));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "busy"));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.beta, "calm"));
+    const std::string layer = layer_bytes(24 * 1024 * 1024, 91);
+    rig.push_image("tenant-one/busy", "v1", R"({"busy":1})", {layer});
+    const std::string calm = layer_bytes(4096, 92);
+    rig.push_image("tenant-one/calm", "v1", R"({"calm":1})", {calm});
+
+    // Forty pulls that stop reading after their headers.
+    std::vector<std::unique_ptr<PausedPull>> pulls;
+    for (int index = 0; index < 40; ++index) {
+        pulls.push_back(start_pull(rig.port(), "/v2/tenant-one/busy/blobs/" + sha256(layer)));
+    }
+    const auto admitted = std::ranges::count_if(pulls, [](const auto& pull) { return pull->status == 200; });
+    const auto refused = std::ranges::count_if(pulls, [](const auto& pull) { return pull->status == 503; });
+    EXPECT_GE(admitted, 1);
+    EXPECT_LE(admitted, 4) << "a stalled pull keeps its admission";
+    EXPECT_EQ(admitted + refused, 40);
+    const auto calm_started = std::chrono::steady_clock::now();
+    EXPECT_TRUE(rig.get_blob("tenant-one/calm", sha256(calm)).body == calm);
+    EXPECT_LT(std::chrono::steady_clock::now() - calm_started, 3s);
+    pulls.clear(); // the clients go away; their streams end and give their admissions back
+
+    // A long put holds alpha's lane while forty pulls arrive: they are refused or wait their
+    // turn, and beta answers meanwhile.
+    rig.zetta->hang(RegistryRig::endpoint(rig.alpha), 100ms);
+    Reply put;
+    std::thread putter([&] { put = rig.push_blob("tenant-one/busy", layer_bytes(2 * 1024 * 1024, 93)); });
+    std::this_thread::sleep_for(300ms);
+    std::vector<std::thread> pullers;
+    std::atomic<int> unavailable{0};
+    for (int index = 0; index < 40; ++index) {
+        pullers.emplace_back([&] {
+            if (rig.get_blob("tenant-one/busy", sha256(layer), "HEAD").status == 503) {
+                ++unavailable;
+            }
+        });
+    }
+    const auto beta_started = std::chrono::steady_clock::now();
+    EXPECT_TRUE(rig.get_blob("tenant-one/calm", sha256(calm)).body == calm);
+    EXPECT_LT(std::chrono::steady_clock::now() - beta_started, 3s) << "another workspace still answers";
+    for (std::thread& puller : pullers) {
+        puller.join();
+    }
+    putter.join();
+    rig.zetta->hang(RegistryRig::endpoint(rig.alpha), 0ms);
+    EXPECT_EQ(put.status, 201U) << put.body;
+    EXPECT_GE(unavailable.load(), 36);
+    // Afterwards the lane admits pulls again.
+    Reply after;
+    for (int attempt = 0; attempt < 50 && after.status != 200; ++attempt) {
+        after = rig.get_blob("tenant-one/busy", sha256(layer), "HEAD");
+        std::this_thread::sleep_for(100ms);
+    }
+    EXPECT_EQ(after.status, 200U);
+}
+
+// `instance_paths` is advisory and only given when nothing could have been missed: a digest the
+// instance's own repositories use is never in it, a routed workspace whose records cannot be read
+// withholds the list, and so does a tenant tag still in the instance registry, whose blobs it
+// still needs.
+TEST(RegistryStore, InstancePathsLeaveOutWhatIsStillNeededAndAreWithheldWhenIncomplete) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "service"));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.two, rig.gamma, "other"));
+    const std::string shared = layer_bytes(3000, 101);
+    const std::string own = layer_bytes(3000, 102);
+    const std::string config = R"({"service":1})";
+    rig.push_image("tenant-one/service", "v1", config, {shared, own});
+    rig.push_image("tenant-two/other", "v1", R"({"other":1})", {layer_bytes(500, 103)});
+    // The instance's own repository uses the shared layer.
+    rig.push_image("instance-tool", "v1", R"({"tool":1})", {shared});
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.gamma));
+    ASSERT_TRUE(rig.copy("copy").value("ok", false));
+    json verified = rig.copy("verify");
+    ASSERT_TRUE(verified.value("ok", false)) << verified;
+    ASSERT_TRUE(verified["value"]["instance_paths"].is_array()) << verified;
+    std::set<std::string> paths;
+    for (const json& path : verified["value"]["instance_paths"]) {
+        paths.insert(path.get<std::string>());
+    }
+    EXPECT_TRUE(paths.contains((rig.registry() / "blobs" / hex_of(sha256(own))).string())) << verified;
+    EXPECT_FALSE(paths.contains((rig.registry() / "blobs" / hex_of(sha256(shared))).string()))
+        << "the instance's repository uses it";
+
+    // A routed workspace that cannot be read: no list.
+    rig.workspaces->status(rig.gamma, "Pending");
+    verified = rig.copy("verify");
+    ASSERT_TRUE(verified.value("ok", false)) << verified;
+    EXPECT_TRUE(verified["value"]["instance_paths"].is_null()) << verified;
+    EXPECT_FALSE(verified["value"].value("instance_paths_withheld", std::string()).empty());
+    rig.workspaces->ready(rig.gamma);
+
+    // A tenant tag the instance registry still holds and its workspace does not (oci_tags not
+    // complete): no list.
+    const std::string legacy_manifest = R"({"schemaVersion":2,"config":{"digest":")" + sha256(config) +
+                                        R"(","size":13},"layers":[{"digest":")" + sha256(own) +
+                                        R"(","size":3000}]})";
+    std::filesystem::create_directories(rig.registry() / "manifests" / "tenant-one" / "service");
+    std::ofstream(rig.registry() / "blobs" / hex_of(sha256(legacy_manifest)), std::ios::binary) << legacy_manifest;
+    std::ofstream(rig.registry() / "manifests" / "tenant-one" / "service" / "legacy.json")
+        << json{{"digest", sha256(legacy_manifest)}}.dump();
+    verified = rig.copy("verify");
+    ASSERT_TRUE(verified.value("ok", false)) << verified;
+    EXPECT_TRUE(verified["value"]["instance_paths"].is_null()) << verified;
+}
+
+// Quota: a new blob past the space's storage quota is 507 and leaves no staged file; a re-push of
+// a blob the store already holds adds nothing and is not refused.
+TEST(RegistryStore, TheQuotaCountsOnlyNewBytesAndARefusedUploadLeavesNothingStaged) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "quota"));
+    const std::string held = layer_bytes(10000, 111);
+    ASSERT_EQ(rig.push_blob("tenant-one/quota", held).status, 201U);
+    ASSERT_TRUE(rig.store->set_storage_quota(rig.one, 1));
+    Reply again = rig.push_blob("tenant-one/quota", held);
+    EXPECT_EQ(again.status, 201U) << again.body;
+    Reply refused = rig.push_blob("tenant-one/quota", layer_bytes(10000, 112));
+    EXPECT_EQ(refused.status, 507U) << refused.body;
+    EXPECT_EQ(oci_code(refused), "DENIED");
+    EXPECT_EQ(rig.staged_uploads(), 0U);
+}
+
+// Uploads abandoned longer than the maximum age are removed by the maintenance thread.
+TEST(RegistryStore, AbandonedUploadsAreSweptAfterTheirMaximumAge) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp([](lake::api::ServerOptions& options) {
+        options.registry_upload_max_age = std::chrono::seconds(1);
+    }));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "abandoned"));
+    Reply started = exchange(rig.port(), "POST", "/v2/tenant-one/abandoned/blobs/uploads/");
+    ASSERT_EQ(started.status, 202U);
+    ASSERT_EQ(exchange(rig.port(), "PATCH", started.headers.at("location"), "never finished",
+                       {{"Content-Type", "application/octet-stream"}, {"Content-Range", "0-13"}})
+                  .status,
+              202U);
+    EXPECT_EQ(rig.staged_uploads(), 1U);
+    // The owner loop (drain, which lake's main loop calls) schedules the sweep.
+    for (int waited = 0; waited < 100 && rig.staged_uploads() != 0; ++waited) {
+        rig.server->drain();
+        std::this_thread::sleep_for(100ms);
+    }
+    EXPECT_EQ(rig.staged_uploads(), 0U);
+}
+
+// Usage keys stored blobs per workspace: a digest one workspace stores and another still reads
+// from the instance registry counts in both places.
+TEST(RegistryStore, UsageCountsAStoredDigestPerWorkspace) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "stored"));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.beta, "registry"));
+    const std::string layer = layer_bytes(7000, 121);
+    const json in_store = rig.push_image("tenant-one/stored", "v1", R"({"s":1})", {layer});
+    const json in_registry = rig.push_image("tenant-one/registry", "v1", R"({"r":1})", {layer});
+    Reply usage = exchange(rig.port(), "GET", "/v1/metering_usage?customer_id=" + rig.one);
+    const json storage = json::parse(usage.body)["value"]["summary"]["storage"];
+    EXPECT_EQ(storage["images_in_workspace_stores_bytes"], layer.size() + 7) << storage;
+    EXPECT_EQ(storage["images_bytes"], in_store.dump().size() + in_registry.dump().size() +
+                                           layer.size() + 7) << storage;
+}
+
+// Image blobs are rooted in liquid (a lease), so a liquid collection of the workspace's store,
+// which keeps only what a root reaches, does not remove them.
+TEST(RegistryStore, ALiquidCollectionOfTheWorkspaceStoreKeepsImageBlobs) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "rooted"));
+    const std::string layer = layer_bytes(300 * 1024, 131);
+    rig.push_image("tenant-one/rooted", "v1", R"({"rooted":1})", {layer});
+    rig.server->stop();
+    rig.server.reset();
+    {
+        const std::string endpoint = RegistryRig::endpoint(rig.alpha);
+        auto client = std::make_shared<lake::control::ZettaObjectClient>(
+            rig.zetta, lake::control::ObjectEndpoint{endpoint, "token-" + rig.alpha});
+        liquid::store_options options;
+        options.backend = std::make_shared<lake::control::ZettaObjectBackend>(
+            client, lake::control::ZettaObjectBackendOptions{.workspace_id = rig.alpha,
+                                                              .instance_kek = std::string(kek)});
+        options.owner = std::make_shared<lake::control::ZettaStoreOwner>(client, 30s);
+        options.owner_wait = 5s;
+        auto store = liquid::runtime::block_on(
+            liquid::store::open(rig.root / "workspaces" / rig.alpha, std::move(options)));
+        ASSERT_TRUE(store) << store.error().message;
+        auto collected = liquid::runtime::block_on(store->collect());
+        ASSERT_TRUE(collected) << collected.error().message;
+        EXPECT_GE(collected->roots, 2U) << "each image blob is a root";
+        ASSERT_TRUE(liquid::runtime::block_on(store->close()));
+    }
+    ASSERT_NO_FATAL_FAILURE(rig.start());
+    EXPECT_TRUE(rig.get_blob("tenant-one/rooted", sha256(layer)).body == layer);
 }

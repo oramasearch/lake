@@ -409,7 +409,11 @@ repository; and `copy_workspace_records` gains `oci_blobs` (`workspace_record_ca
 which streams each recorded blob from the instance registry into its workspace store and verifies
 it by SHA-256. `move_workspace_store` gains mode `provision` (`workspace_store_capabilities.cpp`,
 now an asynchronous handler that runs the other modes on the blocking pool), which creates the
-store of a switched workspace that never held anything (`provision_workspace_store`).
+store of a switched workspace that never held anything (`provision_workspace_store`). A
+completion claims the staged upload (`ArtifactRegistry::claim_upload`) before hashing it; a pull
+holds a lane admission for its whole stream (`admit_workspace_stream`, `stream_blob`, at most 64
+streams); image blobs are rooted with a liquid lease; the owner loop sweeps abandoned uploads
+(`sweep_uploads`, `ServerOptions::registry_upload_max_age`).
 
 `volume_capabilities.cpp` registers the operator's volumes (migration `0069`, operator#259,
 operator#260): `set_workspace_storage` (grow only; a smaller size is `invalid_input` at

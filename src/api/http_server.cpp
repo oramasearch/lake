@@ -1118,35 +1118,74 @@ public:
         return static_cast<std::uint64_t>(size);
     }
 
-    // lake#383 phase B: the file of a staged upload, whose bytes go into the workspace's store
-    // when the upload completes into a switched workspace.
-    ArtifactResult<std::filesystem::path> staged_upload(std::string_view id) const {
+    // lake#383 phase B: moves a staged upload, under the registry's lock, to a name only the
+    // completing request knows (`claimed/<id>-<random>`), so no PATCH to the upload id can append
+    // to the bytes that are then checked and stored. An upload already claimed or unknown is an
+    // error.
+    ArtifactResult<std::filesystem::path> claim_upload(std::string_view id) {
         if (!available()) {
             return std::unexpected("artifact storage is not configured (LAKE_STORE_ROOT)");
         }
         if (!safe_component(id)) {
             return std::unexpected("OCI upload identifier is invalid");
         }
+        std::unique_lock lock(mutex_);
+        const std::filesystem::path claimed =
+            root_ / "claimed" / (std::string(id) + "-" + control::new_uuid_v4());
         std::error_code error;
-        const std::filesystem::path path = upload_path(id);
-        if (!std::filesystem::is_regular_file(path, error)) {
-            return std::unexpected("OCI upload is unknown");
+        std::filesystem::create_directories(claimed.parent_path(), error);
+        if (error) {
+            return std::unexpected("could not create the OCI claim directory: " + error.message());
         }
-        return path;
+        std::filesystem::rename(upload_path(id), claimed, error);
+        if (error) {
+            return std::unexpected("OCI upload is unknown or already completing");
+        }
+        return claimed;
     }
 
-    // Removes a staged upload once its bytes are in the workspace's store.
-    ArtifactResult<void> discard_upload(std::string_view id) {
+    // Puts a claimed upload back under its id, so the client may retry the same completion.
+    ArtifactResult<void> release_upload(std::string_view id, const std::filesystem::path& claimed) {
         if (!safe_component(id)) {
             return std::unexpected("OCI upload identifier is invalid");
         }
         std::unique_lock lock(mutex_);
         std::error_code error;
-        std::filesystem::remove(upload_path(id), error);
+        std::filesystem::rename(claimed, upload_path(id), error);
         if (error) {
-            return std::unexpected("could not remove the staged OCI upload: " + error.message());
+            return std::unexpected("could not restore the OCI upload: " + error.message());
         }
         return {};
+    }
+
+    // Removes a claimed upload once its bytes are recorded in the workspace's store, or once the
+    // store refused them.
+    static void remove_claimed(const std::filesystem::path& claimed) {
+        std::error_code ignored;
+        std::filesystem::remove(claimed, ignored);
+    }
+
+    // Removes staged and claimed uploads untouched for `max_age` (abandoned pushes); answers how
+    // many. The maintenance thread runs it.
+    std::size_t sweep_uploads(std::chrono::seconds max_age) {
+        if (!available()) {
+            return 0;
+        }
+        std::unique_lock lock(mutex_);
+        const auto cutoff = std::filesystem::file_time_type::clock::now() - max_age;
+        std::size_t removed = 0;
+        for (const std::filesystem::path& directory : {root_ / "uploads", root_ / "claimed"}) {
+            std::error_code error;
+            for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+                std::error_code entry_error;
+                if (entry.is_regular_file(entry_error) &&
+                    entry.last_write_time(entry_error) < cutoff && !entry_error &&
+                    std::filesystem::remove(entry.path(), entry_error)) {
+                    ++removed;
+                }
+            }
+        }
+        return removed;
     }
 
     // The file that holds a blob in the instance registry; nullopt when it holds none.
@@ -6222,7 +6261,8 @@ public:
     SyncStoreResult<WorkspaceBlob> put_workspace_blob(const std::string& customer_id,
                                                       const std::string& workspace_id,
                                                       const std::filesystem::path& source,
-                                                      bool admitted) override {
+                                                      bool admitted,
+                                                      const std::string& known_object) override {
         if (!path_component_is_safe(customer_id) || !path_component_is_safe(workspace_id)) {
             return std::unexpected(SyncStoreError{"invalid_input", "invalid workspace location"});
         }
@@ -6240,12 +6280,22 @@ public:
         if (!workspace) {
             return std::unexpected(workspace.error());
         }
+        liquid::store& store = *(*workspace)->store;
+        bool known = false;
+        if (const auto id = liquid::parse_digest(known_object); !known_object.empty() && id) {
+            const auto present = liquid::runtime::block_on(store.contains(*id));
+            if (!present) {
+                return std::unexpected(error_of(present.error()));
+            }
+            known = *present;
+        }
         std::function<std::uint64_t(const std::string&)> quota_of;
         {
             std::lock_guard maps(mutex_);
             quota_of = workspace_config_.quota_bytes;
         }
-        if (const std::uint64_t quota = quota_of ? quota_of(customer_id) : 0; quota != 0) {
+        // A re-push of an object the store holds adds nothing, so only new bytes meet the quota.
+        if (const std::uint64_t quota = quota_of ? quota_of(customer_id) : 0; quota != 0 && !known) {
             auto stored = unique_stored_bytes_locked(customer_id, false);
             if (!stored) {
                 return std::unexpected(stored.error());
@@ -6255,11 +6305,57 @@ public:
             }
         }
         // liquid reads the file in windows as it chunks it, so a layer is never held whole.
-        auto id = liquid::runtime::block_on((*workspace)->store->put_file(source));
+        auto id = liquid::runtime::block_on(store.put_file(source));
         if (!id) {
             return std::unexpected(error_of(id.error()));
         }
-        return WorkspaceBlob{liquid::to_string(*id), static_cast<std::uint64_t>(size)};
+        const std::string object = liquid::to_string(*id);
+        // Only its lake_oci_blobs record names an image blob; nothing in liquid refers to it. A
+        // lease (a liquid root) for a century keeps any liquid collection from removing it.
+        if (!known || object != known_object) {
+            auto rooted = liquid::runtime::block_on(store.lease_root(*id, image_blob_root_ttl));
+            if (!rooted) {
+                return std::unexpected(error_of(rooted.error()));
+            }
+        }
+        return WorkspaceBlob{object, static_cast<std::uint64_t>(size)};
+    }
+
+    static constexpr std::chrono::seconds image_blob_root_ttl{std::chrono::years(100)};
+
+    SyncStoreResult<std::shared_ptr<void>> admit_workspace_stream(const std::string& workspace_id) override {
+        if (!path_component_is_safe(workspace_id)) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid workspace location"});
+        }
+        auto lane = lane_of("w:" + workspace_id);
+        if (lane->moving.load() != 0) {
+            return std::unexpected(SyncStoreError{
+                "store_unavailable", "the store is being moved to its workspace; retry shortly"});
+        }
+        if (lane->occupants.fetch_add(1) >= lane_admission_limit) {
+            lane->occupants.fetch_sub(1);
+            return std::unexpected(SyncStoreError{
+                "store_unavailable", "the store is busy with other requests; retry shortly"});
+        }
+        return std::shared_ptr<void>(nullptr, [lane](void*) { lane->occupants.fetch_sub(1); });
+    }
+
+    SyncStoreResult<bool> workspace_blob_present(const std::string& customer_id,
+                                                 const std::string& workspace_id,
+                                                 const std::string& object) override {
+        if (!path_component_is_safe(customer_id) || !path_component_is_safe(workspace_id)) {
+            return std::unexpected(SyncStoreError{"invalid_input", "invalid workspace location"});
+        }
+        const auto id = liquid::parse_digest(object);
+        if (!id) {
+            return false;
+        }
+        auto lane = hold("w:" + workspace_id);
+        auto workspace = open_workspace(customer_id, workspace_id, false);
+        if (!workspace) {
+            return std::unexpected(workspace.error());
+        }
+        return from_liquid(liquid::runtime::block_on((*workspace)->store->contains(*id)));
     }
 
     SyncStoreResult<std::uint64_t> read_workspace_blob(const std::string& customer_id,
@@ -6778,6 +6874,7 @@ struct ApiServer::Impl {
     std::chrono::steady_clock::time_point next_workspace_deletion_pass{};
     // Switched workspaces' bucket usage is read here, never on a write path (lake#380).
     std::chrono::steady_clock::time_point next_workspace_usage_refresh{};
+    std::chrono::steady_clock::time_point next_upload_sweep{};
     Registry registry;
     mutable control::pki::Service pki;
     mutable control::agents::Service agents;
@@ -16512,12 +16609,16 @@ struct ApiServer::Impl {
     }
 
     // Completes a tenant blob upload (lake#383). In a switched workspace (lake#380) the staged
-    // bytes are checked against the digest and streamed into the workspace's liquid store, off the
-    // server thread, and the blob record maps the digest to the store object (decision 54 S5); the
-    // staged file is then removed. A workspace still served from its space's store keeps phase A:
-    // the bytes go into the instance registry until the copy moves them. Either way the workspace
-    // records that its space pushed the blob, so its manifests may reference it; until it does, the
-    // push is refused and the client retries.
+    // file is first moved, under the registry's lock, to a name only this completion knows, so no
+    // PATCH to the same upload can append to the bytes being checked and stored. Off the server
+    // thread, those bytes are checked against the digest and streamed into the workspace's liquid
+    // store, the stored object must have the size that was hashed, and the blob record maps the
+    // digest to the object (decision 54 S5). The claimed file is removed once the record is
+    // written; if the record cannot be written it goes back under its upload id, so a retry of the
+    // same completion works; a store that is unavailable or over quota removes it. A workspace
+    // still served from its space's store keeps phase A: the bytes go into the instance registry
+    // until the copy moves them. Either way the workspace records that its space pushed the blob,
+    // so its manifests may reference it; until it does, the push is refused and the client retries.
     boost::http::route_task finish_tenant_upload(boost::http::route_params& route,
                                                  TenantImage tenant,
                                                  std::string repository,
@@ -16530,85 +16631,102 @@ struct ApiServer::Impl {
                                                   workspace.error().message,
                                               true, "UNAVAILABLE");
         }
+        auto records = workspace_records(tenant.context, tenant.customer_id, tenant.workspace_id);
+        if (!records) {
+            co_return co_await registry_workspace_error(route, records.error());
+        }
         control::OciBlob blob{.customer_id = tenant.customer_id, .digest = digest};
-        const bool in_store = !workspace->store_moved_at.empty();
-        if (in_store) {
-            if (!ArtifactRegistry::digest_name(digest)) {
-                co_return co_await registry_error(route, boost::http::status::bad_request,
-                                                  "OCI upload or digest is invalid", true,
-                                                  "BLOB_UPLOAD_INVALID");
-            }
-            const auto staged = artifacts.staged_upload(upload);
-            if (!staged) {
-                co_return co_await registry_error(route, boost::http::status::bad_request,
-                                                  staged.error(), true, "BLOB_UPLOAD_INVALID");
-            }
-            const std::filesystem::path source = *staged;
-            auto stored = co_await blocking_call(
-                [&]() -> SyncStoreResult<WorkspaceBlob> {
-                    const auto actual = ArtifactRegistry::file_digest(source);
-                    if (!actual) {
-                        return std::unexpected(SyncStoreError{"io", actual.error()});
-                    }
-                    if (*actual != digest) {
-                        return std::unexpected(SyncStoreError{
-                            "invalid_digest", "uploaded bytes do not match the requested digest"});
-                    }
-                    return sync_store.put_workspace_blob(tenant.customer_id, tenant.workspace_id,
-                                                         source, true);
-                },
-                [](std::string message) -> SyncStoreResult<WorkspaceBlob> {
-                    return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
-                });
-            if (!stored) {
-                if (stored.error().code == "invalid_digest" || stored.error().code == "io") {
-                    co_return co_await registry_error(route, boost::http::status::bad_request,
-                                                      stored.error().message, true,
-                                                      "BLOB_UPLOAD_INVALID");
-                }
-                co_return co_await registry_store_error(route, stored.error());
-            }
-            if (const auto discarded = artifacts.discard_upload(upload); !discarded) {
-                std::cerr << nlohmann::json{{"event", "oci_upload_not_removed"},
-                                            {"workspace_id", tenant.workspace_id},
-                                            {"error", discarded.error()}}
-                                 .dump()
-                          << '\n';
-            }
-            blob.size = stored->size;
-            blob.object = stored->object;
-        } else {
+        if (workspace->store_moved_at.empty()) {
             const auto completed = artifacts.finish_upload(upload, digest);
             if (!completed) {
                 co_return co_await registry_error(route, boost::http::status::bad_request,
                                                   completed.error(), true, "BLOB_UPLOAD_INVALID");
             }
             blob.size = artifacts.blob_size(*completed).value_or(0);
-        }
-        auto records = workspace_records(tenant.context, tenant.customer_id, tenant.workspace_id);
-        if (!records) {
-            co_return co_await registry_workspace_error(route, records.error());
-        }
-        if (in_store) {
-            auto recorded = control::settled(co_await control::store_oci_blob(*records, blob));
-            if (!recorded) {
-                co_return co_await registry_workspace_error(route, recorded.error());
-            }
-        } else {
             auto recorded = control::settled(co_await control::record_oci_blob(*records, blob));
             if (!recorded) {
                 co_return co_await registry_workspace_error(route, recorded.error());
             }
+            co_return co_await blob_created(route, repository, digest);
         }
+        if (!ArtifactRegistry::digest_name(digest)) {
+            co_return co_await registry_error(route, boost::http::status::bad_request,
+                                              "OCI upload or digest is invalid", true,
+                                              "BLOB_UPLOAD_INVALID");
+        }
+        // The object the workspace already names for this digest: a re-push of a blob it holds
+        // adds nothing, so the quota is not checked for it.
+        auto existing = control::settled(
+            co_await control::get_oci_blob(*records, tenant.customer_id, digest));
+        if (!existing) {
+            co_return co_await registry_workspace_error(route, existing.error());
+        }
+        const std::string known = *existing ? (*existing)->object : std::string();
+        const auto claimed = artifacts.claim_upload(upload);
+        if (!claimed) {
+            co_return co_await registry_error(route, boost::http::status::bad_request,
+                                              claimed.error(), true, "BLOB_UPLOAD_INVALID");
+        }
+        const std::filesystem::path source = *claimed;
+        auto stored = co_await blocking_call(
+            [&]() -> SyncStoreResult<WorkspaceBlob> {
+                const auto actual = ArtifactRegistry::file_digest(source);
+                if (!actual) {
+                    return std::unexpected(SyncStoreError{"io", actual.error()});
+                }
+                if (*actual != digest) {
+                    return std::unexpected(SyncStoreError{
+                        "invalid_digest", "uploaded bytes do not match the requested digest"});
+                }
+                std::error_code error;
+                const std::uintmax_t hashed = std::filesystem::file_size(source, error);
+                if (error) {
+                    return std::unexpected(SyncStoreError{"io", error.message()});
+                }
+                auto put = sync_store.put_workspace_blob(tenant.customer_id, tenant.workspace_id,
+                                                         source, true, known);
+                if (put && put->size != hashed) {
+                    return std::unexpected(SyncStoreError{
+                        "corrupt", "the stored blob's size differs from the bytes hashed"});
+                }
+                return put;
+            },
+            [](std::string message) -> SyncStoreResult<WorkspaceBlob> {
+                return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+            });
+        if (!stored) {
+            if (stored.error().code == "invalid_digest" || stored.error().code == "io") {
+                static_cast<void>(artifacts.release_upload(upload, source));
+                co_return co_await registry_error(route, boost::http::status::bad_request,
+                                                  stored.error().message, true,
+                                                  "BLOB_UPLOAD_INVALID");
+            }
+            ArtifactRegistry::remove_claimed(source);
+            co_return co_await registry_store_error(route, stored.error());
+        }
+        blob.size = stored->size;
+        blob.object = stored->object;
+        auto recorded = control::settled(co_await control::store_oci_blob(*records, blob));
+        if (!recorded) {
+            static_cast<void>(artifacts.release_upload(upload, source));
+            co_return co_await registry_workspace_error(route, recorded.error());
+        }
+        ArtifactRegistry::remove_claimed(source);
+        co_return co_await blob_created(route, repository, digest);
+    }
+
+    boost::http::route_task blob_created(boost::http::route_params& route,
+                                         const std::string& repository, const std::string& digest) {
         route.res.set(boost::http::field::location, "/v2/" + repository + "/blobs/" + digest);
         route.res.set("Docker-Content-Digest", digest);
-        co_return co_await send_text(
-            route, boost::http::status::created, {}, "application/octet-stream", "no-store");
+        return send_text(route, boost::http::status::created, {}, "application/octet-stream",
+                         "no-store");
     }
 
     // A workspace store that refused a blob read or write (lake#383 phase B): unavailable stores
-    // (a lease held elsewhere, a full or moving lane) may be retried; the space's storage quota is
-    // 507; a store that lost what a record names is never answered from anywhere else.
+    // (a lease held elsewhere, a full or moving lane, too many pulls) may be retried; the space's
+    // storage quota is 507; a store that lost what a record names is never answered from anywhere
+    // else.
     boost::http::route_task registry_store_error(boost::http::route_params& route,
                                                  const SyncStoreError& error) {
         if (error.rule == "storage_quota") {
@@ -16624,8 +16742,9 @@ struct ApiServer::Impl {
         }
         if (error.code == "not_found") {
             return registry_error(route, boost::http::status::internal_server_error,
-                                  "the workspace store does not hold a blob its record names", true,
-                                  "UNKNOWN");
+                                  "the workspace store does not hold a blob its record names; push "
+                                  "the blob again",
+                                  true, "UNKNOWN");
         }
         return registry_error(route, boost::http::status::internal_server_error,
                               "the image repository's workspace store failed: " + error.code + ": " +
@@ -16633,33 +16752,46 @@ struct ApiServer::Impl {
                               true, "UNKNOWN");
     }
 
-    // Streams a tenant blob from its workspace's store (lake#383 phase B): one window at a time,
-    // so a layer is never held whole. The first read is admitted to the workspace's lane before
-    // any header is sent, so a busy or unavailable store is a clean 503; later reads wait for the
-    // lane, and one that fails ends the connection, which the client sees as a short body and
-    // retries.
-    boost::http::route_task stream_workspace_blob(boost::http::route_params& route,
-                                                  std::string customer_id,
-                                                  std::string workspace_id,
-                                                  control::OciBlob blob,
-                                                  bool head) {
+    // At most this many blob streams run at once in this process, each with one window of
+    // buffer, so pulls never hold more than 64 MiB of layer bytes (lake#383 phase B).
+    static constexpr int blob_stream_limit = 64;
+    static constexpr std::uint64_t blob_window = 1024 * 1024;
+    std::atomic<int> blob_streams{0};
+
+    // Streams a tenant blob one window at a time, so a layer is never held whole: from the
+    // workspace's store (`read` reads a window there) or from the instance registry's file for a
+    // record not copied yet. The first window is read before any header is sent, so a refusal is
+    // a clean status; a later read that fails ends the connection, which the client sees as a
+    // short body and retries.
+    using BlobReader =
+        std::function<SyncStoreResult<std::uint64_t>(std::uint64_t, std::span<std::byte>)>;
+    boost::http::route_task stream_blob(boost::http::route_params& route, std::string digest,
+                                        std::uint64_t size, BlobReader read, bool head) {
         namespace http = boost::http;
-        constexpr std::uint64_t window = 4ULL * 1024 * 1024;
-        const auto read = [&](std::uint64_t offset, std::span<std::byte> into, bool admitted) {
-            return blocking_call(
-                [&, offset, into, admitted] {
-                    return sync_store.read_workspace_blob(customer_id, workspace_id, blob.object,
-                                                          offset, into, admitted);
-                },
-                [](std::string message) -> SyncStoreResult<std::uint64_t> {
-                    return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
-                });
+        struct Slot {
+            std::atomic<int>& count;
+            ~Slot() {
+                count.fetch_sub(1);
+            }
+        };
+        if (blob_streams.fetch_add(1) >= blob_stream_limit) {
+            blob_streams.fetch_sub(1);
+            co_return co_await registry_store_error(
+                route, SyncStoreError{"store_unavailable", "too many image pulls in progress"});
+        }
+        Slot slot{blob_streams};
+        const auto window_read = [&](std::uint64_t offset, std::span<std::byte> into) {
+            return blocking_call([&, offset, into] { return read(offset, into); },
+                                 [](std::string message) -> SyncStoreResult<std::uint64_t> {
+                                     return std::unexpected(
+                                         SyncStoreError{"store_unavailable", std::move(message)});
+                                 });
         };
         std::vector<std::byte> buffer;
         std::uint64_t filled = 0;
-        if (!head && blob.size != 0) {
-            buffer.resize(static_cast<std::size_t>(std::min(window, blob.size)));
-            auto first = co_await read(0, buffer, true);
+        if (!head && size != 0) {
+            buffer.resize(static_cast<std::size_t>(std::min(blob_window, size)));
+            auto first = co_await window_read(0, buffer);
             if (!first) {
                 co_return co_await registry_store_error(route, first.error());
             }
@@ -16673,10 +16805,10 @@ struct ApiServer::Impl {
         route.res.set(http::field::cache_control, "no-store");
         route.res.erase(http::field::etag);
         route.res.erase(http::field::content_length);
-        route.res.set(http::field::etag, blob.digest);
-        route.res.set("Docker-Content-Digest", blob.digest);
-        route.res.set_payload_size(blob.size);
-        if (head || blob.size == 0) {
+        route.res.set(http::field::etag, digest);
+        route.res.set("Docker-Content-Digest", digest);
+        route.res.set_payload_size(size);
+        if (head || size == 0) {
             auto [send_error] = co_await route.res_body.commit_eof(0);
             if (send_error) {
                 co_return http::route_error(send_error);
@@ -16692,7 +16824,7 @@ struct ApiServer::Impl {
                 const auto copied = boost::capy::buffer_copy(
                     output, boost::capy::const_buffer(buffer.data() + offset, filled - offset));
                 offset += copied;
-                if (sent + offset == blob.size) {
+                if (sent + offset == size) {
                     auto [send_error] = co_await route.res_body.commit_eof(copied);
                     if (send_error) {
                         co_return http::route_error(send_error);
@@ -16705,13 +16837,12 @@ struct ApiServer::Impl {
                 }
             }
             sent += filled;
-            const auto wanted = static_cast<std::size_t>(std::min(window, blob.size - sent));
-            auto next = co_await read(sent, std::span(buffer).first(wanted), false);
+            const auto wanted = static_cast<std::size_t>(std::min(blob_window, size - sent));
+            auto next = co_await window_read(sent, std::span(buffer).first(wanted));
             if (!next || *next == 0) {
                 std::cerr << nlohmann::json{{"event", "oci_blob_stream_failed"},
-                                            {"workspace_id", workspace_id},
                                             {"sent", sent},
-                                            {"size", blob.size},
+                                            {"size", size},
                                             {"error", next ? std::string("short read")
                                                            : next.error().code + ": " +
                                                                  next.error().message}}
@@ -16721,6 +16852,66 @@ struct ApiServer::Impl {
             }
             filled = *next;
         }
+    }
+
+    // A tenant blob in its workspace's store. The pull is admitted to the workspace's lane for its
+    // whole stream (one of the lane's admissions, refused at once with 503 when the lane is full
+    // or moving), and each window takes the lane only for its read, so pulls never park more of
+    // the blocking pool than the lane admits. HEAD checks that the store holds the object.
+    boost::http::route_task serve_workspace_blob(boost::http::route_params& route,
+                                                 std::string customer_id, std::string workspace_id,
+                                                 control::OciBlob blob, bool head) {
+        auto admission = sync_store.admit_workspace_stream(workspace_id);
+        if (!admission) {
+            co_return co_await registry_store_error(route, admission.error());
+        }
+        if (head) {
+            auto present = co_await blocking_call(
+                [&] { return sync_store.workspace_blob_present(customer_id, workspace_id, blob.object); },
+                [](std::string message) -> SyncStoreResult<bool> {
+                    return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
+                });
+            if (!present) {
+                co_return co_await registry_store_error(route, present.error());
+            }
+            if (!*present) {
+                co_return co_await registry_store_error(route, SyncStoreError{"not_found", ""});
+            }
+        }
+        const std::string object = blob.object;
+        co_return co_await stream_blob(
+            route, blob.digest, blob.size,
+            [this, customer_id, workspace_id, object](std::uint64_t offset, std::span<std::byte> into) {
+                return sync_store.read_workspace_blob(customer_id, workspace_id, object, offset, into,
+                                                      false);
+            },
+            head);
+    }
+
+    // A tenant blob whose record names no store object yet: streamed from the instance registry's
+    // file, never read whole.
+    boost::http::route_task serve_instance_blob(boost::http::route_params& route,
+                                                std::string digest, bool head) {
+        const auto file = artifacts.blob_file(digest);
+        std::error_code error;
+        const std::uintmax_t size = file ? std::filesystem::file_size(*file, error) : 0;
+        if (!file || error) {
+            co_return co_await registry_error(route, boost::http::status::not_found,
+                                              "blob is unknown in this repository", true);
+        }
+        const std::filesystem::path path = *file;
+        co_return co_await stream_blob(
+            route, digest, size,
+            [path](std::uint64_t offset, std::span<std::byte> into) -> SyncStoreResult<std::uint64_t> {
+                std::ifstream input(path, std::ios::binary);
+                input.seekg(static_cast<std::streamoff>(offset));
+                input.read(reinterpret_cast<char*>(into.data()), static_cast<std::streamsize>(into.size()));
+                if (input.bad() || (!input && input.gcount() == 0 && !into.empty())) {
+                    return std::unexpected(SyncStoreError{"io", "could not read " + path.string()});
+                }
+                return static_cast<std::uint64_t>(input.gcount());
+            },
+            head);
     }
 
     boost::http::route_task serve_oci_blob(boost::http::route_params& route, bool head) {
@@ -16789,10 +16980,11 @@ struct ApiServer::Impl {
                                                   "blob is unknown in this repository", true);
             }
             if (!(*recorded)->object.empty()) {
-                co_return co_await stream_workspace_blob(route, tenant->customer_id,
-                                                         tenant->workspace_id,
-                                                         std::move(**recorded), head);
+                co_return co_await serve_workspace_blob(route, tenant->customer_id,
+                                                        tenant->workspace_id,
+                                                        std::move(**recorded), head);
             }
+            co_return co_await serve_instance_blob(route, digest, head);
         } else if (!artifacts.repository_has_blob(repository, digest)) {
             co_return co_await registry_error(
                 route, boost::http::status::not_found, "blob is unknown in this repository", true);
@@ -20510,6 +20702,17 @@ void ApiServer::drain() {
         impl_->next_workspace_usage_refresh = now + std::chrono::seconds(10);
         Impl* impl = impl_.get();
         impl_->schedule_maintenance("workspace usage", [impl] { impl->sync_store.refresh_workspace_usage(); });
+    }
+    // Abandoned OCI uploads under the store root: only its owner removes them (lake#383 phase B).
+    if (impl_->store_root_state.load() == StoreRootState::open && impl_->artifacts.available() &&
+        now >= impl_->next_upload_sweep) {
+        impl_->next_upload_sweep =
+            now + std::min<std::chrono::steady_clock::duration>(
+                      std::chrono::minutes(10), impl_->options.registry_upload_max_age);
+        Impl* impl = impl_.get();
+        impl_->schedule_maintenance("registry upload sweep", [impl] {
+            static_cast<void>(impl->artifacts.sweep_uploads(impl->options.registry_upload_max_age));
+        });
     }
     if (impl_->metering_recorder &&
         (now >= impl_->next_metering_flush ||

@@ -79,22 +79,39 @@ as a named exception: one instance-wide namespace with public reads.
   Liquid names an object by its own hash (BLAKE3 in a workspace store) and the store is encrypted
   below liquid, so the SHA-256 a client sends finds the blob through its record: `lake_oci_blobs`
   holds, per blob the space pushed into the workspace, its digest, size and `object` (the liquid
-  digest). An upload (monolithic or chunked) is staged as one file under `registry/uploads/`; at
-  completion into a switched workspace lake checks its SHA-256, streams it into the store
-  (`put_file`, which reads it in windows) off the server thread under the workspace's lane, after
-  the space's storage quota (OCI `507 DENIED` past it), records it and removes the staged file. A
+  digest). An upload (monolithic or chunked) is staged as one file under `registry/uploads/`. At
+  completion into a switched workspace lake first moves that file, under the registry's lock, to
+  `registry/claimed/<upload>-<random>`, so a PATCH to the same upload can no longer reach it (it is
+  `400 BLOB_UPLOAD_INVALID`); it then checks the claimed file's SHA-256, streams it into the store
+  (`put_file`, which reads it in windows) off the server thread under the workspace's lane, checks
+  that the stored object has the size it hashed, records it and removes the file. The space's
+  storage quota is checked first (OCI `507 DENIED` past it), except for a re-push of an object the
+  store already holds, which adds nothing. A store that is unavailable or over quota removes the
+  claimed file; a record that cannot be written puts it back under its upload id, so the client may
+  retry the same completion. Uploads untouched for `registry_upload_max_age` (24 hours) are removed
+  by the maintenance thread. A
   workspace not yet switched (`move_workspace_store`) keeps phase A: the bytes go to `blobs/` and
-  the record has no `object`. A manifest pushed into the workspace may reference only blobs recorded
+  the record has no `object`.
+- **A correct push repairs a record.** A liquid object's identity is the hash of its bytes, so a
+  record that names another object than the one a verified push just stored names other bytes (or
+  none the store holds): the push rewrites it at the revision read.
+- **Image blobs are liquid roots.** Nothing in liquid refers to an image blob; only its record
+  does. Each stored blob is rooted with a liquid lease for a century (`store::lease_root`), so a
+  liquid collection of the workspace store keeps it. A durable pin API is
+  [liquid#342](https://github.com/oramasearch/liquid/issues/342). A manifest pushed into the workspace may reference only blobs recorded
   there (otherwise OCI `400 MANIFEST_BLOB_UNKNOWN`), with the sizes the records hold, so knowing
   another space's or another workspace's digest does not publish its layer.
 - **Pulls stream from the store.** A tenant blob is served only when a tag of the requested
   repository references it and the workspace's `lake_oci_blobs` records it. A record that names an
-  object is read only from the workspace's store, 4 MiB at a time: the first read is admitted to
-  the workspace's lane before any header is sent (a busy, moving or unowned store is OCI
-  `503 UNAVAILABLE` with `Retry-After`), later reads wait for the lane, and a read that fails part
-  way ends the connection. A store that lost an object its record names is `500`, never answered
-  from the instance registry. A record without `object` (pushed before phase B, or before its
-  workspace was switched) is read from `blobs/` until the copy below names its object.
+  object is read only from the workspace's store, 1 MiB at a time. A pull holds one of the
+  workspace lane's four admissions for its whole stream, so stalled pulls never park more of the
+  blocking pool than the lane admits; past that, and past 64 streams in the process (which bounds
+  pull buffers to 64 MiB), a pull is OCI `503 UNAVAILABLE` with `Retry-After` before any header is
+  sent. Each window takes the lane only for its read; a read that fails part way ends the
+  connection. HEAD checks that the store holds the object. A store that lost an object its record
+  names is `500` to GET and HEAD, never answered from the instance registry; a push of the blob
+  repairs it. A record without `object` (pushed before phase B, or before its workspace was
+  switched) is streamed from `blobs/`, also in windows, until the copy below names its object.
 - **Workload credentials stay in their workspace.** A build pushes and reads only repositories
   routed to its own workspace, so a build cannot pull a base or cache image of another workspace
   of its space; an app pull token reads only its app's repository, only when the route names the
@@ -129,7 +146,11 @@ nothing; `copy` checks the registry file's SHA-256, streams it into the workspac
 names the object in the record (at the revision read), and a rerun copies nothing twice; `verify`
 reads each object back in windows and compares its SHA-256 and size, and lists in
 `instance_paths` the registry files the verified copies leave behind, leaving out any digest the
-instance's own repositories use or a record not yet copied still needs. Unresolved, each blocking
+instance's own repositories use, a record not yet copied still needs, or a legacy tenant tag not
+yet in its workspace still needs. The list is given only when every routed workspace's records
+were read and every legacy tenant tag is in its workspace (otherwise `instance_paths` is null and
+`instance_paths_withheld` says why). It is **advisory**: the later removal step must check each
+path again against the records and the instance's repositories of its own time. Unresolved, each blocking
 completion: `workspace_not_switched` (switch the workspace first), `blob_missing` (the registry no
 longer holds the file) and `blob_corrupt` (its bytes are not the digest). Nothing is removed from
 the instance registry; removing `instance_paths`, the tenant pointers under

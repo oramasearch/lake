@@ -452,16 +452,17 @@ phase A recorded.
 - **Uploads.** Monolithic and chunked uploads are still staged as one file under
   `registry/uploads/` on lake's volume, not in a `lake_uploads` bucket: liquid's only streaming
   write is `put_file` from a local file, so a bucket would still need a local file at completion.
-  At completion into a switched workspace lake checks the SHA-256 in windows, streams the file
-  into the workspace store with `put_file` under the workspace's lane on the blocking pool, after
-  the space's storage quota (`507 DENIED` past it), writes the record and removes the staged file.
+  At completion into a switched workspace lake claims the file (no PATCH reaches it then), checks
+  the SHA-256 in windows, streams the file into the workspace store with `put_file` under the
+  workspace's lane on the blocking pool, after the space's storage quota (`507 DENIED` past it),
+  writes the record and removes the file.
   A workspace not switched yet keeps phase A (bytes in `registry/blobs/`, a record without
   `object`).
 - **Pulls.** A blob is served when a tag of the repository references it **and** the workspace's
-  `lake_oci_blobs` records it. A record naming an object is streamed from the store in 4 MiB
-  windows (the first read admitted to the lane before any header, later reads waiting for it),
-  never from the instance registry; a store that lost it is `500`. A record without `object` is
-  read from the instance registry until the copy names its object.
+  `lake_oci_blobs` records it. A record naming an object is streamed from the store in 1 MiB
+  windows, the pull holding one lane admission for its whole stream, never from the instance
+  registry; a store that lost it is `500`. A record without `object` is streamed from the instance
+  registry until the copy names its object.
 - **Manifests** take each referenced blob's size from its record, not from the instance registry.
 - **Usage** counts a blob in a workspace store once, in that store's bucket usage
   (`repositories_bytes`); `images_bytes` keeps manifests and blobs still in the instance registry,
@@ -475,9 +476,15 @@ phase A recorded.
 - **Deletion** (#514): the workspace's store is closed with its lease, and the blobs go with its
   Zetta.
 - A switch of a workspace with no repository now creates its store, since its images need one.
-- Not done: lake runs no liquid collector on workspace stores; before one runs it must treat
-  `lake_oci_blobs` objects as roots. Unreferenced instance blobs, and abandoned staged uploads,
-  stay on the volume.
+- Review fixes: a completion claims the staged file before hashing it (no PATCH can change the
+  bytes stored), a correct push repairs a record naming other bytes, a pull holds a lane admission
+  for its whole stream (and at most 64 streams run), HEAD checks the object, abandoned uploads are
+  swept after a day, the quota counts only new bytes, usage keys stored blobs per workspace,
+  `instance_paths` is withheld unless complete and is advisory, and each image blob is rooted by a
+  liquid lease ([liquid#342](https://github.com/oramasearch/liquid/issues/342) asks for a pin).
+- `move_workspace_store` mode `provision` creates the store of a workspace an earlier lake switched
+  with no repository, only when it never held anything.
+- Not done: unreferenced instance blobs stay on the volume.
 
 ### lake#384: Prometheus metrics and request logs
 

@@ -185,10 +185,11 @@ liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,
     }
     std::map<std::string, std::uint64_t> sizes;
     std::set<std::string> failed;
-    std::set<std::string> listed;
-    // Blobs whose bytes are objects of a workspace's liquid store (lake#383 phase B): that store's
-    // usage already counts them, so they are not counted again here.
-    std::set<std::string> stored;
+    // Blobs whose bytes are objects of a workspace's liquid store (lake#383 phase B), per
+    // workspace: that store's usage already counts them, so they are not counted again here. A
+    // digest one workspace stores and another still reads from the instance registry is in both.
+    std::map<std::string, std::set<std::string>> stored_in;
+    std::map<std::string, std::uint64_t> stored_sizes;
     for (const control::OciRepositoryRoute& route : *routes) {
         if (failed.contains(route.workspace_id)) {
             continue;
@@ -200,7 +201,8 @@ liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,
                                         ": " + records.error().message);
             continue;
         }
-        if (listed.insert(route.workspace_id).second) {
+        if (!stored_in.contains(route.workspace_id)) {
+            std::set<std::string>& stored = stored_in[route.workspace_id];
             auto blobs = control::settled(co_await control::list_oci_blobs(*records, customer_id));
             if (!blobs) {
                 failed.insert(route.workspace_id);
@@ -222,15 +224,20 @@ liquid::runtime::task<ImageBytes> tenant_image_bytes(ApiContext& context,
                                         ": " + tags.error().message);
             continue;
         }
+        const std::set<std::string>& stored = stored_in[route.workspace_id];
         for (const control::OciTag& tag : *tags) {
             sizes[tag.digest] = tag.manifest_size;
             for (const control::OciReference& reference : tag.references) {
-                sizes[reference.digest] = reference.size;
+                (stored.contains(reference.digest) ? stored_sizes : sizes)[reference.digest] =
+                    reference.size;
             }
         }
     }
     for (const auto& [digest, size] : sizes) {
-        (stored.contains(digest) ? result.stored_bytes : result.bytes) += size;
+        result.bytes += size;
+    }
+    for (const auto& [digest, size] : stored_sizes) {
+        result.stored_bytes += size;
     }
     co_return result;
 }

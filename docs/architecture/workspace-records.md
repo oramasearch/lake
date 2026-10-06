@@ -507,7 +507,9 @@ and are not run by this change.
    `blob_corrupt` (push the image again, or rerun its build; cache repositories may simply be
    rebuilt). From then on a copied blob is read only from its workspace store.
 5. Once `verify` answers `complete: true` on every page, file the change that removes, with Steve's
-   approval, the files listed in `instance_paths` of every verify page, the tenant pointers under
+   approval, the files listed in `instance_paths` of every verify page (null until every routed
+   workspace was read and `oci_tags` is complete; advisory: check each path again against the
+   records and the instance's repositories when it is removed), the tenant pointers under
    `registry/manifests/<space>/` and their manifest documents in `registry/blobs/`. Nothing is
    removed by lake.
 

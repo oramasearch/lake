@@ -368,22 +368,41 @@ liquid::runtime::task<ApiResult> provision_workspace_store(const json& input, Ap
     const std::string workspace_id = input.at("workspace_id");
     context.audit_kind = "workspace_store.move";
     context.audit_details = {{"workspace_id", workspace_id}, {"mode", "provision"}};
-    const auto workspace = context.store->get_workspace(workspace_id);
-    if (!workspace) {
-        co_return ApiResult::failure(workspace.error().code, workspace.error().message);
+    // The control-store reads run on the blocking pool, off the server thread.
+    struct Rows {
+        control::Workspace workspace;
+        std::vector<control::Repository> repositories;
+    };
+    auto read = co_await blocking_call(
+        [&]() -> std::expected<Rows, ApiResult> {
+            auto workspace = context.store->get_workspace(workspace_id);
+            if (!workspace) {
+                return std::unexpected(
+                    ApiResult::failure(workspace.error().code, workspace.error().message));
+            }
+            auto listed = context.store->list_repositories(workspace->customer_id, 100000,
+                                                           workspace_id);
+            if (!listed) {
+                return std::unexpected(ApiResult::failure(listed.error().code, listed.error().message));
+            }
+            return Rows{std::move(*workspace), std::move(*listed)};
+        },
+        [](std::string message) -> std::expected<Rows, ApiResult> {
+            return std::unexpected(ApiResult::failure("store_unavailable", std::move(message)));
+        });
+    if (!read) {
+        co_return read.error();
     }
-    if (workspace->desired == "deleted") {
+    const control::Workspace& workspace = read->workspace;
+    if (workspace.desired == "deleted") {
         co_return ApiResult::failure("conflict", "the workspace is deleted");
     }
-    if (workspace->store_moved_at.empty()) {
+    if (workspace.store_moved_at.empty()) {
         co_return ApiResult::failure(
             "conflict", "the workspace is not switched; its store is created by copy and switch");
     }
-    const std::string customer_id = workspace->customer_id;
-    const auto repositories = context.store->list_repositories(customer_id, 100000, workspace_id);
-    if (!repositories) {
-        co_return ApiResult::failure(repositories.error().code, repositories.error().message);
-    }
+    const std::string customer_id = workspace.customer_id;
+    const std::vector<control::Repository>* repositories = &read->repositories;
     // A row tombstoned with its retention ended at its deletion is a creation the missing store
     // refused (the creation rolls its row back so): it never held content. Any other row, live or
     // tombstoned, means the store may have held data.
@@ -434,7 +453,7 @@ liquid::runtime::task<ApiResult> provision_workspace_store(const json& input, Ap
     co_return ApiResult::success({{"workspace_id", workspace_id},
                                   {"customer_id", customer_id},
                                   {"mode", "provision"},
-                                  {"store_moved_at", workspace->store_moved_at},
+                                  {"store_moved_at", workspace.store_moved_at},
                                   {"created", provisioned->created},
                                   {"refused_creations", std::move(refused_creations)},
                                   {"objects", provisioned->objects}});

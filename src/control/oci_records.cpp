@@ -342,7 +342,7 @@ liquid::runtime::task<ZettaControlResult<OciBlob>> store_oci_blob(WorkspaceRecor
         if (!found) {
             co_return failed<OciBlob>(found.error());
         }
-        if (*found && !(*found)->object.empty()) {
+        if (*found && (*found)->object == blob.object && (*found)->size == blob.size) {
             co_return ZettaControlResult<OciBlob>(std::move(**found));
         }
         const bool absent = !*found;

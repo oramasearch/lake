@@ -276,9 +276,9 @@ contract asks.
 - Tenant image blobs are objects of the store, so they count in its bucket usage like any other
   write, and an upload checks the space's quota before it writes (`507` past it). Metering reports
   them as `images_in_workspace_stores_bytes`, not again in `images_bytes`.
-- Lake runs no liquid collector on workspace stores. Image blobs are rooted only by their
-  `lake_oci_blobs` records, not by a liquid lease or repository, so a collector must learn them
-  before one ever runs.
+- Lake runs no liquid collector on workspace stores, but one would keep image blobs: each is
+  rooted by a liquid lease for a century when it is stored (a durable pin is
+  [liquid#342](https://github.com/oramasearch/liquid/issues/342)).
 - Deleting a workspace removes its search index objects (when its store is open) and then closes its
   store and releases its lease before the deletion is reported
   (`WorkspaceContent::close_workspace_store`), waiting for an open in progress on the workspace's
@@ -312,13 +312,15 @@ belong in the deployment record once a workspace is switched.
 
 ## Image blobs (lake#383 phase B)
 
-`put_workspace_blob` and `read_workspace_blob` (`SyncStore`) are the registry's only way into a
-workspace store. A put streams a staged file into the store with liquid's `put_file` under the
-workspace's lane, admitted for a push (refused at once when the lane is full or moving) and held
-for the copy; it holds the lane, and liquid's mutation lock, for the whole put, so the workspace's
-other requests wait for a large layer. A read takes the lane for one window of at most 4 MiB: a
-pull is admitted for its first window, before its headers, and its later windows wait for the lane
-rather than cut the layer off. Nothing here changes `ZettaObjectBackend`.
+`put_workspace_blob`, `admit_workspace_stream`, `workspace_blob_present` and `read_workspace_blob`
+(`SyncStore`) are the registry's only way into a workspace store. A put streams a claimed upload
+into the store with liquid's `put_file` under the workspace's lane, admitted for a push (refused at
+once when the lane is full or moving) and held for the copy; it holds the lane, and liquid's
+mutation lock, for the whole put, so the workspace's other requests wait for a large layer, and it
+roots the new object with a lease. A pull is admitted once for its whole stream: it counts as one
+of the lane's four admissions until it ends, without holding the lane, and each window (1 MiB)
+takes the lane only for its read. Pulls therefore never park more than the lane's four blocking
+pool threads per workspace. Nothing here changes `ZettaObjectBackend`.
 
 ## Not yet
 
