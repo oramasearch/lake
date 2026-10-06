@@ -3462,4 +3462,99 @@ TEST(WorkspaceStoreOwner, ReleaseSettlesWithinItsBudgetWhenZettaDoesNotAnswer) {
     rig.zetta->hang(rig.endpoint, 0ms);
 }
 
+// The settling's budget cuts only its own requests: another user of the client (search writes
+// its index with the store's client) keeps its timeout and retries meanwhile.
+TEST(WorkspaceStoreOwner, TheSettleBudgetCutsOnlyTheSettlingRequests) {
+    Rig rig;
+    auto client = rig.client();
+    ASSERT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
+    client->set_before_release([client]() -> liquid::runtime::task<void> {
+        // The settling's own request: cut to the budget.
+        co_return co_await client->put("objects/settled", "bytes", std::nullopt, false);
+    });
+    rig.zetta->hang(rig.endpoint, 1500ms, "/objects/");
+    liquid::result<void> other;
+    std::thread beside([&] {
+        other = liquid::runtime::block_on(client->put("search/manifest.json", "sealed", std::nullopt, false));
+    });
+    std::this_thread::sleep_for(50ms);
+    const auto settled = liquid::runtime::block_on(client->before_release(500ms));
+    beside.join();
+    rig.zetta->hang(rig.endpoint, 0ms);
+    EXPECT_FALSE(settled) << "the settling request ran past its budget";
+    EXPECT_TRUE(other) << "a request beside the settling is not cut: " << (other ? "" : other.error().message);
+}
+
+// What is held is counted exactly: a put replacing a held put, a removal of a held key, and a
+// threshold flush leave only what is still held.
+TEST(WorkspaceStoreBackend, HeldBytesAndPutsStayExact) {
+    Rig rig;
+    auto backend = rig.backend(small_blocks());
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", random_bytes(300, 1))));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", random_bytes(200, 2))));
+    EXPECT_EQ(backend->held(), (std::pair<std::uint64_t, std::size_t>{200, 1})) << "the second put replaced the first";
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/b", random_bytes(100, 3))));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->remove("objects/b")));
+    EXPECT_EQ(backend->held(), (std::pair<std::uint64_t, std::size_t>{200, 1})) << "a held key removed is not held";
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    EXPECT_EQ(backend->held(), (std::pair<std::uint64_t, std::size_t>{0, 0}));
+    // An object in Zetta appended past the flush threshold (4 KiB here) keeps only its partial block.
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, {})));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, random_bytes(5000, 4))));
+    EXPECT_EQ(backend->held(), (std::pair<std::uint64_t, std::size_t>{5000 - 4096, 0}));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    EXPECT_EQ(backend->held(), (std::pair<std::uint64_t, std::size_t>{0, 0}));
+}
+
+// A stale tail whose name the barrier writes again (one left for a later block) is never removed
+// once the barrier has written it: stale tails go after the barrier's writes, and none an object
+// holds.
+TEST(WorkspaceStoreBackend, ABarrierNeverRemovesATailItJustWrote) {
+    Rig rig;
+    auto backend = rig.backend(small_blocks());
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, {})));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    std::vector<std::byte> grown = random_bytes(1500, 5); // one block and a tail of block 1
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, grown)));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    const std::string current = tail_of(rig.zetta->objects(rig.endpoint), "packs/pack-1.pack");
+    ASSERT_FALSE(current.empty());
+    // A tail left for block 2, as an interrupted barrier or a rollback could leave it.
+    const std::string later = current.substr(0, current.find(".lake-tail-")) + ".lake-tail-2" +
+                              current.substr(current.rfind('-'));
+    rig.zetta->set_object(rig.endpoint, later, "left behind");
+    auto reopened = rig.backend(small_blocks());
+    EXPECT_EQ(size_of(*reopened, "packs/pack-1.pack"), 1500U); // the block-2 tail is stale
+    const auto more = random_bytes(1000, 6); // completes block 1, a tail of block 2
+    ASSERT_TRUE(liquid::runtime::block_on(reopened->put_range("packs/pack-1.pack", 1500, more)));
+    grown.insert(grown.end(), more.begin(), more.end());
+    ASSERT_TRUE(liquid::runtime::block_on(reopened->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(reopened->barrier()));
+    auto reader = rig.backend(small_blocks());
+    EXPECT_EQ(size_of(*reader, "packs/pack-1.pack"), grown.size());
+    EXPECT_EQ(read(*reader, "packs/pack-1.pack", 0, grown.size()), grown);
+}
+
+// The search index's objects in the bucket (lake#381) never enter liquid's directory, and liquid
+// cannot write under their prefix.
+TEST(WorkspaceStoreBackend, TheSearchIndexsObjectsAreNotLiquids) {
+    Rig rig;
+    auto backend = rig.backend(small_blocks());
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", bytes_of("a"))));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    rig.zetta->set_object(rig.endpoint, std::string(lake::control::workspace_store_search_prefix) + "manifest.json",
+                          "sealed index");
+    auto reopened = rig.backend(small_blocks());
+    const auto listed = liquid::runtime::block_on(reopened->list(""));
+    ASSERT_TRUE(listed) << listed.error().message;
+    for (const auto& entry : *listed) {
+        EXPECT_FALSE(entry.key.starts_with(lake::control::workspace_store_search_prefix)) << entry.key;
+    }
+    const auto refused = liquid::runtime::block_on(reopened->put("search/manifest.json", bytes_of("x")));
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, liquid::errc::invalid_argument);
+}
+
 } // namespace

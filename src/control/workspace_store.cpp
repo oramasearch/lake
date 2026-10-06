@@ -191,6 +191,11 @@ public:
 
 } // namespace
 
+namespace {
+// The deadline of the settling before a release on this thread (steady clock nanoseconds), or 0.
+thread_local std::int64_t settle_deadline = 0;
+} // namespace
+
 std::shared_ptr<ObjectTransport> make_zetta_object_transport() {
     return std::make_shared<ZettaHttpObjectTransport>();
 }
@@ -321,7 +326,7 @@ liquid::runtime::task<ObjectResponse>
 ZettaObjectClient::send(ObjectRequest request, bool idempotent, ObjectRequestKind kind) {
     request.headers.emplace_back("Authorization", "Bearer " + endpoint_.token);
     int attempts = idempotent ? 4 : 1;
-    if (const std::int64_t deadline = deadline_.load(); deadline != 0) {
+    if (const std::int64_t deadline = settle_deadline; deadline != 0) {
         const auto left = std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(deadline)) -
                           std::chrono::steady_clock::now();
         if (left <= std::chrono::steady_clock::duration::zero()) {
@@ -375,9 +380,12 @@ liquid::runtime::task<void> ZettaObjectClient::before_release(std::chrono::milli
     if (!settle) {
         co_return liquid::result<void>{};
     }
-    deadline_.store((std::chrono::steady_clock::now() + budget).time_since_epoch().count());
+    // Only the settling requests are cut: they run on this thread (block_on keeps a store call's
+    // coroutines on its thread); other users of the client, such as search, keep their timeouts.
+    const std::int64_t previous = settle_deadline;
+    settle_deadline = (std::chrono::steady_clock::now() + budget).time_since_epoch().count();
     auto settled = co_await settle();
-    deadline_.store(0);
+    settle_deadline = previous;
     co_return settled;
 }
 
@@ -1052,7 +1060,8 @@ liquid::result<void> check_liquid_key(std::string_view key) {
     if (key.empty() || key.starts_with('/') || key.size() > 1000) {
         return refused(liquid::errc::invalid_argument, "invalid store backend key", std::string(key));
     }
-    if (key.starts_with("keys/") || key.find(tail_marker) != std::string_view::npos) {
+    if (key.starts_with("keys/") || key.starts_with(workspace_store_search_prefix) ||
+        key.find(tail_marker) != std::string_view::npos) {
         return refused(liquid::errc::invalid_argument,
                        "the key is reserved by lake's workspace store encryption", std::string(key));
     }
@@ -1209,7 +1218,10 @@ liquid::runtime::task<void> ZettaObjectBackend::ensure_directory() {
     }
     std::map<std::string, std::uint64_t> orphans;
     for (const ObjectListEntry& object : *listed) {
-        if (object.key == workspace_store_key_object || object.key.starts_with("keys/")) {
+        // The data key and the search index's sealed objects (lake#381, written beside liquid
+        // with the store's client) are not liquid's.
+        if (object.key == workspace_store_key_object || object.key.starts_with("keys/") ||
+            object.key.starts_with(workspace_store_search_prefix)) {
             continue;
         }
         const std::size_t marker = object.key.find(tail_marker);
@@ -1877,11 +1889,8 @@ liquid::runtime::task<void> ZettaObjectBackend::drain(bool durable) {
             }
         }
         std::lock_guard lock(mutex_);
-        std::erase(queue_, key);
+        unhold(key);
     }
-    std::lock_guard lock(mutex_);
-    held_bytes_ = 0;
-    held_puts_ = 0;
     co_return liquid::result<void>{};
 }
 
@@ -1917,10 +1926,31 @@ void ZettaObjectBackend::hold(const std::string& key, std::uint64_t bytes, bool 
     if (queue_.empty() || queue_.back() != key) {
         queue_.push_back(key);
     }
-    held_bytes_ += bytes;
+    auto& [key_bytes, key_puts] = held_by_key_[key];
     if (put) {
+        // A put replaces whatever was held for the key: its bytes and its put.
+        held_bytes_ -= key_bytes;
+        held_puts_ -= key_puts;
+        key_bytes = 0;
+        key_puts = 1;
         ++held_puts_;
     }
+    key_bytes += bytes;
+    held_bytes_ += bytes;
+}
+
+void ZettaObjectBackend::unhold(const std::string& key) {
+    std::erase(queue_, key);
+    if (const auto found = held_by_key_.find(key); found != held_by_key_.end()) {
+        held_bytes_ -= found->second.first;
+        held_puts_ -= found->second.second;
+        held_by_key_.erase(found);
+    }
+}
+
+std::pair<std::uint64_t, std::size_t> ZettaObjectBackend::held() const {
+    std::lock_guard lock(mutex_);
+    return {held_bytes_, held_puts_};
 }
 
 // A threshold flush of buffered appends, between barriers: sent without durability, so the next
@@ -1949,7 +1979,7 @@ liquid::runtime::task<void> ZettaObjectBackend::flush_entry(const std::string& k
             }
         }
         std::lock_guard lock(mutex_);
-        std::erase(queue_, queued);
+        unhold(queued);
     }
     // An object not in Zetta yet (a held put, appended to) goes whole, as one PUT, so a put is
     // never seen in part; one in Zetta gets its complete blocks.
@@ -1970,7 +2000,13 @@ liquid::runtime::task<void> ZettaObjectBackend::flush_entry(const std::string& k
     }
     std::lock_guard lock(mutex_);
     if (whole) {
-        std::erase(queue_, key);
+        unhold(key);
+    } else if (const auto found = directory_.find(key); found != directory_.end()) {
+        // What stays held of the key: the bytes after its last complete block.
+        const std::uint64_t still = found->second->open.size() - found->second->open_remote;
+        auto& [key_bytes, key_puts] = held_by_key_[key];
+        held_bytes_ = held_bytes_ - key_bytes + still;
+        key_bytes = still;
     }
     dirty_ = true;
     co_return liquid::result<void>{};
@@ -2406,7 +2442,7 @@ liquid::runtime::task<void> ZettaObjectBackend::remove_impl(std::string key) {
         // prefix of the issue order, and nothing needs sending.
         if (!found->second->remote && !found->second->replaces_remote && !queue_.empty() &&
             queue_.back() == key) {
-            queue_.pop_back();
+            unhold(key);
             release_plain(*found->second);
             directory_.erase(found);
             shared_->forget(key);
@@ -2445,7 +2481,7 @@ liquid::runtime::task<void> ZettaObjectBackend::remove_impl(std::string key) {
             }
             directory_.erase(found);
         }
-        std::erase(queue_, key);
+        unhold(key);
     }
     shared_->forget(key);
     co_return liquid::result<void>{};
@@ -2494,35 +2530,37 @@ liquid::runtime::task<void> ZettaObjectBackend::barrier_impl() {
         }
     }
     SendGuard guard(*this);
-    std::set<std::string> stale;
     bool dirty = false;
     bool held = false;
     {
         std::lock_guard lock(mutex_);
-        stale.swap(stale_tails_);
         dirty = dirty_;
         held = !queue_.empty();
-        // A stale tail a held write puts again (the same block of the same version) is replaced,
-        // never removed.
-        for (const std::string& key : queue_) {
-            const auto found = directory_.find(key);
-            if (found != directory_.end() && found->second->header) {
-                stale.erase(found->second->tail_key(key, found->second->append_blocks()));
+    }
+    if (held || dirty) {
+        auto drained = co_await drain(!dirty);
+        if (drained && dirty) {
+            drained = co_await shared_->client->barrier();
+        }
+        if (!drained) {
+            std::lock_guard lock(mutex_);
+            dirty_ = true;
+            co_return std::unexpected(drained.error());
+        }
+    }
+    // The stale tails go after the drain, so none is a tail the drain just wrote: every tail an
+    // object holds now is left alone.
+    std::set<std::string> stale;
+    {
+        std::lock_guard lock(mutex_);
+        stale.swap(stale_tails_);
+        for (const auto& [key, entry] : directory_) {
+            for (const auto& [tail, ignored] : entry->tails) {
+                stale.erase(tail);
             }
         }
     }
     std::vector<std::function<liquid::runtime::task<void>()>> jobs;
-    if (held || dirty) {
-        jobs.push_back([this, dirty]() -> liquid::runtime::task<void> {
-            if (auto drained = co_await drain(!dirty); !drained) {
-                co_return std::unexpected(drained.error());
-            }
-            if (dirty) {
-                co_return co_await shared_->client->barrier();
-            }
-            co_return liquid::result<void>{};
-        });
-    }
     for (const std::string& tail : stale) {
         jobs.push_back([this, tail]() -> liquid::runtime::task<void> { return remove_stale_tail(tail); });
     }

@@ -35,6 +35,9 @@ inline constexpr std::string_view workspace_store_bucket = "lake_store";
 // The object that holds the workspace's wrapped data key. Liquid writes `keys/` only when a
 // store has a keyring, which a workspace store never has; the backend refuses liquid keys there.
 inline constexpr std::string_view workspace_store_key_object = "keys/workspace-v1.wrapped";
+// The search index's sealed objects in the same bucket (lake#381, search::workspace_index_prefix):
+// never liquid's, so the backend leaves them out of its directory and refuses liquid keys there.
+inline constexpr std::string_view workspace_store_search_prefix = "search/";
 
 // One raw exchange with a workspace Zetta's object routes. Bodies are bytes in a std::string.
 struct ObjectRequest {
@@ -243,8 +246,6 @@ private:
     std::string bucket_;
     std::shared_ptr<ObjectStoreCounters> counters_;
     ObjectRequestObserver observer_;
-    // While set (steady clock, nanoseconds), requests are cut to it and not retried.
-    std::atomic<std::int64_t> deadline_{0};
     mutable std::mutex settle_mutex_;
     std::function<liquid::runtime::task<void>()> settle_;
 };
@@ -361,6 +362,8 @@ public:
     // A mutation through this backend or any of its views failed: liquid's memory of the store
     // may be ahead of the bucket, so the store must be closed and opened again before more use.
     bool failed() const;
+    // What this view holds for its next barrier: bytes and puts.
+    std::pair<std::uint64_t, std::size_t> held() const;
     // Barriers every view of this backend: what they hold is sent and durable (lake#527).
     static liquid::runtime::task<void> settle(std::shared_ptr<Shared> shared);
 
@@ -383,8 +386,10 @@ private:
     liquid::runtime::task<void> flush_entry(const std::string& key);
     liquid::runtime::task<void> drain(bool durable);
     liquid::runtime::task<void> keep_order_before_holding(const std::string& key);
-    // Under mutex_: `key` has a held write of `bytes` (a put when `put`).
+    // Under mutex_: `key` has a held write of `bytes` (a put when `put`, which replaces what was
+    // held for the key); unhold forgets what is held for `key`.
     void hold(const std::string& key, std::uint64_t bytes, bool put);
+    void unhold(const std::string& key);
     // Under mutex_.
     bool durable_now() const;
     void release_plain(Entry& entry);
@@ -399,7 +404,7 @@ private:
 
     std::shared_ptr<Shared> shared_;
     std::optional<std::uint64_t> fence_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     bool directory_loaded_ = false;
     std::map<std::string, std::unique_ptr<Entry>> directory_;
     // Tails no reader needs once the bucket holds what the last barrier acknowledged: removed,
@@ -413,9 +418,10 @@ private:
     // another key's held write is sent with everything before it first, so the bucket never holds
     // a later write without an earlier one.
     std::vector<std::string> queue_;
-    // What is held, bounded by options.held_bytes_limit and held_puts_limit.
+    // What is held, bounded by options.held_bytes_limit and held_puts_limit, in all and per key.
     std::uint64_t held_bytes_ = 0;
     std::size_t held_puts_ = 0;
+    std::map<std::string, std::pair<std::uint64_t, std::size_t>> held_by_key_;
     // The plaintext kept in Entry::durable_plain, in all; at most 1 MiB.
     std::uint64_t durable_plain_held_ = 0;
     // One sender at a time, in issue order (SendGuard).

@@ -124,6 +124,12 @@ frame), never a later write without an earlier one. That is the order liquid rel
 barriers; its contract does not state it yet
 ([liquid#344](https://github.com/oramasearch/liquid/issues/344)).
 
+What "a crash keeps a prefix" covers: a crash of the lake process or of the Zetta process on a
+one-node workspace Zetta (every workspace today). It does not yet cover a power loss across a
+Zetta segment roll, where a later segment can survive an earlier one's unsynced tail
+([zetta#1235](https://github.com/oramasearch/zetta/issues/1235)). With `rf` above 1 each key has
+its own primary, so Zetta gives no order across keys; the barrier's durability still holds.
+
 - `put` of at most 1 MiB is held: reads are answered from memory, and the bucket keeps the previous
   version until the held put is sent as one PUT, which Zetta commits atomically. A larger put is
   sent at once, after what is held, without durability.
@@ -145,15 +151,20 @@ barriers; its contract does not state it yet
   a write since the last barrier went without durability (a large put, a threshold flush, held
   writes sent early past their bound); then the barrier sends Zetta's `:barrier` after them.
 - **Bounds.** Held writes past 8 MiB (`held_bytes_limit`) or 256 held puts (`held_puts_limit`) are
-  sent at once, without durability. A view also keeps, to skip an identical rewrite, the
+  sent at once, without durability. The count is exact: a put replacing a held put, a held key
+  removed, and a threshold flush leave only what is still held. A view also keeps, to skip an identical rewrite, the
   plaintext of small objects it wrote whole and durably: at most 16 KiB each and 1 MiB in all.
 - A put of the bytes the bucket already holds durably for that key (written whole by this view,
   nothing appended since) sends nothing: liquid publishes its index manifest twice in a row, with
   barriers between, and the second is the same bytes.
-- `barrier()` sends what is held, in order, and `:barrier` when needed, and answers when the last
-  has answered. Beside them it removes the tails made stale by earlier barriers, without
-  durability: no reader needs them, and a removal brought back by a crash leaves a stale tail,
-  which readers ignore. A barrier with nothing held costs no request.
+- `barrier()` sends what is held, in order, and `:barrier` when needed. Then it removes the tails
+  made stale by earlier barriers, without durability, and answers. It never removes a tail an
+  object holds now (one the drain may just have written again). No reader needs a stale tail, and
+  a removal brought back by a crash leaves a stale tail, which readers ignore. A barrier with
+  nothing held and no stale tail costs no request.
+- **Search's objects.** The search index's sealed objects (`search/`, lake#381) are written with
+  the store's client, outside this backend; the backend leaves them out of its directory and
+  refuses liquid keys under that prefix.
 - **Why the guarantees hold.** Everything acknowledged before a barrier is durable when it answers:
   each write it sends is fsynced before Zetta answers it, and a `:barrier` covers the writes sent
   without durability before it. A crash keeps a prefix of the issue order that includes
@@ -175,8 +186,9 @@ barriers; its contract does not state it yet
 - **Closing.** The owner sends what the store's backend holds before it releases the lease
   (`ZettaObjectClient::before_release`, set by the backend; liquid's close releases without a last
   barrier), so a store closed cleanly leaves nothing unsent. This settling is bounded (10 s by
-  default): each request gets one attempt, cut to the time left, so a drain with the workspace
-  Zetta unreachable does not stall. A lost lease or a failed store is closed without it; what was
+  default): each of its requests gets one attempt, cut to the time left, so a drain with the
+  workspace Zetta unreachable does not stall. Only the settling's requests are cut; other users of
+  the client (search) keep their timeouts. A lost lease or a failed store is closed without it; what was
   held then is lost, as liquid allows for writes no barrier acknowledged.
 - A conditional create that Zetta refuses while the directory said the key was absent (another
   writer, which the fence should exclude) marks the backend failed and keeps the directory and
@@ -530,4 +542,8 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreBackend.ConcurrentRequestsStopAtTheFirstFailureAndReportALostLeaseFirst` | lake#527: no request starts after a failure; `locked` is reported before other errors |
 | `WorkspaceStoreBackend.ACrashMidCommitKeepsEveryAcknowledgedCommit` | lake#527: liquid one-file commits with checkpoints at several intervals, one interrupted (stopped, requests lost, or answers lost), a crash, a successor's reopen: every acknowledged commit reads back and the head is the last acknowledged change (a stale `LIQUID_JOURNAL` would revert it) |
 | `WorkspaceStoreOwner.ReleaseSettlesWithinItsBudgetWhenZettaDoesNotAnswer` | lake#527: release with Zetta not answering the held writes returns within its budget and still releases the lease |
+| `WorkspaceStoreOwner.TheSettleBudgetCutsOnlyTheSettlingRequests` | lake#527: a request beside the settling keeps its own timeout |
+| `WorkspaceStoreBackend.HeldBytesAndPutsStayExact` | lake#527: a replaced held put, a removed held key and a threshold flush leave the held count exact |
+| `WorkspaceStoreBackend.ABarrierNeverRemovesATailItJustWrote` | lake#527: a stale tail whose name the barrier writes again survives the barrier |
+| `WorkspaceStoreBackend.TheSearchIndexsObjectsAreNotLiquids` | lake#527: `search/` objects stay out of liquid's directory, and liquid cannot write there |
 | `WorkspaceStoreMove.ACommitNamesItsStoreRequestsInServerTimingAndMetrics` | lake#527: a commit through lake names its store requests in `Server-Timing`, equal to what the workspace Zetta received, and the metrics count them by kind without a workspace label |

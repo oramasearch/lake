@@ -472,6 +472,9 @@ private:
     std::shared_ptr<IndexObjects> objects_;
 };
 
+static_assert(workspace_index_prefix == control::workspace_store_search_prefix,
+              "the workspace store's backend reserves the search index's prefix");
+
 constexpr std::string_view sealed_magic{"LKSIDX1\0", 8};
 
 class SealedIndexObjects final : public IndexObjects {
