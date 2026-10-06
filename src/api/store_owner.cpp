@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <format>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -15,6 +16,7 @@
 #include <unistd.h>
 
 #include <nlohmann/json.hpp>
+#include <openssl/rand.h>
 
 namespace lake::api {
 namespace {
@@ -116,12 +118,20 @@ std::expected<StoreOwnerLock, std::string> StoreOwnerLock::acquire(
         pause = std::min(pause * 2, std::chrono::milliseconds(100));
     }
     StoreOwnerLock lock(descriptor);
+    std::array<unsigned char, 8> random{};
+    std::string token;
+    if (RAND_bytes(random.data(), static_cast<int>(random.size())) == 1) {
+        for (const unsigned char value : random) {
+            token += std::format("{:02x}", value);
+        }
+    }
     const std::string since = std::format(
         "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
     const std::string record = nlohmann::json{{"pid", static_cast<long long>(::getpid())},
                                               {"host", host_name()},
                                               {"node", std::string(node_name)},
-                                              {"since", since}}
+                                              {"since", since},
+                                              {"token", token}}
                                    .dump() +
                                "\n";
     // The record only names the holder in a refusal; failing to write it does not weaken the lock.
@@ -144,6 +154,65 @@ StoreOwnerLock& StoreOwnerLock::operator=(StoreOwnerLock&& other) noexcept {
 
 StoreOwnerLock::~StoreOwnerLock() {
     release();
+}
+
+namespace {
+
+std::string read_small_file(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return {};
+    }
+    std::string text(4096, '\0');
+    input.read(text.data(), static_cast<std::streamsize>(text.size()));
+    text.resize(static_cast<std::size_t>(input.gcount()));
+    return text;
+}
+
+std::filesystem::path draining_path(const std::filesystem::path& store_root) {
+    return store_root / ".lake-owner.draining";
+}
+
+} // namespace
+
+bool StoreOwnerLock::announce_draining(const std::filesystem::path& store_root) const noexcept try {
+    if (descriptor_ < 0) {
+        return false;
+    }
+    std::array<char, 1024> buffer{};
+    const ssize_t count = ::pread(descriptor_, buffer.data(), buffer.size(), 0);
+    if (count <= 0) {
+        return false;
+    }
+    const std::filesystem::path target = draining_path(store_root);
+    const std::filesystem::path staged = target.string() + ".tmp";
+    {
+        std::ofstream output(staged, std::ios::binary | std::ios::trunc);
+        output.write(buffer.data(), count);
+        if (!output) {
+            return false;
+        }
+    }
+    std::error_code error;
+    std::filesystem::rename(staged, target, error);
+    return !error;
+} catch (...) {
+    return false;
+}
+
+bool StoreOwnerLock::owner_is_draining(const std::filesystem::path& store_root) noexcept try {
+    const std::string marker = read_small_file(draining_path(store_root));
+    if (marker.empty() || marker.find("\"token\":\"\"") != std::string::npos) {
+        return false;
+    }
+    return marker == read_small_file(lock_path(store_root));
+} catch (...) {
+    return false;
+}
+
+void StoreOwnerLock::clear_draining(const std::filesystem::path& store_root) noexcept {
+    std::error_code error;
+    std::filesystem::remove(draining_path(store_root), error);
 }
 
 void StoreOwnerLock::release() noexcept {
