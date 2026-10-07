@@ -141,6 +141,18 @@ void set_socket_options(const net::tcp_socket& socket) {
 #endif
 }
 
+// Opens `socket` and starts its connect in one step of the worker, with no other work between.
+// On Linux, epoll reports a TCP socket that is open but not yet connecting as hung up (EPOLLHUP,
+// with EPOLLOUT). If the reactor polls between the open and the connect, as it does when the open
+// happens where the awaitable is made and the connect only once capy::timeout has started its
+// runner, that stale hang-up is delivered to the parked connect, and corosio completes it with EIO
+// (`SO_ERROR` is 0 for a socket still connecting). lake#544 shipped that order, and every dial on
+// dev failed with "Input/output error"; macOS's kqueue reports no such event, so it passed there.
+boost::capy::io_task<> connect_now(net::tcp_socket& socket, net::endpoint endpoint) {
+    auto [error] = co_await socket.connect(endpoint);
+    co_return {error};
+}
+
 struct Exchange {
     ObjectRequest request;
     ObjectResponse response;
@@ -453,11 +465,12 @@ private:
                     connection.socket.close();
                 }
                 // connect() opens the socket for the endpoint's family (IPv4 or IPv6), and throws
-                // when it cannot; nothing may unwind on the worker.
+                // when it cannot; nothing may unwind on the worker. connect_now opens it and starts
+                // the connect in one step of the worker: see its comment.
                 std::error_code connect_error;
                 try {
                     auto [connected] =
-                        co_await boost::capy::timeout(connection.socket.connect(endpoint), options_.connect_timeout);
+                        co_await boost::capy::timeout(connect_now(connection.socket, endpoint), options_.connect_timeout);
                     connect_error = connected;
                 } catch (const std::system_error& error) {
                     reason = "could not open a socket for " + target.host + ": " + error.code().message();

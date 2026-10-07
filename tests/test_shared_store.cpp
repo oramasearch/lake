@@ -9,6 +9,8 @@
 // subsystem through the overlap and the owner's SIGTERM, and then check the store and that every
 // acknowledged write reads back from the process that took over.
 
+#include <cstdio>
+#include <print>
 #include <gtest/gtest.h>
 
 #include <arpa/inet.h>

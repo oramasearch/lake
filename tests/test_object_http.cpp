@@ -409,6 +409,22 @@ TEST(ObjectHttp, ATimedOutRequestsConnectionIsDroppedAndTheBearerNeverShows) {
     EXPECT_EQ(transport->stats().reused, 0U);
 }
 
+// Every request here dials. On Linux the dial once failed every time with EIO: the socket was
+// opened, the reactor polled it before its connect started, and the stale hang-up epoll reports for
+// a socket not yet connecting completed the connect (see connect_now in object_http.cpp).
+TEST(ObjectHttp, ManyDialsInARowAllConnect) {
+    LoopbackServer server;
+    auto transport = lake::control::make_pooled_object_transport();
+    for (int index = 0; index < 50; ++index) {
+        auto request = request_to(server.url("/dial-" + std::to_string(index)));
+        request.fresh_connection = true;
+        auto answer = send(*transport, std::move(request));
+        ASSERT_EQ(answer.status, 200) << "dial " << index << ": " << answer.error;
+    }
+    EXPECT_EQ(server.accepted(), 50);
+    EXPECT_EQ(transport->stats().connections, 50U);
+}
+
 TEST(ObjectHttp, NoListenerIsATransportFailure) {
     int port = 0;
     {
