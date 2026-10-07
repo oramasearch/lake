@@ -1,5 +1,6 @@
 // The workspace store's HTTP client (lake#544): keep-alive connections to each workspace Zetta,
-// one name resolution per origin while it stays fresh, and TCP_NODELAY on every connection.
+// one name resolution per origin while it stays fresh, TCP_NODELAY and keepalive probes on every
+// connection, and a bounded dial.
 //
 // Before it, every object request went through Zetta's connector transport, which resolves the
 // host, dials, sends `Connection: close` and drops the socket. On dev each resolution of a
@@ -114,9 +115,27 @@ bool still_open(const net::tcp_socket& socket) {
     return got < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
 }
 
-void set_no_delay(const net::tcp_socket& socket) {
+// TCP_NODELAY, and TCP keepalive probes so that a kept connection to a peer that vanished without
+// a word is found dead (and then closed by the peek before reuse) rather than kept for good.
+void set_socket_options(const net::tcp_socket& socket) {
+    const int handle = static_cast<int>(socket.native_handle());
     int yes = 1;
-    ::setsockopt(static_cast<int>(socket.native_handle()), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+    ::setsockopt(handle, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+    ::setsockopt(handle, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
+    int idle = 10;
+    int interval = 5;
+    int count = 3;
+#if defined(TCP_KEEPIDLE)
+    ::setsockopt(handle, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+#elif defined(TCP_KEEPALIVE)
+    ::setsockopt(handle, IPPROTO_TCP, TCP_KEEPALIVE, &idle, sizeof(idle));
+#endif
+#if defined(TCP_KEEPINTVL)
+    ::setsockopt(handle, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
+#endif
+#if defined(TCP_KEEPCNT)
+    ::setsockopt(handle, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
+#endif
 }
 
 struct Exchange {
@@ -279,6 +298,18 @@ private:
         return nullptr;
     }
 
+    void drop_idle(const std::string& origin) {
+        const auto found = idle_.find(origin);
+        if (found == idle_.end()) {
+            return;
+        }
+        for (auto& connection : found->second) {
+            closed_.fetch_add(1);
+            connection->socket.close();
+        }
+        idle_.erase(found);
+    }
+
     void keep(const std::string& origin, std::unique_ptr<Connection> connection) {
         auto& kept = idle_[origin];
         if (kept.size() >= options_.idle_per_origin) {
@@ -336,11 +367,23 @@ private:
                     connection.socket.close();
                 }
                 connection.socket.open();
-                auto [connect_error] = co_await connection.socket.connect(endpoint);
+                auto [connect_error] =
+                    co_await boost::capy::timeout(connection.socket.connect(endpoint), options_.connect_timeout);
                 if (!connect_error) {
-                    set_no_delay(connection.socket);
+                    set_socket_options(connection.socket);
                     connections_.fetch_add(1);
                     co_return {{}, std::string()};
+                }
+                if (connect_error == boost::capy::cond::canceled) {
+                    co_return {{}, "the request was cancelled while it connected"};
+                }
+                if (connect_error == boost::capy::cond::timeout) {
+                    // The address may be gone with its peer: resolve again next time, and do not
+                    // try it again here.
+                    resolved_.erase(target.host + ":" + target.port);
+                    co_return {{}, "could not connect to " + target.host + ":" + target.port +
+                                       ": no answer within " +
+                                       std::to_string(options_.connect_timeout.count()) + " ms"};
                 }
                 reason = "could not connect to " + target.host + ":" + target.port + ": " + connect_error.message();
             }
@@ -355,9 +398,10 @@ private:
     // One attempt: a kept connection or a new one, then the exchange. `connection` is left set to
     // a connection fit to keep, or null.
     boost::capy::io_task<std::string> attempt(const Target& target, Exchange& exchange,
-                                              std::unique_ptr<Connection>& connection) {
+                                              std::unique_ptr<Connection>& connection, bool& reused) {
         const std::string origin = target.host + ":" + target.port;
         connection = take_idle(origin);
+        reused = connection != nullptr;
         if (connection) {
             reused_.fetch_add(1);
         } else {
@@ -389,14 +433,20 @@ private:
         const std::chrono::seconds deadline(exchange->request.timeout_seconds > 0 ? exchange->request.timeout_seconds
                                                                                   : 60);
         std::unique_ptr<Connection> connection;
+        bool reused = false;
         auto [timeout_error, reason] =
-            co_await boost::capy::timeout(attempt(target, *exchange, connection), deadline);
+            co_await boost::capy::timeout(attempt(target, *exchange, connection, reused), deadline);
         if (timeout_error) {
             reason = "the request timed out: " + timeout_error.message();
             if (connection) {
                 connection->socket.close();
                 connection.reset();
             }
+        }
+        if (!reason.empty() && reused) {
+            // A kept connection failed or went silent: the peer may be gone, and with it every
+            // connection kept to it. The next request dials afresh.
+            drop_idle(target.host + ":" + target.port);
         }
         if (!reason.empty()) {
             // Only a transport failure: what was read of an answer is not one.

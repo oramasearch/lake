@@ -74,9 +74,12 @@ struct PooledObjectTransportOptions {
     // Idle connections kept per origin (host and port); more are closed after their answer.
     std::size_t idle_per_origin = 32;
     // A connection idle this long is closed rather than reused.
-    std::chrono::seconds idle_limit{30};
+    std::chrono::milliseconds idle_limit{30'000};
     // A resolved address is used for new connections this long; one that refuses is resolved again.
-    std::chrono::seconds resolve_ttl{30};
+    std::chrono::milliseconds resolve_ttl{30'000};
+    // A dial that gets no answer this soon fails, and the address is resolved again next time: a
+    // silent dead peer costs this, not the request's whole timeout.
+    std::chrono::milliseconds connect_timeout{2'000};
 };
 
 // Lake's client for a workspace Zetta's object routes (lake#544, src/control/object_http.cpp):

@@ -722,6 +722,12 @@ uses it (`make_zetta_object_transport`):
 - **What is not reused.** A kept connection is reused only when it is still open and silent (a
   non-blocking peek), and one idle longer than 30 s is closed. A connection whose request failed or
   timed out, or that Zetta answered `Connection: close` on, is closed.
+- **A peer that went silent.** When a request on a kept connection fails or times out, every other
+  connection kept to that origin is closed too, so the retry dials afresh rather than waiting on
+  another connection to the same dead peer. A dial gets 2 s (`connect_timeout`); one that gets no
+  answer fails then, not at the request's timeout, and its address is resolved again next time.
+  Every connection has TCP keepalive probes (after 10 s idle, every 5 s, 3 probes where the
+  platform lets lake set them), so a kept connection to a vanished peer is found dead.
 - **No request is sent twice by the transport.** A request on a kept connection that fails is a
   transport failure like any other; the retry of an idempotent request stays
   `ZettaObjectClient::send`'s. So the ordering, fencing and durability of lake#527, lake#535 and
@@ -861,7 +867,7 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreZetta.TheBackendOnARealZettaHoldsOnlyCiphertextAndItsLatencyIsMeasured` | the same on a real Zetta, and the latency table |
 | `WorkspaceStoreZetta.TheSearchIndexOnARealZettaIsSealedReloadsAndIsRebuilt` | a workspace's search index on a real Zetta: sealed, reloaded without rewriting, rebuilt once wiped |
 | `WorkspaceStoreZetta.AOneFileCommitsRequestsAreCountedAndTimed` | lake#527: one-file commits on a real Zetta behind a round trip, requests by kind, rounds, the request trace; lake#535: each commit with lake's sync, an fsync cost per durable request (`LAKE_TEST_ZETTA_FSYNC_MS`), a repository with history (`LAKE_TEST_ZETTA_SEED_COMMITS`), and one durable request per commit; lake#544: the transport before it (`LAKE_TEST_ZETTA_TRANSPORT=unpooled`) or lake's, with its connections and resolutions (fewer than one connection per ten requests); lake#538: the first commit after the store is opened again |
-| `ObjectHttp.*` (`tests/test_object_http.cpp`) | lake#544: against a loopback server, sequential requests share one connection and one resolution; overlapping requests each get a connection and keep it; a connection the server closed, one answered `Connection: close`, one idle too long and one whose request timed out are not reused; no listener is a transport failure; the bearer never appears in an error |
+| `ObjectHttp.*` (`tests/test_object_http.cpp`) | lake#544: against a loopback server, sequential requests share one connection and one resolution; overlapping requests each get a connection and keep it; a connection the server closed, one answered `Connection: close`, one idle too long and one whose request timed out are not reused; no listener is a transport failure; the bearer never appears in an error; a request that times out on a kept connection drops the origin's other kept connections; a dial to a silent peer fails within `connect_timeout` and resolves again; a client over a silent Zetta fails `unavailable` within a bounded time |
 | `WorkspaceStoreBackend.ACrashAnywhereKeepsAPrefixOfTheIssueOrderPastTheLastBarrier` | lake#527: 200 random sequences of held puts, immediate puts, appends past the threshold, conditional creates, removes, repeated bytes and crossed bounds, with liquid's barriers and lake's syncs between (lake#535), ending in a sync that is answered, stopped part way, or loses requests or answers at random, then a crash keeping a prefix of the bucket's log: what survives is a prefix of the issue order at least as long as the last answered sync |
 | `WorkspaceStoreBackend.AnIntervalsWritesAreSentOneAtATimeInIssueOrder` | lake#527: a marker, a pack, an index run with appends, a removal and a manifest reach Zetta in that order, never two at once; lake#535: liquid's barriers between them send nothing, and the sync sends one `:barrier` |
 | `WorkspaceStoreBackend.AWriteWhoseAnswerWasLostIsRetriedOrFailsTheBackend` | lake#527: a durable PUT and a DELETE whose answers were lost after they landed are retried harmlessly; a conditional create that landed answers `unavailable`, fails the backend, and the reopened store holds it |

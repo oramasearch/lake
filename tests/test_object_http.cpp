@@ -7,6 +7,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -175,6 +177,48 @@ private:
     std::vector<std::thread> threads_;
 };
 
+// A listener that never accepts, its queue filled, so a new dial to it gets no answer at all: a
+// peer that is gone without a word, as a node that vanished is.
+class SilentListener {
+public:
+    SilentListener() {
+        listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        ::bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+        ::listen(listener_, 1);
+        socklen_t length = sizeof(address);
+        ::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length);
+        port_ = ntohs(address.sin_port);
+        // Fill the queue: dials that complete without an accept, until one does not.
+        for (int index = 0; index < 64; ++index) {
+            const int socket = ::socket(AF_INET, SOCK_STREAM, 0);
+            ::fcntl(socket, F_SETFL, O_NONBLOCK);
+            ::connect(socket, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+            fillers_.push_back(socket);
+            pollfd waiting{socket, POLLOUT, 0};
+            if (::poll(&waiting, 1, 200) == 0) {
+                break;
+            }
+        }
+    }
+    ~SilentListener() {
+        for (const int socket : fillers_) {
+            ::close(socket);
+        }
+        ::close(listener_);
+    }
+    std::string url(std::string_view path) const {
+        return "http://127.0.0.1:" + std::to_string(port_) + std::string(path);
+    }
+
+private:
+    int listener_ = -1;
+    int port_ = 0;
+    std::vector<int> fillers_;
+};
+
 ObjectRequest request_to(std::string url, std::string method = "GET", std::string body = {}) {
     ObjectRequest request;
     request.method = std::move(method);
@@ -299,6 +343,53 @@ TEST(ObjectHttp, NoListenerIsATransportFailure) {
     EXPECT_EQ(answer.status, 0);
     EXPECT_NE(answer.error.find("could not connect"), std::string::npos) << answer.error;
     EXPECT_EQ(answer.error.find("secret-token-544"), std::string::npos);
+}
+
+TEST(ObjectHttp, ARequestThatTimesOutOnAKeptConnectionDropsTheOriginsOtherKeptConnections) {
+    LoopbackServer server;
+    auto transport = lake::control::make_pooled_object_transport();
+    // Two kept connections.
+    std::thread first([&] { EXPECT_EQ(send(*transport, request_to(server.url("/slow/1"))).status, 200); });
+    std::thread second([&] { EXPECT_EQ(send(*transport, request_to(server.url("/slow/2"))).status, 200); });
+    first.join();
+    second.join();
+    ASSERT_EQ(server.accepted(), 2);
+    // A kept connection that does not answer: the peer may be gone, and so the other one too.
+    auto hung = request_to(server.url("/hang"));
+    hung.timeout_seconds = 1;
+    EXPECT_NE(send(*transport, std::move(hung)).error, "");
+    const auto reused = transport->stats().reused;
+    EXPECT_EQ(reused, 1U);
+    EXPECT_EQ(send(*transport, request_to(server.url("/next"))).status, 200);
+    EXPECT_EQ(server.accepted(), 3) << "the next request dials afresh";
+    EXPECT_EQ(transport->stats().reused, reused);
+}
+
+TEST(ObjectHttp, ADialThatGetsNoAnswerFailsWithinTheConnectTimeoutAndResolvesAgain) {
+    SilentListener silent;
+    auto transport = lake::control::make_pooled_object_transport({.connect_timeout = 300ms});
+    for (int attempt = 1; attempt <= 2; ++attempt) {
+        auto request = request_to(silent.url("/x"));
+        request.timeout_seconds = 20;
+        const auto started = std::chrono::steady_clock::now();
+        auto answer = send(*transport, std::move(request));
+        EXPECT_LT(std::chrono::steady_clock::now() - started, 2s);
+        EXPECT_EQ(answer.status, 0);
+        EXPECT_NE(answer.error.find("could not connect"), std::string::npos) << answer.error;
+    }
+    EXPECT_EQ(transport->stats().resolutions, 2U) << "a dial that timed out evicts the resolution";
+}
+
+TEST(ObjectHttp, AStoreWhoseZettaIsSilentFailsWithinABoundedTime) {
+    SilentListener silent;
+    auto transport = lake::control::make_pooled_object_transport({.connect_timeout = 300ms});
+    lake::control::ZettaObjectClient client(transport, lake::control::ObjectEndpoint{silent.url(""), "token"});
+    const auto started = std::chrono::steady_clock::now();
+    // An idempotent read: four attempts, each cut by the connect timeout.
+    auto read = liquid::runtime::block_on(client.get("packs/a", 0, 16));
+    ASSERT_FALSE(read);
+    EXPECT_EQ(read.error().code, liquid::errc::unavailable);
+    EXPECT_LT(std::chrono::steady_clock::now() - started, 4s);
 }
 
 } // namespace
