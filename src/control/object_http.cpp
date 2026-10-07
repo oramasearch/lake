@@ -26,6 +26,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -165,15 +166,25 @@ boost::capy::io_task<std::string> exchange_over(net::tcp_socket& socket, const O
                                                 const http::shared_parser_config& parser_config,
                                                 const http::shared_serializer_config& serializer_config,
                                                 bool& reusable) {
-    const http::method method = http::string_to_method(request.method) == http::method::unknown
-                                    ? http::method::get
-                                    : http::string_to_method(request.method);
+    const http::method method = http::string_to_method(request.method);
+    if (method == http::method::unknown) {
+        co_return {{}, "the method " + request.method + " is not one the client sends"};
+    }
     http::request message(method, target.target, http::version::http_1_1);
-    boost::system::error_code ignored;
-    message.set(http::field::host, host_header(target), ignored);
+    boost::system::error_code refused;
+    message.set(http::field::host, host_header(target), refused);
+    if (refused) {
+        co_return {{}, "could not set the Host header: " + refused.message()};
+    }
     for (const auto& [name, value] : request.headers) {
-        if (!is_host_header(name)) {
-            message.set(name, value, ignored);
+        if (is_host_header(name)) {
+            continue;
+        }
+        // Never a header dropped and the request sent without it. The value is not named: it
+        // may be the bearer.
+        message.set(name, value, refused);
+        if (refused) {
+            co_return {{}, "could not set the header " + name + ": " + refused.message()};
         }
     }
     message.set_content_length(request.body.size());
@@ -194,6 +205,12 @@ boost::capy::io_task<std::string> exchange_over(net::tcp_socket& socket, const O
     }
     parser.set_body_limit(response_body_limit);
     response.status = static_cast<int>(parser.get().status_int());
+    if (response.status < 200) {
+        // An interim answer (lake never sends Expect): what follows on the connection is not
+        // known to be framed, so it is not kept, and the request has no final answer.
+        response.status = 0;
+        co_return {{}, "the workspace Zetta sent an interim answer"};
+    }
     const bool keep_alive = parser.get().keep_alive();
     auto body = parser.source_for(socket);
     boost::capy::const_buffer chunks[16];
@@ -413,9 +430,17 @@ private:
                 if (connection.socket.is_open()) {
                     connection.socket.close();
                 }
-                connection.socket.open();
-                auto [connect_error] =
-                    co_await boost::capy::timeout(connection.socket.connect(endpoint), options_.connect_timeout);
+                // connect() opens the socket for the endpoint's family (IPv4 or IPv6), and throws
+                // when it cannot; nothing may unwind on the worker.
+                std::error_code connect_error;
+                try {
+                    auto [connected] =
+                        co_await boost::capy::timeout(connection.socket.connect(endpoint), options_.connect_timeout);
+                    connect_error = connected;
+                } catch (const std::system_error& error) {
+                    reason = "could not open a socket for " + target.host + ": " + error.code().message();
+                    continue;
+                }
                 if (!connect_error) {
                     set_socket_options(connection.socket);
                     connections_.fetch_add(1);

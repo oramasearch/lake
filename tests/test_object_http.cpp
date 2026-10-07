@@ -36,22 +36,42 @@ using lake::control::ObjectResponse;
 
 // Answers each request with its method, path and body length in the body. A path containing
 // `/close` is answered with `Connection: close` and the connection closed; `/hang` is never
-// answered; `/slow` is answered after 100 ms.
+// answered; `/slow` is answered after 100 ms. The framing cases: `/chunked` answers in chunks,
+// `/short` promises 100 bytes, sends 10 and closes, `/toclose` sends a body with no length and
+// closes, `/nocontent` answers 204, `/extra` sends a stale second answer after its own, and
+// `/continue` sends a 100 Continue before its answer.
 class LoopbackServer {
 public:
-    LoopbackServer() {
-        listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    explicit LoopbackServer(bool v6 = false) : v6_(v6) {
         int yes = 1;
-        ::setsockopt(listener_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        ::bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address));
-        ::listen(listener_, 64);
-        socklen_t length = sizeof(address);
-        ::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length);
-        port_ = ntohs(address.sin_port);
+        if (v6) {
+            listener_ = ::socket(AF_INET6, SOCK_STREAM, 0);
+            ::setsockopt(listener_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+            sockaddr_in6 address{};
+            address.sin6_family = AF_INET6;
+            address.sin6_addr = in6addr_loopback;
+            bound_ = ::bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
+            ::listen(listener_, 64);
+            socklen_t length = sizeof(address);
+            ::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length);
+            port_ = ntohs(address.sin6_port);
+        } else {
+            listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+            ::setsockopt(listener_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+            sockaddr_in address{};
+            address.sin_family = AF_INET;
+            address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            bound_ = ::bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
+            ::listen(listener_, 64);
+            socklen_t length = sizeof(address);
+            ::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length);
+            port_ = ntohs(address.sin_port);
+        }
         acceptor_ = std::thread([this] { accept_loop(); });
+    }
+
+    bool bound() const {
+        return bound_;
     }
 
     ~LoopbackServer() {
@@ -74,7 +94,7 @@ public:
         return port_;
     }
     std::string url(std::string_view path) const {
-        return "http://127.0.0.1:" + std::to_string(port_) + std::string(path);
+        return std::string(v6_ ? "http://[::1]:" : "http://127.0.0.1:") + std::to_string(port_) + std::string(path);
     }
     int accepted() const {
         return accepted_.load();
@@ -149,11 +169,26 @@ private:
             if (line.find("/slow") != std::string::npos) {
                 std::this_thread::sleep_for(100ms);
             }
-            const bool close = line.find("/close") != std::string::npos;
+            bool close = line.find("/close") != std::string::npos;
             const std::string body = line.substr(0, line.rfind(' ')) + " " + std::to_string(length);
             std::string answer = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " +
                                  std::to_string(body.size()) + "\r\n" + (close ? "Connection: close\r\n" : "") +
                                  "\r\n" + body;
+            if (line.find("/chunked") != std::string::npos) {
+                answer = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n";
+            } else if (line.find("/short") != std::string::npos) {
+                answer = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789";
+                close = true;
+            } else if (line.find("/toclose") != std::string::npos) {
+                answer = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nuntil the end";
+                close = true;
+            } else if (line.find("/nocontent") != std::string::npos) {
+                answer = "HTTP/1.1 204 No Content\r\n\r\n";
+            } else if (line.find("/extra") != std::string::npos) {
+                answer += "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nstale";
+            } else if (line.find("/continue") != std::string::npos) {
+                answer = "HTTP/1.1 100 Continue\r\n\r\n" + answer;
+            }
             std::size_t sent = 0;
             while (sent < answer.size()) {
                 const auto wrote = ::send(socket, answer.data() + sent, answer.size() - sent, 0);
@@ -175,6 +210,8 @@ private:
         ::close(socket);
     }
 
+    bool v6_ = false;
+    bool bound_ = false;
     int listener_ = -1;
     int port_ = 0;
     std::thread acceptor_;
@@ -532,6 +569,94 @@ TEST(ObjectHttp, TheClientAsksForAFreshConnectionExactlyForTheRequestsItDoesNotR
         {"DELETE /v1/objects/lake_store/k", {false}},
     };
     EXPECT_EQ(fresh, expected);
+}
+
+TEST(ObjectHttp, AnUnknownMethodIsRefusedAndNothingIsSent) {
+    LoopbackServer server;
+    auto transport = lake::control::make_pooled_object_transport();
+    auto answer = send(*transport, request_to(server.url("/brew"), "BREW"));
+    EXPECT_EQ(answer.status, 0);
+    EXPECT_NE(answer.error.find("method"), std::string::npos) << answer.error;
+    EXPECT_EQ(server.requests(), 0);
+}
+
+TEST(ObjectHttp, AHeaderThatCannotBeSentFailsTheRequestRatherThanBeingDropped) {
+    LoopbackServer server;
+    auto transport = lake::control::make_pooled_object_transport();
+    auto split = request_to(server.url("/a"));
+    split.headers.emplace_back("X-Lake-Note", "one\r\nX-Injected: two");
+    auto answer = send(*transport, std::move(split));
+    EXPECT_EQ(answer.status, 0);
+    EXPECT_NE(answer.error.find("X-Lake-Note"), std::string::npos) << answer.error;
+    auto named = request_to(server.url("/b"));
+    named.headers.emplace_back("Bad Name", "value");
+    answer = send(*transport, std::move(named));
+    EXPECT_EQ(answer.status, 0);
+    EXPECT_EQ(answer.error.find("secret-token-544"), std::string::npos);
+    EXPECT_EQ(server.requests(), 0);
+}
+
+TEST(ObjectHttp, AnInterimAnswerLeavesItsConnectionUnkept) {
+    LoopbackServer server;
+    auto transport = lake::control::make_pooled_object_transport();
+    static_cast<void>(send(*transport, request_to(server.url("/continue"))));
+    auto after = send(*transport, request_to(server.url("/after")));
+    EXPECT_EQ(after.status, 200) << after.error;
+    EXPECT_EQ(after.body, "GET /after 0") << "an earlier answer was served to a later request";
+    EXPECT_EQ(transport->stats().reused, 0U);
+}
+
+TEST(ObjectHttp, AnIpv6AddressConnects) {
+    LoopbackServer server(/*v6=*/true);
+    if (!server.bound()) {
+        GTEST_SKIP() << "no IPv6 loopback";
+    }
+    auto transport = lake::control::make_pooled_object_transport();
+    auto answer = send(*transport, request_to(server.url("/v6")));
+    EXPECT_EQ(answer.status, 200) << answer.error;
+    EXPECT_EQ(answer.body, "GET /v6 0");
+}
+
+TEST(ObjectHttp, AnswersAreFramedAndNoBytePassesToTheNextRequest) {
+    LoopbackServer server;
+    auto transport = lake::control::make_pooled_object_transport();
+    const auto expect_next = [&](const std::string& path) {
+        auto next = send(*transport, request_to(server.url(path)));
+        EXPECT_EQ(next.status, 200) << next.error;
+        EXPECT_EQ(next.body, "GET " + path + " 0");
+    };
+    auto chunked = send(*transport, request_to(server.url("/chunked")));
+    EXPECT_EQ(chunked.status, 200) << chunked.error;
+    EXPECT_EQ(chunked.body, "helloworld");
+    expect_next("/after-chunked");
+    EXPECT_EQ(server.accepted(), 1) << "a chunked answer read to its end leaves its connection kept";
+
+    auto empty = send(*transport, request_to(server.url("/nocontent")));
+    EXPECT_EQ(empty.status, 204) << empty.error;
+    EXPECT_EQ(empty.body, "");
+    expect_next("/after-204");
+    EXPECT_EQ(server.accepted(), 1);
+
+    auto extra = send(*transport, request_to(server.url("/extra")));
+    EXPECT_EQ(extra.status, 200) << extra.error;
+    EXPECT_EQ(extra.body, "GET /extra 0");
+    expect_next("/after-extra");
+
+    const int before_short = server.accepted();
+    auto cut = send(*transport, request_to(server.url("/short")));
+    EXPECT_EQ(cut.status, 0) << "a body shorter than its Content-Length is a transport failure";
+    EXPECT_NE(cut.error, "");
+    expect_next("/after-short");
+    EXPECT_GT(server.accepted(), before_short);
+
+    auto to_close = send(*transport, request_to(server.url("/toclose")));
+    EXPECT_EQ(to_close.status, 200) << to_close.error;
+    EXPECT_EQ(to_close.body, "until the end");
+    const int after_close = server.accepted();
+    const auto reused = transport->stats().reused;
+    expect_next("/after-toclose");
+    EXPECT_EQ(server.accepted(), after_close + 1) << "a body that ran to the close leaves nothing to keep";
+    EXPECT_EQ(transport->stats().reused, reused);
 }
 
 } // namespace
