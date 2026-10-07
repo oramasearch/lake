@@ -68,6 +68,7 @@ struct ObjectConnectionStats {
     std::uint64_t connections = 0; // TCP connections opened
     std::uint64_t reused = 0;      // requests sent on a kept connection
     std::uint64_t closed = 0;      // kept connections found closed, or idle too long, and dropped
+    std::uint64_t overflow = 0;    // connections closed after their answer because the pool was full
 };
 
 struct PooledObjectTransportOptions {
@@ -80,6 +81,9 @@ struct PooledObjectTransportOptions {
     // A dial that gets no answer this soon fails, and the address is resolved again next time: a
     // silent dead peer costs this, not the request's whole timeout.
     std::chrono::milliseconds connect_timeout{2'000};
+    // How often kept connections past idle_limit, and resolutions past resolve_ttl, are dropped for
+    // every origin, including one no longer used.
+    std::chrono::milliseconds sweep_interval{10'000};
 };
 
 // Lake's client for a workspace Zetta's object routes (lake#544, src/control/object_http.cpp):
@@ -91,6 +95,9 @@ struct PooledObjectTransportOptions {
 class PooledObjectTransport : public ObjectTransport {
 public:
     virtual ObjectConnectionStats stats() const = 0;
+    // Stops the client: every request it holds is answered as a transport failure, and later ones
+    // fail at once. The destructor does it.
+    virtual void shutdown() = 0;
 };
 std::shared_ptr<PooledObjectTransport> make_pooled_object_transport(PooledObjectTransportOptions options = {});
 

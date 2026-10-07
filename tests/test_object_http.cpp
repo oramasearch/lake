@@ -17,6 +17,7 @@
 #include <charconv>
 #include <chrono>
 #include <memory>
+#include <future>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -77,6 +78,10 @@ public:
     }
     int requests() const {
         return requests_.load();
+    }
+    // Connections that ended, from either side.
+    int ended() const {
+        return ended_.load();
     }
     // Closes every open connection from the server's side, as a restarted Zetta would.
     void close_connections() {
@@ -161,6 +166,7 @@ private:
     }
 
     void finish(int socket) {
+        ended_.fetch_add(1);
         std::lock_guard lock(mutex_);
         std::erase(open_, socket);
         ::close(socket);
@@ -172,6 +178,7 @@ private:
     std::atomic<bool> stopping_{false};
     std::atomic<int> accepted_{0};
     std::atomic<int> requests_{0};
+    std::atomic<int> ended_{0};
     std::mutex mutex_;
     std::vector<int> open_;
     std::vector<std::thread> threads_;
@@ -390,6 +397,76 @@ TEST(ObjectHttp, AStoreWhoseZettaIsSilentFailsWithinABoundedTime) {
     ASSERT_FALSE(read);
     EXPECT_EQ(read.error().code, liquid::errc::unavailable);
     EXPECT_LT(std::chrono::steady_clock::now() - started, 4s);
+}
+
+TEST(ObjectHttp, AnOriginNoLongerUsedHasItsKeptConnectionClosed) {
+    LoopbackServer used_once;
+    auto transport = lake::control::make_pooled_object_transport({.idle_limit = 200ms, .sweep_interval = 50ms});
+    EXPECT_EQ(send(*transport, request_to(used_once.url("/a"))).status, 200);
+    EXPECT_EQ(used_once.ended(), 0);
+    // Nothing is sent to that origin again; the sweep still closes what is kept for it.
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (used_once.ended() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(20ms);
+    }
+    EXPECT_EQ(used_once.ended(), 1);
+    EXPECT_EQ(transport->stats().closed, 1U);
+}
+
+TEST(ObjectHttp, TheOldestKeptConnectionsAreSweptWhileNewerOnesStay) {
+    LoopbackServer server;
+    auto transport = lake::control::make_pooled_object_transport({.idle_limit = 400ms, .sweep_interval = 50ms});
+    // Two kept connections; then only one is used, and the other ages out.
+    std::thread first([&] { EXPECT_EQ(send(*transport, request_to(server.url("/slow/1"))).status, 200); });
+    std::thread second([&] { EXPECT_EQ(send(*transport, request_to(server.url("/slow/2"))).status, 200); });
+    first.join();
+    second.join();
+    ASSERT_EQ(server.accepted(), 2);
+    const auto until = std::chrono::steady_clock::now() + 1s;
+    while (std::chrono::steady_clock::now() < until) {
+        EXPECT_EQ(send(*transport, request_to(server.url("/again"))).status, 200);
+        std::this_thread::sleep_for(50ms);
+    }
+    EXPECT_EQ(server.ended(), 1) << "the connection not used for 400 ms was closed";
+    EXPECT_EQ(server.accepted(), 2);
+}
+
+TEST(ObjectHttp, AConnectionPastThePoolsBoundIsClosedAndCounted) {
+    LoopbackServer server;
+    auto transport = lake::control::make_pooled_object_transport({.idle_per_origin = 1});
+    std::thread first([&] { EXPECT_EQ(send(*transport, request_to(server.url("/slow/1"))).status, 200); });
+    std::thread second([&] { EXPECT_EQ(send(*transport, request_to(server.url("/slow/2"))).status, 200); });
+    first.join();
+    second.join();
+    EXPECT_EQ(server.accepted(), 2);
+    EXPECT_EQ(transport->stats().overflow, 1U);
+}
+
+TEST(ObjectHttp, DestroyingTheTransportAnswersTheRequestsItHolds) {
+    auto server = std::make_shared<LoopbackServer>();
+    auto transport = lake::control::make_pooled_object_transport();
+    auto answered = std::make_shared<std::promise<ObjectResponse>>();
+    auto future = answered->get_future();
+    std::thread caller([server, transport, answered]() mutable {
+        auto request = request_to(server->url("/hang"));
+        request.timeout_seconds = 60;
+        auto result = liquid::runtime::block_on(transport->exchange(std::move(request)));
+        answered->set_value(result ? std::move(*result) : ObjectResponse{});
+    });
+    while (server->requests() == 0) {
+        std::this_thread::sleep_for(10ms);
+    }
+    {
+        // The caller holds its own reference through the call; drop it from here and stop the
+        // transport by hand the way its last owner going would.
+        auto stopping = std::move(transport);
+        stopping->shutdown();
+    }
+    ASSERT_EQ(future.wait_for(3s), std::future_status::ready) << "a waiting caller was never answered";
+    const ObjectResponse response = future.get();
+    EXPECT_EQ(response.status, 0);
+    EXPECT_NE(response.error, "");
+    caller.join();
 }
 
 } // namespace

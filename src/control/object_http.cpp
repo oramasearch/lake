@@ -22,6 +22,8 @@
 #include <chrono>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -226,9 +228,24 @@ public:
     }
 
     ~PooledTransport() override {
+        shutdown();
+    }
+
+    void shutdown() override {
+        stopped_.store(true);
         io_context_.stop();
         if (worker_.joinable()) {
             worker_.join();
+        }
+        // The worker is gone: nothing else touches what it held. Answer every caller still waiting.
+        std::set<std::shared_ptr<Exchange>> waiting;
+        {
+            std::lock_guard lock(pending_mutex_);
+            waiting.swap(pending_);
+        }
+        for (const auto& exchange : waiting) {
+            exchange->response = ObjectResponse{0, {}, "the workspace store's HTTP client stopped"};
+            exchange->finished.set();
         }
     }
 
@@ -241,13 +258,21 @@ public:
         }
         auto exchange = std::make_shared<Exchange>();
         exchange->request = std::move(request);
+        {
+            std::lock_guard lock(pending_mutex_);
+            if (stopped_.load()) {
+                co_return ObjectResponse{0, {}, "the workspace store's HTTP client stopped"};
+            }
+            pending_.insert(exchange);
+        }
         boost::capy::run_async(io_context_.get_executor())(perform(exchange));
         [[maybe_unused]] const auto waited = co_await exchange->finished.wait();
         co_return std::move(exchange->response);
     }
 
     ObjectConnectionStats stats() const override {
-        return ObjectConnectionStats{resolutions_.load(), connections_.load(), reused_.load(), closed_.load()};
+        return ObjectConnectionStats{resolutions_.load(), connections_.load(), reused_.load(), closed_.load(),
+                                     overflow_.load()};
     }
 
 private:
@@ -271,12 +296,33 @@ private:
         co_return ObjectResponse{response.status, std::move(response.body), std::move(response.error)};
     }
 
+    // Keeps run() from returning, and sweeps every sweep_interval.
     boost::capy::task<> keepalive() {
         net::timer timer(io_context_);
         for (;;) {
-            timer.expires_after(std::chrono::hours(1));
+            timer.expires_after(options_.sweep_interval);
             [[maybe_unused]] const auto waited = co_await timer.wait();
+            sweep();
         }
+    }
+
+    // Closes, for every origin, the kept connections idle past idle_limit or found closed, and
+    // forgets resolutions past resolve_ttl. Each origin's connections are kept oldest first.
+    void sweep() {
+        const auto now = clock::now();
+        for (auto origin = idle_.begin(); origin != idle_.end();) {
+            auto& kept = origin->second;
+            std::erase_if(kept, [&](std::unique_ptr<Connection>& connection) {
+                if (now - connection->idle_since < options_.idle_limit && still_open(connection->socket)) {
+                    return false;
+                }
+                closed_.fetch_add(1);
+                connection->socket.close();
+                return true;
+            });
+            origin = kept.empty() ? idle_.erase(origin) : std::next(origin);
+        }
+        std::erase_if(resolved_, [&](const auto& entry) { return now - entry.second.first >= options_.resolve_ttl; });
     }
 
     // The most recently used open connection to `origin`, or none.
@@ -313,6 +359,7 @@ private:
     void keep(const std::string& origin, std::unique_ptr<Connection> connection) {
         auto& kept = idle_[origin];
         if (kept.size() >= options_.idle_per_origin) {
+            overflow_.fetch_add(1);
             connection->socket.close();
             return;
         }
@@ -423,11 +470,19 @@ private:
         co_return {{}, reason};
     }
 
+    void finish(const std::shared_ptr<Exchange>& exchange) {
+        {
+            std::lock_guard lock(pending_mutex_);
+            pending_.erase(exchange);
+        }
+        exchange->finished.set();
+    }
+
     boost::capy::task<> perform(std::shared_ptr<Exchange> exchange) {
         Target target;
         if (!parse_plain_url(exchange->request.url, target)) {
             exchange->response.error = "not an absolute http URL";
-            exchange->finished.set();
+            finish(exchange);
             co_return;
         }
         const std::chrono::seconds deadline(exchange->request.timeout_seconds > 0 ? exchange->request.timeout_seconds
@@ -454,7 +509,7 @@ private:
         } else if (connection) {
             keep(target.host + ":" + target.port, std::move(connection));
         }
-        exchange->finished.set();
+        finish(exchange);
     }
 
     PooledObjectTransportOptions options_;
@@ -470,6 +525,11 @@ private:
     std::atomic<std::uint64_t> connections_{0};
     std::atomic<std::uint64_t> reused_{0};
     std::atomic<std::uint64_t> closed_{0};
+    std::atomic<std::uint64_t> overflow_{0};
+    // The requests handed to the worker and not yet answered, answered by shutdown().
+    std::mutex pending_mutex_;
+    std::set<std::shared_ptr<Exchange>> pending_;
+    std::atomic<bool> stopped_{false};
 };
 
 } // namespace
