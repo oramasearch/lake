@@ -9,7 +9,6 @@
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
-#include <zetta/connect/http_transport.hpp>
 
 #include "secrets_crypto.hpp"
 
@@ -165,30 +164,6 @@ liquid::result<nlohmann::json> envelope_value(const ObjectResponse& response, st
     return body.value("value", nlohmann::json::object());
 }
 
-class ZettaHttpObjectTransport final : public ObjectTransport {
-public:
-    liquid::runtime::task<ObjectResponse> exchange(ObjectRequest input) override {
-        const zetta::connect::AsyncHttpTransport& transport =
-            zetta::connect::default_async_http_transport();
-        if (!transport) {
-            co_return ObjectResponse{0, {}, "Zetta HTTP transport is not installed"};
-        }
-        zetta::connect::HttpRequest request;
-        request.method = std::move(input.method);
-        request.url = std::move(input.url);
-        request.headers = std::move(input.headers);
-        request.body = std::move(input.body);
-        request.timeout_seconds = input.timeout_seconds;
-        request.secret_headers = {"Authorization"};
-        auto [transport_error, response] = co_await transport(request);
-        if (transport_error) {
-            co_return ObjectResponse{0, {}, transport_error.message()};
-        }
-        co_return ObjectResponse{response.status, std::move(response.body),
-                                 std::move(response.error)};
-    }
-};
-
 } // namespace
 
 namespace {
@@ -197,7 +172,7 @@ thread_local std::int64_t settle_deadline = 0;
 } // namespace
 
 std::shared_ptr<ObjectTransport> make_zetta_object_transport() {
-    return std::make_shared<ZettaHttpObjectTransport>();
+    return make_pooled_object_transport();
 }
 
 std::string_view object_request_kind_name(ObjectRequestKind kind) {

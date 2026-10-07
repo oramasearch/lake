@@ -226,7 +226,9 @@ rename, transfer, visibility and tombstone capabilities, and lifecycle state on 
 page. Those capabilities use the policy metadata and are recorded by the registry audit stream.
 Platform support links a client-only `zetta-api` from the required `LAKE_ZETTA_SOURCE_DIR`, including
 the native transport's runtime event implementation and sharing Lake's existing Boost.HTTP/Beast2
-stack. It mirrors operator-control deployment, environment, and
+stack. The workspace store does not use Zetta's per-request client: `lake-object-http` keeps
+connections to each workspace Zetta and resolves its name once (lake#544; on dev each resolution
+cost about 18 ms of a 20 ms request). It mirrors operator-control deployment, environment, and
 domain rows into migration `0019_platform`, creates environment policy objects, exposes the eight
 policy-checked platform capabilities, Loki-compatible logs, and the server-rendered environment
 pages. Operator-control outages degrade platform health, preserve stale mirror reads, and refuse

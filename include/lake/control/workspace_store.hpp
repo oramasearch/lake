@@ -62,8 +62,36 @@ public:
     virtual liquid::runtime::task<ObjectResponse> exchange(ObjectRequest request) = 0;
 };
 
-// Zetta's installed outbound HTTP client (zetta::connect, installed by
-// install_zetta_control_transport). The bearer never appears in an error.
+// What a pooled transport has done since it was made (lake#544).
+struct ObjectConnectionStats {
+    std::uint64_t resolutions = 0; // host name resolutions
+    std::uint64_t connections = 0; // TCP connections opened
+    std::uint64_t reused = 0;      // requests sent on a kept connection
+    std::uint64_t closed = 0;      // kept connections found closed, or idle too long, and dropped
+};
+
+struct PooledObjectTransportOptions {
+    // Idle connections kept per origin (host and port); more are closed after their answer.
+    std::size_t idle_per_origin = 32;
+    // A connection idle this long is closed rather than reused.
+    std::chrono::seconds idle_limit{30};
+    // A resolved address is used for new connections this long; one that refuses is resolved again.
+    std::chrono::seconds resolve_ttl{30};
+};
+
+// Lake's client for a workspace Zetta's object routes (lake#544, src/control/object_http.cpp):
+// HTTP/1.1 keep-alive connections kept per origin, TCP_NODELAY, and one name resolution per
+// origin while fresh. A kept connection is reused only when it is still open and silent; one that
+// failed, timed out, or that Zetta answered `Connection: close` on is closed. The transport never
+// sends a request twice: retrying an idempotent request stays ZettaObjectClient's. An https URL
+// goes through Zetta's installed client unpooled. The bearer never appears in an error.
+class PooledObjectTransport : public ObjectTransport {
+public:
+    virtual ObjectConnectionStats stats() const = 0;
+};
+std::shared_ptr<PooledObjectTransport> make_pooled_object_transport(PooledObjectTransportOptions options = {});
+
+// The transport lake gives every workspace store: make_pooled_object_transport().
 std::shared_ptr<ObjectTransport> make_zetta_object_transport();
 
 // Where a workspace Zetta answers and the credential lake presents to it (the operator's mounted

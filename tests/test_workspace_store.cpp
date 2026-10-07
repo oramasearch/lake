@@ -41,6 +41,7 @@
 #include <liquid/store.hpp>
 #include <nlohmann/json.hpp>
 #include <pqxx/pqxx>
+#include <zetta/connect/http_transport.hpp>
 
 #include "audit_test_support.hpp"
 #include "lake/api/capabilities.hpp"
@@ -3030,6 +3031,36 @@ std::chrono::milliseconds measured_fsync_cost() {
     return std::chrono::milliseconds(value != nullptr && *value != '\0' ? std::atoi(value) : 0);
 }
 
+// The transport lake used before lake#544: Zetta's connector client, which resolves the host, dials
+// and closes for every request. Kept here to measure against.
+class UnpooledTransport final : public lake::control::ObjectTransport {
+public:
+    liquid::runtime::task<lake::control::ObjectResponse> exchange(lake::control::ObjectRequest input) override {
+        const zetta::connect::AsyncHttpTransport& transport = zetta::connect::default_async_http_transport();
+        if (!transport) {
+            co_return lake::control::ObjectResponse{0, {}, "Zetta HTTP transport is not installed"};
+        }
+        zetta::connect::HttpRequest request;
+        request.method = std::move(input.method);
+        request.url = std::move(input.url);
+        request.headers = std::move(input.headers);
+        request.body = std::move(input.body);
+        request.timeout_seconds = input.timeout_seconds;
+        request.secret_headers = {"Authorization"};
+        auto [transport_error, response] = co_await transport(request);
+        if (transport_error) {
+            co_return lake::control::ObjectResponse{0, {}, transport_error.message()};
+        }
+        co_return lake::control::ObjectResponse{response.status, std::move(response.body), std::move(response.error)};
+    }
+};
+
+// LAKE_TEST_ZETTA_TRANSPORT=unpooled measures the transport before lake#544; anything else, lake's.
+bool measuring_unpooled() {
+    const char* value = std::getenv("LAKE_TEST_ZETTA_TRANSPORT");
+    return value != nullptr && std::string_view(value) == "unpooled";
+}
+
 // What lake's commit_repository_files does for one regular file (SyncStore::commit_repository_files):
 // remove the path (absent is fine), write it, cut the change.
 liquid::result<liquid::change_id> commit_one_file(liquid::repository& repository, const std::string& path,
@@ -3057,10 +3088,15 @@ TEST(WorkspaceStoreZetta, AOneFileCommitsRequestsAreCountedAndTimed) {
     const auto round_trip = measured_round_trip();
     const auto fsync_cost = measured_fsync_cost();
     lake::test::LatencyProxy proxy(zetta.port, round_trip, fsync_cost);
-    auto tracing = std::make_shared<TracingTransport>(lake::control::make_zetta_object_transport());
+    // Lake's transport (lake#544) unless LAKE_TEST_ZETTA_TRANSPORT=unpooled; a host name, as lake's
+    // endpoint is, so a new connection costs a resolution.
+    const bool unpooled = measuring_unpooled();
+    auto pooled = lake::control::make_pooled_object_transport();
+    auto tracing = unpooled ? std::make_shared<TracingTransport>(std::make_shared<UnpooledTransport>())
+                            : std::make_shared<TracingTransport>(pooled);
     const std::string workspace = lake::control::new_uuid_v4();
     auto client = std::make_shared<ZettaObjectClient>(
-        tracing, ObjectEndpoint{"http://127.0.0.1:" + std::to_string(proxy.port()), zetta.token});
+        tracing, ObjectEndpoint{"http://localhost:" + std::to_string(proxy.port()), zetta.token});
     ASSERT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
     auto owner = std::make_shared<ZettaStoreOwner>(client, 30s);
     liquid::store_options options;
@@ -3092,9 +3128,10 @@ TEST(WorkspaceStoreZetta, AOneFileCommitsRequestsAreCountedAndTimed) {
         ASSERT_TRUE(liquid::runtime::block_on(backend->make_durable()));
     }
 
-    std::printf("\nlake#527, lake#535: one-file commits on a workspace store, real Zetta, %lld ms round "
-                "trip, %lld ms per durable request\n",
-                static_cast<long long>(round_trip.count()), static_cast<long long>(fsync_cost.count()));
+    std::printf("\nlake#527, lake#535, lake#544: one-file commits on a workspace store, real Zetta, %lld ms "
+                "round trip, %lld ms per durable request, %s transport\n",
+                static_cast<long long>(round_trip.count()), static_cast<long long>(fsync_cost.count()),
+                unpooled ? "unpooled (before lake#544)" : "pooled");
     std::printf("| Commit | ms | in requests, ms | requests | durable | sequential rounds | by kind |\n"
                 "|---|---:|---:|---:|---:|---:|---|\n");
     double steady_ms = 0;
@@ -3145,6 +3182,60 @@ TEST(WorkspaceStoreZetta, AOneFileCommitsRequestsAreCountedAndTimed) {
         EXPECT_EQ(proxy.durable_requests(), tracing->durable()) << "the proxy saw every durable request";
     }
     ASSERT_TRUE(liquid::runtime::block_on(store->close()));
+
+    // lake#538: the first commit after the store is opened again by a new process, its window
+    // cache and directory cold. The open (with its lease) is timed apart: lake does it in the
+    // background before it serves (lake#536).
+    const std::uint64_t requests_before_open = client->counters()->requests.load();
+    auto open_started = std::chrono::steady_clock::now();
+    auto cold_owner = std::make_shared<ZettaStoreOwner>(client, 30s);
+    auto cold_backend = std::make_shared<ZettaObjectBackend>(
+        client, ZettaObjectBackendOptions{.workspace_id = workspace, .instance_kek = std::string(kek)});
+    liquid::store_options cold_options;
+    cold_options.backend = cold_backend;
+    cold_options.owner = cold_owner;
+    cold_options.owner_wait = 5s;
+    auto cold_store =
+        liquid::runtime::block_on(liquid::store::open(zetta.directory / "unused", std::move(cold_options)));
+    ASSERT_TRUE(cold_store) << cold_store.error().message;
+    const double open_ms = milliseconds_since(open_started);
+    const std::uint64_t open_requests = client->counters()->requests.load() - requests_before_open;
+    lake::control::ObjectRequestTally cold_tally;
+    std::array<std::uint64_t, lake::control::object_request_kinds> cold_count{};
+    std::array<std::uint64_t, lake::control::object_request_kinds> cold_nanoseconds{};
+    for (std::size_t index = 0; index < cold_count.size(); ++index) {
+        cold_count[index] = client->counters()->by_kind.count[index].load();
+        cold_nanoseconds[index] = client->counters()->by_kind.nanoseconds[index].load();
+    }
+    const std::uint64_t cold_rounds_before = tracing->rounds();
+    const auto cold_started = std::chrono::steady_clock::now();
+    liquid::repository_options cold_repository_options;
+    cold_repository_options.store = &*cold_store;
+    auto reopened = liquid::runtime::block_on(liquid::repository::open(identifier, cold_repository_options));
+    ASSERT_TRUE(reopened) << reopened.error().message;
+    auto cold_change = commit_one_file(*reopened, "notes/after-reopen.md", bytes_of("the first commit after an open\n"));
+    ASSERT_TRUE(cold_change) << cold_change.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(cold_backend->make_durable()));
+    const double cold_ms = milliseconds_since(cold_started);
+    cold_tally.add_difference(client->counters()->by_kind, cold_count, cold_nanoseconds);
+    std::printf("\nlake#538: open again, %.0f ms and %llu requests; its first commit %.0f ms, %.0f ms in %llu "
+                "requests, %llu sequential rounds, %s\n",
+                open_ms, static_cast<unsigned long long>(open_requests), cold_ms,
+                static_cast<double>(cold_tally.total_nanoseconds()) / 1e6,
+                static_cast<unsigned long long>(cold_tally.total_requests()),
+                static_cast<unsigned long long>(tracing->rounds() - cold_rounds_before), cold_tally.summary().c_str());
+    if (!unpooled) {
+        // lake#544: one resolution and a connection per request in flight at once, not per request.
+        const auto stats = pooled->stats();
+        std::printf("lake#544 connections: %llu requests, %llu resolutions, %llu connections, %llu reused\n",
+                    static_cast<unsigned long long>(client->counters()->requests.load()),
+                    static_cast<unsigned long long>(stats.resolutions),
+                    static_cast<unsigned long long>(stats.connections),
+                    static_cast<unsigned long long>(stats.reused));
+        EXPECT_LT(stats.connections * 10, client->counters()->requests.load());
+        EXPECT_LE(stats.resolutions, stats.connections);
+    }
+    ASSERT_TRUE(liquid::runtime::block_on(cold_store->close()));
 }
 
 // ---- lake#527: a crash keeps what the last barrier acknowledged --------------------------------

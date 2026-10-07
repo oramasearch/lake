@@ -203,3 +203,8 @@ Since lake#535 its writes go without durability and in issue order, liquid's bar
 and `sync()`/`make_durable()` end an operation with one Zetta `:barrier`; the owner's release
 syncs what a closed store's backend still holds. See
 [workspace-store.md](../../docs/architecture/workspace-store.md).
+`object_http.cpp` (lake#544, its own library `lake-object-http`) is the workspace store's HTTP
+client, `make_pooled_object_transport`: keep-alive connections per workspace Zetta, one name
+resolution per origin while fresh, `TCP_NODELAY`, and a kept connection reused only while it is
+open and silent. It never sends a request twice; `ZettaObjectClient` keeps the retries. See
+[workspace-store.md](../../docs/architecture/workspace-store.md#per-request-cost-lake544).

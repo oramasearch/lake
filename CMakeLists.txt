@@ -276,7 +276,17 @@ target_compile_definitions(lake-core PRIVATE LAKE_BUILD_REVISION=\"${LAKE_BUILD_
 target_link_libraries(lake-core
   PUBLIC nlohmann_json::nlohmann_json liquid::liquid orama::oramacore-cpp OpenSSL::Crypto
   PRIVATE liquid_frontend_syntax)
-target_link_libraries(lake-core PRIVATE zetta-api)
+target_link_libraries(lake-core PRIVATE zetta-api lake-object-http)
+
+# lake-object-http: the workspace store's keep-alive HTTP client for a workspace Zetta's object
+# routes (lake#544). Like zetta-api it names Boost.HTTP and Corosio inside its one translation unit
+# and links them PRIVATE, so no HTTP type reaches lake-core's surface.
+add_library(lake-object-http STATIC src/control/object_http.cpp)
+target_compile_features(lake-object-http PRIVATE cxx_std_26)
+target_include_directories(lake-object-http PRIVATE include)
+target_link_libraries(lake-object-http PRIVATE
+  liquid::liquid zetta-api Boost::http Boost::corosio)
+target_compile_options(lake-object-http PRIVATE -Werror=return-type)
 
 # lake-control-postgres: the one library that names libpqxx and OpenSSL for persistent audit keys.
 add_library(lake-control-postgres STATIC
