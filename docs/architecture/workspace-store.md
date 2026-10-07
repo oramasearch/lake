@@ -545,7 +545,8 @@ read took 3 ms. `WorkspaceStoreZetta.AOneFileCommitsRequestsAreCountedAndTimed` 
 commit (remove the path, write it, cut, as `SyncStore::commit_repository_files` does) through a
 liquid repository on the backend, against a real Zetta behind a loopback proxy that adds a round
 trip (`LAKE_TEST_ZETTA_RTT_MS`, default 10 ms; the cluster's round trip to a workspace Zetta is
-assumed to be 5 to 10 ms, not measured). It counts the requests of each kind one commit sends and
+assumed to be 5 to 10 ms; lake#544 measured it on dev at under 0.2 ms, see
+[Per-request cost](#per-request-cost-lake544)). It counts the requests of each kind one commit sends and
 prints them in order. Apple M3 Max, Zetta `f6a82675`, liquid `8955519`; the fourth commit (the
 store and repository open, directory and headers known):
 
@@ -675,6 +676,116 @@ trip a one-file commit should now cost about its request count times the round t
 about 0.25 to 0.3 s for dev's 104 requests. The measurement on dev belongs in the deployment record
 once deployed.
 
+## Per-request cost (lake#544)
+
+**On dev after lake#535** (lake `20261007a`, `777e6e3`, Zetta `dev-5f70b306`), a one-file commit was
+1.7 s for 77 requests, about 20 ms each, although none of them asked for an fsync:
+
+```
+total;dur=1712  store;dur=1665;desc="77 requests"  store_put;dur=944;desc="49"  store_barrier;dur=127;desc="2"  store_delete;dur=522;desc="23"
+```
+
+**Where the 20 ms went** (measured on dev on 2026-10-07, read-only, from a pod in the `lake`
+namespace and from lake's own pod):
+
+| Step | Cost on dev |
+|---|---:|
+| Resolving `prod-ws-6bb777ba498a-zetta.prod-ws-6bb777ba498a.svc.cluster.local` with glibc in lake's pod | 5 to 32 ms, about 18 ms on average (10 samples) |
+| The same name with a trailing dot (no search domains) | 1.7 to 6.8 ms, including the process start of `getent` |
+| TCP connect to a Zetta Service address | 0.08 ms |
+| A whole request on a fresh connection (connect, send, Zetta's answer) | 0.15 ms |
+| A request on a kept connection | 0.05 ms |
+
+The pod's resolver has `options ndots:5` and four search domains. The workspace Zetta's name has
+four dots, so every lookup first tries it under each search domain (`lake.svc.cluster.local`,
+`svc.cluster.local`, `cluster.local` and the Azure host domain, which is forwarded off the cluster),
+A and AAAA each, before the absolute name. Lake sent every request through Zetta's connector client
+(`zetta::connect`, `src/core/api/native_http_transport.cpp` of the pinned Zetta), which resolves,
+dials, sends `Connection: close` and closes for each request: so each request paid one
+resolution, about 18 ms of its 20. Connection setup and Zetta's own work were well under 1 ms. The
+workspace Zetta is reached over plain HTTP inside the cluster, so there is no TLS handshake. The
+probe pod could not reach the workspace Zetta itself (its NetworkPolicy admits only lake's pods),
+so the connect and request figures are from the bus Zetta in the `lake` namespace, the same binary
+on the same network; the probe used no credential.
+
+**What changed.** Lake has its own client for the object routes, `make_pooled_object_transport`
+(`src/control/object_http.cpp`, its own library `lake-object-http`), and every workspace store
+uses it (`make_zetta_object_transport`):
+- **HTTP/1.1 keep-alive.** Connections are kept per origin (host and port; up to 32 idle), one
+  request at a time each, and a request in flight while the others are busy opens another. Zetta's
+  HTTP server (Beast2's `http_worker`) keeps a connection open between requests and closes none
+  for being idle.
+- **One resolution per origin** while it is younger than 30 s, shared by dials that need it at
+  once, and only when a new connection is dialed. An address that refuses is resolved again once.
+  When the request that started a shared resolution is cancelled (its timeout), the others waiting
+  on it resolve again instead of failing with its cancellation.
+- **`TCP_NODELAY`** on every connection, so a request's header and body are not held apart by
+  Nagle's algorithm on a kept connection.
+- **What is not reused.** A kept connection is reused only when it is still open and silent (a
+  non-blocking peek), and one idle longer than 30 s is closed. A connection whose request failed or
+  timed out, or that Zetta answered `Connection: close` on, is closed.
+- **A peer that went silent.** When a request on a kept connection fails or times out, every other
+  connection kept to that origin is closed too, so the retry dials afresh rather than waiting on
+  another connection to the same dead peer. A dial gets 2 s (`connect_timeout`); one that gets no
+  answer fails then, not at the request's timeout, and its address is resolved again next time.
+  Every connection has TCP keepalive probes (after 10 s idle, every 5 s, 3 probes where the
+  platform lets lake set them), so a kept connection to a vanished peer is found dead.
+- **Nothing lingers.** Every 10 s (`sweep_interval`) the client closes, for every origin, kept
+  connections idle past 30 s or found closed, and forgets resolutions past 30 s: an origin no
+  longer used (a deleted workspace's Zetta) keeps no socket. Connections are kept oldest first and
+  the most recent is reused, so the sweep takes the old ones. Connections closed after their answer
+  because the origin already keeps 32 are counted (`overflow`).
+- **A request that is not retried gets a new connection.** `ZettaObjectClient` sends the requests
+  it makes once (a conditional create, a lease acquisition or renewal, a usage read) with
+  `fresh_connection`, so a kept connection Zetta closed just as the request went out cannot fail
+  them. Its connection is kept afterwards like any other.
+- **Nothing is sent that lake did not ask for.** An unknown method, or a header that cannot be set
+  (a value with a line break, a name with a space), fails the request before anything is sent; a
+  header is never dropped. The error names the header, never its value.
+- **Framing.** Content-Length and chunked answers are read to their end and leave the connection
+  kept; a 204 too. A body shorter than its Content-Length is a transport failure, and a body that
+  runs to the close leaves nothing to keep. Bytes after an answer are never served to the next
+  request. An interim (1xx) answer, which lake never asks for, is a transport failure and its
+  connection is not kept. IPv6 addresses connect (the socket opens for the endpoint's family).
+- **Stopping.** `shutdown()` (the destructor calls it) answers every request still waiting as a
+  transport failure, and later requests fail at once.
+- **No request is sent twice by the transport.** A request on a kept connection that fails is a
+  transport failure like any other; the retry of an idempotent request stays
+  `ZettaObjectClient::send`'s. So the ordering, fencing and durability of lake#527, lake#535 and
+  zetta#1235 are unchanged: the same requests are sent in the same order, one at a time where they
+  were, with the same queries and headers.
+- An `https` endpoint (none today) still goes through Zetta's client, unpooled.
+
+**Measured** (`WorkspaceStoreZetta.AOneFileCommitsRequestsAreCountedAndTimed`, Apple M3 Max, real
+Zetta built from zetta#1235's branch at `c4a62169` (merged into Zetta dev as `5f70b306`), liquid `8955519`, `LAKE_TEST_ZETTA_SEED_COMMITS=20`,
+the endpoint named `localhost` so that a dial resolves; `LAKE_TEST_ZETTA_TRANSPORT=unpooled`
+measures the client before lake#544):
+
+| | 0 ms round trip | 2 ms round trip |
+|---|---:|---:|
+| Steady one-file commit, before | 567 to 7,514 ms (one commit 0.3 s to 13.8 s in requests) | 679 to 802 ms |
+| Steady one-file commit, after | 101 to 108 ms, 33 to 35 ms in about 100 requests | 349 to 394 ms |
+| First commit after the store is opened again, before | 1,215 ms | 920 ms |
+| First commit after the store is opened again, after | 122 ms | 521 ms |
+
+After, about 8,500 requests of that run went over 16 connections and one resolution. Before, each
+request opened a connection, and on a Mac the loopback churn alone made the figures vary by an
+order of magnitude. Locally a request costs about 0.33 ms in all; the proxy's round trip comes on
+top.
+
+On dev the resolution was the cost, so a commit should come down to its request count times Zetta's
+answer time, plus the one `:barrier`'s fsync (about 30 ms): about 0.1 to 0.2 s for 77 requests,
+against 1.7 s. The cold first commit of lake#538 (2,647 requests at about 28 ms) should fall by the
+same factor, to a few seconds. Both belong in the deployment record once measured on dev.
+
+**What was not done for lake#538.** Its reads are liquid's, one at a time: each is a separate small
+object (an index run, the object map, a repository document), so the backend's window is the whole
+object and there is no next window to read ahead. Reading them concurrently needs liquid to issue
+them together; prefetching them needs to know which objects the first commit reads, which the
+counts by kind in `Server-Timing` give once the transport cost is gone. A read across several
+missing 4 MiB windows of one large object (a Drive download) is still fetched window by window;
+at about 1 ms a request that costs a few ms per 100 MiB.
+
 ## Image blobs (lake#383 phase B)
 
 `put_workspace_blob`, `admit_workspace_stream`, `workspace_blob_present` and `read_workspace_blob`
@@ -776,7 +887,9 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreRemoval.AnUnassignedRepositoryIsRefused` | on PostgreSQL, a repository without a workspace refuses the removal although the space's only workspace is switched |
 | `WorkspaceStoreZetta.TheBackendOnARealZettaHoldsOnlyCiphertextAndItsLatencyIsMeasured` | the same on a real Zetta, and the latency table |
 | `WorkspaceStoreZetta.TheSearchIndexOnARealZettaIsSealedReloadsAndIsRebuilt` | a workspace's search index on a real Zetta: sealed, reloaded without rewriting, rebuilt once wiped |
-| `WorkspaceStoreZetta.AOneFileCommitsRequestsAreCountedAndTimed` | lake#527: one-file commits on a real Zetta behind a round trip, requests by kind, rounds, the request trace; lake#535: each commit with lake's sync, an fsync cost per durable request (`LAKE_TEST_ZETTA_FSYNC_MS`), a repository with history (`LAKE_TEST_ZETTA_SEED_COMMITS`), and one durable request per commit |
+| `WorkspaceStoreZetta.AOneFileCommitsRequestsAreCountedAndTimed` | lake#527: one-file commits on a real Zetta behind a round trip, requests by kind, rounds, the request trace; lake#535: each commit with lake's sync, an fsync cost per durable request (`LAKE_TEST_ZETTA_FSYNC_MS`), a repository with history (`LAKE_TEST_ZETTA_SEED_COMMITS`), and one durable request per commit; lake#544: the transport before it (`LAKE_TEST_ZETTA_TRANSPORT=unpooled`) or lake's, with its connections and resolutions (fewer than one connection per ten requests); lake#538: the first commit after the store is opened again |
+| `ObjectHttp.*` (`tests/test_object_http.cpp`) | lake#544: against a loopback server, sequential requests share one connection and one resolution; overlapping requests each get a connection and keep it; a connection the server closed, one answered `Connection: close`, one idle too long and one whose request timed out are not reused; no listener is a transport failure; the bearer never appears in an error; a request that times out on a kept connection drops the origin's other kept connections; a dial to a silent peer fails within `connect_timeout` and resolves again; a client over a silent Zetta fails `unavailable` within a bounded time; the sweep closes an origin no longer used and only the old connections of one in use; a connection past the pool's bound is closed and counted; stopping the transport answers a waiting caller; `fresh_connection` dials, and the client asks for it for exactly its single-attempt requests; an unknown method and a header that cannot be set fail with nothing sent; an interim answer leaves its connection unkept; an IPv6 address connects; chunked, 204, extra-bytes, short and run-to-close answers are framed and nothing passes to the next request; a shared resolution cancelled with its request is done again for the others waiting on it (`resolve_delay`, tests only); 200 rounds of a request right after the server closes its connections: a fresh-connection request never fails, any other answers or fails as a transport failure and never gets another request's answer |
+| `WorkspaceStoreZetta.ALostAnswerOverThePooledTransportIsRetriedOrFailsTheBackend` | lake#544 end to end on a real Zetta through the pooled transport and a proxy that loses answers: a PUT and a DELETE whose answers were lost are retried harmlessly on a new connection; a conditional create whose answer was lost answers `unavailable`, fails the backend, and a reopened backend holds the object |
 | `WorkspaceStoreBackend.ACrashAnywhereKeepsAPrefixOfTheIssueOrderPastTheLastBarrier` | lake#527: 200 random sequences of held puts, immediate puts, appends past the threshold, conditional creates, removes, repeated bytes and crossed bounds, with liquid's barriers and lake's syncs between (lake#535), ending in a sync that is answered, stopped part way, or loses requests or answers at random, then a crash keeping a prefix of the bucket's log: what survives is a prefix of the issue order at least as long as the last answered sync |
 | `WorkspaceStoreBackend.AnIntervalsWritesAreSentOneAtATimeInIssueOrder` | lake#527: a marker, a pack, an index run with appends, a removal and a manifest reach Zetta in that order, never two at once; lake#535: liquid's barriers between them send nothing, and the sync sends one `:barrier` |
 | `WorkspaceStoreBackend.AWriteWhoseAnswerWasLostIsRetriedOrFailsTheBackend` | lake#527: a durable PUT and a DELETE whose answers were lost after they landed are retried harmlessly; a conditional create that landed answers `unavailable`, fails the backend, and the reopened store holds it |

@@ -627,4 +627,14 @@ round trip in front of it, `LAKE_TEST_ZETTA_RTT_MS` (default 10) for
 `WorkspaceStoreZetta.AOneFileCommitsRequestsAreCountedAndTimed`, and holds each request that asks
 for an fsync (`:barrier`, `durable=true`) `LAKE_TEST_ZETTA_FSYNC_MS` longer (default 0; dev's disk
 is about 30, lake#535). `LAKE_TEST_ZETTA_SEED_COMMITS` gives the measured repository that many
-earlier commits of 8 files over 16 directories first.
+earlier commits of 8 files over 16 directories first. `LAKE_TEST_ZETTA_TRANSPORT=unpooled` measures
+that test with the transport lake used before lake#544 (Zetta's connector client, a resolution and a
+connection per request); otherwise it uses lake's pooled transport, prints its connections and
+resolutions, and then times the first commit after the store is opened again (lake#538).
+`test_object_http.cpp` (lake#544) runs the pooled transport (`make_pooled_object_transport`)
+against a loopback HTTP/1.1 server that counts its connections: reuse, concurrency, a connection
+closed by the server, `Connection: close`, the idle limit, a timeout, and no listener; a silent peer,
+the sweep, the pool's bound, shutdown, fresh connections, refused methods and headers, framing,
+IPv6, a cancelled shared resolution, and the close race (200 rounds). `LatencyProxy::lose_next_answers`
+drops the next answers from Zetta and closes their connections, for
+`WorkspaceStoreZetta.ALostAnswerOverThePooledTransportIsRetriedOrFailsTheBackend`.

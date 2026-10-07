@@ -46,6 +46,10 @@ struct ObjectRequest {
     std::vector<std::pair<std::string, std::string>> headers;
     std::string body;
     int timeout_seconds = 60;
+    // Send it on a new connection, never a kept one (lake#544): ZettaObjectClient asks for it for a
+    // request it does not retry (a conditional create, a lease acquisition or renewal, a usage
+    // read), so a kept connection Zetta closed as the request was sent cannot fail it.
+    bool fresh_connection = false;
 };
 
 // `error` is a transport failure (no answer); otherwise `status` and `body` are Zetta's.
@@ -62,8 +66,48 @@ public:
     virtual liquid::runtime::task<ObjectResponse> exchange(ObjectRequest request) = 0;
 };
 
-// Zetta's installed outbound HTTP client (zetta::connect, installed by
-// install_zetta_control_transport). The bearer never appears in an error.
+// What a pooled transport has done since it was made (lake#544).
+struct ObjectConnectionStats {
+    std::uint64_t resolutions = 0; // host name resolutions
+    std::uint64_t connections = 0; // TCP connections opened
+    std::uint64_t reused = 0;      // requests sent on a kept connection
+    std::uint64_t closed = 0;      // kept connections found closed, or idle too long, and dropped
+    std::uint64_t overflow = 0;    // connections closed after their answer because the pool was full
+};
+
+struct PooledObjectTransportOptions {
+    // Idle connections kept per origin (host and port); more are closed after their answer.
+    std::size_t idle_per_origin = 32;
+    // A connection idle this long is closed rather than reused.
+    std::chrono::milliseconds idle_limit{30'000};
+    // A resolved address is used for new connections this long; one that refuses is resolved again.
+    std::chrono::milliseconds resolve_ttl{30'000};
+    // A dial that gets no answer this soon fails, and the address is resolved again next time: a
+    // silent dead peer costs this, not the request's whole timeout.
+    std::chrono::milliseconds connect_timeout{2'000};
+    // How often kept connections past idle_limit, and resolutions past resolve_ttl, are dropped for
+    // every origin, including one no longer used.
+    std::chrono::milliseconds sweep_interval{10'000};
+    // Tests only: each name resolution waits this long first, so a test can cancel one in flight.
+    std::chrono::milliseconds resolve_delay{0};
+};
+
+// Lake's client for a workspace Zetta's object routes (lake#544, src/control/object_http.cpp):
+// HTTP/1.1 keep-alive connections kept per origin, TCP_NODELAY, and one name resolution per
+// origin while fresh. A kept connection is reused only when it is still open and silent; one that
+// failed, timed out, or that Zetta answered `Connection: close` on is closed. The transport never
+// sends a request twice: retrying an idempotent request stays ZettaObjectClient's. An https URL
+// goes through Zetta's installed client unpooled. The bearer never appears in an error.
+class PooledObjectTransport : public ObjectTransport {
+public:
+    virtual ObjectConnectionStats stats() const = 0;
+    // Stops the client: every request it holds is answered as a transport failure, and later ones
+    // fail at once. The destructor does it.
+    virtual void shutdown() = 0;
+};
+std::shared_ptr<PooledObjectTransport> make_pooled_object_transport(PooledObjectTransportOptions options = {});
+
+// The transport lake gives every workspace store: make_pooled_object_transport().
 std::shared_ptr<ObjectTransport> make_zetta_object_transport();
 
 // Where a workspace Zetta answers and the credential lake presents to it (the operator's mounted

@@ -179,7 +179,8 @@ standard cron fields, refusing a schedule that can never fire) and the bounds
 `request_volume_snapshot` and `volume_snapshots`.
 `workspace_store.hpp` is a workspace's liquid store in its workspace Zetta (lake#380,
 [workspace-store.md](../../../docs/architecture/workspace-store.md)): `ObjectTransport` (raw HTTP to
-Zetta's object routes; `make_zetta_object_transport` uses Zetta's installed client), `ZettaObjectClient`
+Zetta's object routes; `make_zetta_object_transport` is `make_pooled_object_transport`, lake's
+keep-alive client, lake#544, with `ObjectConnectionStats`), `ZettaObjectClient`
 (one bucket, liquid's error codes), `WorkspaceStoreCipher` (the data key wrapped under a key derived
 from `LAKE_INSTANCE_KEK`, AES-256-GCM blocks), `ZettaObjectBackend` (liquid's `store_backend`: the
 encrypted block layout, buffered appends, tails, the window cache, the bucket directory, `failed()`,
