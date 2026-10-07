@@ -633,4 +633,8 @@ connection per request); otherwise it uses lake's pooled transport, prints its c
 resolutions, and then times the first commit after the store is opened again (lake#538).
 `test_object_http.cpp` (lake#544) runs the pooled transport (`make_pooled_object_transport`)
 against a loopback HTTP/1.1 server that counts its connections: reuse, concurrency, a connection
-closed by the server, `Connection: close`, the idle limit, a timeout, and no listener.
+closed by the server, `Connection: close`, the idle limit, a timeout, and no listener; a silent peer,
+the sweep, the pool's bound, shutdown, fresh connections, refused methods and headers, framing,
+IPv6, a cancelled shared resolution, and the close race (200 rounds). `LatencyProxy::lose_next_answers`
+drops the next answers from Zetta and closes their connections, for
+`WorkspaceStoreZetta.ALostAnswerOverThePooledTransportIsRetriedOrFailsTheBackend`.

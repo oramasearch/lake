@@ -3238,6 +3238,62 @@ TEST(WorkspaceStoreZetta, AOneFileCommitsRequestsAreCountedAndTimed) {
     ASSERT_TRUE(liquid::runtime::block_on(cold_store->close()));
 }
 
+// lake#544 end to end: answers lost after a real Zetta applied the request, through the pooled
+// transport, as the fake's AWriteWhoseAnswerWasLostIsRetriedOrFailsTheBackend has them.
+TEST(WorkspaceStoreZetta, ALostAnswerOverThePooledTransportIsRetriedOrFailsTheBackend) {
+    RealZetta zetta;
+    if (!zetta.start()) {
+        GTEST_SKIP() << "set LAKE_TEST_ZETTA_BINARY to a zetta built from origin/dev";
+    }
+    lake::test::LatencyProxy proxy(zetta.port, 0ms);
+    auto pooled = lake::control::make_pooled_object_transport();
+    auto client = std::make_shared<ZettaObjectClient>(
+        pooled, ObjectEndpoint{"http://127.0.0.1:" + std::to_string(proxy.port()), zetta.token});
+    ASSERT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
+    const std::string workspace = lake::control::new_uuid_v4();
+    const auto backend_over = [&](bool create_key) {
+        ZettaObjectBackendOptions options = small_blocks();
+        options.workspace_id = workspace;
+        options.instance_kek = std::string(kek);
+        options.create_key = create_key;
+        return std::make_shared<ZettaObjectBackend>(client, options);
+    };
+    auto backend = backend_over(true);
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", bytes_of("first"))));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/b", bytes_of("second"))));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
+
+    // A held put's PUT lands on Zetta, its answer is lost (and its kept connection with it); the
+    // retry lands again on a new connection.
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", bytes_of("replaced"))));
+    const auto connections_before = pooled->stats().connections;
+    proxy.lose_next_answers(1);
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
+    EXPECT_GT(pooled->stats().connections, connections_before);
+    EXPECT_EQ(read(*backend, "objects/a", 0, 8), bytes_of("replaced"));
+    // A DELETE lands, its answer is lost, the retry answers 404, which is the removal.
+    proxy.lose_next_answers(1);
+    ASSERT_TRUE(liquid::runtime::block_on(backend->remove("objects/b")));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
+    EXPECT_FALSE(backend->failed());
+    auto reopened = backend_over(false);
+    EXPECT_EQ(read(*reopened, "objects/a", 0, 8), bytes_of("replaced"));
+    EXPECT_EQ(size_of(*reopened, "objects/b"), 0U);
+
+    // A conditional create that landed but whose answer was lost is not retried: unavailable, the
+    // backend failed, and a reopened backend holds the object.
+    proxy.lose_next_answers(1);
+    const auto created = liquid::runtime::block_on(backend->put_if_absent("objects/c", bytes_of("made")));
+    ASSERT_FALSE(created);
+    EXPECT_EQ(created.error().code, liquid::errc::unavailable);
+    EXPECT_TRUE(backend->failed());
+    auto after = backend_over(false);
+    EXPECT_EQ(read(*after, "objects/c", 0, 4), bytes_of("made"));
+    const auto again = liquid::runtime::block_on(after->put_if_absent("objects/c", bytes_of("made")));
+    ASSERT_FALSE(again);
+    EXPECT_EQ(again.error().code, liquid::errc::already_exists);
+}
+
 // ---- lake#527: a crash keeps what the last barrier acknowledged --------------------------------
 
 using ObjectState = std::optional<std::vector<std::byte>>;

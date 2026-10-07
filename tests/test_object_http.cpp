@@ -333,8 +333,8 @@ TEST(ObjectHttp, AConnectionTheServerClosedIsNotReused) {
     auto transport = lake::control::make_pooled_object_transport();
     EXPECT_EQ(send(*transport, request_to(server.url("/a"))).status, 200);
     server.close_connections();
+    // Long enough for the close to reach the client: the peek before reuse sees it.
     std::this_thread::sleep_for(50ms);
-    // A PATCH, which the transport must not send on a closed connection and then lose.
     auto answer = send(*transport, request_to(server.url("/b"), "PATCH", "appended"));
     EXPECT_TRUE(answer.error.empty()) << answer.error;
     EXPECT_EQ(answer.status, 200);
@@ -343,6 +343,36 @@ TEST(ObjectHttp, AConnectionTheServerClosedIsNotReused) {
     EXPECT_EQ(stats.connections, 2U);
     EXPECT_EQ(stats.reused, 0U);
     EXPECT_EQ(server.requests(), 2);
+}
+
+// The race the peek cannot close: the server closes its connections and a request follows at
+// once. A request the client sends once asks for a fresh connection and is never lost; any other
+// request either answers or fails as a transport failure (which ZettaObjectClient retries for an
+// idempotent request), and never receives another request's answer.
+TEST(ObjectHttp, ARequestRightAfterTheServerClosesItsConnectionsIsNeverLostOrMisanswered) {
+    LoopbackServer server;
+    auto transport = lake::control::make_pooled_object_transport();
+    int failed_unflagged = 0;
+    for (int round = 0; round < 200; ++round) {
+        const std::string tag = std::to_string(round);
+        ASSERT_EQ(send(*transport, request_to(server.url("/keep-" + tag))).status, 200);
+        server.close_connections();
+        auto once = request_to(server.url("/once-" + tag), "PATCH", "appended");
+        once.fresh_connection = true;
+        auto answer = send(*transport, std::move(once));
+        ASSERT_EQ(answer.status, 200) << "round " << round << ": " << answer.error;
+        EXPECT_EQ(answer.body, "PATCH /once-" + tag + " 8");
+        server.close_connections();
+        auto other = send(*transport, request_to(server.url("/other-" + tag)));
+        if (other.status == 0) {
+            EXPECT_NE(other.error, "");
+            ++failed_unflagged;
+        } else {
+            EXPECT_EQ(other.status, 200);
+            EXPECT_EQ(other.body, "GET /other-" + tag + " 0");
+        }
+    }
+    std::printf("requests on a just-closed kept connection that failed: %d of 200\n", failed_unflagged);
 }
 
 TEST(ObjectHttp, AConnectionAnsweredWithCloseIsNotKept) {

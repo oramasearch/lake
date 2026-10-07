@@ -87,6 +87,13 @@ public:
         return durable_requests_.load();
     }
 
+    // The next `count` answers are lost (lake#544): the first bytes of each from Zetta are dropped
+    // and that connection is closed both ways, so the request was applied and the client never
+    // hears.
+    void lose_next_answers(int count) {
+        lose_answers_.fetch_add(count);
+    }
+
 private:
     using clock = std::chrono::steady_clock;
 
@@ -98,6 +105,8 @@ private:
         std::chrono::microseconds delay{};
         std::chrono::microseconds durable_delay{};
         std::atomic<std::uint64_t>* durable_requests = nullptr;
+        // Set on an answer pipe: answers still to lose.
+        std::atomic<int>* lose_answers = nullptr;
         // The request being read: its line and headers so far, then the body bytes still to skip.
         std::string head;
         std::uint64_t body_left = 0;
@@ -125,6 +134,20 @@ private:
                     closed = true;
                     ready.notify_all();
                     return;
+                }
+                if (lose_answers != nullptr) {
+                    int left = lose_answers->load();
+                    while (left > 0 && !lose_answers->compare_exchange_weak(left, left - 1)) {
+                    }
+                    if (left > 0) {
+                        // The answer is dropped and the client's connection closed.
+                        ::shutdown(to, SHUT_RDWR);
+                        ::shutdown(from, SHUT_RDWR);
+                        closed = true;
+                        queue.clear();
+                        ready.notify_all();
+                        return;
+                    }
                 }
                 std::string_view bytes(buffer.data(), static_cast<std::size_t>(got));
                 auto at = clock::now() + delay;
@@ -235,6 +258,7 @@ private:
             down->from = server;
             down->to = client;
             down->delay = half_;
+            down->lose_answers = &lose_answers_;
             std::lock_guard lock(mutex_);
             pipes_.push_back(up);
             pipes_.push_back(down);
@@ -262,6 +286,7 @@ private:
     std::chrono::microseconds half_;
     std::chrono::microseconds durable_delay_;
     std::atomic<std::uint64_t> durable_requests_{0};
+    std::atomic<int> lose_answers_{0};
     int listener_ = -1;
     int port_ = 0;
     std::atomic<bool> stopping_{false};
