@@ -447,7 +447,7 @@ private:
     boost::capy::io_task<std::string> attempt(const Target& target, Exchange& exchange,
                                               std::unique_ptr<Connection>& connection, bool& reused) {
         const std::string origin = target.host + ":" + target.port;
-        connection = take_idle(origin);
+        connection = exchange.request.fresh_connection ? nullptr : take_idle(origin);
         reused = connection != nullptr;
         if (connection) {
             reused_.fetch_add(1);

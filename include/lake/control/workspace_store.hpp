@@ -46,6 +46,10 @@ struct ObjectRequest {
     std::vector<std::pair<std::string, std::string>> headers;
     std::string body;
     int timeout_seconds = 60;
+    // Send it on a new connection, never a kept one (lake#544): ZettaObjectClient asks for it for a
+    // request it does not retry (a conditional create, a lease acquisition or renewal, a usage
+    // read), so a kept connection Zetta closed as the request was sent cannot fail it.
+    bool fresh_connection = false;
 };
 
 // `error` is a transport failure (no answer); otherwise `status` and `body` are Zetta's.

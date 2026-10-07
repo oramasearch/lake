@@ -301,6 +301,9 @@ liquid::runtime::task<ObjectResponse>
 ZettaObjectClient::send(ObjectRequest request, bool idempotent, ObjectRequestKind kind) {
     request.headers.emplace_back("Authorization", "Bearer " + endpoint_.token);
     int attempts = idempotent ? 4 : 1;
+    // A request that is not retried goes on a new connection (lake#544): a kept one that Zetta
+    // closed as it was sent would fail it with no second attempt.
+    request.fresh_connection = request.fresh_connection || !idempotent;
     if (const std::int64_t deadline = settle_deadline; deadline != 0) {
         const auto left = std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(deadline)) -
                           std::chrono::steady_clock::now();

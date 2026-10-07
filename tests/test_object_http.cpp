@@ -16,7 +16,10 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <map>
 #include <memory>
+#include <optional>
+#include <set>
 #include <future>
 #include <mutex>
 #include <string>
@@ -467,6 +470,68 @@ TEST(ObjectHttp, DestroyingTheTransportAnswersTheRequestsItHolds) {
     EXPECT_EQ(response.status, 0);
     EXPECT_NE(response.error, "");
     caller.join();
+}
+
+TEST(ObjectHttp, ARequestThatAsksForAFreshConnectionDialsOne) {
+    LoopbackServer server;
+    auto transport = lake::control::make_pooled_object_transport();
+    EXPECT_EQ(send(*transport, request_to(server.url("/a"))).status, 200);
+    auto fresh = request_to(server.url("/b"), "PUT", "once");
+    fresh.fresh_connection = true;
+    EXPECT_EQ(send(*transport, std::move(fresh)).status, 200);
+    EXPECT_EQ(server.accepted(), 2);
+    EXPECT_EQ(transport->stats().reused, 0U);
+    // Its connection is kept afterwards like any other.
+    EXPECT_EQ(send(*transport, request_to(server.url("/c"))).status, 200);
+    EXPECT_EQ(server.accepted(), 2);
+    EXPECT_EQ(transport->stats().reused, 1U);
+}
+
+// Records each request's path and whether it asked for a new connection, and answers 500.
+class RecordingTransport final : public lake::control::ObjectTransport {
+public:
+    liquid::runtime::task<ObjectResponse> exchange(ObjectRequest request) override {
+        std::lock_guard lock(mutex_);
+        const auto path = request.url.substr(request.url.find("/v1/"));
+        seen_.emplace_back(request.method + " " + path.substr(0, path.find('?')) +
+                               (path.find("if_absent=true") != std::string::npos ? " if_absent" : ""),
+                           request.fresh_connection);
+        co_return ObjectResponse{500, R"({"ok":false,"error":{"code":"internal","message":"no"}})", {}};
+    }
+    std::vector<std::pair<std::string, bool>> seen() const {
+        std::lock_guard lock(mutex_);
+        return seen_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<std::pair<std::string, bool>> seen_;
+};
+
+TEST(ObjectHttp, TheClientAsksForAFreshConnectionExactlyForTheRequestsItDoesNotRetry) {
+    auto recording = std::make_shared<RecordingTransport>();
+    lake::control::ZettaObjectClient client(recording, lake::control::ObjectEndpoint{"http://zetta:4800", "token"});
+    static_cast<void>(liquid::runtime::block_on(client.put("k", "bytes", std::nullopt, true)));
+    static_cast<void>(liquid::runtime::block_on(client.usage()));
+    static_cast<void>(liquid::runtime::block_on(client.acquire("holder", 30s, 0ms)));
+    static_cast<void>(liquid::runtime::block_on(client.renew("holder", 1, 30s, 1s)));
+    static_cast<void>(liquid::runtime::block_on(client.put("k", "bytes", std::nullopt, false)));
+    static_cast<void>(liquid::runtime::block_on(client.get("k", 0, 4)));
+    static_cast<void>(liquid::runtime::block_on(client.remove("k", std::nullopt)));
+    std::map<std::string, std::set<bool>> fresh;
+    for (const auto& [request, asked] : recording->seen()) {
+        fresh[request].insert(asked);
+    }
+    const std::map<std::string, std::set<bool>> expected{
+        {"PUT /v1/objects/lake_store/k if_absent", {true}},
+        {"GET /v1/objects/lake_store:usage", {true}},
+        {"POST /v1/objects/lake_store:acquire", {true}},
+        {"POST /v1/objects/lake_store:renew", {true}},
+        {"PUT /v1/objects/lake_store/k", {false}},
+        {"GET /v1/objects/lake_store/k", {false}},
+        {"DELETE /v1/objects/lake_store/k", {false}},
+    };
+    EXPECT_EQ(fresh, expected);
 }
 
 } // namespace
