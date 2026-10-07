@@ -3057,7 +3057,14 @@ public:
         };
         auto server =
             liquid::sync_server{*(*state)->subject, *(*state)->objects, std::move(options)};
-        return from_liquid(liquid::runtime::block_on(server.handle_push(request)));
+        auto pushed = from_liquid(liquid::runtime::block_on(server.handle_push(request)));
+        if (!pushed) {
+            return pushed;
+        }
+        if (auto durable = entered_repository.durable.now(); !durable) {
+            return std::unexpected(durable.error());
+        }
+        return pushed;
     }
 
     SyncStoreResult<std::vector<std::byte>> pull(const std::string& customer_id,
@@ -3094,6 +3101,9 @@ public:
         auto stored = from_liquid(liquid::runtime::block_on(server.handle_chunks(request)));
         if (!stored) {
             return std::unexpected(stored.error());
+        }
+        if (auto durable = entered_repository.durable.now(); !durable) {
+            return std::unexpected(durable.error());
         }
         return unique_stored_bytes_locked(customer_id, (*state)->workspace.empty());
     }
@@ -3175,6 +3185,9 @@ public:
             (*state)->subject->set_replication_cursor(source_instance, pulled->cursor));
         if (!saved) {
             return std::unexpected(error_of(saved.error()));
+        }
+        if (auto durable = entered_repository.durable.now(); !durable) {
+            return std::unexpected(durable.error());
         }
         return RepositoryReplicationReport{
             .cursor = pulled->cursor.token,
@@ -3561,6 +3574,9 @@ public:
         if (!resolved) {
             return std::unexpected(error_of(resolved.error()));
         }
+        if (auto durable = entered_repository.durable.now(); !durable) {
+            return std::unexpected(durable.error());
+        }
         const std::string change_id = liquid::to_string(resolved->value);
         const auto history = liquid::runtime::block_on((*repository)->subject->log());
         if (!history) {
@@ -3650,6 +3666,9 @@ public:
             (*state)->subject->write(staged_upload_path(oid), std::move(contents)));
         if (!written) {
             return std::unexpected(error_of(written.error()));
+        }
+        if (auto durable = entered_repository.durable.now(); !durable) {
+            return std::unexpected(durable.error());
         }
         return unique_stored_bytes_locked(customer_id, (*state)->workspace.empty());
     }
@@ -3756,6 +3775,11 @@ public:
         if (!change) {
             return std::unexpected(error_of(change.error()));
         }
+        // The checkpoint ends with the removal of LIQUID_JOURNAL and no barrier (liquid#343): it
+        // is durable here, before the change is acknowledged (lake#535).
+        if (auto durable = entered_repository.durable.now(); !durable) {
+            return std::unexpected(durable.error());
+        }
         return liquid::to_string(change->value);
     }
 
@@ -3812,6 +3836,9 @@ public:
             (*state)->subject->set_metadata(provenance_key(*model_revision), std::move(metadata)));
         if (!saved) {
             return std::unexpected(error_of(saved.error()));
+        }
+        if (auto durable = entered_repository.durable.now(); !durable) {
+            return std::unexpected(durable.error());
         }
         return provenance_record(
             *model_revision, dataset_repository_id, *model_id, *run_id, *model, *run);
@@ -3907,6 +3934,9 @@ public:
         const auto restored = liquid::runtime::block_on((*repository)->subject->cut(message));
         if (!restored) {
             return std::unexpected(error_of(restored.error()));
+        }
+        if (auto durable = entered_repository.durable.now(); !durable) {
+            return std::unexpected(durable.error());
         }
         return RepositoryChange{liquid::to_string(restored->value),
                                 {liquid::to_string(parent->value)},
@@ -4119,6 +4149,9 @@ public:
         if (!saved) {
             return std::unexpected(error_of(saved.error()));
         }
+        if (auto durable = entered_repository.durable.now(); !durable) {
+            return std::unexpected(durable.error());
+        }
         return {};
     }
 
@@ -4150,6 +4183,9 @@ public:
             }
             output.commit_changes[key.substr(std::string("git.commit.").size())] =
                 std::string(reinterpret_cast<const char*>((*value)->data()), (*value)->size());
+        }
+        if (auto durable = entered_repository.durable.now(); !durable) {
+            return std::unexpected(durable.error());
         }
         return output;
     }
@@ -4354,12 +4390,69 @@ private:
         std::array<std::uint64_t, control::object_request_kinds> nanoseconds_{};
     };
 
+    // What a call wrote to a workspace store is durable before the call leaves the store's lane
+    // (lake#535): the backend sends what it holds and one Zetta :barrier. A call that writes makes
+    // it durable with now() before it answers, so a failure answers the call; the destructor
+    // covers every other way out, and a failed sync there leaves the backend failed, so the store
+    // is closed and opened again before its next use.
+    class StoreDurability {
+    public:
+        StoreDurability() = default;
+        explicit StoreDurability(std::shared_ptr<control::ZettaObjectBackend> backend)
+            : backend_(std::move(backend)) {}
+        StoreDurability(StoreDurability&& other) noexcept : backend_(std::move(other.backend_)) {}
+        StoreDurability& operator=(StoreDurability&& other) noexcept {
+            if (this != &other) {
+                settle();
+                backend_ = std::move(other.backend_);
+            }
+            return *this;
+        }
+        StoreDurability(const StoreDurability&) = delete;
+        StoreDurability& operator=(const StoreDurability&) = delete;
+        ~StoreDurability() {
+            settle();
+        }
+        SyncStoreResult<void> now() {
+            if (!backend_) {
+                return {};
+            }
+            auto durable = liquid::runtime::block_on(backend_->make_durable());
+            if (!durable) {
+                return std::unexpected(error_of(durable.error()));
+            }
+            return {};
+        }
+
+    private:
+        void settle() noexcept {
+            if (!backend_) {
+                return;
+            }
+            try {
+                static_cast<void>(liquid::runtime::block_on(backend_->make_durable()));
+            } catch (...) {
+            }
+            backend_.reset();
+        }
+        std::shared_ptr<control::ZettaObjectBackend> backend_;
+    };
+
     struct Entered {
         LaneLock lane;
         SyncStoreResult<RepositoryState*> state;
         // Declared after the lane: it settles while the lane is still held.
         StoreRequests requests;
+        // Declared last: it syncs first, while the lane is held and the requests still count.
+        StoreDurability durable;
     };
+
+    // The open workspace store's backend, or none.
+    std::shared_ptr<control::ZettaObjectBackend> workspace_backend(const std::string& workspace_id) {
+        std::lock_guard maps(mutex_);
+        const auto found = workspace_stores_.find(workspace_id);
+        return found != workspace_stores_.end() ? found->second->backend : nullptr;
+    }
 
     // A workspace's lane for one blob operation (lake#383 phase B): admitted for a request,
     // held (waiting, never refused) for lake's own work and a pull's later reads.
@@ -5366,10 +5459,12 @@ private:
             }
             StoreRequests requests(*route ? workspace_store_counters(**route) : nullptr);
             auto state = open_repository(customer_id, repository_id, *route);
+            StoreDurability durable;
             if (*route) {
                 requests.opened(workspace_store_counters(**route));
+                durable = StoreDurability(workspace_backend(**route));
             }
-            return {std::move(*lane), std::move(state), std::move(requests)};
+            return {std::move(*lane), std::move(state), std::move(requests), std::move(durable)};
         }
     }
 
@@ -5504,6 +5599,13 @@ private:
             return std::unexpected(error);
         }
         output->store = std::make_unique<liquid::store>(std::move(*store));
+        // A new view starts unsynced (lake#535): what a predecessor sent may not be durable, and
+        // liquid's open may have written. One :barrier before anything is served from the store;
+        // a store whose :barrier fails is not served.
+        if (auto durable = liquid::runtime::block_on(output->backend->make_durable()); !durable) {
+            static_cast<void>(liquid::runtime::block_on(output->store->close()));
+            return std::unexpected(error_of(durable.error()));
+        }
         bool seeded = false;
         {
             std::lock_guard maps(mutex_);
@@ -5564,6 +5666,12 @@ private:
                         key, "missing_repository"});
                 }
                 return std::unexpected(error_of(opened.error()));
+            }
+            // Liquid's open may recover the repository's state (a journal replayed, a checkpoint
+            // finished): durable before the repository serves anything, also when nothing else
+            // syncs after it (the pre-open, lake#536).
+            if (auto durable = liquid::runtime::block_on((*workspace)->backend->make_durable()); !durable) {
+                return std::unexpected(error_of(durable.error()));
             }
             auto state = std::make_unique<RepositoryState>();
             state->subject = std::make_unique<liquid::repository>(std::move(*opened));
@@ -5771,6 +5879,10 @@ private:
         if (!report) {
             return std::unexpected(error_of(report.error()));
         }
+        // What the copy wrote is durable before the switch is recorded (lake#535).
+        if (auto durable = StoreDurability((*destination)->backend).now(); !durable) {
+            return std::unexpected(durable.error());
+        }
         output.complete = report->complete;
         output.objects = report->objects;
         output.objects_present = report->objects_present;
@@ -5803,7 +5915,11 @@ private:
         if (!created && created.error().code != liquid::errc::already_exists) {
             return std::unexpected(error_of(created.error()));
         }
-        return {};
+        // Durable before the creation or the switch is answered (lake#535). The repository's row
+        // was written before this (create_repository_content): a crash between the two leaves a
+        // row whose repository is missing, which is answered `missing_repository` and tombstoned
+        // by the next creation of its name (create_repository_row).
+        return StoreDurability((*workspace)->backend).now();
     }
 
 public:
@@ -6478,6 +6594,10 @@ public:
                 return std::unexpected(error_of(rooted.error()));
             }
         }
+        // Durable before the blob's record names it (lake#535).
+        if (auto durable = StoreDurability((*workspace)->backend).now(); !durable) {
+            return std::unexpected(durable.error());
+        }
         return WorkspaceBlob{object, static_cast<std::uint64_t>(size), true};
     }
 
@@ -6506,7 +6626,7 @@ public:
         if (!rooted) {
             return std::unexpected(error_of(rooted.error()));
         }
-        return {};
+        return StoreDurability((*workspace)->backend).now();
     }
 
     static constexpr std::chrono::seconds image_blob_root_ttl{std::chrono::years(100)};

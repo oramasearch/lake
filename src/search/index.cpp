@@ -1102,9 +1102,9 @@ struct Service::Impl {
             keep.insert(std::string(blobs_file));
             keep.insert(std::string(artifacts_file));
         }
-        if (const auto synced = storage.sync(); !synced) {
-            return synced;
-        }
+        // No sync before the manifest (lake#535): the objects it names were each answered before
+        // it is sent, to the one bucket whose log keeps the order they were sent in, so a crash
+        // that keeps the manifest keeps them. The sync after it makes the commit durable.
         json manifest{{"version", storage.runs() ? 3 : 2}, {"active", manifest_active(next_active)}};
         if (storage.runs()) {
             std::set<std::string> runs;

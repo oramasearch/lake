@@ -267,6 +267,10 @@ first use, never creates a workspace store, key or repository
 except explicitly (`create_repository_content`, the switch), closes and reopens a store whose lease
 was lost or whose write failed, closes them on drain (`release_workspace_stores`, each as soon as its
 lane is idle, all at once) and on workspace
+I/O, opens each workspace store on first use, never creates a workspace store, key or repository
+except explicitly (`create_repository_content`, the switch), makes what a call wrote to a workspace
+store durable before it answers (`StoreDurability`, one Zetta `:barrier` per call, lake#535),
+closes and reopens a store whose lease was lost or whose write failed, closes them on drain and on workspace
 deletion (`WorkspaceContent::close_workspace_store`), measures a switched workspace's storage as
 its bucket's usage, and keeps replication cursors with liquid's cursor API.
 

@@ -24,10 +24,10 @@ constexpr std::string_view tail_marker = ".lake-tail-";
 // is absent or whole after a crash and an object never ends inside a block.
 constexpr std::size_t zetta_slice_bytes = 4 * 1024 * 1024;
 constexpr std::string_view wrap_label = "lake/workspace-store/v1/";
-// The largest object whose durably written plaintext a view remembers, to skip rewriting it.
-constexpr std::uint64_t durable_plain_bytes = 16 * 1024;
+// The largest object whose plaintext, sent whole, a view remembers, to skip rewriting it.
+constexpr std::uint64_t sent_plain_bytes = 16 * 1024;
 // What a view keeps of such plaintext in all: at most 1 MiB per open store.
-constexpr std::uint64_t durable_plain_limit = 1024 * 1024;
+constexpr std::uint64_t sent_plain_limit = 1024 * 1024;
 
 liquid::error failure(liquid::errc code, std::string message, std::string context = {}) {
     return liquid::error{code, std::move(message), std::move(context)};
@@ -366,9 +366,30 @@ ZettaObjectClient::send(ObjectRequest request, bool idempotent, ObjectRequestKin
     co_return response;
 }
 
-void ZettaObjectClient::set_before_release(std::function<liquid::runtime::task<void>()> settle) {
+void ZettaObjectClient::set_before_release(std::function<liquid::runtime::task<void>()> settle,
+                                           std::function<void()> abandon) {
     std::lock_guard lock(settle_mutex_);
     settle_ = std::move(settle);
+    abandon_ = std::move(abandon);
+}
+
+void ZettaObjectClient::set_owned(bool owned) {
+    owned_.store(owned);
+}
+
+bool ZettaObjectClient::owned() const {
+    return owned_.load();
+}
+
+void ZettaObjectClient::abandon_before_release() {
+    std::function<void()> abandon;
+    {
+        std::lock_guard lock(settle_mutex_);
+        abandon = abandon_;
+    }
+    if (abandon) {
+        abandon();
+    }
 }
 
 liquid::runtime::task<void> ZettaObjectClient::before_release(std::chrono::milliseconds budget) {
@@ -997,11 +1018,13 @@ struct ZettaObjectBackend::Entry {
     // The object K in Zetta and its ciphertext size there.
     bool remote = false;
     // Not in Zetta as this version, but the bucket still holds an older K (this version replaced
-    // or followed a removal since the last barrier): its first write is a replacing PUT.
+    // or followed a removal since it was last sent): its first write is a replacing PUT.
     bool replaces_remote = false;
-    // The plaintext of the version in Zetta, when this view wrote it whole and durably and it is
-    // small (lake#527): a put of the same bytes again changes nothing and sends nothing.
-    std::optional<std::vector<std::byte>> durable_plain;
+    // The plaintext of the version in Zetta, when this view sent it whole and it is small
+    // (lake#527): a put of the same bytes again changes nothing and sends nothing. The bucket's
+    // log holds that version before anything issued after it (lake#535), so skipping the repeat
+    // leaves every prefix of the issue order as it was.
+    std::optional<std::vector<std::byte>> sent_plain;
     std::uint64_t ct_size = 0;
     // The header, once known: always for an object this view created or replaced.
     std::optional<std::string> header;
@@ -1149,22 +1172,47 @@ ZettaObjectBackend::ZettaObjectBackend(std::shared_ptr<ZettaObjectClient> client
     shared_->client->set_before_release(
         [weak = std::weak_ptr<Shared>(shared_)]() -> liquid::runtime::task<void> {
             return settle(weak.lock());
+        },
+        [weak = std::weak_ptr<Shared>(shared_)] {
+            if (auto shared = weak.lock()) {
+                std::vector<std::shared_ptr<ZettaObjectBackend>> views;
+                std::lock_guard lock(shared->views_mutex);
+                views.swap(shared->views);
+            }
         });
 }
 
 ZettaObjectBackend::ZettaObjectBackend(std::shared_ptr<Shared> shared,
                                        std::optional<std::uint64_t> fence)
-    : shared_(std::move(shared)), fence_(fence) {}
+    : shared_(std::move(shared)), fence_(fence) {
+    // A new view starts unsynced (lake#535): what the bucket holds may include writes a
+    // predecessor (or this process before a reopen) sent but never made durable, and they are
+    // served from now on. Its first sync therefore sends :barrier, even with nothing new.
+    dirty_ = true;
+}
 
 ZettaObjectBackend::~ZettaObjectBackend() {
-    // The root backend (the one lake and liquid's options hold) ends the views' lives.
+    // The root backend (the one lake and liquid's options hold) ends the views' lives, unless one
+    // still holds writes or needs its :barrier (lake#535): liquid's close lets go of the backend
+    // before it releases the owner, and the owner's release syncs them, or abandons them when the
+    // lease is lost.
+    // Kept only while an owner will come to settle or abandon them; otherwise the views and
+    // Shared would keep each other alive.
     if (!fence_ && shared_) {
         std::vector<std::shared_ptr<ZettaObjectBackend>> views;
         {
             std::lock_guard lock(shared_->views_mutex);
-            views.swap(shared_->views);
+            if (!shared_->client->owned() ||
+                std::ranges::none_of(shared_->views, [](const auto& view) { return view->unsettled(); })) {
+                views.swap(shared_->views);
+            }
         }
     }
+}
+
+bool ZettaObjectBackend::unsettled() const {
+    std::lock_guard lock(mutex_);
+    return !queue_.empty() || dirty_;
 }
 
 liquid::runtime::task<void> ZettaObjectBackend::settle(std::shared_ptr<Shared> shared) {
@@ -1180,7 +1228,7 @@ liquid::runtime::task<void> ZettaObjectBackend::settle(std::shared_ptr<Shared> s
         if (shared->failed.load()) {
             break;
         }
-        if (auto settled = co_await view->barrier(); !settled) {
+        if (auto settled = co_await view->sync(); !settled) {
             co_return std::unexpected(settled.error());
         }
     }
@@ -1319,8 +1367,8 @@ liquid::runtime::task<void> ZettaObjectBackend::ensure_cipher() {
         if (!wrapped) {
             co_return std::unexpected(wrapped.error());
         }
-        // Durable at once: every object after it is encrypted under it, and a barrier with only
-        // durable writes sends no :barrier that would cover it (lake#527).
+        // Durable at once: every object after it is encrypted under it. It is the bucket's first
+        // object, so no earlier write is left unsynced behind it.
         auto created = co_await shared_->client->put(std::string(workspace_store_key_object),
                                                      std::move(*wrapped), fence_, true, true);
         if (!created && created.error().code != liquid::errc::already_exists) {
@@ -1375,7 +1423,7 @@ liquid::runtime::task<void> ZettaObjectBackend::ensure_header(const std::string&
         Entry& entry = *found->second;
         apply_header(entry, std::move(header), *parsed);
         // Only the tail of the current block can be live; any other was left by an interrupted
-        // barrier or an older version of the object and is removed after the next barrier.
+        // flush or an older version of the object and is removed by the next sync.
         const std::string current = entry.tail_key(key, entry.append_blocks());
         for (auto it = entry.tails.begin(); it != entry.tails.end();) {
             if (it->first != current) {
@@ -1605,8 +1653,8 @@ ZettaObjectBackend::read_plain(const std::string& key, std::uint64_t offset, std
         failure(liquid::errc::busy, "the object kept changing while it was read", key));
 }
 
-// The writes that bring one object up to date (lake#527). At a barrier an object this view has not
-// sent yet (a put held until now, or one created by appends) is one PUT of its header and base
+// The writes that bring one object up to date (lake#527). When sent whole, an object this view has
+// not sent yet (a put held until now, or one created by appends) is one PUT of its header and base
 // blocks, so it never needs a tail; an object in Zetta gets its complete blocks as PATCHes at its
 // exact size and its partial block as a tail.
 struct ZettaObjectBackend::FlushPlan {
@@ -1720,7 +1768,7 @@ ZettaObjectBackend::plan_flush(const std::string& key, bool barrier) {
     return Output{std::move(plan)};
 }
 
-liquid::runtime::task<void> ZettaObjectBackend::send_plan(FlushPlan plan, bool durable) {
+liquid::runtime::task<void> ZettaObjectBackend::send_plan(FlushPlan plan) {
     const std::string& key = plan.key;
     if (plan.whole) {
         const std::uint64_t size = plan.pieces.front().size();
@@ -1731,7 +1779,7 @@ liquid::runtime::task<void> ZettaObjectBackend::send_plan(FlushPlan plan, bool d
             kept = plan.pieces.front();
         }
         auto written =
-            co_await shared_->client->put(key, std::move(plan.pieces.front()), fence_, false, durable);
+            co_await shared_->client->put(key, std::move(plan.pieces.front()), fence_, false);
         if (!written) {
             co_return std::unexpected(written.error());
         }
@@ -1741,12 +1789,12 @@ liquid::runtime::task<void> ZettaObjectBackend::send_plan(FlushPlan plan, bool d
         }
         auto parsed = parse_header(plan.whole_header, key);
         std::lock_guard lock(mutex_);
-        dirty_ = dirty_ || !durable;
+        dirty_ = true;
         const auto found = directory_.find(key);
         if (found == directory_.end() || found->second->remote ||
             found->second->header != plan.original_header ||
             found->second->open.size() < plan.whole_plain) {
-            // Liquid serialises its mutations; a version that changed under a barrier means this
+            // Liquid serialises its mutations; a version that changed while it was sent means this
             // view's directory can no longer be trusted.
             shared_->failed.store(true);
             co_return std::unexpected(
@@ -1757,11 +1805,11 @@ liquid::runtime::task<void> ZettaObjectBackend::send_plan(FlushPlan plan, bool d
         entry.replaces_remote = false;
         entry.ct_size = size;
         release_plain(entry);
-        if (durable && plan.whole_plain <= durable_plain_bytes &&
-            durable_plain_held_ + plan.whole_plain <= durable_plain_limit) {
-            entry.durable_plain.emplace(entry.open.begin(),
+        if (plan.whole_plain <= sent_plain_bytes &&
+            sent_plain_held_ + plan.whole_plain <= sent_plain_limit) {
+            entry.sent_plain.emplace(entry.open.begin(),
                                         entry.open.begin() + static_cast<std::ptrdiff_t>(plan.whole_plain));
-            durable_plain_held_ += plan.whole_plain;
+            sent_plain_held_ += plan.whole_plain;
         }
         apply_header(entry, std::move(plan.whole_header), *parsed);
         entry.open.erase(entry.open.begin(),
@@ -1774,10 +1822,10 @@ liquid::runtime::task<void> ZettaObjectBackend::send_plan(FlushPlan plan, bool d
     for (std::string& piece : plan.pieces) {
         const std::uint64_t size = piece.size();
         // The first piece of an object not in Zetta replaces whatever the bucket holds under its
-        // key (an older version liquid removed or replaced since the last barrier).
+        // key (an older version liquid removed or replaced since it was last sent).
         auto written = plan.create && first
-                           ? co_await shared_->client->put(key, piece, fence_, false, durable)
-                           : co_await shared_->client->append(key, offset, piece, fence_, durable);
+                           ? co_await shared_->client->put(key, piece, fence_, false)
+                           : co_await shared_->client->append(key, offset, piece, fence_);
         if (!written) {
             co_return std::unexpected(written.error());
         }
@@ -1788,7 +1836,7 @@ liquid::runtime::task<void> ZettaObjectBackend::send_plan(FlushPlan plan, bool d
         shared_->extend(key, plan.salt, offset, piece);
         offset += size;
         std::lock_guard lock(mutex_);
-        dirty_ = dirty_ || !durable;
+        dirty_ = true;
         // Record each piece as it lands, so a failure part way leaves the directory exact.
         const auto found = directory_.find(key);
         if (found != directory_.end()) {
@@ -1808,12 +1856,12 @@ liquid::runtime::task<void> ZettaObjectBackend::send_plan(FlushPlan plan, bool d
     if (plan.tail) {
         const std::uint64_t size = plan.tail->second.size();
         auto written =
-            co_await shared_->client->put(plan.tail->first, std::move(plan.tail->second), fence_, false, durable);
+            co_await shared_->client->put(plan.tail->first, std::move(plan.tail->second), fence_, false);
         if (!written) {
             co_return std::unexpected(written.error());
         }
         std::lock_guard lock(mutex_);
-        dirty_ = dirty_ || !durable;
+        dirty_ = true;
         const auto found = directory_.find(key);
         if (found != directory_.end()) {
             found->second->tails[plan.tail->first] = size;
@@ -1859,20 +1907,16 @@ struct ZettaObjectBackend::SendGuard {
     SendGuard& operator=(const SendGuard&) = delete;
 };
 
-bool ZettaObjectBackend::durable_now() const {
-    return !dirty_;
-}
-
 void ZettaObjectBackend::release_plain(Entry& entry) {
-    if (entry.durable_plain) {
-        durable_plain_held_ -= entry.durable_plain->size();
-        entry.durable_plain.reset();
+    if (entry.sent_plain) {
+        sent_plain_held_ -= entry.sent_plain->size();
+        entry.sent_plain.reset();
     }
 }
 
-// Sends every held write in issue order (the caller holds the SendGuard). `durable`: each write
-// with durable=true; otherwise without, and the next barrier sends :barrier.
-liquid::runtime::task<void> ZettaObjectBackend::drain(bool durable) {
+// Sends every held write in issue order, without durability (the caller holds the SendGuard);
+// the next sync's :barrier makes them durable (lake#535).
+liquid::runtime::task<void> ZettaObjectBackend::drain() {
     std::vector<std::string> queued;
     {
         std::lock_guard lock(mutex_);
@@ -1884,7 +1928,7 @@ liquid::runtime::task<void> ZettaObjectBackend::drain(bool durable) {
             co_return std::unexpected(plan.error());
         }
         if (*plan) {
-            if (auto sent = co_await send_plan(std::move(**plan), durable); !sent) {
+            if (auto sent = co_await send_plan(std::move(**plan)); !sent) {
                 co_return std::unexpected(sent.error());
             }
         }
@@ -1907,17 +1951,9 @@ liquid::runtime::task<void> ZettaObjectBackend::keep_order_before_holding(const 
         over = held_bytes_ > shared_->options.held_bytes_limit ||
                held_puts_ >= shared_->options.held_puts_limit;
     }
-    if (over) {
-        // Bounded memory: sent early without durability; the next barrier sends :barrier.
-        auto sent = co_await drain(false);
-        if (sent) {
-            std::lock_guard lock(mutex_);
-            dirty_ = true;
-        }
-        co_return sent;
-    }
-    if (reorder) {
-        co_return co_await drain(durable_now());
+    if (over || reorder) {
+        // Bounded memory, or the order kept: what is held is sent now.
+        co_return co_await drain();
     }
     co_return liquid::result<void>{};
 }
@@ -1953,9 +1989,8 @@ std::pair<std::uint64_t, std::size_t> ZettaObjectBackend::held() const {
     return {held_bytes_, held_puts_};
 }
 
-// A threshold flush of buffered appends, between barriers: sent without durability, so the next
-// barrier sends :barrier. The key is the last held key (keep_order_before_holding), so the keys
-// held before it are sent first.
+// A threshold flush of buffered appends: the key is the last held key (keep_order_before_holding),
+// so the keys held before it are sent first.
 liquid::runtime::task<void> ZettaObjectBackend::flush_entry(const std::string& key) {
     SendGuard guard(*this);
     std::vector<std::string> before;
@@ -1974,7 +2009,7 @@ liquid::runtime::task<void> ZettaObjectBackend::flush_entry(const std::string& k
             co_return std::unexpected(plan.error());
         }
         if (*plan) {
-            if (auto sent = co_await send_plan(std::move(**plan), false); !sent) {
+            if (auto sent = co_await send_plan(std::move(**plan)); !sent) {
                 co_return std::unexpected(sent.error());
             }
         }
@@ -1994,7 +2029,7 @@ liquid::runtime::task<void> ZettaObjectBackend::flush_entry(const std::string& k
         co_return std::unexpected(plan.error());
     }
     if (*plan) {
-        if (auto sent = co_await send_plan(std::move(**plan), false); !sent) {
+        if (auto sent = co_await send_plan(std::move(**plan)); !sent) {
             co_return std::unexpected(sent.error());
         }
     }
@@ -2008,7 +2043,6 @@ liquid::runtime::task<void> ZettaObjectBackend::flush_entry(const std::string& k
         held_bytes_ = held_bytes_ - key_bytes + still;
         key_bytes = still;
     }
-    dirty_ = true;
     co_return liquid::result<void>{};
 }
 
@@ -2084,7 +2118,7 @@ liquid::runtime::task<void> ZettaObjectBackend::remove_stale_tail(std::string ta
         if (removed.error().code == liquid::errc::locked) {
             co_return std::unexpected(removed.error());
         }
-        // Ignored by every reader; the next barrier tries again.
+        // Ignored by every reader; the next sync tries again.
         std::lock_guard lock(mutex_);
         stale_tails_.insert(tail);
     }
@@ -2112,19 +2146,19 @@ liquid::runtime::task<void> ZettaObjectBackend::put_impl(std::string key, std::v
         {
             std::lock_guard lock(mutex_);
             const auto found = directory_.find(key);
-            // The bucket already holds exactly these bytes durably (liquid publishes the index
-            // manifest twice in a row, each between barriers): nothing to write.
-            if (found != directory_.end() && found->second->remote && found->second->durable_plain &&
+            // The bucket already holds exactly these bytes (liquid publishes the index manifest
+            // twice in a row, each between barriers): nothing to write.
+            if (found != directory_.end() && found->second->remote && found->second->sent_plain &&
                 found->second->open.empty() && found->second->open_remote == 0 &&
-                *found->second->durable_plain == bytes) {
+                *found->second->sent_plain == bytes) {
                 co_return liquid::result<void>{};
             }
         }
         if (auto ordered = co_await keep_order_before_holding(key); !ordered) {
             co_return std::unexpected(ordered.error());
         }
-        // Held until the next barrier, which sends it as one PUT in its place among the held
-        // writes (lake#527). Until then reads are answered from memory; the bucket keeps the
+        // Held until it must be sent (a later write about another key held before it, a write sent
+        // at once, a bound, or the sync), as one PUT in its place among the held writes (lake#527). Until then reads are answered from memory; the bucket keeps the
         // previous version, which the PUT replaces atomically.
         auto header = make_header(cipher->key_version(), block_size, 0);
         if (!header) {
@@ -2151,8 +2185,8 @@ liquid::runtime::task<void> ZettaObjectBackend::put_impl(std::string key, std::v
         hold(key, size, true);
         co_return liquid::result<void>{};
     }
-    // A large put is sent at once, after the writes held before it, without durability.
-    if (auto drained = co_await drain(durable_now()); !drained) {
+    // A large put is sent at once, after the writes held before it.
+    if (auto drained = co_await drain(); !drained) {
         co_return std::unexpected(drained.error());
     }
     auto header = make_header(cipher->key_version(), block_size, bytes.size());
@@ -2190,7 +2224,7 @@ liquid::runtime::task<void> ZettaObjectBackend::put_impl(std::string key, std::v
     auto& entry = directory_[key];
     if (entry) {
         release_plain(*entry);
-        // The replaced version's tails go once the PUT is durable (after the next barrier).
+        // The replaced version's tails go once the PUT is durable (after the next sync).
         for (const auto& [tail, ignored] : entry->tails) {
             retiring_tails_.insert(tail);
         }
@@ -2222,16 +2256,10 @@ liquid::runtime::task<void> ZettaObjectBackend::put_if_absent_impl(std::string k
                 failure(liquid::errc::already_exists, "the object already exists", key));
         }
     }
-    // Sent at once, after the writes held before it, durably unless a write since the last
-    // barrier went without (lake#527).
+    // Sent at once, after the writes held before it (lake#527): its answer decides the create.
     SendGuard guard(*this);
-    if (auto drained = co_await drain(durable_now()); !drained) {
+    if (auto drained = co_await drain(); !drained) {
         co_return std::unexpected(drained.error());
-    }
-    bool durable = false;
-    {
-        std::lock_guard lock(mutex_);
-        durable = durable_now();
     }
     std::shared_ptr<const WorkspaceStoreCipher> cipher;
     {
@@ -2255,7 +2283,7 @@ liquid::runtime::task<void> ZettaObjectBackend::put_if_absent_impl(std::string k
         object += *sealed;
     }
     const std::uint64_t size = object.size();
-    auto written = co_await shared_->client->put(key, std::move(object), fence_, true, durable);
+    auto written = co_await shared_->client->put(key, std::move(object), fence_, true);
     if (!written) {
         if (written.error().code == liquid::errc::already_exists) {
             // The directory said the key was absent: another writer exists, which the fence should
@@ -2273,7 +2301,7 @@ liquid::runtime::task<void> ZettaObjectBackend::put_if_absent_impl(std::string k
     entry->ct_size = size;
     apply_header(*entry, std::move(*header), *parsed);
     entry->open_loaded = true;
-    dirty_ = dirty_ || !durable;
+    dirty_ = true;
     co_return liquid::result<void>{};
 }
 
@@ -2419,6 +2447,24 @@ ZettaObjectBackend::get_range(std::string key, std::uint64_t offset, std::uint64
     co_return co_await read_plain(key, offset, size);
 }
 
+// Under mutex_: `key` is held and at most one held key follows it, one this view sends whole as
+// a single PUT (not in Zetta yet), so the key's held write and its removal can both be dropped.
+bool ZettaObjectBackend::removable_unsent(const std::string& key) const {
+    const auto position = std::ranges::find(queue_, key);
+    if (position == queue_.end()) {
+        return false;
+    }
+    const auto after = std::distance(position, queue_.end()) - 1;
+    if (after == 0) {
+        return true;
+    }
+    if (after > 1) {
+        return false;
+    }
+    const auto next = directory_.find(queue_.back());
+    return next != directory_.end() && !next->second->remote;
+}
+
 liquid::runtime::task<void> ZettaObjectBackend::remove_impl(std::string key) {
     if (auto checked = check_liquid_key(key); !checked) {
         co_return std::unexpected(checked.error());
@@ -2426,10 +2472,9 @@ liquid::runtime::task<void> ZettaObjectBackend::remove_impl(std::string key) {
     if (auto ready = co_await ensure_directory(); !ready) {
         co_return std::unexpected(ready.error());
     }
-    // Sent at once, after the writes held before it (lake#527): liquid removes some state with no
-    // barrier after it (a checkpoint's LIQUID_JOURNAL) and then answers, so a removal must not
-    // wait for a barrier that may never come. Durable unless a write since the last barrier went
-    // without, in which case the next barrier's :barrier covers it.
+    // Sent at once, after the writes held before it (lake#527). Liquid ends a checkpoint with the
+    // removal of LIQUID_JOURNAL and no barrier after it (liquid#343); lake's sync at the end of the
+    // operation makes the removal durable before lake answers (lake#535).
     SendGuard guard(*this);
     bool remote = false;
     {
@@ -2438,10 +2483,12 @@ liquid::runtime::task<void> ZettaObjectBackend::remove_impl(std::string key) {
         if (found == directory_.end()) {
             co_return std::unexpected(failure(liquid::errc::not_found, "no such object", key));
         }
-        // Only held, never sent, and the last thing held: dropping it leaves what is sent a
-        // prefix of the issue order, and nothing needs sending.
-        if (!found->second->remote && !found->second->replaces_remote && !queue_.empty() &&
-            queue_.back() == key) {
+        // Only held, never sent, and followed by at most one held key that goes as one PUT (a
+        // staged object published under its name, then the staging removed): dropping both the
+        // held put and its removal leaves every prefix of what is sent equal to a prefix of the
+        // issue order (the one PUT after it lands where the removal did), and nothing is sent.
+        if (!found->second->remote && !found->second->replaces_remote &&
+            removable_unsent(key)) {
             unhold(key);
             release_plain(*found->second);
             directory_.erase(found);
@@ -2449,7 +2496,7 @@ liquid::runtime::task<void> ZettaObjectBackend::remove_impl(std::string key) {
             co_return liquid::result<void>{};
         }
     }
-    if (auto drained = co_await drain(durable_now()); !drained) {
+    if (auto drained = co_await drain(); !drained) {
         co_return std::unexpected(drained.error());
     }
     {
@@ -2458,24 +2505,19 @@ liquid::runtime::task<void> ZettaObjectBackend::remove_impl(std::string key) {
         remote = found != directory_.end() && (found->second->remote || found->second->replaces_remote);
     }
     if (remote) {
-        bool durable = false;
-        {
-            std::lock_guard lock(mutex_);
-            durable = durable_now();
-        }
-        auto removed = co_await shared_->client->remove(key, fence_, durable);
+        auto removed = co_await shared_->client->remove(key, fence_);
         if (!removed && removed.error().code != liquid::errc::not_found) {
             co_return std::unexpected(removed.error());
         }
         std::lock_guard lock(mutex_);
-        dirty_ = dirty_ || !durable;
+        dirty_ = true;
     }
     {
         std::lock_guard lock(mutex_);
         const auto found = directory_.find(key);
         if (found != directory_.end()) {
             release_plain(*found->second);
-            // The key's tails go after the next barrier, once its removal is durable.
+            // The key's tails go after the next sync, once its removal is durable.
             for (const auto& [tail, ignored] : found->second->tails) {
                 retiring_tails_.insert(tail);
             }
@@ -2516,13 +2558,23 @@ ZettaObjectBackend::list(std::string prefix) {
     co_return output;
 }
 
-// Everything acknowledged before the barrier is durable when it answers (lake#527). The writes
-// held since the last barrier are sent one after another in liquid's issue order, each with
-// durable=true; when a write since the last barrier went without durability (a large put, a
-// threshold flush, a bound crossed) they go without, followed by Zetta's :barrier. Tails made
-// stale by an earlier barrier are removed meanwhile, beside them: no reader needs them, and a
-// removal brought back by a crash leaves a stale tail, which readers ignore.
+// Liquid's barrier is a point in its issue order and sends nothing (lake#535). What liquid issued
+// reaches the bucket in that order: held writes are sent before any later write that needs
+// sending, so a crash keeps a prefix of the issue order, which is also what a crash just after
+// some earlier point of it would have left. Held writes keep coalescing across liquid's barriers
+// (a put of a held key replaces it in place, a removal of the last held key cancels it). Making
+// them durable is the sync's job, once per store operation, before lake answers: an operation's
+// own barriers acknowledge nothing outside the process.
 liquid::runtime::task<void> ZettaObjectBackend::barrier_impl() {
+    co_return liquid::result<void>{};
+}
+
+// Everything issued before the sync is durable when it answers (lake#535): the held writes are
+// sent in issue order, one at a time, without durability, then one Zetta :barrier fsyncs the
+// bucket. Tails made stale by an earlier sync are removed beside the :barrier: no reader needs
+// them, and a removal brought back by a crash leaves a stale tail, which readers ignore. A sync
+// with nothing sent since the last :barrier and no stale tail costs no request.
+liquid::runtime::task<void> ZettaObjectBackend::sync_impl() {
     {
         std::lock_guard lock(mutex_);
         if (!directory_loaded_) {
@@ -2530,29 +2582,16 @@ liquid::runtime::task<void> ZettaObjectBackend::barrier_impl() {
         }
     }
     SendGuard guard(*this);
-    bool dirty = false;
-    bool held = false;
-    {
-        std::lock_guard lock(mutex_);
-        dirty = dirty_;
-        held = !queue_.empty();
-    }
-    if (held || dirty) {
-        auto drained = co_await drain(!dirty);
-        if (drained && dirty) {
-            drained = co_await shared_->client->barrier();
-        }
-        if (!drained) {
-            std::lock_guard lock(mutex_);
-            dirty_ = true;
-            co_return std::unexpected(drained.error());
-        }
+    if (auto drained = co_await drain(); !drained) {
+        co_return std::unexpected(drained.error());
     }
     // The stale tails go after the drain, so none is a tail the drain just wrote: every tail an
     // object holds now is left alone.
+    bool dirty = false;
     std::set<std::string> stale;
     {
         std::lock_guard lock(mutex_);
+        dirty = dirty_;
         stale.swap(stale_tails_);
         for (const auto& [key, entry] : directory_) {
             for (const auto& [tail, ignored] : entry->tails) {
@@ -2561,13 +2600,15 @@ liquid::runtime::task<void> ZettaObjectBackend::barrier_impl() {
         }
     }
     std::vector<std::function<liquid::runtime::task<void>()>> jobs;
+    if (dirty) {
+        jobs.push_back([this]() -> liquid::runtime::task<void> { return shared_->client->barrier(); });
+    }
     for (const std::string& tail : stale) {
         jobs.push_back([this, tail]() -> liquid::runtime::task<void> { return remove_stale_tail(tail); });
     }
     auto sent = co_await run_object_requests(std::move(jobs), shared_->options.barrier_concurrency);
     if (!sent) {
         std::lock_guard lock(mutex_);
-        dirty_ = true;
         stale_tails_.insert(stale.begin(), stale.end());
         co_return std::unexpected(sent.error());
     }
@@ -2620,6 +2661,30 @@ liquid::runtime::task<void> ZettaObjectBackend::barrier() {
     co_return observe(co_await barrier_impl(), false);
 }
 
+liquid::runtime::task<void> ZettaObjectBackend::sync() {
+    co_return observe(co_await sync_impl(), false);
+}
+
+liquid::runtime::task<void> ZettaObjectBackend::make_durable() {
+    if (auto synced = co_await sync(); !synced) {
+        co_return synced;
+    }
+    std::vector<std::shared_ptr<ZettaObjectBackend>> views;
+    {
+        std::lock_guard lock(shared_->views_mutex);
+        views = shared_->views;
+    }
+    for (const auto& view : views) {
+        if (view.get() == this) {
+            continue;
+        }
+        if (auto synced = co_await view->sync(); !synced) {
+            co_return synced;
+        }
+    }
+    co_return liquid::result<void>{};
+}
+
 // ---- ZettaStoreOwner -------------------------------------------------------------------------
 
 ZettaStoreOwner::ZettaStoreOwner(std::shared_ptr<ZettaObjectClient> client,
@@ -2627,10 +2692,16 @@ ZettaStoreOwner::ZettaStoreOwner(std::shared_ptr<ZettaObjectClient> client,
                                  std::function<void()> on_lost,
                                  std::chrono::milliseconds settle_budget)
     : client_(std::move(client)), ttl_(ttl), on_lost_(std::move(on_lost)),
-      settle_budget_(settle_budget) {}
+      settle_budget_(settle_budget) {
+    client_->set_owned(true);
+}
 
 ZettaStoreOwner::~ZettaStoreOwner() {
     stop_thread();
+    // Views the backend kept for a release that never came (a store dropped without close) are
+    // let go of, so they do not keep their backend's state alive (lake#535).
+    client_->abandon_before_release();
+    client_->set_owned(false);
 }
 
 bool ZettaStoreOwner::held() const {
@@ -2746,11 +2817,16 @@ void ZettaStoreOwner::renew_loop() {
 }
 
 liquid::runtime::task<void> ZettaStoreOwner::release() {
-    // What the store's backend holds for its next barrier is sent while the lease is still held
-    // (lake#527): a store closed without a last barrier leaves nothing unsent.
+    // What the store's backend holds is sent and made durable while the lease is still held
+    // (lake#527, lake#535): a store closed without a last sync leaves nothing unsent.
+    // Not lost(): liquid's close revokes the store's copy of the grant before it calls release, so
+    // the grant's state cannot tell a close from a fenced refusal. A renewal that failed sets
+    // lost_; after a takeover the settling's writes are refused as fenced and land nothing.
     liquid::result<void> settled;
-    if (held() && !lost()) {
+    if (held() && !lost_.load()) {
         settled = co_await client_->before_release(settle_budget_);
+    } else {
+        client_->abandon_before_release();
     }
     stop_thread();
     std::string holder;

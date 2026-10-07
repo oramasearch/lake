@@ -168,7 +168,7 @@ TEST(WorkspaceStoreBackend, RangesRoundTripAcrossBlocksTailsAndReopen) {
     // A small put is held until the barrier (lake#527) and read back from memory meanwhile.
     EXPECT_FALSE(rig.zetta->objects(rig.endpoint).contains("objects/whole"));
     EXPECT_EQ(read(*backend, "objects/whole", 0, 3000), whole);
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     EXPECT_TRUE(rig.zetta->objects(rig.endpoint).contains("objects/whole"));
     EXPECT_EQ(read(*backend, "objects/whole", 0, 3000), whole);
     EXPECT_EQ(read(*backend, "objects/whole", 1000, 1100),
@@ -186,22 +186,22 @@ TEST(WorkspaceStoreBackend, RangesRoundTripAcrossBlocksTailsAndReopen) {
     // Created and barriered empty, so what follows is appended (an object created and filled in
     // one interval goes as one PUT, with no tail).
     ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, {})));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     append(100, 2);
     append(5000, 3);
     // Bytes not yet barriered read back from the buffer.
     EXPECT_EQ(read(*backend, "packs/pack-1.pack", 0, grown.size()), grown);
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     const auto stored = rig.zetta->objects(rig.endpoint);
     EXPECT_TRUE(stored.contains("packs/pack-1.pack"));
     EXPECT_TRUE(std::ranges::any_of(stored, [](const auto& object) {
         return object.first.starts_with("packs/pack-1.pack.lake-tail-");
     }));
     append(2500, 4);
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     // The replaced tail is removed beside the next barrier's writes, once its replacement is
     // durable; then exactly one current tail is kept.
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     const auto after = rig.zetta->objects(rig.endpoint);
     EXPECT_EQ(std::ranges::count_if(after, [](const auto& object) {
                   return object.first.starts_with("packs/pack-1.pack.lake-tail-");
@@ -217,7 +217,7 @@ TEST(WorkspaceStoreBackend, RangesRoundTripAcrossBlocksTailsAndReopen) {
     // and goes on appending from the stored tail.
     backend = reopened;
     append(700, 5);
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     auto third = rig.backend(small_blocks());
     EXPECT_EQ(read(*third, "packs/pack-1.pack", 0, grown.size()), grown);
 
@@ -227,7 +227,7 @@ TEST(WorkspaceStoreBackend, RangesRoundTripAcrossBlocksTailsAndReopen) {
     const auto rest = random_bytes(2100, 7);
     ASSERT_TRUE(liquid::runtime::block_on(third->put_range("index/run-1.idx", 40, rest)));
     run.insert(run.end(), rest.begin(), rest.end());
-    ASSERT_TRUE(liquid::runtime::block_on(third->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(third->sync()));
     auto fourth = rig.backend(small_blocks());
     EXPECT_EQ(read(*fourth, "index/run-1.idx", 0, run.size()), run);
 
@@ -245,8 +245,8 @@ TEST(WorkspaceStoreBackend, RangesRoundTripAcrossBlocksTailsAndReopen) {
     EXPECT_EQ(read(*fourth, "objects/fresh", 0, 5), bytes_of("fresh"));
     ASSERT_TRUE(liquid::runtime::block_on(fourth->remove("packs/pack-1.pack")));
     // The removal is sent at the barrier, and the object's tails beside the barrier after it.
-    ASSERT_TRUE(liquid::runtime::block_on(fourth->barrier()));
-    ASSERT_TRUE(liquid::runtime::block_on(fourth->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(fourth->sync()));
+    ASSERT_TRUE(liquid::runtime::block_on(fourth->sync()));
     const auto removed = rig.zetta->objects(rig.endpoint);
     EXPECT_FALSE(std::ranges::any_of(removed, [](const auto& object) {
         return object.first.starts_with("packs/pack-1.pack");
@@ -272,7 +272,7 @@ TEST(WorkspaceStoreBackend, ARewriteWithOtherBytesIsRefused) {
     const auto header = random_bytes(64, 11);
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("index/run-2.idx", header)));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("index/run-2.idx", 64, random_bytes(3000, 12))));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     // A retried range with the bytes already there changes nothing.
     EXPECT_TRUE(liquid::runtime::block_on(backend->put_range("index/run-2.idx", 0, header)));
     // A rewrite of written bytes with other bytes is refused, plainly.
@@ -295,7 +295,7 @@ TEST(WorkspaceStoreBackend, TamperingMovedBlocksAndAnotherWorkspacesKeyAreRefuse
     const auto contents = random_bytes(4000, 21);
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", contents)));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/b", contents)));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     const auto stored = rig.zetta->objects(rig.endpoint);
 
     // One flipped bit in a block.
@@ -324,7 +324,7 @@ TEST(WorkspaceStoreBackend, TamperingMovedBlocksAndAnotherWorkspacesKeyAreRefuse
     Rig other;
     auto foreign = other.backend(small_blocks());
     ASSERT_TRUE(liquid::runtime::block_on(foreign->put("objects/own", bytes_of("own"))));
-    ASSERT_TRUE(liquid::runtime::block_on(foreign->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(foreign->sync()));
     other.zetta->set_object(other.endpoint, "objects/a", stored.at("objects/a"));
     auto other_reader = other.backend(small_blocks());
     const auto copied = liquid::runtime::block_on(other_reader->get_range("objects/a", 0, 10));
@@ -542,14 +542,14 @@ TEST(WorkspaceStoreBackend, ATransientFailureIsRetriedAndAPersistentOneIsUnavail
     Rig rig;
     auto backend = rig.backend(small_blocks());
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/x", random_bytes(10, 70))));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     // A small put is sent by the barrier (lake#527), which retries it.
     rig.zetta->drop_next(2);
     EXPECT_TRUE(liquid::runtime::block_on(backend->put("objects/y", random_bytes(10, 71))));
-    EXPECT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    EXPECT_TRUE(liquid::runtime::block_on(backend->sync()));
     rig.zetta->drop_next(10);
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/z", random_bytes(10, 72))));
-    const auto failed = liquid::runtime::block_on(backend->barrier());
+    const auto failed = liquid::runtime::block_on(backend->sync());
     ASSERT_FALSE(failed);
     EXPECT_EQ(failed.error().code, liquid::errc::unavailable);
 }
@@ -960,7 +960,7 @@ TEST(WorkspaceStoreBackend, AMissingKeyIsCreatedOnlyForANewStoreInAnEmptyBucket)
     // too, and its objects are left as they were.
     auto creator = rig.backend(small_blocks());
     ASSERT_TRUE(liquid::runtime::block_on(creator->put("objects/a", bytes_of("a"))));
-    ASSERT_TRUE(liquid::runtime::block_on(creator->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(creator->sync()));
     rig.zetta->erase_object(rig.endpoint, std::string(lake::control::workspace_store_key_object));
     const auto before = rig.zetta->objects(rig.endpoint);
     auto over = rig.backend(small_blocks(), true);
@@ -983,7 +983,7 @@ TEST(WorkspaceStoreBackend, ARemoteConflictOnAConditionalCreateFailsTheBackendAn
     EXPECT_EQ(created.error().code, liquid::errc::already_exists);
     EXPECT_TRUE(backend->failed()) << "the store must be reopened";
     // The buffered append was not dropped.
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     auto reopened = rig.backend(small_blocks());
     EXPECT_EQ(read(*reopened, "packs/pack-1.pack", 0, pack.size()), pack);
 }
@@ -1000,14 +1000,14 @@ TEST(WorkspaceStoreBackend, TailRollbackDeletionTruncationAndACrashBeforeTheTail
     // An object created and barriered empty, so what follows is appended (an object created and
     // filled in one interval is one PUT, with no tail).
     ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, {})));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     append(*backend, 1500, 91); // one appended block and a tail of 476 bytes
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     const auto first = rig.zetta->objects(rig.endpoint);
     const std::string first_tail = tail_of(first, "packs/pack-1.pack");
     ASSERT_FALSE(first_tail.empty());
     append(*backend, 300, 92); // the same block's tail grows to 776 bytes
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     const std::string second_tail = tail_of(rig.zetta->objects(rig.endpoint), "packs/pack-1.pack");
     EXPECT_EQ(second_tail, first_tail) << "a tail of the same block keeps its name";
 
@@ -1043,13 +1043,13 @@ TEST(WorkspaceStoreBackend, TailRollbackDeletionTruncationAndACrashBeforeTheTail
     auto writer = crash.backend(small_blocks());
     std::vector<std::byte> bytes = random_bytes(1500, 93);
     ASSERT_TRUE(liquid::runtime::block_on(writer->put_range("packs/pack-2.pack", 0, {})));
-    ASSERT_TRUE(liquid::runtime::block_on(writer->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(writer->sync()));
     ASSERT_TRUE(liquid::runtime::block_on(writer->put_range("packs/pack-2.pack", 0, bytes)));
-    ASSERT_TRUE(liquid::runtime::block_on(writer->barrier())); // acknowledged: 1,500 bytes
+    ASSERT_TRUE(liquid::runtime::block_on(writer->sync())); // acknowledged: 1,500 bytes
     const auto more = random_bytes(1000, 94);                  // completes block 1, tail of 452
     ASSERT_TRUE(liquid::runtime::block_on(writer->put_range("packs/pack-2.pack", 1500, more)));
     crash.zetta->drop_on("PUT", 1, 4); // the tail put and its three retries never land
-    EXPECT_FALSE(liquid::runtime::block_on(writer->barrier()));
+    EXPECT_FALSE(liquid::runtime::block_on(writer->sync()));
     EXPECT_TRUE(writer->failed());
     auto recovered = crash.backend(small_blocks());
     EXPECT_EQ(size_of(*recovered, "packs/pack-2.pack"), 2048U);
@@ -1063,9 +1063,9 @@ TEST(WorkspaceStoreBackend, TailsThatAreNotCurrentAreRemovedAfterOpen) {
     Rig rig;
     auto backend = rig.backend(small_blocks());
     ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, {})));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, random_bytes(1500, 95))));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     const std::string current = tail_of(rig.zetta->objects(rig.endpoint), "packs/pack-1.pack");
     // A tail an interrupted barrier left behind, for a block the object already passed.
     const std::string stale = current.substr(0, current.find(".lake-tail-")) + ".lake-tail-0" +
@@ -1074,7 +1074,7 @@ TEST(WorkspaceStoreBackend, TailsThatAreNotCurrentAreRemovedAfterOpen) {
     auto reopened = rig.backend(small_blocks());
     EXPECT_EQ(size_of(*reopened, "packs/pack-1.pack"), 1500U);
     ASSERT_TRUE(liquid::runtime::block_on(reopened->put("objects/x", bytes_of("x"))));
-    ASSERT_TRUE(liquid::runtime::block_on(reopened->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(reopened->sync()));
     const auto after = rig.zetta->objects(rig.endpoint);
     EXPECT_FALSE(after.contains(stale));
     EXPECT_TRUE(after.contains(current));
@@ -1089,10 +1089,10 @@ TEST(WorkspaceStoreBackend, AThresholdFlushAndABarrierOnOneKeyDoNotSendItsBlocks
         EXPECT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, first)));
     });
     std::this_thread::sleep_for(100ms);
-    EXPECT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    EXPECT_TRUE(liquid::runtime::block_on(backend->sync()));
     flusher.join();
     rig.zetta->hang(rig.endpoint, 0ms);
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     auto reopened = rig.backend(small_blocks());
     EXPECT_EQ(size_of(*reopened, "packs/pack-1.pack"), first.size());
     EXPECT_EQ(read(*reopened, "packs/pack-1.pack", 0, first.size()), first);
@@ -2281,8 +2281,11 @@ TEST(WorkspaceStoreMove, ACommitNamesItsStoreRequestsInServerTimingAndMetrics) {
                     {"operations", json::array({{{"type", "file"}, {"path", "one.txt"}, {"content", "b25lCg=="}}})}};
     const std::uint64_t before = sum_of(rig.zetta->requests_by_method());
     const std::size_t applied_before = rig.zetta->applied().size();
+    const std::string alpha_endpoint = "http://" + rig.alpha + ".test";
+    const std::uint64_t durable_before = rig.zetta->durable_requests(alpha_endpoint);
     const std::string response = raw_exchange(rig.server->port(), "POST", "/v1/commit_repository_files", body.dump());
     const std::uint64_t received = sum_of(rig.zetta->requests_by_method()) - before;
+    const std::uint64_t durable = rig.zetta->durable_requests(alpha_endpoint) - durable_before;
     ASSERT_TRUE(response.starts_with("HTTP/1.1 200")) << response;
     const std::string timing = header_of(response, "server-timing");
     ASSERT_FALSE(timing.empty()) << response;
@@ -2295,8 +2298,11 @@ TEST(WorkspaceStoreMove, ACommitNamesItsStoreRequestsInServerTimingAndMetrics) {
     EXPECT_GT(named, 0U) << timing;
     EXPECT_EQ(named, received) << timing;
     EXPECT_NE(timing.find("store_put;dur="), std::string::npos) << timing;
-    // Liquid's writes need no :barrier (each is durable as it is sent); since lake#381 the search
-    // index's own writes for the commit go to the same bucket and end with its own :barrier.
+    // Liquid's writes are sent without durability and made durable by one :barrier before lake
+    // answers (lake#535); since lake#381 the search index's own writes for the commit go to the
+    // same bucket and end with its own :barrier. Nothing else asks Zetta to fsync.
+    EXPECT_GE(durable, 1U) << timing;
+    EXPECT_LE(durable, 2U) << timing;
     std::size_t index_writes = 0;
     std::size_t store_writes = 0;
     const auto applied = rig.zetta->applied();
@@ -2304,8 +2310,8 @@ TEST(WorkspaceStoreMove, ACommitNamesItsStoreRequestsInServerTimingAndMetrics) {
         const std::string key = applied[index].substr(applied[index].find(' ') + 1);
         (key.starts_with(lake::search::workspace_index_prefix) ? index_writes : store_writes) += 1;
     }
-    std::printf("commit writes: %zu to the repository store, %zu to the search index\n", store_writes,
-                index_writes);
+    std::printf("commit writes: %zu to the repository store, %zu to the search index; %llu durable requests\n",
+                store_writes, index_writes, static_cast<unsigned long long>(durable));
     std::printf("commit_repository_files Server-Timing: %s\n", timing.c_str());
 
     const std::string metrics = raw_exchange(rig.server->port(), "GET", "/metrics", "");
@@ -2958,6 +2964,10 @@ public:
         line += objects == std::string::npos ? request.url : request.url.substr(objects);
         {
             std::lock_guard lock(mutex_);
+            // A request that asks Zetta to fsync before it answers.
+            if (line.find(":barrier") != std::string::npos || line.find("durable=true") != std::string::npos) {
+                ++durable_;
+            }
             if (recording_) {
                 trace_.push_back(std::move(line));
             }
@@ -2980,6 +2990,10 @@ public:
         std::lock_guard lock(mutex_);
         return rounds_;
     }
+    std::uint64_t durable() const {
+        std::lock_guard lock(mutex_);
+        return durable_;
+    }
 
     void record(bool on) {
         std::lock_guard lock(mutex_);
@@ -3000,11 +3014,20 @@ private:
     std::vector<std::string> trace_;
     int in_flight_ = 0;
     std::uint64_t rounds_ = 0;
+    std::uint64_t durable_ = 0;
 };
 
 std::chrono::milliseconds measured_round_trip() {
     const char* value = std::getenv("LAKE_TEST_ZETTA_RTT_MS");
     return std::chrono::milliseconds(value != nullptr && *value != '\0' ? std::atoi(value) : 10);
+}
+
+// What an fsync costs the workspace Zetta's disk in the measurement (lake#535): the proxy holds
+// each durable request this much longer. Dev's Azure disk answered about 30 ms per durable
+// request (lake#535); 0, the default, leaves it to the loopback disk.
+std::chrono::milliseconds measured_fsync_cost() {
+    const char* value = std::getenv("LAKE_TEST_ZETTA_FSYNC_MS");
+    return std::chrono::milliseconds(value != nullptr && *value != '\0' ? std::atoi(value) : 0);
 }
 
 // What lake's commit_repository_files does for one regular file (SyncStore::commit_repository_files):
@@ -3032,7 +3055,8 @@ TEST(WorkspaceStoreZetta, AOneFileCommitsRequestsAreCountedAndTimed) {
         GTEST_SKIP() << "set LAKE_TEST_ZETTA_BINARY to a zetta built from origin/dev";
     }
     const auto round_trip = measured_round_trip();
-    lake::test::LatencyProxy proxy(zetta.port, round_trip);
+    const auto fsync_cost = measured_fsync_cost();
+    lake::test::LatencyProxy proxy(zetta.port, round_trip, fsync_cost);
     auto tracing = std::make_shared<TracingTransport>(lake::control::make_zetta_object_transport());
     const std::string workspace = lake::control::new_uuid_v4();
     auto client = std::make_shared<ZettaObjectClient>(
@@ -3040,10 +3064,11 @@ TEST(WorkspaceStoreZetta, AOneFileCommitsRequestsAreCountedAndTimed) {
     ASSERT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
     auto owner = std::make_shared<ZettaStoreOwner>(client, 30s);
     liquid::store_options options;
-    options.backend = std::make_shared<ZettaObjectBackend>(
+    auto backend = std::make_shared<ZettaObjectBackend>(
         client, ZettaObjectBackendOptions{.workspace_id = workspace,
                                           .instance_kek = std::string(kek),
                                           .create_key = true});
+    options.backend = backend;
     options.owner = owner;
     auto store = liquid::runtime::block_on(liquid::store::open(zetta.directory / "unused", std::move(options)));
     ASSERT_TRUE(store) << store.error().message;
@@ -3053,11 +3078,28 @@ TEST(WorkspaceStoreZetta, AOneFileCommitsRequestsAreCountedAndTimed) {
     auto repository = liquid::runtime::block_on(liquid::repository::create(identifier, repository_options));
     ASSERT_TRUE(repository) << repository.error().message;
 
-    std::printf("\nlake#527: one-file commits on a workspace store, real Zetta, %lld ms round trip\n",
-                static_cast<long long>(round_trip.count()));
-    std::printf("| Commit | ms | requests | sequential rounds | by kind |\n|---|---:|---:|---:|---|\n");
+    // A repository with history and directories first, as on dev (lake#535):
+    // LAKE_TEST_ZETTA_SEED_COMMITS commits of 8 files each, spread over 16 directories.
+    if (const char* seeded = std::getenv("LAKE_TEST_ZETTA_SEED_COMMITS"); seeded != nullptr) {
+        for (int round = 0; round < std::atoi(seeded); ++round) {
+            for (int file = 0; file < 8; ++file) {
+                const std::string path = "seed/dir-" + std::to_string((round * 8 + file) % 16) + "/file-" +
+                                         std::to_string(round) + "-" + std::to_string(file) + ".md";
+                ASSERT_TRUE(liquid::runtime::block_on(repository->write(path, random_bytes(2000, round * 8 + file))));
+            }
+            ASSERT_TRUE(liquid::runtime::block_on(repository->cut("seed " + std::to_string(round))));
+        }
+        ASSERT_TRUE(liquid::runtime::block_on(backend->make_durable()));
+    }
+
+    std::printf("\nlake#527, lake#535: one-file commits on a workspace store, real Zetta, %lld ms round "
+                "trip, %lld ms per durable request\n",
+                static_cast<long long>(round_trip.count()), static_cast<long long>(fsync_cost.count()));
+    std::printf("| Commit | ms | in requests, ms | requests | durable | sequential rounds | by kind |\n"
+                "|---|---:|---:|---:|---:|---:|---|\n");
     double steady_ms = 0;
     std::uint64_t steady_requests = 0;
+    std::uint64_t steady_durable = 0;
     for (int commit = 1; commit <= 4; ++commit) {
         lake::control::ObjectRequestTally tally;
         std::array<std::uint64_t, lake::control::object_request_kinds> count{};
@@ -3069,27 +3111,39 @@ TEST(WorkspaceStoreZetta, AOneFileCommitsRequestsAreCountedAndTimed) {
         const std::uint64_t rounds_before = tracing->rounds();
         tracing->record(commit == 4);
         const auto started = std::chrono::steady_clock::now();
+        const std::uint64_t durable_before = tracing->durable();
         auto change = commit_one_file(*repository, "notes/file-" + std::to_string(commit) + ".md",
                                       bytes_of("a small note, commit " + std::to_string(commit) + "\n"));
         ASSERT_TRUE(change) << change.error().message;
+        // Lake's sync before it answers (lake#535): the commit is acknowledged once it returns.
+        ASSERT_TRUE(liquid::runtime::block_on(backend->make_durable()));
         const double elapsed = milliseconds_since(started);
         tally.add_difference(client->counters()->by_kind, count, nanoseconds);
         tracing->record(false);
         const std::uint64_t rounds = tracing->rounds() - rounds_before;
-        std::printf("| %d | %.0f | %llu | %llu | %s |\n", commit, elapsed,
+        const std::uint64_t durable = tracing->durable() - durable_before;
+        std::printf("| %d | %.0f | %.0f | %llu | %llu | %llu | %s |\n", commit, elapsed,
+                    static_cast<double>(tally.total_nanoseconds()) / 1e6,
                     static_cast<unsigned long long>(tally.total_requests()),
-                    static_cast<unsigned long long>(rounds), tally.summary().c_str());
+                    static_cast<unsigned long long>(durable), static_cast<unsigned long long>(rounds),
+                    tally.summary().c_str());
         if (commit == 4) {
             steady_ms = elapsed;
             steady_requests = tally.total_requests();
+            steady_durable = durable;
         }
     }
     std::printf("\nrequests of the steady-state commit, in order:\n");
     for (const std::string& line : tracing->trace()) {
         std::printf("  %s\n", line.c_str());
     }
-    std::printf("steady state: %.0f ms, %llu requests\n", steady_ms,
-                static_cast<unsigned long long>(steady_requests));
+    std::printf("steady state: %.0f ms, %llu requests, %llu durable\n", steady_ms,
+                static_cast<unsigned long long>(steady_requests),
+                static_cast<unsigned long long>(steady_durable));
+    EXPECT_EQ(steady_durable, 1U) << "one :barrier per commit (lake#535)";
+    if (fsync_cost.count() > 0) {
+        EXPECT_EQ(proxy.durable_requests(), tracing->durable()) << "the proxy saw every durable request";
+    }
     ASSERT_TRUE(liquid::runtime::block_on(store->close()));
 }
 
@@ -3162,9 +3216,10 @@ bool a_prefix_survived(const std::vector<std::string>& keys,
 }
 
 // Random puts (held and sent at once), appends past the flush threshold, conditional creates and
-// removes, with barriers between; then a barrier that is answered, stopped part way, or loses
-// requests or answers at random; then a crash that keeps a prefix of the bucket's log. What
-// survives is a prefix of liquid's issue order no shorter than the last answered barrier.
+// removes, with liquid's barriers and lake's syncs between (lake#535); then a sync that is
+// answered, stopped part way, or loses requests or answers at random; then a crash that keeps a
+// prefix of the bucket's log. What survives is a prefix of liquid's issue order no shorter than
+// the last answered sync.
 TEST(WorkspaceStoreBackend, ACrashAnywhereKeepsAPrefixOfTheIssueOrderPastTheLastBarrier) {
     const std::vector<std::string> keys{"packs/pack-1.pack", "index/run-1.idx", "index/MANIFEST",
                                         "packs/objects.meta", "repositories/r/LIQUID_REPO",
@@ -3187,7 +3242,13 @@ TEST(WorkspaceStoreBackend, ACrashAnywhereKeepsAPrefixOfTheIssueOrderPastTheLast
             const std::string& key = keys[random() % keys.size()];
             const auto choice = random() % 10;
             if (choice < 2) {
-                ASSERT_TRUE(liquid::runtime::block_on(backend->barrier())) << seed;
+                if (random() % 2 == 0) {
+                    // Liquid's barrier: a point in the issue order that acknowledges nothing.
+                    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier())) << seed;
+                    continue;
+                }
+                // Lake's sync at the end of an operation: everything before it is durable.
+                ASSERT_TRUE(liquid::runtime::block_on(backend->sync())) << seed;
                 acknowledged = issued.size();
                 continue;
             }
@@ -3223,7 +3284,7 @@ TEST(WorkspaceStoreBackend, ACrashAnywhereKeepsAPrefixOfTheIssueOrderPastTheLast
             rig.zetta->lose_answers_randomly(seed, 50);
         }
         if (ending != 0 || random() % 2 == 0) {
-            if (liquid::runtime::block_on(backend->barrier())) {
+            if (liquid::runtime::block_on(backend->sync())) {
                 acknowledged = issued.size();
             }
         }
@@ -3264,22 +3325,31 @@ TEST(WorkspaceStoreBackend, ACrashAnywhereKeepsAPrefixOfTheIssueOrderPastTheLast
     }
 }
 
-// The writes of an interval are sent one after another, in the order liquid issued them, never
-// two at once, so the bucket can never hold a later one without an earlier one.
+// The writes of an operation are sent one after another, in the order liquid issued them, never
+// two at once, so the bucket can never hold a later one without an earlier one. Liquid's barriers
+// between them send nothing (lake#535); none is durable until the sync.
 TEST(WorkspaceStoreBackend, AnIntervalsWritesAreSentOneAtATimeInIssueOrder) {
     Rig rig;
     auto backend = rig.backend(small_blocks());
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/old", bytes_of("old"))));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     const std::size_t before = rig.zetta->applied().size();
+    const std::uint64_t durable_before = rig.zetta->durable_requests(rig.endpoint);
     rig.zetta->set_latency(3ms);
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("gc/marker", bytes_of("pending"))));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("packs/pack-9.pack", random_bytes(1500, 1))));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("index/run-9.idx", random_bytes(40, 2))));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("index/run-9.idx", 40, random_bytes(900, 3))));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    EXPECT_EQ(rig.zetta->applied().size(), before) << "liquid's barriers send nothing";
     ASSERT_TRUE(liquid::runtime::block_on(backend->remove("objects/old")));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("index/MANIFEST", bytes_of("manifest"))));
     ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    EXPECT_EQ(rig.zetta->durable_requests(rig.endpoint), durable_before);
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     rig.zetta->set_latency(0ms);
     const auto applied = rig.zetta->applied();
     std::vector<std::string> keys;
@@ -3288,6 +3358,7 @@ TEST(WorkspaceStoreBackend, AnIntervalsWritesAreSentOneAtATimeInIssueOrder) {
     }
     EXPECT_EQ(keys, (std::vector<std::string>{"gc/marker", "packs/pack-9.pack", "index/run-9.idx",
                                              "objects/old", "index/MANIFEST"}));
+    EXPECT_EQ(rig.zetta->durable_requests(rig.endpoint), durable_before + 1);
     EXPECT_EQ(rig.zetta->most_writes_in_flight(), 1);
 }
 
@@ -3299,11 +3370,11 @@ TEST(WorkspaceStoreBackend, AWriteWhoseAnswerWasLostIsRetriedOrFailsTheBackend) 
     auto backend = rig.backend(small_blocks());
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", bytes_of("first"))));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/b", bytes_of("second"))));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     // The held put's durable PUT lands, its answer is lost, the retry lands again.
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", bytes_of("replaced"))));
     rig.zetta->lose_next_answers(1);
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     EXPECT_EQ(read(*backend, "objects/a", 0, 8), bytes_of("replaced"));
     // The DELETE lands, its answer is lost, the retry answers 404, which is the removal.
     rig.zetta->lose_next_answers(1);
@@ -3337,27 +3408,28 @@ TEST(WorkspaceStoreBackend, HeldWritesPastTheirBoundAreSentEarly) {
     options.held_puts_limit = 4;
     options.held_bytes_limit = 6000;
     auto backend = rig.backend(options);
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     for (int index = 0; index < 5; ++index) {
         ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/" + std::to_string(index), bytes_of("x"))));
     }
     EXPECT_TRUE(rig.zetta->objects(rig.endpoint).contains("objects/0")) << "the fifth put sent the four held";
     EXPECT_FALSE(rig.zetta->objects(rig.endpoint).contains("objects/4"));
     const auto barriers = rig.zetta->barriers(rig.endpoint);
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     EXPECT_EQ(rig.zetta->barriers(rig.endpoint), barriers + 1) << "an early send needs :barrier";
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/big-1", random_bytes(2000, 4))));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/big-2", random_bytes(2000, 5))));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/big-3", random_bytes(2500, 6))));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/big-4", random_bytes(10, 7))));
     EXPECT_TRUE(rig.zetta->objects(rig.endpoint).contains("objects/big-3")) << "past 6,000 held bytes";
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     EXPECT_EQ(rig.zetta->barriers(rig.endpoint), barriers + 2);
 }
 
-// The same through liquid: one-file commits as lake makes them, then one the workspace Zetta stops
-// answering part way through, then a crash. The store reopens (a successor with a higher fence)
-// and every commit that was acknowledged reads back.
+// The same through liquid: one-file commits as lake makes them (each acknowledged once lake's sync
+// after it answers, lake#535), then one the workspace Zetta stops answering part way through, then
+// a crash. The store reopens (a successor with a higher fence) and every commit that was
+// acknowledged reads back.
 TEST(WorkspaceStoreBackend, ACrashMidCommitKeepsEveryAcknowledgedCommit) {
     for (std::uint64_t seed = 1; seed <= 48; ++seed) {
         // Checkpoints every few drips (a one-file commit makes more than one) and liquid's default
@@ -3370,9 +3442,14 @@ TEST(WorkspaceStoreBackend, ACrashMidCommitKeepsEveryAcknowledgedCommit) {
         std::mt19937_64 random(seed);
         std::vector<std::pair<std::string, std::vector<std::byte>>> acknowledged;
         std::optional<liquid::change_id> head;
+        // The interrupted commit when liquid answered it but the sync did not: not acknowledged,
+        // so the crash may keep it or not.
+        std::optional<liquid::change_id> unacknowledged;
         {
             std::shared_ptr<ZettaStoreOwner> owner;
-            auto store = liquid::runtime::block_on(liquid::store::open(root, owned(rig, owner)));
+            auto store_options = owned(rig, owner);
+            auto backend = std::static_pointer_cast<ZettaObjectBackend>(store_options.backend);
+            auto store = liquid::runtime::block_on(liquid::store::open(root, std::move(store_options)));
             ASSERT_TRUE(store) << store.error().message;
             liquid::repository_options options;
             options.store = &*store;
@@ -3385,6 +3462,7 @@ TEST(WorkspaceStoreBackend, ACrashMidCommitKeepsEveryAcknowledgedCommit) {
                 auto bytes = random_bytes(10 + random() % 3000, random());
                 auto change = commit_one_file(*repository, path, bytes);
                 ASSERT_TRUE(change) << seed;
+                ASSERT_TRUE(liquid::runtime::block_on(backend->make_durable())) << seed;
                 head = *change;
                 acknowledged.emplace_back(path, std::move(bytes));
             }
@@ -3399,8 +3477,12 @@ TEST(WorkspaceStoreBackend, ACrashMidCommitKeepsEveryAcknowledgedCommit) {
             }
             auto bytes = random_bytes(10 + random() % 3000, random());
             if (auto change = commit_one_file(*repository, "notes/interrupted.md", bytes)) {
-                head = *change;
-                acknowledged.emplace_back("notes/interrupted.md", std::move(bytes));
+                if (liquid::runtime::block_on(backend->make_durable())) {
+                    head = *change;
+                    acknowledged.emplace_back("notes/interrupted.md", std::move(bytes));
+                } else {
+                    unacknowledged = *change;
+                }
             }
             // The process stops: nothing more reaches the workspace Zetta.
             rig.zetta->fail_randomly(0, 0);
@@ -3423,7 +3505,10 @@ TEST(WorkspaceStoreBackend, ACrashMidCommitKeepsEveryAcknowledgedCommit) {
         // commit's write and its cut) would hold its file but not its change.
         auto reopened_head = liquid::runtime::block_on(repository->head());
         ASSERT_TRUE(reopened_head) << "seed " << seed << ": " << reopened_head.error().message;
-        EXPECT_EQ(liquid::to_string(reopened_head->value), liquid::to_string(head->value)) << "seed " << seed;
+        if (!unacknowledged ||
+            liquid::to_string(reopened_head->value) != liquid::to_string(unacknowledged->value)) {
+            EXPECT_EQ(liquid::to_string(reopened_head->value), liquid::to_string(head->value)) << "seed " << seed;
+        }
         for (const auto& [path, bytes] : acknowledged) {
             auto read_back = liquid::runtime::block_on(repository->read(path));
             ASSERT_TRUE(read_back) << "seed " << seed << ": " << path << ": " << read_back.error().message;
@@ -3526,21 +3611,21 @@ TEST(WorkspaceStoreOwner, TheSettleBudgetCutsOnlyTheSettlingRequests) {
 TEST(WorkspaceStoreBackend, HeldBytesAndPutsStayExact) {
     Rig rig;
     auto backend = rig.backend(small_blocks());
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", random_bytes(300, 1))));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", random_bytes(200, 2))));
     EXPECT_EQ(backend->held(), (std::pair<std::uint64_t, std::size_t>{200, 1})) << "the second put replaced the first";
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/b", random_bytes(100, 3))));
     ASSERT_TRUE(liquid::runtime::block_on(backend->remove("objects/b")));
     EXPECT_EQ(backend->held(), (std::pair<std::uint64_t, std::size_t>{200, 1})) << "a held key removed is not held";
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     EXPECT_EQ(backend->held(), (std::pair<std::uint64_t, std::size_t>{0, 0}));
     // An object in Zetta appended past the flush threshold (4 KiB here) keeps only its partial block.
     ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, {})));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, random_bytes(5000, 4))));
     EXPECT_EQ(backend->held(), (std::pair<std::uint64_t, std::size_t>{5000 - 4096, 0}));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     EXPECT_EQ(backend->held(), (std::pair<std::uint64_t, std::size_t>{0, 0}));
 }
 
@@ -3551,10 +3636,10 @@ TEST(WorkspaceStoreBackend, ABarrierNeverRemovesATailItJustWrote) {
     Rig rig;
     auto backend = rig.backend(small_blocks());
     ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, {})));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     std::vector<std::byte> grown = random_bytes(1500, 5); // one block and a tail of block 1
     ASSERT_TRUE(liquid::runtime::block_on(backend->put_range("packs/pack-1.pack", 0, grown)));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     const std::string current = tail_of(rig.zetta->objects(rig.endpoint), "packs/pack-1.pack");
     ASSERT_FALSE(current.empty());
     // A tail left for block 2, as an interrupted barrier or a rollback could leave it.
@@ -3566,8 +3651,8 @@ TEST(WorkspaceStoreBackend, ABarrierNeverRemovesATailItJustWrote) {
     const auto more = random_bytes(1000, 6); // completes block 1, a tail of block 2
     ASSERT_TRUE(liquid::runtime::block_on(reopened->put_range("packs/pack-1.pack", 1500, more)));
     grown.insert(grown.end(), more.begin(), more.end());
-    ASSERT_TRUE(liquid::runtime::block_on(reopened->barrier()));
-    ASSERT_TRUE(liquid::runtime::block_on(reopened->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(reopened->sync()));
+    ASSERT_TRUE(liquid::runtime::block_on(reopened->sync()));
     auto reader = rig.backend(small_blocks());
     EXPECT_EQ(size_of(*reader, "packs/pack-1.pack"), grown.size());
     EXPECT_EQ(read(*reader, "packs/pack-1.pack", 0, grown.size()), grown);
@@ -3579,7 +3664,7 @@ TEST(WorkspaceStoreBackend, TheSearchIndexsObjectsAreNotLiquids) {
     Rig rig;
     auto backend = rig.backend(small_blocks());
     ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", bytes_of("a"))));
-    ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
     rig.zetta->set_object(rig.endpoint, std::string(lake::control::workspace_store_search_prefix) + "manifest.json",
                           "sealed index");
     auto reopened = rig.backend(small_blocks());
@@ -3908,16 +3993,21 @@ TEST(WorkspaceStoreHandoff, AnUnreadyWorkspaceDoesNotHoldUpTheOthersRepositories
     rig.server->begin_drain();
     ASSERT_TRUE(eventually([&] { return rig.zetta->lease(endpoint_a).fence > old_fence; }));
     rig.server->stop();
+    // Counted before the successor can own the root: its repository pre-open can start as soon
+    // as it does, before store_root_open() is seen here.
+    const auto writes = rig.zetta->applied().size();
     rig.server = std::move(successor);
     ASSERT_TRUE(eventually([&] { return rig.server->store_root_open(); }));
     // Opening a repository writes its entry point again: alpha's repository is opened within
     // seconds, while beta is still being retried.
-    const auto writes = rig.zetta->applied().size();
     EXPECT_TRUE(eventually([&] {
         const auto applied = rig.zetta->applied();
         return std::any_of(applied.begin() + static_cast<std::ptrdiff_t>(writes), applied.end(),
                            [](const std::string& write) { return write.ends_with("/LIQUID_REPO"); });
     }, 3s)) << "alpha's repositories waited for beta";
+    // What the pre-open's repository open wrote is durable, with no request after it (lake#535).
+    EXPECT_TRUE(eventually([&] { return rig.zetta->unsynced(endpoint_a) == 0; }, 3s))
+        << rig.zetta->unsynced(endpoint_a) << " writes left unsynced";
 }
 
 // Final review 3: an announcement left from an earlier owner, or one copied from an older record,
@@ -4011,6 +4101,203 @@ TEST(WorkspaceStoreHandoff, IndexWorkTheDrainDropsIsRebuiltByTheSuccessor) {
                    repositories.size();
     })) << "the successor's index holds every commit";
     EXPECT_TRUE(search_objects(*rig.zetta, endpoint_a).contains("search/manifest.json"));
+}
+
+// lake#535: liquid's one-file commits on the workspace store ask Zetta for one fsync each, lake's
+// sync before it answers; liquid's own barriers send nothing, so the writes go without
+// durability. After the sync, a crash keeps the commit and LIQUID_JOURNAL stays removed.
+TEST(WorkspaceStoreBackend, ACommitAsksForOneDurableRequestAndKeepsItsJournalRemoval) {
+    Rig rig;
+    const auto root = lake::test::fixture_path("workspace-store-durable-" + rig.workspace);
+    const auto identifier = root / "repositories" / "durable";
+    std::shared_ptr<ZettaStoreOwner> owner;
+    auto store_options = owned(rig, owner);
+    auto backend = std::static_pointer_cast<ZettaObjectBackend>(store_options.backend);
+    auto store = liquid::runtime::block_on(liquid::store::open(root, std::move(store_options)));
+    ASSERT_TRUE(store) << store.error().message;
+    liquid::repository_options options;
+    options.store = &*store;
+    options.checkpoint_interval = 1; // every commit checkpoints and removes its journal
+    auto repository = liquid::runtime::block_on(liquid::repository::create(identifier, options));
+    ASSERT_TRUE(repository) << repository.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(backend->make_durable()));
+    std::optional<liquid::change_id> head;
+    for (int commit = 0; commit < 4; ++commit) {
+        const std::uint64_t before = rig.zetta->durable_requests(rig.endpoint);
+        const std::uint64_t barriers_before = rig.zetta->barriers(rig.endpoint);
+        auto change = commit_one_file(*repository, "notes/" + std::to_string(commit) + ".md",
+                                      random_bytes(500 + commit * 100, 70 + commit));
+        ASSERT_TRUE(change) << change.error().message;
+        EXPECT_EQ(rig.zetta->durable_requests(rig.endpoint), before) << "liquid's barriers send no fsync";
+        ASSERT_TRUE(liquid::runtime::block_on(backend->make_durable()));
+        EXPECT_EQ(rig.zetta->durable_requests(rig.endpoint), before + 1) << "commit " << commit;
+        EXPECT_EQ(rig.zetta->barriers(rig.endpoint), barriers_before + 1) << "commit " << commit;
+        head = *change;
+    }
+    // A second sync with nothing new sends nothing.
+    const std::uint64_t idle = rig.zetta->durable_requests(rig.endpoint);
+    ASSERT_TRUE(liquid::runtime::block_on(backend->make_durable()));
+    EXPECT_EQ(rig.zetta->durable_requests(rig.endpoint), idle);
+    for (const auto& [key, bytes] : rig.zetta->objects(rig.endpoint)) {
+        EXPECT_FALSE(key.ends_with("LIQUID_JOURNAL")) << key;
+    }
+    owner->stop_renewing();
+    rig.zetta->crash(rig.endpoint, 7);
+    for (const auto& [key, bytes] : rig.zetta->objects(rig.endpoint)) {
+        EXPECT_FALSE(key.ends_with("LIQUID_JOURNAL")) << "the removal was made durable: " << key;
+    }
+    rig.zetta->expire(rig.endpoint);
+    std::shared_ptr<ZettaStoreOwner> successor;
+    auto reopened_store = liquid::runtime::block_on(liquid::store::open(root, owned(rig, successor)));
+    ASSERT_TRUE(reopened_store) << reopened_store.error().message;
+    options.store = &*reopened_store;
+    auto reopened = liquid::runtime::block_on(liquid::repository::open(identifier, options));
+    ASSERT_TRUE(reopened) << reopened.error().message;
+    auto reopened_head = liquid::runtime::block_on(reopened->head());
+    ASSERT_TRUE(reopened_head);
+    EXPECT_EQ(liquid::to_string(reopened_head->value), liquid::to_string(head->value));
+    ASSERT_TRUE(liquid::runtime::block_on(reopened_store->close()));
+}
+
+// lake#535: a staged object published under its name and then removed (liquid's object map:
+// `objects.meta.tmp`, `objects.meta`, the removal of the staging) sends only the publication,
+// and a crash at any point keeps a prefix of the issue order.
+TEST(WorkspaceStoreBackend, AStagedObjectRemovedAfterItsPublicationSendsOnlyThePublication) {
+    for (std::uint64_t seed = 1; seed <= 16; ++seed) {
+        Rig rig;
+        auto backend = rig.backend(small_blocks());
+        ASSERT_TRUE(liquid::runtime::block_on(backend->put("packs/objects.meta", bytes_of("v1"))));
+        ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
+        const std::size_t before = rig.zetta->applied().size();
+        ASSERT_TRUE(liquid::runtime::block_on(backend->put("packs/objects.meta.tmp", bytes_of("v2"))));
+        ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+        ASSERT_TRUE(liquid::runtime::block_on(backend->put("packs/objects.meta", bytes_of("v2"))));
+        ASSERT_TRUE(liquid::runtime::block_on(backend->barrier()));
+        ASSERT_TRUE(liquid::runtime::block_on(backend->remove("packs/objects.meta.tmp")));
+        // Not elided: two held keys after the staging.
+        ASSERT_TRUE(liquid::runtime::block_on(backend->put("gc/a.tmp", bytes_of("a"))));
+        ASSERT_TRUE(liquid::runtime::block_on(backend->put("gc/b", bytes_of("b"))));
+        ASSERT_TRUE(liquid::runtime::block_on(backend->put("gc/c", bytes_of("c"))));
+        ASSERT_TRUE(liquid::runtime::block_on(backend->remove("gc/a.tmp")));
+        if (seed % 2 == 0) {
+            ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
+        }
+        const auto applied = rig.zetta->applied();
+        std::vector<std::string> sent(applied.begin() + static_cast<std::ptrdiff_t>(before), applied.end());
+        EXPECT_EQ(sent, (std::vector<std::string>{"PUT packs/objects.meta", "PUT gc/a.tmp", "PUT gc/b",
+                                                  "PUT gc/c", "DELETE gc/a.tmp"}));
+        rig.zetta->crash(rig.endpoint, seed);
+        const auto kept = rig.zetta->objects(rig.endpoint);
+        EXPECT_FALSE(kept.contains("packs/objects.meta.tmp"));
+        EXPECT_TRUE(kept.contains("packs/objects.meta"));
+        // A prefix of PUT a.tmp, PUT b, PUT c, DELETE a.tmp.
+        const std::string state = std::string(kept.contains("gc/a.tmp") ? "a" : "") +
+                                  (kept.contains("gc/b") ? "b" : "") + (kept.contains("gc/c") ? "c" : "");
+        EXPECT_TRUE(state.empty() || state == "a" || state == "ab" || state == "abc" || state == "bc")
+            << "seed " << seed << ": " << state;
+        if (seed % 2 == 0) {
+            EXPECT_FALSE(kept.contains("gc/a.tmp"));
+            EXPECT_TRUE(kept.contains("gc/c"));
+        }
+    }
+}
+
+// lake#535: liquid's close lets go of the backend and revokes the store's grant before it releases
+// the owner; the release still syncs what the backend holds, so a crash after a clean close keeps
+// everything the store was asked to write.
+TEST(WorkspaceStoreOwner, ALiquidCloseSyncsWhatTheBackendHolds) {
+    Rig rig;
+    const auto root = lake::test::fixture_path("workspace-store-close-" + rig.workspace);
+    std::shared_ptr<ZettaStoreOwner> owner;
+    std::vector<std::pair<liquid::digest, std::vector<std::byte>>> written;
+    {
+        auto store = liquid::runtime::block_on(liquid::store::open(root, owned(rig, owner)));
+        ASSERT_TRUE(store) << store.error().message;
+        for (std::uint64_t seed = 0; seed < 3; ++seed) {
+            auto contents = random_bytes(3000 + seed * 7, 500 + seed);
+            auto id = liquid::runtime::block_on(store->put(contents));
+            ASSERT_TRUE(id) << id.error().message;
+            written.emplace_back(*id, std::move(contents));
+        }
+        const std::uint64_t barriers = rig.zetta->barriers(rig.endpoint);
+        ASSERT_TRUE(liquid::runtime::block_on(store->close()));
+        EXPECT_EQ(rig.zetta->barriers(rig.endpoint), barriers + 1) << "the release's sync";
+    }
+    rig.zetta->crash(rig.endpoint, 3);
+    std::shared_ptr<ZettaStoreOwner> successor;
+    auto store = liquid::runtime::block_on(liquid::store::open(root, owned(rig, successor)));
+    ASSERT_TRUE(store) << store.error().message;
+    for (const auto& [id, contents] : written) {
+        auto read_back = liquid::runtime::block_on(store->get(id));
+        ASSERT_TRUE(read_back) << read_back.error().message;
+        EXPECT_EQ(*read_back, contents);
+    }
+    ASSERT_TRUE(liquid::runtime::block_on(store->close()));
+}
+
+// lake#535 review B: a write a predecessor sent but never made durable is served by the next
+// view, so that view's first sync sends :barrier even with nothing new, and a crash after it
+// keeps what was served.
+TEST(WorkspaceStoreBackend, ANewViewsFirstSyncMakesWhatItServesDurable) {
+    for (std::uint64_t seed = 1; seed <= 12; ++seed) {
+        Rig rig;
+        {
+            auto writer = rig.backend(small_blocks());
+            auto view = std::static_pointer_cast<ZettaObjectBackend>(*writer->fenced(1));
+            ASSERT_TRUE(liquid::runtime::block_on(view->put("objects/a", bytes_of("acknowledged?"))));
+            // The sync's :barrier is lost: the PUT landed, nothing made it durable.
+            rig.zetta->drop_matching(":barrier", 8);
+            EXPECT_FALSE(liquid::runtime::block_on(view->sync()));
+            rig.zetta->drop_matching({}, 0);
+        }
+        auto reader = rig.backend(small_blocks(), false);
+        auto view = std::static_pointer_cast<ZettaObjectBackend>(*reader->fenced(2));
+        EXPECT_EQ(read(*view, "objects/a", 0, 13), bytes_of("acknowledged?")) << "served";
+        const std::uint64_t barriers = rig.zetta->barriers(rig.endpoint);
+        ASSERT_TRUE(liquid::runtime::block_on(view->sync()));
+        EXPECT_EQ(rig.zetta->barriers(rig.endpoint), barriers + 1) << "the first sync of a view";
+        ASSERT_TRUE(liquid::runtime::block_on(view->sync()));
+        EXPECT_EQ(rig.zetta->barriers(rig.endpoint), barriers + 1) << "and only the first";
+        rig.zetta->crash(rig.endpoint, seed);
+        EXPECT_TRUE(rig.zetta->objects(rig.endpoint).contains("objects/a")) << "seed " << seed;
+    }
+}
+
+// lake#535 review B: a switched workspace's store whose first :barrier fails after an open is
+// not served; once Zetta answers it again, the store opens.
+TEST(WorkspaceStoreMove, AStoreWhoseOpeningBarrierFailsIsNotServed) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_TRUE(written(rig.commit(rig.repo_a, "before.txt", "before the restart")));
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    rig.zetta->drop_matching(":barrier", 1000);
+    // A read too: what the store holds is not served before it is durable.
+    EXPECT_NE(rig.call("GET", "/v1/repository_tree?id=" + rig.repo_a.id + "&ref=main").first, 200U);
+    rig.zetta->drop_matching({}, 0);
+    EXPECT_TRUE(written(rig.commit(rig.repo_a, "after.txt", "served again")));
+}
+
+// lake#535 review E: views a backend keeps for its owner's release are let go of when the owner
+// goes without a release, so they do not keep the backend's state alive.
+TEST(WorkspaceStoreOwner, ViewsKeptForAReleaseThatNeverComesAreLetGo) {
+    Rig rig;
+    auto client = rig.client();
+    ASSERT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
+    auto owner = std::make_shared<ZettaStoreOwner>(client, 30s);
+    ZettaObjectBackendOptions options = small_blocks();
+    options.workspace_id = rig.workspace;
+    options.instance_kek = std::string(kek);
+    options.create_key = true;
+    auto root = std::make_shared<ZettaObjectBackend>(client, options);
+    auto view = std::static_pointer_cast<ZettaObjectBackend>(*root->fenced(1));
+    ASSERT_TRUE(liquid::runtime::block_on(view->put("objects/held", bytes_of("held"))));
+    std::weak_ptr<ZettaObjectBackend> watched = view;
+    view.reset();
+    root.reset();
+    EXPECT_FALSE(watched.expired()) << "kept for the owner's release";
+    owner.reset();
+    EXPECT_TRUE(watched.expired()) << "let go of with the owner";
 }
 
 } // namespace
