@@ -88,6 +88,8 @@ struct PooledObjectTransportOptions {
     // How often kept connections past idle_limit, and resolutions past resolve_ttl, are dropped for
     // every origin, including one no longer used.
     std::chrono::milliseconds sweep_interval{10'000};
+    // Tests only: each name resolution waits this long first, so a test can cancel one in flight.
+    std::chrono::milliseconds resolve_delay{0};
 };
 
 // Lake's client for a workspace Zetta's object routes (lake#544, src/control/object_http.cpp):

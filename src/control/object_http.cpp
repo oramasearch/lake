@@ -388,29 +388,51 @@ private:
     // that need the same origin's addresses at once share one resolution.
     boost::capy::io_task<std::vector<net::endpoint>> addresses(const Target& target, bool fresh) {
         const std::string origin = target.host + ":" + target.port;
-        if (!fresh) {
-            if (const auto found = resolved_.find(origin);
-                found != resolved_.end() && clock::now() - found->second.first < options_.resolve_ttl) {
-                co_return {{}, found->second.second};
+        // A resolution shared with the request that started it ends when that request is
+        // cancelled; its waiters then resolve again rather than fail with its cancellation.
+        for (;;) {
+            if (!fresh) {
+                if (const auto found = resolved_.find(origin);
+                    found != resolved_.end() && clock::now() - found->second.first < options_.resolve_ttl) {
+                    co_return {{}, found->second.second};
+                }
             }
-        }
-        if (const auto pending = resolving_.find(origin); pending != resolving_.end()) {
+            const auto pending = resolving_.find(origin);
+            if (pending == resolving_.end()) {
+                break;
+            }
             const std::shared_ptr<Resolution> shared = pending->second;
-            [[maybe_unused]] const auto waited = co_await shared->done.wait();
+            auto [waited] = co_await shared->done.wait();
+            if (waited) {
+                co_return {waited, {}}; // this request itself was cancelled
+            }
+            if (shared->error == boost::capy::cond::canceled) {
+                continue;
+            }
             co_return {shared->error, shared->endpoints};
         }
         auto resolution = std::make_shared<Resolution>();
         resolving_[origin] = resolution;
         resolutions_.fetch_add(1);
+        std::error_code error;
         net::resolver resolver(io_context_);
-        auto [error, results] = co_await resolver.resolve(target.host, target.port);
+        if (options_.resolve_delay.count() > 0) {
+            auto [waited] = co_await boost::capy::delay(options_.resolve_delay);
+            error = waited;
+        }
+        if (!error) {
+            auto [resolve_error, results] = co_await resolver.resolve(target.host, target.port);
+            error = resolve_error;
+            if (!error) {
+                for (const auto& entry : results) {
+                    resolution->endpoints.push_back(entry.get_endpoint());
+                }
+            }
+        }
         resolution->error = error;
         if (error) {
             resolved_.erase(origin);
         } else {
-            for (const auto& entry : results) {
-                resolution->endpoints.push_back(entry.get_endpoint());
-            }
             resolved_[origin] = {clock::now(), resolution->endpoints};
         }
         resolving_.erase(origin);

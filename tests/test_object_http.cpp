@@ -659,4 +659,22 @@ TEST(ObjectHttp, AnswersAreFramedAndNoBytePassesToTheNextRequest) {
     EXPECT_EQ(transport->stats().reused, reused);
 }
 
+TEST(ObjectHttp, AResolutionCancelledWithItsRequestIsDoneAgainForTheOthersWaitingOnIt) {
+    LoopbackServer server;
+    auto transport = lake::control::make_pooled_object_transport({.resolve_delay = 1500ms});
+    const std::string base = "http://localhost:" + std::to_string(server.port());
+    std::thread cancelled([&] {
+        auto request = request_to(base + "/first");
+        request.timeout_seconds = 1; // gives up while its resolution is in flight
+        EXPECT_NE(send(*transport, std::move(request)).error, "");
+    });
+    std::this_thread::sleep_for(200ms);
+    auto waiting = request_to(base + "/second");
+    waiting.timeout_seconds = 10;
+    auto answer = send(*transport, std::move(waiting));
+    cancelled.join();
+    EXPECT_EQ(answer.status, 200) << answer.error;
+    EXPECT_EQ(transport->stats().resolutions, 2U);
+}
+
 } // namespace
