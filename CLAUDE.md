@@ -39,7 +39,9 @@ Workspace stores are handed off per workspace (lake#536): at SIGTERM lake answer
 workspace store `503` with `Retry-After` and releases each store's lease once its admitted requests
 finish, and a starting lake pre-opens every running switched workspace's store in the background,
 taking each lease the moment it is released, but only once its predecessor has announced its drain
-in `<root>/.lake-owner.draining` or it owns the root (`LAKE_WORKSPACE_STORE_PREOPEN`). See
+in `<root>/.lake-owner.draining` or it owns the root (`LAKE_WORKSPACE_STORE_PREOPEN`). A workspace
+stopped or deleted while an attempt waits for its lease is checked again once the lease is taken,
+and its store closed and lease released at once (lake#541). See
 `docs/architecture/workspace-store.md#rollout-hand-off-lake536`.
 
 Agent tasks now have renewable claim leases, two retries and a terminal failure after three
@@ -198,7 +200,9 @@ within the room the space's quota leaves after a tenth kept for the repositories
 `building_workspaces` meanwhile. `search` decides the caller's spaces and workspaces before any
 workspace is opened. A switch and every start drop switched workspaces from the space index on
 lake's volume; deleting a repository or a workspace removes it from the index. `search` gains an
-optional `workspace_id`; the interim skip of switched workspaces is gone. See `docs/api/search.md`.
+optional `workspace_id`; the interim skip of switched workspaces is gone. A failed index write leaves
+its repository pending, retried by search's worker after 15 s doubling to 10 min, and search names
+the workspace in `stale_workspaces` until then (lake#540). See `docs/api/search.md`.
 
 ## Historical status — superseded 2026-09-08
 
