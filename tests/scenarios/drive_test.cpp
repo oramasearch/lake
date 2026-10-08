@@ -335,7 +335,8 @@ protected:
                                        repository_url(fixture_.repository),
                                        {.bearer_token = fixture_.owner.secret, .durable = false}));
         ASSERT_TRUE(client) << client.error().message;
-        ASSERT_TRUE(liquid::runtime::block_on(client->sync()));
+        const auto synced = liquid::runtime::block_on(client->sync());
+        ASSERT_TRUE(synced) << synced.error().message;
         workspace_ = fixture_.repository.workspace_id;
         link_ = create_link("read");
         ASSERT_TRUE(link_.contains("token")) << link_.dump();
