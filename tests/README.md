@@ -622,7 +622,9 @@ background rebuild queue, backoff, release snapshots, write-once runs and evicti
 move with an interrupted copy, the switch, two workspaces of one space and the lost lease's `503`.
 `zetta_object_fixture.hpp` is `FakeZettaObjects`, Zetta's object routes in memory. It models
 durability (lake#527): the bucket's log is one sequence of applied writes, a barrier or a
-`durable=true` write makes it durable up to there, and `crash` keeps a prefix of the rest;
+`durable=true` write makes it durable up to there, and `crash` keeps a prefix of the rest (the
+rest is kept as the writes themselves and replayed, so appending a large object costs its bytes
+once, not a copy per append: lake#547);
 `durable_requests` counts the requests that asked for an fsync (lake#535).
 `fail_after` and `fail_randomly` lose requests before they are applied; `lose_next_answers` and
 `lose_answers_randomly` apply them and then lose the answer. `applied` and `most_writes_in_flight`

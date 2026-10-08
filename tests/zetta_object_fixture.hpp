@@ -39,6 +39,13 @@ public:
         std::chrono::steady_clock::time_point expires{};
         bool had_holder = false;
     };
+    // One applied write, as the bucket's log holds it.
+    struct Write {
+        enum class Kind { put, append, erase };
+        std::string key;
+        Kind kind = Kind::put;
+        std::string bytes; // the whole value (put) or the bytes appended (append)
+    };
     struct Bucket {
         std::uint64_t quota = 0;
         std::map<std::string, std::string> objects;
@@ -50,9 +57,12 @@ public:
         // What survives a crash (lake#527): the bucket's log is one sequence of writes in the
         // order they were applied; a barrier or a durable write makes everything up to it
         // durable, and a crash keeps a prefix of the rest (Zetta truncates its log at the first
-        // torn frame). `unsynced` is that rest, each write with its key's value after it.
+        // torn frame). `unsynced` is that rest, as the writes themselves: replaying a prefix of
+        // them onto `durable` gives what that crash keeps. A write, not its key's value after it,
+        // so a run of appends costs its own bytes, not a copy of every intermediate value
+        // (lake#547: a 304 MiB layer appended window by window held gigabytes of copies).
         std::map<std::string, std::string> durable;
-        std::vector<std::pair<std::string, std::optional<std::string>>> unsynced;
+        std::vector<Write> unsynced;
     };
     struct Node {
         std::string token;
@@ -159,12 +169,7 @@ public:
             state = state * 6364136223846793005ULL + 1442695040888963407ULL;
             const std::size_t kept = static_cast<std::size_t>((state >> 33U) % (bucket.unsynced.size() + 1));
             for (std::size_t index = 0; index < kept; ++index) {
-                const auto& [key, value] = bucket.unsynced[index];
-                if (value) {
-                    bucket.durable[key] = *value;
-                } else {
-                    bucket.durable.erase(key);
-                }
+                apply(bucket.durable, bucket.unsynced[index]);
             }
             bucket.unsynced.clear();
             bucket.objects = bucket.durable;
@@ -446,22 +451,28 @@ private:
     }
     // A write was applied: appended to the log; when it asked to be durable, it and everything
     // before it are.
-    void record(Bucket& bucket, const std::string& key, bool durable, const std::string& method) {
-        applied_.push_back(method + " " + key);
-        const auto found = bucket.objects.find(key);
-        bucket.unsynced.emplace_back(key, found == bucket.objects.end()
-                                              ? std::nullopt
-                                              : std::optional<std::string>(found->second));
+    static void apply(std::map<std::string, std::string>& objects, const Write& write) {
+        switch (write.kind) {
+        case Write::Kind::put:
+            objects[write.key] = write.bytes;
+            break;
+        case Write::Kind::append:
+            objects[write.key] += write.bytes;
+            break;
+        case Write::Kind::erase:
+            objects.erase(write.key);
+            break;
+        }
+    }
+    void record(Bucket& bucket, Write write, bool durable, const std::string& method) {
+        applied_.push_back(method + " " + write.key);
+        bucket.unsynced.push_back(std::move(write));
         if (!durable) {
             return;
         }
         ++bucket.durable_requests;
-        for (const auto& [written, value] : bucket.unsynced) {
-            if (value) {
-                bucket.durable[written] = *value;
-            } else {
-                bucket.durable.erase(written);
-            }
+        for (const Write& pending : bucket.unsynced) {
+            apply(bucket.durable, pending);
         }
         bucket.unsynced.clear();
     }
@@ -718,7 +729,8 @@ private:
                 return refused(507, "quota_exceeded", "past the bucket's quota");
             }
             bucket.objects[key] = request.body;
-            record(bucket, key, parameters.contains("durable"), request.method);
+            record(bucket, {key, Write::Kind::put, request.body}, parameters.contains("durable"),
+                   request.method);
             return reported(written, false);
         }
         if (request.method == "PATCH") {
@@ -729,7 +741,8 @@ private:
                     return refused(507, "quota_exceeded", "past the bucket's quota");
                 }
                 object += request.body;
-                record(bucket, key, parameters.contains("durable"), request.method);
+                record(bucket, {key, Write::Kind::append, request.body},
+                       parameters.contains("durable"), request.method);
                 return reported(written, false);
             }
             if (offset < object.size() && offset + request.body.size() <= object.size() &&
@@ -748,7 +761,8 @@ private:
             if (bucket.objects.erase(key) == 0) {
                 return refused(404, "not_found", "no object " + key);
             }
-            record(bucket, key, parameters.contains("durable"), request.method);
+            record(bucket, {key, Write::Kind::erase, {}}, parameters.contains("durable"),
+                   request.method);
             return reported(written, false);
         }
         return refused(404, "not_found", "no route");
