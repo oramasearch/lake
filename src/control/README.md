@@ -201,7 +201,11 @@ buffered appends sent as complete blocks at most one Zetta slice per PATCH, the 
 rewrite (Zetta objects only grow), the ciphertext window cache, and the lease's renewal thread.
 Since lake#535 its writes go without durability and in issue order, liquid's barrier sends nothing,
 and `sync()`/`make_durable()` end an operation with one Zetta `:barrier`; the owner's release
-syncs what a closed store's backend still holds. See
+syncs what a closed store's backend still holds. Since lake#543 the lease acquisition refuses a
+workspace Zetta that does not report `object_log_prefix_durability` (an image without zetta#1237),
+every write and `:barrier` carries the incarnation recorded at open as `Zetta-Incarnation`, so a
+Zetta restart inside an operation fails it before a later write lands, a new incarnation is adopted
+only after the lease renews, and a Zetta of several nodes is refused. See
 [workspace-store.md](../../docs/architecture/workspace-store.md).
 `object_http.cpp` (lake#544, its own library `lake-object-http`) is the workspace store's HTTP
 client, `make_pooled_object_transport`: keep-alive connections per workspace Zetta, one name

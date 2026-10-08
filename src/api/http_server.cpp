@@ -4215,7 +4215,8 @@ private:
 
         // A store whose lease was lost, or one a write failed on, is closed and opened again.
         bool usable() const {
-            return !owner->lost() && !backend->failed() && !search_fenced->load();
+            return !owner->lost() && !backend->failed() && !search_fenced->load() &&
+                   !client->restarted();
         }
     };
 
@@ -4470,6 +4471,11 @@ private:
             (error.message.find("owner grant was lost") != std::string::npos ||
              error.message.find("workspace store") != std::string::npos ||
              error.message.find("store root is owned by") != std::string::npos)) {
+            return SyncStoreError{"store_unavailable", error.message, error.context};
+        }
+        // A workspace Zetta lake will not use (lake#543): without the durability format, or of
+        // several nodes. Refused until it is upgraded.
+        if (control::workspace_zetta_unsupported(error)) {
             return SyncStoreError{"store_unavailable", error.message, error.context};
         }
         const std::string code(liquid::to_string(error.code));
