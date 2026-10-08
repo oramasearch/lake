@@ -7,25 +7,64 @@ installer.
 
 ## Build and test workflow
 
-> **Disabled since 2026-09-26** (Steve), with `gh workflow disable ci --repo oramasearch/lake`. The
-> checkout, toolchain and timeout fixes below work: the first Linux runs built lake and ran all
-> 287 tests. 284 pass. The other three (`SharedLinkScenario.ExpiryAfterListingStopsPreviewAndDownload`,
-> `ModelSync.MultiGigabyteRevisionsDeduplicateAndResumePull`,
-> `PostgresForgeScenario.DripsReviewRebaseAndGraphEvidenceLandEndToEnd`) hang or fail on a lost read
-> in the HTTP client on Linux's epoll backend. The server answers 200 and the client never
-> receives the response. That needs liquid#317 (block_on waits for its coroutine) and very
-> likely an update of the `oramasearch/corosio` fork, 221 commits behind upstream `develop`.
-> Re-enable with `gh workflow enable ci --repo oramasearch/lake` once they pass.
+[`ci.yml`](../../.github/workflows/ci.yml) runs lake's **full suite on Linux** for every pull
+request and every push to `main` (lake#547). It is one job, `ci`, on `ubuntu-24.04`:
 
-[`ci.yml`](../../.github/workflows/ci.yml) runs for every push and pull request. It loads one read-only
-deploy key per private repository (below), checks out all submodules recursively, fetches the
-pinned `oramasearch/zetta` and `oramasearch/liquid` commits, starts a Postgres 16 service,
-configures Release with `LAKE_BUILD_TESTS=ON` and `LAKE_ZETTA_SOURCE_DIR=_external/zetta`, builds with clang-19, applies `db/schema.sql`, then
-runs:
+1. loads one read-only deploy key per private repository (below) and checks out all submodules;
+2. fetches `oramasearch/zetta` at `ZETTA_REF` and `oramasearch/liquid` at `LIQUID_REF`, the
+   commits the bridges pin (Zetta `5f70b30`, liquid `8955519`);
+3. installs the Dockerfile toolchain (LLVM 19, CMake 3.31.5, OpenSSL 3.6.3 built from the
+   checksum-verified source);
+4. restores, or else builds, the **Zetta server binary** at `ZETTA_REF` (below);
+5. starts a **Postgres 16 service container**, configures Release with `LAKE_BUILD_TESTS=ON`,
+   builds with clang-19 through ccache and applies `db/schema.sql`;
+6. runs every ctest test with `LAKE_TEST_DB_URI` and `LAKE_TEST_ZETTA_BINARY` set:
 
 ```sh
-ctest --test-dir build --output-on-failure
+ctest --test-dir build --output-on-failure --timeout 600 --parallel 4 --output-junit ctest-results.xml
 ```
+
+That includes the **real-Zetta tests** (`WorkspaceStoreZetta.*`, which start the Zetta binary) and
+the **UI token gates** (`lake-ui-token-gates`, `tools/ui/test-token-gates.sh`). A last step writes
+the totals (passed, failed, skipped, real-Zetta tests run, token gates) to the run summary and fails
+the job if any `WorkspaceStoreZetta` test skipped or the token gates did not pass: without a Zetta
+binary those tests skip rather than fail, so a green run must prove they ran.
+
+A hung test fails by name after ten minutes (`--timeout 600`). A newer push to a pull request
+cancels its older run; runs on `main` always finish.
+
+### The Zetta binary
+
+The real-Zetta tests need a `zetta` built from Zetta dev `5f70b30` or later. CI builds it from
+`ZETTA_REF` with Zetta's own image recipe (clang-19, `ZETTA_BUILD_TESTS=OFF`, target `zetta`,
+stripped) and keeps it in the Actions cache under
+`Linux-zetta-bin-<ZETTA_REF>-clang19-v1`. A cache hit skips Zetta's dependencies, submodules and
+build entirely, so the build runs once per Zetta pin; Zetta's ccache is kept as well, so a pin bump
+recompiles only what changed. No registry credential is involved: pulling the private
+`oramasearch/zetta:dev-*` image instead would need a Docker Hub read token as a secret.
+
+### Caching
+
+| Cache | Key | Saves |
+|---|---|---|
+| Zetta binary | `ZETTA_REF` | the whole Zetta build |
+| Zetta ccache | `ZETTA_REF`, falling back to the newest | recompiling Zetta after a pin bump |
+| OpenSSL `/opt/openssl` | version and checksum | the OpenSSL source build |
+| `build/_deps` | hash of `CMakeLists.txt` | the Boost and GoogleTest downloads |
+| lake ccache | branch and run, falling back to the branch's newest, then `main`'s | recompiling unchanged lake sources |
+
+A cache written by a pull request is visible only to that pull request; one written on `main` is
+visible to every pull request, so the first run after a pin bump lands on `main` warms it for all.
+
+### History: disabled from 2026-09-26 to 2026-10-08
+
+Steve disabled the workflow on 2026-09-26 (`gh workflow disable ci`), so no pull request since then
+ran on Linux and lake#545 merged a change that broke every connection there (lake#546). The first
+Linux runs had built lake and run 287 tests; three
+(`SharedLinkScenario.ExpiryAfterListingStopsPreviewAndDownload`,
+`ModelSync.MultiGigabyteRevisionsDeduplicateAndResumePull`,
+`PostgresForgeScenario.DripsReviewRebaseAndGraphEvidenceLandEndToEnd`) hung or failed on a lost
+read on Linux's epoll backend (lake#176). The deploy keys and secrets were never the cause.
 
 The native toolchain also installs `python3-jsonschema` for the HTTP response conformance test.
 CI selects `/usr/bin/python3`, which owns that distribution package. CMake checks the import
@@ -60,20 +99,22 @@ transitive dependencies; lake's adapter and libliquid's sync client share that o
 target. Its key includes the hash of `CMakeLists.txt`; a missing cache is valid and CMake downloads
 the dependencies again.
 
-`modules/liquid` is a library-only source submodule pinned to liquid `origin/main`. Initialise it
-with the rest of the module tree (`git submodule update --init --recursive`) before configuring a
-consumer build. Its `LIQUID_BUILD_CLI` and `LIQUID_BUILD_TESTS` options stay off for lake.
+liquid is not a submodule of lake: it is a sibling module of liquid-bridge, which holds the one
+pin. CI fetches it at `LIQUID_REF` with its submodules; locally, point `LAKE_LIQUID_SOURCE_DIR` at
+liquid-bridge's `modules/liquid`. Its `LIQUID_BUILD_CLI` and `LIQUID_BUILD_TESTS` options stay off
+for lake.
 
 Zetta remains an external source dependency. `LAKE_ZETTA_SOURCE_DIR` must name the one authorized
 `zetta-bridge/modules/zetta` checkout. Lake builds a client-only `zetta-api` from that directory,
 including the runtime event implementation used by transport completion waits, and links it to
 Lake's existing Boost.HTTP, Beast2, Capy, and Corosio targets, so the binary contains one networking
-stack. CI fetches only the pinned `oramasearch/zetta` commit (the one `zetta-bridge` pins), without
-its submodules, because only its client headers, transport and runtime implementation are compiled;
-the image workflow supplies the same directory as the `zetta_source` named build context. Bump the
-ref in both workflows when the bridge bumps Zetta, and the liquid ref when liquid-bridge bumps
-liquid. Both workflows pin liquid `df2ae4d` (liquid main after liquid#322, the store owner lock
-and `owner_wait` that lake#479 uses); lake does not compile against an older liquid.
+stack. CI fetches the pinned `oramasearch/zetta` commit (the one `zetta-bridge` pins); it compiles
+the client from it and, on a cache miss, builds the Zetta server from the same commit with its
+submodules. The image workflow supplies the same directory as the `zetta_source` named build
+context. Bump `ZETTA_REF` in `ci.yml` and the ref in `image.yml` when the bridge bumps Zetta, and
+`LIQUID_REF` and `image.yml`'s liquid ref when liquid-bridge bumps liquid. Both workflows pin Zetta
+`5f70b30` and liquid `8955519` (the bridge pins on 2026-10-08); lake does not compile against a
+liquid older than `df2ae4d` (liquid#322, the store owner lock and `owner_wait` that lake#479 uses).
 
 Lake's plain environment-value check compiles libliquid's existing private detector source into
 `lake-core`. The detector has no exported shared-library API, so this keeps static and shared builds

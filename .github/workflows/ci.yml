@@ -1,5 +1,9 @@
 name: ci
 
+# Lake's full suite on Linux (lake#547): every pull request and every push to main builds lake
+# with the Dockerfile toolchain and runs all of ctest against a Postgres 16 service and a real
+# Zetta binary, the UI token gates included. docs/build/ci.md explains each step.
+
 on:
   push:
     branches: [main]
@@ -8,17 +12,34 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  # A newer push to a pull request replaces its older run; runs on main always finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Bump ZETTA_REF with the zetta-bridge pin and LIQUID_REF with the liquid-bridge pin.
+  # ZETTA_REF is both the client source lake compiles and the server the real-Zetta tests start.
+  ZETTA_REF: 5f70b3063fa6cbc9e489eb153f0699ecd080cec9
+  LIQUID_REF: 89555191ace2934e1715a58ae957632afb7153c1
+  # The Dockerfile's OpenSSL, so CI and the image link the same library; bump both together.
+  OPENSSL_VERSION: 3.6.3
+  OPENSSL_SHA256: 243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1
+  CMAKE_VERSION: 3.31.5
+
 jobs:
   ci:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 300
     env:
       DEBIAN_FRONTEND: noninteractive
       LAKE_INSTANCE_KEK: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
       LAKE_TEST_DB_URI: postgresql://postgres:postgres@127.0.0.1:5432/lake_test
-      # The Dockerfile's OpenSSL, so CI and the image link the same library; bump both together.
-      OPENSSL_VERSION: 3.6.3
-      OPENSSL_SHA256: 243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1
+      LAKE_TEST_ZETTA_BINARY: ${{ github.workspace }}/_zetta-bin/zetta
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 3G
+      CCACHE_COMPRESS: 'true'
+      CCACHE_BASEDIR: ${{ github.workspace }}
     services:
       postgres:
         image: postgres:16
@@ -48,48 +69,125 @@ jobs:
             ${{ secrets.DEPLOY_KEY_LIQUID }}
             ${{ secrets.DEPLOY_KEY_ZETTA }}
 
+      - name: Read public GitHub repositories over HTTPS
+        # Public submodules named by an ssh URL (oramasearch/http, homer6/automerge-cpp) are read
+        # anonymously, not with another repository's deploy key.
+        run: |
+          git config --global url."https://github.com/oramasearch/http.git".insteadOf "git@github.com:oramasearch/http.git"
+          git config --global url."https://github.com/homer6/".insteadOf "git@github.com:homer6/"
+
       - name: Check out source
         uses: actions/checkout@v4
 
       - name: Check out submodules
         run: git submodule update --init --recursive --depth 1
 
-      - name: Check out the Zetta client source
-        # Only Zetta's client headers and transport are compiled, so its own submodules are not
-        # needed. Bump this ref with the zetta-bridge pin lake is built against.
+      - name: Check out the Zetta source
+        # Lake compiles only Zetta's client headers, transport and runtime; Zetta's submodules are
+        # fetched only when its server binary has to be built (below).
         run: |
           git init -q _external/zetta
           git -C _external/zetta remote add origin git@github.com:oramasearch/zetta.git
-          git -C _external/zetta fetch -q --depth 1 origin acb61fed527515e63affb2e5264ce27f93c44954
+          git -C _external/zetta fetch -q --depth 1 origin "$ZETTA_REF"
           git -C _external/zetta checkout -q FETCH_HEAD
 
       - name: Check out the liquid source
         # liquid is a sibling module of liquid-bridge, not a submodule of lake. The bridge holds
-        # the one pin; bump this ref when the bridge bumps liquid.
+        # the one pin; bump LIQUID_REF when the bridge bumps liquid.
         run: |
           git init -q _external/liquid
           git -C _external/liquid remote add origin git@github.com:oramasearch/liquid.git
-          git -C _external/liquid fetch -q --depth 1 origin df2ae4df3d2851fac2881efeb2cfc6dab090eca8
+          git -C _external/liquid fetch -q --depth 1 origin "$LIQUID_REF"
           git -C _external/liquid checkout -q FETCH_HEAD
           git -C _external/liquid submodule update --init --recursive --depth 1
-
-      - name: Restore FetchContent dependencies
-        uses: actions/cache@v4
-        with:
-          path: build/_deps
-          key: ${{ runner.os }}-lake-fetchcontent-${{ hashFiles('CMakeLists.txt') }}
 
       - name: Install the Dockerfile toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ca-certificates wget gnupg lsb-release software-properties-common \
-            build-essential ninja-build git pkg-config libfuse3-dev fuse3 \
+            build-essential ninja-build git pkg-config libfuse3-dev fuse3 ccache \
             libstdc++-14-dev zlib1g-dev libssl-dev libpq-dev postgresql-client \
             python3 python3-venv python3-jsonschema
           wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 19
+          wget -qO /tmp/cmake.sh \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.sh"
+          sudo sh /tmp/cmake.sh --skip-license --prefix=/usr/local
+          cmake --version
+          node --version
+          echo "Runner: $(nproc) CPUs, $(free -g | awk '/Mem:/ {print $2}') GiB memory, $(df -h --output=avail . | tail -1) free"
+          sudo mkdir -p /opt/openssl
+          sudo chown "$USER" /opt/openssl
+
+      # ---- Zetta: the server binary the real-Zetta tests start ---------------------------------
+      # Built once per ZETTA_REF and kept in the Actions cache; a hit skips to the lake build.
+      - name: Restore the Zetta binary
+        id: zetta_cache
+        uses: actions/cache@v4
+        with:
+          path: _zetta-bin
+          key: ${{ runner.os }}-zetta-bin-${{ env.ZETTA_REF }}-clang19-v1
+
+      - name: Install Zetta's build dependencies
+        if: steps.zetta_cache.outputs.cache-hit != 'true'
+        # Zetta's own image recipe (oramasearch/zetta:dev-*); its binary also links the SDL3 GUI.
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            lld libc++-19-dev libc++abi-19-dev \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev \
+            libxfixes-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+            libgl1-mesa-dev libegl1-mesa-dev libdbus-1-dev libudev-dev \
+            libpipewire-0.3-dev libpulse-dev libasound2-dev
+
+      - name: Restore the Zetta compiler cache
+        if: steps.zetta_cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: .ccache-zetta
+          key: ${{ runner.os }}-ccache-zetta-${{ env.ZETTA_REF }}
+          restore-keys: ${{ runner.os }}-ccache-zetta-
+
+      - name: Build the Zetta binary
+        if: steps.zetta_cache.outputs.cache-hit != 'true'
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache-zetta
+          CCACHE_BASEDIR: ${{ github.workspace }}/_external/zetta
+        run: |
+          git -C _external/zetta submodule update --init --recursive --depth 1
+          cmake -S _external/zetta -B _external/zetta-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DZETTA_BUILD_TESTS=OFF \
+            -DZETTA_ENABLE_CUDA=OFF \
+            -DCMAKE_C_COMPILER=clang-19 \
+            -DCMAKE_CXX_COMPILER=clang++-19 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build _external/zetta-build --target zetta --parallel
+          mkdir -p _zetta-bin
+          cp _external/zetta-build/bin/zetta _zetta-bin/zetta
+          strip _zetta-bin/zetta || true
+          ccache --show-stats
+          rm -rf _external/zetta-build
+
+      - name: Check the Zetta binary
+        run: |
+          ls -l "$LAKE_TEST_ZETTA_BINARY"
+          ldd "$LAKE_TEST_ZETTA_BINARY"
+
+      # ---- Lake --------------------------------------------------------------------------------
+      - name: Restore OpenSSL
+        id: openssl_cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/openssl
+          key: ${{ runner.os }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}
+
+      - name: Build OpenSSL
+        if: steps.openssl_cache.outputs.cache-hit != 'true'
+        # As the Dockerfile: the build and the tests use OpenSSL 3.6.3, not the runner's 3.0.
+        run: |
           wget -qO /tmp/openssl.tar.gz \
             "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
           echo "${OPENSSL_SHA256}  /tmp/openssl.tar.gz" | sha256sum -c -
@@ -98,16 +196,30 @@ jobs:
           ./Configure linux-x86_64 --prefix=/opt/openssl --libdir=lib64 \
             --openssldir=/etc/ssl shared no-tests
           make -j "$(nproc)"
-          sudo make install_sw
-          # As the Dockerfile: the build, the tests and this check use OpenSSL 3.6.3, not the
-          # runner's 3.0, so every later step gets the same library path.
+          make install_sw
+
+      - name: Use OpenSSL 3.6.3
+        run: |
           LD_LIBRARY_PATH=/opt/openssl/lib64 /opt/openssl/bin/openssl version
           echo "LD_LIBRARY_PATH=/opt/openssl/lib64" >> "$GITHUB_ENV"
           echo "OPENSSL_MODULES=/opt/openssl/lib64/ossl-modules" >> "$GITHUB_ENV"
-          cd "$GITHUB_WORKSPACE"
-          wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v3.31.5/cmake-3.31.5-linux-x86_64.sh
-          sudo sh /tmp/cmake.sh --skip-license --prefix=/usr/local
-          cmake --version
+
+      - name: Restore FetchContent dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: ${{ runner.os }}-lake-fetchcontent-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Restore the lake compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          # Every run saves its own key; the newest of this branch, else of main, is restored.
+          key: ${{ runner.os }}-ccache-lake-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-lake-${{ github.ref_name }}-
+            ${{ runner.os }}-ccache-lake-main-
+            ${{ runner.os }}-ccache-lake-
 
       - name: Configure
         run: >-
@@ -119,10 +231,15 @@ jobs:
           -DLAKE_LIQUID_SOURCE_DIR=${{ github.workspace }}/_external/liquid
           -DCMAKE_C_COMPILER=clang-19
           -DCMAKE_CXX_COMPILER=clang++-19
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DOPENSSL_ROOT_DIR=/opt/openssl
 
       - name: Build
-        run: cmake --build build --parallel
+        run: |
+          ccache --zero-stats
+          cmake --build build --parallel
+          ccache --show-stats
 
       - name: Install the Hugging Face client
         run: |
@@ -134,5 +251,61 @@ jobs:
         run: psql "$LAKE_TEST_DB_URI" --set ON_ERROR_STOP=1 --file db/schema.sql
 
       - name: Test
-        # A hung test fails by name after ten minutes instead of holding the job for six hours.
-        run: ctest --test-dir build --output-on-failure --timeout 600
+        # Every ctest test: the token gates (lake-ui-token-gates) and the real-Zetta tests
+        # (WorkspaceStoreZetta.*) included. A hung test fails by name after ten minutes instead of
+        # holding the job.
+        run: >-
+          ctest --test-dir build --output-on-failure --timeout 600 --parallel 4
+          --output-junit "${{ github.workspace }}/ctest-results.xml"
+
+      - name: Report the test counts
+        if: always() && hashFiles('ctest-results.xml') != ''
+        # Writes the counts to the run summary and fails when a test that must run here did not:
+        # without a Zetta binary the real-Zetta tests skip instead of failing.
+        shell: python3 {0}
+        run: |
+          import os, sys, xml.etree.ElementTree as ET
+          root = ET.parse("ctest-results.xml").getroot()
+          passed, failed, skipped = [], [], []
+          for case in root.iter("testcase"):
+              name = case.get("name")
+              output = case.findtext("system-out") or ""
+              if case.find("failure") is not None or case.find("error") is not None:
+                  failed.append(name)
+              elif (case.find("skipped") is not None
+                    or case.get("status") in ("notrun", "disabled")
+                    or "[  SKIPPED ]" in output):
+                  skipped.append(name)
+              else:
+                  passed.append(name)
+          everything = passed + failed + skipped
+          zetta = [n for n in everything if n.startswith("WorkspaceStoreZetta.")]
+          zetta_ran = [n for n in zetta if n not in skipped]
+          gates = "passed" if "lake-ui-token-gates" in passed else "NOT PASSED"
+          lines = [
+              "## Lake tests on Linux",
+              "",
+              "| Total | Passed | Failed | Skipped | Real-Zetta tests run | Token gates |",
+              "|---|---|---|---|---|---|",
+              f"| {len(everything)} | {len(passed)} | {len(failed)} | {len(skipped)} "
+              f"| {len(zetta_ran)} of {len(zetta)} | {gates} |",
+              "",
+          ]
+          if failed:
+              lines += ["### Failed", ""] + [f"- `{n}`" for n in failed] + [""]
+          if skipped:
+              lines += ["### Skipped", ""] + [f"- `{n}`" for n in skipped] + [""]
+          text = "\n".join(lines)
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(text + "\n")
+          problems = []
+          if not zetta:
+              problems.append("no WorkspaceStoreZetta test is registered")
+          elif len(zetta_ran) != len(zetta):
+              problems.append(f"{len(zetta) - len(zetta_ran)} real-Zetta tests did not run")
+          if gates != "passed":
+              problems.append("the token gates did not pass")
+          for problem in problems:
+              print(f"::error::{problem}")
+          sys.exit(1 if problems else 0)
