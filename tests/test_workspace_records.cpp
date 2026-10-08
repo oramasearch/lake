@@ -2090,7 +2090,8 @@ TEST_P(WorkspaceRecordStores, SecretsLiveInTheirMountsWorkspace) {
             const auto put =
                 admin("put_secret", {{"mount_id", placed.back().mount},
                                      {"name", "database"},
-                                     {"value", {{"password", "pw-" + std::to_string(s) + "-" +
+                                     {"value", {{"password", "plaintext-password-" +
+                                                                 std::to_string(s) + "-" +
                                                                  std::to_string(w)}}}});
             ASSERT_TRUE(put.ok) << put.error.message;
             ASSERT_TRUE(admin("create_encryption_key",
@@ -2115,13 +2116,17 @@ TEST_P(WorkspaceRecordStores, SecretsLiveInTheirMountsWorkspace) {
                 const std::string dumped = row.dump();
                 EXPECT_EQ(dumped.find("payments-vault"), std::string::npos) << collection;
                 EXPECT_EQ(dumped.find("database"), std::string::npos) << collection;
-                EXPECT_EQ(dumped.find("pw-"), std::string::npos) << collection;
+                // A marker long enough that sealed bytes never spell it: a sealed record is
+                // base64url, and the three characters "pw-" turned up in one on Linux CI
+                // (lake#547), failing a record that held no plaintext.
+                EXPECT_EQ(dumped.find("plaintext-password-"), std::string::npos) << collection;
             }
         }
         const auto read = admin("read_secret", {{"mount_id", where.mount}, {"name", "database"}});
         ASSERT_TRUE(read.ok) << read.error.message;
         EXPECT_EQ(read.value["value"]["password"],
-                  "pw-" + std::to_string(where.space) + "-" + std::to_string(where.workspace));
+                  "plaintext-password-" + std::to_string(where.space) + "-" +
+                      std::to_string(where.workspace));
         const auto route = t.store->get_secret_mount_route(where.mount);
         ASSERT_TRUE(route);
         EXPECT_EQ(route->workspace_id, spaces[where.space].workspaces[where.workspace]);
