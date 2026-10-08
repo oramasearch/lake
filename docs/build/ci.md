@@ -24,11 +24,21 @@ request and every push to `main` (lake#547). It is one job, `ci`, on `ubuntu-24.
 ctest --test-dir build --output-on-failure --timeout 300 --parallel 2 --output-junit ctest-results.xml
 ```
 
+CI supplies every dependency a test can ask for, so nothing may skip:
+
+| Variable | What CI gives it | Tests |
+|---|---|---|
+| `LAKE_TEST_DB_URI` | the Postgres 16 service | the Postgres stores, scenarios and sync |
+| `LAKE_TEST_ZETTA_BINARY` | the cached Zetta server | `WorkspaceStoreZetta.*`, which start their own node |
+| `LAKE_TEST_ZETTA_URL`, `LAKE_TEST_ZETTA_TOKEN` | a node the job starts on `127.0.0.1:48000` | `RequestRecorderZetta.*`, `WorkspaceRecordsZetta.*` |
+| `LAKE_TEST_LIQUID` | the liquid CLI built at `LIQUID_REF`, cached per pin | `InstanceOrigin.BrowserToTerminal` |
+| `LAKE_TEST_BROWSER`, `LAKE_TEST_PUPPETEER` | the runner's Chrome and `puppeteer-core` 24 | `InstanceOrigin.BrowserToTerminal` |
+
 That includes the **real-Zetta tests** (`WorkspaceStoreZetta.*`, which start the Zetta binary) and
 the **UI token gates** (`lake-ui-token-gates`, `tools/ui/test-token-gates.sh`). A last step writes
 the totals (passed, failed, skipped, real-Zetta tests run, token gates) to the run summary and fails
-the job if any `WorkspaceStoreZetta` test skipped or the token gates did not pass: without a Zetta
-binary those tests skip rather than fail, so a green run must prove they ran.
+the job if any test skipped or the token gates did not pass: without their dependency those tests
+skip rather than fail, so a green run must prove they ran.
 
 A hung test fails by name after five minutes (`--timeout 300`), far inside the job's 300-minute
 limit, so the job reports it instead of being killed. Tests run two at a time: the runner has two
@@ -53,6 +63,7 @@ recompiles only what changed. No registry credential is involved: pulling the pr
 | Cache | Key | Saves |
 |---|---|---|
 | Zetta binary | `ZETTA_REF` | the whole Zetta build |
+| liquid CLI | `LIQUID_REF` and the OpenSSL version | building the CLI |
 | Zetta ccache | `ZETTA_REF`, falling back to the newest | recompiling Zetta after a pin bump |
 | OpenSSL `/opt/openssl` | version and checksum | the OpenSSL source build |
 | `build/_deps` | hash of `CMakeLists.txt` | the Boost and GoogleTest downloads |

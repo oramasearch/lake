@@ -36,6 +36,13 @@ jobs:
       LAKE_INSTANCE_KEK: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
       LAKE_TEST_DB_URI: postgresql://postgres:postgres@127.0.0.1:5432/lake_test
       LAKE_TEST_ZETTA_BINARY: ${{ github.workspace }}/_zetta-bin/zetta
+      # A Zetta node the step "Start a Zetta node" runs for RequestRecorderZetta and
+      # WorkspaceRecordsZetta.
+      LAKE_TEST_ZETTA_URL: http://127.0.0.1:48000
+      LAKE_TEST_ZETTA_TOKEN: lake-ci-zetta-admin
+      # The pinned liquid CLI, Chrome and Puppeteer for InstanceOrigin.BrowserToTerminal.
+      LAKE_TEST_LIQUID: ${{ github.workspace }}/_liquid-bin/liquid
+      LAKE_TEST_BROWSER: /usr/bin/google-chrome
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 3G
       CCACHE_COMPRESS: 'true'
@@ -246,6 +253,48 @@ jobs:
             ${{ runner.os }}-ccache-lake-main-
             ${{ runner.os }}-ccache-lake-
 
+      # ---- The liquid CLI: InstanceOrigin.BrowserToTerminal clones and pushes with it ---------
+      - name: Restore the liquid CLI
+        id: liquid_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: _liquid-bin
+          key: ${{ runner.os }}-liquid-cli-${{ env.LIQUID_REF }}-clang19-openssl${{ env.OPENSSL_VERSION }}-v1
+
+      - name: Build the liquid CLI
+        if: steps.liquid_cache.outputs.cache-hit != 'true'
+        run: |
+          cmake -S _external/liquid -B _external/liquid-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLIQUID_BUILD_CLI=ON \
+            -DLIQUID_BUILD_TESTS=OFF \
+            -DCMAKE_C_COMPILER=clang-19 \
+            -DCMAKE_CXX_COMPILER=clang++-19 \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DOPENSSL_ROOT_DIR=/opt/openssl
+          cmake --build _external/liquid-build --target liquid-cli --parallel
+          mkdir -p _liquid-bin
+          cp _external/liquid-build/liquid _liquid-bin/liquid
+          rm -rf _external/liquid-build
+
+      - name: Save the liquid CLI
+        if: steps.liquid_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: _liquid-bin
+          key: ${{ steps.liquid_cache.outputs.cache-primary-key }}
+
+      - name: Install Puppeteer for the browser proof
+        # puppeteer-core drives the runner's own Chrome; no browser is downloaded.
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/puppeteer" puppeteer-core@24
+          # Ubuntu 24.04 restricts unprivileged user namespaces, which Chrome's sandbox needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "LAKE_TEST_PUPPETEER=$RUNNER_TEMP/puppeteer/node_modules/puppeteer-core/lib/esm/puppeteer/puppeteer-core.js" >> "$GITHUB_ENV"
+          "$LAKE_TEST_BROWSER" --version
+          "$LAKE_TEST_LIQUID" --version || true
+
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
@@ -288,6 +337,22 @@ jobs:
 
       - name: Apply the control-plane schema
         run: psql "$LAKE_TEST_DB_URI" --set ON_ERROR_STOP=1 --file db/schema.sql
+
+      - name: Start a Zetta node
+        run: |
+          mkdir -p "$RUNNER_TEMP/zetta-node"
+          "$LAKE_TEST_ZETTA_BINARY" --headless --no-preflight --data-dir "$RUNNER_TEMP/zetta-node/data" \
+            --admin-token "$LAKE_TEST_ZETTA_TOKEN" --mcp-listen 127.0.0.1:48000 \
+            --listen 127.0.0.1:48001 > "$RUNNER_TEMP/zetta-node/zetta.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -s -o /dev/null "$LAKE_TEST_ZETTA_URL"; then
+              echo "Zetta answers at $LAKE_TEST_ZETTA_URL"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/zetta-node/zetta.log"
+          exit 1
 
       - name: Test
         id: test
@@ -368,8 +433,10 @@ jobs:
           problems = []
           if not zetta:
               problems.append("no WorkspaceStoreZetta test is registered")
-          elif len(zetta_ran) != len(zetta):
-              problems.append(f"{len(zetta) - len(zetta_ran)} real-Zetta tests did not run")
+          # CI supplies everything a test can ask for (Postgres, Zetta, the liquid CLI, a browser),
+          # so a skip means a missing dependency, not an optional one.
+          if skipped:
+              problems.append(f"{len(skipped)} tests skipped: " + ", ".join(skipped))
           if gates != "passed":
               problems.append("the token gates did not pass")
           for problem in problems:
