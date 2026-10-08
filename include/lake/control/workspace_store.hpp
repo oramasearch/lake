@@ -40,13 +40,15 @@ inline constexpr std::string_view workspace_store_key_object = "keys/workspace-v
 inline constexpr std::string_view workspace_store_search_prefix = "search/";
 // The durability format a workspace Zetta must report before lake opens a store on it (lake#543):
 // `object_log_prefix_durability` 1 is zetta#1235's prefix guarantee, which lake's one :barrier
-// per operation relies on (lake#535). Zetta images from before it (older than dev-5f70b306)
-// report nothing and are refused.
+// per operation relies on (lake#535). Zetta reports it, with the incarnation, since
+// oramasearch/zetta#1237; an image without that change reports nothing and is refused, even one
+// that has zetta#1235.
 inline constexpr std::uint32_t workspace_store_prefix_durability = 1;
 
-// The refusal of a workspace Zetta without that durability format: errc::unsupported, naming
-// what Zetta reported. Lake answers it as store_unavailable.
-bool workspace_zetta_lacks_durability(const liquid::error& error);
+// The refusal of a workspace Zetta lake will not open a store on (lake#543): errc::unsupported,
+// naming what Zetta reported. One without that durability format (a Zetta image without
+// oramasearch/zetta#1237), or one of several nodes. Lake answers it as store_unavailable.
+bool workspace_zetta_unsupported(const liquid::error& error);
 
 // One raw exchange with a workspace Zetta's object routes. Bodies are bytes in a std::string.
 struct ObjectRequest {
@@ -232,17 +234,23 @@ struct ObjectUsage {
 // 401/403 unauthorized, 507 busy (quota), 503 or no answer unavailable. Idempotent requests are
 // retried on unavailable a few times.
 //
-// The incarnation (lake#543): acquire refuses a Zetta that does not report
+// The incarnation (lake#543). acquire refuses a Zetta that does not report
 // workspace_store_prefix_durability, releasing the lease it got, and records the bucket's
-// incarnation from its answer. Every later write and :barrier carries it as `Zetta-Incarnation`, a
-// precondition Zetta checks before it applies anything, and its answer carries the incarnation it
-// ran under. A refusal (`incarnation_changed`) while a write answered since the last answered
-// :barrier is still unsynced means Zetta restarted, or reopened the bucket's log, after
-// acknowledging that write without durability: the request fails `unavailable`, as does every
-// later write and :barrier on this client, so the operation fails, the backend with it, and
-// nothing issued after the lost write lands. With nothing unsynced nothing was lost: the client
-// adopts the new incarnation and sends the request once more, so a restart between two operations
-// fails neither. An answer under another incarnation than the one sent is treated the same way.
+// incarnation, holder, fence and ttl from its answer. Every later write and :barrier carries the
+// incarnation as `Zetta-Incarnation`, a precondition Zetta checks in the same step as the write,
+// and its answer carries the incarnation it ran under.
+// - A refusal (`incarnation_changed`) while a write answered since the last answered :barrier is
+//   unsynced (or before the open's first :barrier) means Zetta restarted, or reopened the bucket's
+//   log, after acknowledging something it may have dropped: the request fails `unavailable`, as
+//   does every later write and :barrier on this client (restarted()), so the operation fails, the
+//   backend with it, and nothing issued after the loss lands.
+// - With nothing unsynced nothing was lost, but the restart may have lost Zetta's last second of
+//   lease state, so the client renews its lease with its holder and fence first, and adopts the
+//   incarnation the refusal names only if that succeeds.
+// - A success is never adopted from: one under another incarnation than the one sent, or under
+//   none, is a restart. A renewal answered without the durability format fails the client.
+// - An answer naming more than one owner or node fails the client: the incarnation is the deciding
+//   node's, so lake uses one-node workspace Zettas only.
 class ZettaObjectClient {
 public:
     ZettaObjectClient(std::shared_ptr<ObjectTransport> transport,
@@ -295,6 +303,9 @@ public:
     // The incarnation of the workspace Zetta's bucket this client last accepted (lake#543), empty
     // before the first answer that carries one.
     std::string incarnation() const;
+    // A restart inside an operation (or an unsupported Zetta) was seen: every write and :barrier
+    // fails from now on, and the store must be opened again (lake#543).
+    bool restarted() const;
 
     // Sends what a backend over this client holds and makes it durable (lake#527, lake#535); the
     // owner calls it before it releases the lease, so a closed store leaves nothing unsent or
@@ -324,10 +335,13 @@ private:
     // is unsynced, and its successful answer checked by observe_incarnation.
     liquid::runtime::task<ObjectResponse>
     send_checked(ObjectRequest request, bool idempotent, ObjectRequestKind kind, std::string context);
-    // Checks the incarnation a successful write (`write`) or :barrier answered under. `covered`:
-    // for a :barrier, the writes answered before it was sent, which it made durable.
-    liquid::result<void> observe_incarnation(const ObjectResponse& response, bool write,
-                                             std::uint64_t covered, const std::string& context);
+    // Checks the incarnation a successful write (`write`) or :barrier answered under, against
+    // `sent`, the one it carried. `covered`: for a :barrier, the writes answered before it was
+    // sent, which it made durable.
+    liquid::result<void> observe_incarnation(const ObjectResponse& response, const std::string& sent,
+                                             bool write, std::uint64_t covered,
+                                             const std::string& context);
+    void mark_unsupported(std::string message);
     // Under incarnation_mutex_: records that the bucket's incarnation went from the accepted one
     // to `current` while writes were unsynced.
     void mark_restarted(const std::string& current);
@@ -348,6 +362,10 @@ private:
     std::optional<std::string> incarnation_;
     std::uint64_t unsynced_writes_ = 0;
     std::string restarted_;
+    // The lease acquire recorded, renewed before a new incarnation is adopted.
+    std::string lease_holder_;
+    std::uint64_t lease_fence_ = 0;
+    std::chrono::milliseconds lease_ttl_{30'000};
 };
 
 // The workspace's data key (S3): random, 32 bytes, wrapped with AES-256-GCM under

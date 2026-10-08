@@ -62,6 +62,11 @@ public:
         // incarnation every write, lease and barrier answer carries.
         std::optional<std::uint32_t> durability = 1;
         std::string incarnation;
+        // Whether a write or barrier's Zetta-Incarnation is checked (a Zetta that reports an
+        // incarnation but does not check it stands in for a check that came too late), and how
+        // many nodes a barrier reports.
+        bool checks_incarnation = true;
+        std::uint64_t nodes = 1;
     };
 
     // A workspace Zetta at `http://<name>.test` answering bearer `token`.
@@ -72,9 +77,34 @@ public:
     }
     // lake#543: the durability format the node reports; nothing for a Zetta older than
     // zetta#1235.
+    // Changing it is a restart into another image: a new incarnation.
     void set_durability(const std::string& endpoint, std::optional<std::uint32_t> durability) {
         std::lock_guard lock(mutex_);
         nodes_[endpoint].durability = durability;
+        nodes_[endpoint].incarnation = next_incarnation();
+    }
+    void set_checks_incarnation(const std::string& endpoint, bool checks) {
+        std::lock_guard lock(mutex_);
+        nodes_[endpoint].checks_incarnation = checks;
+    }
+    void set_nodes(const std::string& endpoint, std::uint64_t nodes) {
+        std::lock_guard lock(mutex_);
+        nodes_[endpoint].nodes = nodes;
+    }
+    // The workspace Zetta restarts and its catalogue lost its last second (lake#543): every write
+    // is kept, but the bucket's lease is back as it was before its last acquire, so the next
+    // acquirer gets the fence already handed out.
+    void restart_losing_last_lease(const std::string& endpoint, const std::string& bucket = "lake_store") {
+        std::lock_guard lock(mutex_);
+        Node& node = nodes_[endpoint];
+        node.incarnation = next_incarnation();
+        Lease& lease = node.buckets[bucket].lease;
+        lease.holder.clear();
+        if (lease.fence > 0) {
+            --lease.fence;
+        }
+        lease.had_holder = lease.fence > 0;
+        changed_.notify_all();
     }
     std::string incarnation(const std::string& endpoint) {
         std::lock_guard lock(mutex_);
@@ -523,8 +553,8 @@ private:
         const std::string expected = header(request, "Zetta-Incarnation");
         const bool checks_incarnation = request.method == "PUT" || request.method == "PATCH" ||
                                         request.method == "DELETE" || path.ends_with(":barrier");
-        if (checks_incarnation && reporting.durability && !expected.empty() &&
-            expected != reporting.incarnation) {
+        if (checks_incarnation && reporting.durability && reporting.checks_incarnation &&
+            !expected.empty() && expected != reporting.incarnation) {
             ++incarnation_refusals_;
             return refused(409, "incarnation_changed", "the bucket's incarnation changed",
                            {{"incarnation", reporting.incarnation}});
@@ -585,7 +615,7 @@ private:
                 ++bucket.durable_requests;
                 bucket.durable = bucket.objects;
                 bucket.unsynced.clear();
-                return reported({{"bucket", name}, {"nodes", 1}}, true);
+                return reported({{"bucket", name}, {"nodes", reporting.nodes}}, true);
             }
             if (operation == "usage") {
                 nlohmann::json value{{"objects", bucket.objects.size()}, {"bytes", used(bucket)}};

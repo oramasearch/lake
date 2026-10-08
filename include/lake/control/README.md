@@ -189,9 +189,10 @@ is sent in liquid's issue order, one at a time, small puts and appends held unti
 needs them sent, removals at once; since lake#535 every write goes without durability, liquid's
 `barrier()` sends nothing, and `sync()`/`make_durable()` send what is held and one Zetta
 `:barrier`, which lake runs at the end of each store operation before it answers; since lake#543
-`ZettaObjectClient` refuses at `:acquire` a Zetta without `workspace_store_prefix_durability`,
-`workspace_zetta_lacks_durability` recognizing the refusal, and sends the incarnation it recorded
-as `Zetta-Incarnation` on every write and `:barrier`)
+`ZettaObjectClient` refuses at `:acquire` a Zetta without `workspace_store_prefix_durability`
+(an image without zetta#1237) and a Zetta of several nodes, `workspace_zetta_unsupported`
+recognizing the refusal; it sends the incarnation it recorded as `Zetta-Incarnation` on every write
+and `:barrier`, renews the lease before adopting a new one, and reports `restarted()`)
 and `ZettaStoreOwner` (liquid's `store_owner` over the bucket lease, which settles the backend
 before it releases). `ObjectRequestKind`, `ObjectRequestTally` and `ObjectRequestScope` count the
 requests by kind for the process metrics and a request's `Server-Timing`, and
