@@ -10,7 +10,9 @@ store's lease once its admitted requests are done (lake#536), after it writes `.
 takes a workspace lease; `stop` drains in-flight requests,
 closes the stores and releases the lock (lake#467, lake#479,
 [store-volume.md](../../docs/deployment/store-volume.md#the-hand-off)). A starting server opens the
-stores and repositories of running switched workspaces in the background (`preopen_workspace_stores`).
+stores and repositories of running switched workspaces in the background (`preopen_workspace_stores`);
+once an attempt's acquire returns it checks the workspace again under the lane and closes the store
+of one stopped, deleted or unswitched meanwhile, releasing its lease at once (lake#541).
 lake#452: `/w/<workspace>` and `/w/<workspace>/` redirect to the workspace's home; the selectors
 label the viewer's personal space *Personal space* and workspaces by name, and wrap onto their own
 row at phone width; `workspace_act create_project` says whether a name is missing or taken;

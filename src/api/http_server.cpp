@@ -6870,6 +6870,20 @@ public:
         if (!opened) {
             return std::unexpected(opened.error());
         }
+        // lake#541: the open may have waited up to `wait` for the lease, and a stop meanwhile
+        // takes no lane. Checked again under the lane now that the lease is held: a workspace that
+        // is no longer a running switched one has its store closed and its lease released at once,
+        // before any request or renewal uses it. (A deletion closes under this lane, so it waited
+        // for this open and finds nothing open.)
+        const auto still_serving = serving_workspaces(customer_id);
+        if (!still_serving || std::ranges::find(*still_serving, workspace_id) == still_serving->end()) {
+            static_cast<void>(close_workspace_store_locked(workspace_id));
+            if (!still_serving) {
+                return std::unexpected(still_serving.error());
+            }
+            return std::unexpected(SyncStoreError{
+                "not_found", "the workspace was stopped, deleted or unswitched while the pre-open waited for its lease"});
+        }
         return true;
     }
 
@@ -6889,6 +6903,15 @@ public:
                 continue;
             }
             auto lane = hold("w:" + workspace_id);
+            {
+                // Never opens the store itself (lake#541): a store closed since the pre-open
+                // opened it (the workspace deleted, its lease lost) is left to a request.
+                std::lock_guard maps(mutex_);
+                const auto found = workspace_stores_.find(workspace_id);
+                if (found == workspace_stores_.end() || !found->second->usable()) {
+                    break;
+                }
+            }
             const auto route = workspace_route(customer_id, repository_id);
             if (!route || !*route || **route != workspace_id) {
                 continue;
