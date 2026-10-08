@@ -112,10 +112,11 @@ as a named exception: one instance-wide namespace with public reads.
   object is read only from the workspace's store, 1 MiB at a time. A pull holds one of its
   workspace's eight stream slots for its whole stream; they are apart from the lane's admissions,
   so pulls never lock pushes, git or the repository API of the workspace out. At most 24 pulls run
-  in the process (fewer than the server's 32 workers, and at most 24 MiB of buffers). Past either
+  in the process (fewer than the server's 32 request workers, and at most 24 MiB of buffers). Past either
   limit a pull is OCI `503 UNAVAILABLE` with `Retry-After` and `Connection: close` before any
-  header is sent, so a refused client does not keep a worker
-  ([lake#534](https://github.com/oramasearch/lake/issues/534)). Each window takes the lane only for
+  header is sent, so a refused client does not keep its connection; since
+  [lake#534](../serving/http.md#connections-and-workers) every 503 and 429 closes its connection,
+  and an idle connection holds no worker. Each window takes the lane only for
   its one read; a read that fails part way, or a client that takes no bytes for
   `registry_stream_idle_timeout` (60 s), ends the connection and frees the slot. HEAD checks that the store holds the object. A store that lost an object its record
   names is `500` to GET and HEAD, never answered from the instance registry; a push of the blob

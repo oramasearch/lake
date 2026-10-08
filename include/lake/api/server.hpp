@@ -46,7 +46,23 @@ namespace lake::api {
 struct ServerOptions {
     std::string listen_address = "127.0.0.1";
     unsigned short port = 4900; // 0 = pick an ephemeral port
+    // Connections and request workers are apart (lake#534, docs/serving/http.md, "Connections and
+    // workers"): a request holds one of `worker_coroutines` only while its route runs
+    // (LAKE_HTTP_WORKERS), and waits up to `worker_wait` for one before it is answered 503
+    // (LAKE_HTTP_WORKER_WAIT_SECONDS). An idle or still-arriving connection holds none.
     int worker_coroutines = 32;
+    std::chrono::milliseconds worker_wait{std::chrono::seconds(10)};
+    // Open connections, idle ones included; a connection above it is answered 503 and closed
+    // (LAKE_HTTP_MAX_CONNECTIONS).
+    std::size_t max_connections = 4096;
+    // A keep-alive connection waiting this long for its next request is closed
+    // (LAKE_HTTP_IDLE_TIMEOUT_SECONDS).
+    std::chrono::milliseconds idle_timeout{std::chrono::seconds(30)};
+    // A request header must arrive whole within this of its first byte, or of the accept for a
+    // connection's first request; otherwise the connection is closed
+    // (LAKE_HTTP_HEADER_TIMEOUT_SECONDS).
+    std::chrono::milliseconds header_timeout{std::chrono::seconds(10)};
+    int listen_backlog = 1024;
     std::string node_name = "lake";
     // Maximum completed OCI blob size. The HTTP parser admits this much so registry upload
     // handlers can stream it; every other request body retains the 64 MiB adapter limit.

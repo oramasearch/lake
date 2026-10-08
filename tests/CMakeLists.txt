@@ -14,6 +14,7 @@ add_executable(lake-tests test_main.cpp test_web_ui.cpp test_markdown.cpp
   test_apps.cpp
   test_api.cpp
   test_http_server.cpp
+  test_http_connections.cpp
   test_forge_scenario.cpp
   test_handles.cpp
   test_policy.cpp

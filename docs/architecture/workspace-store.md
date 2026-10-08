@@ -806,7 +806,7 @@ roots the new object with a lease (once per object its record names). A pull tak
 workspace's eight stream slots for its whole stream, apart from the lane's four admissions, so
 pulls never refuse the workspace's pushes, git or repository requests; it does not hold the lane,
 and each window (1 MiB) takes the lane only for its read. At most 24 pulls run in the process,
-below the server's 32 workers, and a client that takes no bytes for 60 s loses its stream. Nothing here changes `ZettaObjectBackend`.
+below the server's 32 request workers (`LAKE_HTTP_WORKERS`, [lake#534](../serving/http.md#connections-and-workers)), and a client that takes no bytes for 60 s loses its stream. Nothing here changes `ZettaObjectBackend`.
 
 ## Not yet
 

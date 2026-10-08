@@ -10,6 +10,7 @@
 #include "lake/api/request_recorder.hpp"
 #include "lake/api/server.hpp"
 #include "forge_records_api.hpp"
+#include "http_connections.hpp"
 #include "lake/thread.hpp"
 
 #include "lake/control/agents.hpp"
@@ -47,7 +48,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/beast2/http_server.hpp>
 #include <boost/capy/buffers.hpp>
 #include <boost/capy/buffers/buffer_copy.hpp>
 #include <boost/capy/buffers/vector_dynamic_buffer.hpp>
@@ -7469,7 +7469,8 @@ struct ApiServer::Impl {
     std::map<std::string, CachedJwks> jwks_cache;
     std::optional<ClerkConfig> clerk;
     boost::corosio::io_context io_context;
-    std::unique_ptr<boost::beast2::http_server> server;
+    // Lake#534: connections apart from the request workers (src/api/http_connections.hpp).
+    std::unique_ptr<HttpConnections> server;
     lake::Thread io_thread;
     std::atomic<bool> is_running{false};
     unsigned short bound_port = 0;
@@ -7667,6 +7668,10 @@ struct ApiServer::Impl {
         drain_started = std::chrono::steady_clock::now();
         drain_deadline = drain_started + options.drain_timeout;
         draining.store(true);
+        // Connections waiting for their next request close now (lake#534).
+        if (server) {
+            server->begin_drain();
+        }
         owner_wait_abandoned.store(true);
         sync_store.begin_drain();
         workspace_release_thread = lake::Thread([this] {
@@ -21458,21 +21463,34 @@ bool ApiServer::start() {
     auto parser_options = http::parser_config{true};
     parser_options.body_limit =
         std::max<std::uint64_t>(maximum_sync_body_size, impl.options.max_registry_blob_bytes);
-    impl.server = std::make_unique<beast2::http_server>(
-        impl.io_context,
-        static_cast<std::size_t>(impl.options.worker_coroutines),
-        router.release(),
-        http::make_parser_config(parser_options),
-        http::make_serializer_config(http::serializer_config()));
+    HttpConnectionLimits limits;
+    limits.workers = impl.options.worker_coroutines > 0
+                         ? static_cast<std::size_t>(impl.options.worker_coroutines)
+                         : 0;
+    limits.max_connections = impl.options.max_connections;
+    limits.idle_timeout = impl.options.idle_timeout;
+    limits.header_timeout = impl.options.header_timeout;
+    limits.worker_wait = impl.options.worker_wait;
+    limits.listen_backlog = impl.options.listen_backlog;
+    // The probes never wait behind busy workers, so a saturated lake is not restarted for it.
+    limits.needs_no_worker = [](std::string_view path) {
+        return path == "/healthz" || path == "/readyz";
+    };
+    impl.server = std::make_unique<HttpConnections>(impl.io_context,
+                                                    router.release(),
+                                                    http::make_parser_config(parser_options),
+                                                    http::make_serializer_config(http::serializer_config()),
+                                                    std::move(limits),
+                                                    &impl.metrics);
 
     corosio::ipv4_address address(impl.options.listen_address);
-    auto bind_error = impl.server->bind(corosio::endpoint(address, impl.options.port));
-    if (bind_error) {
-        impl.failure_reason = "bind failed: " + bind_error.message();
+    const std::string bind_error = impl.server->bind(corosio::endpoint(address, impl.options.port));
+    if (!bind_error.empty()) {
+        impl.failure_reason = bind_error;
         impl.server.reset();
         return false;
     }
-    impl.bound_port = impl.server->local_endpoint().port();
+    impl.bound_port = impl.server->port();
     if (impl.options.store && impl.options.workspaces && !impl.options.instance_kek.empty()) {
         impl.metering_recorder =
             std::make_unique<MeteringRecorder>(impl.options.store.get(),
@@ -21539,7 +21557,8 @@ void ApiServer::stop() {
         }
     }
     const int abandoned_requests = impl.in_flight.load();
-    impl.server->stop();
+    // Closes every connection and lets the sessions unwind on the running io_context first.
+    impl.server->stop(std::chrono::seconds(2));
     impl.io_context.stop();
     if (impl.io_thread.joinable())
         impl.io_thread.join();

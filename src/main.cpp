@@ -112,6 +112,12 @@ int usage() {
                  "(default 268435456; idle ones are evicted and loaded again on use)");
     std::println("  LAKE_DRAIN_SECONDS bounds the wait for in-flight requests on SIGTERM "
                  "(default 20)");
+    std::println("  LAKE_HTTP_WORKERS requests handled at once (default 32); "
+                 "LAKE_HTTP_WORKER_WAIT_SECONDS a request's wait for one before 503 (default 10)");
+    std::println("  LAKE_HTTP_MAX_CONNECTIONS open connections before new ones get 503 "
+                 "(default 4096)");
+    std::println("  LAKE_HTTP_IDLE_TIMEOUT_SECONDS closes idle keep-alive connections (default 30); "
+                 "LAKE_HTTP_HEADER_TIMEOUT_SECONDS bounds a request header (default 10)");
     std::println("  LAKE_WORKSPACE_STORE_PREOPEN=false opens workspace stores on first use only "
                  "(default true: opened in the background from start)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
@@ -133,6 +139,14 @@ int main(int argc, char** argv) {
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
     opts.store_owner_wait = std::chrono::seconds{env_u64("LAKE_STORE_OWNER_WAIT_SECONDS", 90)};
     opts.drain_timeout = std::chrono::seconds{env_u64("LAKE_DRAIN_SECONDS", 20)};
+    // lake#534: connections apart from request workers; zero is refused at start.
+    opts.worker_coroutines = static_cast<int>(std::min<std::uint64_t>(
+        env_u64("LAKE_HTTP_WORKERS", static_cast<std::uint64_t>(opts.worker_coroutines)), 65536));
+    opts.max_connections = static_cast<std::size_t>(
+        env_u64("LAKE_HTTP_MAX_CONNECTIONS", opts.max_connections));
+    opts.idle_timeout = std::chrono::seconds{env_u64("LAKE_HTTP_IDLE_TIMEOUT_SECONDS", 30)};
+    opts.header_timeout = std::chrono::seconds{env_u64("LAKE_HTTP_HEADER_TIMEOUT_SECONDS", 10)};
+    opts.worker_wait = std::chrono::seconds{env_u64("LAKE_HTTP_WORKER_WAIT_SECONDS", 10)};
     opts.preopen_workspace_stores = env_or("LAKE_WORKSPACE_STORE_PREOPEN", "true") != "false";
     opts.workspace_store_lease_ttl =
         std::chrono::seconds{std::max<std::uint64_t>(3, env_u64("LAKE_WORKSPACE_STORE_LEASE_SECONDS", 30))};
@@ -393,6 +407,12 @@ int main(int argc, char** argv) {
              std::chrono::duration_cast<std::chrono::seconds>(opts.store_owner_wait).count()},
             {"drain_seconds",
              std::chrono::duration_cast<std::chrono::seconds>(opts.drain_timeout).count()},
+            {"http_workers", opts.worker_coroutines},
+            {"http_max_connections", opts.max_connections},
+            {"http_idle_timeout_seconds",
+             std::chrono::duration_cast<std::chrono::seconds>(opts.idle_timeout).count()},
+            {"http_header_timeout_seconds",
+             std::chrono::duration_cast<std::chrono::seconds>(opts.header_timeout).count()},
             {"log_mode", lake::transparency::to_string(opts.log_configuration.mode)},
             {"tsa_configured", opts.tsa_endpoint.empty() ? "no" : "yes"},
             {"admin_token_set", opts.admin_token.empty() ? "no" : "yes"},

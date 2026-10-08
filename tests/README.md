@@ -153,11 +153,19 @@ The default `lake-tests` target contains the portable suite plus Postgres-backed
 when `LAKE_TEST_DB_URI` is absent. `lake-postgres-tests` contains the focused control-store cases.
 Run both through CTest after configuring the repository with CMake.
 
-`HttpServer.IdleKeepAliveCloseWritesNothingToStderr` starts Lake with one Beast2 worker, captures
+`HttpServer.IdleKeepAliveCloseWritesNothingToStderr` starts Lake with one request worker, captures
 the process stderr file descriptor through a test-owned pipe, completes a keep-alive request, and
-closes that connection while it is idle. A request on a second connection proves the worker
-processed the close before the test stops the server and asserts that the pipe stayed empty.
-`OutputPipe` captures stderr by default, or stdout.
+closes that connection while it is idle. A request on a second connection follows before the test
+stops the server and asserts that the pipe stayed empty. `OutputPipe` captures stderr by default,
+or stdout.
+
+`test_http_connections.cpp` (lake#534) covers connections apart from request workers
+(`src/api/http_connections.hpp`) over raw sockets: two hundred idle connections beside a request
+answered within 500 ms (with a small router and through `ApiServer`), the idle keep-alive and
+header (slowloris) timeouts, the connection cap's 503, 503 and 429 closing their connection, the
+wait for a worker and its refusal, a 4 MiB streamed response beside idle connections, and the
+drain closing idle connections. It raises the process's open-file soft limit for its sockets. See
+[`../docs/serving/http.md`](../docs/serving/http.md#connections-and-workers).
 
 Request telemetry (decision 54 S9, lake#384, [`../docs/serving/telemetry.md`](../docs/serving/telemetry.md)):
 `HttpServer.RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries` captures stdout while it

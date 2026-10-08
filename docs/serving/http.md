@@ -9,11 +9,13 @@ names no HTTP type. `src/api/http_server.cpp` is the one translation unit that i
 `boost::http` or Boost.JSON. Pages are pure renderers in `src/api/web_ui.cpp` (string in, string
 out) and are the unit-tested surface.
 
-**Lifecycle.** `ApiServer::start()`: build the router → construct
-`beast2::http_server(io_context, workers, router, parser_cfg, serializer_cfg)` → `bind` →
-`local_endpoint().port()` → `start()` → an `io_thread` runs `io_context.run()`. `stop()`:
-`server->stop()`, `io_context.stop()`, join. The owner loop calls `wait_for_work()` then
-`drain()` each tick; both are placeholders until lake has a node to marshal onto.
+**Lifecycle.** `ApiServer::start()`: build the router → construct `HttpConnections(io_context,
+router, parser_cfg, serializer_cfg, limits)` (`src/api/http_connections.hpp`) → `bind` (open,
+`SO_REUSEADDR`, bind, listen) → `port()` → `start()` → an `io_thread` runs `io_context.run()`.
+`begin_drain()` closes the connections waiting for their next request. `stop()`:
+`server->stop()` closes the listener and every connection and waits up to 2 s for the sessions to
+unwind, then `io_context.stop()`, join. The owner loop calls `wait_for_work()` then `drain()` each
+tick.
 
 **Routes.**
 
@@ -57,6 +59,50 @@ out) and are the unit-tested surface.
 | `GET /acme/<customer-id>/directory`, ACME resource `POST`s, `HEAD /acme/<customer-id>/new-nonce`, `GET /.well-known/acme-challenge/<token>` | RFC 8555 account, HTTP-01 order, CSR finalize, polling, and certificate download |
 | `POST /mcp`, `/w/<workspace_id>/mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call`; the same registry as tools. `initialize` declares `tools.listChanged` and answers an `Mcp-Session-Id`; a session from an older tool list gets `notifications/tools/list_changed` ([mcp.md](../api/mcp.md)). `GET`/`DELETE` answer 405. |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
+
+## Connections and workers
+
+Lake used to serve with Beast2's `http_server`: a fixed pool of 32 workers, each owning one
+connection for its whole life. An idle keep-alive connection kept its worker, so about 32 clients
+holding connections open denied service to every tenant (lake#534). Lake now serves the way Zetta
+does (`zetta/src/core/api/http_server.cpp`, 4096 connections by default): it accepts every
+connection up to a cap and serves each with its own session coroutine. A connection is not a
+worker.
+
+| Limit | Default | Environment | What happens |
+|---|---|---|---|
+| Connections | 4096 | `LAKE_HTTP_MAX_CONNECTIONS` | A connection above the cap is accepted, answered `503` with `Connection: close`, `Retry-After: 1` and the JSON envelope `busy`, and closed. Lake keeps accepting meanwhile. |
+| Request workers | 32 | `LAKE_HTTP_WORKERS` | A request takes a worker only while its route runs, from dispatch to the end of its response, so a streaming response (an image pull, an event stream) holds its worker until it ends. Reading a request header and waiting for the next request hold none. `GET /healthz` and `/readyz` need no worker, so the probes answer while every worker is busy. |
+| Wait for a worker | 10 s | `LAKE_HTTP_WORKER_WAIT_SECONDS` | A request that finds every worker taken waits, first come first served; past the wait it is answered `503` `busy` and its connection closed. |
+| Idle keep-alive | 30 s | `LAKE_HTTP_IDLE_TIMEOUT_SECONDS` | A connection that waits this long for its next request is closed. |
+| Request header | 10 s | `LAKE_HTTP_HEADER_TIMEOUT_SECONDS` | A request header must arrive whole within this of its first byte (of the accept, for a connection's first request); otherwise the connection is closed without an answer. A client trickling a header a byte at a time (slowloris) is cut off however steadily it sends. |
+
+Every limit must be positive; lake refuses to start otherwise. A response with status `503` or
+`429` closes its connection (`Connection: close`), whichever handler sent it, so a refused client
+gives the connection back while it waits to retry; the registry's own refusals did since #528.
+`detail::RefusalClosingSink` does this in the sink every response body goes through, before the
+header is written. During the drain (lake#536) a connection waiting for its next request is closed
+at once, and every response closes its connection.
+
+The request body and the response are not bounded by these timeouts; their routes bound them (the
+64 MiB body limit below; `registry_stream_idle_timeout` for a pull). The worker, connection and
+timeout counts are metrics (`lake_http_connections`, `lake_http_requests_active`,
+`lake_http_requests_waiting`, `lake_http_refusals_total{reason}`,
+`lake_http_connections_closed_total{reason}`; [telemetry](telemetry.md)).
+
+`tests/test_http_connections.cpp` proves it: two hundred idle connections (half kept alive after a
+request, half silent) leave two workers free and the next request answers in under 500 ms, also
+through `ApiServer`; an idle connection is closed at its timeout; a trickled header, a silent
+connection and a partial header on a kept-alive connection are each cut off at the header timeout;
+the cap answers 503 and closes, and a closed connection makes room; 503 and 429 close their
+connection; a request waits for a worker and is refused past the wait, the probe needs none; a
+4 MiB streamed response completes beside a hundred idle connections; and the drain closes idle
+connections. The registry's streaming pulls are `RegistryStore.*` in
+`tests/test_registry_store.cpp`.
+
+```sh
+./build/tests/lake-tests --gtest_filter='HttpConnections.*:RegistryStore.*:HttpServer.*'
+```
 
 ## Request body limits
 
@@ -120,7 +166,8 @@ another workspace, and checks the unknown-workspace 404. Run it with:
   **hangs**. Keep it last.
 
 **Idle closes.** A client closing an idle keep-alive connection is a normal end of stream and
-produces no stderr output. Lake pins `oramasearch/beast2` branch `orama-main`, whose carried patch
+produces no stderr output; lake's session loop (`HttpConnections`, [below](#connections-and-workers))
+writes nothing for it. Lake pins `oramasearch/beast2` branch `orama-main`, whose carried patch
 suppresses the former `read_header error: end of stream` line. The carrier and its update procedure
 are recorded in [`../build/dependencies.md`](../build/dependencies.md).
 
@@ -151,8 +198,10 @@ task over one keep-alive connection and checks both answers, the log fields and 
 
 ## Response isolation
 
-Beast2 pools workers across connections. At the pinned revision, each worker retains its
-`route_params::res` and resets the start line and connection policy without clearing old fields.
+Beast2's server pooled workers across connections (lake now gives each connection its own,
+[above](#connections-and-workers), but a keep-alive connection still reuses its response across
+requests). At the pinned revision, a worker retains its `route_params::res` and resets the start
+line and connection policy without clearing old fields.
 Lake previously overwrote only selected headers when sending a response. A sign-in response's
 `Set-Cookie` and `Location` could consequently reach a different client on the next connection,
 as well as a later request on a keep-alive connection. A browser accepting that leaked cookie
