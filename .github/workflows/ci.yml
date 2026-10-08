@@ -20,7 +20,9 @@ concurrency:
 env:
   # Bump ZETTA_REF with the zetta-bridge pin and LIQUID_REF with the liquid-bridge pin.
   # ZETTA_REF is both the client source lake compiles and the server the real-Zetta tests start.
-  ZETTA_REF: 5f70b3063fa6cbc9e489eb153f0699ecd080cec9
+  # Zetta dev 149303c (zetta#1237): lake#543 refuses a Zetta that does not report
+  # object_log_prefix_durability, which the bridge pin 5f70b30 predates.
+  ZETTA_REF: 149303c142e0c9ede4ac0c023ae631838140f1bc
   # liquid#345 (corosio 0def6d3, the connect-after-open fix): until it merges, its branch head;
   # then the liquid-bridge pin that includes it.
   LIQUID_REF: 7f58aec5d94c077580071ad5b6436755aaf638fc

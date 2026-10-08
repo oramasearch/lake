@@ -12,7 +12,7 @@ request and every push to `main` (lake#547). It is one job, `ci`, on `ubuntu-24.
 
 1. loads one read-only deploy key per private repository (below) and checks out all submodules;
 2. fetches `oramasearch/zetta` at `ZETTA_REF` and `oramasearch/liquid` at `LIQUID_REF`, the
-   commits the bridges pin (Zetta `5f70b30`; liquid `7f58aec`, liquid#345, below);
+   commits below (Zetta `149303c`; liquid `7f58aec`, liquid#345);
 3. installs the Dockerfile toolchain (LLVM 19, CMake 3.31.5, OpenSSL 3.6.3 built from the
    checksum-verified source);
 4. restores, or else builds, the **Zetta server binary** at `ZETTA_REF` (below);
@@ -70,7 +70,9 @@ finish.
 
 ### The Zetta binary
 
-The real-Zetta tests need a `zetta` built from Zetta dev `5f70b30` or later. CI builds it from
+The real-Zetta tests need a `zetta` built from Zetta dev `149303c` or later: since lake#543 lake
+refuses a Zetta that does not report `object_log_prefix_durability` (zetta#1237), so on `5f70b30`
+every `WorkspaceStoreZetta` test fails at open. CI builds it from
 `ZETTA_REF` with Zetta's own image recipe (clang-19, `ZETTA_BUILD_TESTS=OFF`, target `zetta`,
 stripped) and keeps it in the Actions cache under
 `Linux-zetta-bin-<ZETTA_REF>-clang19-v1`. A cache hit skips Zetta's dependencies, submodules and
@@ -155,7 +157,7 @@ the client from it and, on a cache miss, builds the Zetta server from the same c
 submodules. The image workflow supplies the same directory as the `zetta_source` named build
 context. Bump `ZETTA_REF` in `ci.yml` and the ref in `image.yml` when the bridge bumps Zetta, and
 `LIQUID_REF` and `image.yml`'s liquid ref when liquid-bridge bumps liquid. Both workflows pin Zetta
-`5f70b30` (the bridge pin on 2026-10-08). `ci.yml` pins liquid `7f58aec`, the head of liquid#345,
+dev `149303c` (zetta#1237), ahead of the bridge pin `5f70b30`, which lake#543 no longer accepts. `ci.yml` pins liquid `7f58aec`, the head of liquid#345,
 which moves liquid's Corosio to `0def6d3`: on the bridge's liquid `8955519` (Corosio `1d56cba`) a
 TCP connect fails on Linux with `Input/output error` when epoll has already reported its open,
 unconnected socket (corosio#10), which failed lake's drive, sync and model-sync tests in CI. Once

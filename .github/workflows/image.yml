@@ -44,7 +44,7 @@ jobs:
         run: |
           git init -q _external/zetta
           git -C _external/zetta remote add origin git@github.com:oramasearch/zetta.git
-          git -C _external/zetta fetch -q --depth 1 origin 5f70b3063fa6cbc9e489eb153f0699ecd080cec9
+          git -C _external/zetta fetch -q --depth 1 origin 149303c142e0c9ede4ac0c023ae631838140f1bc
           git -C _external/zetta checkout -q FETCH_HEAD
 
       - name: Check out the liquid source
