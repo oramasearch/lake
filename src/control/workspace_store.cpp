@@ -153,6 +153,25 @@ liquid::error mapped(const ObjectResponse& response, std::string context) {
     }
 }
 
+// The refusal of a workspace Zetta without prefix durability starts with this (lake#543).
+constexpr std::string_view durability_refusal =
+    "the workspace Zetta does not keep a prefix of its object log after a power loss";
+
+// The incarnation a successful object answer carries (lake#543), or empty.
+std::string answered_incarnation(const ObjectResponse& response) {
+    const nlohmann::json body = nlohmann::json::parse(response.body, nullptr, false);
+    if (!body.is_object() || !body.contains("value") || !body.at("value").is_object()) {
+        return {};
+    }
+    const nlohmann::json& value = body.at("value");
+    const auto found = value.find("incarnation");
+    return found != value.end() && found->is_string() ? found->get<std::string>() : std::string();
+}
+
+std::string shown_incarnation(const std::string& incarnation) {
+    return incarnation.empty() ? std::string("none") : incarnation;
+}
+
 // The `value` of a successful JSON envelope.
 liquid::result<nlohmann::json> envelope_value(const ObjectResponse& response, std::string context) {
     const nlohmann::json body = nlohmann::json::parse(response.body, nullptr, false);
@@ -170,6 +189,10 @@ namespace {
 // The deadline of the settling before a release on this thread (steady clock nanoseconds), or 0.
 thread_local std::int64_t settle_deadline = 0;
 } // namespace
+
+bool workspace_zetta_lacks_durability(const liquid::error& error) {
+    return error.code == liquid::errc::unsupported && error.message.starts_with(durability_refusal);
+}
 
 std::shared_ptr<ObjectTransport> make_zetta_object_transport() {
     return make_pooled_object_transport();
@@ -344,6 +367,104 @@ ZettaObjectClient::send(ObjectRequest request, bool idempotent, ObjectRequestKin
     co_return response;
 }
 
+void ZettaObjectClient::mark_restarted(const std::string& current) {
+    restarted_ = "the workspace Zetta restarted, or reopened the bucket's log, inside this operation "
+                 "(incarnation " +
+                 shown_incarnation(incarnation_.value_or(std::string())) + " before, " +
+                 shown_incarnation(current) +
+                 " now): writes it acknowledged since the last :barrier may be lost, so the "
+                 "operation fails and the workspace store is opened again (lake#543)";
+}
+
+liquid::result<void> ZettaObjectClient::observe_incarnation(const ObjectResponse& response,
+                                                            bool write,
+                                                            std::uint64_t covered,
+                                                            const std::string& context) {
+    const std::string answered = answered_incarnation(response);
+    std::lock_guard lock(incarnation_mutex_);
+    if (restarted_.empty() && incarnation_ && answered != *incarnation_) {
+        if (write && unsynced_writes_ == 0) {
+            // Nothing acknowledged was unsynced when Zetta changed: nothing was lost.
+            incarnation_ = answered;
+        } else {
+            mark_restarted(answered);
+        }
+    }
+    if (!restarted_.empty()) {
+        return refused(liquid::errc::unavailable, restarted_, context);
+    }
+    if (!incarnation_) {
+        incarnation_ = answered;
+    }
+    if (write) {
+        ++unsynced_writes_;
+    } else {
+        unsynced_writes_ -= std::min(covered, unsynced_writes_);
+    }
+    return {};
+}
+
+liquid::runtime::task<ObjectResponse> ZettaObjectClient::send_checked(ObjectRequest request,
+                                                                      bool idempotent,
+                                                                      ObjectRequestKind kind,
+                                                                      std::string context) {
+    const bool write = kind != ObjectRequestKind::barrier;
+    for (int attempt = 1;; ++attempt) {
+        ObjectRequest sent = request;
+        std::uint64_t covered = 0;
+        {
+            std::lock_guard lock(incarnation_mutex_);
+            if (!restarted_.empty()) {
+                co_return std::unexpected(failure(liquid::errc::unavailable, restarted_, context));
+            }
+            if (incarnation_ && !incarnation_->empty()) {
+                sent.headers.emplace_back("Zetta-Incarnation", *incarnation_);
+            }
+            covered = unsynced_writes_;
+        }
+        auto response = co_await send(std::move(sent), idempotent, kind);
+        if (!response) {
+            co_return std::unexpected(response.error());
+        }
+        if (response->status == 409 && response->error.empty()) {
+            const ZettaError error = zetta_error(*response);
+            if (error.code == "incarnation_changed") {
+                const std::string current = error.details.is_object()
+                                                ? error.details.value("incarnation", std::string())
+                                                : std::string();
+                bool again = false;
+                {
+                    std::lock_guard lock(incarnation_mutex_);
+                    if (restarted_.empty()) {
+                        if (write && unsynced_writes_ == 0 && attempt == 1 && !current.empty()) {
+                            incarnation_ = current;
+                            again = true;
+                        } else {
+                            mark_restarted(current);
+                        }
+                    }
+                }
+                if (again) {
+                    continue;
+                }
+                std::lock_guard lock(incarnation_mutex_);
+                co_return std::unexpected(failure(liquid::errc::unavailable, restarted_, context));
+            }
+        }
+        if (response->status == 200 || response->status == 201) {
+            if (auto observed = observe_incarnation(*response, write, covered, context); !observed) {
+                co_return std::unexpected(observed.error());
+            }
+        }
+        co_return response;
+    }
+}
+
+std::string ZettaObjectClient::incarnation() const {
+    std::lock_guard lock(incarnation_mutex_);
+    return incarnation_.value_or(std::string());
+}
+
 void ZettaObjectClient::set_before_release(std::function<liquid::runtime::task<void>()> settle,
                                            std::function<void()> abandon) {
     std::lock_guard lock(settle_mutex_);
@@ -432,8 +553,10 @@ liquid::runtime::task<void> ZettaObjectClient::put(std::string key,
         request.headers.emplace_back("Zetta-Fence", std::to_string(*fence));
     }
     request.body = std::move(bytes);
-    auto response = co_await send(std::move(request), !if_absent,
-                                  if_absent ? ObjectRequestKind::put_if_absent : ObjectRequestKind::put);
+    auto response = co_await send_checked(std::move(request), !if_absent,
+                                          if_absent ? ObjectRequestKind::put_if_absent
+                                                    : ObjectRequestKind::put,
+                                          bucket_ + "/" + key);
     if (!response) {
         co_return std::unexpected(response.error());
     }
@@ -462,7 +585,8 @@ liquid::runtime::task<void> ZettaObjectClient::append(std::string key,
     }
     request.body = std::move(bytes);
     // A retried append of the same bytes at the same offset changes nothing.
-    auto response = co_await send(std::move(request), true, ObjectRequestKind::patch);
+    auto response = co_await send_checked(std::move(request), true, ObjectRequestKind::patch,
+                                          bucket_ + "/" + key);
     if (!response) {
         co_return std::unexpected(response.error());
     }
@@ -525,7 +649,8 @@ liquid::runtime::task<void> ZettaObjectClient::remove(std::string key,
     if (fence) {
         request.headers.emplace_back("Zetta-Fence", std::to_string(*fence));
     }
-    auto response = co_await send(std::move(request), true, ObjectRequestKind::remove);
+    auto response =
+        co_await send_checked(std::move(request), true, ObjectRequestKind::remove, bucket_ + "/" + key);
     if (!response) {
         co_return std::unexpected(response.error());
     }
@@ -576,7 +701,8 @@ liquid::runtime::task<void> ZettaObjectClient::barrier() {
     request.url = bucket_url(":barrier");
     request.headers = {{"Content-Type", "application/json"}, {"Accept", "application/json"}};
     request.body = "{}";
-    auto response = co_await send(std::move(request), true, ObjectRequestKind::barrier);
+    auto response =
+        co_await send_checked(std::move(request), true, ObjectRequestKind::barrier, bucket_ + ":barrier");
     if (!response) {
         co_return std::unexpected(response.error());
     }
@@ -648,7 +774,45 @@ liquid::runtime::task<ObjectLease> ZettaObjectClient::acquire(std::string holder
         }
         co_return std::unexpected(std::move(error));
     }
-    co_return lease_of(*response, bucket_ + ":acquire");
+    auto lease = lease_of(*response, bucket_ + ":acquire");
+    if (!lease) {
+        co_return std::unexpected(lease.error());
+    }
+    // lake#543: a Zetta without zetta#1235's prefix durability is refused before the store opens,
+    // and the lease it granted is given back.
+    const auto value = envelope_value(*response, bucket_ + ":acquire");
+    const nlohmann::json durability =
+        value ? value->value("object_log_prefix_durability", nlohmann::json()) : nlohmann::json();
+    const std::string current = answered_incarnation(*response);
+    std::string reason;
+    if (!durability.is_number_unsigned() && !durability.is_number_integer()) {
+        reason = "it reports no object_log_prefix_durability, so its image predates zetta#1235 "
+                 "(oramasearch/zetta dev-5f70b306)";
+    } else if (durability.get<std::int64_t>() < static_cast<std::int64_t>(workspace_store_prefix_durability)) {
+        reason = "it reports object_log_prefix_durability " + durability.dump() + ", and lake needs " +
+                 std::to_string(workspace_store_prefix_durability) + " or later";
+    } else if (current.empty()) {
+        reason = "it reports no incarnation";
+    }
+    if (!reason.empty()) {
+        static_cast<void>(co_await release(lease->holder, lease->fence));
+        co_return std::unexpected(failure(
+            liquid::errc::unsupported,
+            std::string(durability_refusal) + ": " + reason +
+                ". Lake makes each store operation durable with one :barrier, which a power loss "
+                "there can break, losing acknowledged commits; it opens no workspace store on that "
+                "Zetta until it runs dev-5f70b306 or later (lake#543)",
+            bucket_ + ":acquire"));
+    }
+    {
+        std::lock_guard lock(incarnation_mutex_);
+        if (!incarnation_ || unsynced_writes_ == 0) {
+            incarnation_ = current;
+        } else if (*incarnation_ != current && restarted_.empty()) {
+            mark_restarted(current);
+        }
+    }
+    co_return lease;
 }
 
 liquid::runtime::task<ObjectLease> ZettaObjectClient::renew(std::string holder,

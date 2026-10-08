@@ -38,6 +38,15 @@ inline constexpr std::string_view workspace_store_key_object = "keys/workspace-v
 // The search index's sealed objects in the same bucket (lake#381, search::workspace_index_prefix):
 // never liquid's, so the backend leaves them out of its directory and refuses liquid keys there.
 inline constexpr std::string_view workspace_store_search_prefix = "search/";
+// The durability format a workspace Zetta must report before lake opens a store on it (lake#543):
+// `object_log_prefix_durability` 1 is zetta#1235's prefix guarantee, which lake's one :barrier
+// per operation relies on (lake#535). Zetta images from before it (older than dev-5f70b306)
+// report nothing and are refused.
+inline constexpr std::uint32_t workspace_store_prefix_durability = 1;
+
+// The refusal of a workspace Zetta without that durability format: errc::unsupported, naming
+// what Zetta reported. Lake answers it as store_unavailable.
+bool workspace_zetta_lacks_durability(const liquid::error& error);
 
 // One raw exchange with a workspace Zetta's object routes. Bodies are bytes in a std::string.
 struct ObjectRequest {
@@ -222,6 +231,18 @@ struct ObjectUsage {
 // conflict (already_exists for a conditional create), 409 fenced or held locked, 416 corrupt,
 // 401/403 unauthorized, 507 busy (quota), 503 or no answer unavailable. Idempotent requests are
 // retried on unavailable a few times.
+//
+// The incarnation (lake#543): acquire refuses a Zetta that does not report
+// workspace_store_prefix_durability, releasing the lease it got, and records the bucket's
+// incarnation from its answer. Every later write and :barrier carries it as `Zetta-Incarnation`, a
+// precondition Zetta checks before it applies anything, and its answer carries the incarnation it
+// ran under. A refusal (`incarnation_changed`) while a write answered since the last answered
+// :barrier is still unsynced means Zetta restarted, or reopened the bucket's log, after
+// acknowledging that write without durability: the request fails `unavailable`, as does every
+// later write and :barrier on this client, so the operation fails, the backend with it, and
+// nothing issued after the lost write lands. With nothing unsynced nothing was lost: the client
+// adopts the new incarnation and sends the request once more, so a restart between two operations
+// fails neither. An answer under another incarnation than the one sent is treated the same way.
 class ZettaObjectClient {
 public:
     ZettaObjectClient(std::shared_ptr<ObjectTransport> transport,
@@ -271,6 +292,10 @@ public:
                                              std::chrono::milliseconds timeout);
     liquid::runtime::task<void> release(std::string holder, std::uint64_t fence);
 
+    // The incarnation of the workspace Zetta's bucket this client last accepted (lake#543), empty
+    // before the first answer that carries one.
+    std::string incarnation() const;
+
     // Sends what a backend over this client holds and makes it durable (lake#527, lake#535); the
     // owner calls it before it releases the lease, so a closed store leaves nothing unsent or
     // undurable. Set by ZettaObjectBackend; the last one constructed over the client is the open
@@ -293,6 +318,19 @@ private:
     send(ObjectRequest request, bool idempotent, ObjectRequestKind kind);
     std::string object_url(std::string_view key) const;
     std::string bucket_url(std::string_view suffix) const;
+    // A write (`kind` other than barrier) or :barrier under the incarnation precondition
+    // (lake#543): refused at once after a restart inside an operation, sent with
+    // `Zetta-Incarnation` once one is known, sent once more on `incarnation_changed` when nothing
+    // is unsynced, and its successful answer checked by observe_incarnation.
+    liquid::runtime::task<ObjectResponse>
+    send_checked(ObjectRequest request, bool idempotent, ObjectRequestKind kind, std::string context);
+    // Checks the incarnation a successful write (`write`) or :barrier answered under. `covered`:
+    // for a :barrier, the writes answered before it was sent, which it made durable.
+    liquid::result<void> observe_incarnation(const ObjectResponse& response, bool write,
+                                             std::uint64_t covered, const std::string& context);
+    // Under incarnation_mutex_: records that the bucket's incarnation went from the accepted one
+    // to `current` while writes were unsynced.
+    void mark_restarted(const std::string& current);
 
     std::shared_ptr<ObjectTransport> transport_;
     ObjectEndpoint endpoint_;
@@ -303,6 +341,13 @@ private:
     std::function<liquid::runtime::task<void>()> settle_;
     std::function<void()> abandon_;
     std::atomic<bool> owned_{false};
+    // lake#543, under incarnation_mutex_: the accepted incarnation, writes answered since the last
+    // :barrier answered (less what it covered), and why the client refuses, once a restart inside
+    // an operation was seen.
+    mutable std::mutex incarnation_mutex_;
+    std::optional<std::string> incarnation_;
+    std::uint64_t unsynced_writes_ = 0;
+    std::string restarted_;
 };
 
 // The workspace's data key (S3): random, 32 bytes, wrapped with AES-256-GCM under

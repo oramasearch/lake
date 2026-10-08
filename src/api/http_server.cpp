@@ -4472,6 +4472,10 @@ private:
              error.message.find("store root is owned by") != std::string::npos)) {
             return SyncStoreError{"store_unavailable", error.message, error.context};
         }
+        // A workspace Zetta without prefix durability (lake#543): refused until it is upgraded.
+        if (control::workspace_zetta_lacks_durability(error)) {
+            return SyncStoreError{"store_unavailable", error.message, error.context};
+        }
         const std::string code(liquid::to_string(error.code));
         return SyncStoreError{code, error.message, error.context};
     }

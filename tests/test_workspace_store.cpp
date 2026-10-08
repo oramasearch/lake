@@ -2655,10 +2655,34 @@ struct RealZetta {
         directory = lake::test::fixture_path("workspace-store-zetta-" + lake::control::new_uuid_v4());
         std::filesystem::create_directories(directory);
         std::mt19937 generator(std::random_device{}());
-        const int mcp = 20000 + static_cast<int>(generator() % 20000);
+        port = 20000 + static_cast<int>(generator() % 20000);
+        url = "http://127.0.0.1:" + std::to_string(port);
+        this->binary = binary;
+        if (!spawn()) {
+            return false;
+        }
+        lake::control::install_zetta_control_transport();
+        installed = true;
+        return ready();
+    }
+
+    // Kills the process at once (SIGKILL, as a lost node would stop) and starts it again on the
+    // same data and port (lake#543).
+    bool restart() {
+        if (pid > 0) {
+            kill(pid, SIGKILL);
+            int status = 0;
+            waitpid(pid, &status, 0);
+            pid = -1;
+        }
+        return spawn() && ready();
+    }
+
+    std::string binary;
+
+    bool spawn() {
+        const int mcp = port;
         const int cluster = mcp + 1;
-        port = mcp;
-        url = "http://127.0.0.1:" + std::to_string(mcp);
         const std::string data = (directory / "data").string();
         const std::string log = (directory / "zetta.log").string();
         std::vector<std::string> arguments = {binary, "--headless", "--no-preflight", "--data-dir", data,
@@ -2672,15 +2696,14 @@ struct RealZetta {
         argv.push_back(nullptr);
         posix_spawn_file_actions_t actions;
         posix_spawn_file_actions_init(&actions);
-        posix_spawn_file_actions_addopen(&actions, 1, log.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        posix_spawn_file_actions_addopen(&actions, 1, log.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
         posix_spawn_file_actions_adddup2(&actions, 1, 2);
-        const int spawned = posix_spawn(&pid, binary, &actions, nullptr, argv.data(), environ);
+        const int spawned = posix_spawn(&pid, binary.c_str(), &actions, nullptr, argv.data(), environ);
         posix_spawn_file_actions_destroy(&actions);
-        if (spawned != 0) {
-            return false;
-        }
-        lake::control::install_zetta_control_transport();
-        installed = true;
+        return spawned == 0;
+    }
+
+    bool ready() {
         auto client = std::make_shared<ZettaObjectClient>(lake::control::make_zetta_object_transport(),
                                                           ObjectEndpoint{url, token});
         for (int attempt = 0; attempt < 300; ++attempt) {
@@ -3341,6 +3364,74 @@ TEST(WorkspaceStoreZetta, ALostAnswerOverThePooledTransportIsRetriedOrFailsTheBa
     EXPECT_EQ(again.error().code, liquid::errc::already_exists);
 }
 
+// lake#543 on a real Zetta: the store opens only because Zetta reports prefix durability, and
+// records its incarnation. A restart of Zetta (SIGKILL) inside an operation fails it at the next
+// write, refused by its precondition; a restart between operations fails nothing.
+TEST(WorkspaceStoreZetta, AZettaRestartInsideAnOperationFailsItAndBetweenOperationsDoesNot) {
+    RealZetta zetta;
+    if (!zetta.start()) {
+        GTEST_SKIP() << "set LAKE_TEST_ZETTA_BINARY to a zetta built from origin/dev";
+    }
+    const auto root = lake::test::fixture_path("workspace-store-zetta-restart-" + lake::control::new_uuid_v4());
+    const std::string workspace = lake::control::new_uuid_v4();
+    auto client = std::make_shared<ZettaObjectClient>(lake::control::make_zetta_object_transport(),
+                                                      ObjectEndpoint{zetta.url, zetta.token});
+    ASSERT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
+    auto owner = std::make_shared<ZettaStoreOwner>(client, 30s);
+    liquid::store_options options;
+    auto backend = std::make_shared<ZettaObjectBackend>(
+        client, ZettaObjectBackendOptions{.workspace_id = workspace, .instance_kek = std::string(kek),
+                                          .create_key = true});
+    options.backend = backend;
+    options.owner = owner;
+    auto store = liquid::runtime::block_on(liquid::store::open(root, std::move(options)));
+    ASSERT_TRUE(store) << store.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(backend->make_durable()));
+    const std::string first = client->incarnation();
+    ASSERT_EQ(first.size(), 34U) << first;
+    EXPECT_TRUE(first.ends_with(".0")) << first;
+    auto view = std::static_pointer_cast<ZettaObjectBackend>(*backend->fenced(owner->fence()));
+    struct StopRenewing {
+        std::shared_ptr<ZettaStoreOwner> owner;
+        ~StopRenewing() {
+            owner->stop_renewing();
+        }
+    } stop_renewing{owner};
+
+    // Between operations: everything acknowledged is durable, so nothing fails.
+    ASSERT_TRUE(liquid::runtime::block_on(view->put("objects/a", bytes_of("before"))));
+    ASSERT_TRUE(liquid::runtime::block_on(view->make_durable()));
+    // Zetta writes its catalogue (the bucket and its lease) to disk once a second; a kill sooner
+    // would lose the lease, which is not what this test is about.
+    std::this_thread::sleep_for(2500ms);
+    ASSERT_TRUE(zetta.restart());
+    ASSERT_TRUE(liquid::runtime::block_on(view->put("objects/b", bytes_of("after a restart"))));
+    ASSERT_TRUE(liquid::runtime::block_on(view->make_durable()));
+    EXPECT_FALSE(view->failed());
+    const std::string second = client->incarnation();
+    EXPECT_NE(second, first);
+
+    // Inside an operation: a write acknowledged without durability, then Zetta is killed.
+    std::this_thread::sleep_for(2500ms);
+    ASSERT_TRUE(liquid::runtime::block_on(view->put("objects/large", random_bytes(2 * 1024 * 1024, 31))));
+    ASSERT_TRUE(zetta.restart());
+    const auto removed = liquid::runtime::block_on(view->remove("objects/a"));
+    ASSERT_FALSE(removed);
+    EXPECT_EQ(removed.error().code, liquid::errc::unavailable);
+    EXPECT_NE(removed.error().message.find(second), std::string::npos) << removed.error().message;
+    EXPECT_TRUE(view->failed());
+    EXPECT_FALSE(liquid::runtime::block_on(view->make_durable()));
+    // The refused removal applied nothing.
+    auto reader = std::make_shared<ZettaObjectBackend>(
+        std::make_shared<ZettaObjectClient>(lake::control::make_zetta_object_transport(),
+                                            ObjectEndpoint{zetta.url, zetta.token}),
+        ZettaObjectBackendOptions{.workspace_id = workspace, .instance_kek = std::string(kek)});
+    EXPECT_EQ(read(*reader, "objects/a", 0, 6), bytes_of("before"));
+    // Lake closes a failed store before it opens it again.
+    view.reset();
+    static_cast<void>(liquid::runtime::block_on(store->close()));
+}
+
 // ---- lake#527: a crash keeps what the last barrier acknowledged --------------------------------
 
 using ObjectState = std::optional<std::vector<std::byte>>;
@@ -3582,11 +3673,13 @@ TEST(WorkspaceStoreBackend, AWriteWhoseAnswerWasLostIsRetriedOrFailsTheBackend) 
 
     // A conditional create that landed but whose answer was lost is not retried: unavailable,
     // the backend failed (lake reopens the store), and the reopened store holds the object.
+    // (On the backend opened after the crash: the earlier one's writes now carry the crashed
+    // Zetta's incarnation, lake#543.)
     rig.zetta->lose_next_answers(1);
-    const auto created = liquid::runtime::block_on(backend->put_if_absent("objects/c", bytes_of("made")));
+    const auto created = liquid::runtime::block_on(reopened->put_if_absent("objects/c", bytes_of("made")));
     ASSERT_FALSE(created);
     EXPECT_EQ(created.error().code, liquid::errc::unavailable);
-    EXPECT_TRUE(backend->failed());
+    EXPECT_TRUE(reopened->failed());
     auto after = rig.backend(small_blocks(), false);
     EXPECT_EQ(read(*after, "objects/c", 0, 4), bytes_of("made"));
     const auto again = liquid::runtime::block_on(after->put_if_absent("objects/c", bytes_of("made")));
@@ -4500,6 +4593,148 @@ TEST(WorkspaceStoreMove, AStoreWhoseOpeningBarrierFailsIsNotServed) {
     EXPECT_NE(rig.call("GET", "/v1/repository_tree?id=" + rig.repo_a.id + "&ref=main").first, 200U);
     rig.zetta->drop_matching({}, 0);
     EXPECT_TRUE(written(rig.commit(rig.repo_a, "after.txt", "served again")));
+}
+
+// lake#543: a workspace Zetta from before zetta#1235 reports no prefix durability in its lease
+// answer, and the store is not opened on it: the owner refuses, naming the reason, and gives the
+// lease back. One that reports a format below lake's minimum is refused too.
+TEST(WorkspaceStoreOwner, AZettaWithoutPrefixDurabilityIsRefused) {
+    for (const std::optional<std::uint32_t> durability : {std::optional<std::uint32_t>{}, std::optional<std::uint32_t>{0U}}) {
+        Rig rig;
+        rig.zetta->set_durability(rig.endpoint, durability);
+        const auto root = lake::test::fixture_path("workspace-store-old-zetta-" + rig.workspace);
+        std::shared_ptr<ZettaStoreOwner> owner;
+        auto store = liquid::runtime::block_on(liquid::store::open(root, owned(rig, owner)));
+        ASSERT_FALSE(store);
+        EXPECT_EQ(store.error().code, liquid::errc::unsupported);
+        EXPECT_TRUE(lake::control::workspace_zetta_lacks_durability(store.error())) << store.error().message;
+        EXPECT_NE(store.error().message.find(durability ? "object_log_prefix_durability 0"
+                                                        : "reports no object_log_prefix_durability"),
+                  std::string::npos)
+            << store.error().message;
+        EXPECT_NE(store.error().message.find("dev-5f70b306"), std::string::npos) << store.error().message;
+        EXPECT_FALSE(owner->held());
+        EXPECT_TRUE(rig.zetta->lease(rig.endpoint).holder.empty()) << "the lease was given back";
+        // Nothing of the store was written.
+        EXPECT_TRUE(rig.zetta->objects(rig.endpoint).empty());
+        // Once the Zetta reports it, the store opens.
+        rig.zetta->set_durability(rig.endpoint, 1U);
+        std::shared_ptr<ZettaStoreOwner> later;
+        auto opened = liquid::runtime::block_on(liquid::store::open(root, owned(rig, later)));
+        ASSERT_TRUE(opened) << opened.error().message;
+        ASSERT_TRUE(liquid::runtime::block_on(opened->close()));
+    }
+}
+
+// lake#543 through the API: a switched workspace whose Zetta is downgraded to an image without
+// prefix durability answers store_unavailable naming the reason, and serves again once upgraded.
+TEST(WorkspaceStoreMove, AWorkspaceZettaWithoutPrefixDurabilityAnswersStoreUnavailable) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    ASSERT_TRUE(written(rig.commit(rig.repo_a, "before.txt", "before the downgrade")));
+    const std::string endpoint = "http://" + rig.alpha + ".test";
+    rig.zetta->set_durability(endpoint, std::nullopt);
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    const auto refused = rig.commit(rig.repo_a, "after.txt", "on an old Zetta");
+    EXPECT_EQ(refused.first, 503U) << refused.second.dump();
+    EXPECT_EQ(refused.second["error"]["code"], "store_unavailable") << refused.second.dump();
+    EXPECT_NE(refused.second["error"]["message"].get<std::string>().find("object_log_prefix_durability"),
+              std::string::npos)
+        << refused.second.dump();
+    EXPECT_TRUE(rig.zetta->lease(endpoint).holder.empty());
+    rig.zetta->set_durability(endpoint, 1U);
+    EXPECT_TRUE(written(rig.commit(rig.repo_a, "after.txt", "upgraded")));
+}
+
+// lake#543 (risk D in docs/architecture/workspace-store.md): the workspace Zetta restarts inside
+// one operation, after acknowledging a write it then lost. The next write is refused by its
+// Zetta-Incarnation precondition, so it never lands without the lost one; the operation fails,
+// the backend fails, and every later write and :barrier of that backend is refused without being
+// sent. The reopened store holds a prefix of what was sent.
+TEST(WorkspaceStoreBackend, AZettaRestartInsideAnOperationFailsIt) {
+    Rig rig;
+    const auto root = lake::test::fixture_path("workspace-store-restart-" + rig.workspace);
+    std::shared_ptr<ZettaStoreOwner> owner;
+    auto options = owned(rig, owner);
+    auto backend = std::static_pointer_cast<ZettaObjectBackend>(options.backend);
+    auto store = liquid::runtime::block_on(liquid::store::open(root, std::move(options)));
+    ASSERT_TRUE(store) << store.error().message;
+    ASSERT_TRUE(liquid::runtime::block_on(backend->make_durable()));
+    const std::string before = rig.zetta->incarnation(rig.endpoint);
+    EXPECT_EQ(backend->client().incarnation(), before);
+    auto view = std::static_pointer_cast<ZettaObjectBackend>(*backend->fenced(owner->fence()));
+
+    // A put past the held bound is sent at once and acknowledged, without durability.
+    const auto large = random_bytes(2 * 1024 * 1024, 11);
+    ASSERT_TRUE(liquid::runtime::block_on(view->put("objects/large", large)));
+    ASSERT_TRUE(rig.zetta->objects(rig.endpoint).contains("objects/large"));
+    // The workspace Zetta loses power: the unsynced put is gone, and it comes back as another
+    // incarnation.
+    rig.zetta->lose_power(rig.endpoint);
+    ASSERT_FALSE(rig.zetta->objects(rig.endpoint).contains("objects/large"));
+    const auto applied = rig.zetta->applied().size();
+    const auto refusals = rig.zetta->incarnation_refusals();
+
+    // The operation's next write is refused before Zetta applies it.
+    const auto removed = liquid::runtime::block_on(view->remove("objects/large"));
+    ASSERT_FALSE(removed);
+    EXPECT_EQ(removed.error().code, liquid::errc::unavailable);
+    EXPECT_NE(removed.error().message.find("restarted"), std::string::npos) << removed.error().message;
+    EXPECT_NE(removed.error().message.find(before), std::string::npos) << removed.error().message;
+    EXPECT_TRUE(view->failed());
+    EXPECT_EQ(rig.zetta->incarnation_refusals(), refusals + 1);
+    EXPECT_EQ(rig.zetta->applied().size(), applied) << "nothing landed after the lost write";
+    // Nothing more is sent: a later write and the operation's :barrier fail at once.
+    const auto requests = rig.zetta->requests();
+    EXPECT_FALSE(liquid::runtime::block_on(view->put("objects/later", large)));
+    const auto synced = liquid::runtime::block_on(view->make_durable());
+    ASSERT_FALSE(synced);
+    EXPECT_EQ(synced.error().code, liquid::errc::unavailable);
+    EXPECT_EQ(rig.zetta->requests(), requests);
+}
+
+// lake#543: the restart can also come between a write's answer and the operation's :barrier; the
+// :barrier is refused, so the operation is never acknowledged.
+TEST(WorkspaceStoreBackend, AZettaRestartBeforeTheBarrierFailsTheOperation) {
+    Rig rig;
+    auto backend = rig.backend(small_blocks());
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", bytes_of("acknowledged"))));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
+    // Sent at once, past the held bound, and acknowledged without durability.
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/b", random_bytes(2 * 1024 * 1024, 12))));
+    rig.zetta->lose_power(rig.endpoint);
+    const auto barriers = rig.zetta->barriers(rig.endpoint);
+    const auto synced = liquid::runtime::block_on(backend->sync());
+    ASSERT_FALSE(synced);
+    EXPECT_EQ(synced.error().code, liquid::errc::unavailable);
+    EXPECT_TRUE(backend->failed());
+    EXPECT_EQ(rig.zetta->barriers(rig.endpoint), barriers) << "the :barrier was refused, not applied";
+    // The reopened backend reads the durable state.
+    auto reopened = rig.backend(small_blocks(), false);
+    EXPECT_EQ(read(*reopened, "objects/a", 0, 12), bytes_of("acknowledged"));
+}
+
+// lake#543: a restart between two operations loses nothing (everything acknowledged was made
+// durable by the last :barrier), so the next operation adopts the new incarnation and succeeds,
+// and so does one that only reads.
+TEST(WorkspaceStoreBackend, AZettaRestartBetweenOperationsFailsNothing) {
+    Rig rig;
+    auto backend = rig.backend(small_blocks());
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/a", bytes_of("first"))));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
+    const std::string before = backend->client().incarnation();
+    ASSERT_EQ(before, rig.zetta->incarnation(rig.endpoint));
+    rig.zetta->restart(rig.endpoint);
+    EXPECT_EQ(read(*backend, "objects/a", 0, 5), bytes_of("first"));
+    const auto refusals = rig.zetta->incarnation_refusals();
+    ASSERT_TRUE(liquid::runtime::block_on(backend->put("objects/b", bytes_of("second"))));
+    ASSERT_TRUE(liquid::runtime::block_on(backend->sync()));
+    EXPECT_FALSE(backend->failed());
+    EXPECT_EQ(rig.zetta->incarnation_refusals(), refusals + 1) << "refused once, then sent again";
+    EXPECT_EQ(backend->client().incarnation(), rig.zetta->incarnation(rig.endpoint));
+    EXPECT_NE(backend->client().incarnation(), before);
+    EXPECT_EQ(read(*backend, "objects/b", 0, 6), bytes_of("second"));
 }
 
 // lake#535 review E: views a backend keeps for its owner's release are let go of when the owner
