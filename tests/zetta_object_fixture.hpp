@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <format>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -26,7 +27,10 @@ namespace lake::test {
 // inside the object must equal the bytes there, otherwise 409 conflict: the decided contract that
 // refuses in-place rewrites), ranged reads (416 outside, 404 absent), paged listing, remove,
 // barrier, usage, and the owner lease whose fence every mutation carries once the bucket has had
-// a holder (409 fenced, 409 held). Tests reach in to read, alter, expire or count.
+// a holder (409 fenced, 409 held). Each node reports zetta#1235's prefix durability and an
+// incarnation, which changes when it crashes or restarts and which a write or :barrier may
+// require (`Zetta-Incarnation`, 409 incarnation_changed) as zetta docs/data/object-store.md
+// specifies (lake#543). Tests reach in to read, alter, expire or count.
 class FakeZettaObjects final : public control::ObjectTransport {
 public:
     struct Lease {
@@ -53,12 +57,80 @@ public:
     struct Node {
         std::string token;
         std::map<std::string, Bucket> buckets;
+        // lake#543: what the lease and barrier answers report as object_log_prefix_durability
+        // (nothing: a Zetta from before zetta#1235, which reports no incarnation either), and the
+        // incarnation every write, lease and barrier answer carries.
+        std::optional<std::uint32_t> durability = 1;
+        std::string incarnation;
+        // Whether a write or barrier's Zetta-Incarnation is checked (a Zetta that reports an
+        // incarnation but does not check it stands in for a check that came too late), and how
+        // many nodes a barrier reports.
+        bool checks_incarnation = true;
+        std::uint64_t nodes = 1;
     };
 
     // A workspace Zetta at `http://<name>.test` answering bearer `token`.
     void add_node(const std::string& endpoint, std::string token) {
         std::lock_guard lock(mutex_);
         nodes_[endpoint].token = std::move(token);
+        nodes_[endpoint].incarnation = next_incarnation();
+    }
+    // lake#543: the durability format the node reports; nothing for a Zetta older than
+    // zetta#1235.
+    // Changing it is a restart into another image: a new incarnation.
+    void set_durability(const std::string& endpoint, std::optional<std::uint32_t> durability) {
+        std::lock_guard lock(mutex_);
+        nodes_[endpoint].durability = durability;
+        nodes_[endpoint].incarnation = next_incarnation();
+    }
+    void set_checks_incarnation(const std::string& endpoint, bool checks) {
+        std::lock_guard lock(mutex_);
+        nodes_[endpoint].checks_incarnation = checks;
+    }
+    void set_nodes(const std::string& endpoint, std::uint64_t nodes) {
+        std::lock_guard lock(mutex_);
+        nodes_[endpoint].nodes = nodes;
+    }
+    // The workspace Zetta restarts and its catalogue lost its last second (lake#543): every write
+    // is kept, but the bucket's lease is back as it was before its last acquire, so the next
+    // acquirer gets the fence already handed out.
+    void restart_losing_last_lease(const std::string& endpoint, const std::string& bucket = "lake_store") {
+        std::lock_guard lock(mutex_);
+        Node& node = nodes_[endpoint];
+        node.incarnation = next_incarnation();
+        Lease& lease = node.buckets[bucket].lease;
+        lease.holder.clear();
+        if (lease.fence > 0) {
+            --lease.fence;
+        }
+        lease.had_holder = lease.fence > 0;
+        changed_.notify_all();
+    }
+    std::string incarnation(const std::string& endpoint) {
+        std::lock_guard lock(mutex_);
+        return nodes_[endpoint].incarnation;
+    }
+    // The workspace Zetta's node loses power: every write since the bucket was last made durable
+    // is lost, and it comes back as a new incarnation (lake#543).
+    void lose_power(const std::string& endpoint) {
+        std::lock_guard lock(mutex_);
+        Node& node = nodes_[endpoint];
+        node.incarnation = next_incarnation();
+        for (auto& [name, bucket] : node.buckets) {
+            bucket.unsynced.clear();
+            bucket.objects = bucket.durable;
+        }
+    }
+    // The workspace Zetta restarts with every write it applied durable (a clean stop): a new
+    // incarnation and nothing lost.
+    void restart(const std::string& endpoint) {
+        std::lock_guard lock(mutex_);
+        Node& node = nodes_[endpoint];
+        node.incarnation = next_incarnation();
+        for (auto& [name, bucket] : node.buckets) {
+            bucket.durable = bucket.objects;
+            bucket.unsynced.clear();
+        }
     }
 
     std::map<std::string, std::string> objects(const std::string& endpoint,
@@ -81,6 +153,7 @@ public:
     // applied). The lease is kept.
     void crash(const std::string& endpoint, std::uint64_t seed) {
         std::lock_guard lock(mutex_);
+        nodes_[endpoint].incarnation = next_incarnation();
         std::uint64_t state = seed * 6364136223846793005ULL + 1442695040888963407ULL;
         for (auto& [name, bucket] : nodes_[endpoint].buckets) {
             state = state * 6364136223846793005ULL + 1442695040888963407ULL;
@@ -133,6 +206,11 @@ public:
     std::uint64_t requests() {
         std::lock_guard lock(mutex_);
         return requests_;
+    }
+    // Writes and barriers refused as incarnation_changed (lake#543).
+    std::uint64_t incarnation_refusals() {
+        std::lock_guard lock(mutex_);
+        return incarnation_refusals_;
     }
     // Every request sent to one workspace Zetta.
     std::uint64_t requests_to(const std::string& endpoint) {
@@ -310,6 +388,9 @@ public:
     }
 
 private:
+    std::string next_incarnation() {
+        return std::format("{:032x}.0", ++incarnations_);
+    }
     static control::ObjectResponse ok(nlohmann::json value) {
         return {200, nlohmann::json{{"ok", true}, {"value", std::move(value)}}.dump(), {}};
     }
@@ -458,6 +539,26 @@ private:
             return refused(403, "unauthorized", "bad bearer");
         }
         auto& buckets = node->second.buckets;
+        // lake#543: what this node reports, and the precondition a write or barrier may carry.
+        const Node& reporting = node->second;
+        const auto reported = [&](nlohmann::json value, bool durability) {
+            if (reporting.durability) {
+                value["incarnation"] = reporting.incarnation;
+                if (durability) {
+                    value["object_log_prefix_durability"] = *reporting.durability;
+                }
+            }
+            return ok(std::move(value));
+        };
+        const std::string expected = header(request, "Zetta-Incarnation");
+        const bool checks_incarnation = request.method == "PUT" || request.method == "PATCH" ||
+                                        request.method == "DELETE" || path.ends_with(":barrier");
+        if (checks_incarnation && reporting.durability && reporting.checks_incarnation &&
+            !expected.empty() && expected != reporting.incarnation) {
+            ++incarnation_refusals_;
+            return refused(409, "incarnation_changed", "the bucket's incarnation changed",
+                           {{"incarnation", reporting.incarnation}});
+        }
         if (path == "/v1/create_bucket") {
             const auto input = nlohmann::json::parse(request.body);
             const std::string name = input.at("bucket");
@@ -514,7 +615,7 @@ private:
                 ++bucket.durable_requests;
                 bucket.durable = bucket.objects;
                 bucket.unsynced.clear();
-                return ok({{"bucket", name}, {"nodes", 1}});
+                return reported({{"bucket", name}, {"nodes", reporting.nodes}}, true);
             }
             if (operation == "usage") {
                 nlohmann::json value{{"objects", bucket.objects.size()}, {"bytes", used(bucket)}};
@@ -548,7 +649,7 @@ private:
                         lease.expires = now + ttl;
                         lease.had_holder = true;
                         changed_.notify_all();
-                        return ok(lease_value());
+                        return reported(lease_value(), true);
                     }
                     if (now >= deadline) {
                         return refused(409, "held", "the bucket's lease is held",
@@ -566,7 +667,7 @@ private:
                 }
                 lease.expires = std::chrono::steady_clock::now() +
                                 std::chrono::milliseconds(input.at("ttl_ms").get<std::int64_t>());
-                return ok(lease_value());
+                return reported(lease_value(), true);
             }
             if (operation == "release") {
                 if (input.at("fence").get<std::uint64_t>() != lease.fence) {
@@ -574,7 +675,7 @@ private:
                 }
                 lease.holder.clear();
                 changed_.notify_all();
-                return ok(lease_value());
+                return reported(lease_value(), true);
             }
             return refused(404, "not_found", "no route");
         }
@@ -618,7 +719,7 @@ private:
             }
             bucket.objects[key] = request.body;
             record(bucket, key, parameters.contains("durable"), request.method);
-            return ok(written);
+            return reported(written, false);
         }
         if (request.method == "PATCH") {
             const std::uint64_t offset = std::stoull(parameters.at("offset"));
@@ -629,13 +730,13 @@ private:
                 }
                 object += request.body;
                 record(bucket, key, parameters.contains("durable"), request.method);
-                return ok(written);
+                return reported(written, false);
             }
             if (offset < object.size() && offset + request.body.size() <= object.size() &&
                 object.compare(offset, request.body.size(), request.body) == 0) {
                 nlohmann::json unchanged = written;
                 unchanged["unchanged"] = true;
-                return ok(unchanged);
+                return reported(unchanged, false);
             }
             if (object.empty()) {
                 bucket.objects.erase(key);
@@ -648,7 +749,7 @@ private:
                 return refused(404, "not_found", "no object " + key);
             }
             record(bucket, key, parameters.contains("durable"), request.method);
-            return ok(written);
+            return reported(written, false);
         }
         return refused(404, "not_found", "no route");
     }
@@ -657,6 +758,8 @@ private:
     std::condition_variable changed_;
     std::map<std::string, Node> nodes_;
     std::uint64_t requests_ = 0;
+    std::uint64_t incarnations_ = 0;
+    std::uint64_t incarnation_refusals_ = 0;
     std::map<std::string, std::uint64_t> by_endpoint_;
     std::map<std::string, std::uint64_t> by_method_;
     std::map<std::string, int> acquiring_;

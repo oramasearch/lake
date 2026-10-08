@@ -9,7 +9,14 @@ store in its workspace Zetta, on Zetta's object capability
 ([zetta#1005](https://github.com/oramasearch/zetta/issues/1005), zetta `docs/data/object-store.md`,
 live on dev Zetta). It needs liquid at or after `8955519`, which writes each index run once
 ([liquid#332](https://github.com/oramasearch/liquid/issues/332)); an earlier liquid's index merge
-rewrote a finished run in place, which Zetta refuses.
+rewrote a finished run in place, which Zetta refuses. Since
+[lake#543](https://github.com/oramasearch/lake/issues/543) it opens a workspace store only on a
+one-node workspace Zetta that reports `object_log_prefix_durability` 1 or later: a Zetta image built
+with [zetta#1237](https://github.com/oramasearch/zetta/pull/1237), which reports
+[zetta#1235](https://github.com/oramasearch/zetta/issues/1235)'s prefix durability and the
+incarnation. `dev-5f70b306` has zetta#1235 but reports neither, and is refused
+([Durability check and incarnation](#durability-check-and-incarnation-lake543),
+[deploy order](#deploy-order-lake543)).
 
 ## What lives where
 
@@ -136,7 +143,7 @@ segment's unsynced tail does not, so a later write can survive without an earlie
 ([zetta#1235](https://github.com/oramasearch/zetta/issues/1235)). With `rf` above 1 each key has
 its own primary, so Zetta gives no order across keys; the `:barrier`'s durability still holds.
 
-**Deploy gate: zetta#1235.** Before lake#535 every write was fsynced before the next was sent, so
+**Deploy gate: zetta#1235, enforced since lake#543 through the capability zetta#1237 reports.** Before lake#535 every write was fsynced before the next was sent, so
 only the writes sent without durability (large puts, threshold flushes) were exposed to that
 window. Since lake#535 every write of an operation is, until its `:barrier`, and that loses
 acknowledged data, not only the operation in flight. For example, a checkpoint puts `LIQUID_REPO`
@@ -150,14 +157,97 @@ maintenance fsyncs a rolled segment within 100 ms), but it is real, so the order
    unsynced segment) and rolled out to every workspace Zetta;
 2. then lake with lake#535.
 With zetta#1235 in place a power loss keeps a prefix of the bucket's log, and every argument below
-holds for it too.
+holds for it too. Lake no longer trusts the order alone: it refuses to open a workspace store on a
+Zetta that does not report that guarantee (lake#543, below).
 
-**Not detected: a Zetta restart inside an operation.** If the workspace Zetta restarts (a power
-loss of its node) between two writes of one operation, lake sees only failed or slow requests,
-then answers; the writes before the restart may be gone while the ones after it landed, and
-neither lake nor the final `:barrier` can tell. Before lake#535 each write was durable before the
-next, so a restart lost nothing acknowledged. A boot or incarnation id from Zetta in each answer,
-checked by the backend, would close this: a change within one operation fails it.
+**A Zetta restart inside an operation (risk D) is refused since lake#543.** If the workspace Zetta
+restarts (a power loss of its node) between two writes of one operation, the writes before the
+restart may be gone. Before lake#543, lake saw only failed or slow requests and then answered; the
+writes after the restart landed, so the bucket could hold a later write without an earlier one,
+and neither lake nor the final `:barrier` could tell. Before lake#535 each write was durable before
+the next, so a restart lost nothing acknowledged. Now every write and `:barrier` carries the
+incarnation the store last saw as a precondition, and Zetta refuses one from another incarnation
+before applying it ([Durability check and incarnation](#durability-check-and-incarnation-lake543)).
+
+### Durability check and incarnation (lake#543)
+
+Zetta reports two things in its object answers since
+[zetta#1237](https://github.com/oramasearch/zetta/pull/1237) (zetta `docs/data/object-store.md`,
+"Durability format and incarnation"):
+
+- `object_log_prefix_durability`, in the lease and `:barrier` answers: `1` is zetta#1235's prefix
+  guarantee. A Zetta image without zetta#1237 reports nothing, `dev-5f70b306` included, although
+  it has zetta#1235. Lake checks the capability's version, not an image tag.
+- `incarnation`, in every write, lease and `:barrier` answer: a random id chosen when the Zetta
+  node starts, then `.` and how many times it reopened the bucket's log after a failed fsync. It
+  changes whenever unsynced, acknowledged writes may have been dropped.
+
+`Zetta-Incarnation` on a write or `:barrier` is a precondition. Zetta checks it in the same step as
+the write, under the log's writers' lock, which a reopen also takes, and refuses
+`409 incarnation_changed` without applying anything. A `:barrier` refuses when the log was
+reopened while it synced, and answers the incarnation read after its sync.
+
+What lake does with them (`ZettaObjectClient`):
+
+- **At open.** The owner's `:acquire` answer must report `object_log_prefix_durability` of at
+  least `workspace_store_prefix_durability` (1) and an incarnation. Otherwise the client releases
+  the lease it was just granted and the open fails `errc::unsupported`, which lake answers as
+  `store_unavailable`. The message names what Zetta reported and zetta#1237. No object of the store
+  is read or written first. The workspace serves again once its Zetta reports the format: the next
+  request opens the store.
+- **The incarnation, holder, fence and ttl recorded at open** come from the acquire answer. Until
+  the open's first `:barrier` answers, the client counts the store as unsynced: what it serves may
+  include writes a predecessor never made durable.
+- **Every later `PUT`, `PATCH`, `DELETE` and `:barrier`** sends the incarnation as
+  `Zetta-Incarnation`.
+- **A change inside an operation fails it.** The client counts the writes answered since the last
+  answered `:barrier`, less those that `:barrier` covered. When Zetta refuses a write or a
+  `:barrier` while that count is not zero, something it acknowledged may be gone. The request then
+  fails `unavailable`, naming both incarnations. Every later write and `:barrier` on that client
+  fails at once without being sent (`restarted()`), the backend is marked failed, the store stops
+  being usable (`WorkspaceStore::usable` reads `restarted()`, so reads stop too), and lake opens it
+  again before its next use. So nothing issued after the loss lands, the bucket stays a prefix of
+  the issue order, and the operation is never acknowledged. A checkpoint is one case: if its put of
+  `LIQUID_REPO` was lost, its removal of `LIQUID_JOURNAL` is refused, and the reopened repository
+  replays the journal.
+- **A change between operations fails nothing, if the lease survived.** With nothing unsynced, a
+  restart lost nothing acknowledged. But it could have lost Zetta's last second of lease state, and
+  then a second holder could have the same fence. So before adopting the incarnation the refusal
+  names, the client renews its lease with its holder and fence. Only if that succeeds does it adopt
+  the incarnation and send the request again; otherwise the client fails as above. A bare `:barrier`
+  refused with nothing unsynced is adopted the same way. A request sent with the old incarnation
+  while another adopted the new one is sent again with the new one.
+- **A success is never adopted from.** A success answered under another incarnation than the one
+  sent, or under none (Zetta rolled back to an image without zetta#1237 while the store is open),
+  fails the client. So does a renewal whose answer lacks the durability format.
+- **One node only.** The incarnation is the deciding node's: with `rf` above 1, another owner's
+  restart would not show. A write answer with `replicas_expected` above 1, or a `:barrier` answered
+  by more than one node, fails the client with `errc::unsupported`, answered as
+  `store_unavailable`. The open's first `:barrier` reports the node count, so a store is never
+  served from a Zetta of several nodes. This holds until the incarnation is per owner.
+- **Limits.**
+  - A Zetta downgraded to an image without zetta#1237 does not read `Zetta-Incarnation`, so it
+    cannot enforce the precondition. Lake fails the store on its first answer, which carries no
+    incarnation, but that write has already landed.
+  - Restoring a workspace Zetta's volume snapshot rolls its lease record, its bucket record and its
+    catalogue back together. Fences issued after the snapshot can then be issued again, so every
+    lake process holding that workspace store must be stopped before a restore.
+  - Zetta keeps the lease and the bucket definition on disk before it answers (zetta#1237), so a
+    crash within the catalogue's one-second flush loses neither.
+- Once a client has refused a Zetta as unsupported (no durability format, several nodes), every
+  later request on it gives the same reason, answered as `store_unavailable`.
+- A client never opened through `:acquire` (a usage read, tests) has no recorded incarnation or
+  lease. It takes the first incarnation an answer carries, and adopts a refusal's with nothing
+  unsynced without a renewal.
+
+### Deploy order (lake#543)
+
+1. Merge zetta#1237 into Zetta `dev` and build its image.
+2. Roll **every** workspace Zetta to it: `Lake/prod` `spec.services.zettaImage`, which also sets
+   the image of new workspace Zettas, then each existing workspace Zetta. Check `server_info`:
+   `object_log_prefix_durability` is `1` and `incarnation` is present.
+3. Only then roll lake with lake#543. Lake rolled first refuses every workspace Zetta that does not
+   report the capability (`dev-5f70b306` included) with `store_unavailable` until it is rolled.
 
 Why liquid's barriers need not be durable: a crash keeps a prefix of the issue order, and every
 prefix is a state liquid could have been left in by a crash at the moment that prefix ends, on a
@@ -936,6 +1026,19 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreHandoff.IndexWorkTheDrainDropsIsRebuiltByTheSuccessor` | lake#536: a rebuild and a pending commit dropped by the drain: the manifest is removed, and the successor's rebuilt index holds every commit |
 | `WorkspaceStoreBackend.ACommitAsksForOneDurableRequestAndKeepsItsJournalRemoval` | lake#535: liquid one-file commits that each checkpoint send no fsync until lake's sync, which sends one `:barrier`; an idle sync sends nothing; after a crash `LIQUID_JOURNAL` stays removed and the reopened head is the last commit |
 | `WorkspaceStoreBackend.ANewViewsFirstSyncMakesWhatItServesDurable` | lake#535: a write a predecessor sent but never made durable is served by the next view, whose first sync sends `:barrier` (and only the first); a crash after it keeps the write |
+| `WorkspaceStoreOwner.AZettaWithoutPrefixDurabilityIsRefused` | lake#543: a fake Zetta without zetta#1237 (no `object_log_prefix_durability` in its lease answer), and one reporting `0`, are refused `unsupported` naming the reason and zetta#1237; the lease is given back and nothing is written; once it reports `1`, the store opens |
+| `WorkspaceStoreOwner.ARestartThatLostTheLeaseNeverLetsTheOldHolderWrite` | lake#543: a restart that lost the fake Zetta's last lease (the next acquirer gets the same fence): the old holder, with nothing unsynced, renews before adopting the new incarnation, is refused, and lands no write |
+| `WorkspaceStoreBackend.ConcurrentWritersOverTheSharedClientAdoptARestartBetweenOperations` | lake#543: two threads (liquid's keys and search's) write through one client; a restart between operations is adopted once (a request sent with the old incarnation meanwhile is sent again), and a bare `:barrier` refused with nothing unsynced is adopted |
+| `WorkspaceStoreBackend.ADowngradeWhileTheStoreIsOpenFailsIt` | lake#543: the fake Zetta rolled back to an image without zetta#1237 (a new incarnation, none reported) while a store is open: the next write fails the client even with nothing unsynced, and a renewal without the durability format fails it and stops every later request |
+| `WorkspaceStoreBackend.ASuccessUnderAnotherIncarnationIsARestart` | lake#543: a success answered under another incarnation than the one sent fails the client; it is never adopted from |
+| `WorkspaceStoreBackend.ARefusalOfSeveralNodesStaysTheAnswer` | lake#543: after a `:barrier` reports three nodes, every later write and `:barrier` on that client fails `unsupported` naming the reason, without a request |
+| `WorkspaceStoreMove.AWorkspaceZettaOfSeveralNodesAnswersStoreUnavailable` | lake#543: a workspace Zetta whose `:barrier` reports three nodes answers a commit `503 store_unavailable` naming it, and serves again at one node |
+| `WorkspaceStoreZetta.ALeaseTakenJustBeforeAKillSurvivesItAndTheOldHolderNeverWrites` | lake#543 on a real Zetta: a lease taken just before a `SIGKILL` (no wait for the catalogue flush) comes back with its holder; a second holder waits for it to lapse and gets a higher fence; the old holder's write is fenced and lands nothing |
+| `WorkspaceStoreMove.AWorkspaceZettaWithoutPrefixDurabilityAnswersStoreUnavailable` | lake#543: a switched workspace whose Zetta stops reporting the format answers a commit `503 store_unavailable` naming it, and commits again once the Zetta reports it |
+| `WorkspaceStoreBackend.AZettaRestartInsideAnOperationFailsIt` | lake#543 (risk D): a put acknowledged and then lost to a power loss of the workspace Zetta; the operation's next write is refused by its `Zetta-Incarnation` precondition and applies nothing, fails `unavailable` naming the old incarnation, the backend fails, and a later write and the `:barrier` fail without a request |
+| `WorkspaceStoreBackend.AZettaRestartBeforeTheBarrierFailsTheOperation` | lake#543: the restart between a write's answer and the operation's `:barrier`: the `:barrier` is refused, not applied, and the sync fails |
+| `WorkspaceStoreBackend.AZettaRestartBetweenOperationsFailsNothing` | lake#543: a clean restart after a `:barrier`: a read is served, the next write is refused once, adopts the new incarnation and is sent again, and the sync succeeds |
+| `WorkspaceStoreZetta.AZettaRestartInsideAnOperationFailsItAndBetweenOperationsDoesNot` | lake#543 on a real Zetta (`LAKE_TEST_ZETTA_BINARY`, built with zetta#1237): the store opens and records a `<32 hex>.0` incarnation; Zetta killed (`SIGKILL`, at once, also right after the bucket is created) and restarted after a `:barrier` fails nothing and the next write renews and adopts the new incarnation; killed after an unsynced write, the next write is refused `unavailable` and applies nothing, and the `:barrier` fails |
 | `WorkspaceStoreMove.AStoreWhoseOpeningBarrierFailsIsNotServed` | lake#535: after a restart, a workspace store whose opening `:barrier` fails serves no read; once Zetta answers, it opens and serves |
 | `WorkspaceStoreOwner.ViewsKeptForAReleaseThatNeverComesAreLetGo` | lake#535: views kept for the owner's release are let go of when the owner goes without one |
 | `WorkspaceStoreOwner.ALiquidCloseSyncsWhatTheBackendHolds` | lake#535: liquid's close (backend let go of, grant revoked) still syncs what the backend holds with one `:barrier`; a crash after it keeps every object |

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <format>
 #include <span>
+#include <tuple>
 
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
@@ -153,6 +154,56 @@ liquid::error mapped(const ObjectResponse& response, std::string context) {
     }
 }
 
+// The refusals of a workspace Zetta lake will not open a store on start with one of these
+// (lake#543): one without the prefix durability lake relies on, and one of several nodes, where the
+// incarnation is not yet per owner.
+constexpr std::string_view durability_refusal =
+    "the workspace Zetta does not report the object log durability lake needs";
+constexpr std::string_view several_nodes_refusal =
+    "the workspace Zetta has more than one node, and lake checks its incarnation on one node only";
+
+// The answer's `value`, or an empty object.
+nlohmann::json answered_value(const ObjectResponse& response) {
+    const nlohmann::json body = nlohmann::json::parse(response.body, nullptr, false);
+    if (!body.is_object() || !body.contains("value") || !body.at("value").is_object()) {
+        return nlohmann::json::object();
+    }
+    return body.at("value");
+}
+
+// Why lake will not use a workspace Zetta that answered a lease with `value` (lake#543), or empty.
+std::string durability_shortfall(const nlohmann::json& value) {
+    const nlohmann::json durability = value.value("object_log_prefix_durability", nlohmann::json());
+    if (!durability.is_number_unsigned() && !durability.is_number_integer()) {
+        return "it reports no object_log_prefix_durability, so it runs a Zetta image from before "
+               "oramasearch/zetta#1237";
+    }
+    if (durability.get<std::int64_t>() < static_cast<std::int64_t>(workspace_store_prefix_durability)) {
+        return "it reports object_log_prefix_durability " + durability.dump() + ", and lake needs " +
+               std::to_string(workspace_store_prefix_durability) + " or later";
+    }
+    const auto incarnation = value.find("incarnation");
+    if (incarnation == value.end() || !incarnation->is_string() || incarnation->get<std::string>().empty()) {
+        return "it reports no incarnation";
+    }
+    return {};
+}
+
+liquid::error durability_failure(const std::string& reason, std::string context) {
+    return failure(liquid::errc::unsupported,
+                   std::string(durability_refusal) + ": " + reason +
+                       ". Lake makes each store operation durable with one :barrier, which needs "
+                       "zetta#1235's prefix durability, and checks it and the incarnation only on a "
+                       "Zetta that reports them (oramasearch/zetta#1237, object_log_prefix_durability "
+                       "1 or later); it opens no workspace store until its Zetta runs an image built "
+                       "with zetta#1237 (lake#543)",
+                   std::move(context));
+}
+
+std::string shown_incarnation(const std::string& incarnation) {
+    return incarnation.empty() ? std::string("none") : incarnation;
+}
+
 // The `value` of a successful JSON envelope.
 liquid::result<nlohmann::json> envelope_value(const ObjectResponse& response, std::string context) {
     const nlohmann::json body = nlohmann::json::parse(response.body, nullptr, false);
@@ -170,6 +221,22 @@ namespace {
 // The deadline of the settling before a release on this thread (steady clock nanoseconds), or 0.
 thread_local std::int64_t settle_deadline = 0;
 } // namespace
+
+namespace {
+// Why a client refuses every later write and :barrier (lake#543): an unsupported workspace Zetta
+// (no durability format, several nodes) keeps answering as such, so lake keeps answering
+// store_unavailable naming the reason; a restart inside an operation is `unavailable`.
+liquid::error stopped_error(const std::string& reason, const std::string& context) {
+    const bool unsupported =
+        reason.starts_with(durability_refusal) || reason.starts_with(several_nodes_refusal);
+    return failure(unsupported ? liquid::errc::unsupported : liquid::errc::unavailable, reason, context);
+}
+} // namespace
+
+bool workspace_zetta_unsupported(const liquid::error& error) {
+    return error.code == liquid::errc::unsupported &&
+           (error.message.starts_with(durability_refusal) || error.message.starts_with(several_nodes_refusal));
+}
 
 std::shared_ptr<ObjectTransport> make_zetta_object_transport() {
     return make_pooled_object_transport();
@@ -344,6 +411,180 @@ ZettaObjectClient::send(ObjectRequest request, bool idempotent, ObjectRequestKin
     co_return response;
 }
 
+void ZettaObjectClient::mark_restarted(const std::string& current) {
+    if (!restarted_.empty()) {
+        return;
+    }
+    restarted_ = "the workspace Zetta restarted, or reopened the bucket's log, inside this operation "
+                 "(incarnation " +
+                 shown_incarnation(incarnation_.value_or(std::string())) + " before, " +
+                 shown_incarnation(current) +
+                 " now): writes it acknowledged since the last :barrier may be lost, so the "
+                 "operation fails and the workspace store is opened again (lake#543)";
+}
+
+void ZettaObjectClient::mark_unsupported(std::string message) {
+    std::lock_guard lock(incarnation_mutex_);
+    if (restarted_.empty()) {
+        restarted_ = std::move(message);
+    }
+}
+
+liquid::result<void> ZettaObjectClient::observe_incarnation(const ObjectResponse& response,
+                                                            const std::string& sent,
+                                                            bool write,
+                                                            std::uint64_t covered,
+                                                            const std::string& context) {
+    const nlohmann::json value = answered_value(response);
+    const auto found = value.find("incarnation");
+    const std::string answered =
+        found != value.end() && found->is_string() ? found->get<std::string>() : std::string();
+    // One node only (lake#543): the incarnation is the deciding node's, so a write placed on
+    // several owners, or a barrier several nodes answered, is not covered by it.
+    const bool several = value.value("replicas_expected", std::uint64_t{1}) > 1 ||
+                         value.value("nodes", std::uint64_t{1}) > 1;
+    std::lock_guard lock(incarnation_mutex_);
+    if (several && restarted_.empty()) {
+        restarted_ = std::string(several_nodes_refusal) +
+                     ": an object answer named more than one owner or node; lake opens no "
+                     "workspace store on it until the incarnation is per owner (lake#543)";
+        return refused(liquid::errc::unsupported, restarted_, context);
+    }
+    if (restarted_.empty()) {
+        if (!sent.empty()) {
+            // Never adopted from a success (lake#543): a success under another incarnation than
+            // the one sent, or under none (a rollback to an older Zetta), is a restart.
+            if (answered != sent) {
+                mark_restarted(answered);
+            }
+        } else if (!incarnation_) {
+            // A client never opened through :acquire takes the first incarnation it sees.
+            if (!answered.empty()) {
+                incarnation_ = answered;
+            }
+        } else if (answered != *incarnation_) {
+            mark_restarted(answered);
+        }
+    }
+    if (!restarted_.empty()) {
+        return std::unexpected(stopped_error(restarted_, context));
+    }
+    if (write) {
+        ++unsynced_writes_;
+    } else {
+        unsynced_writes_ -= std::min(covered, unsynced_writes_);
+    }
+    return {};
+}
+
+liquid::runtime::task<ObjectResponse> ZettaObjectClient::send_checked(ObjectRequest request,
+                                                                      bool idempotent,
+                                                                      ObjectRequestKind kind,
+                                                                      std::string context) {
+    const bool write = kind != ObjectRequestKind::barrier;
+    // Bounded: each pass either sends the incarnation another request adopted meanwhile, or adopts
+    // one after the lease check.
+    for (int attempt = 1; attempt <= 4; ++attempt) {
+        ObjectRequest sent_request = request;
+        std::string sent;
+        std::uint64_t covered = 0;
+        {
+            std::lock_guard lock(incarnation_mutex_);
+            if (!restarted_.empty()) {
+                co_return std::unexpected(stopped_error(restarted_, context));
+            }
+            sent = incarnation_.value_or(std::string());
+            if (!sent.empty()) {
+                sent_request.headers.emplace_back("Zetta-Incarnation", sent);
+            }
+            covered = unsynced_writes_;
+        }
+        auto response = co_await send(std::move(sent_request), idempotent, kind);
+        if (!response) {
+            co_return std::unexpected(response.error());
+        }
+        if (response->status == 409 && response->error.empty()) {
+            const ZettaError error = zetta_error(*response);
+            if (error.code == "incarnation_changed") {
+                const std::string current = error.details.is_object()
+                                                ? error.details.value("incarnation", std::string())
+                                                : std::string();
+                std::optional<std::tuple<std::string, std::uint64_t, std::chrono::milliseconds>> check;
+                {
+                    std::lock_guard lock(incarnation_mutex_);
+                    if (restarted_.empty()) {
+                        if (incarnation_.value_or(std::string()) != sent) {
+                            // Another request adopted a new incarnation since this one was sent:
+                            // send it again with that one.
+                            continue;
+                        }
+                        if (current.empty()) {
+                            mark_restarted(current);
+                        } else if (unsynced_writes_ != 0) {
+                            mark_restarted(current);
+                        } else if (lease_holder_.empty()) {
+                            // Nothing unsynced and no lease to check (a client never opened through
+                            // :acquire): nothing was lost.
+                            incarnation_ = current;
+                            continue;
+                        } else {
+                            check.emplace(lease_holder_, lease_fence_, lease_ttl_);
+                        }
+                    }
+                }
+                if (check) {
+                    // Nothing acknowledged was unsynced, but a restart can also lose the last
+                    // second of Zetta's catalogue, the lease with it: adopt the new incarnation
+                    // only while this holder still holds the lease with its fence (lake#543).
+                    const auto& [holder, fence, ttl] = *check;
+                    auto renewed = co_await renew(holder, fence, ttl, std::chrono::seconds(5));
+                    std::lock_guard lock(incarnation_mutex_);
+                    if (restarted_.empty()) {
+                        if (!renewed) {
+                            restarted_ = "the workspace Zetta restarted and this lake process no longer "
+                                         "holds the workspace store's lease (" +
+                                         renewed.error().message +
+                                         "): the store is opened again (lake#543)";
+                        } else if (incarnation_.value_or(std::string()) == sent) {
+                            if (unsynced_writes_ != 0) {
+                                mark_restarted(current);
+                            } else {
+                                incarnation_ = current;
+                            }
+                        }
+                    }
+                    if (restarted_.empty()) {
+                        continue;
+                    }
+                }
+                std::lock_guard lock(incarnation_mutex_);
+                co_return std::unexpected(stopped_error(restarted_, context));
+            }
+        }
+        if (response->status == 200 || response->status == 201) {
+            if (auto observed = observe_incarnation(*response, sent, write, covered, context); !observed) {
+                co_return std::unexpected(observed.error());
+            }
+        }
+        co_return response;
+    }
+    std::lock_guard lock(incarnation_mutex_);
+    if (restarted_.empty()) {
+        restarted_ = "the workspace Zetta's incarnation kept changing (lake#543)";
+    }
+    co_return std::unexpected(stopped_error(restarted_, context));
+}
+
+bool ZettaObjectClient::restarted() const {
+    std::lock_guard lock(incarnation_mutex_);
+    return !restarted_.empty();
+}
+
+std::string ZettaObjectClient::incarnation() const {
+    std::lock_guard lock(incarnation_mutex_);
+    return incarnation_.value_or(std::string());
+}
+
 void ZettaObjectClient::set_before_release(std::function<liquid::runtime::task<void>()> settle,
                                            std::function<void()> abandon) {
     std::lock_guard lock(settle_mutex_);
@@ -432,8 +673,10 @@ liquid::runtime::task<void> ZettaObjectClient::put(std::string key,
         request.headers.emplace_back("Zetta-Fence", std::to_string(*fence));
     }
     request.body = std::move(bytes);
-    auto response = co_await send(std::move(request), !if_absent,
-                                  if_absent ? ObjectRequestKind::put_if_absent : ObjectRequestKind::put);
+    auto response = co_await send_checked(std::move(request), !if_absent,
+                                          if_absent ? ObjectRequestKind::put_if_absent
+                                                    : ObjectRequestKind::put,
+                                          bucket_ + "/" + key);
     if (!response) {
         co_return std::unexpected(response.error());
     }
@@ -462,7 +705,8 @@ liquid::runtime::task<void> ZettaObjectClient::append(std::string key,
     }
     request.body = std::move(bytes);
     // A retried append of the same bytes at the same offset changes nothing.
-    auto response = co_await send(std::move(request), true, ObjectRequestKind::patch);
+    auto response = co_await send_checked(std::move(request), true, ObjectRequestKind::patch,
+                                          bucket_ + "/" + key);
     if (!response) {
         co_return std::unexpected(response.error());
     }
@@ -525,7 +769,8 @@ liquid::runtime::task<void> ZettaObjectClient::remove(std::string key,
     if (fence) {
         request.headers.emplace_back("Zetta-Fence", std::to_string(*fence));
     }
-    auto response = co_await send(std::move(request), true, ObjectRequestKind::remove);
+    auto response =
+        co_await send_checked(std::move(request), true, ObjectRequestKind::remove, bucket_ + "/" + key);
     if (!response) {
         co_return std::unexpected(response.error());
     }
@@ -576,7 +821,8 @@ liquid::runtime::task<void> ZettaObjectClient::barrier() {
     request.url = bucket_url(":barrier");
     request.headers = {{"Content-Type", "application/json"}, {"Accept", "application/json"}};
     request.body = "{}";
-    auto response = co_await send(std::move(request), true, ObjectRequestKind::barrier);
+    auto response =
+        co_await send_checked(std::move(request), true, ObjectRequestKind::barrier, bucket_ + ":barrier");
     if (!response) {
         co_return std::unexpected(response.error());
     }
@@ -648,7 +894,33 @@ liquid::runtime::task<ObjectLease> ZettaObjectClient::acquire(std::string holder
         }
         co_return std::unexpected(std::move(error));
     }
-    co_return lease_of(*response, bucket_ + ":acquire");
+    auto lease = lease_of(*response, bucket_ + ":acquire");
+    if (!lease) {
+        co_return std::unexpected(lease.error());
+    }
+    // lake#543: a Zetta without the durability format lake needs is refused before the store opens,
+    // and the lease it granted is given back.
+    const nlohmann::json value = answered_value(*response);
+    if (const std::string reason = durability_shortfall(value); !reason.empty()) {
+        static_cast<void>(co_await release(lease->holder, lease->fence));
+        co_return std::unexpected(durability_failure(reason, bucket_ + ":acquire"));
+    }
+    const std::string current = value.at("incarnation").get<std::string>();
+    {
+        std::lock_guard lock(incarnation_mutex_);
+        lease_holder_ = lease->holder;
+        lease_fence_ = lease->fence;
+        lease_ttl_ = ttl;
+        if (!incarnation_ || (unsynced_writes_ == 0 && restarted_.empty())) {
+            incarnation_ = current;
+            // What the store serves when it opens may include writes a predecessor never made
+            // durable: until its first :barrier answers, a change of incarnation is a restart.
+            unsynced_writes_ = 1;
+        } else if (*incarnation_ != current) {
+            mark_restarted(current);
+        }
+    }
+    co_return lease;
 }
 
 liquid::runtime::task<ObjectLease> ZettaObjectClient::renew(std::string holder,
@@ -670,6 +942,22 @@ liquid::runtime::task<ObjectLease> ZettaObjectClient::renew(std::string holder,
     }
     if (response->status != 200) {
         co_return std::unexpected(mapped(*response, bucket_ + ":renew"));
+    }
+    // lake#543: a renewal answered by a Zetta without the durability format (rolled back while
+    // the store is open) fails the client at once, so nothing more is sent; one answered under
+    // another incarnation while writes are unsynced is a restart.
+    const nlohmann::json value = answered_value(*response);
+    if (const std::string reason = durability_shortfall(value); !reason.empty()) {
+        auto error = durability_failure(reason, bucket_ + ":renew");
+        mark_unsupported(error.message);
+        co_return std::unexpected(std::move(error));
+    }
+    {
+        std::lock_guard lock(incarnation_mutex_);
+        const std::string current = value.at("incarnation").get<std::string>();
+        if (incarnation_ && *incarnation_ != current && unsynced_writes_ != 0) {
+            mark_restarted(current);
+        }
     }
     co_return lease_of(*response, bucket_ + ":renew");
 }
