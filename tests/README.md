@@ -164,7 +164,9 @@ Request telemetry (decision 54 S9, lake#384, [`../docs/serving/telemetry.md`](..
 makes repository, capability, registry (`/:package`, OCI manifest), drive and sync requests,
 checks every line names the route and request id and carries no raw path and no repository,
 package, image or file name, then reads the `lake_requests` series of two workspaces of one space
-and one of another after the owner loop's flush (a request with no workspace counted nowhere).
+and one of another after the flush at `stop()` (a request with no workspace counted nowhere). A
+handler sends its response before it logs and counts the request, so the test stops the server,
+which waits for every request, before it reads the log or the series (lake#547).
 `test_request_series.cpp` covers the log line (`RequestLog.*`), `RequestRecorder` aggregation per
 workspace, minute and labels, the bound and its drop count, a failed or not-ready write kept, and
 deleted, unknown and conflicting workspaces dropped. `RequestRecorderZetta.QueryMetricReturnsTheFlushedCounts`
