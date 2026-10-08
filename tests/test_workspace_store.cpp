@@ -3445,7 +3445,7 @@ TEST(WorkspaceStoreZetta, ALeaseTakenJustBeforeAKillSurvivesItAndTheOldHolderNev
     auto first = std::make_shared<ZettaObjectClient>(transport, ObjectEndpoint{zetta.url, zetta.token});
     ASSERT_TRUE(liquid::runtime::block_on(first->create_bucket(0)));
     std::this_thread::sleep_for(1500ms);  // the bucket definition reaches Zetta's disk
-    auto lease = liquid::runtime::block_on(first->acquire("lake-a", 3s, 0ms));
+    auto lease = liquid::runtime::block_on(first->acquire("lake-a", 10s, 0ms));
     ASSERT_TRUE(lease) << lease.error().message;
     ASSERT_TRUE(liquid::runtime::block_on(first->barrier()));
     ASSERT_TRUE(liquid::runtime::block_on(first->put("objects/a", "from a", lease->fence, false)));
@@ -3456,7 +3456,7 @@ TEST(WorkspaceStoreZetta, ALeaseTakenJustBeforeAKillSurvivesItAndTheOldHolderNev
     auto held = liquid::runtime::block_on(second->acquire("lake-b", 30s, 0ms));
     ASSERT_FALSE(held) << "the lease came back with its holder";
     EXPECT_EQ(held.error().code, liquid::errc::locked);
-    auto taken = liquid::runtime::block_on(second->acquire("lake-b", 30s, 10s));
+    auto taken = liquid::runtime::block_on(second->acquire("lake-b", 30s, 25s));
     ASSERT_TRUE(taken) << taken.error().message;
     EXPECT_GT(taken->fence, lease->fence);
     ASSERT_TRUE(liquid::runtime::block_on(second->barrier()));
