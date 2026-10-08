@@ -49,6 +49,7 @@
 #include <vector>
 
 #include <boost/capy/buffers.hpp>
+#include <sys/resource.h>
 #include <boost/capy/buffers/buffer_copy.hpp>
 #include <boost/capy/buffers/vector_dynamic_buffer.hpp>
 #include <boost/capy/ex/run_async.hpp>
@@ -8749,6 +8750,12 @@ struct ApiServer::Impl {
         ApiContext ctx;
         if (page_read) {
             ctx.page_customers = std::make_shared<std::optional<ApiResult>>();
+        }
+        // A capability that long-polls gives its HTTP worker back (lake#534).
+        if (server) {
+            ctx.leave_worker = [connections = server.get(), token = server->request_token(route)] {
+                connections->leave_worker(token);
+            };
         }
         ctx.request_path = std::string(route.url.path());
         ctx.request_query = std::string(route.url.encoded_query());
@@ -17731,6 +17738,11 @@ struct ApiServer::Impl {
             }
             co_return http::route_done;
         }
+        // A pull streams for as long as its client reads: it leaves the short-request workers
+        // (lake#534); its own stream slots bound it.
+        if (server) {
+            server->leave_worker(route);
+        }
         std::uint64_t sent = 0;
         for (;;) {
             std::size_t offset = 0;
@@ -21499,6 +21511,29 @@ bool ApiServer::start() {
     limits.needs_no_worker = [](std::string_view path) {
         return path == "/healthz" || path == "/readyz";
     };
+    limits.io_timeout = impl.options.io_timeout;
+    // A request that waits for the store root (lake#479) waits before it takes a worker, so a
+    // rollout's requests are all answered after the hand-off, however many arrive.
+    limits.admitted = [&impl](std::string_view path) {
+        const StoreRootState state = impl.store_root_state.load();
+        return state == StoreRootState::open || state == StoreRootState::failed ||
+               impl.draining.load() || store_root_exempt(path);
+    };
+    limits.admission_wait = impl.options.store_owner_wait + std::chrono::minutes(2);
+    // Answered before any route: logged and counted like a routed request, named by the reason.
+    limits.refused = [&impl](std::string_view method, unsigned status, std::string_view reason) {
+        const telemetry::Labels labels{{"method", std::string(method)},
+                                       {"route", std::string(reason)},
+                                       {"status", std::to_string(status)}};
+        impl.metrics.increment_counter("lake_http_requests_total", labels);
+        RequestLogEntry entry{.ts = log_timestamp(),
+                              .method = std::string(method),
+                              .route = std::string(reason),
+                              .status = static_cast<int>(status),
+                              .duration_ms = 0.0,
+                              .node = impl.options.node_name};
+        std::println("{}", request_log_line(entry));
+    };
     impl.server = std::make_unique<HttpConnections>(impl.io_context,
                                                     router.release(),
                                                     http::make_parser_config(parser_options),
@@ -21550,6 +21585,31 @@ bool ApiServer::start() {
         }
     }
     return true;
+}
+
+OpenFileBudget fit_connections_to_open_files(std::size_t wanted) {
+    rlimit limit{};
+    if (::getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        return {0, wanted};
+    }
+    if (limit.rlim_cur < limit.rlim_max) {
+        // macOS refuses RLIM_INFINITY and anything above OPEN_MAX for the soft limit.
+        for (const rlim_t target : {limit.rlim_max, static_cast<rlim_t>(1U << 20),
+                                    static_cast<rlim_t>(65536), static_cast<rlim_t>(10240)}) {
+            if (target <= limit.rlim_cur || target > limit.rlim_max) {
+                continue;
+            }
+            rlimit raised = limit;
+            raised.rlim_cur = target;
+            if (::setrlimit(RLIMIT_NOFILE, &raised) == 0) {
+                limit = raised;
+                break;
+            }
+        }
+    }
+    const auto open_files = static_cast<std::uint64_t>(
+        limit.rlim_cur == RLIM_INFINITY ? std::numeric_limits<std::uint32_t>::max() : limit.rlim_cur);
+    return {open_files, connections_for_open_files(wanted, open_files)};
 }
 
 void ApiServer::begin_drain() {

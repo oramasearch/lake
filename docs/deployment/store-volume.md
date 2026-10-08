@@ -88,8 +88,10 @@ reachable while it waits.
    result indexes, then marks the root open.
 2. **Hold, never refuse.** Until the root is open, every request except `/healthz`, `/readyz`,
    `/metrics` and the embedded stylesheet, fonts and experiment assets waits for the open. The
-   wait is a timer on the server's io thread, not a blocked thread, so probes keep answering. When
-   the root opens, the held requests run. They are answered `503 store_unavailable` only if the
+   wait is a timer on the server's io thread, not a blocked thread, so probes keep answering. A
+   held request waits before it takes one of the HTTP request workers (lake#534,
+   [connections and workers](../serving/http.md#connections-and-workers)), so however many arrive
+   none is refused for want of a worker. When the root opens, the held requests run. They are answered `503 store_unavailable` only if the
    wait expires, the open fails, or the process is stopped before it ever owned the root. All
    other requests wait, not only the ones known to write the store, because a capability can reach
    the root indirectly (the audit mirror into the transparency log, search, registry indexes),

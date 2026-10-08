@@ -1026,6 +1026,12 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
     CallState state = prepare_call(capability, call_input, context);
     if (state.proceed) {
+        // A long poll (`wait_ms`) parks on the bus: it gives its HTTP worker back so parked
+        // callers never fill the short-request workers (lake#534).
+        if (context.leave_worker && call_input.is_object() && call_input.contains("wait_ms") &&
+            call_input.at("wait_ms").is_number() && call_input.at("wait_ms").get<double>() > 0) {
+            context.leave_worker();
+        }
         const auto start = std::chrono::steady_clock::now();
         try {
             if (capability->async_handler) {

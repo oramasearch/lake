@@ -161,10 +161,14 @@ or stdout.
 
 `test_http_connections.cpp` (lake#534) covers connections apart from request workers
 (`src/api/http_connections.hpp`) over raw sockets: two hundred idle connections beside a request
-answered within 500 ms (with a small router and through `ApiServer`), the idle keep-alive and
-header (slowloris) timeouts, the connection cap's 503, 503 and 429 closing their connection, the
-wait for a worker and its refusal, a 4 MiB streamed response beside idle connections, and the
-drain closing idle connections. It raises the process's open-file soft limit for its sockets. See
+answered within 500 ms (with a small router and through `ApiServer`), forty long polls that leave
+their workers, the idle keep-alive, header (slowloris) and body/response I/O timeouts, the
+connection cap's 503 and its fit to the open-file limit, 503 and 429 closing their connection, a
+refusal reaching a client still sending its body, unread bodies never parsed as requests, the wait
+for a worker and its refusal, 400, 431 and `100 Continue`, uploads, HEAD and a client's close, a
+4 MiB streamed response beside idle connections, the drain, and an idle connection's memory.
+`StoreOwner.EveryRequestDuringTheHandOffIsAnsweredAfterIt` (`test_shared_store.cpp`) holds forty
+requests through a store-root hand-off on two workers. It raises the process's open-file soft limit for its sockets. See
 [`../docs/serving/http.md`](../docs/serving/http.md#connections-and-workers).
 
 Request telemetry (decision 54 S9, lake#384, [`../docs/serving/telemetry.md`](../docs/serving/telemetry.md)):

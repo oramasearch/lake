@@ -66,42 +66,93 @@ Lake used to serve with Beast2's `http_server`: a fixed pool of 32 workers, each
 connection for its whole life. An idle keep-alive connection kept its worker, so about 32 clients
 holding connections open denied service to every tenant (lake#534). Lake now serves the way Zetta
 does (`zetta/src/core/api/http_server.cpp`, 4096 connections by default): it accepts every
-connection up to a cap and serves each with its own session coroutine. A connection is not a
-worker.
+connection up to a cap and serves each with its own session coroutine
+(`src/api/http_connections.hpp`). A connection is not a worker.
 
 | Limit | Default | Environment | What happens |
 |---|---|---|---|
-| Connections | 4096 | `LAKE_HTTP_MAX_CONNECTIONS` | A connection above the cap is accepted, answered `503` with `Connection: close`, `Retry-After: 1` and the JSON envelope `busy`, and closed. Lake keeps accepting meanwhile. |
-| Request workers | 32 | `LAKE_HTTP_WORKERS` | A request takes a worker only while its route runs, from dispatch to the end of its response, so a streaming response (an image pull, an event stream) holds its worker until it ends. Reading a request header and waiting for the next request hold none. `GET /healthz` and `/readyz` need no worker, so the probes answer while every worker is busy. |
-| Wait for a worker | 10 s | `LAKE_HTTP_WORKER_WAIT_SECONDS` | A request that finds every worker taken waits, first come first served; past the wait it is answered `503` `busy` and its connection closed. |
-| Idle keep-alive | 30 s | `LAKE_HTTP_IDLE_TIMEOUT_SECONDS` | A connection that waits this long for its next request is closed. |
+| Connections | 4096 | `LAKE_HTTP_MAX_CONNECTIONS` | A connection above the cap is accepted, answered `503` with `Connection: close`, `Retry-After: 1` and the JSON envelope `busy`, and closed lingering (below). Lake keeps accepting meanwhile. At start lake raises its soft open-file limit to the hard limit and lowers the cap to fit: the limit less 512 descriptors (half the limit when that is smaller) for PostgreSQL, store files and outbound connections; it says so on stderr, and the startup line reports `open_files_limit` and the effective `http_max_connections`. |
+| Request workers | 32 | `LAKE_HTTP_WORKERS` | A request takes a worker only while its route runs. Reading a request header, waiting for the next request, and waiting for the store root (below) hold none. A request that parks or streams leaves its worker (below). `GET /healthz` and `/readyz` need no worker, so the probes answer while every worker is busy. |
+| Wait for a worker | 10 s | `LAKE_HTTP_WORKER_WAIT_SECONDS` | A request that finds every worker taken waits, first come first served; past the wait it is answered `503` `busy` (with `Access-Control-Allow-Origin: *`, no body for `HEAD`) and its connection closed. The refusal is logged as a request line with route `workers_busy` and counted in `lake_http_requests_total`. A client that has left by the time its request gets a worker is not dispatched. |
+| Idle keep-alive | 75 s | `LAKE_HTTP_IDLE_TIMEOUT_SECONDS` | A connection that waits this long for its next request is closed. **It must exceed the idle timeout of any proxy's pooled upstream connections** (nginx keeps them 60 s): a proxy that reuses a connection lake is closing answers the client `502`, and does not retry a `POST`. |
 | Request header | 10 s | `LAKE_HTTP_HEADER_TIMEOUT_SECONDS` | A request header must arrive whole within this of its first byte (of the accept, for a connection's first request); otherwise the connection is closed without an answer. A client trickling a header a byte at a time (slowloris) is cut off however steadily it sends. |
+| Body and response I/O | 60 s | `LAKE_HTTP_IO_TIMEOUT_SECONDS` | Each read of a request body and each write of a response must make progress within this, or the connection is closed: a trickled upload or a client that stops reading cannot hold a worker. It matches the registry's `registry_stream_idle_timeout`, so a pull is not cut off sooner than the registry allows. |
 
-Every limit must be positive; lake refuses to start otherwise. A response with status `503` or
-`429` closes its connection (`Connection: close`), whichever handler sent it, so a refused client
-gives the connection back while it waits to retry; the registry's own refusals did since #528.
-`detail::RefusalClosingSink` does this in the sink every response body goes through, before the
-header is written. During the drain (lake#536) a connection waiting for its next request is closed
-at once, and every response closes its connection.
+Every limit must be positive; lake refuses to start otherwise. The startup line reports the
+workers, the worker wait, the cap, and the idle, header and I/O timeouts.
 
-The request body and the response are not bounded by these timeouts; their routes bound them (the
-64 MiB body limit below; `registry_stream_idle_timeout` for a pull). The worker, connection and
-timeout counts are metrics (`lake_http_connections`, `lake_http_requests_active`,
-`lake_http_requests_waiting`, `lake_http_refusals_total{reason}`,
-`lake_http_connections_closed_total{reason}`; [telemetry](telemetry.md)).
+**Waiting for the store root.** While a starting lake waits for its predecessor's store root
+(lake#479, [store volume](../deployment/store-volume.md#the-hand-off)), a request that needs it waits
+*before* it takes a worker, polling up to `LAKE_STORE_OWNER_WAIT_SECONDS` plus two minutes, then is
+dispatched; so however many requests a rollout sends, none is refused for want of a worker.
 
-`tests/test_http_connections.cpp` proves it: two hundred idle connections (half kept alive after a
-request, half silent) leave two workers free and the next request answers in under 500 ms, also
-through `ApiServer`; an idle connection is closed at its timeout; a trickled header, a silent
-connection and a partial header on a kept-alive connection are each cut off at the header timeout;
-the cap answers 503 and closes, and a closed connection makes room; 503 and 429 close their
-connection; a request waits for a worker and is refused past the wait, the probe needs none; a
-4 MiB streamed response completes beside a hundred idle connections; and the drain closes idle
-connections. The registry's streaming pulls are `RegistryStore.*` in
+**Long polls and streams leave their worker.** A capability called with `wait_ms` > 0 (agent task
+inboxes, task, build and app events, stream reads; the UI's 25 s pollers) gives its worker back
+before it parks: `Registry::call_async` calls `ApiContext::leave_worker`. An image pull gives its
+worker back once it starts streaming; its own stream slots bound it (8 per workspace, 24 per
+process, [registry](../api/registry.md)). Such requests count in `lake_http_requests_long` and are
+bounded by the connection cap, so parked agents and open UI tabs never fill the short-request
+workers.
+
+**Closing a connection.** A response with status `503` or `429` closes its connection
+(`Connection: close`), whichever handler sent it, so a refused client gives the connection back
+while it waits to retry; the registry's own refusals did since #528. So does every response during
+the drain (lake#536), and a response whose request body its route left unread unless that body is
+at most 64 KiB with a `Content-Length`: lake then reads and discards it (within a second) and keeps
+the connection, because unread body bytes would otherwise be parsed as the next request.
+`detail::RefusalClosingSink` decides this in the sink every response body goes through, before the
+header is written. Every close lingers: lake shuts its sending side, then reads and discards what
+the client still sends (at most 64 KiB, at most a second) before it closes, so a `503`, `413` or
+`401` answered while the request body is still arriving reaches the client instead of being lost to
+a reset. During the drain a connection waiting for its next request is closed at once; a request
+in flight finishes, and a connection that has not sent its first request yet is still answered.
+
+**Before any route.** A request target that is not a valid URL, or a request that cannot be parsed,
+is answered `400`; a header over 8 KiB is `431`; both close the connection and are logged like the
+busy refusal. A request with `Expect: 100-continue` is answered `100 Continue` once it has a worker.
+An accept that fails for want of descriptors (`EMFILE`, `ENFILE`) backs off 10 ms; other accept
+errors are retried at once.
+
+**Memory.** An idle connection costs about 25 KiB of lake's resident memory (the parser's 8 KiB
+header space and buffers, the serializer, the session), measured by
+`HttpConnections.AnIdleConnectionCostsLittleMemory` on macOS, plus the kernel's socket buffers,
+which the container's memory cgroup also charges. At the default cap, 4096 idle connections are
+about 100 MiB of the dev pod's 512 MiB limit (`Lake/prod`, `requests 128Mi`, `limits 512Mi`); lower
+`LAKE_HTTP_MAX_CONNECTIONS` or raise the limit for a pod that must hold more.
+
+The worker, connection and timeout counts are metrics (`lake_http_connections`,
+`lake_http_requests_active`, `lake_http_requests_waiting`, `lake_http_requests_long`,
+`lake_http_refusals_total{reason}`, `lake_http_connections_closed_total{reason}`;
+[telemetry](telemetry.md)).
+
+`tests/test_http_connections.cpp` proves it:
+- two hundred idle connections (half kept alive after a request, half silent) leave two workers
+  free and the next request answers in under 500 ms, also through `ApiServer`;
+- forty long polls leave the two short-request workers free, and the registry gives the worker
+  back for `wait_ms` > 0 only;
+- an idle connection is closed at its timeout, and the default idle timeout outlasts nginx's;
+- a trickled header, a silent connection and a partial header on a kept-alive connection are each
+  cut off at the header timeout; a trickled body and a client that never reads a 64 MiB response are
+  cut off at the I/O timeout;
+- the cap answers 503 and closes, and a closed connection makes room; 503 and 429 close their
+  connection; a 503 answered while an 8 MiB body is still arriving reaches the client;
+- a body the route did not read is never parsed as a request: a small one is discarded and the
+  connection kept, a large one closes it;
+- a request waits for a worker and is refused past the wait (with CORS, no body for HEAD, reported);
+  the probe needs none; a client gone before its worker came is not dispatched;
+- a bad target is 400, a 9 KiB header 431, `Expect: 100-continue` is answered; Content-Length and
+  chunked uploads, HEAD and a client's `Connection: close` work over one connection;
+- a 4 MiB streamed response completes beside a hundred idle connections; the drain closes idle
+  connections, lets a request in flight finish and answers a connection that had not sent yet;
+- the cap fits the open-file limit; an idle connection costs under 256 KiB.
+
+`StoreOwner.EveryRequestDuringTheHandOffIsAnsweredAfterIt` (`tests/test_shared_store.cpp`) sends
+forty requests to a successor with two workers while it waits for the root; all are answered `200`
+after the hand-off. The registry's streaming pulls are `RegistryStore.*` in
 `tests/test_registry_store.cpp`.
 
 ```sh
-./build/tests/lake-tests --gtest_filter='HttpConnections.*:RegistryStore.*:HttpServer.*'
+./build/tests/lake-tests --gtest_filter='HttpConnections.*:RegistryStore.*:HttpServer.*:StoreOwner.*'
 ```
 
 ## Request body limits

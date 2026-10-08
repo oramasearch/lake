@@ -258,6 +258,10 @@ struct ApiContext {
     std::string request_id;
     std::string request_path;  // the page route, for web UI navigation; never used to authorize
     std::string request_query; // its query string, for the same; never used to authorize
+    // Set by the HTTP server for a request: gives its request worker back. call_async calls it
+    // before a capability long-polls (`wait_ms` > 0), so a parked caller never holds one of the
+    // short-request workers (lake#534). Empty outside HTTP.
+    std::function<void()> leave_worker;
     // Why a presented credential was not accepted: "invalid" or "expired" (lake#450); empty when
     // none was presented or it was accepted.
     std::string credential_rejection;

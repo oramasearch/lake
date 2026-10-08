@@ -14,7 +14,16 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <fstream>
+#include <limits>
+#include <iostream>
+#include <mutex>
+#include <tuple>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -24,6 +33,8 @@
 #include <unistd.h>
 
 #include <boost/capy/buffers/buffer_copy.hpp>
+#include <boost/capy/buffers/vector_dynamic_buffer.hpp>
+#include <boost/capy/read.hpp>
 #include <boost/corosio/endpoint.hpp>
 #include <boost/corosio/io_context.hpp>
 #include <boost/corosio/ipv4_address.hpp>
@@ -31,6 +42,7 @@
 #include <boost/http/server/router.hpp>
 
 #include "api/http_connections.hpp"
+#include "lake/api/registry.hpp"
 #include "lake/api/server.hpp"
 
 namespace {
@@ -120,6 +132,37 @@ public:
                 return {};
             }
         }
+    }
+
+    // The header of one response, without reading a body (a HEAD answer).
+    std::string header_only() {
+        for (;;) {
+            const auto header_end = buffer_.find("\r\n\r\n");
+            if (header_end != std::string::npos) {
+                std::string header = buffer_.substr(0, header_end + 4);
+                buffer_.erase(0, header_end + 4);
+                return header;
+            }
+            if (!receive()) {
+                return {};
+            }
+        }
+    }
+
+    // Whatever arrives before the receive timeout; empty when nothing did.
+    std::string anything() {
+        if (!buffer_.empty()) {
+            return std::exchange(buffer_, {});
+        }
+        receive();
+        return std::exchange(buffer_, {});
+    }
+
+    void set_send_timeout(std::chrono::milliseconds timeout) {
+        timeval value{};
+        value.tv_sec = static_cast<decltype(value.tv_sec)>(timeout.count() / 1000);
+        value.tv_usec = static_cast<decltype(value.tv_usec)>((timeout.count() % 1000) * 1000);
+        static_cast<void>(::setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &value, sizeof(value)));
     }
 
     // True when the peer closed (EOF or reset) before the receive timeout.
@@ -261,6 +304,86 @@ public:
                        }
                        co_return http::route_done;
                    });
+        router.add(http::method::head,
+                   "/fine",
+                   [](http::route_params& route) -> http::route_task {
+                       route.status(http::status::ok);
+                       route.res.set(http::field::content_type, "text/plain");
+                       route.res.set_payload_size(2);
+                       auto [error] = co_await route.res_body.commit_eof(0);
+                       if (error) {
+                           co_return http::route_error(error);
+                       }
+                       co_return http::route_done;
+                   });
+        // Reads the whole body, Content-Length or chunked, and answers its size.
+        router.add(http::method::post,
+                   "/echo",
+                   [answer](http::route_params& route) -> http::route_task {
+                       std::vector<unsigned char> body;
+                       auto [error, size] = co_await boost::capy::read(
+                           route.req_body, boost::capy::dynamic_buffer(body, 64U * 1024U * 1024U));
+                       static_cast<void>(size);
+                       if (error) {
+                           co_return http::route_error(error);
+                       }
+                       co_return co_await answer(route, http::status::ok,
+                                                 "size=" + std::to_string(body.size()));
+                   });
+        // Answer without reading the body.
+        router.add(http::method::post, "/ignore", [answer](http::route_params& route) {
+            return answer(route, http::status::ok, "ignored");
+        });
+        router.add(http::method::post, "/busy", [answer](http::route_params& route) {
+            return answer(route, http::status::service_unavailable, "busy");
+        });
+        // A long poll: gives its worker back, then waits until released.
+        router.add(http::method::get,
+                   "/park",
+                   [this, answer](http::route_params& route) -> http::route_task {
+                       connections_->leave_worker(route);
+                       parked_.fetch_add(1);
+                       boost::corosio::timer timer(io_context_);
+                       while (!released_.load()) {
+                           timer.expires_after(5ms);
+                           auto [error] = co_await timer.wait();
+                           if (error) {
+                               co_return http::route_error(error);
+                           }
+                       }
+                       co_return co_await answer(route, http::status::ok, "parked");
+                   });
+        // 64 MiB, for a client that never reads.
+        router.add(http::method::get,
+                   "/big",
+                   [](http::route_params& route) -> http::route_task {
+                       constexpr std::size_t total = 64U * 1024U * 1024U;
+                       route.status(http::status::ok);
+                       route.res.set(http::field::content_type, "application/octet-stream");
+                       route.res.set_payload_size(total);
+                       const std::string chunk(256U * 1024U, 'b');
+                       std::size_t sent = 0;
+                       while (sent < total) {
+                           std::array<boost::capy::mutable_buffer, 16> buffers{};
+                           const auto output = route.res_body.prepare(buffers);
+                           const auto copied = boost::capy::buffer_copy(
+                               output, boost::capy::const_buffer(chunk.data(),
+                                                                 std::min(chunk.size(), total - sent)));
+                           sent += copied;
+                           auto [error] = sent == total ? co_await route.res_body.commit_eof(copied)
+                                                        : co_await route.res_body.commit(copied);
+                           if (error) {
+                               co_return http::route_error(error);
+                           }
+                       }
+                       co_return http::route_done;
+                   });
+        if (!limits.refused) {
+            limits.refused = [this](std::string_view method, unsigned status, std::string_view reason) {
+                std::lock_guard lock(mutex_);
+                refusals_.emplace_back(std::string(method), status, std::string(reason));
+            };
+        }
         limits.needs_no_worker = [](std::string_view path) { return path == "/healthz"; };
         connections_ = std::make_unique<lake::api::HttpConnections>(
             io_context_,
@@ -304,6 +427,13 @@ public:
     void begin_drain() {
         connections_->begin_drain();
     }
+    [[nodiscard]] int parked() const {
+        return parked_.load();
+    }
+    [[nodiscard]] std::vector<std::tuple<std::string, unsigned, std::string>> refusals() const {
+        std::lock_guard lock(mutex_);
+        return refusals_;
+    }
 
     // Polls a stats predicate until it holds or two seconds pass.
     template <class Predicate> bool eventually(Predicate predicate) const {
@@ -323,6 +453,9 @@ private:
     std::thread thread_;
     std::atomic<bool> released_{false};
     std::atomic<int> holding_{0};
+    std::atomic<int> parked_{0};
+    mutable std::mutex mutex_;
+    std::vector<std::tuple<std::string, unsigned, std::string>> refusals_;
 };
 
 lake::api::HttpConnectionLimits limits_with(std::size_t workers) {
@@ -498,6 +631,19 @@ TEST(HttpConnections, ARequestWaitsForAWorkerThenIsRefused) {
     EXPECT_EQ(header_value(busy, "connection"), "close");
     EXPECT_TRUE(refused.closed_by_peer());
     EXPECT_EQ(served.stats().busy_refusals, 1U);
+    // A browser can read the refusal, and a HEAD refusal has no body.
+    EXPECT_EQ(header_value(busy, "access-control-allow-origin"), "*");
+    Client head(served.port());
+    ASSERT_TRUE(head.send("HEAD /fine HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    const std::string head_busy = head.header_only();
+    ASSERT_TRUE(head_busy.starts_with("HTTP/1.1 503")) << head_busy;
+    EXPECT_TRUE(head.closed_by_peer()) << "a HEAD refusal carries no body";
+    EXPECT_EQ(served.stats().busy_refusals, 2U);
+    // Both are reported, so lake logs and counts them.
+    const auto reported = served.refusals();
+    ASSERT_EQ(reported.size(), 2U);
+    EXPECT_EQ(reported[0], std::make_tuple(std::string("GET"), 503U, std::string("workers_busy")));
+    EXPECT_EQ(reported[1], std::make_tuple(std::string("HEAD"), 503U, std::string("workers_busy")));
 
     // A request waiting when the worker is released gets it.
     Client waiting(served.port());
@@ -506,7 +652,7 @@ TEST(HttpConnections, ARequestWaitsForAWorkerThenIsRefused) {
     served.release();
     EXPECT_TRUE(holder.response().starts_with("HTTP/1.1 200"));
     EXPECT_TRUE(waiting.response().starts_with("HTTP/1.1 200"));
-    EXPECT_EQ(served.stats().busy_refusals, 1U);
+    EXPECT_EQ(served.stats().busy_refusals, 2U);
 }
 
 TEST(HttpConnections, AStreamingResponseCompletesBesideIdleConnections) {
@@ -572,4 +718,311 @@ TEST(HttpConnections, ApiServerServesBesideTwoHundredIdleConnections) {
     EXPECT_TRUE(idle.front()->closed_by_peer());
     EXPECT_LT(Clock::now() - waited_from, 4s);
     server.stop();
+}
+
+namespace {
+
+std::uint64_t resident_bytes() {
+#if defined(__APPLE__)
+    mach_task_basic_info info{};
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info),
+                  &count) != KERN_SUCCESS) {
+        return 0;
+    }
+    return info.resident_size;
+#else
+    std::ifstream statm("/proc/self/statm");
+    std::uint64_t pages = 0, resident = 0;
+    statm >> pages >> resident;
+    return resident * static_cast<std::uint64_t>(::sysconf(_SC_PAGESIZE));
+#endif
+}
+
+std::string post(std::string_view path, std::string_view body, std::string_view extra = {}) {
+    return "POST " + std::string(path) + " HTTP/1.1\r\nHost: localhost\r\nContent-Length: " +
+           std::to_string(body.size()) + "\r\n" + std::string(extra) + "\r\n" + std::string(body);
+}
+
+} // namespace
+
+// Review item 2: long polls (and streamed pulls) leave their worker, so forty of them never fill
+// the two short-request workers.
+TEST(HttpConnections, FortyLongPollsLeaveTheShortRequestWorkersFree) {
+    Served served(limits_with(2));
+    std::vector<std::unique_ptr<Client>> polls;
+    for (int i = 0; i < 40; ++i) {
+        polls.push_back(std::make_unique<Client>(served.port()));
+        ASSERT_TRUE(polls.back()->send(get("/park")));
+    }
+    ASSERT_TRUE(served.eventually([&served](const auto& stats) {
+        return served.parked() == 40 && stats.long_requests == 40;
+    })) << served.parked();
+    EXPECT_EQ(served.stats().active_requests, 0U);
+    Client short_request(served.port());
+    const auto started = Clock::now();
+    ASSERT_TRUE(short_request.send(get("/fine")));
+    EXPECT_TRUE(short_request.response().starts_with("HTTP/1.1 200"));
+    EXPECT_LT(Clock::now() - started, 500ms);
+    served.release();
+    for (auto& poll : polls) {
+        EXPECT_TRUE(poll->response().starts_with("HTTP/1.1 200"));
+    }
+    EXPECT_TRUE(served.eventually([](const auto& stats) { return stats.long_requests == 0; }));
+    EXPECT_EQ(served.stats().busy_refusals, 0U);
+}
+
+// The registry gives the worker back before a capability parks on `wait_ms`, and only then.
+TEST(HttpConnections, ALongPollCapabilityGivesItsWorkerBack) {
+    lake::api::Registry registry;
+    int left_at_handler = -1;
+    int left = 0;
+    ASSERT_TRUE(registry.add(lake::api::Capability{
+        .name = "poll",
+        .title = "Poll",
+        .description = "Long-polls.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"wait_ms", {{"type", "integer"}, {"minimum", 0}}}}}},
+        .output_schema = {{"type", "object"}},
+        .kind = lake::api::CapabilityKind::Read,
+        .requires_auth = false,
+        .async_handler = [&](const nlohmann::json&, lake::api::ApiContext&)
+            -> liquid::runtime::task<lake::api::ApiResult> {
+            left_at_handler = left;
+            co_return lake::api::ApiResult::success(nlohmann::json::object());
+        }}));
+    lake::api::ApiContext context;
+    context.leave_worker = [&left] { ++left; };
+    ASSERT_TRUE(liquid::runtime::block_on(registry.call_async("poll", {{"wait_ms", 25000}}, context))->ok);
+    EXPECT_EQ(left_at_handler, 1);
+    ASSERT_TRUE(liquid::runtime::block_on(registry.call_async("poll", {{"wait_ms", 0}}, context))->ok);
+    ASSERT_TRUE(liquid::runtime::block_on(registry.call_async("poll", nlohmann::json::object(), context))->ok);
+    EXPECT_EQ(left, 1);
+}
+
+// Review item 3: lake's idle timeout outlasts nginx's 60 s upstream keep-alive.
+TEST(HttpConnections, TheIdleTimeoutOutlastsTheProxys) {
+    EXPECT_EQ(lake::api::HttpConnectionLimits{}.idle_timeout, 75s);
+    EXPECT_EQ(lake::api::ServerOptions{}.idle_timeout, 75s);
+    EXPECT_GT(lake::api::ServerOptions{}.idle_timeout, 60s);
+    EXPECT_EQ(lake::api::ServerOptions{}.io_timeout, 60s);
+}
+
+// Review item 4: a body trickled slower than the I/O bound, and a client that never reads, are
+// cut off, and lake keeps serving.
+TEST(HttpConnections, ATrickledBodyAndAClientThatNeverReadsAreCutOff) {
+    auto limits = limits_with(2);
+    limits.io_timeout = 300ms;
+    Served served(std::move(limits));
+
+    Client trickle(served.port());
+    ASSERT_TRUE(trickle.send("POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n"
+                             "0123456789"));
+    const auto started = Clock::now();
+    EXPECT_TRUE(trickle.closed_by_peer());
+    EXPECT_GE(Clock::now() - started, 250ms);
+    EXPECT_LT(Clock::now() - started, 4s);
+    ASSERT_TRUE(served.eventually([](const auto& stats) { return stats.io_timeouts >= 1; }));
+
+    Client deaf(served.port());
+    ASSERT_TRUE(deaf.send(get("/big")));
+    const auto before = served.stats().io_timeouts;
+    const auto deadline = Clock::now() + 10s;
+    while (served.stats().io_timeouts == before && Clock::now() < deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    EXPECT_GT(served.stats().io_timeouts, before) << "a response nobody reads is never cut off";
+    EXPECT_TRUE(served.eventually([](const auto& stats) { return stats.active_requests == 0; }));
+
+    Client next(served.port());
+    ASSERT_TRUE(next.send(get("/fine")));
+    EXPECT_TRUE(next.response().starts_with("HTTP/1.1 200"));
+}
+
+// Review item 5: the answer to a request whose body is still arriving reaches the client; the
+// close lingers instead of resetting.
+TEST(HttpConnections, ARefusalReachesAClientStillSendingItsBody) {
+    Served served(limits_with(2));
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        Client client(served.port());
+        client.set_send_timeout(3s);
+        constexpr std::size_t declared = 8U * 1024U * 1024U;
+        ASSERT_TRUE(client.send("POST /busy HTTP/1.1\r\nHost: localhost\r\nContent-Length: " +
+                                std::to_string(declared) + "\r\n\r\n"));
+        std::thread sender([&client] {
+            const std::string piece(64U * 1024U, 'x');
+            for (std::size_t sent = 0; sent < declared; sent += piece.size()) {
+                if (!client.send(piece)) {
+                    return;
+                }
+            }
+        });
+        const std::string answer = client.response();
+        sender.join();
+        EXPECT_TRUE(answer.starts_with("HTTP/1.1 503")) << "attempt " << attempt << ": " << answer;
+        EXPECT_EQ(header_value(answer, "connection"), "close");
+    }
+}
+
+// Review item 6: a body the route did not read is never parsed as the next request. A small one
+// is discarded and the connection kept; a large one closes the connection.
+TEST(HttpConnections, AnUnreadBodyIsNeverParsedAsARequest) {
+    Served served(limits_with(2));
+    Client client(served.port(), 300ms);
+    const std::string smuggled = get("/hold");
+    ASSERT_TRUE(client.send(post("/ignore", smuggled)));
+    const std::string ignored = client.response();
+    ASSERT_TRUE(ignored.starts_with("HTTP/1.1 200")) << ignored;
+    EXPECT_TRUE(header_value(ignored, "connection").empty()) << ignored;
+    // Nothing else is answered: the body was not a request.
+    EXPECT_TRUE(client.anything().empty());
+    EXPECT_EQ(served.holding(), 0);
+    client.set_receive_timeout(5s);
+    ASSERT_TRUE(client.send(get("/fine")));
+    EXPECT_TRUE(client.response().starts_with("HTTP/1.1 200"));
+
+    Client large(served.port());
+    std::string body(128U * 1024U, 'y');
+    body.replace(0, smuggled.size(), smuggled);
+    ASSERT_TRUE(large.send(post("/ignore", body)));
+    const std::string answer = large.response();
+    ASSERT_TRUE(answer.starts_with("HTTP/1.1 200")) << answer;
+    EXPECT_EQ(header_value(answer, "connection"), "close");
+    EXPECT_TRUE(large.closed_by_peer());
+    EXPECT_EQ(served.holding(), 0);
+    EXPECT_EQ(served.stats().unread_bodies, 1U);
+}
+
+// Review item 7: the connection cap fits in the open-file limit, with room kept for the rest.
+TEST(HttpConnections, TheConnectionCapFitsTheOpenFileLimit) {
+    EXPECT_EQ(lake::api::connections_for_open_files(4096, 1048576), 4096U);
+    EXPECT_EQ(lake::api::connections_for_open_files(4096, 4096), 3584U);
+    EXPECT_EQ(lake::api::connections_for_open_files(4096, 1024), 512U);
+    EXPECT_EQ(lake::api::connections_for_open_files(4096, 256), 128U);
+    EXPECT_EQ(lake::api::connections_for_open_files(4096, 1), 1U);
+    rlimit before{};
+    ASSERT_EQ(::getrlimit(RLIMIT_NOFILE, &before), 0);
+    const auto budget = lake::api::fit_connections_to_open_files(4096);
+    rlimit after{};
+    ASSERT_EQ(::getrlimit(RLIMIT_NOFILE, &after), 0);
+    EXPECT_GE(after.rlim_cur, before.rlim_cur);
+    EXPECT_EQ(budget.open_files, after.rlim_cur == RLIM_INFINITY
+                                     ? std::uint64_t{std::numeric_limits<std::uint32_t>::max()}
+                                     : static_cast<std::uint64_t>(after.rlim_cur));
+    EXPECT_EQ(budget.max_connections,
+              lake::api::connections_for_open_files(4096, budget.open_files));
+}
+
+// Nits: a malformed target is 400, a header over 8 KiB is 431, `Expect: 100-continue` is answered,
+// and a client that left while its request waited is not dispatched.
+TEST(HttpConnections, MalformedRequestsAndExpectContinue) {
+    Served served(limits_with(1));
+    Client bad(served.port());
+    ASSERT_TRUE(bad.send("GET /%zz HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    const std::string bad_answer = bad.response();
+    EXPECT_TRUE(bad_answer.starts_with("HTTP/1.1 400")) << bad_answer;
+    EXPECT_TRUE(bad.closed_by_peer());
+
+    Client large(served.port());
+    ASSERT_TRUE(large.send("GET /fine HTTP/1.1\r\nHost: localhost\r\nX-Large: " +
+                           std::string(9000, 'h') + "\r\n\r\n"));
+    const std::string large_answer = large.response();
+    EXPECT_TRUE(large_answer.starts_with("HTTP/1.1 431")) << large_answer;
+
+    Client expecting(served.port());
+    ASSERT_TRUE(expecting.send("POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n"
+                               "Expect: 100-continue\r\n\r\n"));
+    const std::string proceed = expecting.header_only();
+    EXPECT_EQ(proceed, "HTTP/1.1 100 Continue\r\n\r\n");
+    ASSERT_TRUE(expecting.send("hello"));
+    const std::string echoed = expecting.response();
+    ASSERT_TRUE(echoed.starts_with("HTTP/1.1 200")) << echoed;
+    EXPECT_TRUE(echoed.ends_with("size=5"));
+
+    Client holder(served.port());
+    ASSERT_TRUE(holder.send(get("/hold")));
+    ASSERT_TRUE(served.eventually([&served](const auto&) { return served.holding() == 1; }));
+    {
+        Client gone(served.port());
+        ASSERT_TRUE(gone.send(get("/fine")));
+        ASSERT_TRUE(served.eventually([](const auto& stats) { return stats.waiting_requests == 1; }));
+    }
+    served.release();
+    EXPECT_TRUE(holder.response().starts_with("HTTP/1.1 200"));
+    EXPECT_TRUE(served.eventually([](const auto& stats) { return stats.gone_before_dispatch == 1; }));
+}
+
+// The review's protocol cases: Content-Length and chunked uploads, HEAD, and a client's
+// `Connection: close`, each over a kept-alive connection.
+TEST(HttpConnections, UploadsHeadAndAClientsClose) {
+    Served served(limits_with(2));
+    Client client(served.port());
+    ASSERT_TRUE(client.send(post("/echo", std::string(60000, 'a'))));
+    const std::string sized = client.response();
+    ASSERT_TRUE(sized.starts_with("HTTP/1.1 200")) << sized;
+    EXPECT_TRUE(sized.ends_with("size=60000"));
+    ASSERT_TRUE(client.send("POST /echo HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n"
+                            "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"));
+    const std::string chunked = client.response();
+    ASSERT_TRUE(chunked.starts_with("HTTP/1.1 200")) << chunked;
+    EXPECT_TRUE(chunked.ends_with("size=11"));
+    ASSERT_TRUE(client.send("HEAD /fine HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    const std::string head = client.header_only();
+    ASSERT_TRUE(head.starts_with("HTTP/1.1 200")) << head;
+    EXPECT_EQ(header_value(head, "content-length"), "2");
+    ASSERT_TRUE(client.send(get("/fine", false)));
+    const std::string last = client.response();
+    ASSERT_TRUE(last.starts_with("HTTP/1.1 200")) << last;
+    EXPECT_EQ(header_value(last, "connection"), "close");
+    EXPECT_TRUE(client.closed_by_peer());
+}
+
+// The drain: a request in flight finishes (and closes its connection), and a connection that has
+// not sent its first request yet is still answered.
+TEST(HttpConnections, TheDrainLetsRequestsInFlightAndNewConnectionsFinish) {
+    Served served(limits_with(2));
+    Client in_flight(served.port());
+    ASSERT_TRUE(in_flight.send(get("/hold")));
+    ASSERT_TRUE(served.eventually([&served](const auto&) { return served.holding() == 1; }));
+    Client fresh(served.port());
+    ASSERT_TRUE(served.eventually([](const auto& stats) { return stats.connections == 2; }));
+    served.begin_drain();
+    std::this_thread::sleep_for(50ms);
+    ASSERT_TRUE(fresh.send(get("/fine")));
+    const std::string answered = fresh.response();
+    ASSERT_TRUE(answered.starts_with("HTTP/1.1 200")) << answered;
+    EXPECT_EQ(header_value(answered, "connection"), "close");
+    EXPECT_TRUE(fresh.closed_by_peer());
+    served.release();
+    const std::string finished = in_flight.response();
+    ASSERT_TRUE(finished.starts_with("HTTP/1.1 200")) << finished;
+    EXPECT_EQ(header_value(finished, "connection"), "close");
+    EXPECT_TRUE(in_flight.closed_by_peer());
+}
+
+// What an idle connection costs lake (docs/serving/http.md, "Memory"): measured, and bounded so a
+// regression shows.
+TEST(HttpConnections, AnIdleConnectionCostsLittleMemory) {
+    raise_descriptor_limit(4096);
+    Served served(limits_with(2));
+    constexpr int count = 1000;
+    std::vector<std::unique_ptr<Client>> idle;
+    idle.reserve(count);
+    for (int i = 0; i < 10; ++i) {
+        idle.push_back(std::make_unique<Client>(served.port()));
+        ASSERT_TRUE(idle.back()->send(get("/fine")));
+        ASSERT_TRUE(idle.back()->response().starts_with("HTTP/1.1 200"));
+    }
+    const std::uint64_t before = resident_bytes();
+    for (int i = 10; i < count; ++i) {
+        idle.push_back(std::make_unique<Client>(served.port()));
+        ASSERT_TRUE(idle.back()->connected()) << i;
+        ASSERT_TRUE(idle.back()->send(get("/fine")));
+        ASSERT_TRUE(idle.back()->response().starts_with("HTTP/1.1 200")) << i;
+    }
+    const std::uint64_t after = resident_bytes();
+    const std::uint64_t each = after > before ? (after - before) / (count - 10) : 0;
+    std::cout << "[ idle connection ] " << each / 1024 << " KiB resident each over " << count - 10
+              << " connections\n";
+    EXPECT_LT(each, 256U * 1024U);
 }

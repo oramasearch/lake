@@ -7,21 +7,33 @@
 // connection up to `max_connections` and serves each with its own session coroutine, answering
 // `503` with `Connection: close` above the cap. On top of that:
 //
-// - a request takes one of `workers` slots only while its route is dispatched, so an idle
-//   connection, or one still sending its header, holds no worker; a request that finds every slot
-//   taken waits `worker_wait` for one and is then answered `503` and its connection closed;
+// - a request takes one of `workers` slots only while its route runs, so an idle connection, or
+//   one still sending its header, holds no worker; a request that finds every slot taken waits
+//   `worker_wait` for one and is then answered `503` and its connection closed;
+// - a request that must wait before any route can answer it (the store-root hand-off, `admitted`)
+//   waits before it takes a worker;
+// - a request that parks in a long poll or streams a long response leaves its worker
+//   (leave_worker()) and finishes outside the short-request budget;
 // - a connection waiting for its next request is closed after `idle_timeout`;
 // - a request header must arrive whole within `header_timeout` of its first byte (of the accept,
 //   for a connection's first request), so a client trickling a header (slowloris) is cut off;
-// - a response with status 503 or 429 closes its connection, so a refused client gives the
-//   connection back while it waits to retry.
+// - every read of a request body and every write of a response must progress within
+//   `io_timeout`, so a trickled body or a client that never reads is cut off;
+// - a response with status 503 or 429 closes its connection, as does every response during the
+//   drain and every request whose body its route did not read;
+// - a connection is closed lingering: lake stops sending, then reads and discards what the client
+//   still sends for a moment, so its last answer is not lost to a reset.
 //
 // Every member of the shared state belongs to the IO executor (one thread runs the io_context):
 // the accept loop, the sessions and the worker queue never run concurrently. stop() and
 // begin_drain() hand their work to that executor. Only http_server.cpp and the tests include this
 // header; no beast2 or boost::http type reaches lake's public headers.
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -31,12 +43,15 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
+
+#include <sys/socket.h>
 
 #include <boost/beast2/http_worker.hpp>
 #include <boost/capy/buffers.hpp>
@@ -47,6 +62,7 @@
 #include <boost/capy/io/any_buffer_sink.hpp>
 #include <boost/capy/io/any_buffer_source.hpp>
 #include <boost/capy/io/any_read_stream.hpp>
+#include <boost/capy/io_task.hpp>
 #include <boost/capy/task.hpp>
 #include <boost/capy/timeout.hpp>
 #include <boost/capy/write.hpp>
@@ -57,6 +73,7 @@
 #include <boost/corosio/tcp_socket.hpp>
 #include <boost/corosio/timer.hpp>
 #include <boost/http/error.hpp>
+#include <boost/http/field.hpp>
 #include <boost/http/request_parser.hpp>
 #include <boost/http/serializer.hpp>
 #include <boost/http/server/router.hpp>
@@ -67,46 +84,117 @@
 namespace lake::api {
 
 struct HttpConnectionLimits {
-    // Requests dispatched at once (LAKE_HTTP_WORKERS). A streaming response holds its worker until
-    // it ends.
+    // Requests whose routes run at once (LAKE_HTTP_WORKERS). A request that leaves its worker
+    // (a long poll, a streamed pull) no longer counts.
     std::size_t workers = 32;
     // Open connections, idle ones included (LAKE_HTTP_MAX_CONNECTIONS). Above it a new connection
     // is answered 503 and closed at once.
     std::size_t max_connections = 4096;
     // How long a keep-alive connection waits for its next request (LAKE_HTTP_IDLE_TIMEOUT_SECONDS).
-    std::chrono::milliseconds idle_timeout{std::chrono::seconds(30)};
+    // It must outlast the idle timeout of any proxy's pooled upstream connections (nginx: 60 s), or
+    // the proxy reuses a connection lake is closing.
+    std::chrono::milliseconds idle_timeout{std::chrono::seconds(75)};
     // How long a request header may take, from its first byte, or from the accept for a
     // connection's first request (LAKE_HTTP_HEADER_TIMEOUT_SECONDS).
     std::chrono::milliseconds header_timeout{std::chrono::seconds(10)};
     // How long a request waits for a free worker before it is answered 503
     // (LAKE_HTTP_WORKER_WAIT_SECONDS).
     std::chrono::milliseconds worker_wait{std::chrono::seconds(10)};
+    // How long one read of a request body or one write of a response may make no progress
+    // (LAKE_HTTP_IO_TIMEOUT_SECONDS).
+    std::chrono::milliseconds io_timeout{std::chrono::seconds(60)};
     // Pending kernel handshakes, not admitted connections; the OS may clamp it.
     int listen_backlog = 1024;
     // Paths answered without taking a worker: the probes, so a saturated lake is not restarted.
     std::function<bool(std::string_view path)> needs_no_worker;
+    // False while a request for this path cannot be answered yet (lake waits for the store root):
+    // it waits, polling, up to `admission_wait` before it takes a worker, then is dispatched.
+    std::function<bool(std::string_view path)> admitted;
+    std::chrono::milliseconds admission_wait{std::chrono::minutes(4)};
+    // Told of every request answered before any route (400, 431, the busy 503): method, status
+    // and reason. Lake logs and counts them.
+    std::function<void(std::string_view method, unsigned status, std::string_view reason)> refused;
 };
 
 struct HttpConnectionStats {
     std::size_t connections = 0;
     std::size_t active_requests = 0;
     std::size_t waiting_requests = 0;
+    std::size_t long_requests = 0;
     std::uint64_t refused_connections = 0;
     std::uint64_t idle_timeouts = 0;
     std::uint64_t header_timeouts = 0;
+    std::uint64_t io_timeouts = 0;
     std::uint64_t busy_refusals = 0;
+    std::uint64_t bad_requests = 0;
+    std::uint64_t unread_bodies = 0;
+    std::uint64_t gone_before_dispatch = 0;
 };
+
+// The descriptors lake may hold for connections: the soft open-file limit less a reserve for
+// PostgreSQL, store files and outbound connections (half the limit when that is smaller).
+inline std::size_t connections_for_open_files(std::size_t wanted, std::uint64_t open_files,
+                                              std::uint64_t reserve = 512) {
+    const std::uint64_t kept = std::min(reserve, open_files / 2);
+    const std::uint64_t room = open_files > kept ? open_files - kept : 1;
+    return static_cast<std::size_t>(std::max<std::uint64_t>(1, std::min<std::uint64_t>(wanted, room)));
+}
 
 namespace detail {
 
-// The serializer's sink, closing the connection of a 503 or 429 response before its header is
-// written. Every response body leaves through it, so no send helper has to remember.
+// The socket as the parser and serializer see it: every read and every write must make progress
+// within the bound, or it ends with a timeout and the connection closes.
+class TimedSocket {
+public:
+    TimedSocket(boost::corosio::tcp_socket& socket, std::chrono::milliseconds bound,
+                std::atomic<std::uint64_t>* timeouts)
+        : socket_(&socket), bound_(bound), timeouts_(timeouts) {}
+
+    template <class MutableBufferSequence>
+    boost::capy::io_task<std::size_t> read_some(MutableBufferSequence buffers) {
+        auto [error, read] = co_await boost::capy::timeout(socket_->read_some(buffers), bound_);
+        if (error == boost::capy::cond::timeout) {
+            timeouts_->fetch_add(1);
+        }
+        co_return {error, read};
+    }
+
+    template <class ConstBufferSequence>
+    boost::capy::io_task<std::size_t> write_some(ConstBufferSequence buffers) {
+        auto [error, written] = co_await boost::capy::timeout(socket_->write_some(buffers), bound_);
+        if (error == boost::capy::cond::timeout) {
+            timeouts_->fetch_add(1);
+        }
+        co_return {error, written};
+    }
+
+private:
+    boost::corosio::tcp_socket* socket_;
+    std::chrono::milliseconds bound_;
+    std::atomic<std::uint64_t>* timeouts_;
+};
+
+// The serializer's sink, closing the connection of a 503 or 429 response, of any response during
+// the drain, and of a response whose request body its route left unread and too large to discard
+// (more than `discard_limit` bytes, or chunked), before its header is written. Every response body leaves through it, so no
+// send helper has to remember.
 class RefusalClosingSink {
 public:
-    using Inner = boost::http::serializer::sink<boost::corosio::tcp_socket>;
+    using Inner = boost::http::serializer::sink<TimedSocket>;
 
-    RefusalClosingSink(Inner inner, boost::http::response& response)
-        : inner_(inner), response_(&response) {}
+    static constexpr std::uint64_t discard_limit = 64U * 1024U;
+
+    RefusalClosingSink(Inner inner, boost::http::response& response,
+                       const boost::http::request& request,
+                       const boost::http::request_parser& parser, const std::atomic<bool>* draining)
+        : inner_(inner), response_(&response), request_(&request), parser_(&parser),
+          draining_(draining) {}
+
+    // The body left unread is small enough for the session to read and discard after the route.
+    [[nodiscard]] bool unread_body_discardable() const {
+        return request_->payload() == boost::http::payload::size &&
+               request_->payload_size() <= discard_limit;
+    }
 
     void begin_response() {
         checked_ = false;
@@ -145,15 +233,19 @@ private:
         }
         checked_ = true;
         const auto status = response_->status();
-        if ((status == boost::http::status::service_unavailable ||
-             status == boost::http::status::too_many_requests) &&
-            response_->keep_alive()) {
+        const bool refusal = status == boost::http::status::service_unavailable ||
+                             status == boost::http::status::too_many_requests;
+        const bool unread = !parser_->is_complete() && !unread_body_discardable();
+        if ((refusal || draining_->load() || unread) && response_->keep_alive()) {
             response_->set_keep_alive(false);
         }
     }
 
     Inner inner_;
     boost::http::response* response_;
+    const boost::http::request* request_;
+    const boost::http::request_parser* parser_;
+    const std::atomic<bool>* draining_;
     bool checked_ = false;
 };
 
@@ -180,17 +272,18 @@ public:
     // Opens, binds and listens. An empty string on success, otherwise why not.
     std::string bind(const boost::corosio::endpoint& endpoint) {
         State& state = *state_;
-        if (state.limits.workers == 0 || state.limits.max_connections == 0 ||
-            state.limits.listen_backlog <= 0 || state.limits.idle_timeout.count() <= 0 ||
-            state.limits.header_timeout.count() <= 0 || state.limits.worker_wait.count() <= 0) {
-            return "HTTP workers, max_connections, listen_backlog and the idle, header and worker "
-                   "wait timeouts must be positive";
+        const auto& limits = state.limits;
+        if (limits.workers == 0 || limits.max_connections == 0 || limits.listen_backlog <= 0 ||
+            limits.idle_timeout.count() <= 0 || limits.header_timeout.count() <= 0 ||
+            limits.worker_wait.count() <= 0 || limits.io_timeout.count() <= 0) {
+            return "HTTP workers, max_connections, listen_backlog and the idle, header, worker "
+                   "wait and I/O timeouts must be positive";
         }
         state.acceptor.open();
         state.acceptor.set_option(boost::corosio::socket_option::reuse_address(true));
         auto error = state.acceptor.bind(endpoint);
         if (!error) {
-            error = state.acceptor.listen(state.limits.listen_backlog);
+            error = state.acceptor.listen(limits.listen_backlog);
         }
         if (error) {
             state.acceptor.close();
@@ -212,7 +305,7 @@ public:
     }
 
     // At the drain (lake#536): connections waiting for their next request are closed; the
-    // requests in progress finish, and their responses close their connections.
+    // requests in progress finish, and every response closes its connection.
     void begin_drain() {
         if (state_->draining.exchange(true)) {
             return;
@@ -234,20 +327,46 @@ public:
         }
     }
 
+    // The request a route is handling, as a token leave_worker() takes later; 0 for none. IO
+    // executor only: call it from the route.
+    [[nodiscard]] std::uint64_t request_token(const boost::http::route_params& route) const {
+        const auto found = state_->tokens.find(&route);
+        return found == state_->tokens.end() ? 0 : found->second;
+    }
+
+    // The request parks (a long poll) or streams a long response: it gives its worker back and
+    // finishes outside the worker budget. A request that already left, or has ended, is ignored.
+    // IO executor only.
+    void leave_worker(std::uint64_t token) {
+        const auto found = state_->slots.find(token);
+        if (found != state_->slots.end()) {
+            found->second->leave();
+        }
+    }
+    void leave_worker(const boost::http::route_params& route) {
+        leave_worker(request_token(route));
+    }
+
     [[nodiscard]] HttpConnectionStats stats() const {
         const State& state = *state_;
         return {state.connection_count.load(),
                 state.active_requests.load(),
                 state.waiting_requests.load(),
+                state.long_requests.load(),
                 state.refused_connections.load(),
                 state.idle_timeouts.load(),
                 state.header_timeouts.load(),
-                state.busy_refusals.load()};
+                state.io_timeouts.load(),
+                state.busy_refusals.load(),
+                state.bad_requests.load(),
+                state.unread_bodies.load(),
+                state.gone_before_dispatch.load()};
     }
 
 private:
     struct Connection : boost::beast2::http_worker {
         boost::corosio::tcp_socket socket;
+        detail::TimedSocket timed;
         detail::RefusalClosingSink sink;
         // Waiting for the first byte of its next request: the drain closes it.
         bool idle = false;
@@ -255,13 +374,17 @@ private:
         Connection(boost::corosio::tcp_socket accepted,
                    boost::http::router<boost::http::route_params> router,
                    boost::http::shared_parser_config parser_config,
-                   boost::http::shared_serializer_config serializer_config)
+                   boost::http::shared_serializer_config serializer_config,
+                   std::chrono::milliseconds io_timeout,
+                   std::atomic<std::uint64_t>* io_timeouts,
+                   const std::atomic<bool>* draining)
             : http_worker(std::move(router), std::move(parser_config), std::move(serializer_config)),
               socket(std::move(accepted)),
-              sink(serializer.sink_for(socket), rp.res) {
-            rp.req_body = boost::capy::any_buffer_source(parser.source_for(socket));
+              timed(socket, io_timeout, io_timeouts),
+              sink(serializer.sink_for(timed), rp.res, rp.req, parser, draining) {
+            rp.req_body = boost::capy::any_buffer_source(parser.source_for(timed));
             rp.res_body = boost::capy::any_buffer_sink(&sink);
-            stream = boost::capy::any_read_stream(&socket);
+            stream = boost::capy::any_read_stream(&timed);
         }
     };
 
@@ -269,6 +392,59 @@ private:
     struct WorkerWaiter {
         boost::corosio::timer* timer = nullptr;
         bool granted = false;
+    };
+
+    struct State;
+
+    // One request's place in the worker budget, from before its dispatch to its end.
+    struct WorkerSlot {
+        State* state = nullptr;
+        std::uint64_t token = 0;
+        const boost::http::route_params* route = nullptr;
+        bool holds = false;
+        bool left = false;
+
+        void enter(State& owner, const boost::http::route_params& params) {
+            state = &owner;
+            token = ++owner.next_token;
+            route = &params;
+            owner.slots.emplace(token, this);
+            owner.tokens.insert_or_assign(route, token);
+        }
+        void hold() {
+            holds = true;
+            state->active_requests.fetch_add(1);
+            state->gauges();
+        }
+        void leave() {
+            if (!holds) {
+                return;
+            }
+            holds = false;
+            left = true;
+            state->active_requests.fetch_sub(1);
+            state->long_requests.fetch_add(1);
+            state->release_worker();
+            state->gauges();
+        }
+        ~WorkerSlot() {
+            if (state == nullptr) {
+                return;
+            }
+            state->slots.erase(token);
+            const auto found = state->tokens.find(route);
+            if (found != state->tokens.end() && found->second == token) {
+                state->tokens.erase(found);
+            }
+            if (holds) {
+                state->active_requests.fetch_sub(1);
+                state->release_worker();
+            }
+            if (left) {
+                state->long_requests.fetch_sub(1);
+            }
+            state->gauges();
+        }
     };
 
     struct State {
@@ -301,6 +477,12 @@ private:
         std::uint64_t next_connection = 0;
         std::size_t free_workers;
         std::deque<WorkerWaiter*> waiters;
+        std::map<std::uint64_t, WorkerSlot*> slots;
+        std::map<const boost::http::route_params*, std::uint64_t> tokens;
+        std::uint64_t next_token = 0;
+        // Refused connections being closed lingering (at most `lingering_bound` at once).
+        std::set<boost::corosio::tcp_socket*> lingering;
+        static constexpr std::size_t lingering_bound = 64;
 
         std::atomic<bool> running{false};
         std::atomic<bool> draining{false};
@@ -309,10 +491,15 @@ private:
         std::atomic<std::size_t> connection_count{0};
         std::atomic<std::size_t> active_requests{0};
         std::atomic<std::size_t> waiting_requests{0};
+        std::atomic<std::size_t> long_requests{0};
         std::atomic<std::uint64_t> refused_connections{0};
         std::atomic<std::uint64_t> idle_timeouts{0};
         std::atomic<std::uint64_t> header_timeouts{0};
+        std::atomic<std::uint64_t> io_timeouts{0};
         std::atomic<std::uint64_t> busy_refusals{0};
+        std::atomic<std::uint64_t> bad_requests{0};
+        std::atomic<std::uint64_t> unread_bodies{0};
+        std::atomic<std::uint64_t> gone_before_dispatch{0};
 
         void gauges() {
             if (metrics == nullptr) {
@@ -321,6 +508,7 @@ private:
             metrics->set_gauge("lake_http_connections", {}, static_cast<double>(connection_count.load()));
             metrics->set_gauge("lake_http_requests_active", {}, static_cast<double>(active_requests.load()));
             metrics->set_gauge("lake_http_requests_waiting", {}, static_cast<double>(waiting_requests.load()));
+            metrics->set_gauge("lake_http_requests_long", {}, static_cast<double>(long_requests.load()));
         }
 
         void count(const char* name, const char* reason) {
@@ -329,12 +517,14 @@ private:
             }
         }
 
+        enum class Grant { at_once, after_wait, refused };
+
         // A worker for one request: at once when one is free, otherwise the first released within
-        // limits.worker_wait. False when the wait ran out or the server is stopping.
-        boost::capy::task<bool> acquire_worker() {
+        // limits.worker_wait.
+        boost::capy::task<Grant> acquire_worker() {
             if (free_workers > 0 && waiters.empty()) {
                 --free_workers;
-                co_return true;
+                co_return Grant::at_once;
             }
             boost::corosio::timer timer(io_context);
             WorkerWaiter waiter{&timer, false};
@@ -348,11 +538,12 @@ private:
                 ~Leave() {
                     std::erase(state.waiters, &waiter);
                     state.waiting_requests.fetch_sub(1);
+                    state.gauges();
                 }
             } leave{*this, waiter};
             static_cast<void>(co_await timer.wait());
             // Granted wins over a timer that fired just before release_worker() reached it.
-            co_return waiter.granted;
+            co_return waiter.granted ? Grant::after_wait : Grant::refused;
         }
 
         void release_worker() {
@@ -367,18 +558,14 @@ private:
         }
     };
 
-    struct WorkerSlot {
-        State* state = nullptr;
-        ~WorkerSlot() {
-            if (state != nullptr) {
-                state->active_requests.fetch_sub(1);
-                state->release_worker();
-                state->gauges();
-            }
-        }
-    };
+    enum class HeaderRead { ok, closed, idle_timeout, header_timeout, too_large, bad, failed };
 
-    enum class HeaderRead { ok, closed, idle_timeout, header_timeout, failed };
+    static bool header_too_large(const boost::system::error_code& error) {
+        return error == boost::http::error::headers_limit ||
+               error == boost::http::error::field_size_limit ||
+               error == boost::http::error::fields_limit ||
+               error == boost::http::error::start_line_limit;
+    }
 
     // The parser's read_header with deadlines: `idle_timeout` for the first byte of a later
     // request on a kept-alive connection, then `header_timeout` for the rest of the header; a
@@ -394,8 +581,10 @@ private:
                 co_return HeaderRead::ok;
             }
             if (parse_error != boost::http::condition::need_more_input) {
-                co_return parse_error == boost::http::error::end_of_stream ? HeaderRead::closed
-                                                                           : HeaderRead::failed;
+                if (parse_error == boost::http::error::end_of_stream) {
+                    co_return HeaderRead::closed;
+                }
+                co_return header_too_large(parse_error) ? HeaderRead::too_large : HeaderRead::bad;
             }
             const bool waiting_for_request = !first && !received;
             if (waiting_for_request && state.draining.load()) {
@@ -433,25 +622,117 @@ private:
         }
     }
 
-    // A transport-level refusal, bounded even for a peer that does not read.
-    static boost::capy::task<void> refuse(boost::corosio::tcp_socket& socket,
-                                          std::string_view message,
-                                          std::chrono::milliseconds bound) {
-        const std::string body =
-            std::string(R"({"ok":false,"error":{"code":"busy","message":")") + std::string(message) +
-            "\"}}";
-        const std::string response =
-            "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n"
-            "Content-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\n"
-            "Retry-After: 1\r\nContent-Length: " +
-            std::to_string(body.size()) + "\r\n\r\n" + body;
+    // A response written before any route, bounded even for a peer that does not read. A HEAD
+    // request gets the header alone.
+    static boost::capy::task<void> answer_raw(boost::corosio::tcp_socket& socket,
+                                              std::string_view status_line,
+                                              std::string_view code,
+                                              std::string_view message,
+                                              bool head,
+                                              std::chrono::milliseconds bound) {
+        const std::string body = std::string(R"({"ok":false,"error":{"code":")") +
+                                 std::string(code) + R"(","message":")" + std::string(message) +
+                                 "\"}}";
+        std::string response = "HTTP/1.1 " + std::string(status_line) +
+                               "\r\nConnection: close\r\n"
+                               "Content-Type: application/json; charset=utf-8\r\n"
+                               "Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\n";
+        if (status_line.starts_with("503")) {
+            response += "Retry-After: 1\r\n";
+        }
+        response += "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n";
+        if (!head) {
+            response += body;
+        }
         [[maybe_unused]] auto sent = co_await boost::capy::timeout(
             boost::capy::write(socket, boost::capy::const_buffer(response.data(), response.size())),
             bound);
     }
 
-    // beast2's http_worker::do_http_session with deadlines on the header and a worker only for
-    // the dispatch.
+    // Close without losing the last answer: stop sending, then read and discard what the client
+    // still sends (at most 64 KiB, at most a second), so the close is not a reset that discards a
+    // response the client has not read yet.
+    static boost::capy::task<void> linger_close(boost::corosio::tcp_socket& socket) {
+        using clock = std::chrono::steady_clock;
+        if (socket.is_open()) {
+            try {
+                socket.shutdown(boost::corosio::tcp_socket::shutdown_send);
+            } catch (const std::exception&) {
+            }
+            std::array<char, 4096> scratch{};
+            std::size_t discarded = 0;
+            const auto deadline = clock::now() + std::chrono::seconds(1);
+            while (discarded < 64U * 1024U && socket.is_open()) {
+                const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - clock::now());
+                if (left <= std::chrono::milliseconds::zero()) {
+                    break;
+                }
+                auto [error, read] = co_await boost::capy::timeout(
+                    socket.read_some(boost::capy::mutable_buffer(scratch.data(), scratch.size())), left);
+                if (error) {
+                    break;
+                }
+                discarded += read;
+            }
+        }
+        socket.close();
+    }
+
+    // Reads and discards the rest of a request body of at most discard_limit bytes, within a
+    // second; true when the request is then complete.
+    static boost::capy::task<bool> discard_body(Connection& connection) {
+        if (!connection.sink.unread_body_discardable()) {
+            co_return false;
+        }
+        using clock = std::chrono::steady_clock;
+        const auto deadline = clock::now() + std::chrono::seconds(1);
+        std::array<char, 4096> scratch{};
+        while (!connection.parser.is_complete()) {
+            const auto left = std::chrono::ceil<std::chrono::milliseconds>(deadline - clock::now());
+            if (left <= std::chrono::milliseconds::zero()) {
+                co_return false;
+            }
+            auto [error, read] = co_await boost::capy::timeout(
+                connection.parser.read(connection.socket,
+                                       boost::capy::mutable_buffer(scratch.data(), scratch.size())),
+                left);
+            if (error && error != boost::capy::cond::eof) {
+                co_return false;
+            }
+            if (error == boost::capy::cond::eof && !connection.parser.is_complete()) {
+                co_return false;
+            }
+        }
+        co_return true;
+    }
+
+    // A client that closed (or reset) its connection while its request waited: nothing to answer.
+    static bool client_gone(boost::corosio::tcp_socket& socket) {
+        char byte = 0;
+        const auto peeked = ::recv(socket.native_handle(), &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (peeked == 0) {
+            return true;
+        }
+        return peeked < 0 && (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN);
+    }
+
+    static bool expects_continue(const boost::http::route_params& rp) {
+        std::string expect(rp.req.value_or(boost::http::field::expect, ""));
+        std::ranges::transform(expect, expect.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return expect == "100-continue";
+    }
+
+    static void report_refusal(State& state, const boost::http::route_params& rp, unsigned status,
+                        std::string_view reason) {
+        if (state.limits.refused) {
+            state.limits.refused(rp.req.method_text(), status, reason);
+        }
+    }
+
+    // beast2's http_worker::do_http_session with deadlines on the header, a worker only while a
+    // route runs, and a close whenever the connection cannot carry another request.
     static boost::capy::task<void> session(State& state, Connection& connection) {
         auto& rp = connection.rp;
         for (bool first = true;; first = false) {
@@ -459,47 +740,118 @@ private:
             connection.parser.start();
             rp.session_data.clear();
             const HeaderRead header = co_await read_header(state, connection, first);
-            if (header == HeaderRead::idle_timeout) {
+            switch (header) {
+            case HeaderRead::ok:
+                break;
+            case HeaderRead::idle_timeout:
                 state.idle_timeouts.fetch_add(1);
                 state.count("lake_http_connections_closed_total", "idle_timeout");
-            } else if (header == HeaderRead::header_timeout) {
+                co_return;
+            case HeaderRead::header_timeout:
                 state.header_timeouts.fetch_add(1);
                 state.count("lake_http_connections_closed_total", "header_timeout");
+                co_return;
+            case HeaderRead::too_large:
+            case HeaderRead::bad: {
+                const bool large = header == HeaderRead::too_large;
+                state.bad_requests.fetch_add(1);
+                state.count("lake_http_refusals_total", large ? "header_too_large" : "bad_request");
+                if (state.limits.refused) {
+                    state.limits.refused("", large ? 431U : 400U, large ? "header_too_large" : "bad_request");
+                }
+                co_await answer_raw(connection.socket,
+                                    large ? "431 Request Header Fields Too Large" : "400 Bad Request",
+                                    large ? "header_too_large" : "invalid_input",
+                                    large ? "the request header exceeds 8 KiB"
+                                          : "the request could not be parsed",
+                                    false,
+                                    std::chrono::seconds(1));
+                co_return;
             }
-            if (header != HeaderRead::ok) {
+            case HeaderRead::closed:
+            case HeaderRead::failed:
                 co_return;
             }
             rp.req = connection.parser.get();
             rp.route_data.clear();
             rp.res.set_start_line(boost::http::status::ok, rp.req.version());
-            rp.res.set_keep_alive(rp.req.keep_alive());
+            rp.res.set_keep_alive(rp.req.keep_alive() && !state.draining.load());
             connection.serializer.reset();
             connection.sink.begin_response();
+            const bool head = rp.req.method() == boost::http::method::head;
             auto url = boost::urls::parse_uri_reference(rp.req.target());
             if (url.has_error()) {
+                state.bad_requests.fetch_add(1);
+                state.count("lake_http_refusals_total", "bad_request");
+                report_refusal(state, rp, 400, "bad_url");
+                co_await answer_raw(connection.socket, "400 Bad Request", "invalid_input",
+                                    "the request target is not a valid URL", head,
+                                    std::chrono::seconds(1));
                 co_return;
             }
             rp.url = url.value();
+            const std::string path(rp.url.path());
+            bool waited = false;
+            // The store-root hand-off: wait for it before taking a worker, so a rollout's
+            // requests do not use up the workers and are refused (lake#479, lake#534).
+            if (state.limits.admitted && !state.limits.admitted(path)) {
+                waited = true;
+                boost::corosio::timer timer(state.io_context);
+                auto pause = std::chrono::milliseconds(5);
+                const auto deadline = std::chrono::steady_clock::now() + state.limits.admission_wait;
+                while (state.running.load() && !state.limits.admitted(path) &&
+                       std::chrono::steady_clock::now() < deadline) {
+                    timer.expires_after(pause);
+                    static_cast<void>(co_await timer.wait());
+                    pause = std::min(pause * 2, std::chrono::milliseconds(100));
+                }
+                if (!state.running.load()) {
+                    co_return;
+                }
+            }
             WorkerSlot slot;
-            const bool exempt =
-                state.limits.needs_no_worker && state.limits.needs_no_worker(rp.url.path());
+            slot.enter(state, rp);
+            const bool exempt = state.limits.needs_no_worker && state.limits.needs_no_worker(path);
             if (!exempt) {
-                if (!co_await state.acquire_worker()) {
+                const auto grant = co_await state.acquire_worker();
+                if (grant == State::Grant::refused) {
                     if (state.running.load()) {
                         state.busy_refusals.fetch_add(1);
                         state.count("lake_http_refusals_total", "workers_busy");
-                        co_await refuse(connection.socket,
-                                        "every request worker stayed busy; retry",
-                                        std::chrono::seconds(1));
+                        report_refusal(state, rp, 503, "workers_busy");
+                        co_await answer_raw(connection.socket, "503 Service Unavailable", "busy",
+                                            "every request worker stayed busy; retry", head,
+                                            std::chrono::seconds(1));
                     }
                     co_return;
                 }
-                slot.state = &state;
-                state.active_requests.fetch_add(1);
-                state.gauges();
+                slot.hold();
+                waited = waited || grant == State::Grant::after_wait;
+            }
+            if (waited && client_gone(connection.socket)) {
+                state.gone_before_dispatch.fetch_add(1);
+                co_return;
+            }
+            if (expects_continue(rp) && !connection.parser.is_complete()) {
+                static constexpr std::string_view proceed = "HTTP/1.1 100 Continue\r\n\r\n";
+                auto [sent, written] = co_await boost::capy::write(
+                    connection.timed, boost::capy::const_buffer(proceed.data(), proceed.size()));
+                if (sent) {
+                    co_return;
+                }
             }
             auto routed = co_await connection.fr.dispatch(rp.req.method(), rp.url, rp);
-            if (routed.failed() || !rp.res.keep_alive()) {
+            if (routed.failed()) {
+                co_return;
+            }
+            // A body the route did not read would be parsed as the next request: a small one is
+            // read and discarded, anything else closes the connection.
+            if (!connection.parser.is_complete() &&
+                (!rp.res.keep_alive() || !co_await discard_body(connection))) {
+                state.unread_bodies.fetch_add(1);
+                co_return;
+            }
+            if (!rp.res.keep_alive()) {
                 co_return;
             }
         }
@@ -515,11 +867,27 @@ private:
                 std::fprintf(stderr, "lake: HTTP session failed: %s\n", error.what());
             }
         }
-        connection->socket.close();
+        co_await linger_close(connection->socket);
         state->connections.erase(id);
         state->connection_count.store(state->connections.size());
         state->gauges();
         state->live.fetch_sub(1);
+    }
+
+    static boost::capy::task<void> refuse_connection(std::shared_ptr<State> state,
+                                                     boost::corosio::tcp_socket socket) {
+        state->lingering.insert(&socket);
+        co_await answer_raw(socket, "503 Service Unavailable", "busy",
+                            "the HTTP connection limit is reached; retry", false,
+                            std::chrono::milliseconds(50));
+        co_await linger_close(socket);
+        state->lingering.erase(&socket);
+        state->live.fetch_sub(1);
+    }
+
+    static bool out_of_descriptors(const std::error_code& error) {
+        return error == std::errc::too_many_files_open ||
+               error == std::errc::too_many_files_open_in_system;
     }
 
     static boost::capy::task<void> accept_connections(std::shared_ptr<State> state) {
@@ -537,7 +905,10 @@ private:
                     reported_error = true;
                 }
                 // Descriptor exhaustion must not become a loop that keeps sessions from closing.
-                [[maybe_unused]] auto paused = co_await boost::capy::delay(std::chrono::milliseconds(10));
+                if (out_of_descriptors(error)) {
+                    [[maybe_unused]] auto paused =
+                        co_await boost::capy::delay(std::chrono::milliseconds(10));
+                }
                 continue;
             }
             reported_error = false;
@@ -550,14 +921,26 @@ private:
                                  state->limits.max_connections);
                     reported_capacity = true;
                 }
-                co_await refuse(accepted, "the HTTP connection limit is reached; retry",
-                                std::chrono::milliseconds(50));
-                accepted.close();
+                if (state->lingering.size() < State::lingering_bound) {
+                    state->live.fetch_add(1);
+                    boost::capy::run_async(state->io_context.get_executor())(
+                        refuse_connection(state, std::move(accepted)));
+                } else {
+                    co_await answer_raw(accepted, "503 Service Unavailable", "busy",
+                                        "the HTTP connection limit is reached; retry", false,
+                                        std::chrono::milliseconds(50));
+                    accepted.close();
+                }
                 continue;
             }
             reported_capacity = false;
-            auto connection = std::make_shared<Connection>(
-                std::move(accepted), state->router, state->parser_config, state->serializer_config);
+            auto connection = std::make_shared<Connection>(std::move(accepted),
+                                                           state->router,
+                                                           state->parser_config,
+                                                           state->serializer_config,
+                                                           state->limits.io_timeout,
+                                                           &state->io_timeouts,
+                                                           &state->draining);
             const auto id = state->next_connection++;
             state->connections.emplace(id, connection);
             state->connection_count.store(state->connections.size());
@@ -582,6 +965,9 @@ private:
         state->acceptor.close();
         for (const auto& [id, connection] : state->connections) {
             connection->socket.close();
+        }
+        for (boost::corosio::tcp_socket* socket : state->lingering) {
+            socket->close();
         }
         // Refused, not granted: release_worker() hands out nothing once running is false.
         for (WorkerWaiter* waiter : state->waiters) {

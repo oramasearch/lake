@@ -116,7 +116,7 @@ as a named exception: one instance-wide namespace with public reads.
   limit a pull is OCI `503 UNAVAILABLE` with `Retry-After` and `Connection: close` before any
   header is sent, so a refused client does not keep its connection; since
   [lake#534](../serving/http.md#connections-and-workers) every 503 and 429 closes its connection,
-  and an idle connection holds no worker. Each window takes the lane only for
+  an idle connection holds no worker, and a pull gives its request worker back once it streams. Each window takes the lane only for
   its one read; a read that fails part way, or a client that takes no bytes for
   `registry_stream_idle_timeout` (60 s), ends the connection and frees the slot. HEAD checks that the store holds the object. A store that lost an object its record
   names is `500` to GET and HEAD, never answered from the instance registry; a push of the blob

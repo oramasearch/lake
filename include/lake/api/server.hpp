@@ -56,8 +56,12 @@ struct ServerOptions {
     // (LAKE_HTTP_MAX_CONNECTIONS).
     std::size_t max_connections = 4096;
     // A keep-alive connection waiting this long for its next request is closed
-    // (LAKE_HTTP_IDLE_TIMEOUT_SECONDS).
-    std::chrono::milliseconds idle_timeout{std::chrono::seconds(30)};
+    // (LAKE_HTTP_IDLE_TIMEOUT_SECONDS). It must outlast the idle timeout of a proxy's pooled
+    // upstream connections (nginx: 60 s).
+    std::chrono::milliseconds idle_timeout{std::chrono::seconds(75)};
+    // One read of a request body or one write of a response that makes no progress for this long
+    // ends the connection (LAKE_HTTP_IO_TIMEOUT_SECONDS).
+    std::chrono::milliseconds io_timeout{std::chrono::seconds(60)};
     // A request header must arrive whole within this of its first byte, or of the accept for a
     // connection's first request; otherwise the connection is closed
     // (LAKE_HTTP_HEADER_TIMEOUT_SECONDS).
@@ -200,6 +204,15 @@ inline std::string repository_external_origin(const ServerOptions& options) {
     }
     return {};
 }
+
+// lake#534: raises the soft open-file limit to the hard limit and returns it, with the
+// connections that fit in it: `wanted`, at most the limit less a reserve of 512 descriptors (half
+// the limit when that is smaller) for PostgreSQL, store files and outbound connections.
+struct OpenFileBudget {
+    std::uint64_t open_files = 0;
+    std::size_t max_connections = 0;
+};
+OpenFileBudget fit_connections_to_open_files(std::size_t wanted);
 
 class ApiServer {
 public:

@@ -21,11 +21,13 @@ The exported metric families are:
 - `lake_http_requests_total{method,route,status}`
 - `lake_http_request_duration_seconds{method,route,status}`
 - the gauges `lake_http_connections` (open connections), `lake_http_requests_active` (requests
-  holding a worker) and `lake_http_requests_waiting` (requests waiting for one), and the counters
-  `lake_http_refusals_total{reason}` (`connection_limit`, `workers_busy`) and
-  `lake_http_connections_closed_total{reason}` (`idle_timeout`, `header_timeout`): the connection
-  limits ([http](http.md#connections-and-workers), lake#534). A refusal here has no request log
-  line; it is answered before any route
+  holding a worker), `lake_http_requests_waiting` (requests waiting for one) and
+  `lake_http_requests_long` (long polls and pulls that left their worker), and the counters
+  `lake_http_refusals_total{reason}` (`connection_limit`, `workers_busy`, `bad_request`,
+  `header_too_large`) and `lake_http_connections_closed_total{reason}` (`idle_timeout`,
+  `header_timeout`): the connection limits ([http](http.md#connections-and-workers), lake#534). A
+  request refused before any route (`workers_busy`, `bad_url`, `bad_request`, `header_too_large`)
+  is also logged and counted in `lake_http_requests_total` with that reason as its route
 - `lake_store_calls_total{store,operation,result}`
 - `lake_store_call_duration_seconds{store,operation,result}`
 - `lake_metering_records_written_total{collection}`, `lake_metering_flush_errors_total`,
