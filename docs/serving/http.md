@@ -96,9 +96,13 @@ counts in the drain's in-flight count, so stopping lake answers it rather than c
 (`Capability::long_poll`: `receive_agent_tasks`, `receive_agent_events`, `receive_build_events`,
 `receive_app_events`, `browse_stream` and `tail_experiment_events`, which the UI's pollers call)
 gives its worker back before it parks when it is called with `wait_ms` > 0: `Registry::call_async`
-calls `ApiContext::leave_worker`. A caller's `wait_ms` alone never decides it; every other
+calls `ApiContext::leave_worker`; `tail_experiment_events`, which waits 10 s when no `wait_ms`
+is sent (`Capability::default_wait_ms`), leaves it for that wait too. A caller's `wait_ms` alone
+never decides it; every other
 capability keeps its worker whatever its input, and repository writes refuse fields they do not
-read. An image pull gives its worker back once it starts streaming; its own stream slots bound it
+read (the Hub preupload adapter passes `prepare_repository_upload` only `files`, `id` and
+`revision`, never the client's own fields such as `huggingface_hub`'s `gitIgnore`). An image pull
+gives its worker back once it starts streaming; its own stream slots bound it
 too (8 per workspace, 24 per process, [registry](../api/registry.md)). Such requests count in
 `lake_http_requests_long` and `lake_http_long_requests_total`, and are capped (the table above),
 so parked agents and open UI tabs never fill the short-request workers. Repository-store work runs

@@ -1034,9 +1034,12 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
         // A long poll (`wait_ms`) parks on the bus: it gives its HTTP worker back so parked
         // callers never fill the short-request workers (lake#534). Only a capability declared a
         // long poll does; a caller's `wait_ms` alone never decides it.
-        if (capability->long_poll && context.leave_worker && call_input.is_object() &&
-            call_input.contains("wait_ms") && call_input.at("wait_ms").is_number() &&
-            call_input.at("wait_ms").get<double>() > 0 &&
+        const double wait_ms =
+            call_input.is_object() && call_input.contains("wait_ms") &&
+                    call_input.at("wait_ms").is_number()
+                ? call_input.at("wait_ms").get<double>()
+                : static_cast<double>(capability->default_wait_ms);
+        if (capability->long_poll && context.leave_worker && wait_ms > 0 &&
             !context.leave_worker(context.acting_identity)) {
             co_return finish_call(capability.get(), name, call_input,
                                   ApiResult::failure("rate_limited",

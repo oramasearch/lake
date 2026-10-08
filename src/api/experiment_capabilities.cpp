@@ -375,6 +375,7 @@ void add(Registry& registry, std::string name, std::string upstream, json proper
         .output_schema = std::move(output),
         .kind = read ? CapabilityKind::Read : CapabilityKind::Action,
         .long_poll = name == "tail_experiment_events",
+        .default_wait_ms = name == "tail_experiment_events" ? 10000 : 0,
         .post_alias = read,
         .object = "customer",
         .action = std::move(permission),

@@ -827,6 +827,28 @@ TEST(HttpConnections, ALongPollCapabilityGivesItsWorkerBack) {
     ASSERT_TRUE(liquid::runtime::block_on(registry.call_async("poll", {{"wait_ms", 0}}, context))->ok);
     ASSERT_TRUE(liquid::runtime::block_on(registry.call_async("poll", nlohmann::json::object(), context))->ok);
     EXPECT_EQ(left, 1);
+    // A long poll with a default wait leaves its worker when the caller sends none.
+    ASSERT_TRUE(registry.add(lake::api::Capability{
+        .name = "poll_by_default",
+        .title = "Poll by default",
+        .description = "Long-polls 10 s unless told otherwise.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"wait_ms", {{"type", "integer"}, {"minimum", 0}}}}}},
+        .output_schema = {{"type", "object"}},
+        .kind = lake::api::CapabilityKind::Read,
+        .long_poll = true,
+        .default_wait_ms = 10000,
+        .requires_auth = false,
+        .async_handler = [](const nlohmann::json&, lake::api::ApiContext&)
+            -> liquid::runtime::task<lake::api::ApiResult> {
+            co_return lake::api::ApiResult::success(nlohmann::json::object());
+        }}));
+    ASSERT_TRUE(liquid::runtime::block_on(
+        registry.call_async("poll_by_default", nlohmann::json::object(), context))->ok);
+    EXPECT_EQ(left, 2);
+    ASSERT_TRUE(liquid::runtime::block_on(
+        registry.call_async("poll_by_default", {{"wait_ms", 0}}, context))->ok);
+    EXPECT_EQ(left, 2);
     // A full cap refuses the long poll with 429 before it parks.
     context.leave_worker = [](const std::string&) { return false; };
     const auto refused = liquid::runtime::block_on(registry.call_async("poll", {{"wait_ms", 1}}, context));
@@ -1154,6 +1176,8 @@ TEST(HttpConnections, TheLongPollsAreDeclaredAndWritesAreStrict) {
         long_polls += capability->long_poll ? 1 : 0;
     }
     EXPECT_EQ(long_polls, 6U);
+    // tail_experiment_events waits 10 s when no wait_ms is sent, and leaves its worker for it.
+    EXPECT_EQ(registry.find("tail_experiment_events")->default_wait_ms, 10000);
     const auto write = registry.find("commit_repository_files");
     ASSERT_TRUE(write);
     EXPECT_EQ(write->input_schema.value("additionalProperties", true), false);

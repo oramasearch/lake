@@ -18454,10 +18454,15 @@ struct ApiServer::Impl {
                                          "application/json; charset=utf-8",
                                          "no-store");
         }
-        request["id"] = repository->id;
-        request["revision"] = route_value(route, "revision");
+        // Only what the capability reads: huggingface_hub adds fields of its own (`gitIgnore` when
+        // a commit adds a .gitignore, 0.33.4 to 1.24.0), and the repository write schemas are
+        // strict (lake#534).
+        nlohmann::json input{{"id", repository->id}, {"revision", route_value(route, "revision")}};
+        if (request.contains("files")) {
+            input["files"] = request.at("files");
+        }
         ApiContext context = context_for(route);
-        const ApiResult result = registry.call("prepare_repository_upload", request, context);
+        const ApiResult result = registry.call("prepare_repository_upload", input, context);
         co_return co_await send_hub_result(route, result);
     }
 

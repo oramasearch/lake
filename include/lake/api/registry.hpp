@@ -387,6 +387,9 @@ struct Capability {
     // A long poll: called with `wait_ms` > 0 it parks on a bus, so it gives its HTTP request
     // worker back first (lake#534). Declared here, never inferred from a caller's input.
     bool long_poll = false;
+    // The wait a long poll applies when its caller sends no `wait_ms` (tail_experiment_events
+    // waits 10 s by default): it gives its worker back for that wait too.
+    std::int64_t default_wait_ms = 0;
     // Read capabilities may also accept a JSON body without becoming actions.
     bool post_alias = false;
     CapabilityTransport transport = CapabilityTransport::Json;

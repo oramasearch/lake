@@ -5322,6 +5322,15 @@ TEST(HuggingFaceHttp, CommonModelAndDatasetCallsUseRepositoryCapabilities) {
     EXPECT_NE(preupload.find(" 200 "), std::string::npos) << preupload;
     EXPECT_EQ(response_json(preupload)["files"][0]["uploadMode"], "regular");
 
+    // huggingface_hub sends `gitIgnore` whenever a commit adds a .gitignore; the strict write
+    // schema never sees it (lake#534).
+    const std::string ignored = http_request(
+        server.port(), "POST", "/api/models/ada/fixture-model/preupload/main",
+        R"({"files":[{"path":".gitignore","size":6,"sample":"Ki5sb2cK"}],"gitIgnore":"*.log\n"})",
+        "application/json", {}, authorization);
+    EXPECT_NE(ignored.find(" 200 "), std::string::npos) << ignored;
+    EXPECT_EQ(response_json(ignored)["files"][0]["path"], ".gitignore");
+
     const std::string config = "{\"hidden\":8}";
     const std::string commit_body = R"({"key":"header","value":{"summary":"initial model"}})"
                                     "\n" +
