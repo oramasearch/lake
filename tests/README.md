@@ -500,7 +500,8 @@ rotation finished after a workspace was not ready, leases, denial). `test_worksp
 `SecretsLiveInTheirMountsWorkspace` covers two spaces with two workspaces each, sealed records only
 at their own endpoint and none in PostgreSQL, missing, malformed, unknown and foreign ids, another
 space's person, a record copied elsewhere, a workspace not ready, KEK rotation across workspaces and
-workspace deletion, and no retired secrets table in PostgreSQL. The identity exit scenario and the Postgres secrets round trip give their mount a Ready workspace.
+workspace deletion, and no retired secrets table in PostgreSQL; it looks for its plaintext by a
+long marker, since sealed base64url bytes can spell a short one (lake#547). The identity exit scenario and the Postgres secrets round trip give their mount a Ready workspace.
 Dynamic leases (lake#362): `test_secrets.cpp` covers a lease's sealed record and content-free
 route, renewal and revocation, a renewal racing a revocation or an expiry (the record fixture's
 `before_put` lands the other writer's change between the read and the conditional write), the
