@@ -21,7 +21,7 @@ request and every push to `main` (lake#547). It is one job, `ci`, on `ubuntu-24.
 6. runs every ctest test with `LAKE_TEST_DB_URI` and `LAKE_TEST_ZETTA_BINARY` set:
 
 ```sh
-ctest --test-dir build --output-on-failure --timeout 600 --parallel 4 --output-junit ctest-results.xml
+ctest --test-dir build --output-on-failure --timeout 300 --parallel 2 --output-junit ctest-results.xml
 ```
 
 That includes the **real-Zetta tests** (`WorkspaceStoreZetta.*`, which start the Zetta binary) and
@@ -30,8 +30,13 @@ the totals (passed, failed, skipped, real-Zetta tests run, token gates) to the r
 the job if any `WorkspaceStoreZetta` test skipped or the token gates did not pass: without a Zetta
 binary those tests skip rather than fail, so a green run must prove they ran.
 
-A hung test fails by name after ten minutes (`--timeout 600`). A newer push to a pull request
-cancels its older run; runs on `main` always finish.
+A hung test fails by name after five minutes (`--timeout 300`), far inside the job's 300-minute
+limit, so the job reports it instead of being killed. Tests run two at a time: the runner has two
+CPUs and 7 GiB of memory. The summary step runs even when tests fail; if ctest did not finish it
+says so and fails. A `Diagnostics` step prints the memory samples taken every five seconds during
+the tests and any out-of-memory kill, and the `ctest-log` artifact keeps `LastTest.log` and the
+JUnit file for 14 days. A newer push to a pull request cancels its older run; runs on `main` always
+finish.
 
 ### The Zetta binary
 
@@ -52,6 +57,12 @@ recompiles only what changed. No registry credential is involved: pulling the pr
 | OpenSSL `/opt/openssl` | version and checksum | the OpenSSL source build |
 | `build/_deps` | hash of `CMakeLists.txt` | the Boost and GoogleTest downloads |
 | lake ccache | branch and run, falling back to the branch's newest, then `main`'s | recompiling unchanged lake sources |
+
+Each cache is restored and saved by separate `actions/cache/restore` and `actions/cache/save`
+steps, saved as soon as what it holds is built: `actions/cache` alone saves only when the whole job
+succeeds, so a run with a failing test would rebuild Zetta every time. ccache runs without
+`CCACHE_BASEDIR`, which would rewrite `__FILE__` to a relative path and break the tests that find
+their fixtures next to their source file (`GitHubImport.*`, the drive scenarios).
 
 A cache written by a pull request is visible only to that pull request; one written on `main` is
 visible to every pull request, so the first run after a pin bump lands on `main` warms it for all.

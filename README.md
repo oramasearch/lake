@@ -116,6 +116,15 @@ Trusted timestamping uses `LAKE_TSA_URL`, optional PEM `LAKE_TSA_TRUST_CERT`, an
 [`docs/api/transparency.md`](docs/api/transparency.md).
 SIGINT/SIGTERM stop it cleanly.
 
+## Continuous integration
+
+Every pull request and every push to `main` runs lake's **full suite on Linux** in the `ci`
+workflow: Ubuntu 24.04, clang-19, a Postgres 16 service, the real-Zetta tests against a Zetta
+server built at the zetta-bridge pin and cached per pin, and the UI token gates. The run summary
+shows the passed, failed and skipped counts, and the job fails if a real-Zetta test skipped. Merge
+only on a green `ci` check; macOS-only testing let lake#545 ship a change that broke every
+connection on Linux. See [`docs/build/ci.md`](docs/build/ci.md).
+
 ## Container image
 
 `Dockerfile` builds the `lake` binary on Ubuntu 24.04 with clang-19 (LLVM apt channel), libstdc++-14

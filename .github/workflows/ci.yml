@@ -39,7 +39,8 @@ jobs:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 3G
       CCACHE_COMPRESS: 'true'
-      CCACHE_BASEDIR: ${{ github.workspace }}
+      # No CCACHE_BASEDIR: it rewrites __FILE__ to a relative path, and tests find their fixtures
+      # next to __FILE__. Every run builds in the same absolute directory, so hits are unaffected.
     services:
       postgres:
         image: postgres:16
@@ -123,9 +124,11 @@ jobs:
 
       # ---- Zetta: the server binary the real-Zetta tests start ---------------------------------
       # Built once per ZETTA_REF and kept in the Actions cache; a hit skips to the lake build.
+      # Caches are restored and saved by separate steps so a run whose tests fail still keeps
+      # what it built (actions/cache saves only when the whole job succeeds).
       - name: Restore the Zetta binary
         id: zetta_cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: _zetta-bin
           key: ${{ runner.os }}-zetta-bin-${{ env.ZETTA_REF }}-clang19-v1
@@ -143,7 +146,7 @@ jobs:
 
       - name: Restore the Zetta compiler cache
         if: steps.zetta_cache.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .ccache-zetta
           key: ${{ runner.os }}-ccache-zetta-${{ env.ZETTA_REF }}
@@ -153,7 +156,6 @@ jobs:
         if: steps.zetta_cache.outputs.cache-hit != 'true'
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache-zetta
-          CCACHE_BASEDIR: ${{ github.workspace }}/_external/zetta
         run: |
           git -C _external/zetta submodule update --init --recursive --depth 1
           cmake -S _external/zetta -B _external/zetta-build -G Ninja \
@@ -171,6 +173,20 @@ jobs:
           ccache --show-stats
           rm -rf _external/zetta-build
 
+      - name: Save the Zetta binary
+        if: steps.zetta_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: _zetta-bin
+          key: ${{ steps.zetta_cache.outputs.cache-primary-key }}
+
+      - name: Save the Zetta compiler cache
+        if: steps.zetta_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache-zetta
+          key: ${{ runner.os }}-ccache-zetta-${{ env.ZETTA_REF }}
+
       - name: Check the Zetta binary
         run: |
           ls -l "$LAKE_TEST_ZETTA_BINARY"
@@ -179,7 +195,7 @@ jobs:
       # ---- Lake --------------------------------------------------------------------------------
       - name: Restore OpenSSL
         id: openssl_cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /opt/openssl
           key: ${{ runner.os }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}
@@ -198,6 +214,13 @@ jobs:
           make -j "$(nproc)"
           make install_sw
 
+      - name: Save OpenSSL
+        if: steps.openssl_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/openssl
+          key: ${{ steps.openssl_cache.outputs.cache-primary-key }}
+
       - name: Use OpenSSL 3.6.3
         run: |
           LD_LIBRARY_PATH=/opt/openssl/lib64 /opt/openssl/bin/openssl version
@@ -205,13 +228,15 @@ jobs:
           echo "OPENSSL_MODULES=/opt/openssl/lib64/ossl-modules" >> "$GITHUB_ENV"
 
       - name: Restore FetchContent dependencies
-        uses: actions/cache@v4
+        id: deps_cache
+        uses: actions/cache/restore@v4
         with:
           path: build/_deps
           key: ${{ runner.os }}-lake-fetchcontent-${{ hashFiles('CMakeLists.txt') }}
 
       - name: Restore the lake compiler cache
-        uses: actions/cache@v4
+        id: lake_ccache
+        uses: actions/cache/restore@v4
         with:
           path: .ccache
           # Every run saves its own key; the newest of this branch, else of main, is restored.
@@ -241,6 +266,20 @@ jobs:
           cmake --build build --parallel
           ccache --show-stats
 
+      - name: Save the lake compiler cache
+        if: always() && steps.lake_ccache.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ${{ steps.lake_ccache.outputs.cache-primary-key }}
+
+      - name: Save FetchContent dependencies
+        if: always() && steps.deps_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/_deps
+          key: ${{ steps.deps_cache.outputs.cache-primary-key }}
+
       - name: Install the Hugging Face client
         run: |
           python3 -m venv .venv-huggingface
@@ -251,20 +290,47 @@ jobs:
         run: psql "$LAKE_TEST_DB_URI" --set ON_ERROR_STOP=1 --file db/schema.sql
 
       - name: Test
+        id: test
         # Every ctest test: the token gates (lake-ui-token-gates) and the real-Zetta tests
-        # (WorkspaceStoreZetta.*) included. A hung test fails by name after ten minutes instead of
-        # holding the job.
-        run: >-
-          ctest --test-dir build --output-on-failure --timeout 600 --parallel 4
-          --output-junit "${{ github.workspace }}/ctest-results.xml"
+        # (WorkspaceStoreZetta.*) included. A hung test fails by name after five minutes instead of
+        # holding the job. A sampler records memory every five seconds for the diagnostics step.
+        run: |
+          ( while true; do
+              echo "$(date -u +%H:%M:%S) $(free -m | awk '/Mem:/ {print "used=" $3 " avail=" $7}') $(df -m --output=avail . | tail -1 | tr -d ' ')MB-disk"
+              ps -eo rss=,comm= --sort=-rss | head -3 | tr '\n' ' '; echo
+              sleep 5
+            done ) > "$RUNNER_TEMP/memory.log" 2>&1 &
+          ctest --test-dir build --output-on-failure --timeout 300 --parallel 2 \
+            --output-junit "${{ github.workspace }}/ctest-results.xml"
+
+      - name: Diagnostics
+        if: always()
+        run: |
+          tail -n 40 "$RUNNER_TEMP/memory.log" || true
+          sudo dmesg | grep -iE "oom|killed process|out of memory" | tail -20 || true
+
+      - name: Keep the test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-log
+          path: |
+            build/Testing/Temporary/LastTest.log
+            ctest-results.xml
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Report the test counts
-        if: always() && hashFiles('ctest-results.xml') != ''
+        if: always() && steps.test.outcome != 'skipped'
         # Writes the counts to the run summary and fails when a test that must run here did not:
         # without a Zetta binary the real-Zetta tests skip instead of failing.
         shell: python3 {0}
         run: |
           import os, sys, xml.etree.ElementTree as ET
+          if not os.path.exists("ctest-results.xml"):
+              print("::error::ctest did not finish, so no test was reported; see the Test step "
+                    "and the ctest-log artifact")
+              sys.exit(1)
           root = ET.parse("ctest-results.xml").getroot()
           passed, failed, skipped = [], [], []
           for case in root.iter("testcase"):
