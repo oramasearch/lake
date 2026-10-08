@@ -12,7 +12,7 @@ request and every push to `main` (lake#547). It is one job, `ci`, on `ubuntu-24.
 
 1. loads one read-only deploy key per private repository (below) and checks out all submodules;
 2. fetches `oramasearch/zetta` at `ZETTA_REF` and `oramasearch/liquid` at `LIQUID_REF`, the
-   commits below (Zetta `149303c`; liquid `7f58aec`, liquid#345);
+   commits the bridges pin (Zetta `149303c`, liquid `93ddcfe`);
 3. installs the Dockerfile toolchain (LLVM 19, CMake 3.31.5, OpenSSL 3.6.3 built from the
    checksum-verified source);
 4. restores, or else builds, the **Zetta server binary** at `ZETTA_REF` (below);
@@ -157,11 +157,11 @@ the client from it and, on a cache miss, builds the Zetta server from the same c
 submodules. The image workflow supplies the same directory as the `zetta_source` named build
 context. Bump `ZETTA_REF` in `ci.yml` and the ref in `image.yml` when the bridge bumps Zetta, and
 `LIQUID_REF` and `image.yml`'s liquid ref when liquid-bridge bumps liquid. Both workflows pin Zetta
-dev `149303c` (zetta#1237), ahead of the bridge pin `5f70b30`, which lake#543 no longer accepts. `ci.yml` pins liquid `7f58aec`, the head of liquid#345,
-which moves liquid's Corosio to `0def6d3`: on the bridge's liquid `8955519` (Corosio `1d56cba`) a
-TCP connect fails on Linux with `Input/output error` when epoll has already reported its open,
-unconnected socket (corosio#10), which failed lake's drive, sync and model-sync tests in CI. Once
-liquid#345 merges, `LIQUID_REF` moves to that merge and `image.yml` follows. Lake does not compile
+dev `149303c` (zetta#1237; lake#543 refuses an older Zetta) and liquid `93ddcfe` (liquid#347), the
+bridge pins on 2026-10-08. Liquid `93ddcfe` moves its Corosio to `0def6d3`: on liquid `8955519`
+(Corosio `1d56cba`) a TCP connect failed on Linux with `Input/output error` when epoll had already
+reported its open, unconnected socket (corosio#10), which failed lake's drive, sync and model-sync
+tests in CI (lake#176). Lake does not compile
 against a liquid older than `df2ae4d` (liquid#322, the store owner lock and `owner_wait` that
 lake#479 uses).
 
