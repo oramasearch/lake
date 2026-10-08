@@ -149,10 +149,12 @@ sign-in results may include a JWT; API-token issuance retains only its derived s
 
 `http_connections.hpp` (lake#534) accepts and serves `http_server.cpp`'s connections: one session
 coroutine per connection up to `LAKE_HTTP_MAX_CONNECTIONS` (503 above it), a request worker only
-while a route runs (taken after any store-root wait, given back by long polls through
-`ApiContext::leave_worker` and by streaming pulls), idle, header and body/response I/O timeouts,
-lingering closes, and a sink that closes every 503 and 429's connection and any whose unread body
-is too large to discard. Like `route_guard.hpp` it names Beast2 and Boost.HTTP types and stays in `src/api/`. See
+while a route runs (taken after any store-root wait, given back by the capabilities declared
+`Capability::long_poll` through `ApiContext::leave_worker` and by streaming pulls, within the
+long-request caps), idle, header and body/response I/O timeouts, a minimum transfer rate while a
+worker is held, lingering closes, and a sink that closes every 503 and 429's connection and any
+whose unread body is too large to discard. `registry.cpp`'s blocking pool refuses (`busy`) past 256
+queued tasks. Like `route_guard.hpp` it names Beast2 and Boost.HTTP types and stays in `src/api/`. See
 [connections and workers](../../docs/serving/http.md#connections-and-workers).
 
 `route_guard.hpp` wraps every route handler registered by `http_server.cpp`: an exception is

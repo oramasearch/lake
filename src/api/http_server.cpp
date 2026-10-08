@@ -8753,8 +8753,9 @@ struct ApiServer::Impl {
         }
         // A capability that long-polls gives its HTTP worker back (lake#534).
         if (server) {
-            ctx.leave_worker = [connections = server.get(), token = server->request_token(route)] {
-                connections->leave_worker(token);
+            ctx.leave_worker = [connections = server.get(), token = server->request_token(route)](
+                                   const std::string& principal) {
+                return connections->leave_worker(token, principal);
             };
         }
         ctx.request_path = std::string(route.url.path());
@@ -17739,9 +17740,12 @@ struct ApiServer::Impl {
             co_return http::route_done;
         }
         // A pull streams for as long as its client reads: it leaves the short-request workers
-        // (lake#534); its own stream slots bound it.
-        if (server) {
-            server->leave_worker(route);
+        // (lake#534); its own stream slots and the long-request caps bound it.
+        if (server && !server->leave_worker(route)) {
+            route.res.set(http::field::retry_after, "1");
+            co_return co_await registry_error(route, http::status::too_many_requests,
+                                              "too many long requests are waiting; retry", true,
+                                              "TOOMANYREQUESTS");
         }
         std::uint64_t sent = 0;
         for (;;) {
@@ -19824,7 +19828,8 @@ struct ApiServer::Impl {
         if (!www_authenticate.empty()) {
             route.res.set(http::field::www_authenticate, www_authenticate);
         }
-        if (status == http::status::service_unavailable) {
+        if (status == http::status::service_unavailable ||
+            status == http::status::too_many_requests) {
             route.res.set(http::field::retry_after, "1");
         }
         // A repository write names its workspace store requests as a page does (lake#527).
@@ -21512,6 +21517,10 @@ bool ApiServer::start() {
         return path == "/healthz" || path == "/readyz";
     };
     limits.io_timeout = impl.options.io_timeout;
+    limits.min_transfer_rate = impl.options.min_transfer_rate;
+    limits.max_long_requests = impl.options.max_long_requests;
+    limits.max_long_requests_per_caller = impl.options.max_long_requests_per_caller;
+    limits.in_flight = &impl.in_flight;
     // A request that waits for the store root (lake#479) waits before it takes a worker, so a
     // rollout's requests are all answered after the hand-off, however many arrive.
     limits.admitted = [&impl](std::string_view path) {

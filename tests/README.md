@@ -166,9 +166,15 @@ their workers, the idle keep-alive, header (slowloris) and body/response I/O tim
 connection cap's 503 and its fit to the open-file limit, 503 and 429 closing their connection, a
 refusal reaching a client still sending its body, unread bodies never parsed as requests, the wait
 for a worker and its refusal, 400, 431 and `100 Continue`, uploads, HEAD and a client's close, a
-4 MiB streamed response beside idle connections, the drain, and an idle connection's memory.
+4 MiB streamed response beside idle connections, the drain, an idle connection's memory, the
+transfer rate against trickled bodies and slow readers, the declared long polls and strict writes,
+the bounded blocking pool, the long-request caps, and the admission, half-close, continue and
+discard cases.
 `StoreOwner.EveryRequestDuringTheHandOffIsAnsweredAfterIt` (`test_shared_store.cpp`) holds forty
-requests through a store-root hand-off on two workers. It raises the process's open-file soft limit for its sockets. See
+requests through a store-root hand-off on two workers, and
+`StoppingAWaitingSuccessorAnswersItsWaitingRequests` answers the ones still waiting at a stop.
+`HttpServer/HttpResponseIsolation.ALongPollOverRestGivesItsWorkerBack` and
+`RegistryStore.AStreamingPullGivesItsWorkerBack` cover the REST long poll and the pull. It raises the process's open-file soft limit for its sockets. See
 [`../docs/serving/http.md`](../docs/serving/http.md#connections-and-workers).
 
 Request telemetry (decision 54 S9, lake#384, [`../docs/serving/telemetry.md`](../docs/serving/telemetry.md)):

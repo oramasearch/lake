@@ -1194,6 +1194,7 @@ void register_web_app_capabilities(Registry& registry) {
                         {"wait_ms", {{"type", "integer"}, {"minimum", 0}, {"maximum", 30000}}}}),
                    .output_schema = {{"type", "object"}},
                    .kind = CapabilityKind::Read,
+                   .long_poll = true,
                    .object = "customer",
                    .action = "read",
                    .resolve_object = customer_object,

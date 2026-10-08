@@ -941,6 +941,50 @@ TEST(StoreOwner, EveryRequestDuringTheHandOffIsAnsweredAfterIt) {
     second.stop();
 }
 
+// lake#534: a request waiting for the store root counts as in flight, so stopping the successor
+// before the hand-off answers it (503) instead of closing its connection unanswered.
+TEST(StoreOwner, StoppingAWaitingSuccessorAnswersItsWaitingRequests) {
+    const auto root = lake::test::fixture_path("store-owner-stop-waiting");
+    lake::api::ServerOptions options;
+    options.port = 0;
+    options.store_root = root.string();
+    options.admin_token = admin_token;
+    options.store = std::make_shared<lake::control::InMemoryStore>();
+    lake::api::ApiServer first(options);
+    ASSERT_TRUE(first.start()) << first.reason();
+    const auto open_deadline = std::chrono::steady_clock::now() + 10s;
+    while (!first.store_root_open() && std::chrono::steady_clock::now() < open_deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    ASSERT_TRUE(first.store_root_open());
+    lake::api::ApiServer second(options);
+    ASSERT_TRUE(second.start()) << second.reason();
+    const auto waiting_deadline = std::chrono::steady_clock::now() + 10s;
+    while (http(second.port(), "GET", "/readyz").body.find("\"store_root\":\"waiting\"") ==
+               std::string::npos &&
+           std::chrono::steady_clock::now() < waiting_deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    constexpr int count = 8;
+    std::vector<HttpResponse> answers(count);
+    std::vector<std::thread> requests;
+    for (int i = 0; i < count; ++i) {
+        requests.emplace_back([&, i] {
+            answers[static_cast<std::size_t>(i)] = http(second.port(), "GET", "/v1/server_info");
+        });
+    }
+    std::this_thread::sleep_for(300ms);
+    second.stop();
+    for (auto& request : requests) {
+        request.join();
+    }
+    for (int i = 0; i < count; ++i) {
+        EXPECT_EQ(answers[static_cast<std::size_t>(i)].status, 503)
+            << "request " << i << " was not answered: " << answers[static_cast<std::size_t>(i)].body;
+    }
+    first.stop();
+}
+
 // A predecessor that never releases the root: the successor gives up after its bounded wait,
 // readiness fails, and a waiting request is answered instead of hanging.
 TEST(StoreOwner, SuccessorGivesUpAfterItsOwnerWait) {

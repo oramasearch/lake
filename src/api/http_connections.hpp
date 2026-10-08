@@ -51,7 +51,13 @@
 #include <thread>
 #include <utility>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
+#if defined(__APPLE__)
+#include <netinet/tcp_fsm.h>
+#endif
 
 #include <boost/beast2/http_worker.hpp>
 #include <boost/capy/buffers.hpp>
@@ -103,6 +109,19 @@ struct HttpConnectionLimits {
     // How long one read of a request body or one write of a response may make no progress
     // (LAKE_HTTP_IO_TIMEOUT_SECONDS).
     std::chrono::milliseconds io_timeout{std::chrono::seconds(60)};
+    // While a request holds a worker, the time it waits on its client may not exceed
+    // `rate_grace` plus a second per `min_transfer_rate` bytes it moved
+    // (LAKE_HTTP_MIN_TRANSFER_RATE, bytes per second; 0 turns it off).
+    std::size_t min_transfer_rate = 1024;
+    std::chrono::milliseconds rate_grace{std::chrono::seconds(10)};
+    // Requests that left their worker (long polls, pulls): at most this many in all
+    // (LAKE_HTTP_MAX_LONG_REQUESTS) and per caller (LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER; an
+    // unauthenticated caller is its client address). Past either the request is answered 429.
+    std::size_t max_long_requests = 512;
+    std::size_t max_long_requests_per_caller = 64;
+    // Counted while a request waits for the store root or a worker and while its route runs, so
+    // the owner's drain (lake#479) answers it before it closes the connections.
+    std::atomic<int>* in_flight = nullptr;
     // Pending kernel handshakes, not admitted connections; the OS may clamp it.
     int listen_backlog = 1024;
     // Paths answered without taking a worker: the probes, so a saturated lake is not restarted.
@@ -129,6 +148,9 @@ struct HttpConnectionStats {
     std::uint64_t bad_requests = 0;
     std::uint64_t unread_bodies = 0;
     std::uint64_t gone_before_dispatch = 0;
+    std::uint64_t slow_transfers = 0;
+    std::uint64_t long_refusals = 0;
+    std::uint64_t admission_timeouts = 0;
 };
 
 // The descriptors lake may hold for connections: the soft open-file limit less a reserve for
@@ -142,36 +164,106 @@ inline std::size_t connections_for_open_files(std::size_t wanted, std::uint64_t 
 
 namespace detail {
 
-// The socket as the parser and serializer see it: every read and every write must make progress
-// within the bound, or it ends with a timeout and the connection closes.
+// The socket as the parser and serializer see it. Every read and every write must make progress
+// within `bound`. While a request holds a worker the transfer is also metered, as a bucket of
+// waiting time: it starts with `grace`, each byte moved adds 1/`min_rate` of a second (never past
+// `grace`), and the time spent waiting on the client is taken out. An operation may wait only as
+// long as the bucket holds, so a client that trickles a body or reads a response a few bytes at a
+// time empties it and is cut off however steadily it keeps the connection alive, while a fast
+// transfer keeps it full. Time the route spends on its own work is not counted. A pending
+// `100 Continue` is sent at the route's first read of the body.
 class TimedSocket {
 public:
+    using clock = std::chrono::steady_clock;
+
+    struct Counters {
+        std::atomic<std::uint64_t>* timeouts;
+        std::atomic<std::uint64_t>* slow;
+    };
+
     TimedSocket(boost::corosio::tcp_socket& socket, std::chrono::milliseconds bound,
-                std::atomic<std::uint64_t>* timeouts)
-        : socket_(&socket), bound_(bound), timeouts_(timeouts) {}
+                std::size_t min_rate, std::chrono::milliseconds grace, Counters counters)
+        : socket_(&socket), bound_(bound), min_rate_(min_rate), grace_(grace),
+          counters_(counters) {}
+
+    // Metering while a worker is held; off for a request that left its worker.
+    void meter(bool on) {
+        metered_ = on && min_rate_ > 0;
+        balance_ = grace_;
+    }
+    void expect_continue(bool pending) {
+        continue_pending_ = pending;
+    }
+    [[nodiscard]] bool continue_pending() const {
+        return continue_pending_;
+    }
 
     template <class MutableBufferSequence>
     boost::capy::io_task<std::size_t> read_some(MutableBufferSequence buffers) {
-        auto [error, read] = co_await boost::capy::timeout(socket_->read_some(buffers), bound_);
-        if (error == boost::capy::cond::timeout) {
-            timeouts_->fetch_add(1);
+        if (continue_pending_) {
+            continue_pending_ = false;
+            static constexpr std::string_view proceed = "HTTP/1.1 100 Continue\r\n\r\n";
+            auto [sent, written] = co_await boost::capy::timeout(
+                boost::capy::write(*socket_, boost::capy::const_buffer(proceed.data(), proceed.size())),
+                bound_);
+            if (sent) {
+                co_return {sent, 0};
+            }
         }
+        const auto bound = allowance();
+        if (bound <= std::chrono::milliseconds::zero()) {
+            counters_.slow->fetch_add(1);
+            co_return {std::error_code(boost::capy::error::timeout), 0};
+        }
+        const auto started = clock::now();
+        auto [error, read] = co_await boost::capy::timeout(socket_->read_some(buffers), bound);
+        account(started, read, error, bound);
         co_return {error, read};
     }
 
     template <class ConstBufferSequence>
     boost::capy::io_task<std::size_t> write_some(ConstBufferSequence buffers) {
-        auto [error, written] = co_await boost::capy::timeout(socket_->write_some(buffers), bound_);
-        if (error == boost::capy::cond::timeout) {
-            timeouts_->fetch_add(1);
+        const auto bound = allowance();
+        if (bound <= std::chrono::milliseconds::zero()) {
+            counters_.slow->fetch_add(1);
+            co_return {std::error_code(boost::capy::error::timeout), 0};
         }
+        const auto started = clock::now();
+        auto [error, written] = co_await boost::capy::timeout(socket_->write_some(buffers), bound);
+        account(started, written, error, bound);
         co_return {error, written};
     }
 
 private:
+    // The bound for the next operation: the I/O bound, or less when the rate allows less.
+    [[nodiscard]] std::chrono::milliseconds allowance() const {
+        if (!metered_) {
+            return bound_;
+        }
+        return std::min(bound_, std::chrono::ceil<std::chrono::milliseconds>(balance_));
+    }
+
+    void account(clock::time_point started, std::size_t moved, const std::error_code& error,
+                 std::chrono::milliseconds bound) {
+        if (metered_) {
+            const auto earned = std::chrono::duration_cast<clock::duration>(
+                std::chrono::duration<double>(static_cast<double>(moved) /
+                                              static_cast<double>(min_rate_)));
+            balance_ = std::min<clock::duration>(grace_, balance_ - (clock::now() - started) + earned);
+        }
+        if (error == boost::capy::cond::timeout) {
+            (bound < bound_ ? counters_.slow : counters_.timeouts)->fetch_add(1);
+        }
+    }
+
     boost::corosio::tcp_socket* socket_;
     std::chrono::milliseconds bound_;
-    std::atomic<std::uint64_t>* timeouts_;
+    std::size_t min_rate_;
+    std::chrono::milliseconds grace_;
+    Counters counters_;
+    bool metered_ = false;
+    bool continue_pending_ = false;
+    clock::duration balance_{};
 };
 
 // The serializer's sink, closing the connection of a 503 or 429 response, of any response during
@@ -186,14 +278,16 @@ public:
 
     RefusalClosingSink(Inner inner, boost::http::response& response,
                        const boost::http::request& request,
-                       const boost::http::request_parser& parser, const std::atomic<bool>* draining)
+                       const boost::http::request_parser& parser, const TimedSocket& socket,
+                       const std::atomic<bool>* draining)
         : inner_(inner), response_(&response), request_(&request), parser_(&parser),
-          draining_(draining) {}
+          socket_(&socket), draining_(draining) {}
 
     // The body left unread is small enough for the session to read and discard after the route.
+    // A client still waiting for `100 Continue` will not send it: the connection closes instead.
     [[nodiscard]] bool unread_body_discardable() const {
         return request_->payload() == boost::http::payload::size &&
-               request_->payload_size() <= discard_limit;
+               request_->payload_size() <= discard_limit && !socket_->continue_pending();
     }
 
     void begin_response() {
@@ -245,6 +339,7 @@ private:
     boost::http::response* response_;
     const boost::http::request* request_;
     const boost::http::request_parser* parser_;
+    const TimedSocket* socket_;
     const std::atomic<bool>* draining_;
     bool checked_ = false;
 };
@@ -335,16 +430,16 @@ public:
     }
 
     // The request parks (a long poll) or streams a long response: it gives its worker back and
-    // finishes outside the worker budget. A request that already left, or has ended, is ignored.
-    // IO executor only.
-    void leave_worker(std::uint64_t token) {
+    // finishes outside the worker budget, counted against the long-request caps for `principal`
+    // (empty: the client's address). False when a cap is full: the request keeps its worker and
+    // should be answered 429. A request that already left, or has ended, is ignored. IO executor
+    // only.
+    bool leave_worker(std::uint64_t token, std::string_view principal = {}) {
         const auto found = state_->slots.find(token);
-        if (found != state_->slots.end()) {
-            found->second->leave();
-        }
+        return found == state_->slots.end() || found->second->leave(principal);
     }
-    void leave_worker(const boost::http::route_params& route) {
-        leave_worker(request_token(route));
+    bool leave_worker(const boost::http::route_params& route, std::string_view principal = {}) {
+        return leave_worker(request_token(route), principal);
     }
 
     [[nodiscard]] HttpConnectionStats stats() const {
@@ -360,7 +455,10 @@ public:
                 state.busy_refusals.load(),
                 state.bad_requests.load(),
                 state.unread_bodies.load(),
-                state.gone_before_dispatch.load()};
+                state.gone_before_dispatch.load(),
+                state.slow_transfers.load(),
+                state.long_refusals.load(),
+                state.admission_timeouts.load()};
     }
 
 private:
@@ -370,23 +468,39 @@ private:
         detail::RefusalClosingSink sink;
         // Waiting for the first byte of its next request: the drain closes it.
         bool idle = false;
+        // The client's address: an unauthenticated caller's identity for the long-request cap.
+        std::string peer;
 
         Connection(boost::corosio::tcp_socket accepted,
                    boost::http::router<boost::http::route_params> router,
                    boost::http::shared_parser_config parser_config,
                    boost::http::shared_serializer_config serializer_config,
-                   std::chrono::milliseconds io_timeout,
-                   std::atomic<std::uint64_t>* io_timeouts,
+                   const HttpConnectionLimits& limits,
+                   detail::TimedSocket::Counters counters,
                    const std::atomic<bool>* draining)
             : http_worker(std::move(router), std::move(parser_config), std::move(serializer_config)),
               socket(std::move(accepted)),
-              timed(socket, io_timeout, io_timeouts),
-              sink(serializer.sink_for(timed), rp.res, rp.req, parser, draining) {
+              timed(socket, limits.io_timeout, limits.min_transfer_rate, limits.rate_grace, counters),
+              sink(serializer.sink_for(timed), rp.res, rp.req, parser, timed, draining),
+              peer(peer_address(socket)) {
             rp.req_body = boost::capy::any_buffer_source(parser.source_for(timed));
             rp.res_body = boost::capy::any_buffer_sink(&sink);
             stream = boost::capy::any_read_stream(&timed);
         }
     };
+
+    static std::string peer_address(boost::corosio::tcp_socket& socket) {
+        sockaddr_storage address{};
+        socklen_t length = sizeof(address);
+        if (::getpeername(socket.native_handle(), reinterpret_cast<sockaddr*>(&address), &length) != 0) {
+            return "unknown";
+        }
+        char text[INET6_ADDRSTRLEN] = {};
+        const void* raw = address.ss_family == AF_INET6
+                              ? static_cast<const void*>(&reinterpret_cast<sockaddr_in6*>(&address)->sin6_addr)
+                              : static_cast<const void*>(&reinterpret_cast<sockaddr_in*>(&address)->sin_addr);
+        return ::inet_ntop(address.ss_family, raw, text, sizeof(text)) != nullptr ? text : "unknown";
+    }
 
     // A request waiting for a worker. Granted by release_worker(), or refused by its own timer.
     struct WorkerWaiter {
@@ -399,31 +513,65 @@ private:
     // One request's place in the worker budget, from before its dispatch to its end.
     struct WorkerSlot {
         State* state = nullptr;
+        Connection* connection = nullptr;
         std::uint64_t token = 0;
         const boost::http::route_params* route = nullptr;
         bool holds = false;
         bool left = false;
+        std::string caller;
 
-        void enter(State& owner, const boost::http::route_params& params) {
+        void enter(State& owner, Connection& served) {
             state = &owner;
+            connection = &served;
             token = ++owner.next_token;
-            route = &params;
+            route = &served.rp;
             owner.slots.emplace(token, this);
             owner.tokens.insert_or_assign(route, token);
         }
         void hold() {
             holds = true;
+            connection->timed.meter(true);
             state->active_requests.fetch_add(1);
             state->gauges();
         }
-        void leave() {
+        // Gives the worker back for the rest of the request, counted against the long-request
+        // caps for `principal` (empty: the client's address). False, keeping the worker, when a
+        // cap is full.
+        bool leave(std::string_view principal) {
+            if (!holds) {
+                return true;
+            }
+            std::string key = principal.empty() ? "address:" + connection->peer
+                                                : "caller:" + std::string(principal);
+            auto& by_caller = state->long_by_caller[key];
+            if (state->long_requests.load() >= state->limits.max_long_requests ||
+                by_caller >= state->limits.max_long_requests_per_caller) {
+                if (by_caller == 0) {
+                    state->long_by_caller.erase(key);
+                }
+                state->long_refusals.fetch_add(1);
+                state->count("lake_http_refusals_total", "long_requests");
+                return false;
+            }
+            ++by_caller;
+            caller = std::move(key);
+            release();
+            left = true;
+            state->long_requests.fetch_add(1);
+            if (state->metrics != nullptr) {
+                state->metrics->increment_counter("lake_http_long_requests_total", {});
+            }
+            state->gauges();
+            return true;
+        }
+        // Gives the worker back early (before discarding an unread body); idempotent.
+        void release() {
             if (!holds) {
                 return;
             }
             holds = false;
-            left = true;
+            connection->timed.meter(false);
             state->active_requests.fetch_sub(1);
-            state->long_requests.fetch_add(1);
             state->release_worker();
             state->gauges();
         }
@@ -436,12 +584,13 @@ private:
             if (found != state->tokens.end() && found->second == token) {
                 state->tokens.erase(found);
             }
-            if (holds) {
-                state->active_requests.fetch_sub(1);
-                state->release_worker();
-            }
+            release();
             if (left) {
                 state->long_requests.fetch_sub(1);
+                const auto counted = state->long_by_caller.find(caller);
+                if (counted != state->long_by_caller.end() && --counted->second == 0) {
+                    state->long_by_caller.erase(counted);
+                }
             }
             state->gauges();
         }
@@ -479,6 +628,7 @@ private:
         std::deque<WorkerWaiter*> waiters;
         std::map<std::uint64_t, WorkerSlot*> slots;
         std::map<const boost::http::route_params*, std::uint64_t> tokens;
+        std::map<std::string, std::size_t> long_by_caller;
         std::uint64_t next_token = 0;
         // Refused connections being closed lingering (at most `lingering_bound` at once).
         std::set<boost::corosio::tcp_socket*> lingering;
@@ -500,6 +650,9 @@ private:
         std::atomic<std::uint64_t> bad_requests{0};
         std::atomic<std::uint64_t> unread_bodies{0};
         std::atomic<std::uint64_t> gone_before_dispatch{0};
+        std::atomic<std::uint64_t> slow_transfers{0};
+        std::atomic<std::uint64_t> long_refusals{0};
+        std::atomic<std::uint64_t> admission_timeouts{0};
 
         void gauges() {
             if (metrics == nullptr) {
@@ -706,15 +859,54 @@ private:
         co_return true;
     }
 
-    // A client that closed (or reset) its connection while its request waited: nothing to answer.
-    static bool client_gone(boost::corosio::tcp_socket& socket) {
+    // A client that reset its connection while its request waited, or closed it before sending
+    // the whole request: nothing to answer. A client that half-closed after a complete request
+    // (it sends nothing more but still reads) is answered.
+    static bool client_gone(Connection& connection) {
         char byte = 0;
-        const auto peeked = ::recv(socket.native_handle(), &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+        const auto peeked =
+            ::recv(connection.socket.native_handle(), &byte, 1, MSG_PEEK | MSG_DONTWAIT);
         if (peeked == 0) {
-            return true;
+            return !connection.parser.is_complete() || reset_by_peer(connection.socket);
         }
         return peeked < 0 && (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN);
     }
+
+    // The reactor may already have taken a reset's error, leaving the socket reading as at end of
+    // stream; the TCP state still tells a reset (closed) from a half-close (close-wait).
+    static bool reset_by_peer(boost::corosio::tcp_socket& socket) {
+#if defined(__linux__)
+        tcp_info info{};
+        socklen_t length = sizeof(info);
+        return ::getsockopt(socket.native_handle(), IPPROTO_TCP, TCP_INFO, &info, &length) == 0 &&
+               info.tcpi_state == TCP_CLOSE;
+#elif defined(__APPLE__)
+        tcp_connection_info info{};
+        socklen_t length = sizeof(info);
+        return ::getsockopt(socket.native_handle(), IPPROTO_TCP, TCP_CONNECTION_INFO, &info,
+                            &length) == 0 &&
+               info.tcpi_state == TCPS_CLOSED;
+#else
+        static_cast<void>(socket);
+        return false;
+#endif
+    }
+
+    struct InFlight {
+        std::atomic<int>* counter;
+        explicit InFlight(std::atomic<int>* in_flight) : counter(in_flight) {
+            if (counter != nullptr) {
+                counter->fetch_add(1);
+            }
+        }
+        ~InFlight() {
+            if (counter != nullptr) {
+                counter->fetch_sub(1);
+            }
+        }
+        InFlight(const InFlight&) = delete;
+        InFlight& operator=(const InFlight&) = delete;
+    };
 
     static bool expects_continue(const boost::http::route_params& rp) {
         std::string expect(rp.req.value_or(boost::http::field::expect, ""));
@@ -791,9 +983,14 @@ private:
             }
             rp.url = url.value();
             const std::string path(rp.url.path());
+            // Counted from here to the end of the route, so the drain answers a request that is
+            // still waiting for the store root or a worker before it closes the connections.
+            InFlight counted(state.limits.in_flight);
             bool waited = false;
             // The store-root hand-off: wait for it before taking a worker, so a rollout's
-            // requests do not use up the workers and are refused (lake#479, lake#534).
+            // requests do not use up the workers and are refused (lake#479, lake#534). A request
+            // still not admitted when the wait runs out is answered here, never dispatched to wait
+            // again while holding a worker.
             if (state.limits.admitted && !state.limits.admitted(path)) {
                 waited = true;
                 boost::corosio::timer timer(state.io_context);
@@ -808,9 +1005,18 @@ private:
                 if (!state.running.load()) {
                     co_return;
                 }
+                if (!state.limits.admitted(path)) {
+                    state.admission_timeouts.fetch_add(1);
+                    report_refusal(state, rp, 503, "store_root_wait");
+                    co_await answer_raw(connection.socket, "503 Service Unavailable",
+                                        "store_unavailable",
+                                        "lake gave up waiting for the store root", head,
+                                        std::chrono::seconds(1));
+                    co_return;
+                }
             }
             WorkerSlot slot;
-            slot.enter(state, rp);
+            slot.enter(state, connection);
             const bool exempt = state.limits.needs_no_worker && state.limits.needs_no_worker(path);
             if (!exempt) {
                 const auto grant = co_await state.acquire_worker();
@@ -828,28 +1034,28 @@ private:
                 slot.hold();
                 waited = waited || grant == State::Grant::after_wait;
             }
-            if (waited && client_gone(connection.socket)) {
+            if (waited && client_gone(connection)) {
                 state.gone_before_dispatch.fetch_add(1);
                 co_return;
             }
-            if (expects_continue(rp) && !connection.parser.is_complete()) {
-                static constexpr std::string_view proceed = "HTTP/1.1 100 Continue\r\n\r\n";
-                auto [sent, written] = co_await boost::capy::write(
-                    connection.timed, boost::capy::const_buffer(proceed.data(), proceed.size()));
-                if (sent) {
-                    co_return;
-                }
-            }
+            // `100 Continue` goes out at the route's first read of the body, so a route that
+            // refuses without reading never invites the body.
+            connection.timed.expect_continue(expects_continue(rp) && !connection.parser.is_complete());
             auto routed = co_await connection.fr.dispatch(rp.req.method(), rp.url, rp);
+            const bool invited = !connection.timed.continue_pending();
+            connection.timed.expect_continue(false);
             if (routed.failed()) {
                 co_return;
             }
             // A body the route did not read would be parsed as the next request: a small one is
-            // read and discarded, anything else closes the connection.
-            if (!connection.parser.is_complete() &&
-                (!rp.res.keep_alive() || !co_await discard_body(connection))) {
-                state.unread_bodies.fetch_add(1);
-                co_return;
+            // read and discarded (with the worker given back first), anything else closes the
+            // connection.
+            if (!connection.parser.is_complete()) {
+                slot.release();
+                if (!rp.res.keep_alive() || !invited || !co_await discard_body(connection)) {
+                    state.unread_bodies.fetch_add(1);
+                    co_return;
+                }
             }
             if (!rp.res.keep_alive()) {
                 co_return;
@@ -884,6 +1090,12 @@ private:
         state->lingering.erase(&socket);
         state->live.fetch_sub(1);
     }
+
+#ifdef MSG_NOSIGNAL
+    static constexpr int send_flags = MSG_NOSIGNAL;
+#else
+    static constexpr int send_flags = 0;
+#endif
 
     static bool out_of_descriptors(const std::error_code& error) {
         return error == std::errc::too_many_files_open ||
@@ -926,21 +1138,23 @@ private:
                     boost::capy::run_async(state->io_context.get_executor())(
                         refuse_connection(state, std::move(accepted)));
                 } else {
-                    co_await answer_raw(accepted, "503 Service Unavailable", "busy",
-                                        "the HTTP connection limit is reached; retry", false,
-                                        std::chrono::milliseconds(50));
+                    // Never waits: one non-blocking send, then close, so a flood of refusals
+                    // cannot slow the accept loop.
+                    static constexpr std::string_view refusal =
+                        "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n"
+                        "Retry-After: 1\r\nContent-Length: 0\r\n\r\n";
+                    static_cast<void>(::send(accepted.native_handle(), refusal.data(),
+                                             refusal.size(), MSG_DONTWAIT | send_flags));
                     accepted.close();
                 }
                 continue;
             }
             reported_capacity = false;
-            auto connection = std::make_shared<Connection>(std::move(accepted),
-                                                           state->router,
-                                                           state->parser_config,
-                                                           state->serializer_config,
-                                                           state->limits.io_timeout,
-                                                           &state->io_timeouts,
-                                                           &state->draining);
+            auto connection = std::make_shared<Connection>(
+                std::move(accepted), state->router, state->parser_config, state->serializer_config,
+                state->limits,
+                detail::TimedSocket::Counters{&state->io_timeouts, &state->slow_transfers},
+                &state->draining);
             const auto id = state->next_connection++;
             state->connections.emplace(id, connection);
             state->connection_count.store(state->connections.size());

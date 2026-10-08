@@ -1345,6 +1345,31 @@ TEST_P(HttpResponseIsolation, SignInCannotAuthenticateAnotherClient) {
     }
 }
 
+// lake#534: a real long poll over REST gives its HTTP worker back (counted once in
+// lake_http_long_requests_total); the same capability without a wait keeps it.
+TEST_P(HttpResponseIsolation, ALongPollOverRestGivesItsWorkerBack) {
+    HttpConnection connection(server_->port());
+    const auto long_requests = [&]() -> std::string {
+        const std::string metrics = connection.request("GET", "/metrics", "", "", "HTTP/1.1",
+                                                       "front-door-operator");
+        const auto at = metrics.find("\nlake_http_long_requests_total ");
+        return at == std::string::npos
+                   ? std::string("0")
+                   : metrics.substr(at + 31, metrics.find('\n', at + 1) - at - 31);
+    };
+    EXPECT_EQ(long_requests(), "0");
+    const std::string immediate = connection.request(
+        "GET", "/v1/receive_agent_tasks?agent=agent-project&wait_ms=0", "", "", "HTTP/1.1",
+        "bus-token-agent-project");
+    ASSERT_TRUE(immediate.starts_with("HTTP/1.1 200")) << immediate;
+    EXPECT_EQ(long_requests(), "0");
+    const std::string parked = connection.request(
+        "GET", "/v1/receive_agent_tasks?agent=agent-project&wait_ms=200", "", "", "HTTP/1.1",
+        "bus-token-agent-project");
+    ASSERT_TRUE(parked.starts_with("HTTP/1.1 200")) << parked;
+    EXPECT_EQ(long_requests(), "1");
+}
+
 TEST_P(HttpResponseIsolation, AgentsReachAWorkspacesZettaThroughLakeInZettasShape) {
     auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
     if (memory == nullptr) {

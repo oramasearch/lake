@@ -121,6 +121,10 @@ int usage() {
                  "(default 10)");
     std::println("  LAKE_HTTP_IO_TIMEOUT_SECONDS bounds a body read or response write that makes "
                  "no progress (default 60)");
+    std::println("  LAKE_HTTP_MIN_TRANSFER_RATE bytes per second a client must move while it holds "
+                 "a worker, after 10 s (default 1024; 0 turns it off)");
+    std::println("  LAKE_HTTP_MAX_LONG_REQUESTS long polls and pulls at once (default 512); "
+                 "LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER per caller (default 64)");
     std::println("  LAKE_WORKSPACE_STORE_PREOPEN=false opens workspace stores on first use only "
                  "(default true: opened in the background from start)");
     std::println("  --memory-store an in-memory control plane for local demos and tests");
@@ -149,6 +153,12 @@ int main(int argc, char** argv) {
         env_u64("LAKE_HTTP_MAX_CONNECTIONS", opts.max_connections));
     opts.idle_timeout = std::chrono::seconds{env_u64("LAKE_HTTP_IDLE_TIMEOUT_SECONDS", 75)};
     opts.io_timeout = std::chrono::seconds{env_u64("LAKE_HTTP_IO_TIMEOUT_SECONDS", 60)};
+    opts.min_transfer_rate =
+        static_cast<std::size_t>(env_u64("LAKE_HTTP_MIN_TRANSFER_RATE", opts.min_transfer_rate));
+    opts.max_long_requests =
+        static_cast<std::size_t>(env_u64("LAKE_HTTP_MAX_LONG_REQUESTS", opts.max_long_requests));
+    opts.max_long_requests_per_caller = static_cast<std::size_t>(
+        env_u64("LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER", opts.max_long_requests_per_caller));
     opts.header_timeout = std::chrono::seconds{env_u64("LAKE_HTTP_HEADER_TIMEOUT_SECONDS", 10)};
     opts.worker_wait = std::chrono::seconds{env_u64("LAKE_HTTP_WORKER_WAIT_SECONDS", 10)};
     // Every connection is a descriptor: raise the soft limit to the hard one and keep the
@@ -431,6 +441,9 @@ int main(int argc, char** argv) {
              std::chrono::duration_cast<std::chrono::seconds>(opts.worker_wait).count()},
             {"http_io_timeout_seconds",
              std::chrono::duration_cast<std::chrono::seconds>(opts.io_timeout).count()},
+            {"http_min_transfer_rate", opts.min_transfer_rate},
+            {"http_max_long_requests", opts.max_long_requests},
+            {"http_max_long_requests_per_caller", opts.max_long_requests_per_caller},
             {"open_files_limit", open_file_budget.open_files},
             {"log_mode", lake::transparency::to_string(opts.log_configuration.mode)},
             {"tsa_configured", opts.tsa_endpoint.empty() ? "no" : "yes"},

@@ -596,7 +596,9 @@ json write_input_schema() {
               {"dataset_revision", {{"type", "string"}}},
               {"model_attestation", {{"type", "string"}}},
               {"run_attestation", {{"type", "string"}}}}},
-            {"required", json::array({"id"})}};
+            {"required", json::array({"id"})},
+            // Strict, so a writer cannot pass fields a handler does not read (such as `wait_ms`).
+            {"additionalProperties", false}};
 }
 
 Capability write_capability(std::string name,

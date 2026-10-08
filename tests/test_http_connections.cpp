@@ -42,6 +42,7 @@
 #include <boost/http/server/router.hpp>
 
 #include "api/http_connections.hpp"
+#include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/server.hpp"
 
@@ -93,6 +94,9 @@ public:
 
     [[nodiscard]] bool connected() const {
         return fd_ >= 0;
+    }
+    [[nodiscard]] int descriptor() const {
+        return fd_;
     }
 
     void set_receive_timeout(std::chrono::milliseconds timeout) {
@@ -156,6 +160,18 @@ public:
         }
         receive();
         return std::exchange(buffer_, {});
+    }
+
+    // Closes with a reset, as a client that gave up does.
+    void reset() {
+        linger abort{1, 0};
+        static_cast<void>(::setsockopt(fd_, SOL_SOCKET, SO_LINGER, &abort, sizeof(abort)));
+        ::close(fd_);
+        fd_ = -1;
+    }
+
+    void shutdown_send() {
+        static_cast<void>(::shutdown(fd_, SHUT_WR));
     }
 
     void set_send_timeout(std::chrono::milliseconds timeout) {
@@ -341,7 +357,16 @@ public:
         router.add(http::method::get,
                    "/park",
                    [this, answer](http::route_params& route) -> http::route_task {
-                       connections_->leave_worker(route);
+                       std::string who;
+                       if (auto found = route.url.params().find("who");
+                           found != route.url.params().end()) {
+                           who = (*found).value;
+                       }
+                       if (!connections_->leave_worker(route, who)) {
+                           route.res.set(http::field::retry_after, "1");
+                           co_return co_await answer(route, http::status::too_many_requests,
+                                                     "too many long requests");
+                       }
                        parked_.fetch_add(1);
                        boost::corosio::timer timer(io_context_);
                        while (!released_.load()) {
@@ -785,6 +810,7 @@ TEST(HttpConnections, ALongPollCapabilityGivesItsWorkerBack) {
                          {"properties", {{"wait_ms", {{"type", "integer"}, {"minimum", 0}}}}}},
         .output_schema = {{"type", "object"}},
         .kind = lake::api::CapabilityKind::Read,
+        .long_poll = true,
         .requires_auth = false,
         .async_handler = [&](const nlohmann::json&, lake::api::ApiContext&)
             -> liquid::runtime::task<lake::api::ApiResult> {
@@ -792,12 +818,21 @@ TEST(HttpConnections, ALongPollCapabilityGivesItsWorkerBack) {
             co_return lake::api::ApiResult::success(nlohmann::json::object());
         }}));
     lake::api::ApiContext context;
-    context.leave_worker = [&left] { ++left; };
+    context.leave_worker = [&left](const std::string&) {
+        ++left;
+        return true;
+    };
     ASSERT_TRUE(liquid::runtime::block_on(registry.call_async("poll", {{"wait_ms", 25000}}, context))->ok);
     EXPECT_EQ(left_at_handler, 1);
     ASSERT_TRUE(liquid::runtime::block_on(registry.call_async("poll", {{"wait_ms", 0}}, context))->ok);
     ASSERT_TRUE(liquid::runtime::block_on(registry.call_async("poll", nlohmann::json::object(), context))->ok);
     EXPECT_EQ(left, 1);
+    // A full cap refuses the long poll with 429 before it parks.
+    context.leave_worker = [](const std::string&) { return false; };
+    const auto refused = liquid::runtime::block_on(registry.call_async("poll", {{"wait_ms", 1}}, context));
+    ASSERT_TRUE(refused);
+    EXPECT_FALSE(refused->ok);
+    EXPECT_EQ(refused->error.code, "rate_limited");
 }
 
 // Review item 3: lake's idle timeout outlasts nginx's 60 s upstream keep-alive.
@@ -946,6 +981,8 @@ TEST(HttpConnections, MalformedRequestsAndExpectContinue) {
         Client gone(served.port());
         ASSERT_TRUE(gone.send(get("/fine")));
         ASSERT_TRUE(served.eventually([](const auto& stats) { return stats.waiting_requests == 1; }));
+        gone.reset();
+        std::this_thread::sleep_for(100ms);
     }
     served.release();
     EXPECT_TRUE(holder.response().starts_with("HTTP/1.1 200"));
@@ -1025,4 +1062,234 @@ TEST(HttpConnections, AnIdleConnectionCostsLittleMemory) {
     std::cout << "[ idle connection ] " << each / 1024 << " KiB resident each over " << count - 10
               << " connections\n";
     EXPECT_LT(each, 256U * 1024U);
+}
+
+// Re-review A: a body trickled a byte at a time, each byte well inside the I/O timeout, still
+// empties the transfer-rate bucket and is cut off.
+TEST(HttpConnections, ATrickledBodyIsCutOffByTheTransferRate) {
+    auto limits = limits_with(2);
+    limits.io_timeout = 60s;
+    limits.rate_grace = 1s;
+    Served served(std::move(limits));
+    Client trickle(served.port(), 8s);
+    trickle.set_send_timeout(2s);
+    ASSERT_TRUE(trickle.send("POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n"));
+    std::atomic<bool> stop{false};
+    std::thread sender([&] {
+        for (int i = 0; i < 40 && !stop.load(); ++i) {
+            std::this_thread::sleep_for(300ms);
+            if (!trickle.send("x")) {
+                return;
+            }
+        }
+    });
+    const auto started = Clock::now();
+    EXPECT_TRUE(trickle.closed_by_peer()) << "a byte every 300 ms holds the worker";
+    EXPECT_LT(Clock::now() - started, 6s);
+    stop.store(true);
+    sender.join();
+    EXPECT_GE(served.stats().slow_transfers, 1U);
+    EXPECT_EQ(served.stats().io_timeouts, 0U);
+}
+
+// Re-review A: a client that reads a response a few bytes at a time is cut off the same way.
+TEST(HttpConnections, ASlowReaderIsCutOffByTheTransferRate) {
+    auto limits = limits_with(2);
+    limits.io_timeout = 60s;
+    limits.rate_grace = 1s;
+    Served served(std::move(limits));
+    Client reader(served.port(), 200ms);
+    ASSERT_TRUE(reader.send(get("/big")));
+    const auto deadline = Clock::now() + 30s;
+    while (served.stats().slow_transfers == 0 && Clock::now() < deadline) {
+        char bytes[64];
+        static_cast<void>(::recv(reader.descriptor(), bytes, sizeof(bytes), 0));
+        std::this_thread::sleep_for(100ms);
+    }
+    EXPECT_GE(served.stats().slow_transfers, 1U) << "64 bytes every 100 ms keeps a worker";
+    EXPECT_EQ(served.stats().io_timeouts, 0U);
+    EXPECT_TRUE(served.eventually([](const auto& stats) { return stats.active_requests == 0; }));
+}
+
+// Re-review B: only a capability declared a long poll leaves its worker; `wait_ms` from the
+// caller alone never does.
+TEST(HttpConnections, AWaitMsAloneNeverLeavesTheWorker) {
+    lake::api::Registry registry;
+    ASSERT_TRUE(registry.add(lake::api::Capability{
+        .name = "ordinary",
+        .title = "Ordinary",
+        .description = "Takes a wait_ms it does not wait for.",
+        .input_schema = {{"type", "object"},
+                         {"properties", {{"wait_ms", {{"type", "integer"}, {"minimum", 0}}}}}},
+        .output_schema = {{"type", "object"}},
+        .kind = lake::api::CapabilityKind::Read,
+        .requires_auth = false,
+        .async_handler = [](const nlohmann::json&, lake::api::ApiContext&)
+            -> liquid::runtime::task<lake::api::ApiResult> {
+            co_return lake::api::ApiResult::success(nlohmann::json::object());
+        }}));
+    int left = 0;
+    lake::api::ApiContext context;
+    context.leave_worker = [&left](const std::string&) {
+        ++left;
+        return true;
+    };
+    ASSERT_TRUE(liquid::runtime::block_on(registry.call_async("ordinary", {{"wait_ms", 25000}}, context))->ok);
+    EXPECT_EQ(left, 0);
+}
+
+// Re-review B: the real long polls are declared, and a repository write takes no field it does
+// not read (so no `wait_ms`).
+TEST(HttpConnections, TheLongPollsAreDeclaredAndWritesAreStrict) {
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    for (const char* name : {"receive_agent_tasks", "receive_agent_events", "receive_build_events",
+                             "receive_app_events", "browse_stream", "tail_experiment_events"}) {
+        const auto capability = registry.find(name);
+        ASSERT_TRUE(capability) << name;
+        EXPECT_TRUE(capability->long_poll) << name;
+    }
+    std::size_t long_polls = 0;
+    for (const auto& capability : registry.list()) {
+        long_polls += capability->long_poll ? 1 : 0;
+    }
+    EXPECT_EQ(long_polls, 6U);
+    const auto write = registry.find("commit_repository_files");
+    ASSERT_TRUE(write);
+    EXPECT_EQ(write->input_schema.value("additionalProperties", true), false);
+    const auto refused = lake::api::validate_input(
+        *write, {{"id", "00000000-0000-4000-8000-000000000000"}, {"wait_ms", 25000}});
+    EXPECT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "invalid_input") << refused.error.message;
+}
+
+// Re-review B: the blocking pool's queue is bounded; past it run_blocking answers busy at once.
+TEST(HttpConnections, TheBlockingPoolRefusesPastItsBound) {
+    auto& limit = lake::api::detail::blocking_task_limit();
+    const int kept = limit.load();
+    limit.store(0);
+    const auto refused = liquid::runtime::block_on(lake::api::run_blocking(
+        []() -> std::expected<int, liquid::error> { return 1; }));
+    limit.store(kept);
+    ASSERT_FALSE(refused);
+    EXPECT_EQ(refused.error().code, liquid::errc::busy);
+    const auto ran = liquid::runtime::block_on(lake::api::run_blocking(
+        []() -> std::expected<int, liquid::error> { return 1; }));
+    ASSERT_TRUE(ran);
+    EXPECT_EQ(*ran, 1);
+}
+
+// Re-review C: requests that left their worker are capped in all and per caller (an
+// unauthenticated caller by its address); past either cap, 429 with Retry-After closes the
+// connection.
+TEST(HttpConnections, LongRequestsAreCappedInAllAndPerCaller) {
+    auto limits = limits_with(2);
+    limits.max_long_requests = 5;
+    limits.max_long_requests_per_caller = 3;
+    Served served(std::move(limits));
+    std::vector<std::unique_ptr<Client>> parked;
+    const auto park = [&](const std::string& who) {
+        parked.push_back(std::make_unique<Client>(served.port()));
+        EXPECT_TRUE(parked.back()->send(get(who.empty() ? "/park" : "/park?who=" + who)));
+    };
+    const auto refused = [&](const std::string& who) {
+        Client client(served.port());
+        EXPECT_TRUE(client.send(get(who.empty() ? "/park" : "/park?who=" + who)));
+        const std::string answer = client.response();
+        EXPECT_TRUE(answer.starts_with("HTTP/1.1 429")) << who << ": " << answer;
+        EXPECT_EQ(header_value(answer, "retry-after"), "1");
+        EXPECT_EQ(header_value(answer, "connection"), "close");
+        EXPECT_TRUE(client.closed_by_peer());
+    };
+    for (int i = 0; i < 3; ++i) {
+        park("alice");
+    }
+    ASSERT_TRUE(served.eventually([&served](const auto&) { return served.parked() == 3; }));
+    refused("alice");
+    park("");
+    park("");
+    ASSERT_TRUE(served.eventually([&served](const auto&) { return served.parked() == 5; }));
+    refused("bob");
+    EXPECT_EQ(served.stats().long_refusals, 2U);
+    served.release();
+    for (auto& client : parked) {
+        EXPECT_TRUE(client->response().starts_with("HTTP/1.1 200"));
+    }
+}
+
+TEST(HttpConnections, AnUnauthenticatedCallerIsCappedByItsAddress) {
+    auto limits = limits_with(2);
+    limits.max_long_requests_per_caller = 2;
+    Served served(std::move(limits));
+    Client first(served.port());
+    Client second(served.port());
+    ASSERT_TRUE(first.send(get("/park")));
+    ASSERT_TRUE(second.send(get("/park")));
+    ASSERT_TRUE(served.eventually([&served](const auto&) { return served.parked() == 2; }));
+    Client third(served.port());
+    ASSERT_TRUE(third.send(get("/park")));
+    EXPECT_TRUE(third.response().starts_with("HTTP/1.1 429"));
+    // A named caller from the same address has its own count.
+    Client named(served.port());
+    ASSERT_TRUE(named.send(get("/park?who=carol")));
+    ASSERT_TRUE(served.eventually([&served](const auto&) { return served.parked() == 3; }));
+    served.release();
+    EXPECT_TRUE(first.response().starts_with("HTTP/1.1 200"));
+    EXPECT_TRUE(named.response().starts_with("HTTP/1.1 200"));
+}
+
+// Re-review nit: the worker is given back before an unread body is discarded, so the discard's
+// wait never holds it.
+TEST(HttpConnections, TheWorkerIsFreeWhileAnUnreadBodyIsDiscarded) {
+    Served served(limits_with(1));
+    Client slow(served.port());
+    ASSERT_TRUE(slow.send("POST /ignore HTTP/1.1\r\nHost: localhost\r\nContent-Length: 60000\r\n\r\n" +
+                          std::string(1000, 'z')));
+    ASSERT_TRUE(slow.response().starts_with("HTTP/1.1 200"));
+    Client next(served.port());
+    const auto started = Clock::now();
+    ASSERT_TRUE(next.send(get("/fine")));
+    EXPECT_TRUE(next.response().starts_with("HTTP/1.1 200"));
+    EXPECT_LT(Clock::now() - started, 500ms) << "the discard of another request held the worker";
+}
+
+// Re-review nit: a request still not admitted when the admission wait runs out is answered 503
+// and never dispatched to wait again while holding a worker.
+TEST(HttpConnections, ARequestNotAdmittedInTimeIsAnsweredWithoutAWorker) {
+    auto limits = limits_with(1);
+    limits.admitted = [](std::string_view) { return false; };
+    limits.admission_wait = 200ms;
+    Served served(std::move(limits));
+    Client client(served.port());
+    ASSERT_TRUE(client.send(get("/hold")));
+    const std::string answer = client.response();
+    EXPECT_TRUE(answer.starts_with("HTTP/1.1 503")) << answer;
+    EXPECT_NE(answer.find("store_unavailable"), std::string::npos);
+    EXPECT_EQ(served.holding(), 0) << "the route ran";
+    EXPECT_EQ(served.stats().admission_timeouts, 1U);
+}
+
+// Re-review nits: a client that half-closes after a complete request is still answered, and a
+// route that refuses without reading the body never invites it with `100 Continue`.
+TEST(HttpConnections, AHalfCloseIsAnsweredAndARefusalSendsNoContinue) {
+    Served served(limits_with(1));
+    Client holder(served.port());
+    ASSERT_TRUE(holder.send(get("/hold")));
+    ASSERT_TRUE(served.eventually([&served](const auto&) { return served.holding() == 1; }));
+    Client half(served.port());
+    ASSERT_TRUE(half.send(get("/fine")));
+    half.shutdown_send();
+    ASSERT_TRUE(served.eventually([](const auto& stats) { return stats.waiting_requests == 1; }));
+    served.release();
+    EXPECT_TRUE(holder.response().starts_with("HTTP/1.1 200"));
+    const std::string answered = half.response();
+    EXPECT_TRUE(answered.starts_with("HTTP/1.1 200")) << answered;
+    EXPECT_EQ(served.stats().gone_before_dispatch, 0U);
+
+    Client refused(served.port());
+    ASSERT_TRUE(refused.send("POST /busy HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n"
+                             "Expect: 100-continue\r\n\r\n"));
+    const std::string first = refused.header_only();
+    EXPECT_TRUE(first.starts_with("HTTP/1.1 503")) << first;
+    EXPECT_EQ(header_value(first, "connection"), "close");
 }

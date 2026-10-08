@@ -124,6 +124,9 @@ namespace detail {
 boost::capy::thread_pool& blocking_pool();
 // Pool tasks not yet finished, posting their completion included.
 std::atomic<int>& blocking_tasks();
+// At most this many pool tasks are queued or running; past it run_blocking answers errc::busy at
+// once instead of queueing (lake#534). The pool has 32 threads.
+std::atomic<int>& blocking_task_limit();
 // Completions are posted under this lock, and never to an execution context a server has
 // closed (close_execution_context): a task that outlives its server's drain is abandoned.
 std::mutex& completion_gate();
@@ -177,6 +180,11 @@ private:
 template <class Callable>
 liquid::runtime::task<std::invoke_result_t<Callable>> run_blocking(Callable callable) {
     using output_type = std::invoke_result_t<Callable>;
+    if (detail::blocking_tasks().load() >= detail::blocking_task_limit().load()) {
+        co_return std::unexpected(liquid::error{liquid::errc::busy,
+                                                "the server's blocking pool is full; retry",
+                                                "lake::api::run_blocking"});
+    }
     auto state = std::make_shared<liquid::runtime::detail::offload_state<output_type>>();
     const auto executor = co_await boost::capy::this_coro::executor;
     co_await detail::blocking_awaiter<Callable, output_type, decltype(executor)>{std::move(callable), state,
@@ -258,10 +266,11 @@ struct ApiContext {
     std::string request_id;
     std::string request_path;  // the page route, for web UI navigation; never used to authorize
     std::string request_query; // its query string, for the same; never used to authorize
-    // Set by the HTTP server for a request: gives its request worker back. call_async calls it
-    // before a capability long-polls (`wait_ms` > 0), so a parked caller never holds one of the
-    // short-request workers (lake#534). Empty outside HTTP.
-    std::function<void()> leave_worker;
+    // Set by the HTTP server for a request: gives its request worker back, counted against the
+    // long-request caps for `principal` (empty: the client's address). False when a cap is full.
+    // call_async calls it before a long-poll capability parks (`wait_ms` > 0), so a parked caller
+    // never holds one of the short-request workers (lake#534). Empty outside HTTP.
+    std::function<bool(const std::string& principal)> leave_worker;
     // Why a presented credential was not accepted: "invalid" or "expired" (lake#450); empty when
     // none was presented or it was accepted.
     std::string credential_rejection;
@@ -375,6 +384,9 @@ struct Capability {
                                   // additionalProperties false
     nlohmann::json output_schema; // the success value's shape
     CapabilityKind kind = CapabilityKind::Read;
+    // A long poll: called with `wait_ms` > 0 it parks on a bus, so it gives its HTTP request
+    // worker back first (lake#534). Declared here, never inferred from a caller's input.
+    bool long_poll = false;
     // Read capabilities may also accept a JSON body without becoming actions.
     bool post_alias = false;
     CapabilityTransport transport = CapabilityTransport::Json;

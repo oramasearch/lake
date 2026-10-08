@@ -62,6 +62,13 @@ struct ServerOptions {
     // One read of a request body or one write of a response that makes no progress for this long
     // ends the connection (LAKE_HTTP_IO_TIMEOUT_SECONDS).
     std::chrono::milliseconds io_timeout{std::chrono::seconds(60)};
+    // While a request holds a worker, the time it waits on its client may not exceed 10 s plus a
+    // second per this many bytes moved (LAKE_HTTP_MIN_TRANSFER_RATE, bytes per second; 0: off).
+    std::size_t min_transfer_rate = 1024;
+    // Requests that left their worker (long polls, pulls), in all and per caller; past either a
+    // request is answered 429 (LAKE_HTTP_MAX_LONG_REQUESTS, LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER).
+    std::size_t max_long_requests = 512;
+    std::size_t max_long_requests_per_caller = 64;
     // A request header must arrive whole within this of its first byte, or of the accept for a
     // connection's first request; otherwise the connection is closed
     // (LAKE_HTTP_HEADER_TIMEOUT_SECONDS).
