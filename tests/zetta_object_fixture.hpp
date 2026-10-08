@@ -139,6 +139,11 @@ public:
         std::lock_guard lock(mutex_);
         return by_endpoint_[endpoint];
     }
+    // Acquires of `endpoint`'s leases waiting now for a holder to let go.
+    int acquiring(const std::string& endpoint) {
+        std::lock_guard lock(mutex_);
+        return acquiring_[endpoint];
+    }
     std::map<std::string, std::uint64_t> requests_by_method() {
         std::lock_guard lock(mutex_);
         return by_method_;
@@ -549,7 +554,9 @@ private:
                         return refused(409, "held", "the bucket's lease is held",
                                        {{"holder", lease.holder}});
                     }
+                    ++acquiring_[endpoint];
                     changed_.wait_until(lock, std::min(deadline, lease.expires));
+                    --acquiring_[endpoint];
                 }
             }
             if (operation == "renew") {
@@ -652,6 +659,7 @@ private:
     std::uint64_t requests_ = 0;
     std::map<std::string, std::uint64_t> by_endpoint_;
     std::map<std::string, std::uint64_t> by_method_;
+    std::map<std::string, int> acquiring_;
     std::vector<std::string> bodies_;
     int drop_ = 0;
     int fail_after_ = -1;

@@ -1762,6 +1762,53 @@ TEST(WorkspaceStoreSearch, AFailedSearchWriteDoesNotFailTheWorkspaceStore) {
     EXPECT_EQ(rig.zetta->lease(endpoint_a).fence, fence);
 }
 
+// lake#540: a publication whose index write fails leaves its repository pending. Search answers
+// from the index as it was and names the workspace in `stale_workspaces`, and search's worker
+// retries the repository by itself, with no other request, after which the change is found.
+TEST(WorkspaceStoreSearch, AFailedIndexWriteIsRetriedAndTheWorkspaceIsPartlyStaleUntilThen) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    const auto text = rig.create(rig.alpha, "retried-text");
+    ASSERT_TRUE(text);
+    ASSERT_EQ(rig.commit(*text, "README.md", "first " + std::string(alpha_term)).first, 200U);
+    const json first = searched(rig, std::string(alpha_term) + "&workspace_id=" + rig.alpha);
+    ASSERT_EQ(first["value"]["items"].size(), 1U) << first.dump();
+    EXPECT_TRUE(first["value"]["stale_workspaces"].empty()) << first.dump();
+    rig.options.search->set_pending_retry(1500ms);
+
+    // Every index write of the next commit (its publication and its reindex), and every retry of
+    // each, gets no answer; the store's own writes go through.
+    rig.zetta->drop_matching("/lake_store/search/", 1000);
+    const auto [status, body] = rig.commit(*text, "retried.txt", "retriedterm540 lands");
+    rig.zetta->drop_matching({}, 0);
+    ASSERT_EQ(status, 200U) << "a failed index write never fails the commit: " << body.dump();
+    EXPECT_EQ(rig.tree(*text), (std::vector<std::string>{"README.md", "retried.txt"}));
+
+    // Until the retry, the index answers as it was, and says it is partly stale.
+    const auto [stale_status, stale] = rig.call("GET", "/v1/search?query=retriedterm540&workspace_id=" + rig.alpha);
+    ASSERT_EQ(stale_status, 200U) << stale.dump();
+    EXPECT_TRUE(stale["value"]["items"].empty()) << stale.dump();
+    EXPECT_TRUE(stale["value"]["building_workspaces"].empty()) << stale.dump();
+    EXPECT_EQ(stale["value"]["stale_workspaces"], json::array({rig.alpha})) << stale.dump();
+    const json older = searched(rig, std::string(alpha_term) + "&workspace_id=" + rig.alpha);
+    EXPECT_EQ(older["value"]["items"].size(), 1U) << older.dump();
+
+    // The worker retries it with no request asking: the change is found and nothing is stale.
+    json found;
+    const auto deadline = std::chrono::steady_clock::now() + 15s;
+    for (;;) {
+        found = rig.call("GET", "/v1/search?query=retriedterm540&workspace_id=" + rig.alpha).second;
+        if (found["value"]["items"].size() == 1U || std::chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    ASSERT_EQ(found["value"]["items"].size(), 1U) << "never retried: " << found.dump();
+    EXPECT_TRUE(found["value"]["stale_workspaces"].empty()) << found.dump();
+    EXPECT_EQ(found["value"]["items"][0].value("path", ""), "retried.txt") << found.dump();
+}
+
 // lake#381 review S3: the index is built off the request path.
 TEST(WorkspaceStoreSearch, TheFirstPushAfterASwitchDoesNotWaitForTheIndex) {
     MoveRig rig;
@@ -3970,8 +4017,10 @@ TEST(WorkspaceStoreHandoff, MoreWorkspacesThanWorkersAreAllPreopenedBeforeTheRoo
     ASSERT_TRUE(eventually([&] { return rig.server->store_root_open(); }));
 }
 
-// Review 5: a workspace stopped or deleted while the pre-open waits for its lease is never opened:
-// the pre-open checks again, under the lane, before each attempt.
+// Review 5, lake#541: a workspace stopped or deleted while the pre-open waits for its lease is
+// never served. The pre-open checks under the lane before each attempt, and again once Zetta's
+// acquire returns: the lease it took meanwhile is released at once, never renewed and never taken
+// again. A deletion waits for the attempt in flight (it closes under the same lane).
 TEST(WorkspaceStoreHandoff, AWorkspaceStoppedOrDeletedDuringThePreopenIsNotOpened) {
     MoveRig rig;
     ASSERT_NO_FATAL_FAILURE(rig.SetUp());
@@ -3986,18 +4035,46 @@ TEST(WorkspaceStoreHandoff, AWorkspaceStoppedOrDeletedDuringThePreopenIsNotOpene
     const auto held_b = rig.zetta->take_over(endpoint_b, "another process");
     rig.options.preopen_workspace_stores = true;
     ASSERT_NO_FATAL_FAILURE(rig.start());
+    // Both attempts are inside Zetta's acquire, past the check before it.
+    ASSERT_TRUE(eventually([&] { return rig.zetta->acquiring(endpoint_a) > 0 && rig.zetta->acquiring(endpoint_b) > 0; },
+                           3s))
+        << "the pre-open is waiting for both leases";
+
+    // Alpha stops while its attempt waits, and then the lease frees: the attempt takes it.
     ASSERT_TRUE(rig.store->update_workspace(rig.alpha, {.desired = "stopped"}));
-    const auto deleted = rig.call("POST", "/v1/delete_workspace",
-                                  {{"customer_id", rig.customer_id}, {"workspace_id", rig.beta},
-                                   {"confirm", "beta"}});
-    EXPECT_EQ(deleted.first, 200U) << deleted.second.dump();
     rig.zetta->release(endpoint_a);
+
+    // Beta is deleted while its attempt waits. The deletion's cascade is committed, and its close
+    // waits for the attempt's lane; the lease frees meanwhile and the attempt takes it.
+    std::pair<unsigned, json> deleted;
+    std::thread deleting([&] {
+        deleted = rig.call("POST", "/v1/delete_workspace",
+                           {{"customer_id", rig.customer_id}, {"workspace_id", rig.beta}, {"confirm", "beta"}});
+    });
+    ASSERT_TRUE(eventually([&] {
+        const auto row = rig.store->get_workspace(rig.beta);
+        return row && row->desired == "deleted";
+    }, 3s)) << "the deletion's cascade committed";
     rig.zetta->release(endpoint_b);
+    deleting.join();
+    EXPECT_EQ(deleted.first, 200U) << deleted.second.dump();
+    EXPECT_TRUE(deleted.second["value"]["deletion"].value("completed", false)) << deleted.second.dump();
+
+    // Each lease was taken at most once and is released at once.
+    EXPECT_TRUE(eventually([&] { return rig.zetta->lease(endpoint_a).holder.empty(); }, 2s))
+        << "the stopped workspace's lease is still held";
+    EXPECT_TRUE(eventually([&] { return rig.zetta->lease(endpoint_b).holder.empty(); }, 2s))
+        << "the deleted workspace's lease is still held";
+    const auto fence_a = rig.zetta->lease(endpoint_a).fence;
+    const auto fence_b = rig.zetta->lease(endpoint_b).fence;
+    EXPECT_LE(fence_a, held_a + 1);
+    EXPECT_LE(fence_b, held_b + 1);
+    // And never again: past the pre-open's next attempt, neither is held or taken.
     std::this_thread::sleep_for(2500ms);
-    EXPECT_EQ(rig.zetta->lease(endpoint_a).fence, held_a) << "the stopped workspace's lease was taken";
     EXPECT_TRUE(rig.zetta->lease(endpoint_a).holder.empty());
-    EXPECT_EQ(rig.zetta->lease(endpoint_b).fence, held_b) << "the deleted workspace's lease was taken";
+    EXPECT_EQ(rig.zetta->lease(endpoint_a).fence, fence_a) << "the stopped workspace's lease was taken again";
     EXPECT_TRUE(rig.zetta->lease(endpoint_b).holder.empty());
+    EXPECT_EQ(rig.zetta->lease(endpoint_b).fence, fence_b) << "the deleted workspace's lease was taken again";
 }
 
 // A draining lake answers a new workspace store request 503 with Retry-After at once, lets the

@@ -599,7 +599,7 @@ but not the operator's message; `VolumeSchedules.*` the cron grammar and the nev
 trigger, the policy checks and the backfill; `OperatorContract.*` the operator's new workspace and
 snapshot statements.
 `test_workspace_store.cpp` covers lake#380 (the table is in
-`docs/architecture/workspace-store.md#tests`): the encrypted backend, its refusal of a rewrite, tampering, the owner's hand-off and lost lease, the rollout hand-off between two lake servers (`WorkspaceStoreHandoff.*`, lake#536), and, through a running lake, the
+`docs/architecture/workspace-store.md#tests`): the encrypted backend, its refusal of a rewrite, tampering, the owner's hand-off and lost lease, the rollout hand-off between two lake servers (`WorkspaceStoreHandoff.*`, lake#536; a workspace stopped or deleted while the pre-open waits in Zetta's acquire has the lease released at once, lake#541), and, through a running lake, the
 move with an interrupted copy, the switch, two workspaces of one space and the lost lease's `503`;
 `WorkspaceStoreRemoval.*` the removal of a space's old store (refusals, a linked space or store
 directory refused, dry run, exactly two directories removed, the instance's directory untouched, switched workspaces still answering, a later
@@ -609,7 +609,8 @@ Its `WorkspaceStoreSearch.*` cover lake#381 through a running lake: sealed per-w
 indexes beside each store, the switch's drop from the space index, reload after a restart, a
 non-operator caller who never makes search open another space's workspace, rebuild of a wiped,
 partial or tampered index with and without a restart, a failed index write that leaves the store
-alone, a first push that does not wait for the rebuild, pushes beside searches, and deletion;
+alone, a dropped index write retried by search's worker with the workspace reported partly stale
+until then (lake#540), a first push that does not wait for the rebuild, pushes beside searches, and deletion;
 `test_search.cpp`'s `SearchWorkspaces.*` cover the same index on in-memory objects, with the
 background rebuild queue, backoff, release snapshots, write-once runs and eviction.
 `zetta_object_fixture.hpp` is `FakeZettaObjects`, Zetta's object routes in memory. Set

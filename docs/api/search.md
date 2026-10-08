@@ -20,13 +20,16 @@ a result that the capability would reject.
 | artifact scope | Append `in:artifact:<name>[@<version>]` to `query`. The name is a build output path and the version is its immutable result digest. This scope cannot be combined with `ref`, `change`, or `history`. |
 
 The value is
-`{mode,scanned_changes,skipped_workspaces,building_workspaces,items:[{customer,repository,path,change,snippet,score,artifact,artifact_version,digest,line,workspace_id}]}`.
+`{mode,scanned_changes,skipped_workspaces,building_workspaces,stale_workspaces,items:[{customer,repository,path,change,snippet,score,artifact,artifact_version,digest,line,workspace_id}]}`.
 `workspace_id` names the workspace whose index answered a hit (empty for the space's index on lake's
 volume). `skipped_workspaces` lists the switched workspaces a space-wide search could not read
 (stopped, its store unavailable or moving); a search that names a workspace or a repository fails
 instead. `building_workspaces` lists the workspaces whose index is being built (after a switch, or
 because it was lost): they answer nothing yet, and the search does not wait for them or take their
-store's lane. `mode` explains which corpus answered the request:
+store's lane. `stale_workspaces` lists the workspaces whose index answered but is partly stale: a
+write to it failed and left repositories pending (lake#540, [below](#a-failed-index-write-is-retried-lake540)),
+so it answers what it held before them until the retry succeeds. `mode` explains which corpus
+answered the request:
 
 | Mode | Corpus |
 |---|---|
@@ -123,6 +126,21 @@ index before its record is written and again after, so a build that read the rel
 record existed applies it afterwards. Deleting a repository removes it from the index. Lock
 order: a store's lane, then an index's lock, then search's map lock, which is only held briefly and
 never across I/O or a lane wait.
+
+### A failed index write is retried (lake#540)
+
+A publication, a `reindex_artifacts` (every push and commit) or a deletion whose write to a
+workspace's index fails (a Zetta error or timeout, the index's room spent) leaves the repository
+pending in that workspace's index (`pending`, or `removed` for a deletion), in memory, and the
+caller still sees the failure (a push or commit records it and never fails on it). Search's worker
+retries the workspace after a delay that starts at 15 s (`Service::set_pending_retry`) and doubles on
+each retry that fails, up to 10 minutes; it is reset once nothing is pending. A retry loads the
+stored index if it was dropped from memory by the failure, rather than rebuilding it, and refreshes
+each pending repository (branch tips, release snapshots, artifacts) under its store's lane as lake's
+own work. Until then the index answers what it held before the failed write, and every search that
+reads it names the workspace in `stale_workspaces`. What is pending is in memory only: a lake that
+stops drops it, and removes that workspace's manifest before it releases the store (lake#536), so
+the next process rebuilds the index.
 
 **Loaded on first use, evicted when idle.** A workspace's index is loaded into memory on its first
 use, and again when the store is owned under another lease fence. Loaded workspace indexes are
@@ -293,7 +311,9 @@ dropping the space index's copy, a restart reloading without rewriting, a delete
 the index; a non-operator caller in two spaces who never makes search touch the other space's
 workspace and gets one answer for another space's workspace and an unknown one; a wiped, partly
 lost or tampered index rebuilt with and without a restart; a failed index write leaving the store's
-lease and holder as they were; the first push after a switch not waiting for a slow rebuild; pushes,
+lease and holder as they were; a commit whose index writes are all dropped
+(`FakeZettaObjects::drop_matching`) leaving its workspace in `stale_workspaces` until search's worker
+retries it by itself and the change is found (lake#540); the first push after a switch not waiting for a slow rebuild; pushes,
 commits and searches side by side with 503s bounded; and a deletion removing the index objects and
 not held up when their removal fails; the index's room counted against the whole space and what it
 wrote since the last usage reading; a usage refresh not waiting on a slow rebuild; a Hugging Face
@@ -326,8 +346,6 @@ build/tests/lake-tests --gtest_also_run_disabled_tests \
 - `customer` stays an input; the decided API (a required `workspace_id`, `/w/<id>/search`) is a
   later change. `rebuild_search_index` as its own capability is not built; `reindex_artifacts` of
   each repository, or a wiped index, rebuilds.
-- A publication whose index write fails leaves the index without that change until the repository
-  is published or reindexed again; nothing retries it (the failure is not recorded as pending).
 - Rollback of a workspace's index objects by the workspace Zetta is not detected, as for the store
   ([lake#522](https://github.com/oramasearch/lake/issues/522)); a rollback reads as an older index.
 

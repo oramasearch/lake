@@ -648,6 +648,7 @@ json search_output_schema() {
               {"scanned_changes", {{"type", "integer"}}},
               {"skipped_workspaces", {{"type", "array"}, {"items", {{"type", "string"}}}}},
               {"building_workspaces", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+              {"stale_workspaces", {{"type", "array"}, {"items", {{"type", "string"}}}}},
               {"items", {{"type", "array"}, {"items", search_schema()}}}}}};
 }
 
@@ -673,6 +674,7 @@ ApiResult search_result(search::Result<search::QueryResult> result) {
                                {"scanned_changes", result->scanned_changes},
                                {"skipped_workspaces", result->skipped_workspaces},
                                {"building_workspaces", result->building_workspaces},
+                               {"stale_workspaces", result->stale_workspaces},
                                {"items", std::move(values)}});
 }
 
