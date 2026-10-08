@@ -3737,10 +3737,13 @@ TEST(HttpServer, RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries) {
             "POST", "/v1/repositories/" + repository->id + "/sync/pull", "not a sync request",
             {}, "HTTP/1.1", admin, "application/octet-stream", {{"X-Request-Id", "request-384"}});
         statuses.push_back(pull.substr(0, pull.find("\r\n")));
-        server.drain();
+        // A handler sends its response and then logs and counts the request, so the client can
+        // hold the last answer before that request is counted (lake#547: on Linux an owner-loop
+        // flush here ran first and the stop flushed home's series a second time). stop() waits for
+        // every request to finish and then flushes once.
+        server.stop();
         output = captured.finish();
     }
-    server.stop();
 
     std::vector<nlohmann::json> lines;
     std::istringstream stream(output);
@@ -3787,7 +3790,7 @@ TEST(HttpServer, RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries) {
     EXPECT_EQ(workspaces.records(other).metric_total("lake_requests"), 1) << statuses[3];
     EXPECT_EQ(home_series.metric_total("lake_requests", {{"route", "/v1/server_info"}}), 0);
     EXPECT_EQ(home_series.metric_total("lake_requests", {{"route", "/:package"}}), 0);
-    // Nothing reached the workspace on the request path: only the owner loop's flush wrote.
+    // Nothing reached the workspace on the request path: only the flush at stop wrote.
     EXPECT_EQ(std::ranges::count(home_series.calls, std::string("record_metric")), 1);
 }
 
