@@ -129,6 +129,8 @@ supplies the actual clone/push text executed by the pinned Liquid CLI against th
 fresh database, non-default loopback port, store and credential. It refuses off-origin requests and compares
 cloned and pushed bytes. Set `LAKE_TEST_DB_URI` and `LAKE_TEST_LIQUID`, plus the native browser
 and Puppeteer paths where needed. See [private-install.md](../docs/deployment/private-install.md).
+It finds the panel by its exact heading, "Clone and Push" (Title Case since 94afa50); CI runs it
+(lake#547), which is how the stale "Clone and push" it still looked for was found.
 
 Every filesystem fixture lives below the process-unique directory returned by
 `lake::test::process_fixture_root()` in `temporary_directory.hpp`. Use `fixture_path()` for named
