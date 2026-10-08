@@ -44,7 +44,7 @@ jobs:
         run: |
           git init -q _external/zetta
           git -C _external/zetta remote add origin git@github.com:oramasearch/zetta.git
-          git -C _external/zetta fetch -q --depth 1 origin acb61fed527515e63affb2e5264ce27f93c44954
+          git -C _external/zetta fetch -q --depth 1 origin 149303c142e0c9ede4ac0c023ae631838140f1bc
           git -C _external/zetta checkout -q FETCH_HEAD
 
       - name: Check out the liquid source
@@ -53,7 +53,7 @@ jobs:
         run: |
           git init -q _external/liquid
           git -C _external/liquid remote add origin git@github.com:oramasearch/liquid.git
-          git -C _external/liquid fetch -q --depth 1 origin df2ae4df3d2851fac2881efeb2cfc6dab090eca8
+          git -C _external/liquid fetch -q --depth 1 origin 93ddcfe3a44aeeb033414720787130d0cb53df62
           git -C _external/liquid checkout -q FETCH_HEAD
           git -C _external/liquid submodule update --init --recursive --depth 1
           # liquid's own .dockerignore excludes its whole tree; as a named build context here it
