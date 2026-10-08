@@ -225,6 +225,17 @@ What lake does with them (`ZettaObjectClient`):
   by more than one node, fails the client with `errc::unsupported`, answered as
   `store_unavailable`. The open's first `:barrier` reports the node count, so a store is never
   served from a Zetta of several nodes. This holds until the incarnation is per owner.
+- **Limits.**
+  - A Zetta downgraded to an image without zetta#1237 does not read `Zetta-Incarnation`, so it
+    cannot enforce the precondition. Lake fails the store on its first answer, which carries no
+    incarnation, but that write has already landed.
+  - Restoring a workspace Zetta's volume snapshot rolls its lease record, its bucket record and its
+    catalogue back together. Fences issued after the snapshot can then be issued again, so every
+    lake process holding that workspace store must be stopped before a restore.
+  - Zetta keeps the lease and the bucket definition on disk before it answers (zetta#1237), so a
+    crash within the catalogue's one-second flush loses neither.
+- Once a client has refused a Zetta as unsupported (no durability format, several nodes), every
+  later request on it gives the same reason, answered as `store_unavailable`.
 - A client never opened through `:acquire` (a usage read, tests) has no recorded incarnation or
   lease. It takes the first incarnation an answer carries, and adopts a refusal's with nothing
   unsynced without a renewal.
@@ -1020,6 +1031,7 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreBackend.ConcurrentWritersOverTheSharedClientAdoptARestartBetweenOperations` | lake#543: two threads (liquid's keys and search's) write through one client; a restart between operations is adopted once (a request sent with the old incarnation meanwhile is sent again), and a bare `:barrier` refused with nothing unsynced is adopted |
 | `WorkspaceStoreBackend.ADowngradeWhileTheStoreIsOpenFailsIt` | lake#543: the fake Zetta rolled back to an image without zetta#1237 (a new incarnation, none reported) while a store is open: the next write fails the client even with nothing unsynced, and a renewal without the durability format fails it and stops every later request |
 | `WorkspaceStoreBackend.ASuccessUnderAnotherIncarnationIsARestart` | lake#543: a success answered under another incarnation than the one sent fails the client; it is never adopted from |
+| `WorkspaceStoreBackend.ARefusalOfSeveralNodesStaysTheAnswer` | lake#543: after a `:barrier` reports three nodes, every later write and `:barrier` on that client fails `unsupported` naming the reason, without a request |
 | `WorkspaceStoreMove.AWorkspaceZettaOfSeveralNodesAnswersStoreUnavailable` | lake#543: a workspace Zetta whose `:barrier` reports three nodes answers a commit `503 store_unavailable` naming it, and serves again at one node |
 | `WorkspaceStoreZetta.ALeaseTakenJustBeforeAKillSurvivesItAndTheOldHolderNeverWrites` | lake#543 on a real Zetta: a lease taken just before a `SIGKILL` (no wait for the catalogue flush) comes back with its holder; a second holder waits for it to lapse and gets a higher fence; the old holder's write is fenced and lands nothing |
 | `WorkspaceStoreMove.AWorkspaceZettaWithoutPrefixDurabilityAnswersStoreUnavailable` | lake#543: a switched workspace whose Zetta stops reporting the format answers a commit `503 store_unavailable` naming it, and commits again once the Zetta reports it |

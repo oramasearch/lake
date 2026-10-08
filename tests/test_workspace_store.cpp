@@ -4928,6 +4928,30 @@ TEST(WorkspaceStoreMove, AWorkspaceZettaOfSeveralNodesAnswersStoreUnavailable) {
     EXPECT_TRUE(written(rig.commit(rig.repo_a, "after.txt", "one node again")));
 }
 
+// lake#543: once a client has learned its workspace Zetta has several nodes, every later write
+// and :barrier keeps answering that reason as unsupported (lake's store_unavailable), not a
+// generic failure.
+TEST(WorkspaceStoreBackend, ARefusalOfSeveralNodesStaysTheAnswer) {
+    Rig rig;
+    auto client = rig.client();
+    ASSERT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
+    auto lease = liquid::runtime::block_on(client->acquire("lake", 30s, 0ms));
+    ASSERT_TRUE(lease) << lease.error().message;
+    rig.zetta->set_nodes(rig.endpoint, 3);
+    const auto first = liquid::runtime::block_on(client->barrier());
+    ASSERT_FALSE(first);
+    EXPECT_TRUE(lake::control::workspace_zetta_unsupported(first.error())) << first.error().message;
+    const auto requests = rig.zetta->requests();
+    const auto later = liquid::runtime::block_on(client->put("objects/a", "a", lease->fence, false));
+    ASSERT_FALSE(later);
+    EXPECT_TRUE(lake::control::workspace_zetta_unsupported(later.error())) << later.error().message;
+    EXPECT_NE(later.error().message.find("more than one node"), std::string::npos) << later.error().message;
+    const auto again = liquid::runtime::block_on(client->barrier());
+    ASSERT_FALSE(again);
+    EXPECT_TRUE(lake::control::workspace_zetta_unsupported(again.error()));
+    EXPECT_EQ(rig.zetta->requests(), requests) << "nothing more is sent";
+}
+
 // lake#535 review E: views a backend keeps for its owner's release are let go of when the owner
 // goes without a release, so they do not keep the backend's state alive.
 TEST(WorkspaceStoreOwner, ViewsKeptForAReleaseThatNeverComesAreLetGo) {

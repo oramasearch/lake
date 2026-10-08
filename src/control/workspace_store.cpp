@@ -222,6 +222,17 @@ namespace {
 thread_local std::int64_t settle_deadline = 0;
 } // namespace
 
+namespace {
+// Why a client refuses every later write and :barrier (lake#543): an unsupported workspace Zetta
+// (no durability format, several nodes) keeps answering as such, so lake keeps answering
+// store_unavailable naming the reason; a restart inside an operation is `unavailable`.
+liquid::error stopped_error(const std::string& reason, const std::string& context) {
+    const bool unsupported =
+        reason.starts_with(durability_refusal) || reason.starts_with(several_nodes_refusal);
+    return failure(unsupported ? liquid::errc::unsupported : liquid::errc::unavailable, reason, context);
+}
+} // namespace
+
 bool workspace_zetta_unsupported(const liquid::error& error) {
     return error.code == liquid::errc::unsupported &&
            (error.message.starts_with(durability_refusal) || error.message.starts_with(several_nodes_refusal));
@@ -456,7 +467,7 @@ liquid::result<void> ZettaObjectClient::observe_incarnation(const ObjectResponse
         }
     }
     if (!restarted_.empty()) {
-        return refused(liquid::errc::unavailable, restarted_, context);
+        return std::unexpected(stopped_error(restarted_, context));
     }
     if (write) {
         ++unsynced_writes_;
@@ -480,7 +491,7 @@ liquid::runtime::task<ObjectResponse> ZettaObjectClient::send_checked(ObjectRequ
         {
             std::lock_guard lock(incarnation_mutex_);
             if (!restarted_.empty()) {
-                co_return std::unexpected(failure(liquid::errc::unavailable, restarted_, context));
+                co_return std::unexpected(stopped_error(restarted_, context));
             }
             sent = incarnation_.value_or(std::string());
             if (!sent.empty()) {
@@ -547,7 +558,7 @@ liquid::runtime::task<ObjectResponse> ZettaObjectClient::send_checked(ObjectRequ
                     }
                 }
                 std::lock_guard lock(incarnation_mutex_);
-                co_return std::unexpected(failure(liquid::errc::unavailable, restarted_, context));
+                co_return std::unexpected(stopped_error(restarted_, context));
             }
         }
         if (response->status == 200 || response->status == 201) {
@@ -561,7 +572,7 @@ liquid::runtime::task<ObjectResponse> ZettaObjectClient::send_checked(ObjectRequ
     if (restarted_.empty()) {
         restarted_ = "the workspace Zetta's incarnation kept changing (lake#543)";
     }
-    co_return std::unexpected(failure(liquid::errc::unavailable, restarted_, context));
+    co_return std::unexpected(stopped_error(restarted_, context));
 }
 
 bool ZettaObjectClient::restarted() const {
