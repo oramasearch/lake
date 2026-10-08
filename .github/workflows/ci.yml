@@ -21,7 +21,9 @@ env:
   # Bump ZETTA_REF with the zetta-bridge pin and LIQUID_REF with the liquid-bridge pin.
   # ZETTA_REF is both the client source lake compiles and the server the real-Zetta tests start.
   ZETTA_REF: 5f70b3063fa6cbc9e489eb153f0699ecd080cec9
-  LIQUID_REF: 89555191ace2934e1715a58ae957632afb7153c1
+  # liquid#345 (corosio 0def6d3, the connect-after-open fix): until it merges, its branch head;
+  # then the liquid-bridge pin that includes it.
+  LIQUID_REF: 7f58aec5d94c077580071ad5b6436755aaf638fc
   # The Dockerfile's OpenSSL, so CI and the image link the same library; bump both together.
   OPENSSL_VERSION: 3.6.3
   OPENSSL_SHA256: 243a86649cf6f23eeb6a2ff2456e09e5d77dd9018a54d3d96b0c6bdd6ba6c7f1
@@ -428,10 +430,16 @@ jobs:
           for result in ("ctest-results.xml", "ctest-results-heavy.xml"):
               if os.path.exists(result):
                   cases += list(ET.parse(result).getroot().iter("testcase"))
+          import re
           passed, failed, skipped = [], [], []
+          reasons = {}
           for case in cases:
               name = case.get("name")
               output = case.findtext("system-out") or ""
+              skip = case.find("skipped")
+              reason = re.search(r"Skipped\n(.*)\n", output)
+              reasons[name] = (reason.group(1) if reason else
+                               (skip.get("message") if skip is not None else "")) or ""
               if case.find("failure") is not None or case.find("error") is not None:
                   failed.append(name)
               elif (case.find("skipped") is not None
@@ -455,8 +463,13 @@ jobs:
           ]
           if failed:
               lines += ["### Failed", ""] + [f"- `{n}`" for n in failed] + [""]
+          # A skip whose reason names a missing variable or tool means CI lacks a dependency; the
+          # rest skip by design (a parameter that does not apply, a disabled benchmark).
+          missing = [n for n in skipped
+                     if re.search(r"LAKE_TEST_|not configured|not set|\bSet ", reasons[n])]
           if skipped:
-              lines += ["### Skipped", ""] + [f"- `{n}`" for n in skipped] + [""]
+              lines += ["### Skipped", ""] + [
+                  f"- `{n}`" + (f": {reasons[n]}" if reasons[n] else "") for n in skipped] + [""]
           text = "\n".join(lines)
           print(text)
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
@@ -464,10 +477,10 @@ jobs:
           problems = []
           if not zetta:
               problems.append("no WorkspaceStoreZetta test is registered")
-          # CI supplies everything a test can ask for (Postgres, Zetta, the liquid CLI, a browser),
-          # so a skip means a missing dependency, not an optional one.
-          if skipped:
-              problems.append(f"{len(skipped)} tests skipped: " + ", ".join(skipped))
+          # CI supplies everything a test can ask for (Postgres, Zetta, the liquid CLI, a browser).
+          if missing:
+              problems.append(f"{len(missing)} tests skipped for a missing dependency: "
+                              + ", ".join(missing))
           if gates != "passed":
               problems.append("the token gates did not pass")
           for problem in problems:

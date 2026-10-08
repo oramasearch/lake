@@ -12,7 +12,7 @@ request and every push to `main` (lake#547). It is one job, `ci`, on `ubuntu-24.
 
 1. loads one read-only deploy key per private repository (below) and checks out all submodules;
 2. fetches `oramasearch/zetta` at `ZETTA_REF` and `oramasearch/liquid` at `LIQUID_REF`, the
-   commits the bridges pin (Zetta `5f70b30`, liquid `8955519`);
+   commits the bridges pin (Zetta `5f70b30`; liquid `7f58aec`, liquid#345, below);
 3. installs the Dockerfile toolchain (LLVM 19, CMake 3.31.5, OpenSSL 3.6.3 built from the
    checksum-verified source);
 4. restores, or else builds, the **Zetta server binary** at `ZETTA_REF` (below);
@@ -25,7 +25,7 @@ ctest --test-dir build --output-on-failure --timeout 300 --parallel 2 -E "$HEAVY
 ctest --test-dir build --output-on-failure --timeout 600 --parallel 1 -R "$HEAVY_TESTS" --output-junit ctest-results-heavy.xml
 ```
 
-CI supplies every dependency a test can ask for, so nothing may skip:
+CI supplies every dependency a test can ask for, so no test may skip for a missing one:
 
 | Variable | What CI gives it | Tests |
 |---|---|---|
@@ -38,8 +38,11 @@ CI supplies every dependency a test can ask for, so nothing may skip:
 That includes the **real-Zetta tests** (`WorkspaceStoreZetta.*`, which start the Zetta binary) and
 the **UI token gates** (`lake-ui-token-gates`, `tools/ui/test-token-gates.sh`). A last step writes
 the totals (passed, failed, skipped, real-Zetta tests run, token gates) to the run summary and fails
-the job if any test skipped or the token gates did not pass: without their dependency those tests
-skip rather than fail, so a green run must prove they ran.
+the job if a test skipped for a missing dependency (its skip reason names a `LAKE_TEST_` variable or
+says it is not configured or not set) or the token gates did not pass: without their dependency
+those tests skip rather than fail, so a green run must prove they ran. Skips by design stay allowed
+and are listed with their reason: the Postgres variants of `HttpResponseIsolation` tests whose
+operator status is written only on the memory store, and the disabled `SearchBenchmark`.
 
 A hung test fails by name after five minutes (`--timeout 300`), far inside the job's 300-minute
 limit, so the job reports it instead of being killed. Tests run two at a time: the runner has two
@@ -152,8 +155,13 @@ the client from it and, on a cache miss, builds the Zetta server from the same c
 submodules. The image workflow supplies the same directory as the `zetta_source` named build
 context. Bump `ZETTA_REF` in `ci.yml` and the ref in `image.yml` when the bridge bumps Zetta, and
 `LIQUID_REF` and `image.yml`'s liquid ref when liquid-bridge bumps liquid. Both workflows pin Zetta
-`5f70b30` and liquid `8955519` (the bridge pins on 2026-10-08); lake does not compile against a
-liquid older than `df2ae4d` (liquid#322, the store owner lock and `owner_wait` that lake#479 uses).
+`5f70b30` (the bridge pin on 2026-10-08). `ci.yml` pins liquid `7f58aec`, the head of liquid#345,
+which moves liquid's Corosio to `0def6d3`: on the bridge's liquid `8955519` (Corosio `1d56cba`) a
+TCP connect fails on Linux with `Input/output error` when epoll has already reported its open,
+unconnected socket (corosio#10), which failed lake's drive, sync and model-sync tests in CI. Once
+liquid#345 merges, `LIQUID_REF` moves to that merge and `image.yml` follows. Lake does not compile
+against a liquid older than `df2ae4d` (liquid#322, the store owner lock and `owner_wait` that
+lake#479 uses).
 
 Lake's plain environment-value check compiles libliquid's existing private detector source into
 `lake-core`. The detector has no exported shared-library API, so this keeps static and shared builds
