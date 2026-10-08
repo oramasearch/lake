@@ -212,9 +212,9 @@ try {
     await page.goto(`${origin}/repository?id=${repository.id}`, { waitUntil: "networkidle0" });
     const panel = await page.evaluate(() => {
         const heading = [...document.querySelectorAll("h2")]
-            .find((element) => element.textContent === "Clone and push");
+            .find((element) => element.textContent === "Clone and Push");
         if (!heading) {
-            throw new Error("Clone and push panel missing");
+            throw new Error("Clone and Push panel missing");
         }
         return {
             text: heading.parentElement.innerText,

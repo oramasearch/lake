@@ -129,6 +129,8 @@ supplies the actual clone/push text executed by the pinned Liquid CLI against th
 fresh database, non-default loopback port, store and credential. It refuses off-origin requests and compares
 cloned and pushed bytes. Set `LAKE_TEST_DB_URI` and `LAKE_TEST_LIQUID`, plus the native browser
 and Puppeteer paths where needed. See [private-install.md](../docs/deployment/private-install.md).
+It finds the panel by its exact heading, "Clone and Push" (Title Case since 94afa50); CI runs it
+(lake#547), which is how the stale "Clone and push" it still looked for was found.
 
 Every filesystem fixture lives below the process-unique directory returned by
 `lake::test::process_fixture_root()` in `temporary_directory.hpp`. Use `fixture_path()` for named
@@ -638,7 +640,9 @@ background rebuild queue, backoff, release snapshots, write-once runs and evicti
 move with an interrupted copy, the switch, two workspaces of one space and the lost lease's `503`.
 `zetta_object_fixture.hpp` is `FakeZettaObjects`, Zetta's object routes in memory. It models
 durability (lake#527): the bucket's log is one sequence of applied writes, a barrier or a
-`durable=true` write makes it durable up to there, and `crash` keeps a prefix of the rest;
+`durable=true` write makes it durable up to there, and `crash` keeps a prefix of the rest (the
+rest is kept as the writes themselves and replayed, so appending a large object costs its bytes
+once, not a copy per append: lake#547);
 `durable_requests` counts the requests that asked for an fsync (lake#535).
 `fail_after` and `fail_randomly` lose requests before they are applied; `lose_next_answers` and
 `lose_answers_randomly` apply them and then lose the answer. `applied` and `most_writes_in_flight`
