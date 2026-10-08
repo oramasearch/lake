@@ -21,7 +21,8 @@ request and every push to `main` (lake#547). It is one job, `ci`, on `ubuntu-24.
 6. runs every ctest test with `LAKE_TEST_DB_URI` and `LAKE_TEST_ZETTA_BINARY` set:
 
 ```sh
-ctest --test-dir build --output-on-failure --timeout 300 --parallel 2 --output-junit ctest-results.xml
+ctest --test-dir build --output-on-failure --timeout 300 --parallel 2 -E "$HEAVY_TESTS" --output-junit ctest-results.xml
+ctest --test-dir build --output-on-failure --timeout 600 --parallel 1 -R "$HEAVY_TESTS" --output-junit ctest-results-heavy.xml
 ```
 
 CI supplies every dependency a test can ask for, so nothing may skip:
@@ -42,10 +43,26 @@ skip rather than fail, so a green run must prove they ran.
 
 A hung test fails by name after five minutes (`--timeout 300`), far inside the job's 300-minute
 limit, so the job reports it instead of being killed. Tests run two at a time: the runner has two
-CPUs and 7 GiB of memory. The summary step runs even when tests fail; if ctest did not finish it
-says so and fails. A `Diagnostics` step prints the memory samples taken every five seconds during
-the tests and any out-of-memory kill, and the `ctest-log` artifact keeps `LastTest.log` and the
-JUnit file for 14 days. A newer push to a pull request cancels its older run; runs on `main` always
+CPUs and 7 GiB of memory. `HEAVY_TESTS` (`RegistryStore.ALargeLayerIsStreamedNeverHeldWhole`, a
+304 MiB layer, and `ModelSync.MultiGigabyteRevisionsDeduplicateAndResumePull`) run one at a time
+after the rest, with a ten-minute timeout.
+
+The first two Linux runs (2026-10-08) lost the whole job about six minutes into the tests, both
+times while `RegistryStore.ALargeLayerIsStreamedNeverHeldWhole` was running: the Test step got
+`SIGTERM` (exit 143) and no later step ran, which is how a runner ends when its agent dies, not how
+a failing or timed-out test ends. To leave a trace and to keep the runner alive:
+
+- a first step deletes preinstalled toolchains CI does not use (.NET, Android, GHC, CodeQL, Swift),
+  and a step after the build deletes both compiler caches (already saved) and Zetta's submodules,
+  so the tests start with far more than the runner's original 12 GiB free;
+- a sampler prints memory, swap, free disk and the three largest processes into the Test step's
+  log every ten seconds, so the log shows what ran out even if the job dies;
+- the tests run with `oom_score_adj` 1000, so an out-of-memory kill takes a test, which ctest
+  reports by name, rather than the runner's agent.
+
+The summary step runs even when tests fail; if ctest did not finish it says so and fails. A
+`Diagnostics` step prints memory, disk and any out-of-memory or no-space kernel message, and the
+`ctest-log` artifact keeps `LastTest*.log` and the JUnit files for 14 days. A newer push to a pull request cancels its older run; runs on `main` always
 finish.
 
 ### The Zetta binary
