@@ -3367,8 +3367,8 @@ TEST(WorkspaceStoreZetta, ALostAnswerOverThePooledTransportIsRetriedOrFailsTheBa
 // lake#543 on a real Zetta: the store opens only because Zetta reports prefix durability, and
 // records its incarnation. A restart of Zetta (SIGKILL) inside an operation fails it at the next
 // write, refused by its precondition; a restart between operations fails nothing. Every kill
-// comes at once, with no wait for Zetta's catalogue to reach disk, except one after the bucket is
-// created: a bucket definition is still flushed with the catalogue, once a second.
+// comes at once, with no wait for Zetta's catalogue to reach disk: the bucket definition and the
+// lease are on Zetta's disk before it answers.
 TEST(WorkspaceStoreZetta, AZettaRestartInsideAnOperationFailsItAndBetweenOperationsDoesNot) {
     RealZetta zetta;
     if (!zetta.start()) {
@@ -3379,7 +3379,6 @@ TEST(WorkspaceStoreZetta, AZettaRestartInsideAnOperationFailsItAndBetweenOperati
     auto client = std::make_shared<ZettaObjectClient>(lake::control::make_zetta_object_transport(),
                                                       ObjectEndpoint{zetta.url, zetta.token});
     ASSERT_TRUE(liquid::runtime::block_on(client->create_bucket(0)));
-    std::this_thread::sleep_for(1500ms);  // the bucket definition reaches Zetta's disk
     auto owner = std::make_shared<ZettaStoreOwner>(client, 30s);
     liquid::store_options options;
     auto backend = std::make_shared<ZettaObjectBackend>(
@@ -3444,7 +3443,6 @@ TEST(WorkspaceStoreZetta, ALeaseTakenJustBeforeAKillSurvivesItAndTheOldHolderNev
     const auto transport = lake::control::make_zetta_object_transport();
     auto first = std::make_shared<ZettaObjectClient>(transport, ObjectEndpoint{zetta.url, zetta.token});
     ASSERT_TRUE(liquid::runtime::block_on(first->create_bucket(0)));
-    std::this_thread::sleep_for(1500ms);  // the bucket definition reaches Zetta's disk
     auto lease = liquid::runtime::block_on(first->acquire("lake-a", 10s, 0ms));
     ASSERT_TRUE(lease) << lease.error().message;
     ASSERT_TRUE(liquid::runtime::block_on(first->barrier()));
