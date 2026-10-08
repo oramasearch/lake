@@ -658,6 +658,9 @@ struct Service::Impl {
         std::chrono::steady_clock::time_point retry_after{};
         std::chrono::seconds backoff{0};
         std::string last_error;
+        // lake#540: the delay before the last retry of `pending` and `removed`; it doubles on each
+        // retry that fails, up to pending_retry_most, and is reset once they are all applied.
+        std::chrono::milliseconds pending_backoff{0};
     };
 
     enum class Readiness { Ready, Building, Schedule };
@@ -683,6 +686,25 @@ struct Service::Impl {
     [[nodiscard]] WorkspaceAccess workspace_config() const {
         std::lock_guard lock(mutex);
         return workspace_access;
+    }
+
+    // The first delay before a workspace's pending repositories are tried again (lake#540).
+    std::chrono::milliseconds pending_retry_first{std::chrono::seconds(15)};
+    static constexpr std::chrono::milliseconds pending_retry_most{std::chrono::minutes(10)};
+
+    // The delay before the next retry of a workspace's pending repositories and removals: the
+    // first after pending_retry_first, then doubling up to 10 minutes. The caller holds the state's
+    // mutex (Impl::mutex is taken after it, briefly).
+    [[nodiscard]] std::chrono::milliseconds next_pending_retry(IndexState& state) {
+        std::chrono::milliseconds first;
+        {
+            std::lock_guard lock(mutex);
+            first = pending_retry_first;
+        }
+        state.pending_backoff = state.pending_backoff.count() == 0
+                                    ? first
+                                    : std::min<std::chrono::milliseconds>(pending_retry_most, state.pending_backoff * 2);
+        return state.pending_backoff;
     }
 
     [[nodiscard]] std::shared_ptr<IndexState> space_state(const std::string& customer) {
@@ -1878,7 +1900,8 @@ struct Service::Impl {
                                                                   const WorkspaceIndex& index,
                                                                   liquid::repository& opened,
                                                                   const std::string& repository,
-                                                                  bool tags) {
+                                                                  bool tags,
+                                                                  bool* write_failed = nullptr) {
         auto next_active = state.data.active;
         if (const auto published = publish_refs(opened, state.data, repository, next_active); !published) {
             return std::unexpected(published.error());
@@ -1906,6 +1929,9 @@ struct Service::Impl {
             // What is in memory may be ahead of the objects: read them again on next use.
             state.loaded = false;
             state.data = CustomerState{};
+            if (write_failed != nullptr) {
+                *write_failed = true;
+            }
             return std::unexpected(committed.error());
         }
         return *reindexed;
@@ -1982,6 +2008,11 @@ void Service::schedule_rebuild(const std::string& customer, const std::string& w
     impl_->schedule(customer, workspace, *this);
 }
 
+void Service::set_pending_retry(std::chrono::milliseconds first) {
+    std::lock_guard lock(impl_->mutex);
+    impl_->pending_retry_first = std::max(first, std::chrono::milliseconds(1));
+}
+
 void Service::shutdown() {
     impl_->stopping.store(true);
 }
@@ -2013,10 +2044,6 @@ std::vector<std::string> Service::tracked_workspaces() const {
     return output;
 }
 
-namespace {
-constexpr auto pending_retry = std::chrono::seconds(15);
-}
-
 Result<void> Service::rebuild_workspace(const std::string& customer, const std::string& workspace) {
     if (impl_->stopping.load()) {
         return std::unexpected(Error{"store_unavailable", "lake is stopping"});
@@ -2029,13 +2056,65 @@ Result<void> Service::rebuild_workspace(const std::string& customer, const std::
     }
     const auto state = impl_->workspace_state(workspace);
     bool ready = false;
+    bool unloaded = false;
     {
         std::lock_guard held(state->mutex);
         ready = state->loaded && !state->building;
-        if (!ready) {
+        // Not loaded and not being built: evicted, or a write failed and left repositories pending
+        // (lake#540). Its stored index is loaded rather than rebuilt when it reads back.
+        unloaded = !ready && !state->building && (!state->pending.empty() || !state->removed.empty());
+        if (!ready && !unloaded) {
             state->building = true;
             state->loaded = false;
             state->data = Impl::CustomerState{};
+        }
+    }
+    if (unloaded) {
+        const WorkspaceAccess config = impl_->workspace_config();
+        Result<Impl::Readiness> loaded = Impl::Readiness::Schedule;
+        {
+            auto lent = config.lend ? config.lend(customer, workspace, true)
+                                    : Result<BorrowedWorkspace>(
+                                          std::unexpected(Error{"unsupported", "no workspace access"}));
+            if (!lent) {
+                std::chrono::milliseconds delay{0};
+                {
+                    std::lock_guard held(state->mutex);
+                    delay = impl_->next_pending_retry(*state);
+                }
+                impl_->schedule(customer, workspace, *this, delay);
+                return std::unexpected(lent.error());
+            }
+            std::lock_guard held(state->mutex);
+            if (state->loaded && !state->building) {
+                loaded = Impl::Readiness::Ready;
+            } else if (state->building) {
+                loaded = Impl::Readiness::Building;
+            } else {
+                loaded = Impl::ensure_workspace(*state, lent->index);
+            }
+            if (loaded && *loaded == Impl::Readiness::Schedule) {
+                // ensure_workspace marked it as being built: rebuilt below.
+                state->loaded = false;
+                state->data = Impl::CustomerState{};
+            }
+        }
+        if (!loaded) {
+            std::chrono::milliseconds delay{0};
+            {
+                std::lock_guard held(state->mutex);
+                delay = impl_->next_pending_retry(*state);
+            }
+            impl_->schedule(customer, workspace, *this, delay);
+            return std::unexpected(loaded.error());
+        }
+        if (*loaded == Impl::Readiness::Ready) {
+            impl_->trim();
+            return apply_pending(customer, workspace);
+        }
+        if (*loaded == Impl::Readiness::Building) {
+            // A rebuild that failed waits out its delay; the next use schedules it again.
+            return {};
         }
     }
     if (ready) {
@@ -2250,9 +2329,17 @@ Result<void> Service::apply_pending(const std::string& customer, const std::stri
         }
     }
     impl_->trim();
+    std::chrono::milliseconds delay{0};
+    {
+        std::lock_guard held(state->mutex);
+        if (retry) {
+            delay = impl_->next_pending_retry(*state);
+        } else if (state->pending.empty() && state->removed.empty()) {
+            state->pending_backoff = std::chrono::milliseconds(0);
+        }
+    }
     if (retry) {
-        impl_->schedule(customer, workspace, *this,
-                        std::chrono::duration_cast<std::chrono::milliseconds>(pending_retry));
+        impl_->schedule(customer, workspace, *this, delay);
         return std::unexpected(last);
     }
     return {};
@@ -2266,6 +2353,9 @@ Result<void> Service::publish(const Publish& publication) {
                 Error{"invalid_input", "customer, repository, ref and change are required"});
         }
         std::optional<std::string> to_schedule;
+        // lake#540: a failed index write leaves the repository pending, retried after this delay.
+        std::optional<std::pair<std::string, std::chrono::milliseconds>> to_retry;
+        Error write_error{"", ""};
         {
             auto borrowed = impl_->borrow(publication.customer, publication.repository);
             if (!borrowed) {
@@ -2305,7 +2395,11 @@ Result<void> Service::publish(const Publish& publication) {
                                 !committed) {
                                 state->loaded = false;
                                 state->data = Impl::CustomerState{};
-                                return committed;
+                                // Kept pending, so search says the index is partly stale and
+                                // the worker refreshes the repository after a growing delay.
+                                state->pending.insert(publication.repository);
+                                to_retry.emplace(index.workspace, impl_->next_pending_retry(*state));
+                                write_error = committed.error();
                             }
                         }
                     }
@@ -2331,6 +2425,10 @@ Result<void> Service::publish(const Publish& publication) {
         }
         if (to_schedule) {
             impl_->schedule(publication.customer, *to_schedule, *this);
+        }
+        if (to_retry) {
+            impl_->schedule(publication.customer, to_retry->first, *this, to_retry->second);
+            return std::unexpected(std::move(write_error));
         }
         impl_->trim();
         // What the space's index held of it from before the switch goes.
@@ -2396,14 +2494,15 @@ Result<void> Service::forget_repository(const std::string& customer,
                 }
                 // Otherwise the removal is kept and tried again later, so the repository never
                 // stays in the index.
+                std::chrono::milliseconds delay{0};
                 {
                     const auto state = impl_->workspace_state(workspace);
                     std::lock_guard held(state->mutex);
                     state->removed.insert(repository);
                     state->pending.erase(repository);
+                    delay = impl_->next_pending_retry(*state);
                 }
-                impl_->schedule(customer, workspace, *this,
-                                std::chrono::duration_cast<std::chrono::milliseconds>(pending_retry));
+                impl_->schedule(customer, workspace, *this, delay);
                 return std::unexpected(lent.error());
             }
             const auto state = impl_->workspace_state(workspace);
@@ -2530,6 +2629,8 @@ Result<ReindexResult> Service::reindex_artifacts(const std::string& customer,
             return std::unexpected(Error{"invalid_input", "customer and repository are required"});
         }
         std::optional<std::string> to_schedule;
+        std::optional<std::pair<std::string, std::chrono::milliseconds>> to_retry;
+        Error write_error{"", ""};
         ReindexResult result;
         {
             auto borrowed = impl_->borrow(customer, repository);
@@ -2573,12 +2674,26 @@ Result<ReindexResult> Service::reindex_artifacts(const std::string& customer,
                     to_schedule = index.workspace;
                 }
             } else {
-                auto refreshed = Impl::refresh_repository(*state, index, *opened, repository, false);
-                if (!refreshed) {
+                bool write_failed = false;
+                auto refreshed =
+                    Impl::refresh_repository(*state, index, *opened, repository, false, &write_failed);
+                if (!refreshed && !write_failed) {
                     return std::unexpected(refreshed.error());
                 }
-                result = *refreshed;
+                if (!refreshed) {
+                    // lake#540: kept pending, so search says the index is partly stale and the
+                    // worker refreshes the repository after a growing delay.
+                    state->pending.insert(repository);
+                    to_retry.emplace(index.workspace, impl_->next_pending_retry(*state));
+                    write_error = refreshed.error();
+                } else {
+                    result = *refreshed;
+                }
             }
+        }
+        if (to_retry) {
+            impl_->schedule(customer, to_retry->first, *this, to_retry->second);
+            return std::unexpected(std::move(write_error));
         }
         if (to_schedule) {
             impl_->schedule(customer, *to_schedule, *this);
@@ -2888,6 +3003,10 @@ Service::query(const Query& query, const std::string& principal, control::Store&
                         to_schedule.emplace_back(space, workspace);
                     }
                     continue;
+                }
+                // lake#540: the index answers, but without what a failed write left pending.
+                if (!state->pending.empty() || !state->removed.empty()) {
+                    output.stale_workspaces.push_back(workspace);
                 }
                 if (scanned_repository) {
                     ObjectStorage storage(index.objects);

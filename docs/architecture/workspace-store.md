@@ -431,6 +431,16 @@ stores, at most eight at once.
   releases it (Zetta's acquire wakes on the release), which is before the predecessor releases the
   root. Before each attempt, under the lane, the pass checks again that the workspace is still
   switched and running; one deleted or stopped meanwhile is not opened.
+- **Checked again once the lease is taken (lake#541).** A stop or a deletion can land while the
+  attempt waits in Zetta's acquire, and the acquire then takes the lease as soon as it frees. So
+  once the open returns, still under the lane, the pass checks again; a workspace no longer
+  switched, running and live has its store closed and its lease released at once, before any
+  request or renewal uses it, and the attempt ends `not_found`. Such a lease is taken at most once,
+  never renewed and never taken again. A deletion (lake#514) closes the store under the same lane,
+  so it waits for an attempt in flight (at most its 5 s) and then finds nothing open; its cascade is
+  committed before it waits, so that check sees it. The repository workers open repositories only
+  in a store that is still open and usable, never the store itself, so a store closed meanwhile is
+  not opened again by them.
 - It holds the lane as lake's own work, so a request that arrives meanwhile waits for the open and
   then uses it. Attempts go on until `LAKE_STORE_OWNER_WAIT_SECONDS`, the drain, or a failed root;
   anything but a held lease or an unready workspace Zetta is left to the first request. Each store
@@ -916,7 +926,7 @@ a real lake server. `WorkspaceStoreZetta.*` run against a real Zetta binary when
 | `WorkspaceStoreHandoff.ASuccessorTakesEachLeaseBeforeTheRootAndItsFirstRequestsNeedNoOpen` | lake#536: two lake servers on one volume and one fake Zetta (10 ms a request, 30 s TTL): the successor's pre-open waits while the predecessor holds both workspaces; once the predecessor begins to drain (still owning the root) the successor takes both leases with higher fences, before the root; the first commit to each workspace answers in under 5 s and takes no lease (no open); a write with the predecessor's fence is refused |
 | `WorkspaceStoreHandoff.AServingPredecessorKeepsAWorkspaceItNeverOpenedWhileTheSuccessorPreopens` | lake#536: before the predecessor drains, the successor takes no free lease, and the predecessor serves a workspace it had never opened |
 | `WorkspaceStoreHandoff.MoreWorkspacesThanWorkersAreAllPreopenedBeforeTheRoot` | lake#536: ten workspaces (more than the eight pre-open workers) are all pre-opened while the predecessor still owns the root |
-| `WorkspaceStoreHandoff.AWorkspaceStoppedOrDeletedDuringThePreopenIsNotOpened` | lake#536: a workspace stopped, and one deleted, while the pre-open waits for their leases are not opened once the leases are free |
+| `WorkspaceStoreHandoff.AWorkspaceStoppedOrDeletedDuringThePreopenIsNotOpened` | lake#536, lake#541: with both pre-open attempts inside Zetta's acquire, one workspace is stopped and one deleted (the deletion waiting on the lane), then the leases free: each is taken at most once, released at once, and not held or taken again 2.5 s later; the deletion completes |
 | `WorkspaceStoreHandoff.ADrainingLakeRefusesNewStoreRequestsFinishesAdmittedOnesAndReleasesTheLease` | lake#536: after `begin_drain` a new request to the workspace answers `503` with `Retry-After: 1` at once, the commit admitted before finishes `200`, and the lease is released before `stop()`; a search, a commit and the operator's copy, verify and switch after the release are refused and take no lease again; the commit reads back after a restart |
 | `WorkspaceStoreHandoff.ASearchRebuildDoesNotHoldOffTheRelease` | lake#536: a search index rebuild reading eight repositories from a slow workspace Zetta stops at the drain, and the lease is released in under 2.5 s (about 8.5 s when the rebuild runs on) |
 | `RegistryStore.ADrainingLakeRefusesBlobWorkAndNeverRetakesTheLease` | lake#536: after `begin_drain` a blob `HEAD` and `GET` answer `503` with `Retry-After: 1` (stream admission), the operator's copy of an unrooted blob is refused by `root_workspace_blob`, and the released lease is not taken again |

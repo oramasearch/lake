@@ -105,6 +105,9 @@ struct QueryResult {
     // Workspaces whose index is being built (after a switch, or because it was lost): they answer
     // nothing until it is ready, and are not waited for.
     std::vector<std::string> building_workspaces;
+    // Workspaces whose index answered but is partly stale (lake#540): a write to it failed, and the
+    // repositories it left pending are retried, after a growing delay, until it succeeds.
+    std::vector<std::string> stale_workspaces;
 };
 
 // The objects of one workspace's search index (lake#381, decision 54 S8), kept beside the
@@ -267,6 +270,9 @@ public:
     // retried on the workspace's next use after a growing delay (kept in memory only: a restarted
     // lake tries again at once).
     [[nodiscard]] Result<void> rebuild_workspace(const std::string& customer, const std::string& workspace);
+    // The first delay before a workspace's pending repositories are tried again after a failed
+    // index write (lake#540); later retries double it, up to 10 minutes. Default 15 s.
+    void set_pending_retry(std::chrono::milliseconds first);
     // Stops scheduling and running rebuilds (the server is stopping); one in progress stops at its
     // next repository. set_workspace_access starts them again.
     void shutdown();
