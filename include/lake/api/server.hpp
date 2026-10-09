@@ -46,7 +46,34 @@ namespace lake::api {
 struct ServerOptions {
     std::string listen_address = "127.0.0.1";
     unsigned short port = 4900; // 0 = pick an ephemeral port
+    // Connections and request workers are apart (lake#534, docs/serving/http.md, "Connections and
+    // workers"): a request holds one of `worker_coroutines` only while its route runs
+    // (LAKE_HTTP_WORKERS), and waits up to `worker_wait` for one before it is answered 503
+    // (LAKE_HTTP_WORKER_WAIT_SECONDS). An idle or still-arriving connection holds none.
     int worker_coroutines = 32;
+    std::chrono::milliseconds worker_wait{std::chrono::seconds(10)};
+    // Open connections, idle ones included; a connection above it is answered 503 and closed
+    // (LAKE_HTTP_MAX_CONNECTIONS).
+    std::size_t max_connections = 4096;
+    // A keep-alive connection waiting this long for its next request is closed
+    // (LAKE_HTTP_IDLE_TIMEOUT_SECONDS). It must outlast the idle timeout of a proxy's pooled
+    // upstream connections (nginx: 60 s).
+    std::chrono::milliseconds idle_timeout{std::chrono::seconds(75)};
+    // One read of a request body or one write of a response that makes no progress for this long
+    // ends the connection (LAKE_HTTP_IO_TIMEOUT_SECONDS).
+    std::chrono::milliseconds io_timeout{std::chrono::seconds(60)};
+    // While a request holds a worker, the time it waits on its client may not exceed 10 s plus a
+    // second per this many bytes moved (LAKE_HTTP_MIN_TRANSFER_RATE, bytes per second; 0: off).
+    std::size_t min_transfer_rate = 1024;
+    // Requests that left their worker (long polls, pulls), in all and per caller; past either a
+    // request is answered 429 (LAKE_HTTP_MAX_LONG_REQUESTS, LAKE_HTTP_MAX_LONG_REQUESTS_PER_CALLER).
+    std::size_t max_long_requests = 512;
+    std::size_t max_long_requests_per_caller = 64;
+    // A request header must arrive whole within this of its first byte, or of the accept for a
+    // connection's first request; otherwise the connection is closed
+    // (LAKE_HTTP_HEADER_TIMEOUT_SECONDS).
+    std::chrono::milliseconds header_timeout{std::chrono::seconds(10)};
+    int listen_backlog = 1024;
     std::string node_name = "lake";
     // Maximum completed OCI blob size. The HTTP parser admits this much so registry upload
     // handlers can stream it; every other request body retains the 64 MiB adapter limit.
@@ -184,6 +211,15 @@ inline std::string repository_external_origin(const ServerOptions& options) {
     }
     return {};
 }
+
+// lake#534: raises the soft open-file limit to the hard limit and returns it, with the
+// connections that fit in it: `wanted`, at most the limit less a reserve of 512 descriptors (half
+// the limit when that is smaller) for PostgreSQL, store files and outbound connections.
+struct OpenFileBudget {
+    std::uint64_t open_files = 0;
+    std::size_t max_connections = 0;
+};
+OpenFileBudget fit_connections_to_open_files(std::size_t wanted);
 
 class ApiServer {
 public:

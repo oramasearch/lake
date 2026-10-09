@@ -524,6 +524,7 @@ void register_build_capabilities(Registry& registry) {
             {{"from_sequence", {{"type", "integer"}}}, {"wait_ms", {{"type", "integer"}}}}),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
+        .long_poll = true,
         .object = "customer",
         .action = "read",
         .resolve_object = customer_object,

@@ -1360,6 +1360,28 @@ TEST(RegistryStore, PullsHaveTheirOwnSlotsAndAStalledReaderTimesOut) {
     EXPECT_EQ(fresh->status, 200U);
 }
 
+// lake#534: a streaming pull gives its request worker back, so four stalled pulls on a lake with
+// two workers neither wait for a worker nor keep the next request from one.
+TEST(RegistryStore, AStreamingPullGivesItsWorkerBack) {
+    RegistryRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp([](lake::api::ServerOptions& options) {
+        options.worker_coroutines = 2;
+        options.worker_wait = std::chrono::milliseconds(300);
+    }));
+    ASSERT_NO_FATAL_FAILURE(rig.switch_store(rig.alpha));
+    ASSERT_NO_FATAL_FAILURE(rig.route(rig.one, rig.alpha, "stalled"));
+    const std::string layer = layer_bytes(8 * 1024 * 1024, 151);
+    rig.push_image("tenant-one/stalled", "v1", R"({"stalled":1})", {layer});
+    const std::string path = "/v2/tenant-one/stalled/blobs/" + sha256(layer);
+    std::vector<std::unique_ptr<PausedPull>> pulls;
+    for (int index = 0; index < 4; ++index) {
+        pulls.push_back(start_pull(rig.port(), path));
+        ASSERT_EQ(pulls.back()->status, 200U) << index;
+    }
+    const Reply head = rig.get_blob("tenant-one/stalled", sha256(layer), "HEAD");
+    EXPECT_EQ(head.status, 200U) << head.body;
+}
+
 // At most 24 pulls run in the process, fewer than the server's workers, and once they do a
 // pull of another workspace is refused at once while that workspace's other requests answer.
 TEST(RegistryStore, WithTheGlobalPullCapReachedOtherWorkspacesStillAnswer) {

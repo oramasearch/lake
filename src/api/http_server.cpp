@@ -10,6 +10,7 @@
 #include "lake/api/request_recorder.hpp"
 #include "lake/api/server.hpp"
 #include "forge_records_api.hpp"
+#include "http_connections.hpp"
 #include "lake/thread.hpp"
 
 #include "lake/control/agents.hpp"
@@ -47,8 +48,11 @@
 #include <utility>
 #include <vector>
 
-#include <boost/beast2/http_server.hpp>
 #include <boost/capy/buffers.hpp>
+#include <sys/resource.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <boost/capy/buffers/buffer_copy.hpp>
 #include <boost/capy/buffers/vector_dynamic_buffer.hpp>
 #include <boost/capy/ex/run_async.hpp>
@@ -7498,7 +7502,8 @@ struct ApiServer::Impl {
     std::map<std::string, CachedJwks> jwks_cache;
     std::optional<ClerkConfig> clerk;
     boost::corosio::io_context io_context;
-    std::unique_ptr<boost::beast2::http_server> server;
+    // Lake#534: connections apart from the request workers (src/api/http_connections.hpp).
+    std::unique_ptr<HttpConnections> server;
     lake::Thread io_thread;
     std::atomic<bool> is_running{false};
     unsigned short bound_port = 0;
@@ -7696,6 +7701,10 @@ struct ApiServer::Impl {
         drain_started = std::chrono::steady_clock::now();
         drain_deadline = drain_started + options.drain_timeout;
         draining.store(true);
+        // Connections waiting for their next request close now (lake#534).
+        if (server) {
+            server->begin_drain();
+        }
         owner_wait_abandoned.store(true);
         sync_store.begin_drain();
         workspace_release_thread = lake::Thread([this] {
@@ -8750,6 +8759,13 @@ struct ApiServer::Impl {
         ApiContext ctx;
         if (page_read) {
             ctx.page_customers = std::make_shared<std::optional<ApiResult>>();
+        }
+        // A capability that long-polls gives its HTTP worker back (lake#534).
+        if (server) {
+            ctx.leave_worker = [connections = server.get(), token = server->request_token(route)](
+                                   const std::string& principal) {
+                return connections->leave_worker(token, principal);
+            };
         }
         ctx.request_path = std::string(route.url.path());
         ctx.request_query = std::string(route.url.encoded_query());
@@ -17732,6 +17748,14 @@ struct ApiServer::Impl {
             }
             co_return http::route_done;
         }
+        // A pull streams for as long as its client reads: it leaves the short-request workers
+        // (lake#534); its own stream slots and the long-request caps bound it.
+        if (server && !server->leave_worker(route)) {
+            route.res.set(http::field::retry_after, "1");
+            co_return co_await registry_error(route, http::status::too_many_requests,
+                                              "too many long requests are waiting; retry", true,
+                                              "TOOMANYREQUESTS");
+        }
         std::uint64_t sent = 0;
         for (;;) {
             std::size_t offset = 0;
@@ -18439,10 +18463,15 @@ struct ApiServer::Impl {
                                          "application/json; charset=utf-8",
                                          "no-store");
         }
-        request["id"] = repository->id;
-        request["revision"] = route_value(route, "revision");
+        // Only what the capability reads: huggingface_hub adds fields of its own (`gitIgnore` when
+        // a commit adds a .gitignore, 0.33.4 to 1.24.0), and the repository write schemas are
+        // strict (lake#534).
+        nlohmann::json input{{"id", repository->id}, {"revision", route_value(route, "revision")}};
+        if (request.contains("files")) {
+            input["files"] = request.at("files");
+        }
         ApiContext context = context_for(route);
-        const ApiResult result = registry.call("prepare_repository_upload", request, context);
+        const ApiResult result = registry.call("prepare_repository_upload", input, context);
         co_return co_await send_hub_result(route, result);
     }
 
@@ -19813,7 +19842,8 @@ struct ApiServer::Impl {
         if (!www_authenticate.empty()) {
             route.res.set(http::field::www_authenticate, www_authenticate);
         }
-        if (status == http::status::service_unavailable) {
+        if (status == http::status::service_unavailable ||
+            status == http::status::too_many_requests) {
             route.res.set(http::field::retry_after, "1");
         }
         // A repository write names its workspace store requests as a page does (lake#527).
@@ -19952,7 +19982,26 @@ ApiServer::~ApiServer() {
     forget_execution_context(context);
 }
 
+namespace {
+// glibc raises its mmap threshold each time it frees a large mapped block, up to 32 MiB, after
+// which the request bodies, windows and buffers a transfer passes through come from the heap and
+// stay resident when freed. A fixed threshold keeps them mapped and returned, so lake's resident
+// set follows what it holds (lake#534: with per-connection sessions a 304 MiB pull grew the
+// resident set by 230 MiB on Linux, and by 15 MiB with this). MALLOC_MMAP_THRESHOLD_ overrides it.
+void fix_malloc_mmap_threshold() {
+#if defined(__GLIBC__)
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (std::getenv("MALLOC_MMAP_THRESHOLD_") == nullptr) {
+            mallopt(M_MMAP_THRESHOLD, 128 * 1024);
+        }
+    });
+#endif
+}
+} // namespace
+
 bool ApiServer::start() {
+    fix_malloc_mmap_threshold();
     namespace http = boost::http;
     namespace corosio = boost::corosio;
     namespace beast2 = boost::beast2;
@@ -21487,21 +21536,61 @@ bool ApiServer::start() {
     auto parser_options = http::parser_config{true};
     parser_options.body_limit =
         std::max<std::uint64_t>(maximum_sync_body_size, impl.options.max_registry_blob_bytes);
-    impl.server = std::make_unique<beast2::http_server>(
-        impl.io_context,
-        static_cast<std::size_t>(impl.options.worker_coroutines),
-        router.release(),
-        http::make_parser_config(parser_options),
-        http::make_serializer_config(http::serializer_config()));
+    HttpConnectionLimits limits;
+    limits.workers = impl.options.worker_coroutines > 0
+                         ? static_cast<std::size_t>(impl.options.worker_coroutines)
+                         : 0;
+    limits.max_connections = impl.options.max_connections;
+    limits.idle_timeout = impl.options.idle_timeout;
+    limits.header_timeout = impl.options.header_timeout;
+    limits.worker_wait = impl.options.worker_wait;
+    limits.listen_backlog = impl.options.listen_backlog;
+    // The probes never wait behind busy workers, so a saturated lake is not restarted for it.
+    limits.needs_no_worker = [](std::string_view path) {
+        return path == "/healthz" || path == "/readyz";
+    };
+    limits.io_timeout = impl.options.io_timeout;
+    limits.min_transfer_rate = impl.options.min_transfer_rate;
+    limits.max_long_requests = impl.options.max_long_requests;
+    limits.max_long_requests_per_caller = impl.options.max_long_requests_per_caller;
+    limits.in_flight = &impl.in_flight;
+    // A request that waits for the store root (lake#479) waits before it takes a worker, so a
+    // rollout's requests are all answered after the hand-off, however many arrive.
+    limits.admitted = [&impl](std::string_view path) {
+        const StoreRootState state = impl.store_root_state.load();
+        return state == StoreRootState::open || state == StoreRootState::failed ||
+               impl.draining.load() || store_root_exempt(path);
+    };
+    limits.admission_wait = impl.options.store_owner_wait + std::chrono::minutes(2);
+    // Answered before any route: logged and counted like a routed request, named by the reason.
+    limits.refused = [&impl](std::string_view method, unsigned status, std::string_view reason) {
+        const telemetry::Labels labels{{"method", std::string(method)},
+                                       {"route", std::string(reason)},
+                                       {"status", std::to_string(status)}};
+        impl.metrics.increment_counter("lake_http_requests_total", labels);
+        RequestLogEntry entry{.ts = log_timestamp(),
+                              .method = std::string(method),
+                              .route = std::string(reason),
+                              .status = static_cast<int>(status),
+                              .duration_ms = 0.0,
+                              .node = impl.options.node_name};
+        std::println("{}", request_log_line(entry));
+    };
+    impl.server = std::make_unique<HttpConnections>(impl.io_context,
+                                                    router.release(),
+                                                    http::make_parser_config(parser_options),
+                                                    http::make_serializer_config(http::serializer_config()),
+                                                    std::move(limits),
+                                                    &impl.metrics);
 
     corosio::ipv4_address address(impl.options.listen_address);
-    auto bind_error = impl.server->bind(corosio::endpoint(address, impl.options.port));
-    if (bind_error) {
-        impl.failure_reason = "bind failed: " + bind_error.message();
+    const std::string bind_error = impl.server->bind(corosio::endpoint(address, impl.options.port));
+    if (!bind_error.empty()) {
+        impl.failure_reason = bind_error;
         impl.server.reset();
         return false;
     }
-    impl.bound_port = impl.server->local_endpoint().port();
+    impl.bound_port = impl.server->port();
     if (impl.options.store && impl.options.workspaces && !impl.options.instance_kek.empty()) {
         impl.metering_recorder =
             std::make_unique<MeteringRecorder>(impl.options.store.get(),
@@ -21540,6 +21629,31 @@ bool ApiServer::start() {
     return true;
 }
 
+OpenFileBudget fit_connections_to_open_files(std::size_t wanted) {
+    rlimit limit{};
+    if (::getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+        return {0, wanted};
+    }
+    if (limit.rlim_cur < limit.rlim_max) {
+        // macOS refuses RLIM_INFINITY and anything above OPEN_MAX for the soft limit.
+        for (const rlim_t target : {limit.rlim_max, static_cast<rlim_t>(1U << 20),
+                                    static_cast<rlim_t>(65536), static_cast<rlim_t>(10240)}) {
+            if (target <= limit.rlim_cur || target > limit.rlim_max) {
+                continue;
+            }
+            rlimit raised = limit;
+            raised.rlim_cur = target;
+            if (::setrlimit(RLIMIT_NOFILE, &raised) == 0) {
+                limit = raised;
+                break;
+            }
+        }
+    }
+    const auto open_files = static_cast<std::uint64_t>(
+        limit.rlim_cur == RLIM_INFINITY ? std::numeric_limits<std::uint32_t>::max() : limit.rlim_cur);
+    return {open_files, connections_for_open_files(wanted, open_files)};
+}
+
 void ApiServer::begin_drain() {
     if (impl_->is_running.load()) {
         impl_->begin_drain();
@@ -21568,7 +21682,8 @@ void ApiServer::stop() {
         }
     }
     const int abandoned_requests = impl.in_flight.load();
-    impl.server->stop();
+    // Closes every connection and lets the sessions unwind on the running io_context first.
+    impl.server->stop(std::chrono::seconds(2));
     impl.io_context.stop();
     if (impl.io_thread.joinable())
         impl.io_thread.join();

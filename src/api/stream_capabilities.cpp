@@ -779,6 +779,7 @@ void add(Registry& registry, std::string name, json properties, json required, j
         .input_schema = schema,
         .output_schema = std::move(output),
         .kind = read ? CapabilityKind::Read : CapabilityKind::Action,
+        .long_poll = name == "browse_stream",
         .post_alias = read,
         .object = "customer",
         .action = std::move(permission),

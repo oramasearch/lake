@@ -52,6 +52,7 @@ Every capability answers a failure the same way on REST and MCP:
 | `store_unavailable` | 503 | The control-plane store, the workspace or another dependency is not reachable now. |
 | `workspace_not_ready` | 503 | The workspace or service exists but is not ready yet. |
 | `busy` | 503 | The resource is busy; retry. |
+| `rate_limited` | 429 | Too many requests from this caller, or in all, are waiting; retry. Sent with `Retry-After: 1` when a long poll finds the long-request caps full ([http](../serving/http.md#connections-and-workers), lake#534). |
 
 `not_supported` was 500, `engine_error` 500, `quota_exceeded` 500, and a missing or rejected
 credential 403 `unauthorized` before lake#450.

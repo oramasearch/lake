@@ -63,7 +63,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 29> documented_error_codes{{
+constexpr std::array<ErrorCode, 30> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -117,6 +117,7 @@ constexpr std::array<ErrorCode, 29> documented_error_codes{{
      "The control-plane store, the workspace or another dependency is not reachable now."},
     {"workspace_not_ready", 503, "The workspace or service exists but is not ready yet."},
     {"busy", 503, "The resource is busy; retry."},
+    {"rate_limited", 429, "Too many requests from this caller, or in all, are waiting; retry."},
 }};
 
 // Other spellings of a documented code: the workspace engine's and liquid's.
@@ -142,6 +143,10 @@ namespace detail {
 boost::capy::thread_pool& blocking_pool() {
     static boost::capy::thread_pool pool(32, "lake-store-");
     return pool;
+}
+std::atomic<int>& blocking_task_limit() {
+    static std::atomic<int> limit{256};
+    return limit;
 }
 std::atomic<int>& blocking_tasks() {
     static std::atomic<int> tasks{0};
@@ -1026,6 +1031,21 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
         agent_task_input(*capability, workspace_input, context, task_resolved_input);
     CallState state = prepare_call(capability, call_input, context);
     if (state.proceed) {
+        // A long poll (`wait_ms`) parks on the bus: it gives its HTTP worker back so parked
+        // callers never fill the short-request workers (lake#534). Only a capability declared a
+        // long poll does; a caller's `wait_ms` alone never decides it.
+        const double wait_ms =
+            call_input.is_object() && call_input.contains("wait_ms") &&
+                    call_input.at("wait_ms").is_number()
+                ? call_input.at("wait_ms").get<double>()
+                : static_cast<double>(capability->default_wait_ms);
+        if (capability->long_poll && context.leave_worker && wait_ms > 0 &&
+            !context.leave_worker(context.acting_identity)) {
+            co_return finish_call(capability.get(), name, call_input,
+                                  ApiResult::failure("rate_limited",
+                                                     "too many long polls are waiting; retry"),
+                                  context, false);
+        }
         const auto start = std::chrono::steady_clock::now();
         try {
             if (capability->async_handler) {
@@ -1042,7 +1062,9 @@ liquid::runtime::task<ApiResult> Registry::call_async(const std::string& name,
                     return handler(call_input, context);
                 });
                 state.result = completed ? std::move(*completed)
-                                         : ApiResult::failure("store_error", completed.error().message);
+                               : completed.error().code == liquid::errc::busy
+                                   ? ApiResult::failure("busy", completed.error().message)
+                                   : ApiResult::failure("store_error", completed.error().message);
             } else if (capability->handler) {
                 state.result = capability->handler(call_input, context);
             } else {

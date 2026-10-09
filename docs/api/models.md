@@ -82,7 +82,7 @@ is resolved to an immutable liquid change digest before response metadata is ret
 | `GET /api/{models,datasets}/:namespace/:name/tree/:revision` | Recursive file listing used by `list_repo_files` and snapshots |
 | `HEAD`, `GET /:namespace/:name/resolve/:revision/*file` | Model file metadata or exact bytes with `ETag` and immutable `X-Repo-Commit` |
 | `HEAD`, `GET /datasets/:namespace/:name/resolve/:revision/*file` | Dataset file metadata or exact bytes |
-| `POST /api/{models,datasets}/:namespace/:name/preupload/:revision` | Chooses regular or basic-LFS upload mode |
+| `POST /api/{models,datasets}/:namespace/:name/preupload/:revision` | Chooses regular or basic-LFS upload mode; reads only `files` from the body, so fields a client adds (`gitIgnore` from `huggingface_hub` 0.33.4 to 1.24.0) are ignored |
 | `POST /api/{models,datasets}/:namespace/:name/commit/main` | Applies Hub NDJSON file, LFS-file, and delete operations as one liquid revision |
 | `POST /:namespace/:name.git/info/lfs/objects/batch` | Returns a short-lived HMAC-authenticated basic-LFS upload URL |
 | `PUT /api/lfs/:repository/:oid?...` | Stages one SHA-256 and size-verified object; the signed URL carries no Lake token |

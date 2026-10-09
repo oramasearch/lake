@@ -30,6 +30,9 @@ upstream. Branch `orama-main` carries one reviewed commit on Lake's current Beas
 `boost::http::error::end_of_stream` from an idle keep-alive close as a normal connection end and
 does not print it to stderr. Lake records that commit in `modules/beast2` and declares
 `branch = orama-main` in `.gitmodules` for update tooling.
+Since lake#534 lake runs its own session loop (`src/api/http_connections.hpp`) over Beast2's
+`http_worker` instead of `http_worker::do_http_session`, so the patch no longer runs in the server;
+it still covers the `http_server` a test builds (`HttpServer.AHandlerThatThrowsIsAnswered500AndLogged`).
 
 Maintain the carrier in its own checkout. Give the public `upstream` remote a disabled push URL,
 fast-forward carrier `main` to the reviewed public commit, then replay the carried patch:
