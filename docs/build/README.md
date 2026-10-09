@@ -3,6 +3,9 @@
 [local.md](local.md) documents native configuration and execution. [testing.md](testing.md)
 describes isolated filesystem and PostgreSQL fixtures. [session-authentication.md](session-authentication.md)
 records the session lookup measurements, row-access regression and lifecycle proof.
+[ci.md](ci.md) documents the `ci` workflow: the full suite on Linux for every pull request and push
+to `main`, with a Postgres service, a cached Zetta binary for the real-Zetta tests and the token
+gates (lake#547).
 
 Run static and shared suites with the local PostgreSQL fixture, one suite at a time and builds
 limited to six jobs. Keep each proof page aligned with the tests it names.

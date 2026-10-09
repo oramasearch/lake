@@ -17,6 +17,9 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #endif
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -77,8 +80,14 @@ std::string layer_bytes(std::size_t size, std::uint64_t seed) {
     return output;
 }
 
-// The resident set size of this process now.
+// The resident set size of this process now. On glibc, freed memory is first returned from every
+// arena (malloc_trim), so the figure is what the process holds, not pages glibc keeps for reuse:
+// without it a pull that held about 110 MiB at its peak (lake's 64 MiB window cache and the
+// windows in flight) read as 142 to 149 MiB on Linux CI (lake#547).
 std::uint64_t resident_bytes() {
+#if defined(__GLIBC__)
+    ::malloc_trim(0);
+#endif
 #if defined(__APPLE__)
     mach_task_basic_info info{};
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;

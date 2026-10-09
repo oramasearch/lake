@@ -260,7 +260,9 @@ Phase B is `tests/test_registry_store.cpp`, a real lake server with workspace st
 `blobs/` or `uploads/`, a repeated layer stored once, usage counted once),
 `RegistryStore.AChunkedUploadLandsInTheStoreAndAWrongDigestIsRefused`,
 `RegistryStore.ALargeLayerIsStreamedNeverHeldWhole` (a 304 MiB layer pulled while the resident set
-grows by far less than the layer),
+grows by less than 128 MiB; on glibc each reading first calls `malloc_trim`, so freed pages glibc
+keeps for reuse are not counted: about 110 MiB is held at the peak, the 64 MiB window cache and the
+windows in flight, lake#547),
 `RegistryStore.ABlobOfAnotherWorkspaceOrSpaceIsRefused`,
 `RegistryStore.TheCopyMovesInstanceBlobsIntoTheirStoresAndVerifiesThem` (plan, copy, rerun,
 verify, a missing, a corrupt and an unswitched blob unresolved, and pulls after the registry files
