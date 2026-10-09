@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -29,14 +30,18 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <print>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <liquid/hash.hpp>
+#include <liquid/identity.hpp>
 #include <liquid/repository.hpp>
 #include <liquid/store.hpp>
 #include <nlohmann/json.hpp>
@@ -4973,3 +4978,154 @@ TEST(WorkspaceStoreOwner, ViewsKeptForAReleaseThatNeverComesAreLetGo) {
 }
 
 } // namespace
+
+// ---- lake#534 follow-up: liquid's local identity in a fresh process -----------------------------
+
+namespace {
+
+// Points LIQUID_HOME at a new, empty directory for the test, as a new pod's home is.
+class FreshLiquidHome {
+public:
+    FreshLiquidHome()
+        : path_(lake::test::fixture_path("liquid-home-" + lake::control::new_uuid_v4())) {
+        if (const char* previous = std::getenv("LIQUID_HOME")) {
+            previous_ = previous;
+        }
+        ::setenv("LIQUID_HOME", path_.c_str(), 1);
+    }
+    ~FreshLiquidHome() {
+        if (previous_) {
+            ::setenv("LIQUID_HOME", previous_->c_str(), 1);
+        } else {
+            ::unsetenv("LIQUID_HOME");
+        }
+        std::error_code ignored;
+        std::filesystem::remove_all(path_, ignored);
+    }
+    FreshLiquidHome(const FreshLiquidHome&) = delete;
+    FreshLiquidHome& operator=(const FreshLiquidHome&) = delete;
+
+private:
+    std::filesystem::path path_;
+    std::optional<std::string> previous_;
+};
+
+// Captures what the process writes to stderr while it lives (the store-owner log lines).
+class StderrLines {
+public:
+    StderrLines() {
+        std::fflush(stderr);
+        if (::pipe(pipe_) != 0) {
+            return;
+        }
+        original_ = ::dup(STDERR_FILENO);
+        ::dup2(pipe_[1], STDERR_FILENO);
+        ::close(pipe_[1]);
+        reader_ = std::thread([this] {
+            char buffer[4096];
+            for (;;) {
+                const ssize_t count = ::read(pipe_[0], buffer, sizeof(buffer));
+                if (count <= 0) {
+                    return;
+                }
+                std::lock_guard lock(mutex_);
+                text_.append(buffer, static_cast<std::size_t>(count));
+            }
+        });
+    }
+    ~StderrLines() {
+        finish();
+    }
+    std::string finish() {
+        if (original_ >= 0) {
+            std::fflush(stderr);
+            ::dup2(original_, STDERR_FILENO);
+            ::close(original_);
+            original_ = -1;
+            if (reader_.joinable()) {
+                reader_.join();
+            }
+            ::close(pipe_[0]);
+        }
+        std::lock_guard lock(mutex_);
+        return text_;
+    }
+
+private:
+    int pipe_[2]{-1, -1};
+    int original_{-1};
+    std::thread reader_;
+    std::mutex mutex_;
+    std::string text_;
+};
+
+} // namespace
+
+// A new process has no local liquid identity yet (a new pod's home is empty), and its first
+// repository opens create it, at once: the pre-open's workers open several workspaces'
+// repositories while the first requests open theirs. liquid creates the identity without a lock,
+// so two first uses at once leave an identity key wrapped with another wrapping key, and every
+// repository open answers `cannot unwrap local identity` for the life of the process (lake 20261009a
+// on dev). Lake creates the identity once at start, before anything opens a repository. Here many
+// first uses start together the moment the server is up; each must find the one identity, and a
+// read and a commit through the operator token then work, and the pre-open opened each switched
+// workspace's repository. Three fresh processes, since one race may miss.
+TEST(WorkspaceStoreHandoff, AFreshProcessCreatesOneLocalIdentityForItsConcurrentFirstOpens) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    for (const auto& workspace : {rig.alpha, rig.beta}) {
+        ASSERT_EQ(rig.move(workspace, "copy").first, 200U);
+        ASSERT_EQ(rig.move(workspace, "switch").first, 200U);
+    }
+    ASSERT_EQ(rig.commit(rig.repo_a, "a.txt", "alpha").first, 200U);
+    ASSERT_EQ(rig.commit(rig.repo_b, "b.txt", "beta").first, 200U);
+    rig.server->stop();
+    rig.server.reset();
+    rig.options.preopen_workspace_stores = true;
+
+    for (int round = 0; round < 3; ++round) {
+        SCOPED_TRACE("fresh process " + std::to_string(round));
+        FreshLiquidHome home;
+        StderrLines stderr_lines;
+        rig.options.search = std::make_shared<lake::search::Service>(rig.root);
+        rig.server = std::make_unique<lake::api::ApiServer>(rig.options);
+        ASSERT_TRUE(rig.server->start()) << rig.server->reason();
+        std::atomic<bool> go{false};
+        std::atomic<int> refused{0};
+        std::vector<std::thread> first_uses;
+        for (int index = 0; index < 32; ++index) {
+            first_uses.emplace_back([&go, &refused] {
+                while (!go.load()) {
+                }
+                if (!liquid::runtime::block_on(liquid::identity_detail::local_signer())) {
+                    refused.fetch_add(1);
+                }
+            });
+        }
+        go.store(true);
+        for (auto& first_use : first_uses) {
+            first_use.join();
+        }
+        EXPECT_EQ(refused.load(), 0) << "a first use found no usable identity";
+        ASSERT_TRUE(eventually([&] { return rig.server->store_root_open(); }));
+        const auto [read_status, read] =
+            rig.call("GET", "/v1/repository_tree?id=" + rig.repo_a.id + "&ref=main");
+        EXPECT_EQ(read_status, 200U) << read.dump();
+        const auto [commit_status, committed] =
+            rig.commit(rig.repo_b, "round-" + std::to_string(round) + ".txt", "later");
+        EXPECT_EQ(commit_status, 200U) << committed.dump();
+        rig.server->stop();
+        rig.server.reset();
+
+        std::map<std::string, int> preopened;
+        std::istringstream lines(stderr_lines.finish());
+        for (std::string line; std::getline(lines, line);) {
+            const json entry = json::parse(line, nullptr, false);
+            if (entry.is_object() && entry.value("state", "") == "repositories_preopened") {
+                preopened[entry.value("workspace_id", "")] = entry.value("repositories", -1);
+            }
+        }
+        EXPECT_EQ(preopened[rig.alpha], 1) << "alpha's repository was not pre-opened";
+        EXPECT_EQ(preopened[rig.beta], 1) << "beta's repository was not pre-opened";
+    }
+}

@@ -664,3 +664,9 @@ the sweep, the pool's bound, shutdown, fresh connections, refused methods and he
 IPv6, a cancelled shared resolution, and the close race (200 rounds). `LatencyProxy::lose_next_answers`
 drops the next answers from Zetta and closes their connections, for
 `WorkspaceStoreZetta.ALostAnswerOverThePooledTransportIsRetriedOrFailsTheBackend`.
+
+`WorkspaceStoreHandoff.AFreshProcessCreatesOneLocalIdentityForItsConcurrentFirstOpens`
+(`test_workspace_store.cpp`) points `LIQUID_HOME` at a fresh directory, starts lake with the
+pre-open on, runs 32 first uses of liquid's local identity at once, then reads and commits through
+the operator token and reads the `repositories_preopened` lines from stderr. It guards the
+start-time creation of the identity ([`../docs/deployment/store-volume.md`](../docs/deployment/store-volume.md#liquids-local-identity)).

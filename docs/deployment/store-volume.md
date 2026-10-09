@@ -245,3 +245,26 @@ Do not change the root layout, user ID, or volume access assumptions only in the
 manifest. Update the `Lake` CR reference, this page, `README.md`, `CLAUDE.md`, and the operator
 runbook together. Store-format changes belong to liquid and reach lake through a pinned submodule
 commit.
+
+## liquid's local identity
+
+liquid signs what a repository records (drips, deltas, sessions) with the process's local identity
+in `$LIQUID_HOME/identity`, or `$HOME/.liquid/identity` (`/home/lake/.liquid/identity` in the
+image). It is not on the store volume, so each new pod creates its own on first use. liquid creates
+it without a lock: two first uses at once each write a wrapping key, the key file left on disk is
+wrapped with the other one, and from then on every repository open in that process answers
+`unauthorized: cannot unwrap local identity`. A new pod's first uses do run at once: the pre-open's
+workers open several workspaces' repositories (on dev two of them start 6 ms apart) while the
+first requests open theirs. Lake `20261009a` lost this race on dev (repository reads and commits
+`unauthorized`, `repositories_preopened` 0); every earlier build could have, the race predates
+lake#534.
+
+`ApiServer::start` therefore creates or loads the identity once, under an exclusive `flock` on
+`identity/.lake-create.lock`, before the owner, pre-open and HTTP threads start; afterwards every
+use only reads it, which is safe at any concurrency. A start that finds the identity unusable
+fails with the directory and liquid's reason, so a broken identity restarts the container (whose
+home is new) instead of serving `unauthorized`.
+`WorkspaceStoreHandoff.AFreshProcessCreatesOneLocalIdentityForItsConcurrentFirstOpens` starts three
+processes with a fresh `LIQUID_HOME`, runs 32 first uses at once against each, then reads and
+commits through the operator token and checks that the pre-open opened each switched workspace's
+repository; without the start-time creation it fails, on `fd4ea84` (before lake#534) as on main.

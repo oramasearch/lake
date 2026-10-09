@@ -49,6 +49,8 @@
 #include <vector>
 
 #include <boost/capy/buffers.hpp>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/resource.h>
 #if defined(__GLIBC__)
 #include <malloc.h>
@@ -117,6 +119,7 @@
 
 #include <liquid/git.hpp>
 #include <liquid/hash.hpp>
+#include <liquid/identity.hpp>
 #include <liquid/repository.hpp>
 #include <liquid/runtime.hpp>
 #include <liquid/store.hpp>
@@ -20000,6 +20003,52 @@ void fix_malloc_mmap_threshold() {
 }
 } // namespace
 
+// liquid's local identity (`$LIQUID_HOME`, or `$HOME/.liquid`, `/identity`) signs what lake's
+// repositories record. liquid creates it on first use without a lock: two first uses at once each
+// write a wrapping key, and the identity left on disk is wrapped with the other one, so every later
+// repository open answers `cannot unwrap local identity` for the life of the process. A new pod's
+// home is empty, and its first uses run at once (the pre-open's workers, the first requests). Lake
+// therefore creates or loads it here, once, before anything opens a repository, under a file lock
+// that also orders lake processes sharing one home (lake#534 follow-up).
+static std::expected<void, std::string> prepare_local_identity() {
+    static std::mutex mutex;
+    // The homes whose identity this process has loaded (one, outside tests).
+    static std::set<std::filesystem::path> ready;
+    std::lock_guard guard(mutex);
+    std::filesystem::path home;
+    if (const char* configured = std::getenv("LIQUID_HOME"); configured != nullptr && *configured) {
+        home = configured;
+    } else if (const char* user_home = std::getenv("HOME"); user_home != nullptr && *user_home) {
+        home = std::filesystem::path(user_home) / ".liquid";
+    } else {
+        home = std::filesystem::current_path() / ".liquid";
+    }
+    if (ready.contains(home)) {
+        return {};
+    }
+    std::error_code created;
+    std::filesystem::create_directories(home / "identity", created);
+    int lock = -1;
+    if (!created) {
+        lock = ::open((home / "identity" / ".lake-create.lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC,
+                      0600);
+        if (lock >= 0) {
+            static_cast<void>(::flock(lock, LOCK_EX));
+        }
+    }
+    auto signer = liquid::runtime::block_on(liquid::identity_detail::local_signer());
+    if (lock >= 0) {
+        static_cast<void>(::flock(lock, LOCK_UN));
+        ::close(lock);
+    }
+    if (!signer) {
+        return std::unexpected("liquid's local identity in " + (home / "identity").string() +
+                               " is unusable: " + signer.error().message);
+    }
+    ready.insert(home);
+    return {};
+}
+
 bool ApiServer::start() {
     fix_malloc_mmap_threshold();
     namespace http = boost::http;
@@ -20009,6 +20058,10 @@ bool ApiServer::start() {
     if (impl.is_running.load())
         return true;
     if (!impl.failure_reason.empty()) {
+        return false;
+    }
+    if (const auto identity = prepare_local_identity(); !identity) {
+        impl.failure_reason = identity.error();
         return false;
     }
     // An ApiServer is started once: stop() leaves search shut down, the maintenance and search

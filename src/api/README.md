@@ -147,6 +147,10 @@ issuer scopes, lifetime and static authority in `capabilities.cpp`. The common H
 carries authenticated session metadata; adapters do not decide delegation policy. Application
 sign-in results may include a JWT; API-token issuance retains only its derived session bearer.
 
+`http_server.cpp`'s `ApiServer::start` creates or loads liquid's local identity once, under a file
+lock, before any thread opens a repository: liquid creates it without a lock, and two first uses
+at once break it for the process ([store volume](../../docs/deployment/store-volume.md#liquids-local-identity)).
+
 `http_connections.hpp` (lake#534) accepts and serves `http_server.cpp`'s connections: one session
 coroutine per connection up to `LAKE_HTTP_MAX_CONNECTIONS` (503 above it), a request worker only
 while a route runs (taken after any store-root wait, given back by the capabilities declared
