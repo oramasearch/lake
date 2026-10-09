@@ -12,6 +12,12 @@ the shared test fixture loads the schema and removes only its own database after
 - `DriveScenario.ConcurrentOfflineEditsExposeAndResolveFirstClassConflict` synchronizes two clients,
   edits the same file while they are disconnected, checks both named files, inspects the full
   conflict record and rendered explanation, then resolves the record through the public API.
+- `DriveScenario.ReplacingAnUploadedFileKeepsThePreviousVersionRestorable` (lake#123) uploads the
+  same file twice through `/v1/upload_drive_files`, then checks that `drive_history` and the
+  rendered history page show the replacement as a modification with both versions comparable and
+  restorable, that a restore is a stable-node modification, and that a real deletion stays distinct.
+  The same exercise (`../drive_history_support.hpp`) runs against the memory store's space store and
+  a switched workspace store in `WorkspaceStoreDrive.*` (`../test_workspace_store.cpp`).
 - `DriveScenario.SyncedFolderPullsAsRepositoryAndBuildsProject` synchronizes a CMake project,
   pulls and materializes the same repository with Liquid's public client, and builds and runs it.
 

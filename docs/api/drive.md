@@ -15,7 +15,7 @@ deduplication remain liquid repository values.
 | `upload_drive_files` | `write` on the containing folder | One liquid change containing all decoded uploads |
 | `move_drive_path` | `write` on the source and destination parent | A new liquid move preserving the stable path node |
 | `delete_drive_path` | `write` on the path | A new liquid deletion without history removal |
-| `drive_history` | `read` on the path or nearest retained parent | Changes whose structural diff names `path` as its old or new path |
+| `drive_history` | `read` on the path or nearest retained parent | Changes whose structural diff names `path` as its old or new path, one item per change with the path's state after it (see below) |
 | `diff_drive_versions` | `read` on the path or nearest retained parent | The two immutable files and a structural text difference |
 | `drive_conflict` | `read` on the path | Conflict kind, exact region, explanation, reasons, preserved values, and a text difference when registered |
 | `resolve_conflict` | `write` on the path | The selected value and the Liquid change carrying its resolution record |
@@ -26,6 +26,18 @@ stable liquid tree node id means a move does not discard policy. Reads use the n
 folder object, so repository policy remains the default. Move authorization checks both the
 source and destination location. Every mutation calls `commit_repository_files`; the HTTP forms
 do not write the store directly.
+
+## Path history
+
+`drive_history` answers one item per change, newest first, with `changes`, `old_blob`, `new_blob`,
+`old_path` and the conflict identities. A change can carry several structural entries for one path:
+`upload_drive_files` over an existing file removes the old node and adds a new one at the same
+path. The item is the path's state after the change (lake#123): the entry that leaves a file at
+`path`, with `old_blob` taken from the entry that held `path` before and `added` reported as
+`modified`. A restore, which rewrites the same node, is a plain `modified` entry. An item with an
+empty `new_blob` is a deletion and has no version to compare or restore.
+`diff_drive_versions` and `restore_drive_version` take the item `id` as `left`/`right` or
+`change_id`.
 
 ## Formats
 

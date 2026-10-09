@@ -1,6 +1,6 @@
 # Drive pages
 
-**Status: implemented for lake #8, #43, and #116.** The drive is a server-rendered repository view for people
+**Status: implemented for lake #8, #43, #116, and #123.** The drive is a server-rendered repository view for people
 who work with folders and files. It uses the same liquid paths, stable node identifiers, blobs,
 changes, conflicts, policy checks, and audit records as every API caller.
 
@@ -44,6 +44,14 @@ path. Each available version can be restored with `POST /drive/history/restore`;
 new change. Selecting two text versions opens `GET /drive/history/diff`, which reads both immutable
 revisions and renders their structural line difference.
 
+Each row is the path's state after its change (lake#123). Uploading a file over an existing one is
+an ordinary overwrite: the upload removes the old node and adds a new one at the same path, so its
+change carries two structural entries for the path. The row takes the entry that leaves a file at
+the path, names the blob it replaced, and reads **modified**; the new version is current and the
+previous one stays a normal prior version that can be compared and restored. A restore writes the
+same node and also reads **modified**. Only a change that leaves no file at the path is shown as
+**Deleted**, without compare or restore controls.
+
 The repository conflicts page links each path to `GET /drive/conflict`. Both the repository and
 drive pages state the conflict kind in person-facing words, identify the exact path plus byte or
 stable-node region, show Liquid's explanation and suspicious-merge reasons, and retain the
@@ -75,6 +83,11 @@ Liquid client contracts:
   and resolve it through the public action. It requires the bootstrap actor identity fix from
   [liquid #262](https://github.com/oramasearch/liquid/pull/262). The scenario proof uses the recorded
   Liquid `main` pin, including first-class conflict records and structural convergence.
+- `DriveScenario.ReplacingAnUploadedFileKeepsThePreviousVersionRestorable` proves that two uploads
+  of the same file name leave two available versions on the API and the rendered page, that the two
+  compare and the previous one restores, and that a real deletion stays distinct (lake#123). The
+  same exercise runs on the memory store's space store and on a switched workspace store
+  (`WorkspaceStoreDrive.*`).
 - `DriveScenario.SyncedFolderPullsAsRepositoryAndBuildsProject` proves that a drive folder is the
   same Liquid repository: the public repository client pulls and materializes it, after which CMake
   builds and runs the contained project.
