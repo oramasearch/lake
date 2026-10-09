@@ -144,6 +144,9 @@ and schema-loads a fresh database on first use in each test and drops it after f
 untouched. Each test receives a random `LAKE_INSTANCE_KEK`. See
 [`testing.md`](../docs/build/testing.md) for ownership, assertion patterns, and the sweep.
 `audit_test_support.hpp` exhausts append-order pages; use exact request filters for specific calls.
+`drive_history_support.hpp` is the Drive overwrite exercise of lake#123 (upload twice, history,
+comparison, restore, deletion, and the rendered history page) over any running Lake; the Postgres
+scenario and `WorkspaceStoreDrive.*` (space store and switched workspace store) both run it.
 
 The `scenarios/` cases combine those production Postgres stores with an in-process Lake, public
 HTTP routes, and public client libraries. The drive scenario signs users up, synchronizes and

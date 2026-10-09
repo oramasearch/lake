@@ -1,6 +1,7 @@
 #include "lake/api/capabilities.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <chrono>
 #include <cstddef>
 #include <expected>
@@ -486,6 +487,60 @@ json change_json(const RepositoryChange& change) {
             {"author", change.author},
             {"message", change.message},
             {"occurred_at", change.occurred_at}};
+}
+
+// What one change did to `path` (lake#123). A change can carry several structural entries for one
+// path: an overwrite through `commit_repository_files` removes the old node and adds a new one at the
+// same path, and a file can be moved away while another takes its place. The entry that leaves a
+// file at `path` is the path's state after the change; the version it replaced comes from the entry
+// that held `path` before, so a replacement reads as a modification of the path and never as a
+// deletion. A change whose only entries remove or move the path away keeps its first entry.
+std::optional<json> drive_path_change(const RepositoryChange& change,
+                                      const std::vector<RepositoryDiffEntry>& differences,
+                                      const std::string& path) {
+    std::vector<const RepositoryDiffEntry*> matches;
+    for (const RepositoryDiffEntry& difference : differences) {
+        if (difference.path == path || difference.old_path == path) {
+            matches.push_back(&difference);
+        }
+    }
+    if (matches.empty()) {
+        return std::nullopt;
+    }
+    const auto present = std::ranges::find_if(matches, [&](const RepositoryDiffEntry* entry) {
+        return entry->path == path && !entry->new_blob.empty() &&
+               std::ranges::find(entry->changes, "removed") == entry->changes.end();
+    });
+    const RepositoryDiffEntry& selected = present == matches.end() ? *matches.front() : **present;
+    json value = change_json(change);
+    value["path"] = selected.path;
+    value["old_path"] = selected.old_path;
+    value["changes"] = selected.changes;
+    value["old_blob"] = selected.old_blob;
+    value["new_blob"] = selected.new_blob;
+    value["old_conflicts"] = selected.old_conflicts;
+    value["new_conflicts"] = selected.new_conflicts;
+    if (present == matches.end() || !selected.old_blob.empty()) {
+        return value;
+    }
+    const auto replaced = std::ranges::find_if(matches, [&](const RepositoryDiffEntry* entry) {
+        return entry != &selected && !entry->old_blob.empty() &&
+               (entry->old_path == path || (entry->path == path && entry->old_path.empty()));
+    });
+    if (replaced == matches.end()) {
+        return value;
+    }
+    std::vector<std::string> kinds;
+    for (const std::string& kind : selected.changes) {
+        const std::string named = kind == "added" ? "modified" : kind;
+        if (std::ranges::find(kinds, named) == kinds.end()) {
+            kinds.push_back(named);
+        }
+    }
+    value["changes"] = std::move(kinds);
+    value["old_blob"] = (*replaced)->old_blob;
+    value["old_conflicts"] = (*replaced)->old_conflicts;
+    return value;
 }
 
 std::string token_hash(std::string_view token) {
@@ -1216,20 +1271,8 @@ void register_drive_capabilities(Registry& registry) {
                 if (!differences) {
                     return sync_error(differences.error());
                 }
-                for (const RepositoryDiffEntry& difference : *differences) {
-                    if (difference.path != path && difference.old_path != path) {
-                        continue;
-                    }
-                    json value = change_json(change);
-                    value["path"] = difference.path;
-                    value["old_path"] = difference.old_path;
-                    value["changes"] = difference.changes;
-                    value["old_blob"] = difference.old_blob;
-                    value["new_blob"] = difference.new_blob;
-                    value["old_conflicts"] = difference.old_conflicts;
-                    value["new_conflicts"] = difference.new_conflicts;
-                    items.push_back(std::move(value));
-                    break;
+                if (auto value = drive_path_change(change, *differences, path)) {
+                    items.push_back(std::move(*value));
                 }
             }
             context.audit_customer_id = repository->customer_id;

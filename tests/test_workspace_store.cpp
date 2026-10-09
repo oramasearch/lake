@@ -49,6 +49,7 @@
 #include <zetta/connect/http_transport.hpp>
 
 #include "audit_test_support.hpp"
+#include "drive_history_support.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/store_owner.hpp"
@@ -716,6 +717,25 @@ struct MoveRig {
         }
         const std::string text(reinterpret_cast<const char*>(response->body.data()), response->body.size());
         return {response->status, json::parse(text, nullptr, false)};
+    }
+
+    // The raw answer, for routes that render a page.
+    std::pair<unsigned, std::string> raw(std::string_view method, const std::string& path,
+                                         const std::string& data) {
+        const auto* bytes = reinterpret_cast<const std::byte*>(data.data());
+        const auto response = lake::test::http_request(
+            {.url = "http://127.0.0.1:" + std::to_string(server->port()),
+             .method = std::string(method),
+             .suffix = path,
+             .headers = {{"Authorization", "Bearer workspace-store-operator"},
+                         {"Content-Type", "application/json"}},
+             .body = std::vector<std::byte>(bytes, bytes + data.size())});
+        EXPECT_TRUE(response);
+        if (!response) {
+            return {0, std::string()};
+        }
+        return {response->status,
+                std::string(reinterpret_cast<const char*>(response->body.data()), response->body.size())};
     }
 
     std::pair<unsigned, json> move(const std::string& workspace, const std::string& mode) {
@@ -1401,6 +1421,33 @@ TEST(WorkspaceStoreMove, APushLandsInTheWorkspaceStore) {
         EXPECT_FALSE(holds_marker(rig.zetta->objects(endpoint_a)));
     }
     EXPECT_EQ(files_under(rig.root / rig.customer_id / "store" / "packs"), before);
+}
+
+// lake#123: replacing a Drive file keeps the previous version, in the space store (memory
+// control store) and in a switched workspace's store.
+TEST(WorkspaceStoreDrive, AReplacedFileInTheSpaceStoreKeepsItsPreviousVersion) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    lake::test::expect_replaced_drive_file_keeps_its_history(
+        [&](std::string_view method, const std::string& path, const std::string& body) {
+            return rig.raw(method, path, body);
+        },
+        rig.repo_b.id);
+    EXPECT_TRUE(rig.store->get_workspace(rig.beta)->store_moved_at.empty());
+}
+
+TEST(WorkspaceStoreDrive, AReplacedFileInAWorkspaceStoreKeepsItsPreviousVersion) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    ASSERT_EQ(rig.move(rig.alpha, "copy").first, 200U);
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    lake::test::expect_replaced_drive_file_keeps_its_history(
+        [&](std::string_view method, const std::string& path, const std::string& body) {
+            return rig.raw(method, path, body);
+        },
+        rig.repo_a.id);
+    EXPECT_TRUE(rig.zetta->has_bucket("http://" + rig.alpha + ".test"))
+        << "the history was served from the workspace store";
 }
 
 TEST(WorkspaceStoreMove, ACreationTheWorkspaceStoreRefusesLeavesNoRowAndCanBeRetried) {

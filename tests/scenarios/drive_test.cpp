@@ -37,6 +37,7 @@
 #include <liquid/sync.hpp>
 #include <liquid/vfs.hpp>
 
+#include "../drive_history_support.hpp"
 #include "../temporary_directory.hpp"
 #include "../workspace_fixture.hpp"
 #include "api/workspace_records_api.hpp"
@@ -654,6 +655,36 @@ TEST_F(DriveScenario, UserSyncsSharesAndSeesHistoryEndToEnd) {
     EXPECT_NE(history.find(" 200 "), std::string::npos) << history;
     EXPECT_NE(history.find("shared-project/notes.txt"), std::string::npos);
     EXPECT_NE(history.find(change), std::string::npos);
+}
+
+// lake#123: an ordinary overwrite through the Postgres-backed upload route keeps the previous
+// version as a normal, comparable and restorable prior version, on the API and the page.
+TEST_F(DriveScenario, ReplacingAnUploadedFileKeepsThePreviousVersionRestorable) {
+    const ProvisionedRepository fixture = provision("replace-owner");
+    ASSERT_FALSE(fixture.owner.secret.empty());
+    // A populated main branch with the destination folder, as the drive client leaves it.
+    const std::filesystem::path folder = root_.path() / "replace-drive";
+    write_text(folder / "shared" / "README.md", "replace scenario\n");
+    auto client = liquid::runtime::block_on(
+        liquid::drive_client::open(folder,
+                                   repository_url(fixture.repository),
+                                   {.bearer_token = fixture.owner.secret, .durable = false}));
+    ASSERT_TRUE(client) << client.error().message;
+    const auto synced = liquid::runtime::block_on(client->sync());
+    ASSERT_TRUE(synced) << synced.error().message;
+    const std::string authorization = bearer(fixture.owner);
+    lake::test::expect_replaced_drive_file_keeps_its_history(
+        [&](std::string_view method, const std::string& path, const std::string& body) {
+            const std::string response =
+                http_request(server_->port(), method, path, body, authorization);
+            const std::size_t space = response.find(' ');
+            const unsigned status =
+                space == std::string::npos
+                    ? 0U
+                    : static_cast<unsigned>(std::strtoul(response.c_str() + space + 1, nullptr, 10));
+            return std::pair<unsigned, std::string>{status, response_body(response)};
+        },
+        fixture.repository.id);
 }
 
 TEST_F(DriveScenario, ConcurrentOfflineEditsExposeAndResolveFirstClassConflict) {

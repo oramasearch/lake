@@ -312,6 +312,9 @@ lake#350) live in the workspace named by `workspace_id` on create, list (`drive_
 and revoke, and by the bearer token on resolve, preview and download; the sharing pages carry the
 workspace in their URLs and forms (`http_server.cpp`, `web_ui.cpp`). The retired `drive_share_links` table and its copy went with
 migration `0070`.
+`drive_history` (`drive_capabilities.cpp`, `drive_path_change`) answers each change's state of the
+path, so an upload over an existing file (removal plus addition of the path in one change) reads as
+`modified` with the replaced blob, never as a deletion (lake#123, `docs/api/drive.md#path-history`).
 (lake#370, `docs/architecture/workspace-records.md`). `app_capabilities.cpp` records application
 lifecycle events and delivery attempts in the application's workspace (lake#356, lake#357):
 `register_application` requires `workspace_id`, the synchronous identity callers record an event
