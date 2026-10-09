@@ -138,7 +138,12 @@ header space and buffers, the serializer, the session), measured by
 `HttpConnections.AnIdleConnectionCostsLittleMemory` on macOS, plus the kernel's socket buffers,
 which the container's memory cgroup also charges. At the default cap, 4096 idle connections are
 about 100 MiB of the dev pod's 512 MiB limit (`Lake/prod`, `requests 128Mi`, `limits 512Mi`); lower
-`LAKE_HTTP_MAX_CONNECTIONS` or raise the limit for a pod that must hold more.
+`LAKE_HTTP_MAX_CONNECTIONS` or raise the limit for a pod that must hold more. On Linux, `ApiServer::start` fixes glibc's
+mmap threshold at 128 KiB (unless `MALLOC_MMAP_THRESHOLD_` is set): glibc otherwise raises it to
+32 MiB as large blocks are freed, after which request bodies and transfer buffers come from the
+heap and stay resident. Measured on the Linux test image, a 304 MiB pull after a 304 MiB push grew
+the resident set by 230 MiB without it and by 15 MiB with it
+(`RegistryStore.ALargeLayerIsStreamedNeverHeldWhole`).
 
 The worker, connection and timeout counts are metrics (`lake_http_connections`,
 `lake_http_requests_active`, `lake_http_requests_waiting`, `lake_http_requests_long`,

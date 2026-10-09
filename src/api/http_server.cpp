@@ -50,6 +50,9 @@
 
 #include <boost/capy/buffers.hpp>
 #include <sys/resource.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <boost/capy/buffers/buffer_copy.hpp>
 #include <boost/capy/buffers/vector_dynamic_buffer.hpp>
 #include <boost/capy/ex/run_async.hpp>
@@ -19979,7 +19982,26 @@ ApiServer::~ApiServer() {
     forget_execution_context(context);
 }
 
+namespace {
+// glibc raises its mmap threshold each time it frees a large mapped block, up to 32 MiB, after
+// which the request bodies, windows and buffers a transfer passes through come from the heap and
+// stay resident when freed. A fixed threshold keeps them mapped and returned, so lake's resident
+// set follows what it holds (lake#534: with per-connection sessions a 304 MiB pull grew the
+// resident set by 230 MiB on Linux, and by 15 MiB with this). MALLOC_MMAP_THRESHOLD_ overrides it.
+void fix_malloc_mmap_threshold() {
+#if defined(__GLIBC__)
+    static std::once_flag once;
+    std::call_once(once, [] {
+        if (std::getenv("MALLOC_MMAP_THRESHOLD_") == nullptr) {
+            mallopt(M_MMAP_THRESHOLD, 128 * 1024);
+        }
+    });
+#endif
+}
+} // namespace
+
 bool ApiServer::start() {
+    fix_malloc_mmap_threshold();
     namespace http = boost::http;
     namespace corosio = boost::corosio;
     namespace beast2 = boost::beast2;
