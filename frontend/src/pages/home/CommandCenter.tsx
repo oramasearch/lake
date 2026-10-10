@@ -89,6 +89,15 @@ const sum = (values: (number | null | undefined)[]): number | null => {
   return known.length ? known.reduce((a, b) => a + b, 0) : null;
 };
 
+/** "Run of <pipeline> in <project> failed", from whichever names the run carries. */
+function runTitle(run: Row): string {
+  const name = run.pipeline_name || run.graph;
+  const project = run.pipeline_name ? run.project_name : run.project;
+  if (name && project) return `Run of ${name} in ${project} failed`;
+  if (name || project) return `Run of ${name || project} failed`;
+  return "A run failed";
+}
+
 function runState(run: Row): string {
   return String(run.status ?? run.state ?? "").toLowerCase();
 }
@@ -138,7 +147,7 @@ export default function CommandCenter() {
   });
   const repositories = useQuery({
     queryKey: ["home-repositories"],
-    queryFn: ({ signal }) => read<{ repositories?: Row[] }>("list_repositories", { limit: 1000 }, { workspace: null, signal }),
+    queryFn: ({ signal }) => read<{ items?: Row[] }>("list_repositories", { limit: 500 }, { workspace: null, signal }),
     staleTime: 30_000,
   });
   const spaceIds = [...new Set(chosen.map((w) => w.customer_id))];
@@ -151,14 +160,14 @@ export default function CommandCenter() {
   });
   const activity = useQuery({
     queryKey: ["home-activity"],
-    queryFn: ({ signal }) => read<{ items?: Row[] }>("my_audit", { limit: 12, order: "desc" }, { workspace: null, signal }),
+    queryFn: ({ signal }) => read<{ items?: Row[] }>("my_audit", { limit: 12, order: "newest" }, { workspace: null, signal }),
     staleTime: 30_000,
   });
 
   const loading = perWorkspace.some((q) => q.isLoading);
   const figures = perWorkspace.map((q) => q.data);
   const chosenSet = new Set(chosen.map((w) => w.id));
-  const repoRows = (repositories.data?.repositories ?? []).filter((r) => !r.workspace_id || chosenSet.has(r.workspace_id));
+  const repoRows = (repositories.data?.items ?? []).filter((r) => !r.workspace_id || chosenSet.has(r.workspace_id));
   const serviceRows = services.flatMap((q) => q.data?.services ?? []).filter((s) => !s.workspace_id || chosenSet.has(s.workspace_id));
   const runs = figures.flatMap((f) => f?.runs ?? []);
   const running = runs.filter((r) => /^(running|queued|pending|starting)$/.test(runState(r))).length;
@@ -196,7 +205,7 @@ export default function CommandCenter() {
     ...failedRuns.slice(0, 6).map((r, i) => ({
       key: `run-${r.id ?? i}`,
       tone: "bad" as const,
-      title: `Run of ${r.pipeline_name ?? r.pipeline ?? r.project ?? "a pipeline"} failed`,
+      title: runTitle(r),
       detail: r.error ?? r.message ?? relative(r.created),
       to: r.id ? `/train/run?id=${encodeURIComponent(r.id)}` : "/train/runs",
     })),
