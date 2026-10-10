@@ -1,6 +1,5 @@
 import type { Audience, Screen } from "@/routes/types";
 import { lazyPage } from "@/lib/lazyPage";
-import { stub } from "@/components/ScreenStub";
 
 const ALL: Audience[] = ["visitor", "account", "operator"];
 /** Drive, webhooks and branch protection need sign-in: their capabilities have no anonymous read. */
@@ -28,7 +27,7 @@ export const screens: Screen[] = [
   { path: "/drive/conflict", title: "Conflict", section: "top", audience: SIGNED_IN, component: lazyPage(() => import("./DriveConflictPage")) },
   { path: "/drive/share", title: "Sharing", section: "top", audience: SIGNED_IN, component: lazyPage(() => import("./DriveSharePage")) },
   { path: "/drive/share/link", title: "Share Link", section: "top", audience: SIGNED_IN, component: lazyPage(() => import("./DriveShareLinkPage")) },
-  { path: "/shared-with-me", title: "Shared with Me", section: "top", nav: true, icon: "repository", audience: ["account"], owns: ["/share"], component: stub("Shared with Me") },
-  { path: "/share/:token", title: "Shared Folder", section: "none", audience: ALL, bare: true, component: stub("Shared Folder") },
-  { path: "/share/:token/preview", title: "Shared File", section: "none", audience: ALL, bare: true, component: stub("Shared File") },
+  { path: "/shared-with-me", title: "Shared with Me", section: "top", nav: true, icon: "repository", audience: ["account"], owns: ["/share"], component: lazyPage(() => import("./SharedWithMePage")) },
+  { path: "/share/:token", title: "Shared Folder", section: "none", audience: ALL, bare: true, component: lazyPage(() => import("./SharePage")) },
+  { path: "/share/:token/preview", title: "Shared File", section: "none", audience: ALL, bare: true, component: lazyPage(() => import("./SharePreviewPage")) },
 ];
