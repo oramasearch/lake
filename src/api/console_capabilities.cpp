@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <set>
 #include <string>
 #include <string_view>
@@ -9,6 +10,7 @@
 
 #include "lake/api/agent_docs.hpp"
 #include "lake/api/clerk.hpp"
+#include "lake/api/markdown.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
@@ -385,16 +387,183 @@ liquid::runtime::task<ApiResult> list_packages(const json& input, ApiContext& co
 // ---- Docs ----
 
 json doc_link_schema() {
-    return object_schema({{"slug", string_schema()}, {"title", string_schema()}},
-                         json::array({"slug", "title"}));
+    return object_schema(
+        {{"slug", string_schema()}, {"title", string_schema()}, {"section", string_schema()}},
+        json::array({"slug", "title"}));
 }
 
-ApiResult list_docs() {
-    json pages = json::array();
-    for (const WebUiGuidePage& page : web_ui_guide()) {
-        pages.push_back({{"slug", page.slug}, {"title", page.title}});
+json doc_heading_schema() {
+    return object_schema({{"level", {{"type", "integer"}}},
+                          {"text", string_schema()},
+                          {"anchor", string_schema()}},
+                         json::array({"level", "text", "anchor"}));
+}
+
+json doc_page_schema() {
+    return object_schema({{"slug", string_schema()},
+                          {"title", string_schema()},
+                          {"section", string_schema()},
+                          {"headings", {{"type", "array"}, {"items", doc_heading_schema()}}},
+                          {"match", {{"type", "string"}, {"enum", {"title", "heading", "text"}}}},
+                          {"anchor", string_schema()},
+                          {"excerpt", string_schema()}},
+                         json::array({"slug", "title", "section", "headings"}));
+}
+
+std::string ascii_lower(std::string_view text) {
+    std::string out(text);
+    std::ranges::transform(out, out.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
+
+// One heading of a guide as the renderers anchor it: every #–#### heading outside a code block is
+// counted, so a repeated heading's anchor is numbered -2, -3, … exactly as markdown_to_html and the
+// web app's Markdown number it. `at` is the heading line's offset in the Markdown.
+struct DocHeading {
+    int level = 0;
+    std::string text, anchor;
+    std::size_t at = 0;
+};
+
+std::vector<DocHeading> doc_headings(std::string_view markdown) {
+    std::vector<DocHeading> out;
+    std::map<std::string, int> seen;
+    bool code = false;
+    std::size_t start = 0;
+    while (start <= markdown.size()) {
+        const std::size_t end = std::min(markdown.find('\n', start), markdown.size());
+        const std::string_view line = markdown.substr(start, end - start);
+        if (line.starts_with("```")) {
+            code = !code;
+        } else if (!code) {
+            int level = 0;
+            while (level < static_cast<int>(line.size()) && line[level] == '#') {
+                ++level;
+            }
+            if (level >= 1 && level <= 4 && line.size() > static_cast<std::size_t>(level) &&
+                line[level] == ' ') {
+                const std::string_view raw = line.substr(level + 1);
+                std::string anchor = markdown_anchor(raw);
+                if (const int count = ++seen[anchor]; count > 1) {
+                    anchor += "-" + std::to_string(count);
+                }
+                // The heading as read: inline code and emphasis markers are not part of its text.
+                std::string text;
+                for (const char c : raw) {
+                    if (c != '`' && c != '*') {
+                        text += c;
+                    }
+                }
+                out.push_back({level, std::move(text), std::move(anchor), start});
+            }
+        }
+        if (end == markdown.size()) {
+            break;
+        }
+        start = end + 1;
     }
-    return ApiResult::success({{"pages", std::move(pages)}});
+    return out;
+}
+
+// A short excerpt of `text` around byte `at`, whitespace collapsed, never splitting a UTF-8
+// character.
+std::string doc_excerpt(std::string_view text, std::size_t at, std::size_t length) {
+    std::size_t from = at > 60 ? at - 60 : 0;
+    std::size_t to = std::min(text.size(), from + length);
+    const auto continuation = [&](std::size_t i) {
+        return i < text.size() && (static_cast<unsigned char>(text[i]) & 0xC0) == 0x80;
+    };
+    while (from > 0 && continuation(from)) {
+        --from;
+    }
+    while (to < text.size() && continuation(to)) {
+        ++to;
+    }
+    std::string out = from > 0 ? "…" : "";
+    bool space = false;
+    for (const char c : text.substr(from, to - from)) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            space = true;
+            continue;
+        }
+        if (space && !out.empty() && out != "…") {
+            out += ' ';
+        }
+        space = false;
+        out += c;
+    }
+    if (to < text.size()) {
+        out += "…";
+    }
+    return out;
+}
+
+json doc_link(const WebUiGuidePage& page) {
+    return {{"slug", page.slug}, {"title", page.title}, {"section", page.section}};
+}
+
+// The guides in reading order with their sections and headings; with `q`, only the guides whose
+// title, headings or text contain it (ASCII case ignored), best match first: a title match, then a
+// heading match (its anchor), then the text (the heading above the first match, and an excerpt).
+ApiResult list_docs(const json& input) {
+    const std::string q = ascii_lower(input.value("q", std::string()));
+    if (q.size() > 200) {
+        return ApiResult::failure("invalid_input", "q is at most 200 characters", "/q");
+    }
+    json sections = json::array();
+    std::vector<std::pair<int, json>> pages;
+    for (const WebUiGuidePage& page : web_ui_guide()) {
+        if (sections.empty() || sections.back() != page.section) {
+            sections.push_back(page.section);
+        }
+        const std::vector<DocHeading> headings = doc_headings(page.markdown);
+        json item = doc_link(page);
+        item["headings"] = json::array();
+        for (const DocHeading& heading : headings) {
+            if (heading.level == 2 || heading.level == 3) {
+                item["headings"].push_back(
+                    {{"level", heading.level}, {"text", heading.text}, {"anchor", heading.anchor}});
+            }
+        }
+        int rank = 0;
+        if (!q.empty()) {
+            const std::string body = ascii_lower(page.markdown);
+            const auto in_heading = std::ranges::find_if(headings, [&](const DocHeading& heading) {
+                return heading.level > 1 && ascii_lower(heading.text).find(q) != std::string::npos;
+            });
+            // The body after the title line, so a title match is not also the first text match.
+            const std::size_t after_title = std::min(body.find('\n'), body.size());
+            const std::size_t hit = body.find(q, after_title);
+            if (ascii_lower(page.title).find(q) != std::string::npos) {
+                item["match"] = "title";
+            } else if (in_heading != headings.end()) {
+                item["match"] = "heading";
+                item["anchor"] = in_heading->anchor;
+                rank = 1;
+            } else if (hit != std::string::npos) {
+                item["match"] = "text";
+                rank = 2;
+                for (const DocHeading& heading : headings) {
+                    if (heading.level > 1 && heading.at < hit) {
+                        item["anchor"] = heading.anchor;
+                    }
+                }
+            } else {
+                continue;
+            }
+            if (hit != std::string::npos) {
+                item["excerpt"] = doc_excerpt(page.markdown, hit, 180);
+            }
+        }
+        pages.emplace_back(rank, std::move(item));
+    }
+    std::ranges::stable_sort(pages, {}, &std::pair<int, json>::first);
+    json out = json::array();
+    for (auto& [rank, item] : pages) {
+        out.push_back(std::move(item));
+    }
+    return ApiResult::success({{"pages", std::move(out)}, {"sections", std::move(sections)}});
 }
 
 ApiResult get_doc(const json& input) {
@@ -405,9 +574,15 @@ ApiResult get_doc(const json& input) {
     if (found == pages.end()) {
         return ApiResult::failure("not_found", "there is no Docs page " + slug, "/page");
     }
-    json out{{"slug", found->slug}, {"title", found->title}, {"markdown", found->markdown}};
+    json out{{"slug", found->slug},
+             {"title", found->title},
+             {"section", found->section},
+             {"markdown", found->markdown}};
+    if (found != pages.begin()) {
+        out["previous"] = doc_link(*std::prev(found));
+    }
     if (const auto after = std::next(found); after != pages.end()) {
-        out["next"] = {{"slug", after->slug}, {"title", after->title}};
+        out["next"] = doc_link(*after);
     }
     return ApiResult::success(std::move(out));
 }
@@ -574,10 +749,17 @@ void register_console_capabilities(Registry& registry, std::string_view version)
     registry.add(Capability{
         .name = "list_docs",
         .title = "List Docs pages",
-        .description = "The Docs guides in reading order, each by its slug and title. Public.",
-        .input_schema = object_schema(json::object()),
+        .description =
+            "The Docs guides in reading order, each by its slug, title, section (the group the "
+            "Docs navigation shows it under) and its headings (level 2 and 3, each with the "
+            "anchor that links to it), plus the sections in order. With `q`, only the guides "
+            "whose title, headings or text contain it (case ignored), best match first, each "
+            "saying what matched, the anchor of the heading to open and an excerpt. Public.",
+        .input_schema = object_schema({{"q", string_schema()}}),
         .output_schema = object_schema(
-            {{"pages", {{"type", "array"}, {"items", doc_link_schema()}}}}, json::array({"pages"})),
+            {{"pages", {{"type", "array"}, {"items", doc_page_schema()}}},
+             {"sections", string_array_schema()}},
+            json::array({"pages", "sections"})),
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "server",
@@ -585,18 +767,21 @@ void register_console_capabilities(Registry& registry, std::string_view version)
         .resolve_object = no_object,
         // Every guide is public.
         .authorizes_candidates = true,
-        .handler = [](const json&, ApiContext&) { return list_docs(); }});
+        .handler = [](const json& input, ApiContext&) { return list_docs(input); }});
     registry.add(Capability{
         .name = "get_doc",
         .title = "Read a Docs page",
         .description = "One Docs guide as Markdown, by its slug (`page`; absent is the first, "
-                       "Getting Started), with the next guide in reading order. Public.",
+                       "Getting Started), with its section and the previous and next guides in "
+                       "reading order. Public.",
         .input_schema = object_schema({{"page", string_schema()}}),
         .output_schema = object_schema({{"slug", string_schema()},
                                         {"title", string_schema()},
+                                        {"section", string_schema()},
                                         {"markdown", string_schema()},
+                                        {"previous", doc_link_schema()},
                                         {"next", doc_link_schema()}},
-                                       json::array({"slug", "title", "markdown"})),
+                                       json::array({"slug", "title", "section", "markdown"})),
         .kind = CapabilityKind::Read,
         .requires_auth = false,
         .object = "server",

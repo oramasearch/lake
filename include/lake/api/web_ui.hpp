@@ -41,9 +41,10 @@ std::string_view web_ui_asset_cache_control(std::string_view path);
 std::string_view web_ui_font(std::string_view name);
 
 // The Docs guides (lake#252): docs/guide/*.md embedded at build time, in reading order, read by
-// the list_docs and get_doc capabilities.
+// the list_docs and get_doc capabilities. `section` is the group the Docs navigation shows the page
+// under (cmake/embed_guide.cmake's GUIDE_SECTIONS, lake#561); pages of one section are adjacent.
 struct WebUiGuidePage {
-    std::string_view slug, title, markdown;
+    std::string_view slug, title, markdown, section;
 };
 const std::vector<WebUiGuidePage>& web_ui_guide();
 

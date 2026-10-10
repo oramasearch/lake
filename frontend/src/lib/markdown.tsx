@@ -39,7 +39,9 @@ function appPath(href: string | undefined): boolean {
   return !!href && href.startsWith("/") && !href.startsWith("//") && !isServerRoute(href.split(/[?#]/)[0]);
 }
 
-export function Markdown({ children, inline, as = "div" }: { children: string; inline?: boolean; as?: "div" | "article" }) {
+/** `headingLinks`: every heading below the title carries a "#" link to itself, so a reader can copy
+ * the address of a section (the Docs, lake#561). */
+export function Markdown({ children, inline, as = "div", headingLinks }: { children: string; inline?: boolean; as?: "div" | "article"; headingLinks?: boolean }) {
   // One counter per rendered document, so a repeated heading reads "-2", "-3".
   const seen = new Map<string, number>();
   const anchor = (content: ReactNode) => {
@@ -48,13 +50,27 @@ export function Markdown({ children, inline, as = "div" }: { children: string; i
     seen.set(base, count);
     return count > 1 ? `${base}-${count}` : base;
   };
+  const linked = (Tag: "h2" | "h3" | "h4" | "h5" | "h6") =>
+    function Heading({ children: c }: { children?: ReactNode }) {
+      const id = anchor(c);
+      return (
+        <Tag id={id}>
+          {c}
+          {headingLinks && (
+            <a className="heading-link" href={`#${id}`} aria-label={`Link to ${textOf(c)}`}>
+              #
+            </a>
+          )}
+        </Tag>
+      );
+    };
   const components: Components = {
     h1: ({ children: c }) => <h1 id={anchor(c)}>{c}</h1>,
-    h2: ({ children: c }) => <h2 id={anchor(c)}>{c}</h2>,
-    h3: ({ children: c }) => <h3 id={anchor(c)}>{c}</h3>,
-    h4: ({ children: c }) => <h4 id={anchor(c)}>{c}</h4>,
-    h5: ({ children: c }) => <h5 id={anchor(c)}>{c}</h5>,
-    h6: ({ children: c }) => <h6 id={anchor(c)}>{c}</h6>,
+    h2: linked("h2"),
+    h3: linked("h3"),
+    h4: linked("h4"),
+    h5: linked("h5"),
+    h6: linked("h6"),
     a: ({ href, children: text }) => (appPath(href) ? <Link to={href!}>{text}</Link> : <a href={href}>{text}</a>),
   };
   const Box = as;
