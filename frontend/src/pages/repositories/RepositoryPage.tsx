@@ -1,18 +1,24 @@
-/** /repository?id= (web_ui_repository): the repository home. Files, recent changes and the README
- * on the left; clone and push, references and releases, languages, effective access and About on
- * the right. Public repositories render for visitors. */
+/** /repository?id= (web_ui_repository): the repository home, as a code host draws it. A header with
+ * the name, visibility and actions (Clone, Build image); the repository's tabs; figures; then the
+ * files at the default ref, recent changes and the README on the left, and clone and push, About,
+ * references, releases, languages and effective access on the right. Public repositories render
+ * for visitors. */
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { BookOpen, Download, FolderTree, GitCommitHorizontal, Hammer, History, Package, Tag } from "lucide-react";
 import { ApiError } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import { useToast } from "@/lib/toast";
 import { entityCrumb, useTrail } from "@/lib/trail";
-import { Badge, Button } from "@/lib/ui";
-import { dateTime } from "@/lib/format";
+import { Modal } from "@/lib/overlay";
+import { Banner, Button, Card, Chip, CopyBlock, Empty, KeyValue, Meter, Split, Stat, StatRow, Status } from "@/lib/ui";
+import { dateTime, relative } from "@/lib/format";
 import { Markdown } from "./Markdown";
 import {
   byteCount,
+  EntryIcon,
   fileLanguage,
-  ForgeBadge,
+  ForgeStatus,
   ForgeTabs,
   forgeAct,
   Identifier,
@@ -20,6 +26,7 @@ import {
   pending,
   ToRepositories,
   useForgeRead,
+  Visibility,
   type AccessEntry,
   type Change,
   type ForgeRecord,
@@ -62,6 +69,7 @@ function RepositoryHome({ id }: { id: string }) {
   const releases = useForgeRead<Items<ForgeRecord>>("list_releases", { repository_id: id }, { retry: false });
   const workspaceId = repository.data?.workspace_id;
   const workspace = useForgeRead<Workspace>(signedIn && customerId && workspaceId ? "get_workspace" : null, { customer_id: customerId, workspace_id: workspaceId }, { retry: false });
+  const [cloning, setCloning] = useState(false);
 
   const ownerName = owner.data?.name ?? repository.data?.customer_id ?? "";
   const title = repository.data ? `${ownerName}/${repository.data.name}` : "";
@@ -74,6 +82,7 @@ function RepositoryHome({ id }: { id: string }) {
   const r = repository.data!;
   const entries = hasRefs ? itemsOf(tree.data) : [];
   const recent = itemsOf(changes.data);
+  const releaseList = itemsOf(releases.data);
   const blobs = entries.filter((entry) => entry.kind === "blob");
   const languages = new Map<string, number>();
   for (const entry of blobs) languages.set(fileLanguage(entry.path), (languages.get(fileLanguage(entry.path)) ?? 0) + entry.size);
@@ -83,243 +92,275 @@ function RepositoryHome({ id }: { id: string }) {
   const origin = viewer.external_origin ?? "";
   const url = shellArgument(`${origin}/v1/repositories/${id}`);
   const directory = shellArgument(`./${r.name}`);
+  const treeHref = `/repository/tree?id=${encoded}&ref=${refQuery}`;
+
+  const clone = (
+    <>
+      {!origin ? (
+        <p className="muted m-0">
+          An administrator must set <code>LAKE_EXTERNAL_ORIGIN</code> or <code>LAKE_PUBLIC_HOST</code> before clone and push commands are available.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          <p className="muted m-0 text-[12.5px]">
+            Create an account token on this instance under <Link to="/tokens">Tokens</Link> and export it as <code>LIQUID_TOKEN</code> in your terminal. Use a token issued by this
+            instance only.
+          </p>
+          <CopyBlock label="First checkout into a new directory" value={`liquid clone ${url} ${directory}\ncd ${directory}`} multiline />
+          <CopyBlock label="From that checkout, after capturing and naming your changes" value={`liquid push ${url}`} />
+        </div>
+      )}
+    </>
+  );
 
   return (
     <div className="page-container">
-      <div className="forge-heading">
-        <div>
-          <p className="eyebrow">repository</p>
-          <h1>{title}</h1>
+      <header className="page-header">
+        <div className="min-w-0">
+          <p className="eyebrow">Data · Repository</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="break-words">{title}</h1>
+            <Visibility value={r.visibility} />
+            {r.deleted_at && <Status value="deleted" />}
+          </div>
           <p className="sub">{r.description_unavailable ? `Description unavailable: ${r.description_unavailable}` : r.description || "No description."}</p>
+          <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px] text-ink-2">
+            <span>
+              Owner <Link to={`/repositories?customer_id=${encodeURIComponent(r.customer_id)}`}>{ownerName}</Link>
+            </span>
+            {workspace.data && (
+              <span>
+                Workspace <Link to={`/w/${encodeURIComponent(workspace.data.id)}/design/projects`}>{workspace.data.name}</Link>
+              </span>
+            )}
+            <span>Updated {relative(r.updated_at)}</span>
+          </div>
         </div>
-        <Badge>{r.visibility}</Badge>
-      </div>
-      <ForgeTabs repository={r} current="code" />
-      <div className="repository-layout">
-        <div className="repository-main">
-          {workspace.data ? (
-            <p className="muted repository-workspace">
-              Workspace <Link to={`/w/${encodeURIComponent(workspace.data.id)}/design/projects`}>{workspace.data.name}</Link>
-            </p>
-          ) : signedIn && !r.workspace_id ? (
-            <div className="notice">
-              <strong>No workspace yet.</strong> This repository was created before workspaces and has not been assigned one.
-            </div>
-          ) : null}
-          {r.deleted_at && (
-            <div className="notice status-danger">
-              <strong>Tombstoned.</strong> Deleted {dateTime(r.deleted_at)}. Collection may reclaim unreferenced content after {dateTime(r.retention_until)}.
-            </div>
-          )}
+        <div className="page-actions">
+          <Button to={treeHref}>
+            <FolderTree size={14} aria-hidden /> Browse files
+          </Button>
           {signedIn && !r.deleted_at && <BuildImage repository={r} revision={defaultRef} />}
-          <section className="panel repository-browser">
-            <div className="section-heading">
-              <div>
-                <h2>Files</h2>
-                <p className="muted">
-                  The published tree at <code>{defaultRef}</code>.
-                </p>
-              </div>
-              <Link to={`/repository/tree?id=${encoded}&ref=${refQuery}`}>Browse tree</Link>
-            </div>
-            {entries.length === 0 ? (
-              <div className="empty compact-empty">No files are published on this ref.</div>
-            ) : (
-              <details className="tree-group" open>
-                <summary>Repository root</summary>
-                <ul className="forge-tree">
-                  {entries.slice(0, 12).map((entry) => (
-                    <li key={entry.path}>
-                      <span className="tree-kind" aria-hidden="true">
-                        {entry.kind === "blob" ? "·" : "›"}
+          <Button variant="primary" onClick={() => setCloning(true)}>
+            <Download size={14} aria-hidden /> Clone
+          </Button>
+        </div>
+      </header>
+      <ForgeTabs repository={r} current="code" />
+      {signedIn && !r.workspace_id && (
+        <Banner tone="quiet" title="No workspace yet">
+          This repository was created before workspaces and has not been assigned one.
+        </Banner>
+      )}
+      {r.deleted_at && (
+        <Banner tone="warn" title="Tombstoned">
+          Deleted {dateTime(r.deleted_at)}. Collection may reclaim unreferenced content after {dateTime(r.retention_until)}.
+        </Banner>
+      )}
+      <StatRow>
+        <Stat label="Files" value={hasRefs ? blobs.length : 0} icon={FolderTree} sub={hasRefs ? `${byteCount(total)} at ${defaultRef}` : "nothing published yet"} to={treeHref} />
+        <Stat label="Changes" value={recent.length} icon={GitCommitHorizontal} sub={recent[0] ? `latest ${relative(recent[0].occurred_at)}` : "none cut yet"} to={`/changes?repository_id=${encoded}`} />
+        <Stat label="References" value={refList.length} icon={Tag} sub={hasRefs ? `default ${defaultRef}` : "none published"} />
+        <Stat
+          label="Releases"
+          value={releases.isError ? "—" : releaseList.length}
+          icon={Package}
+          sub={releases.isError ? "unavailable" : releaseList[0]?.value.tag ? `latest ${releaseList[0].value.tag}` : "none published"}
+          to={`/releases?repository_id=${encoded}`}
+        />
+      </StatRow>
+      <Split
+        side={
+          <>
+            <Card label="Clone and push" title="Use liquid">
+              {clone}
+            </Card>
+            <Card label="About">
+              <KeyValue
+                rows={[
+                  ["Identifier", <Identifier value={r.id} />],
+                  ["Owner", <Link to={`/repositories?customer_id=${encodeURIComponent(r.customer_id)}`}>{ownerName}</Link>],
+                  ["Workspace", workspace.data ? <Link to={`/w/${encodeURIComponent(workspace.data.id)}/design/projects`}>{workspace.data.name}</Link> : null],
+                  ["Visibility", <Visibility value={r.visibility} />],
+                  ["Created", dateTime(r.created_at)],
+                  ["Updated", dateTime(r.updated_at)],
+                ]}
+              />
+            </Card>
+            <Card label="References" actions={<span className="font-mono text-[11px] text-ink-3">{refList.length}</span>}>
+              {refList.length === 0 ? (
+                <p className="muted m-0">No references are published.</p>
+              ) : (
+                <ul className="detail-list">
+                  {refList.map((ref, index) => (
+                    <li key={ref.name}>
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <Link to={`/repository/tree?id=${encoded}&ref=${encodeURIComponent(ref.name)}`}>{ref.name}</Link>
+                        {index === 0 && <Chip tone="action">default</Chip>}
                       </span>
-                      <Link
-                        to={
-                          entry.kind === "blob"
-                            ? `/file?repository_id=${encoded}&ref=${refQuery}&path=${encodeURIComponent(entry.path)}`
-                            : `/repository/tree?id=${encoded}&ref=${refQuery}#${encodeURIComponent(entry.path)}`
-                        }
-                      >
-                        {entry.path}
-                      </Link>
-                      <span className="tree-size">{entry.kind === "blob" ? byteCount(entry.size) : "directory"}</span>
+                      <Identifier value={ref.change} />
                     </li>
                   ))}
                 </ul>
-              </details>
-            )}
-          </section>
-          <section className="panel recent-changes">
-            <div className="section-heading">
-              <h2>Recent Changes</h2>
-              <Link to={`/changes?repository_id=${encoded}`}>All changes</Link>
-            </div>
-            {recent.length === 0 ? (
-              <div className="empty compact-empty">No changes have been cut.</div>
-            ) : (
-              <ol className="change-list">
-                {recent.slice(0, 5).map((change) => (
-                  <li key={change.id}>
-                    <div>
-                      <strong>
-                        <Link to={`/change?repository_id=${encoded}&id=${encodeURIComponent(change.id)}`}>{change.message || "Untitled change"}</Link>
-                      </strong>
-                      <span className="muted">
-                        {change.author} · {dateTime(change.occurred_at)}
-                      </span>
-                    </div>
-                    <Identifier value={change.id} />
-                  </li>
-                ))}
-              </ol>
-            )}
-          </section>
-          <section className="panel readme-panel">
-            <div className="section-heading">
-              <h2>README</h2>
-            </div>
-            {readme.data ? <Markdown>{readme.data.contents}</Markdown> : <div className="empty compact-empty">Add a README.md to explain this repository.</div>}
-          </section>
-        </div>
-        <aside className="repository-sidebar" aria-label="Repository details">
-          <section className="panel">
-            <h2>Clone and Push</h2>
-            {!origin ? (
-              <p className="muted">
-                An administrator must set <code>LAKE_EXTERNAL_ORIGIN</code> or <code>LAKE_PUBLIC_HOST</code> before clone and push commands are available.
-              </p>
-            ) : (
-              <>
-                <p className="muted">
-                  Create an account token on this instance under <Link to="/tokens">Tokens</Link> and export it as <code>LIQUID_TOKEN</code> in your terminal. Use a token issued by this
-                  instance only.
-                </p>
-                <p>First checkout into a new directory:</p>
-                <pre>
-                  <code>{`liquid clone ${url} ${directory}\ncd ${directory}`}</code>
-                </pre>
-                <p>From that checkout, after capturing and naming your changes:</p>
-                <pre>
-                  <code>{`liquid push ${url}`}</code>
-                </pre>
-              </>
-            )}
-          </section>
-          <section className="panel">
-            <h2>References</h2>
-            {refList.length === 0 ? (
-              <p className="muted">No references are published.</p>
-            ) : (
-              <ul className="detail-list">
-                {refList.map((ref, index) => (
-                  <li key={ref.name}>
-                    <div>
-                      <span>
-                        <Link to={`/repository/tree?id=${encoded}&ref=${encodeURIComponent(ref.name)}`}>{ref.name}</Link>
-                        {index === 0 && (
-                          <>
-                            {" "}
-                            <Badge>default</Badge>
-                          </>
-                        )}
-                      </span>
-                    </div>
-                    <Identifier value={ref.change} />
-                  </li>
-                ))}
-              </ul>
-            )}
-            {releases.isError ? (
-              <>
-                <h3>Releases</h3>
-                <p className="muted">Releases are unavailable: {(releases.error as Error).message}</p>
-              </>
-            ) : itemsOf(releases.data).length > 0 ? (
-              <>
-                <h3>Releases</h3>
+              )}
+            </Card>
+            <Card label="Releases" actions={<Link to={`/releases?repository_id=${encoded}`}>All releases</Link>}>
+              {releases.isError ? (
+                <p className="muted m-0">Releases are unavailable: {(releases.error as Error).message}</p>
+              ) : releaseList.length === 0 ? (
+                <p className="muted m-0">No releases have been published.</p>
+              ) : (
                 <ul className="detail-list">
-                  {itemsOf(releases.data).map((release) => (
+                  {releaseList.map((release) => (
                     <li key={release.id}>
-                      <strong>{release.value.tag ?? "untagged"}</strong>
+                      <span className="flex items-center gap-1.5">
+                        <Tag size={13} aria-hidden className="text-ink-3" />
+                        <strong>{release.value.tag ?? "untagged"}</strong>
+                      </span>
                       <Identifier value={release.value.change_id ?? ""} />
                     </li>
                   ))}
                 </ul>
-              </>
-            ) : null}
-          </section>
-          <section className="panel">
-            <h2>Languages</h2>
-            {languages.size === 0 ? (
-              <p className="muted">No indexed file sizes yet.</p>
-            ) : (
-              <>
-                <ul className="language-summary">
-                  {[...languages.entries()]
-                    .sort(([a], [b]) => (a < b ? -1 : 1))
-                    .map(([language, bytes]) => (
-                      <li key={language}>
-                        <span>{language}</span>
-                        <strong>{byteCount(bytes)}</strong>
-                      </li>
-                    ))}
+              )}
+            </Card>
+            <Card label="Languages">
+              {languages.size === 0 ? (
+                <p className="muted m-0">No indexed file sizes yet.</p>
+              ) : (
+                <>
+                  <ul className="m-0 list-none space-y-2 p-0">
+                    {[...languages.entries()]
+                      .sort(([, a], [, b]) => b - a)
+                      .map(([language, size]) => (
+                        <li key={language}>
+                          <div className="mb-0.5 text-[12.5px] text-ink">{language}</div>
+                          <Meter value={size} max={total || 1} label={byteCount(size)} />
+                        </li>
+                      ))}
+                  </ul>
+                  <p className="muted mt-2 mb-0 text-[12px]">
+                    {byteCount(total)} indexed across {blobs.length} files.
+                  </p>
+                </>
+              )}
+            </Card>
+            <Card label="Effective access" actions={signedIn ? <Link to={`/repository/access?id=${encoded}`}>View access details</Link> : undefined}>
+              {access.isError ? (
+                <p className="muted m-0">Effective access is unavailable: {(access.error as Error).message}</p>
+              ) : itemsOf(access.data).length === 0 ? (
+                <p className="muted m-0">No direct or inherited grants are visible.</p>
+              ) : (
+                <ul className="detail-list">
+                  {itemsOf(access.data).map((entry, index) => (
+                    <li key={index}>
+                      <Identifier value={entry.principal_taap_id} />
+                      <ForgeStatus value={entry.role} />
+                    </li>
+                  ))}
                 </ul>
-                <p className="muted">
-                  {byteCount(total)} indexed across {blobs.length} files.
-                </p>
-              </>
-            )}
-          </section>
-          <section className="panel">
-            <h2>Effective Access</h2>
-            {access.isError ? (
-              <p className="muted">Effective access is unavailable: {(access.error as Error).message}</p>
-            ) : itemsOf(access.data).length === 0 ? (
-              <p className="muted">No direct or inherited grants are visible.</p>
-            ) : (
-              <ul className="detail-list">
-                {itemsOf(access.data).map((entry, index) => (
-                  <li key={index}>
-                    <Identifier value={entry.principal_taap_id} />
-                    <ForgeBadge value={entry.role} />
-                  </li>
-                ))}
-              </ul>
-            )}
-            <p>{signedIn && <Link to={`/repository/access?id=${encoded}`}>View access details</Link>}</p>
-          </section>
-          <section className="panel repository-meta">
-            <h2>About</h2>
-            <dl>
-              <dt>Identifier</dt>
-              <dd>
-                <Identifier value={r.id} />
-              </dd>
-              <dt>Owner</dt>
-              <dd>
-                <Link to={`/repositories?customer_id=${encodeURIComponent(r.customer_id)}`}>{ownerName}</Link>
-              </dd>
-              <dt>Created</dt>
-              <dd>{dateTime(r.created_at)}</dd>
-              <dt>Updated</dt>
-              <dd>{dateTime(r.updated_at)}</dd>
-            </dl>
-          </section>
-        </aside>
-      </div>
+              )}
+            </Card>
+          </>
+        }
+      >
+        <Card
+          padded={false}
+          label="Files"
+          title={
+            <>
+              The published tree at <code>{defaultRef}</code>
+            </>
+          }
+          actions={<Button to={treeHref}>Browse tree</Button>}
+        >
+          {entries.length === 0 ? (
+            <div className="p-4">
+              <Empty compact icon={FolderTree} title="No files yet">
+                No files are published on this ref. Push a change to publish its first tree.
+              </Empty>
+            </div>
+          ) : (
+            <ul className="m-0 list-none divide-y divide-hairline p-0">
+              {entries.slice(0, 12).map((entry) => (
+                <li key={entry.path} className="flex items-center gap-2.5 px-4 py-2 text-[13px]">
+                  <EntryIcon kind={entry.kind === "blob" ? "blob" : "tree"} size={14} />
+                  <Link
+                    className="min-w-0 flex-1 truncate"
+                    to={
+                      entry.kind === "blob"
+                        ? `/file?repository_id=${encoded}&ref=${refQuery}&path=${encodeURIComponent(entry.path)}`
+                        : `/repository/tree?id=${encoded}&ref=${refQuery}#${encodeURIComponent(entry.path)}`
+                    }
+                  >
+                    {entry.path}
+                  </Link>
+                  <span className="font-mono text-[11.5px] text-ink-3">{entry.kind === "blob" ? byteCount(entry.size) : "directory"}</span>
+                </li>
+              ))}
+              {entries.length > 12 && (
+                <li className="px-4 py-2 text-[12.5px]">
+                  <Link to={treeHref}>All {entries.length} paths</Link>
+                </li>
+              )}
+            </ul>
+          )}
+        </Card>
+        <Card padded={false} label="Recent changes" actions={<Link to={`/changes?repository_id=${encoded}`}>All changes</Link>}>
+          {recent.length === 0 ? (
+            <div className="p-4">
+              <Empty compact icon={History} title="No changes yet">
+                No changes have been cut.
+              </Empty>
+            </div>
+          ) : (
+            <ol className="m-0 list-none divide-y divide-hairline p-0">
+              {recent.slice(0, 5).map((change) => (
+                <li key={change.id} className="flex items-start gap-3 px-4 py-2.5">
+                  <GitCommitHorizontal size={15} aria-hidden className="mt-0.5 shrink-0 text-ink-3" />
+                  <div className="min-w-0 flex-1">
+                    <Link className="font-semibold" to={`/change?repository_id=${encoded}&id=${encodeURIComponent(change.id)}`}>
+                      {change.message.split("\n")[0] || "Untitled change"}
+                    </Link>
+                    <div className="truncate text-[12px] text-ink-3">
+                      {change.author} · <span title={dateTime(change.occurred_at)}>{relative(change.occurred_at)}</span>
+                    </div>
+                  </div>
+                  <Identifier value={change.id} />
+                </li>
+              ))}
+            </ol>
+          )}
+        </Card>
+        <Card label="README" title={readme.data ? "README.md" : undefined}>
+          {readme.data ? (
+            <div className="readme-panel">
+              <Markdown>{readme.data.contents}</Markdown>
+            </div>
+          ) : (
+            <Empty compact icon={BookOpen} title="No README">
+              Add a README.md to explain this repository.
+            </Empty>
+          )}
+        </Card>
+      </Split>
+      {cloning && (
+        <Modal title="Clone This Repository" subtitle={title} onClose={() => setCloning(false)} width={640}>
+          {clone}
+        </Modal>
+      )}
     </div>
   );
 }
 
 /** "Build image": queue an in-cluster build of the default ref as `<name>:latest`; success opens
- * the workspace's Packages page, where the build shows (serve_repository_build). */
+ * the workspace's Packages page, where the build shows (serve_repository_build). A refusal is
+ * said in a toast. */
 function BuildImage({ repository, revision }: { repository: Repository; revision: string }) {
   const navigate = useNavigate();
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const build = async () => {
     setBusy(true);
-    setError(null);
     try {
       await forgeAct("build_image", {
         customer_id: repository.customer_id,
@@ -330,27 +371,14 @@ function BuildImage({ repository, revision }: { repository: Repository; revision
       });
       navigate(repository.workspace_id ? `/w/${encodeURIComponent(repository.workspace_id)}/ship/packages` : `/ship/packages`);
     } catch (e) {
-      setError((e as Error).message);
+      toast(`Build image: ${(e as Error).message}`, "bad");
     } finally {
       setBusy(false);
     }
   };
   return (
-    <section className="panel">
-      <div className="section-heading">
-        <div>
-          <h2>Build Image</h2>
-          <p className="muted">Queue an in-cluster build from this repository.</p>
-        </div>
-        <Button variant="primary" loading={busy} onClick={() => void build()}>
-          Build image
-        </Button>
-      </div>
-      {error && (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      )}
-    </section>
+    <Button loading={busy} onClick={() => void build()} title="Queue an in-cluster build from this repository">
+      {!busy && <Hammer size={14} aria-hidden />} Build image
+    </Button>
   );
 }

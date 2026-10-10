@@ -26,7 +26,9 @@ visible before anything is shared:
 | Removing a local sync selection revokes access | The page names policy and link revocation as the access controls. Local sync selection does not appear as a share mutation. |
 | A downloaded copy can be recalled | The independent-copy panel and link-revoke message state that copied bytes cannot be recalled. |
 
-The People and Organization controls both call `share_drive_folder` with the named TAAP identity,
+The page shows its figures (who has access, active links, expired or revoked links) above the
+access table. Each delivery is a card whose button opens its form in a dialog; the header offers
+**Share with person** and **Create link** as well. The People and Organization controls both call `share_drive_folder` with the named TAAP identity,
 role, and attestation digest. An organization grant is made to that named identity; the table
 shows the identities that actually have effective access. The Link control calls
 `create_drive_share_link` with its role and required expiry, and shows the new link's address.

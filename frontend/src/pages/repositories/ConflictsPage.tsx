@@ -1,8 +1,10 @@
 /** /conflicts?repository_id= (web_ui_repository_conflicts): unresolved conflict values, each
  * explained, with its preserved values and the choice of which to keep (on `main`, as the page
  * always resolved). Reached from Drive's Conflicts link; no repository tab is current. */
-import { Link, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
+import { CircleCheck, GitCompareArrows, TriangleAlert } from "lucide-react";
 import { useToast } from "@/lib/toast";
+import { Banner, Button, Card, Empty, Split } from "@/lib/ui";
 import {
   ConflictReasons,
   ConflictRegion,
@@ -10,12 +12,10 @@ import {
   ConflictValues,
   conflictKindLabel,
   driveHref,
-  ForgeBadge,
   ForgePage,
-  ForgeTabs,
+  ForgeStatus,
   itemsOf,
   pending,
-  repositoryName,
   ToRepositories,
   useForgeRead,
   useRepositoryTrail,
@@ -41,32 +41,54 @@ function Conflicts({ id }: { id: string }) {
   const r = repository.data!;
   const rows = itemsOf(conflicts.data);
   return (
-    <ForgePage eyebrow="repository conflicts" title="Conflicts" sub={repositoryName(r)}>
-      <ForgeTabs repository={r} current="conflicts" />
+    <ForgePage title="Conflicts" repository={r} tab="conflicts" sub="Concurrent values lake preserved instead of choosing one. Compare them, then keep one.">
       {rows.length === 0 ? (
-        <div className="panel empty">No unresolved conflict values.</div>
+        <Empty icon={CircleCheck} title="No conflicts">
+          No unresolved conflict values.
+        </Empty>
       ) : (
-        rows.map((conflict) => (
-          <article key={conflict.id} className="panel conflict-value">
-            <header>
-              <h2>
-                <code>{conflict.region.path}</code>
-              </h2>
-              <ForgeBadge value={conflict.kind} />
-            </header>
-            <p>
-              <strong>{conflictKindLabel(conflict.kind)}</strong>
-            </p>
-            <p>{conflict.explanation}</p>
-            <p className="sub">
-              Affected region: <ConflictRegion region={conflict.region} />
-            </p>
-            <ConflictReasons conflict={conflict} />
-            <ConflictValues conflict={conflict} />
-            <Link to={driveHref("/drive/conflict", id, "main", conflict.region.path)}>Compare preserved values</Link>
-            <ConflictResolution repositoryId={id} refName="main" conflict={conflict} done={() => toast("Conflict resolved")} />
-          </article>
-        ))
+        <>
+          <Banner tone="info" title={`${rows.length} unresolved ${rows.length === 1 ? "conflict" : "conflicts"}`}>
+            Each is resolved on <code>main</code>.
+          </Banner>
+          <div className="space-y-4">
+            {rows.map((conflict) => (
+              <Card
+                key={conflict.id}
+                tone="exception"
+                label={conflictKindLabel(conflict.kind)}
+                title={<code>{conflict.region.path}</code>}
+                actions={
+                  <>
+                    <ForgeStatus value={conflict.kind} />
+                    <Button to={driveHref("/drive/conflict", id, "main", conflict.region.path)}>
+                      <GitCompareArrows size={14} aria-hidden /> Compare preserved values
+                    </Button>
+                  </>
+                }
+              >
+                <Split
+                  side={
+                    <div className="rounded-[6px] border border-hairline bg-raised/40 px-3 py-2.5">
+                      <div className="label mb-1.5">Preserved values</div>
+                      <ConflictValues conflict={conflict} />
+                    </div>
+                  }
+                >
+                  <div className="flex items-start gap-2">
+                    <TriangleAlert size={15} aria-hidden className="mt-0.5 shrink-0 text-warn" />
+                    <p className="m-0">{conflict.explanation}</p>
+                  </div>
+                  <p className="sub m-0">
+                    Affected region: <ConflictRegion region={conflict.region} />
+                  </p>
+                  <ConflictReasons conflict={conflict} />
+                  <ConflictResolution repositoryId={id} refName="main" conflict={conflict} done={() => toast("Conflict resolved")} />
+                </Split>
+              </Card>
+            ))}
+          </div>
+        </>
       )}
     </ForgePage>
   );

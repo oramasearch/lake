@@ -1,16 +1,18 @@
 /** /repository/tree?id=&ref= (web_ui_repository_tree): every path of a ref with the newest change
- * that touched it. A directory "opens" by an anchor jump: the tree is recursive. */
-import { useEffect } from "react";
+ * that touched it, filtered by path in the page, beside the ref's figures. A directory "opens" by an
+ * anchor jump: the tree is recursive. */
+import { useEffect, useState } from "react";
+import { FolderTree } from "lucide-react";
+import { Card, Empty, KeyValue, SearchInput, Split, Toolbar } from "@/lib/ui";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
-import { dateTime } from "@/lib/format";
+import { dateTime, relative } from "@/lib/format";
 import {
+  EntryIcon,
   ForgePage,
-  ForgeTabs,
   Identifier,
   itemsOf,
   pending,
   PathBreadcrumbs,
-  repositoryName,
   ToRepositories,
   useChangeDiffs,
   useForgeRead,
@@ -51,6 +53,7 @@ function Tree({ id, refName }: { id: string; refName: string }) {
   const changes = useForgeRead<Items<Change>>("list_changes", { id });
   const diffs = useChangeDiffs(id, changes.data ? itemsOf(changes.data) : undefined);
   const location = useLocation();
+  const [filter, setFilter] = useState("");
   useRepositoryTrail(repository.data, "Code");
   const ready = !!diffs.data && !!tree.data;
   useEffect(() => {
@@ -63,63 +66,87 @@ function Tree({ id, refName }: { id: string; refName: string }) {
   const entries = itemsOf(tree.data);
   const last = lastChanges(entries, itemsOf(changes.data), diffs.data!);
   const encoded = encodeURIComponent(id);
+  const blobs = entries.filter((entry) => entry.kind === "blob");
+  const total = blobs.reduce((sum, entry) => sum + entry.size, 0);
+  const needle = filter.trim().toLowerCase();
+  const shown = needle ? entries.filter((entry) => entry.path.toLowerCase().includes(needle)) : entries;
   return (
     <ForgePage
       above={<PathBreadcrumbs repository={r} refName={refName} path="" />}
-      eyebrow="repository tree"
-      title={repositoryName(r)}
+      title="Files"
+      repository={r}
+      tab="code"
       sub={
         <>
           Browse <code>{refName}</code> by path and last change.
         </>
       }
     >
-      <ForgeTabs repository={r} current="code" />
       {entries.length === 0 ? (
-        <div className="panel empty">
-          <strong>This ref has no files.</strong>
-          <p>Push a change to publish its first tree.</p>
-        </div>
+        <Empty icon={FolderTree} title="This ref has no files">
+          Push a change to publish its first tree.
+        </Empty>
       ) : (
-        <section className="panel tree-browser">
-          <div className="tree-browser-heading">
-            <span>Path</span>
-            <span>Last change</span>
-          </div>
-          <ul className="tree-view">
-            {entries.map((entry) => {
-              const change = last.get(entry.path);
-              return (
-                <li key={entry.path} id={entry.path}>
-                  <div className="tree-entry-name">
-                    <span className="tree-kind" aria-hidden="true">
-                      {entry.kind === "blob" ? "·" : "›"}
-                    </span>
-                    <div>
-                      {entry.kind === "blob" ? (
-                        <Link to={`/file?repository_id=${encoded}&ref=${encodeURIComponent(refName)}&path=${encodeURIComponent(entry.path)}`}>{entry.path}</Link>
-                      ) : (
-                        <a href={`#${encodeURIComponent(entry.path)}`}>{entry.path}</a>
-                      )}
-                      <span className="tree-entry-meta">
-                        {entry.kind} · <code>{entry.mode.toString(8)}</code>
-                        {entry.kind === "blob" && ` · ${byteCount(entry.size)}`}
-                      </span>
+        <Split
+          side={
+            <Card label="This ref">
+              <KeyValue
+                rows={[
+                  ["Ref", <code>{refName}</code>],
+                  ["Files", <span className="font-mono">{blobs.length}</span>],
+                  ["Directories", <span className="font-mono">{entries.length - blobs.length}</span>],
+                  ["Size", byteCount(total)],
+                  ["Changes", <Link to={`/changes?repository_id=${encoded}`}>{itemsOf(changes.data).length} in the log</Link>],
+                ]}
+              />
+            </Card>
+          }
+        >
+          <Toolbar>
+            <SearchInput value={filter} onChange={setFilter} placeholder="Filter paths…" label="Filter paths" />
+            <span className="ml-auto font-mono text-[12px] text-ink-3">
+              {shown.length} of {entries.length} paths
+            </span>
+          </Toolbar>
+          <section className="panel tree-browser">
+            <div className="tree-browser-heading">
+              <span>Path</span>
+              <span>Last change</span>
+            </div>
+            <ul className="tree-view">
+              {shown.map((entry) => {
+                const change = last.get(entry.path);
+                return (
+                  <li key={entry.path} id={entry.path}>
+                    <div className="tree-entry-name">
+                      <EntryIcon kind={entry.kind === "blob" ? "blob" : "tree"} size={14} />
+                      <div>
+                        {entry.kind === "blob" ? (
+                          <Link to={`/file?repository_id=${encoded}&ref=${encodeURIComponent(refName)}&path=${encodeURIComponent(entry.path)}`}>{entry.path}</Link>
+                        ) : (
+                          <a href={`#${encodeURIComponent(entry.path)}`}>{entry.path}</a>
+                        )}
+                        <span className="tree-entry-meta">
+                          {entry.kind} · <code>{entry.mode.toString(8)}</code>
+                          {entry.kind === "blob" && ` · ${byteCount(entry.size)}`}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                  <div className="tree-last-change">
-                    {change ? <Identifier value={change.id} /> : <span className="muted">No recorded change</span>}
-                    {change?.message && (
-                      <span className="muted">
-                        {change.message} · {dateTime(change.occurred_at)}
-                      </span>
-                    )}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
+                    <div className="tree-last-change">
+                      {change ? <Identifier value={change.id} /> : <span className="muted">No recorded change</span>}
+                      {change?.message && (
+                        <span className="muted">
+                          {change.message} · <span title={dateTime(change.occurred_at)}>{relative(change.occurred_at)}</span>
+                        </span>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+              {shown.length === 0 && <li className="muted">No path matches “{filter}”.</li>}
+            </ul>
+          </section>
+        </Split>
       )}
     </ForgePage>
   );

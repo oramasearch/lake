@@ -1,20 +1,19 @@
 /** /webhooks?repository_id= (web_ui_webhooks): each webhook with its signed delivery history; a
- * failed delivery can be retried. */
+ * failed delivery can be retried. Figures on top: webhooks, deliveries and failures. */
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { CircleAlert, Send, Webhook } from "lucide-react";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
-import { Button } from "@/lib/ui";
+import { Button, Card, Chip, Empty, Stat, StatRow } from "@/lib/ui";
 import { dateTime } from "@/lib/format";
 import {
-  ForgeBadge,
   ForgePage,
-  ForgeTabs,
+  ForgeStatus,
   forgeAct,
   Identifier,
   itemsOf,
   pending,
-  repositoryName,
   ToRepositories,
   useForgeRead,
   useRepositoryTrail,
@@ -40,43 +39,66 @@ function Webhooks({ id }: { id: string }) {
   if (wait) return wait;
   const r = repository.data!;
   const hooks = itemsOf(webhooks.data);
+  const attemptsAll = itemsOf(deliveries.data);
+  const failed = attemptsAll.filter((delivery) => !delivery.value.delivered).length;
   return (
-    <ForgePage eyebrow="repository automation" title="Webhooks" sub={`${repositoryName(r)} · signed delivery history`}>
-      <ForgeTabs repository={r} current="webhooks" />
-      {hooks.length === 0 && <div className="panel empty">No webhooks are configured.</div>}
-      {hooks.map((webhook) => {
-        const attempts = itemsOf(deliveries.data).filter((delivery) => delivery.value.webhook_id === webhook.id);
-        return (
-          <section key={webhook.id} className="panel webhook-card">
-            <header>
-              <div>
-                <h2>{webhook.value.url ?? ""}</h2>
-                <p className="sub">{dateTime(webhook.created_at)}</p>
-              </div>
-              <Identifier value={webhook.id} />
-            </header>
-            <p>Events: {(webhook.value.events ?? []).join(", ")}</p>
-            <h3>Deliveries</h3>
-            {attempts.map((delivery) => {
-              const delivered = !!delivery.value.delivered;
+    <ForgePage title="Webhooks" repository={r} tab="webhooks" sub="Each webhook and its signed delivery history.">
+      {hooks.length === 0 ? (
+        <Empty icon={Webhook} title="No webhooks yet">
+          No webhooks are configured.
+        </Empty>
+      ) : (
+        <>
+          <StatRow cols={3}>
+            <Stat label="Webhooks" value={hooks.length} icon={Webhook} sub="configured" />
+            <Stat label="Deliveries" value={attemptsAll.length} icon={Send} sub="attempts kept" />
+            <Stat label="Failed" value={failed} icon={CircleAlert} tone={failed ? "bad" : undefined} sub={failed ? "can be retried" : "none"} />
+          </StatRow>
+          <div className="space-y-4">
+            {hooks.map((webhook) => {
+              const attempts = attemptsAll.filter((delivery) => delivery.value.webhook_id === webhook.id);
               return (
-                <article key={delivery.id} className="delivery-row">
-                  <div>
-                    <strong>{delivery.value.event ?? "event"}</strong>
-                    <ForgeBadge value={delivered ? "delivered" : "failed"} />
-                    <p className="sub">
-                      attempt {delivery.value.attempt ?? 0} · status {delivery.value.status ?? 0} · {delivery.value.error || "no error"}
-                    </p>
+                <Card
+                  key={webhook.id}
+                  padded={false}
+                  label={<Identifier value={webhook.id} />}
+                  title={<span className="break-all font-mono text-[13.5px]">{webhook.value.url ?? ""}</span>}
+                  actions={<span className="text-[12px] text-ink-3">{dateTime(webhook.created_at)}</span>}
+                >
+                  <div className="flex flex-wrap items-center gap-1.5 border-b border-hairline px-4 py-2.5">
+                    <span className="label m-0 mr-1">Events</span>
+                    {(webhook.value.events ?? []).map((event: string) => (
+                      <Chip key={event}>{event}</Chip>
+                    ))}
                   </div>
-                  <Identifier value={delivery.id} />
-                  {!delivered && viewer.signed_in && <Retry repositoryId={id} deliveryId={delivery.id} />}
-                </article>
+                  {attempts.length === 0 ? (
+                    <p className="muted m-0 px-4 py-3">No delivery attempts.</p>
+                  ) : (
+                    <ul className="m-0 list-none divide-y divide-hairline p-0">
+                      {attempts.map((delivery) => {
+                        const delivered = !!delivery.value.delivered;
+                        return (
+                          <li key={delivery.id} className="flex flex-wrap items-center gap-3 px-4 py-2.5">
+                            <ForgeStatus value={delivered ? "delivered" : "failed"} />
+                            <div className="min-w-0 flex-1">
+                              <strong>{delivery.value.event ?? "event"}</strong>
+                              <div className="text-[12px] text-ink-3">
+                                attempt {delivery.value.attempt ?? 0} · status {delivery.value.status ?? 0} · {delivery.value.error || "no error"}
+                              </div>
+                            </div>
+                            <Identifier value={delivery.id} />
+                            {!delivered && viewer.signed_in && <Retry repositoryId={id} deliveryId={delivery.id} />}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </Card>
               );
             })}
-            {attempts.length === 0 && <div className="empty compact-empty">No delivery attempts.</div>}
-          </section>
-        );
-      })}
+          </div>
+        </>
+      )}
     </ForgePage>
   );
 }
@@ -87,7 +109,7 @@ function Retry({ repositoryId, deliveryId }: { repositoryId: string; deliveryId:
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
-    <span>
+    <span className="flex items-center gap-2">
       <Button
         loading={busy}
         onClick={async () => {
@@ -106,7 +128,7 @@ function Retry({ repositoryId, deliveryId }: { repositoryId: string; deliveryId:
         Retry
       </Button>
       {error && (
-        <span className="error" role="alert">
+        <span className="text-[12px] text-bad" role="alert">
           {error}
         </span>
       )}

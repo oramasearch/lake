@@ -1,21 +1,43 @@
-/** /drive?repository_id=&ref=&path=&view=&sort=&direction= (web_ui_drive_folder): a Drive folder in
- * a list or a grid, with new folder, upload (choose or drop files), and per entry history, rename,
- * move and delete. Every write is a new change; earlier versions stay in history. */
+/** /drive?repository_id=&ref=&path=&view=&sort=&direction= (web_ui_drive_folder): a Drive folder as a
+ * file manager. The breadcrumb and the folder's figures; a toolbar to filter by name, sort (by
+ * name, size or modified, either direction) and switch between list and grid, which write the same
+ * query parameters; a drop zone that uploads what is dropped or chosen; and each item's actions
+ * (history, download, rename, move, delete) in a menu. New folder opens a dialog. Every write is a
+ * new change; earlier versions stay in history. */
 import { type DragEvent, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import {
+  ArrowDownAZ,
+  ArrowUpAZ,
+  Download,
+  FileText,
+  Folder,
+  FolderInput,
+  FolderOpen,
+  FolderPlus,
+  GitCompareArrows,
+  History,
+  LayoutGrid,
+  List,
+  Pencil,
+  Share2,
+  Trash2,
+  Upload as UploadIcon,
+} from "lucide-react";
 import { useToast } from "@/lib/toast";
-import { ConfirmButton } from "@/lib/overlay";
-import { Button } from "@/lib/ui";
-import { dateTime } from "@/lib/format";
+import { Modal } from "@/lib/overlay";
+import { Banner, Button, DataTable, Empty, Field, SearchInput, Stat, StatRow, Toolbar } from "@/lib/ui";
+import { dateTime, relative } from "@/lib/format";
 import {
   bytesToBase64,
   displaySize,
   DriveBreadcrumbs,
   driveHref,
-  ForgeBadge,
+  EntryIcon,
   forgeAct,
   ForgePage,
   itemsOf,
+  Menu,
   parentPath,
   pathName,
   pending,
@@ -47,118 +69,172 @@ function DriveFolder({ id }: { id: string }) {
   const view = params.get("view") === "grid" ? "grid" : "list";
   const sort = ["name", "size", "modified"].includes(params.get("sort") ?? "") ? (params.get("sort") as string) : "name";
   const direction = params.get("direction") === "desc" ? "desc" : "asc";
-  const [display, setDisplay] = useState({ view, sort, direction });
+  const [filter, setFilter] = useState("");
+  const [creating, setCreating] = useState(false);
   const browse = useForgeRead<Browse>("drive_browse", { repository_id: id, ref, path, sort, direction });
   useRepositoryTrail(browse.data?.repository, "Files");
+  const upload = useUpload(id, ref, path);
   const wait = pending(browse);
   if (wait) return wait;
   const r = browse.data!.repository;
   const entries = itemsOf(browse.data);
+  const display = (next: Partial<{ view: string; sort: string; direction: string }>) => {
+    const d = { view, sort, direction, ...next };
+    setParams(new URLSearchParams({ repository_id: id, ref, path, view: d.view, sort: d.sort, direction: d.direction }));
+  };
+  const needle = filter.trim().toLowerCase();
+  const shown = needle ? entries.filter((entry) => pathName(entry.path).toLowerCase().includes(needle)) : entries;
+  const folders = entries.filter((entry) => entry.kind === "tree");
+  const files = entries.filter((entry) => entry.kind !== "tree");
+  const size = files.reduce((sum, entry) => sum + entry.size, 0);
+
+  const actions = (
+    <>
+      <Button to={driveHref("/drive/share", id, ref, path)}>
+        <Share2 size={14} aria-hidden /> Share
+      </Button>
+      <Button onClick={() => setCreating(true)}>
+        <FolderPlus size={14} aria-hidden /> New folder
+      </Button>
+      <Button variant="primary" loading={upload.busy} onClick={() => upload.choose()}>
+        {!upload.busy && <UploadIcon size={14} aria-hidden />} Upload
+      </Button>
+      <Menu
+        label="Folder actions"
+        items={[
+          { label: "History", icon: History, to: driveHref("/drive/history", id, ref, path) },
+          { label: "Conflicts", icon: GitCompareArrows, to: `/conflicts?repository_id=${encodeURIComponent(id)}` },
+        ]}
+      />
+    </>
+  );
+
   return (
     <ForgePage
       above={<DriveBreadcrumbs repository={r} refName={ref} path={path} />}
-      eyebrow="drive"
       title={path ? pathName(path) : repositoryName(r)}
+      repository={r}
+      tab="files"
       sub={
         <>
           Folder <code>{path || "/"}</code> at <code>{ref}</code>. Moves and deletes create new history; prior versions remain available.
         </>
       }
+      actions={actions}
     >
-      <div className="actions">
-        <Link to={driveHref("/drive/history", id, ref, path)}>History</Link>
-        <Link to={driveHref("/drive/share", id, ref, path)}>Share</Link>
-        <Link to={`/conflicts?repository_id=${encodeURIComponent(id)}`}>Conflicts</Link>
-      </div>
-      <form
-        className="filters"
-        aria-label="Folder display"
-        onSubmit={(e) => {
-          e.preventDefault();
-          setParams(new URLSearchParams({ repository_id: id, ref, path, view: display.view, sort: display.sort, direction: display.direction }));
-        }}
-      >
-        <label>
-          View
-          <select value={display.view} onChange={(e) => setDisplay({ ...display, view: e.target.value })}>
-            <option value="list">List</option>
-            <option value="grid">Grid</option>
-          </select>
-        </label>
-        <label>
-          Sort
-          <select value={display.sort} onChange={(e) => setDisplay({ ...display, sort: e.target.value })}>
-            <option value="name">name</option>
-            <option value="size">size</option>
-            <option value="modified">modified</option>
-          </select>
-        </label>
-        <label>
-          Direction
-          <select value={display.direction} onChange={(e) => setDisplay({ ...display, direction: e.target.value })}>
-            <option value="asc">Ascending</option>
-            <option value="desc">Descending</option>
-          </select>
-        </label>
-        <button type="submit">Apply</button>
-      </form>
-      <div className="drive-create grid">
-        <NewFolder id={id} refName={ref} path={path} />
-        <Upload id={id} refName={ref} path={path} />
-      </div>
-      {view === "grid" ? (
-        <div className="drive-grid">
-          {entries.map((entry) => (
-            <article key={entry.path} className="card drive-card">
-              <p>
-                <ForgeBadge value={entry.kind} />
-              </p>
-              <h2>
-                <EntryLink id={id} refName={ref} entry={entry} />
-              </h2>
-              <p className="muted">
-                {entry.kind === "tree" ? "—" : displaySize(entry.size)} · {entry.modified_at ? dateTime(entry.modified_at) : "—"}
-              </p>
-              <EntryActions id={id} refName={ref} entry={entry} />
-            </article>
-          ))}
-          {entries.length === 0 && <div className="panel empty">This folder is empty.</div>}
-        </div>
-      ) : (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Size</th>
-                <th>Modified</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((entry) => (
-                <tr key={entry.path}>
-                  <td>
-                    <EntryLink id={id} refName={ref} entry={entry} /> <ForgeBadge value={entry.kind} />
-                  </td>
-                  <td>{entry.kind === "tree" ? "—" : displaySize(entry.size)}</td>
-                  <td>{entry.modified_at ? dateTime(entry.modified_at) : "—"}</td>
-                  <td>
-                    <EntryActions id={id} refName={ref} entry={entry} />
-                  </td>
-                </tr>
-              ))}
-              {entries.length === 0 && (
-                <tr>
-                  <td colSpan={4} className="empty">
-                    This folder is empty.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+      <StatRow cols={3}>
+        <Stat label="Folders" value={folders.length} icon={Folder} sub="in this folder" />
+        <Stat label="Files" value={files.length} icon={FileText} sub="in this folder" />
+        <Stat label="Size" value={displaySize(size)} icon={FolderOpen} sub="of these files" />
+      </StatRow>
+      {upload.error && (
+        <Banner tone="warn" title="Upload refused">
+          {upload.error}
+        </Banner>
       )}
+      <Toolbar>
+        <SearchInput value={filter} onChange={setFilter} placeholder="Filter by name…" label="Filter by name" />
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-1.5 text-[12.5px] text-ink-2">
+            <span className="label m-0">Sort</span>
+            <select aria-label="Sort" value={sort} onChange={(e) => display({ sort: e.target.value })}>
+              <option value="name">name</option>
+              <option value="size">size</option>
+              <option value="modified">modified</option>
+            </select>
+          </label>
+          <Button
+            variant="ghost"
+            aria-label={direction === "asc" ? "Ascending; sort descending" : "Descending; sort ascending"}
+            title={direction === "asc" ? "Ascending" : "Descending"}
+            onClick={() => display({ direction: direction === "asc" ? "desc" : "asc" })}
+          >
+            {direction === "asc" ? <ArrowDownAZ size={15} aria-hidden /> : <ArrowUpAZ size={15} aria-hidden />}
+          </Button>
+          <div className="view-toggle" role="group" aria-label="View">
+            <button type="button" aria-pressed={view === "list"} aria-label="List" title="List" onClick={() => display({ view: "list" })}>
+              <List size={15} aria-hidden />
+            </button>
+            <button type="button" aria-pressed={view === "grid"} aria-label="Grid" title="Grid" onClick={() => display({ view: "grid" })}>
+              <LayoutGrid size={15} aria-hidden />
+            </button>
+          </div>
+        </div>
+      </Toolbar>
+      <DropZone upload={upload} />
+      <div className="mt-3">
+        {entries.length === 0 ? (
+          <Empty
+            icon={FolderOpen}
+            title="This folder is empty"
+            action={
+              <>
+                <Button onClick={() => setCreating(true)}>New folder</Button>
+                <Button variant="primary" onClick={() => upload.choose()}>
+                  Upload files
+                </Button>
+              </>
+            }
+          >
+            Upload files or create a folder to start.
+          </Empty>
+        ) : shown.length === 0 ? (
+          <Empty compact title="Nothing matches">
+            No item here is named like “{filter}”.
+          </Empty>
+        ) : view === "grid" ? (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+            {shown.map((entry) => (
+              <article key={entry.path} className="relative flex min-w-0 flex-col rounded-[6px] border border-hairline bg-surface p-3 transition-colors hover:border-rule">
+                <div className="mb-3 flex items-start justify-between gap-2">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-[6px] bg-raised">
+                    <EntryIcon kind={entry.kind} size={18} />
+                  </span>
+                  <EntryActions id={id} refName={ref} entry={entry} />
+                </div>
+                <div className="min-w-0 truncate text-[13.5px] font-semibold">
+                  <EntryLink id={id} refName={ref} entry={entry} />
+                </div>
+                <div className="mt-0.5 truncate text-[12px] text-ink-3">
+                  {entry.kind === "tree" ? "folder" : displaySize(entry.size)} · <span title={entry.modified_at ? dateTime(entry.modified_at) : undefined}>{entry.modified_at ? relative(entry.modified_at) : "—"}</span>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <DataTable<TreeEntry>
+            what="folder"
+            caption="Folder contents"
+            rows={shown}
+            rowKey={(entry) => entry.path}
+            columns={[
+              {
+                key: "name",
+                label: "Name",
+                render: (entry) => (
+                  <span className="flex min-w-0 items-center gap-2.5">
+                    <EntryIcon kind={entry.kind} />
+                    <EntryLink id={id} refName={ref} entry={entry} />
+                  </span>
+                ),
+              },
+              { key: "kind", label: "Kind", render: (entry) => <span className="text-[12.5px] text-ink-2">{entry.kind === "tree" ? "folder" : entry.kind === "blob" ? "file" : entry.kind}</span> },
+              { key: "size", label: "Size", numeric: true, render: (entry) => <span className="font-mono text-[12px]">{entry.kind === "tree" ? "—" : displaySize(entry.size)}</span> },
+              {
+                key: "modified",
+                label: "Modified",
+                render: (entry) => (
+                  <span className="font-mono text-[12px] text-ink-2" title={entry.modified_at ? dateTime(entry.modified_at) : undefined}>
+                    {entry.modified_at ? relative(entry.modified_at) : "—"}
+                  </span>
+                ),
+              },
+              { key: "actions", label: <span className="sr-only">Actions</span>, className: "w-10 text-right", render: (entry) => <EntryActions id={id} refName={ref} entry={entry} /> },
+            ]}
+          />
+        )}
+      </div>
+      {creating && <NewFolder id={id} refName={ref} path={path} onClose={() => setCreating(false)} />}
     </ForgePage>
   );
 }
@@ -167,16 +243,29 @@ function EntryLink({ id, refName, entry }: { id: string; refName: string; entry:
   return <Link to={driveHref(entry.kind === "tree" ? "/drive" : "/drive/preview", id, refName, entry.path)}>{pathName(entry.path)}</Link>;
 }
 
-/** "New Folder" (serve_drive_folder_create): a folder in the current folder. */
-function NewFolder({ id, refName, path }: { id: string; refName: string; path: string }) {
+/** "New folder" (serve_drive_folder_create): a folder in the current folder. */
+function NewFolder({ id, refName, path, onClose }: { id: string; refName: string; path: string; onClose: () => void }) {
   const toast = useToast();
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
-    <section className="panel">
-      <h2>New Folder</h2>
+    <Modal
+      title="New Folder"
+      subtitle={`In /${path}`}
+      onClose={onClose}
+      width={440}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" form="drive-new-folder" variant="primary" loading={busy}>
+            Create folder
+          </Button>
+        </>
+      }
+    >
       <form
+        id="drive-new-folder"
         className="stack"
         onSubmit={async (e) => {
           e.preventDefault();
@@ -184,8 +273,8 @@ function NewFolder({ id, refName, path }: { id: string; refName: string; path: s
           setError(null);
           try {
             await forgeAct("create_drive_folder", { repository_id: id, ref: refName, path, name });
-            setName("");
             toast("Folder created");
+            onClose();
           } catch (err) {
             setError((err as Error).message);
           } finally {
@@ -198,30 +287,25 @@ function NewFolder({ id, refName, path }: { id: string; refName: string; path: s
             {error}
           </p>
         )}
-        <label>
-          Name
-          <input value={name} onChange={(e) => setName(e.target.value)} required />
-        </label>
-        <div>
-          <Button type="submit" loading={busy}>
-            Create folder
-          </Button>
-        </div>
+        <Field label="Name" required>
+          <input value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+        </Field>
       </form>
-    </section>
+    </Modal>
   );
 }
 
+type Uploader = ReturnType<typeof useUpload>;
+
 /** "Upload" (serve_drive_upload): every chosen or dropped file in one change, sent as base64 JSON
- * (`upload_drive_files`) instead of the old multipart form. Dropping files uploads them at once,
- * as the drop script submitted the form. */
-function Upload({ id, refName, path }: { id: string; refName: string; path: string }) {
+ * (`upload_drive_files`) instead of the old multipart form. Choosing or dropping files uploads them
+ * at once, as the drop script submitted the form. */
+function useUpload(id: string, refName: string, path: string) {
   const toast = useToast();
   const input = useRef<HTMLInputElement>(null);
-  const [active, setActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const upload = async (list: FileList | null) => {
+  const send = async (list: FileList | null) => {
     if (!list || list.length === 0) {
       setError("at least one uploaded file is required");
       return;
@@ -233,14 +317,20 @@ function Upload({ id, refName, path }: { id: string; refName: string; path: stri
       const size = files.reduce((sum, file) => sum + file.content.length + file.name.length + 32, 256);
       if (size > MAX_BODY) throw new Error(`These files are too large to upload at once: ${displaySize(size)} encoded, of at most ${displaySize(MAX_BODY)}.`);
       await forgeAct("upload_drive_files", { repository_id: id, ref: refName, path, files });
-      if (input.current) input.current.value = "";
       toast(files.length === 1 ? "File uploaded" : `${files.length} files uploaded`);
     } catch (err) {
       setError((err as Error).message);
     } finally {
+      if (input.current) input.current.value = "";
       setBusy(false);
     }
   };
+  return { input, busy, error, send, choose: () => input.current?.click() };
+}
+
+/** The drop zone: drop files anywhere on it, or press it to choose them. */
+function DropZone({ upload }: { upload: Uploader }) {
+  const [active, setActive] = useState(false);
   const over = (event: DragEvent) => {
     event.preventDefault();
     setActive(true);
@@ -250,79 +340,101 @@ function Upload({ id, refName, path }: { id: string; refName: string; path: stri
     setActive(false);
   };
   return (
-    <section className="panel">
-      <h2>Upload</h2>
-      <form
-        id="drive-upload"
-        className="stack"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void upload(input.current?.files ?? null);
+    <form id="drive-upload" onSubmit={(e) => e.preventDefault()}>
+      <label
+        id="drive-drop-zone"
+        className="drive-drop-zone"
+        data-active={active ? "true" : undefined}
+        onDragEnter={over}
+        onDragOver={over}
+        onDragLeave={leave}
+        onDrop={(event) => {
+          leave(event);
+          if (event.dataTransfer.files.length) void upload.send(event.dataTransfer.files);
         }}
       >
-        {error && (
-          <p className="error" role="alert">
-            {error}
-          </p>
-        )}
-        <label
-          id="drive-drop-zone"
-          className="drive-drop-zone"
-          data-active={active ? "true" : undefined}
-          onDragEnter={over}
-          onDragOver={over}
-          onDragLeave={leave}
-          onDrop={(event) => {
-            leave(event);
-            if (event.dataTransfer.files.length) void upload(event.dataTransfer.files);
-          }}
-        >
-          Choose files or drop them here
-          <input ref={input} id="drive-files" type="file" name="files" multiple required />
-        </label>
-        <div>
-          <Button type="submit" loading={busy}>
-            Upload files
-          </Button>
-        </div>
-      </form>
-    </section>
+        <UploadIcon size={16} aria-hidden />
+        <span>{upload.busy ? "Uploading…" : "Choose files or drop them here"}</span>
+        <input ref={upload.input} id="drive-files" type="file" name="files" multiple className="sr-only" onChange={(e) => void upload.send(e.target.files)} />
+      </label>
+    </form>
   );
 }
 
-/** `drive_entry_actions`: History, then Manage: rename, move and delete. */
+/** `drive_entry_actions`: History and Download, then rename, move and delete, in the item's menu. */
 function EntryActions({ id, refName, entry }: { id: string; refName: string; entry: TreeEntry }) {
   const toast = useToast();
   const navigate = useNavigate();
+  const [dialog, setDialog] = useState<"rename" | "move" | "delete" | null>(null);
   const [name, setName] = useState(pathName(entry.path));
   const [folder, setFolder] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const close = () => {
+    setDialog(null);
+    setError(null);
+  };
   const move = async (kind: "rename" | "move", destination: string, after: string) => {
-    setBusy(kind);
+    setBusy(true);
     setError(null);
     try {
       await forgeAct("move_drive_path", { repository_id: id, ref: refName, path: entry.path, destination });
       toast(kind === "rename" ? "Renamed" : "Moved");
+      close();
       navigate(driveHref("/drive", id, refName, after));
     } catch (err) {
       setError((err as Error).message);
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   };
+  const remove = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await forgeAct("delete_drive_path", { repository_id: id, ref: refName, path: entry.path });
+      toast("Deleted");
+      close();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const label = pathName(entry.path);
+  const errorBlock = error && (
+    <p className="error" role="alert">
+      {error}
+    </p>
+  );
   return (
-    <div className="drive-item-actions">
-      <Link to={driveHref("/drive/history", id, refName, entry.path)}>History</Link>
-      <details>
-        <summary>Manage</summary>
-        <div className="drive-manage">
-          {error && (
-            <p className="error" role="alert">
-              {error}
-            </p>
-          )}
+    <>
+      <Menu
+        label={`Actions for ${label}`}
+        items={[
+          { label: "History", icon: History, to: driveHref("/drive/history", id, refName, entry.path) },
+          ...(entry.kind === "blob" ? [{ label: "Download", icon: Download, href: driveHref("/drive/download", id, refName, entry.path) }] : []),
+          { label: "Rename", icon: Pencil, onSelect: () => setDialog("rename") },
+          { label: "Move", icon: FolderInput, onSelect: () => setDialog("move") },
+          { label: "Delete", icon: Trash2, danger: true, onSelect: () => setDialog("delete") },
+        ]}
+      />
+      {dialog === "rename" && (
+        <Modal
+          title={`Rename ${label}`}
+          onClose={close}
+          width={440}
+          footer={
+            <>
+              <Button onClick={close}>Cancel</Button>
+              <Button type="submit" form={`rename-${entry.path}`} variant="primary" loading={busy}>
+                Rename
+              </Button>
+            </>
+          }
+        >
           <form
+            id={`rename-${entry.path}`}
             className="stack"
             onSubmit={(e) => {
               e.preventDefault();
@@ -332,17 +444,29 @@ function EntryActions({ id, refName, entry }: { id: string; refName: string; ent
               void move("rename", destination, parentPath(destination));
             }}
           >
-            <label>
-              New name
-              <input value={name} onChange={(e) => setName(e.target.value)} required />
-            </label>
-            <div>
-              <Button type="submit" loading={busy === "rename"}>
-                Rename
-              </Button>
-            </div>
+            {errorBlock}
+            <Field label="New name" required>
+              <input value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+            </Field>
           </form>
+        </Modal>
+      )}
+      {dialog === "move" && (
+        <Modal
+          title={`Move ${label}`}
+          onClose={close}
+          width={440}
+          footer={
+            <>
+              <Button onClick={close}>Cancel</Button>
+              <Button type="submit" form={`move-${entry.path}`} variant="primary" loading={busy}>
+                Move
+              </Button>
+            </>
+          }
+        >
           <form
+            id={`move-${entry.path}`}
             className="stack"
             onSubmit={(e) => {
               e.preventDefault();
@@ -352,32 +476,35 @@ function EntryActions({ id, refName, entry }: { id: string; refName: string; ent
               void move("move", destination, target);
             }}
           >
-            <label>
-              Destination folder
-              <input value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="team/archive" />
-            </label>
-            <div>
-              <Button type="submit" loading={busy === "move"}>
-                Move
-              </Button>
-            </div>
+            {errorBlock}
+            <Field label="Destination folder" help="Leave empty to move it to the top of the repository.">
+              <input value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="team/archive" autoFocus />
+            </Field>
           </form>
-          <div>
-            <ConfirmButton
-              variant="danger"
-              title={`Delete ${pathName(entry.path)}?`}
-              confirmLabel="Delete"
-              confirm="This writes a new change without it. Earlier versions stay in its history and can be restored."
-              onConfirm={async () => {
-                await forgeAct("delete_drive_path", { repository_id: id, ref: refName, path: entry.path });
-                toast("Deleted");
-              }}
-            >
-              Delete
-            </ConfirmButton>
-          </div>
-        </div>
-      </details>
-    </div>
+        </Modal>
+      )}
+      {dialog === "delete" && (
+        <Modal
+          title={`Delete ${label}?`}
+          onClose={close}
+          width={460}
+          footer={
+            <>
+              <Button onClick={close}>Cancel</Button>
+              <Button variant="danger" loading={busy} onClick={() => void remove()}>
+                Delete
+              </Button>
+            </>
+          }
+        >
+          <div className="muted">This writes a new change without it. Earlier versions stay in its history and can be restored.</div>
+          {error && (
+            <div className="error mt-3" role="alert">
+              {error}
+            </div>
+          )}
+        </Modal>
+      )}
+    </>
   );
 }

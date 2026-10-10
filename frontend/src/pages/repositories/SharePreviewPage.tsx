@@ -1,7 +1,8 @@
 /** /share/:token/preview?ref=&path= (web_ui_drive_link_preview): a file opened through a bearer
  * link, previewed by lake's format registry, with no sign-in. */
-import { Link, useParams, useSearchParams } from "react-router-dom";
-import { Skeleton } from "@/lib/ui";
+import { useParams, useSearchParams } from "react-router-dom";
+import { ArrowLeft, Download } from "lucide-react";
+import { Button, Card, Chip, Page, Skeleton } from "@/lib/ui";
 import { displaySize, parentPath, pathName, useForgeRead } from "./forge";
 import { ShareError, sharedUrl, useShareTrail } from "./share";
 
@@ -24,20 +25,29 @@ export default function SharePreviewPage() {
   if (preview.isError || !preview.data) return <ShareError title="Shared folder" message={(preview.error as Error | null)?.message ?? "share link is not recognized"} />;
   const p = preview.data;
   return (
-    <div className="page-container">
-      <p className="eyebrow">shared file preview</p>
-      <h1>{pathName(p.path)}</h1>
-      <p className="sub">
-        {p.format} · {displaySize(p.size)}
-      </p>
-      <div className="actions">
-        <Link to={sharedUrl(token, ref, parentPath(p.path))}>Back to folder</Link>
-        <a href={sharedUrl(token, ref, p.path, "download")} download>
-          Download
-        </a>
-      </div>
+    <Page
+      eyebrow="Shared file preview"
+      title={pathName(p.path)}
+      sub={
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <Chip>{p.format}</Chip> {displaySize(p.size)}
+        </span>
+      }
+      actions={
+        <>
+          <Button variant="ghost" to={sharedUrl(token, ref, parentPath(p.path))}>
+            <ArrowLeft size={14} aria-hidden /> Back to folder
+          </Button>
+          <Button variant="primary" href={sharedUrl(token, ref, p.path, "download")}>
+            <Download size={14} aria-hidden /> Download
+          </Button>
+        </>
+      }
+    >
       {/* The format registry's markup, escaped by lake (DriveFormatRegistry, src/api/drive.cpp). */}
-      <div className="panel" dangerouslySetInnerHTML={{ __html: p.html }} />
-    </div>
+      <Card label="Preview">
+        <div className="min-w-0 overflow-auto" dangerouslySetInnerHTML={{ __html: p.html }} />
+      </Card>
+    </Page>
   );
 }

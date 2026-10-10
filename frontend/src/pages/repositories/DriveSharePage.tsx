@@ -1,26 +1,32 @@
 /** /drive/share?repository_id=&ref=&path=&workspace_id= (web_ui_drive_share): who can reach a
- * Drive folder now, the four ways to deliver it, and the folder's links. A folder's links are held
+ * Drive folder now (with its figures), the four ways to deliver it (each form in a dialog), and the
+ * folder's links. A folder's links are held
  * in one workspace of the repository's space: without `workspace_id` the page opens the current
  * workspace when it is one of them, else the only one, else asks (web_ui_drive_share_workspaces). */
 import { useState } from "react";
 import { Link, Navigate, useSearchParams } from "react-router-dom";
+import { Ban, Download, Layers, Link2, ShieldCheck, User, Users } from "lucide-react";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
-import { Button, CopyBlock, Notice, Skeleton } from "@/lib/ui";
+import { Modal } from "@/lib/overlay";
+import { Banner, Button, Card, Chip, CopyBlock, DataTable, Empty, Field, Notice, Section, Skeleton, Stat, StatRow, Status } from "@/lib/ui";
 import { dateTime } from "@/lib/format";
 import {
+  DriveBreadcrumbs,
   driveHref,
   ErrorPage,
   forgeAct,
   ForgePage,
+  ForgeStatus,
   pending,
   ToRepositories,
   useForgeRead,
   useRepositoryTrail,
+  type AccessEntry,
   type PolicyObject,
   type Repository,
 } from "./forge";
-import { linkActions, linkState, type EffectiveAccess } from "./share";
+import { linkActions, linkState, type EffectiveAccess, type ShareLink } from "./share";
 
 type Workspace = { id: string; name: string; customer_id: string; desired?: string };
 
@@ -75,18 +81,25 @@ function ChooseWorkspace({ id, refName, path }: { id: string; refName: string; p
   if (chosen) return <Navigate to={driveHref("/drive/share", id, refName, path, { workspace_id: chosen })} replace />;
   return (
     <ForgePage
-      eyebrow="drive sharing"
-      title={`Share ${path}`}
-      sub="A folder's links are held in one of this space's workspaces. Choose the workspace whose links you want to see or create."
+      above={<DriveBreadcrumbs repository={repository.data!} refName={refName} path={path} />}
+      title={`Share ${path || "/"}`}
+      repository={repository.data!}
+      tab="files"
+      sub="A folder's links are held in one workspace. Choose the workspace whose links you want to see or create."
     >
-      <ul className="stack">
-        {choices.map((w) => (
-          <li key={w.id}>
-            <Link to={driveHref("/drive/share", id, refName, path, { workspace_id: w.id })}>{w.name}</Link>
-          </li>
-        ))}
-        {choices.length === 0 && <li className="empty">There is no workspace here yet. Create one before making a link.</li>}
-      </ul>
+      {choices.length === 0 ? (
+        <Empty icon={Layers} title="No workspace yet" action={<Button to="/workspaces">Create a workspace</Button>}>
+          There is no workspace here yet. Create one before making a link.
+        </Empty>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {choices.map((w) => (
+            <Card key={w.id} to={driveHref("/drive/share", id, refName, path, { workspace_id: w.id })} label="Workspace" title={w.name}>
+              <span className="text-[12.5px] text-ink-2">Hold this folder's links here</span>
+            </Card>
+          ))}
+        </div>
+      )}
     </ForgePage>
   );
 }
@@ -98,6 +111,7 @@ function FolderSharing({ id, refName, path, workspaceId }: { id: string; refName
   const [created, setCreated] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
+  const [delivery, setDelivery] = useState<Delivery | null>(null);
   useRepositoryTrail(access.data?.repository, "Sharing");
   const wait = pending(access);
   if (wait) return wait;
@@ -116,16 +130,41 @@ function FolderSharing({ id, refName, path, workspaceId }: { id: string; refName
       setRevoking(null);
     }
   };
+  const direct = a.items.filter((entry) => !entry.inherited).length;
+  const activeLinks = a.links.filter((link) => linkState(link) === "active").length;
+  const deliveries: { key: Delivery; icon: typeof Users; title: string; text: string; button: string }[] = [
+    { key: "person", icon: User, title: "People", text: "A named person receives a live folder. Updates and moves continue to apply.", button: "Share with person" },
+    {
+      key: "organization",
+      icon: Users,
+      title: "Organization",
+      text: "A named organization identity receives the same live folder. People appear only when their identity has effective access above.",
+      button: "Share with organization",
+    },
+    { key: "link", icon: Link2, title: "Link", text: "Anyone holding the link can open this live folder until its expiry or revocation.", button: "Create link" },
+  ];
   return (
     <ForgePage
-      eyebrow="drive sharing"
-      title={`Share ${path}`}
-      sub="Before sharing, review who can access this folder, what they can do, whether access is inherited, and whether the recipient gets a live object, a continuing link, or an independent copy."
+      above={<DriveBreadcrumbs repository={a.repository} refName={refName} path={path} />}
+      title={`Share ${path || "/"}`}
+      repository={a.repository}
+      tab="files"
+      sub="Review who can access this folder, then deliver it as a live folder, a continuing link, or an independent copy."
+      actions={
+        <>
+          <Button onClick={() => setDelivery("person")}>
+            <User size={14} aria-hidden /> Share with person
+          </Button>
+          <Button variant="primary" onClick={() => setDelivery("link")}>
+            <Link2 size={14} aria-hidden /> Create link
+          </Button>
+        </>
+      }
     >
       {error && (
-        <p className="error" role="alert">
+        <Banner tone="warn" title="Revoke refused">
           {error}
-        </p>
+        </Banner>
       )}
       {created && (
         <Notice title="Copy this link now">
@@ -133,126 +172,147 @@ function FolderSharing({ id, refName, path, workspaceId }: { id: string; refName
           <CopyBlock value={new URL(created, window.location.origin).toString()} />
         </Notice>
       )}
-      <h2>Who Can Access This Folder Now</h2>
-      <p className="sub">This is the live policy result. It names people and organization identities, their actual actions, and whether each access path is inherited.</p>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Who</th>
-              <th>What they can do</th>
-              <th>How access arrives</th>
-            </tr>
-          </thead>
-          <tbody>
-            {a.items.map((entry, index) => (
-              <tr key={index}>
-                <td>
-                  <code>{entry.principal_taap_id}</code>
-                </td>
-                <td>
-                  {entry.role}: {entry.actions.join(", ")}
-                </td>
-                <td>{entry.inherited ? "inherited" : "direct"}</td>
-              </tr>
+      <StatRow cols={3}>
+        <Stat label="With access" value={a.items.length} icon={Users} sub={`${direct} direct, ${a.items.length - direct} inherited`} />
+        <Stat label="Active links" value={activeLinks} icon={Link2} sub={`${a.links.length} in workspace ${heldIn}`} />
+        <Stat label="Expired or revoked" value={a.links.length - activeLinks} icon={Ban} sub="no longer open the folder" />
+      </StatRow>
+      <div className="space-y-6">
+        <Section title="Who Can Access This Folder Now" sub="The live policy result: people and organization identities, their actual actions, and whether each access path is inherited.">
+          <DataTable<AccessEntry>
+            what="access"
+            caption="Who can access this folder"
+            rows={a.items}
+            rowKey={(_, index) => String(index)}
+            empty={<Empty compact icon={ShieldCheck} title="No grants" />}
+            columns={[
+              { key: "who", label: "Who", render: (entry) => <code className="break-all">{entry.principal_taap_id}</code> },
+              {
+                key: "what",
+                label: "What they can do",
+                render: (entry) => (
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    <ForgeStatus value={entry.role} />
+                    <span className="text-[12.5px] text-ink-2">{entry.actions.join(", ")}</span>
+                  </span>
+                ),
+              },
+              { key: "how", label: "How access arrives", render: (entry) => <Chip tone={entry.inherited ? "neutral" : "action"}>{entry.inherited ? "inherited" : "direct"}</Chip> },
+            ]}
+          />
+        </Section>
+        <Section title="Choose a Delivery">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {deliveries.map((d) => (
+              <Card
+                key={d.key}
+                label={
+                  <span className="inline-flex items-center gap-1.5">
+                    <d.icon size={13} /> live
+                  </span>
+                }
+                title={d.title}
+                footer={
+                  <Button variant={d.key === "link" ? "primary" : "secondary"} onClick={() => setDelivery(d.key)}>
+                    {d.button}
+                  </Button>
+                }
+              >
+                <p className="m-0 text-[13px] text-ink-2">{d.text}</p>
+              </Card>
             ))}
-            {a.items.length === 0 && (
-              <tr>
-                <td colSpan={3} className="empty">
-                  No grants.
-                </td>
-              </tr>
+            <Card
+              tone="quiet"
+              label={
+                <span className="inline-flex items-center gap-1.5">
+                  <Download size={13} /> not live
+                </span>
+              }
+              title="Independent Copy"
+            >
+              <p className="m-0 text-[13px] text-ink-2">Downloaded bytes stop being a live object. They cannot be updated or recalled by changing access here.</p>
+            </Card>
+          </div>
+        </Section>
+        <Section title="Folder Share Management" sub="A link is a continuing capability, not an attachment. Revoking it prevents its next open; copies already downloaded remain independent.">
+          <Banner tone="quiet">
+            Links held in workspace <strong>{heldIn}</strong>
+            {others.length > 0 && (
+              <>
+                . Other workspaces:{" "}
+                {others.map((w, index) => (
+                  <span key={w.id}>
+                    {index > 0 && " · "}
+                    <Link to={driveHref("/drive/share", id, refName, path, { workspace_id: w.id })}>{w.name}</Link>
+                  </span>
+                ))}
+              </>
             )}
-          </tbody>
-        </table>
-      </div>
-      <h2>Choose a Delivery</h2>
-      <div className="grid">
-        <DirectShare
-          id={id}
-          refName={refName}
-          path={path}
-          heading="People"
-          text="A named person receives a live folder. Updates and moves continue to apply."
-          principalLabel="Person's TAAP identity"
-          roleLabel="What they can do"
-          button="Share with person"
-        />
-        <DirectShare
-          id={id}
-          refName={refName}
-          path={path}
-          heading="Organization"
-          text="A named organization identity receives the same live folder. People appear only when their identity has effective access above."
-          principalLabel="Organization TAAP identity"
-          roleLabel="What it can do"
-          button="Share with organization"
-        />
-        <CreateLink id={id} refName={refName} path={path} workspaceId={workspaceId} onCreated={setCreated} />
-        <section className="panel">
-          <h3>Independent Copy</h3>
-          <p>Downloaded bytes stop being a live object. They cannot be updated or recalled by changing access here.</p>
-        </section>
-      </div>
-      <h2>Folder Share Management</h2>
-      <p className="sub">A link is a continuing capability, not an attachment. Revoking it prevents its next open; copies already downloaded remain independent.</p>
-      <p className="muted">
-        Links held in workspace <strong>{heldIn}</strong>
-        {others.length > 0 && (
-          <>
-            . Other workspaces:{" "}
-            {others.map((w, index) => (
-              <span key={w.id}>
-                {index > 0 && " · "}
-                <Link to={driveHref("/drive/share", id, refName, path, { workspace_id: w.id })}>{w.name}</Link>
-              </span>
-            ))}
-          </>
-        )}
-      </p>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Who can access</th>
-              <th>What they can do</th>
-              <th>Until when</th>
-              <th>State</th>
-              <th>
-                <span className="sr-only">Actions</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {a.links.map((link) => (
-              <tr key={link.id}>
-                <td>Anyone with this link</td>
-                <td>{linkActions(link.role)}</td>
-                <td>{dateTime(link.expires_at)}</td>
-                <td>{linkState(link)}</td>
-                <td>
-                  <span className="flex flex-wrap items-center gap-2">
-                    <Link to={driveHref("/drive/share/link", id, refName, path, { workspace_id: workspaceId, link_id: link.id })}>Details</Link>
+          </Banner>
+          <DataTable<ShareLink>
+            what="links"
+            caption="Folder links"
+            rows={a.links}
+            rowKey={(link) => link.id}
+            empty={
+              <Empty compact icon={Link2} title="No links" action={<Button onClick={() => setDelivery("link")}>Create link</Button>}>
+                A link lets anyone holding it open this folder.
+              </Empty>
+            }
+            columns={[
+              { key: "who", label: "Who can access", render: () => "Anyone with this link" },
+              { key: "what", label: "What they can do", render: (link) => linkActions(link.role) },
+              { key: "until", label: "Until when", sort: (link) => link.expires_at, render: (link) => dateTime(link.expires_at) },
+              { key: "state", label: "State", render: (link) => <Status value={linkState(link)} /> },
+              {
+                key: "actions",
+                label: <span className="sr-only">Actions</span>,
+                render: (link) => (
+                  <span className="flex flex-wrap items-center justify-end gap-2">
+                    <Button variant="ghost" to={driveHref("/drive/share/link", id, refName, path, { workspace_id: workspaceId, link_id: link.id })}>
+                      Details
+                    </Button>
                     <Button loading={revoking === link.id} disabled={!!revoking} onClick={() => void revoke(link.id)}>
                       Revoke link
                     </Button>
                   </span>
-                </td>
-              </tr>
-            ))}
-            {a.links.length === 0 && (
-              <tr>
-                <td colSpan={5} className="empty">
-                  No links.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+                ),
+              },
+            ]}
+          />
+        </Section>
       </div>
+      {(delivery === "person" || delivery === "organization") && (
+        <DirectShare
+          id={id}
+          refName={refName}
+          path={path}
+          heading={delivery === "person" ? "Share with a Person" : "Share with an Organization"}
+          text={deliveries.find((d) => d.key === delivery)!.text}
+          principalLabel={delivery === "person" ? "Person's TAAP identity" : "Organization TAAP identity"}
+          roleLabel={delivery === "person" ? "What they can do" : "What it can do"}
+          button={delivery === "person" ? "Share with person" : "Share with organization"}
+          onClose={() => setDelivery(null)}
+        />
+      )}
+      {delivery === "link" && (
+        <CreateLink
+          id={id}
+          refName={refName}
+          path={path}
+          workspaceId={workspaceId}
+          onCreated={(url) => {
+            setCreated(url);
+            setDelivery(null);
+          }}
+          onClose={() => setDelivery(null)}
+        />
+      )}
     </ForgePage>
   );
 }
+
+type Delivery = "person" | "organization" | "link";
 
 const ROLES = [
   ["read", "View — browse and download"],
@@ -260,7 +320,7 @@ const ROLES = [
   ["share", "Share — browse and create shares"],
 ] as const;
 
-/** People and Organization (serve_drive_share_direct): a live grant on the folder. */
+/** People and Organization (serve_drive_share_direct): a live grant on the folder, in a dialog. */
 function DirectShare({
   id,
   refName,
@@ -270,6 +330,7 @@ function DirectShare({
   principalLabel,
   roleLabel,
   button,
+  onClose,
 }: {
   id: string;
   refName: string;
@@ -279,6 +340,7 @@ function DirectShare({
   principalLabel: string;
   roleLabel: string;
   button: string;
+  onClose: () => void;
 }) {
   const toast = useToast();
   const [principal, setPrincipal] = useState("");
@@ -287,10 +349,21 @@ function DirectShare({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
-    <section className="panel">
-      <h3>{heading}</h3>
-      <p>{text}</p>
+    <Modal
+      title={heading}
+      subtitle={text}
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" form="drive-share-direct" variant="primary" loading={busy}>
+            {button}
+          </Button>
+        </>
+      }
+    >
       <form
+        id="drive-share-direct"
         className="stack"
         onSubmit={async (e) => {
           e.preventDefault();
@@ -298,9 +371,8 @@ function DirectShare({
           setError(null);
           try {
             await forgeAct("share_drive_folder", { repository_id: id, ref: refName, path, principal_taap_id: principal, role, attestation_digest: digest });
-            setPrincipal("");
-            setDigest("");
             toast("Folder shared");
+            onClose();
           } catch (err) {
             setError((err as Error).message);
           } finally {
@@ -313,12 +385,10 @@ function DirectShare({
             {error}
           </p>
         )}
-        <label>
-          {principalLabel}
-          <input value={principal} onChange={(e) => setPrincipal(e.target.value)} required />
-        </label>
-        <label>
-          {roleLabel}
+        <Field label={principalLabel} required>
+          <input value={principal} onChange={(e) => setPrincipal(e.target.value)} autoFocus />
+        </Field>
+        <Field label={roleLabel}>
           <select value={role} onChange={(e) => setRole(e.target.value)}>
             {ROLES.map(([value, label]) => (
               <option key={value} value={value}>
@@ -326,33 +396,52 @@ function DirectShare({
               </option>
             ))}
           </select>
-        </label>
-        <label>
-          Attestation digest
-          <input value={digest} onChange={(e) => setDigest(e.target.value)} required />
-        </label>
-        <div>
-          <Button type="submit" variant="primary" loading={busy}>
-            {button}
-          </Button>
-        </div>
+        </Field>
+        <Field label="Attestation digest" required>
+          <input value={digest} onChange={(e) => setDigest(e.target.value)} />
+        </Field>
       </form>
-    </section>
+    </Modal>
   );
 }
 
-/** Link (serve_drive_share_link_create): a bearer link held in this workspace. Its URL is a
- * one-time secret, shown once above. */
-function CreateLink({ id, refName, path, workspaceId, onCreated }: { id: string; refName: string; path: string; workspaceId: string; onCreated: (url: string) => void }) {
+/** Link (serve_drive_share_link_create): a bearer link held in this workspace, in a dialog. Its
+ * URL is a one-time secret, shown once on the page. */
+function CreateLink({
+  id,
+  refName,
+  path,
+  workspaceId,
+  onCreated,
+  onClose,
+}: {
+  id: string;
+  refName: string;
+  path: string;
+  workspaceId: string;
+  onCreated: (url: string) => void;
+  onClose: () => void;
+}) {
   const [role, setRole] = useState("read");
   const [expires, setExpires] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
-    <section className="panel">
-      <h3>Link</h3>
-      <p>Anyone holding the link can open this live folder until its expiry or revocation.</p>
+    <Modal
+      title="Create a Link"
+      subtitle="Anyone holding the link can open this live folder until its expiry or revocation."
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" form="drive-share-link" variant="primary" loading={busy}>
+            Create link
+          </Button>
+        </>
+      }
+    >
       <form
+        id="drive-share-link"
         className="stack"
         onSubmit={async (e) => {
           e.preventDefault();
@@ -361,7 +450,6 @@ function CreateLink({ id, refName, path, workspaceId, onCreated }: { id: string;
           try {
             const link = await forgeAct<{ url: string }>("create_drive_share_link", { repository_id: id, workspace_id: workspaceId, ref: refName, path, role, expires_at: expires });
             onCreated(link.url);
-            setExpires("");
           } catch (err) {
             setError((err as Error).message);
           } finally {
@@ -374,28 +462,19 @@ function CreateLink({ id, refName, path, workspaceId, onCreated }: { id: string;
             {error}
           </p>
         )}
-        <label>
-          What link holders can do
+        <Field label="What link holders can do">
           <select value={role} onChange={(e) => setRole(e.target.value)}>
             <option value="read">View — browse and download</option>
             <option value="write">Write scope — capability-aware clients only</option>
           </select>
-        </label>
-        <label>
-          Until when (UTC)
-          <input value={expires} onChange={(e) => setExpires(e.target.value)} placeholder="2030-01-01T00:00:00Z" required />
-        </label>
-        <label>
-          Passcode
+        </Field>
+        <Field label="Until when (UTC)" required>
+          <input value={expires} onChange={(e) => setExpires(e.target.value)} placeholder="2030-01-01T00:00:00Z" autoFocus />
+        </Field>
+        <Field label="Passcode" help="Passcodes are not supported for drive-share links. No passcode is sent or stored.">
           <input disabled placeholder="Not available for drive links" />
-        </label>
-        <p className="muted">Passcodes are not supported for drive-share links. No passcode is sent or stored.</p>
-        <div>
-          <Button type="submit" variant="primary" loading={busy}>
-            Create link
-          </Button>
-        </div>
+        </Field>
       </form>
-    </section>
+    </Modal>
   );
 }

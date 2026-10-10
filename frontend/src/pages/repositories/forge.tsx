@@ -1,13 +1,16 @@
 /** What the repository, forge and Drive pages share: the shapes their capabilities answer, lake's
  * forge markup helpers (identifiers, badges, sizes, the repository tabs and breadcrumbs), the
  * repository error page and the conflict resolution block (web_ui.cpp). */
-import { type ReactNode, useState } from "react";
+import { type ComponentType, type ReactNode, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Link, Navigate, useLocation } from "react-router-dom";
 import { useQuery, type UseQueryOptions, type UseQueryResult } from "@tanstack/react-query";
 import { act, ApiError, query, read, useRead, type Params } from "@/lib/api";
 import { useSession } from "@/lib/session";
+import "@/styles/repositories.css";
 import { entityCrumb, useTrail } from "@/lib/trail";
-import { Badge, Button, cx, Skeleton, type Tone } from "@/lib/ui";
+import { FileText, Folder, FolderGit2, Globe, HardDrive, Lock, MoreHorizontal } from "lucide-react";
+import { Button, Chip, cx, Field, Skeleton, Status, toneOf, type Tone } from "@/lib/ui";
 
 /* ------------------------------------------------------------------ calls */
 
@@ -142,10 +145,6 @@ export function forgeTone(value: string): Tone {
   return "neutral";
 }
 
-export function ForgeBadge({ value }: { value: string }) {
-  return <Badge tone={forgeTone(value)}>{value}</Badge>;
-}
-
 /** `byte_count`: the forge pages' sizes. */
 export function byteCount(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -232,21 +231,26 @@ export function driveHref(page: string, repositoryId: string, ref: string, path:
 
 /* ------------------------------------------------------------------ page structure */
 
-/** A forge page: what sits above the heading (the path breadcrumbs), the eyebrow, `<h1>`, sub
- * line and actions, then the content. Lake's page classes. */
+/** A forge page in the Data group: what sits above the heading (the path breadcrumbs), the
+ * eyebrow, `<h1>`, the repository it belongs to (name and visibility), one sub line and the
+ * actions, then the repository's tabs (`tab`) and the content. */
 export function ForgePage({
   above,
-  eyebrow,
+  eyebrow = "Data",
   title,
   sub,
   actions,
+  repository,
+  tab,
   children,
 }: {
   above?: ReactNode;
-  eyebrow: ReactNode;
+  eyebrow?: ReactNode;
   title: ReactNode;
   sub?: ReactNode;
   actions?: ReactNode;
+  repository?: Pick<Repository, "id" | "name" | "visibility">;
+  tab?: TabKey;
   children?: ReactNode;
 }) {
   return (
@@ -255,14 +259,154 @@ export function ForgePage({
       <header className="page-header">
         <div className="min-w-0">
           <p className="eyebrow">{eyebrow}</p>
-          <h1>{title}</h1>
+          <h1 className="break-words">{title}</h1>
+          {repository && <RepositoryLine repository={repository} />}
           {sub && <p className="sub">{sub}</p>}
         </div>
         {actions && <div className="page-actions">{actions}</div>}
       </header>
+      {repository && tab && <ForgeTabs repository={repository} current={tab} />}
       {children}
     </div>
   );
+}
+
+/** The repository a forge page belongs to: its name as the way back, and its visibility. */
+export function RepositoryLine({ repository }: { repository: Pick<Repository, "id" | "name" | "visibility"> }) {
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-2 text-[13px] text-ink-2">
+      <FolderGit2 size={14} aria-hidden className="text-ink-3" />
+      <Link to={`/repository?id=${encodeURIComponent(repository.id)}`}>{repositoryName(repository)}</Link>
+      <Visibility value={repository.visibility} />
+    </div>
+  );
+}
+
+/** A repository's visibility as a chip: private with a lock, public with a globe. */
+export function Visibility({ value }: { value: string | null | undefined }) {
+  if (!value) return null;
+  if (value === "public")
+    return (
+      <Chip tone="ok">
+        <Globe size={11} aria-hidden /> public
+      </Chip>
+    );
+  return (
+    <Chip>
+      {value === "private" && <Lock size={11} aria-hidden />} {value}
+    </Chip>
+  );
+}
+
+/** A forge state (`open`, `delivered`, `verified`, …) as a state chip: lake's forge colour when it
+ * names one, else the colour the word carries anywhere in lake (`toneOf`). */
+export function ForgeStatus({ value }: { value: string }) {
+  const tone = forgeTone(value);
+  return <Status value={value} tone={tone === "neutral" ? toneOf(value) : tone} />;
+}
+
+/** A row's actions behind one "⋯" button (a file manager's item menu). An item runs `onSelect`,
+ * opens `to`, or downloads `href`. The menu is drawn above the page (a portal at the button), so a
+ * scrolling table does not clip it; Escape, a press outside, a scroll or a resize closes it. */
+export function Menu({
+  label,
+  items,
+}: {
+  label: string;
+  items: { label: ReactNode; icon?: ComponentType<{ size?: number }>; onSelect?: () => void; to?: string; href?: string; danger?: boolean }[];
+}) {
+  const [at, setAt] = useState<{ top: number; right: number } | null>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const open = at !== null;
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setAt(null);
+    const press = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (!list.current?.contains(target) && !button.current?.contains(target)) close();
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("mousedown", press);
+    document.addEventListener("keydown", key);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    list.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus();
+    return () => {
+      document.removeEventListener("mousedown", press);
+      document.removeEventListener("keydown", key);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [open]);
+  const toggle = () => {
+    if (open) return setAt(null);
+    const rect = button.current?.getBoundingClientRect();
+    if (rect) setAt({ top: rect.bottom + 4, right: Math.max(8, window.innerWidth - rect.right) });
+  };
+  const done = () => setAt(null);
+  return (
+    <>
+      <button ref={button} type="button" className="icon-button" aria-label={label} aria-haspopup="menu" aria-expanded={open} onClick={toggle}>
+        <MoreHorizontal size={16} aria-hidden />
+      </button>
+      {at &&
+        createPortal(
+          <div
+            ref={list}
+            role="menu"
+            aria-label={label}
+            className="fixed z-50 min-w-[176px] rounded-[6px] border border-hairline bg-surface p-1 shadow-popover"
+            style={{ top: at.top, right: at.right }}
+          >
+            {items.map((item, index) => {
+              const Icon = item.icon;
+              const content = (
+                <>
+                  {Icon && <Icon size={14} />}
+                  {item.label}
+                </>
+              );
+              if (item.to)
+                return (
+                  <Link key={index} role="menuitem" to={item.to} className="forge-menu-item inline-flex items-center" data-danger={item.danger || undefined} onClick={done}>
+                    {content}
+                  </Link>
+                );
+              if (item.href)
+                return (
+                  <a key={index} role="menuitem" href={item.href} download className="forge-menu-item inline-flex items-center" data-danger={item.danger || undefined} onClick={done}>
+                    {content}
+                  </a>
+                );
+              return (
+                <button
+                  key={index}
+                  type="button"
+                  role="menuitem"
+                  className="forge-menu-item inline-flex items-center"
+                  data-danger={item.danger || undefined}
+                  onClick={() => {
+                    done();
+                    item.onSelect?.();
+                  }}
+                >
+                  {content}
+                </button>
+              );
+            })}
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
+
+/** A Drive or tree entry's icon: a folder for a tree, a file for anything else. */
+export function EntryIcon({ kind, size = 15 }: { kind: string; size?: number }) {
+  return kind === "tree" ? <Folder size={size} aria-hidden className="shrink-0 text-action" /> : <FileText size={size} aria-hidden className="shrink-0 text-ink-3" />;
 }
 
 /** The `repository_shell` trail: Repositories › <repository> › <page>. */
@@ -274,7 +418,7 @@ export function useRepositoryTrail(repository: Pick<Repository, "id" | "name"> |
   );
 }
 
-type TabKey = "files" | "code" | "changes" | "issues" | "releases" | "artifacts" | "platform" | "webhooks" | "protection" | "conflicts";
+export type TabKey = "files" | "code" | "changes" | "issues" | "releases" | "artifacts" | "platform" | "webhooks" | "protection" | "conflicts";
 
 /** `forge_tabs`: the repository's sections. Signed out, Files, Deployments and Webhooks are
  * hidden; Protection is shown to the operator only, because its page reads the instance audit. */
@@ -312,7 +456,8 @@ export function PathBreadcrumbs({ repository, refName, path }: { repository: Pic
   const tree = `/repository/tree?id=${id}&ref=${encodeURIComponent(refName)}`;
   const parts = path ? path.split("/") : [];
   return (
-    <nav className="breadcrumbs" aria-label="Breadcrumb">
+    <nav className="breadcrumbs forge-path" aria-label="Breadcrumb">
+      <FolderGit2 size={14} aria-hidden />
       <Link to={`/repository?id=${id}`}>{repositoryName(repository)}</Link>
       <span aria-hidden="true">/</span>
       <Link to={tree}>{refName}</Link>
@@ -333,7 +478,8 @@ export function PathBreadcrumbs({ repository, refName, path }: { repository: Pic
 export function DriveBreadcrumbs({ repository, refName, path }: { repository: Pick<Repository, "id" | "name">; refName: string; path: string }) {
   const parts = path ? path.split("/") : [];
   return (
-    <nav className="breadcrumbs" aria-label="Breadcrumb">
+    <nav className="breadcrumbs forge-path" aria-label="Breadcrumb">
+      <HardDrive size={14} aria-hidden />
       <Link to={driveHref("/drive", repository.id, refName, "")}>{repositoryName(repository)}</Link>
       {parts.map((part, index) => (
         <span key={index} className="contents">
@@ -536,10 +682,9 @@ export function ConflictResolution({
             </Button>
           )}
         </div>
-        <label>
-          Prepared replacement text
+        <Field label="Prepared replacement text">
           <textarea rows={6} value={text} onChange={(e) => setText(e.target.value)} />
-        </label>
+        </Field>
         <div>
           <Button type="submit" loading={busy === "blob"} disabled={!!busy}>
             Use prepared text
