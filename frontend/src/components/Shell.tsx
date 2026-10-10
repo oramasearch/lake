@@ -3,7 +3,11 @@
  * listed beneath on a hairline, Docs and Developer at its foot, then the signed-in person and the
  * collapse control; a slim top bar with the breadcrumb, the space and workspace picker, search
  * (⌘K or /), the theme switch and Ask Orama. Collapsible to icons; below 1024px the rail is an
- * off-canvas drawer. G then a group's letter jumps to it. */
+ * off-canvas drawer. G then a group's letter jumps to it.
+ *
+ * On a phone (docs/ui/mobile-web.md) the top bar is compact: the breadcrumb shows its last level,
+ * and search, the workspace pill and Ask Orama are icons; Ask Orama is a full-screen conversation
+ * that closes when a link in it navigates, so the page shows. */
 import { type ReactNode, Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
@@ -39,6 +43,8 @@ import { ScreenBoundary } from "./ScreenBoundary";
 import { WorkspacePicker } from "./WorkspacePicker";
 import { LakeMark } from "./LakeMark";
 import { resizingAsk, useAskWidth } from "@/lib/askWidth";
+import { onOpenAsk, type AskRequest } from "@/lib/ask";
+import { PHONE_QUERY } from "@/lib/phoneSheet";
 
 // Ask Orama loads the first time it is opened, so the shell carries no Markdown or conversation code.
 const AskPanel = lazy(() => import("./AskPanel").then((m) => ({ default: m.AskPanel })));
@@ -124,6 +130,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const [drawer, setDrawer] = useState(false);
   const [palette, setPalette] = useState(false);
   const [ask, setAsk] = useState(false);
+  const [askRequest, setAskRequest] = useState<AskRequest | null>(null);
   const askToggledAt = useRef(Number.NEGATIVE_INFINITY);
   const pendingG = useRef(0);
   const [theme, toggleTheme] = useTheme();
@@ -138,7 +145,17 @@ export function Shell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     setDrawer(false);
+    // On a phone Ask Orama covers the page: a link in it that navigates closes it, so the page shows.
+    if (matchMedia(PHONE_QUERY).matches) setAsk(false);
   }, [location.pathname]);
+
+  // A page opens Ask Orama about something (the transcript page's "Ask Orama about this").
+  useEffect(() => {
+    return onOpenAsk((request) => {
+      setAskRequest(request);
+      setAsk(true);
+    });
+  }, []);
 
   // The document title: "lake — <page>".
   useEffect(() => {
@@ -302,13 +319,13 @@ export function Shell({ children }: { children: ReactNode }) {
         <nav
           aria-label="Navigation"
           className={cx(
-            "flex flex-col border-r border-hairline bg-surface pt-[2px]",
+            "flex flex-col border-r border-hairline bg-surface pt-[max(2px,env(safe-area-inset-top))] pb-[env(safe-area-inset-bottom)] lg:pt-[2px] lg:pb-0",
             "fixed inset-y-0 left-0 z-50 w-[280px] max-w-[85vw] transition-transform duration-200",
             "lg:sticky lg:top-0 lg:z-auto lg:h-screen lg:w-auto lg:max-w-none lg:translate-x-0",
             drawer ? "translate-x-0 shadow-dialog" : "-translate-x-full",
           )}
         >
-          <button type="button" onClick={() => setDrawer(false)} className="absolute top-3 right-3 rounded p-1.5 text-ink-3 hover:bg-raised hover:text-ink lg:hidden" aria-label="Close the navigation">
+          <button type="button" onClick={() => setDrawer(false)} className="hit absolute top-[max(0.75rem,env(safe-area-inset-top))] right-3 z-10 rounded p-1.5 text-ink-3 hover:bg-raised hover:text-ink lg:hidden" aria-label="Close the navigation">
             <X size={17} />
           </button>
           <Link
@@ -337,8 +354,8 @@ export function Shell({ children }: { children: ReactNode }) {
           className={cx("min-w-0", !resizingAsk() && "transition-[margin] duration-200")}
           style={askPushes ? { marginRight: askWidth } : undefined}
         >
-          <header className="sticky top-[2px] z-30 flex h-12 items-center gap-2 border-b border-hairline bg-canvas/90 px-3 backdrop-blur sm:gap-3 sm:px-6">
-            <button type="button" onClick={() => setDrawer(true)} className="-ml-1 rounded-[5px] p-2 text-ink-2 hover:bg-raised hover:text-ink lg:hidden" aria-label="Open the navigation">
+          <header className="shell-bar sticky top-[2px] z-30 flex h-12 min-w-0 items-center gap-1 border-b border-hairline bg-canvas/90 px-2 backdrop-blur sm:gap-3 sm:px-6">
+            <button type="button" onClick={() => setDrawer(true)} className="hit rounded-[5px] p-2 text-ink-2 hover:bg-raised hover:text-ink lg:hidden" aria-label="Open the navigation">
               <Menu size={18} />
             </button>
             <Breadcrumb trail={trail} />
@@ -355,7 +372,7 @@ export function Shell({ children }: { children: ReactNode }) {
                   <span className="flex-1 text-left">Search</span>
                   <Kbd>⌘K</Kbd>
                 </button>
-                <button type="button" onClick={() => setPalette(true)} className="rounded-[5px] p-2 text-ink-2 hover:bg-raised hover:text-ink md:hidden" aria-label="Search">
+                <button type="button" onClick={() => setPalette(true)} className="hit rounded-[5px] p-2 text-ink-2 hover:bg-raised hover:text-ink md:hidden" aria-label="Search">
                   <Search size={16} />
                 </button>
               </>
@@ -363,7 +380,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <button
               type="button"
               onClick={toggleTheme}
-              className="rounded-[5px] p-2 text-ink-2 hover:bg-raised hover:text-ink"
+              className="hit rounded-[5px] p-2 text-ink-2 hover:bg-raised hover:text-ink"
               aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}
               aria-pressed={theme === "dark"}
               title="Theme"
@@ -382,7 +399,12 @@ export function Shell({ children }: { children: ReactNode }) {
       {ask && signedInPerson && (
         <Suspense fallback={null}>
           <AskPanel
-            onClose={() => setAsk(false)}
+            onClose={() => {
+              setAsk(false);
+              setAskRequest(null);
+            }}
+            request={askRequest}
+            onRequestDone={() => setAskRequest(null)}
             from={localPath(location.pathname) + location.search}
             width={askWidth}
             onResize={setAskWidth}
@@ -576,8 +598,10 @@ function SessionActions({ onAsk, askOpen }: { onAsk: (e: React.MouseEvent) => vo
       type="button"
       onClick={onAsk}
       aria-pressed={askOpen}
+      aria-label="Ask Orama"
+      title="Ask Orama"
       className={cx(
-        "inline-flex h-8 items-center gap-1.5 rounded-[6px] border px-2.5 text-[12.5px] font-medium transition-colors",
+        "hit inline-flex h-8 shrink-0 items-center gap-1.5 rounded-[6px] border px-2 text-[12.5px] font-medium transition-colors sm:px-2.5",
         askOpen ? "border-action bg-action text-on-action" : "border-rule bg-surface text-ink-2 hover:border-action hover:text-action",
       )}
     >

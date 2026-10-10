@@ -423,12 +423,38 @@ button:disabled:hover {
 .ask-panel[data-overlay] {
   box-shadow: var(--lake-shadow-dialog);
 }
+/* On a phone Ask Orama is a full-screen conversation (docs/ui/mobile-web.md): sized to the visual
+   viewport, so its message box sits just above the keyboard, inside the safe areas, above the shell. */
 @media (max-width: 47.99rem) {
   .ask-panel {
-    top: 0;
+    z-index: calc(var(--orama-zIndex-dialog) - 2);
+    top: var(--vv-top, 0px);
+    bottom: auto;
+    height: var(--vv-height, 100dvh);
     width: 100vw !important;
+    border-left: 0;
+    box-shadow: none;
+  }
+  .ask-panel .ask-head {
+    padding-top: max(6px, env(safe-area-inset-top));
+    padding-right: max(4px, env(safe-area-inset-right));
+    padding-left: max(16px, env(safe-area-inset-left));
+  }
+  .ask-panel .ask-head .icon-button {
+    width: 44px;
+    min-height: 44px;
+  }
+  .ask-panel .ask-scroll {
+    padding-right: max(16px, env(safe-area-inset-right));
+    padding-left: max(16px, env(safe-area-inset-left));
+  }
+  .ask-panel .ask-foot {
+    padding-right: max(12px, env(safe-area-inset-right));
+    padding-bottom: calc(10px + var(--sheet-safe-bottom, env(safe-area-inset-bottom)));
+    padding-left: max(12px, env(safe-area-inset-left));
   }
 }
 .nav-group + .nav-group {
   margin-top: var(--lake-space-1);
 }
+

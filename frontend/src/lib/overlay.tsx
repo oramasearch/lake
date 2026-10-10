@@ -1,10 +1,28 @@
 /** Modal, Drawer and ConfirmButton: the only elevated surfaces. Panels carry no shadow; overlays
- * use lake's dialog shadow so they read as above the page. */
-import { type ReactNode, useEffect, useRef, useState } from "react";
+ * use lake's dialog shadow so they read as above the page.
+ *
+ * A Modal with `sheet` is, on a phone, a full-screen sheet with rev-os's mechanics (lake#561;
+ * lib/phoneSheet.ts, docs/ui/mobile-web.md): sized to the visual viewport, the page behind locked,
+ * inside the safe areas, its body scrolling on its own, the focused field brought above the
+ * keyboard, and `SheetActions` pinned to its bottom. On a wide screen it is the same dialog as any
+ * other. */
+import { createContext, type CSSProperties, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
-import { Button } from "./ui";
+import { Button, cx } from "./ui";
 import { backdropMayClose } from "./clicks";
+import { useIsPhone, usePhoneSheet } from "./phoneSheet";
+
+/** Where a phone sheet pins its actions; absent everywhere else. */
+const SheetFooter = createContext<HTMLElement | null>(null);
+
+/** A form's actions (Save, Create…). In a phone sheet they are pinned to the sheet's bottom, so they
+ * sit just above the keyboard whatever is scrolled; anywhere else they stay where they are written. */
+export function SheetActions({ children, className }: { children: ReactNode; className?: string }) {
+  const slot = useContext(SheetFooter);
+  const row = <div className={className}>{children}</div>;
+  return slot ? createPortal(row, slot) : row;
+}
 
 /** The backdrop closes what it covers on a deliberate press only: one that starts and ends on it,
  * and not the opener's second click or a double-click landing on it just after the overlay
@@ -62,6 +80,7 @@ export function Modal({
   children,
   footer,
   width = 560,
+  sheet = false,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
@@ -69,20 +88,35 @@ export function Modal({
   children: ReactNode;
   footer?: ReactNode;
   width?: number;
+  /** On a phone: a full-screen sheet, its actions above the keyboard. */
+  sheet?: boolean;
 }) {
+  const phone = useIsPhone();
+  // One tree either way: turning a phone sideways (past the breakpoint) restyles the dialog and
+  // never remounts what is in it, so a half-written form survives.
+  const asSheet = sheet && phone;
+  const body = useRef<HTMLDivElement>(null);
+  const [slot, setSlot] = useState<HTMLDivElement | null>(null);
+  const keyboard = usePhoneSheet(asSheet, body);
+  // The home indicator's strip matters only while the keyboard is down.
+  const style = (asSheet ? { "--sheet-safe-bottom": keyboard ? "0px" : "env(safe-area-inset-bottom)" } : { maxWidth: width }) as CSSProperties;
   return (
     <Overlay onClose={onClose}>
-      <div role="dialog" aria-modal className="dialog" style={{ maxWidth: width }}>
+      <div role="dialog" aria-modal className={cx("dialog", asSheet && "dialog-sheet")} data-sheet={asSheet || undefined} style={style}>
         <div className="dialog-head">
           <div className="min-w-0 flex-1">
             <h2 className="dialog-title">{title}</h2>
             {subtitle && <p className="muted m-0">{subtitle}</p>}
           </div>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
-            <X size={16} aria-hidden />
+          <button type="button" className="icon-button dialog-close" onClick={onClose} aria-label="Close">
+            <X size={asSheet ? 20 : 16} aria-hidden />
           </button>
         </div>
-        <div className="dialog-body">{children}</div>
+        <div ref={body} data-modal-body className="dialog-body">
+          <SheetFooter.Provider value={asSheet ? slot : null}>{children}</SheetFooter.Provider>
+        </div>
+        {/* A phone sheet's pinned actions (SheetActions); hidden while empty. */}
+        <div ref={setSlot} className={cx("empty:hidden", asSheet && "sheet-actions")} />
         {footer && <div className="dialog-foot">{footer}</div>}
       </div>
     </Overlay>

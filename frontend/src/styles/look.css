@@ -587,7 +587,7 @@ main :not(pre) > code {
 
 /* lake.css styles every <button>; the shell draws its controls with utilities, which only set what
    they name. Reset the rest here (components layer), so the utilities alone decide. */
-[data-shell] :is(header, nav) button {
+[data-shell] :is(header.shell-bar, nav[aria-label='Navigation']) button {
   min-height: 0;
   border-width: 0;
   padding: 0;
@@ -596,7 +596,7 @@ main :not(pre) > code {
   font-weight: inherit;
   line-height: inherit;
 }
-[data-shell] :is(header, nav) button:hover {
+[data-shell] :is(header.shell-bar, nav[aria-label='Navigation']) button:hover {
   color: inherit;
   background: transparent;
 }
@@ -672,4 +672,19 @@ main .chip-button[aria-pressed='true'] {
   border-color: var(--lake-action);
   color: var(--lake-action);
   font-weight: var(--lake-weight-semibold);
+}
+
+/* A primary or danger button inside a dialog or drawer keeps its colour: `.dialog button` above
+   would otherwise outrank `.button-primary` (Save in a sheet, Delete in a confirmation). */
+:is(.dialog, .drawer) .button-primary,
+:is(.dialog, .drawer) .button-primary:hover {
+  border-color: var(--lake-action-filled);
+  color: var(--lake-text-on-action);
+  background: var(--lake-action-filled);
+}
+:is(.dialog, .drawer) .button-danger,
+:is(.dialog, .drawer) .button-danger:hover {
+  border-color: var(--lake-danger);
+  color: var(--lake-text-on-danger);
+  background: var(--lake-danger);
 }
