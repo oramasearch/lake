@@ -85,7 +85,7 @@ function ChooseWorkspace({ id, refName, path }: { id: string; refName: string; p
             <Link to={driveHref("/drive/share", id, refName, path, { workspace_id: w.id })}>{w.name}</Link>
           </li>
         ))}
-        {choices.length === 0 && <li className="empty">This space has no workspace yet. Create one before making a link.</li>}
+        {choices.length === 0 && <li className="empty">There is no workspace here yet. Create one before making a link.</li>}
       </ul>
     </ForgePage>
   );

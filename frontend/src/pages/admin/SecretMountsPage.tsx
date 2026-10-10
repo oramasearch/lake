@@ -24,7 +24,7 @@ export default function SecretMountsPage() {
   return (
     <Page eyebrow="control plane" title="Secret Mounts" sub="Organization-scoped static secrets and named encryption keys, kept in the workspace each mount was created in. Key material remains inside lake.">
       {unknown ? (
-        <ErrorBlock error={new ApiError(400, "invalid_input", "workspace_id must name a workspace Zetta in this space", "/workspace_id")} />
+        <ErrorBlock error={new ApiError(400, "invalid_input", "workspace_id must name one of your workspaces", "/workspace_id")} />
       ) : !workspace ? (
         <PanelEmpty>Choose a workspace to see its secret mounts.</PanelEmpty>
       ) : (

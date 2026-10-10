@@ -2726,7 +2726,7 @@ TEST_P(HttpResponseIsolation, TheViewerSaysWhoIsSignedInAndWhereTheyAre) {
     EXPECT_EQ(signed_in["customer_id"], customer_id);
     EXPECT_EQ(signed_in["workspace_id"], workspace_id) << "the space's only workspace";
     ASSERT_EQ(signed_in["spaces"].size(), 1U);
-    EXPECT_EQ(signed_in["spaces"][0]["label"], "Personal space");
+    EXPECT_EQ(signed_in["spaces"][0]["label"], "Your workspaces");
     EXPECT_EQ(signed_in["spaces"][0]["personal"], true);
     EXPECT_EQ(signed_in["spaces"][0]["workspaces"][0]["id"], workspace_id);
     EXPECT_FALSE(signed_in["config"]["frontier_model"].get<std::string>().empty());

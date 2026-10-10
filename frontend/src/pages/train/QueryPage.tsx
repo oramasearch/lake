@@ -12,12 +12,12 @@ export default function QueryPage() {
   const { customerId } = useWorkspace();
   const ws = useWsPath();
   const space = qs({ customer_id: customerId });
-  useTrail([{ label: "Train", to: ws(`/train/data?${space}`) }, { label: "Data", to: ws(`/train/data?${space}`) }, { label: "Query" }]);
+  useTrail([{ label: "Data", to: "/repositories" }, { label: "Datasets", to: ws(`/train/data?${space}`) }, { label: "Query" }]);
   const [params] = useSearchParams();
   const error = params.get("error");
   return (
     <WorkspaceFrame
-      eyebrow="Train"
+      eyebrow="Data"
       title="Query"
       sub="Read-only SQL over your workspace's data: one SELECT or WITH query at a time."
       before={

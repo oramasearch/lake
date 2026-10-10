@@ -52,7 +52,7 @@ export default function OrganizationsPage() {
   ];
 
   return (
-    <Page eyebrow="identity" title="Organizations" sub="An organization has its own space for repositories, workspaces and apps, and people in it as owners, admins or members.">
+    <Page eyebrow="identity" title="Organizations" sub="An organization has its own workspaces, repositories and apps, and people in it as owners, admins or members.">
       {(invitations.data?.length ?? 0) > 0 && <InvitationsForYou invitations={invitations.data ?? []} onJoined={refresh} />}
       <DataTable
         q={organizations}
@@ -139,7 +139,7 @@ function CreateOrganization({ onCreated }: { onCreated: () => void }) {
   const displayNameError = fieldError(error, "display_name");
   return (
     <Panel title="Create an Organization">
-      <p>You become its owner. It gets its own space, separate from your personal space; invite colleagues next.</p>
+      <p>You become its owner. It gets its own workspaces, separate from yours; invite colleagues next.</p>
       <Form onSubmit={submit} error={nameError || displayNameError ? null : error}>
         <Field label="Organization name" required error={displayNameError}>
           <input name="display_name" placeholder="Acme Research" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
@@ -193,10 +193,10 @@ function ConvertPersonalSpace({ customerId, handle, onConverted }: { customerId:
   const confirmError = fieldError(error, "confirm");
   const displayNameError = fieldError(error, "display_name");
   return (
-    <Panel title="Turn Your Personal Space into an Organization">
+    <Panel title="Turn Your Workspace into an Organization">
       <p>
-        Your personal space <code>{handle}</code> becomes the organization's space. Its handle, repositories, workspaces and apps stay where they are, so links and clones keep
-        working. You become the organization's owner and can invite colleagues. lake gives you a new, empty personal space with a generated handle.
+        Your workspace <code>{handle}</code> becomes the organization's. Its handle, repositories, workspaces and apps stay where they are, so links and clones keep
+        working. You become the organization's owner and can invite colleagues. lake gives you a new, empty workspace with a generated handle.
       </p>
       <p className="muted">This cannot be undone here.</p>
       <Form onSubmit={submit} error={confirmError || displayNameError ? null : error}>

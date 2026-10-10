@@ -17,9 +17,10 @@
 namespace lake::api {
 
 std::string web_ui_escape(std::string_view text);
-// The space selector's label: the viewer's own personal space is "Personal space", not its
-// generated handle (lake#452); every other space keeps its name. The `viewer` capability labels
-// spaces this way (lake#561).
+// A space's label for people: the viewer's own individual space reads "Your workspaces", never its
+// generated handle (lake#452) or "personal space", which the product does not say (Steve,
+// 2026-10-10); every other space keeps its name. The `viewer` capability labels spaces this way
+// (lake#561).
 std::string web_ui_space_label(const control::Customer& customer, std::string_view user_id);
 // The syntax units of a source file, as the File page shades them (lake#561): an array of
 // {start_line, end_line, kind} from liquid's parser for the formats it parses (C and C++ by

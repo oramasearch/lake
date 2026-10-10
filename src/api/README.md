@@ -25,7 +25,7 @@ closes the stores and releases the lock (lake#467, lake#479,
 stores and repositories of running switched workspaces in the background (`preopen_workspace_stores`);
 once an attempt's acquire returns it checks the workspace again under the lane and closes the store
 of one stopped, deleted or unswitched meanwhile, releasing its lease at once (lake#541).
-lake#452: the `viewer` read labels the viewer's personal space *Personal space* and workspaces by
+lake#452: the `viewer` read labels the viewer's own space *Your workspaces* and workspaces by
 name; `workspace_act create_project` says whether a name is missing or taken;
 `create_app` requires `confirm_public` (or a person's acknowledgement on the confirmed
 ApplicationAgent turn) for a public app; `list_services` answers the page's `status` and

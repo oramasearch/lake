@@ -81,7 +81,7 @@ export default function AppsPage() {
   if (!space) {
     return (
       <Page eyebrow="Ship" title="Apps" sub="Create, deploy and operate customer applications with live rollout status.">
-        <div className="panel empty">You have no space to work in yet.</div>
+        <div className="panel empty">You have no workspace yet.</div>
       </Page>
     );
   }

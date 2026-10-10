@@ -210,7 +210,7 @@ std::string application_shell(const control::Application& application,
 
 std::string web_ui_space_label(const control::Customer& customer, std::string_view user_id) {
     if (customer.customer_type == "individual" && !user_id.empty() && customer.user_id == user_id) {
-        return "Personal space";
+        return "Your workspaces";
     }
     return customer.name;
 }

@@ -13,7 +13,7 @@ import { Button, ErrorBlock, Field, Form, Page, Skeleton, fieldError } from "@/l
 import { qs, secondsSince, spokenDuration, text, useAsync, wq } from "../train/workspace";
 
 const SUB =
-  "The databases, streams and engines this space runs on lake: Postgres, Zetta, Kafka, ClickHouse, TiDB, Cassandra and Valkey, each its own, with its data kept apart from every other customer's. Your workspace is the Zetta that Design, Train and Ship use.";
+  "The databases, streams and engines your workspaces run on lake: Postgres, Zetta, Kafka, ClickHouse, TiDB, Cassandra and Valkey, each its own, with its data kept apart from every other customer's. Your workspace is the Zetta that Design, Train and Ship use.";
 
 type Kind = { kind: string; label: string; ready_seconds: number };
 
@@ -70,7 +70,7 @@ export default function ServicesPage() {
   ]);
   return (
     <Page eyebrow="Ship" title="Services" sub={SUB}>
-      {customerId ? <Services customerId={customerId} /> : <div className="panel empty">You have no space to work in yet.</div>}
+      {customerId ? <Services customerId={customerId} /> : <div className="panel empty">You have no workspace yet.</div>}
     </Page>
   );
 }
@@ -355,7 +355,7 @@ function NewService({
             <input name="storage_gi" type="number" min={1} max={100} value={storage} onChange={(e) => setStorage(e.target.value)} />
           </Field>
           <p className="muted">
-            {limit && limit !== "0" ? `This space may run ${limit} services at once. ` : ""}Each kind's usual start time is next to it.
+            {limit && limit !== "0" ? `Your workspaces may run ${limit} services at once. ` : ""}Each kind's usual start time is next to it.
           </p>
           <div>
             <Button type="submit" variant="primary" loading={create.busy}>

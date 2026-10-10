@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Maximize2, Plus, Sparkles, X } from "lucide-react";
 import { useSession } from "@/lib/session";
+import { ASK_DEFAULT_WIDTH, setResizingAsk } from "@/lib/askWidth";
 import { qs, useAsync } from "@/pages/train/workspace";
 import { AskComposer, AskMessages, TurnInStreams, sendMessage, useAppPath, useConversation, useTalkTo } from "@/pages/ask/conversation";
 
@@ -33,10 +34,69 @@ function keep(workspaceId: string, state: PanelState) {
   }
 }
 
-export function AskPanel({ onClose, from }: { onClose: () => void; from: string }) {
+/** The panel's left edge: drag it, use the arrow keys on it, or double-click it to reset. */
+function ResizeHandle({ width, onResize }: { width: number; onResize: (width: number) => void }) {
+  const [active, setActive] = useState(false);
+  const start = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = width;
+    setResizingAsk(true);
+    setActive(true);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const move = (e: PointerEvent) => onResize(startWidth + (startX - e.clientX));
+    const up = () => {
+      setResizingAsk(false);
+      setActive(false);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize Ask Orama"
+      aria-valuenow={width}
+      tabIndex={0}
+      title="Drag to resize · double-click to reset"
+      onPointerDown={start}
+      onDoubleClick={() => onResize(ASK_DEFAULT_WIDTH)}
+      onKeyDown={(e) => {
+        if (e.key === "ArrowLeft") onResize(width + 24);
+        else if (e.key === "ArrowRight") onResize(width - 24);
+        else return;
+        e.preventDefault();
+      }}
+      className="group absolute top-0 bottom-0 -left-[3px] z-10 hidden w-[7px] cursor-col-resize focus:outline-none md:block"
+    >
+      <div className={active ? "mx-auto h-full w-[2px] bg-action" : "mx-auto h-full w-[2px] bg-transparent group-hover:bg-action/60 group-focus-visible:bg-action"} />
+    </div>
+  );
+}
+
+export function AskPanel({
+  onClose,
+  from,
+  width,
+  onResize,
+  overlay,
+}: {
+  onClose: () => void;
+  from: string;
+  width: number;
+  onResize: (width: number) => void;
+  overlay: boolean;
+}) {
   const { workspaceId, space } = useSession();
   return (
-    <aside className="ask-panel" aria-label="Ask Orama">
+    <aside className="ask-panel" data-overlay={overlay || undefined} style={{ width }} aria-label="Ask Orama">
+      <ResizeHandle width={width} onResize={onResize} />
       <div className="flex items-center gap-2 border-b border-[var(--lake-border-subtle)] px-4 py-2">
         <Sparkles size={15} aria-hidden />
         <div className="min-w-0 flex-1">

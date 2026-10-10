@@ -18,7 +18,7 @@ export default function AgentsPage() {
   const { customerId } = useWorkspace();
   const query = qs({ customer_id: customerId });
   useTrail([
-    { label: "Train", to: ws(`/train/data?${query}`) },
+    { label: "Train", to: ws(`/train/agents?${query}`) },
     { label: "Agents", to: ws(`/train/agents?${query}`) },
   ]);
   return (

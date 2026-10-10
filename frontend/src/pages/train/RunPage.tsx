@@ -23,7 +23,7 @@ export default function RunPage() {
     refetchInterval: (query) => (UNFINISHED.has(text(query.state.data as Row | undefined, "status")) ? 15_000 : false),
   });
   useTrail([
-    { label: "Train", to: path(`/train/data?${space}`) },
+    { label: "Train", to: path(`/train/agents?${space}`) },
     { label: "Runs", to: path(`/train/runs?${space}`) },
     entityCrumb(id),
   ]);

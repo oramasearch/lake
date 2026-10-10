@@ -22,7 +22,7 @@ export default function GrantsPage() {
             what="grants"
             rows={grants.data}
             rowKey={(g) => g.id}
-            empty={<PanelEmpty>No direct grants on this object. Access to it comes from the space, organization or team above it.</PanelEmpty>}
+            empty={<PanelEmpty>No direct grants on this object. Access to it comes from the workspace, organization or team above it.</PanelEmpty>}
             columns={[
               { key: "principal", label: "Principal", render: (g) => <code>{g.principal_taap_id}</code> },
               { key: "role", label: "Role", render: (g) => <RoleBadge role={g.role} /> },

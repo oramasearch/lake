@@ -42,7 +42,7 @@ export default function WorkspacesPage() {
   return (
     <Page eyebrow="Ship" title="Workspaces" sub="Isolated environments for your space.">
       {!customerId ? (
-        <div className="panel empty">You have no space to work in yet.</div>
+        <div className="panel empty">You have no workspace yet.</div>
       ) : listed.isLoading ? (
         <Skeleton />
       ) : listed.isError ? (

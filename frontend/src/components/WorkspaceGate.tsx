@@ -64,7 +64,7 @@ export function WorkspaceGate({
   returnTo?: string;
 }) {
   const { q, customerId, workspaceId } = useWorkspaceStatus();
-  if (!customerId) return <div className="panel empty">You have no space to work in yet.</div>;
+  if (!customerId) return <div className="panel empty">You have no workspace yet.</div>;
   if (!workspaceId || q.isLoading) return <Skeleton />;
   if (q.isError) {
     const message = (q.error as ApiError)?.message ?? "";

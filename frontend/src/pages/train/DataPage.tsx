@@ -22,14 +22,14 @@ export default function DataPage() {
   const ws = useWsPath();
   const space = qs({ customer_id: customerId });
   useTrail([
-    { label: "Train", to: ws(`/train/data?${space}`) },
-    { label: "Data", to: ws(`/train/data?${space}`) },
+    { label: "Data", to: "/repositories" },
+    { label: "Datasets", to: ws(`/train/data?${space}`) },
     ...(browse ? [entityCrumb(browse)] : []),
   ]);
   const error = params.get("error");
   return (
     <WorkspaceFrame
-      eyebrow="Train"
+      eyebrow="Data"
       title={browse ? `Data: ${browse}` : "Data"}
       sub={SUB}
       before={
@@ -731,7 +731,7 @@ function Storage() {
       <NewStorage providers={providerList} providersError={providers.isError ? providers.error : null} />
       {connection && (
         <Modal title={`Connection to ${text(connection, "name")}`} onClose={() => setConnection(null)}>
-          <p>What a service in your space mounts or calls to use it. It is not shown again unless you ask.</p>
+          <p>What a service in your workspace mounts or calls to use it. It is not shown again unless you ask.</p>
           <dl>
             {Object.entries(connection)
               .filter(([key]) => key !== "name")

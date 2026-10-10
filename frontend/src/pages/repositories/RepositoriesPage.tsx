@@ -129,13 +129,13 @@ function CreateRepository({ workspaceId }: { workspaceId: string | null }) {
     <section className="panel">
       <h2>Create a Repository</h2>
       <p>
-        A repository belongs to one workspace of a space, and stays there. Your personal space is marked <em>your personal space</em> below.
+        A repository belongs to one workspace, and stays there. Your own workspaces are marked <em>yours</em> below.
       </p>
       <Form onSubmit={submit} error={formError}>
         <Field label="Workspace" required error={fieldError(error, "workspace_id")}>
           <select value={workspace} onChange={(e) => setWorkspace(e.target.value)}>
             {spaces.map((space) => (
-              <optgroup key={space.id} label={space.name + (space.personal ? " (your personal space)" : "")}>
+              <optgroup key={space.id} label={space.personal ? "Your workspaces" : space.name}>
                 {space.workspaces.map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.name}

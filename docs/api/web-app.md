@@ -38,7 +38,7 @@ answers `401`: a visitor, or a browser holding a dead cookie, gets `signed_in: f
 | `signed_in`, `administrator` | yes | a credential was accepted; it is the operator credential |
 | `user_id`, `taap_id`, `session_id`, `credential_kind`, `display_name`, `email` | a person | the person and the credential this request carries (`session_id` is what `revoke_session` takes) |
 | `mfa_enrolled` | yes | the person has an active TOTP enrollment (`Store::mfa_enrolled`); false for a visitor and the operator |
-| `spaces` | yes | what `list_customers` gives the caller: `{id, name, label, personal, kind, workspaces}`; `label` is *Personal space* for the person's own individual space, else the name; `workspaces` are its live ones (`desired` not `deleted`) as `{id, name, customer_id, status}`, `status` the operator's phase in lower case (`pending` until it reports) |
+| `spaces` | yes | what `list_customers` gives the caller: `{id, name, label, personal, kind, workspaces}`; `label` is *Your workspaces* for the person's own individual space, else the name; `workspaces` are its live ones (`desired` not `deleted`) as `{id, name, customer_id, status}`, `status` the operator's phase in lower case (`pending` until it reports) |
 | `customer_id` | when there is one | the space asked for when the caller can see it, else the space of the workspace asked for, else the first |
 | `workspace_id` | when there is one | the workspace asked for when it is live in one of the caller's spaces, else that space's only workspace, else absent |
 | `clerk` | yes | `{enabled, publishable_key, frontend_api}` from `LAKE_CLERK_PUBLISHABLE_KEY` ([clerk.md](clerk.md)) |

@@ -40,7 +40,9 @@ export function WorkspacePicker() {
     setOpen(false);
   };
   const label = workspace ? workspace.name : "Choose a workspace";
-  const spaceLabel = space?.label ?? viewer.spaces[0]?.label;
+  // The viewer's own workspaces are just workspaces; an organization's are named by it.
+  const owner = space ?? viewer.spaces[0];
+  const spaceLabel = owner && !owner.personal ? owner.label : undefined;
 
   return (
     <div ref={box} className="relative">
@@ -62,7 +64,7 @@ export function WorkspacePicker() {
         <div role="listbox" className="absolute right-0 z-50 mt-1 max-h-[70vh] w-[280px] overflow-auto rounded-[6px] border border-hairline bg-overlay py-1 shadow-popover">
           {viewer.spaces.map((s) => (
             <div key={s.id} className="py-1">
-              <div className="px-3 pt-1 pb-1 font-mono text-[10px] font-semibold tracking-[0.12em] text-ink-3 uppercase">{s.label}</div>
+              <div className="px-3 pt-1 pb-1 font-mono text-[10px] font-semibold tracking-[0.12em] text-ink-3 uppercase">{s.personal ? "Your workspaces" : s.label}</div>
               {s.workspaces.map((w) => (
                 <button
                   key={w.id}

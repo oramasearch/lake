@@ -19,7 +19,7 @@ export default function AgentPage() {
   const agent = useWq<Row>(id ? "get_agent" : null, { id });
   const name = agent.data ? text(agent.data, "name") : "";
   useTrail(
-    [{ label: "Train", to: ws(`/train/data?${query}`) }, { label: "Agents", to: ws(`/train/agents?${query}`) }, entityCrumb(id || "Agent")],
+    [{ label: "Train", to: ws(`/train/agents?${query}`) }, { label: "Agents", to: ws(`/train/agents?${query}`) }, entityCrumb(id || "Agent")],
     `Agent: ${name || id}`,
   );
   return (

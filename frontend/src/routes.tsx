@@ -41,6 +41,7 @@ export const SCREENS: Screen[] = [
 
 const SECTION_LABELS: Record<SectionKey, string> = {
   top: "",
+  data: "Data",
   design: "Design",
   train: "Train",
   ship: "Ship",
@@ -65,16 +66,18 @@ const ALL: Audience[] = ["visitor", "account", "operator"];
  * the operator sees Administration instead. */
 export const NAV: NavItem[] = [
   { section: "top", path: "/", label: "Home", icon: "home", audience: ALL },
-  { section: "top", path: "/repositories", label: "Repositories", icon: "repository", audience: ALL },
-  { section: "top", path: "/shared-with-me", label: "Shared with Me", icon: "repository", audience: ["account"] },
-  { section: "top", path: "/search", label: "Search", icon: "search", audience: AO },
+  // Data: where a person's data lives and is found (Steve, 2026-10-10). Datasets is the Train →
+  // Data page, kept at its address.
+  { section: "data", path: "/repositories", label: "Repositories", icon: "repository", audience: ALL },
+  { section: "data", path: "/shared-with-me", label: "Shared with Me", icon: "repository", audience: ["account"] },
+  { section: "data", path: "/search", label: "Search", icon: "search", audience: AO },
+  { section: "data", path: "/train/data", label: "Datasets", icon: "metering", audience: AO },
   { section: "design", path: "/design/projects", label: "Projects", icon: "audit", audience: AO },
   { section: "design", path: "/design/opportunities", label: "Opportunities", icon: "search", audience: AO },
   { section: "design", path: "/design/solutions", label: "Solutions", icon: "audit", audience: AO },
   { section: "design", path: "/design/methodologies", label: "Methodologies", icon: "metering", audience: AO },
   { section: "design", path: "/design/agent-library", label: "Agent Library", icon: "agent", audience: AO },
   { section: "train", path: "/train/agents", label: "Agents", icon: "agent", audience: AO },
-  { section: "train", path: "/train/data", label: "Data", icon: "metering", audience: AO },
   { section: "train", path: "/train/runs", label: "Runs", icon: "metering", audience: AO },
   { section: "train", path: "/train/experiments", label: "Experiments", icon: "metering", audience: AO },
   { section: "train", path: "/train/streams", label: "Streams", icon: "streams", audience: AO },

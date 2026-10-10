@@ -14,6 +14,7 @@ import {
   ChevronsRight,
   Code2,
   Compass,
+  Database,
   FlaskConical,
   Home,
   type LucideIcon,
@@ -37,15 +38,17 @@ import { CommandPalette } from "./CommandPalette";
 import { ScreenBoundary } from "./ScreenBoundary";
 import { WorkspacePicker } from "./WorkspacePicker";
 import { LakeMark } from "./LakeMark";
+import { resizingAsk, useAskWidth } from "@/lib/askWidth";
 
 // Ask Orama loads the first time it is opened, so the shell carries no Markdown or conversation code.
 const AskPanel = lazy(() => import("./AskPanel").then((m) => ({ default: m.AskPanel })));
 
-/** G then this letter jumps to the group's first page. */
-const JUMPS: Record<string, SectionKey> = { d: "design", t: "train", s: "ship", o: "organization", a: "administration" };
+/** G then this letter jumps to the group's first page (R for Data: its first page is Repositories). */
+const JUMPS: Record<string, SectionKey> = { r: "data", d: "design", t: "train", s: "ship", o: "organization", a: "administration" };
 
 /** Each group's icon, and the icons of the ungrouped items at the top. */
 const SECTION_ICONS: Partial<Record<SectionKey, LucideIcon>> = {
+  data: Database,
   design: Compass,
   train: FlaskConical,
   ship: Rocket,
@@ -59,6 +62,16 @@ const TOP_ICONS: Record<string, LucideIcon> = {
   "/shared-with-me": Share2,
   "/search": Search,
 };
+
+function useViewportWidth(): number {
+  const [width, setWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const on = () => setWidth(window.innerWidth);
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
+  return width;
+}
 
 function useMediaQuery(query: string): boolean {
   const [matches, setMatches] = useState(() => matchMedia(query).matches);
@@ -117,6 +130,11 @@ export function Shell({ children }: { children: ReactNode }) {
   const trailState = useTrailState();
   const signedInPerson = viewer.signed_in && !viewer.administrator;
   const rail = collapsed && wide;
+  const [askWidth, setAskWidth] = useAskWidth();
+  const viewport = useViewportWidth();
+  // Ask Orama pushes the page aside only while the page keeps room to read; narrower, it lies over
+  // the page, which keeps its own layout (rev-os's assistant rule).
+  const askPushes = ask && viewport >= 1280 && viewport - (rail ? 60 : 232) - askWidth >= 900;
 
   useEffect(() => {
     setDrawer(false);
@@ -315,7 +333,10 @@ export function Shell({ children }: { children: ReactNode }) {
           <RailPerson rail={rail} onToggle={toggleRail} />
         </nav>
 
-        <div className="min-w-0">
+        <div
+          className={cx("min-w-0", !resizingAsk() && "transition-[margin] duration-200")}
+          style={askPushes ? { marginRight: askWidth } : undefined}
+        >
           <header className="sticky top-[2px] z-30 flex h-12 items-center gap-2 border-b border-hairline bg-canvas/90 px-3 backdrop-blur sm:gap-3 sm:px-6">
             <button type="button" onClick={() => setDrawer(true)} className="-ml-1 rounded-[5px] p-2 text-ink-2 hover:bg-raised hover:text-ink lg:hidden" aria-label="Open the navigation">
               <Menu size={18} />
@@ -360,7 +381,13 @@ export function Shell({ children }: { children: ReactNode }) {
       </div>
       {ask && signedInPerson && (
         <Suspense fallback={null}>
-          <AskPanel onClose={() => setAsk(false)} from={localPath(location.pathname) + location.search} />
+          <AskPanel
+            onClose={() => setAsk(false)}
+            from={localPath(location.pathname) + location.search}
+            width={askWidth}
+            onResize={setAskWidth}
+            overlay={!askPushes}
+          />
         </Suspense>
       )}
       {palette && <CommandPalette onClose={() => setPalette(false)} />}

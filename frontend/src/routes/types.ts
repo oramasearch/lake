@@ -7,7 +7,7 @@ import type { ComponentType, LazyExoticComponent } from "react";
 export type Audience = "visitor" | "account" | "operator";
 
 /** The rail's groups, in order. "top" items have no group label. */
-export type SectionKey = "top" | "design" | "train" | "ship" | "organization" | "administration" | "developer" | "account" | "none";
+export type SectionKey = "top" | "data" | "design" | "train" | "ship" | "organization" | "administration" | "developer" | "account" | "none";
 
 export type Screen = {
   /** The router pattern, without the `/w/:workspaceId` prefix. Keep lake's existing URL and query

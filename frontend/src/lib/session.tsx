@@ -8,7 +8,8 @@ import { prefetchRead, setSignedIn, setWorkspace, useRead } from "./api";
 
 /** A workspace the viewer can choose. */
 export type WorkspaceChoice = { id: string; name: string; customer_id: string; status?: string };
-/** A space (customer) the viewer can act in, with its live workspaces. "Personal space" is the
+/** A space (customer) the viewer can act in, with its live workspaces. The UI never names the
+ * viewer's own space: its workspaces read "Your workspaces" (Steve, 2026-10-10). `personal` marks the
  * viewer's own individual customer. */
 export type SpaceChoice = { id: string; name: string; label: string; personal: boolean; kind?: string; workspaces: WorkspaceChoice[] };
 

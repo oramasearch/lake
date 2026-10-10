@@ -202,7 +202,7 @@ function InvitationsTab({ organizationId, invitations }: { organizationId: strin
   return (
     <>
       <Panel title="Invite a Member">
-        <p>The person joins from their Organizations page once they sign in with that email address, or with the personal space that has that handle.</p>
+        <p>The person joins from their Organizations page once they sign in with that email address, or with the workspace that has that handle.</p>
         <Form onSubmit={submit} error={inviteeError || daysError ? null : error}>
           <Field label="Email or handle" required error={inviteeError}>
             <input name="invitee" value={invitee} onChange={(e) => setInvitee(e.target.value)} />
@@ -368,7 +368,7 @@ function UsageTab({ organizationId }: { organizationId: string }) {
   let body;
   if (customers.isLoading || usage.isLoading) body = <Skeleton />;
   else if (failed) body = <ErrorBlock error={failed.error} retry={() => void failed.refetch()} what="usage" />;
-  else if (!space) body = <p className="empty">No space is attached to this organization.</p>;
+  else if (!space) body = <p className="empty">No workspace is attached to this organization.</p>;
   else {
     const quota = Number(usage.data?.quota_bytes ?? 0);
     const total = usage.data?.summary?.storage?.total_bytes ?? 0;

@@ -65,7 +65,7 @@ export default function PackagesPage() {
       {KINDS.map((kind) => (
         <section key={kind.key} className="panel">
           <h2>{kind.title}</h2>
-          {kind.key === "oci" && images.isError && <ErrorBlock error={images.error} retry={() => void images.refetch()} what="this space's images" />}
+          {kind.key === "oci" && images.isError && <ErrorBlock error={images.error} retry={() => void images.refetch()} what="your workspace's images" />}
           {lists[kind.key].length === 0 ? (
             kind.key === "oci" && images.isLoading ? (
               <Skeleton lines={2} />

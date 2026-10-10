@@ -98,7 +98,7 @@ export default function RunsPage() {
   const { customerId } = useWorkspace();
   const space = qs({ customer_id: customerId });
   useTrail([
-    { label: "Train", to: path(`/train/data?${space}`) },
+    { label: "Train", to: path(`/train/agents?${space}`) },
     { label: "Runs", to: path(`/train/runs?${space}`) },
   ]);
   return (

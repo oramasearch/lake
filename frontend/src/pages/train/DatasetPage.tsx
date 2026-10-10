@@ -71,11 +71,11 @@ export default function DatasetPage() {
   const { customerId } = useWorkspace();
   const ws = useWsPath();
   const space = qs({ customer_id: customerId });
-  useTrail([{ label: "Train", to: ws(`/train/data?${space}`) }, { label: "Data", to: ws(`/train/data?${space}`) }, ...(name ? [entityCrumb(name)] : [{ label: "Dataset" }])]);
+  useTrail([{ label: "Data", to: "/repositories" }, { label: "Datasets", to: ws(`/train/data?${space}`) }, ...(name ? [entityCrumb(name)] : [{ label: "Dataset" }])]);
   const error = params.get("error");
   return (
     <WorkspaceFrame
-      eyebrow="Train"
+      eyebrow="Data"
       title={name ? `Dataset: ${name}` : "Dataset"}
       before={
         error ? (
