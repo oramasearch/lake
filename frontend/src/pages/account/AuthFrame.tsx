@@ -3,7 +3,8 @@
 import { type ReactNode, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useTheme } from "@/lib/theme";
-import { Icon } from "@/components/Icon";
+import { Moon, Sun } from "lucide-react";
+import { LakeMark } from "@/components/LakeMark";
 import { useSession } from "@/lib/session";
 import { isLeaving, leaveFor, returnTarget } from "./signIn";
 import "@/styles/account.css";
@@ -14,30 +15,38 @@ export function AuthFrame({ children, title }: { children: ReactNode; title: str
     document.title = `lake — ${title}`;
   }, [title]);
   return (
-    <div className="auth-frame">
+    <div className="auth-plane">
+      <div className="brand-strip fixed inset-x-0 top-0 z-40" />
       <a className="skip-link" href="#main-content">
         Skip to content
       </a>
-      <header className="auth-header">
-        <Link className="brand" to="/">
-          <span className="brand-mark">
-            <Icon name="lake" />
-          </span>
-          <span>lake</span>
-        </Link>
-        <button
-          type="button"
-          className="theme-toggle"
-          onClick={toggleTheme}
-          aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}
-          aria-pressed={theme === "dark"}
-        >
-          <Icon name="theme" />
-        </button>
-      </header>
-      <main id="main-content" tabIndex={-1}>
-        {children}
-      </main>
+      <button
+        type="button"
+        className="auth-theme"
+        onClick={toggleTheme}
+        aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}
+        aria-pressed={theme === "dark"}
+      >
+        {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+      </button>
+      <div className="auth-layout">
+        <section className="auth-brand" aria-label="lake">
+          <Link to="/" className="auth-brand-link">
+            <LakeMark size={30} />
+            <span className="auth-kicker">Orama</span>
+          </Link>
+          <p className="auth-name">lake</p>
+          <p className="auth-tagline">Design, train and ship AI on your own data, in your own workspace.</p>
+          <ul className="auth-stages">
+            <li>Design</li>
+            <li>Train</li>
+            <li>Ship</li>
+          </ul>
+        </section>
+        <main id="main-content" tabIndex={-1} className="auth-card">
+          {children}
+        </main>
+      </div>
     </div>
   );
 }

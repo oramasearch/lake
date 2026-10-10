@@ -76,6 +76,17 @@ function postToLake(token: string, next: string) {
   form.submit();
 }
 
+/** Clerk's form inside lake's card: lake's blue, IBM Plex and radius, and no card of its own. */
+const CLERK_APPEARANCE = {
+  variables: { colorPrimary: "#0f62fe", fontFamily: "'IBM Plex Sans', 'Helvetica Neue', Arial, sans-serif", borderRadius: "6px" },
+  elements: {
+    rootBox: { width: "100%" },
+    cardBox: { width: "100%", boxShadow: "none", border: "0" },
+    card: { boxShadow: "none", border: "0", padding: "0", background: "transparent" },
+    header: { display: "none" },
+  },
+};
+
 export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
   const { viewer } = useSession();
   const location = useLocation();
@@ -133,8 +144,8 @@ export function ClerkSignIn({ mode }: { mode: "sign-in" | "sign-up" }) {
         });
         // Clerk returns to this page, keeping the pending return, and the exchange runs here.
         const back = `/sign-in${kept}`;
-        if (signUp) clerk.mountSignUp(node, { signInUrl: back, forceRedirectUrl: back });
-        else clerk.mountSignIn(node, { signUpUrl: `/sign-up${kept}`, forceRedirectUrl: back });
+        if (signUp) clerk.mountSignUp(node, { signInUrl: back, forceRedirectUrl: back, appearance: CLERK_APPEARANCE });
+        else clerk.mountSignIn(node, { signUpUrl: `/sign-up${kept}`, forceRedirectUrl: back, appearance: CLERK_APPEARANCE });
       } catch (e) {
         if (!cancelled) setStatus(`Sign-in could not load: ${(e as Error).message}`);
       }

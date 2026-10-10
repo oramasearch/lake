@@ -1,8 +1,8 @@
 /** The router: every registered screen, inside the shell unless it is bare (sign-in, public share
  * pages). Workspace pages answer at `/w/:workspaceId<path>`; their unprefixed address opens the
  * remembered or only workspace, or asks for one. */
-import { Suspense, type ComponentType } from "react";
-import { Navigate, Route, Routes, useLocation, useParams } from "react-router-dom";
+import { Suspense, useEffect, type ComponentType } from "react";
+import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { SessionProvider, useSession } from "@/lib/session";
 import { TrailProvider } from "@/lib/trail";
 import { Page, Skeleton, Empty, Button } from "@/lib/ui";
@@ -10,6 +10,7 @@ import { audienceOf, SCREENS, type Screen } from "@/routes";
 import { Shell } from "@/components/Shell";
 import { SessionEndedNotice } from "@/components/SessionEnded";
 import { ScreenBoundary } from "@/components/ScreenBoundary";
+import { preloadPages } from "@/lib/lazyPage";
 
 function Loading() {
   return (
@@ -63,38 +64,59 @@ function WorkspaceHome() {
   return <Navigate to={`/w/${workspaceId}/design/projects${location.search}`} replace />;
 }
 
-function render(screen: Screen) {
+function page(screen: Screen) {
   const Component = screen.component as ComponentType<object>;
-  const page = (
+  return (
     <Guard screen={screen}>
       <Component />
     </Guard>
   );
-  if (screen.bare) {
-    return (
-      <ScreenBoundary>
-        <Suspense fallback={<Loading />}>{page}</Suspense>
-      </ScreenBoundary>
-    );
-  }
-  return <Shell>{page}</Shell>;
+}
+
+/** Bare pages (sign-in, public share links) render without the shell. */
+function bare(screen: Screen) {
+  return (
+    <ScreenBoundary>
+      <Suspense fallback={<Loading />}>{page(screen)}</Suspense>
+    </ScreenBoundary>
+  );
+}
+
+/** One shell for every console page: it stays mounted across navigation, so the rail, the top bar
+ * and their state survive, and only the page area waits for a page's code. */
+function ShellLayout() {
+  return (
+    <Shell>
+      <Outlet />
+    </Shell>
+  );
 }
 
 export default function App() {
+  // Once the first page is up, fetch the other pages' code while the browser is idle.
+  useEffect(() => {
+    const timer = setTimeout(preloadPages, 1500);
+    return () => clearTimeout(timer);
+  }, []);
   return (
     <TrailProvider>
       <SessionProvider fallback={<Loading />}>
         <Routes>
           <Route path="/w/:workspaceId" element={<WorkspaceHome />} />
           <Route path="/w/:workspaceId/" element={<WorkspaceHome />} />
-          {SCREENS.flatMap((screen) =>
-            screen.workspace
-              ? [
-                  <Route key={`w${screen.path}`} path={`/w/:workspaceId${screen.path}`} element={render(screen)} />,
-                  <Route key={screen.path} path={screen.path} element={<Shell><WorkspaceRedirect screen={screen} /></Shell>} />,
-                ]
-              : [<Route key={screen.path} path={screen.path} element={render(screen)} />],
-          )}
+          {SCREENS.filter((screen) => screen.bare).map((screen) => (
+            <Route key={screen.path} path={screen.path} element={bare(screen)} />
+          ))}
+          <Route element={<ShellLayout />}>
+            {SCREENS.filter((screen) => !screen.bare).flatMap((screen) =>
+              screen.workspace
+                ? [
+                    <Route key={`w${screen.path}`} path={`/w/:workspaceId${screen.path}`} element={page(screen)} />,
+                    <Route key={screen.path} path={screen.path} element={<WorkspaceRedirect screen={screen} />} />,
+                  ]
+                : [<Route key={screen.path} path={screen.path} element={page(screen)} />],
+            )}
+          </Route>
         </Routes>
         <SessionEndedNotice />
       </SessionProvider>

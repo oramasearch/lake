@@ -210,6 +210,16 @@ export function useRead<T = Row>(name: string | null, input?: Params, options?: 
   });
 }
 
+/** Start a read now, under the key `useRead` will look for, so a page that is still loading its
+ * code finds the answer already on its way. */
+export function prefetchRead(name: string, input?: Params, options?: CallOptions) {
+  const scope = options && options.workspace !== undefined ? (options.workspace ? `/w/${encodeURIComponent(options.workspace)}` : "") : workspacePrefix;
+  void queryClient.prefetchQuery({
+    queryKey: [name, scope, input ?? {}],
+    queryFn: ({ signal }) => read(name, input, { workspace: options?.workspace, signal }),
+  });
+}
+
 /** A read capability whose value holds a list, as a query of the list itself. `pick` names the
  * field that carries it (most lake reads answer `{<plural>: [...]}`); with no `pick` the first
  * array-valued field is taken. */

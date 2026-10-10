@@ -363,8 +363,13 @@ TEST(WebAppHttp, BrowsersGetTheAppAndCustomDomainsTheirHostedSignIn) {
         EXPECT_EQ(response_header(page, "content-type"), "text/html; charset=utf-8") << path;
         EXPECT_EQ(response_header(page, "content-security-policy"), "frame-ancestors 'self'")
             << path;
-        EXPECT_EQ(response_header(page, "cache-control"), "no-cache") << path;
+        // The page carries this request's viewer, so it is personal and never stored by a cache.
+        EXPECT_EQ(response_header(page, "cache-control"), "private, no-store") << path;
         EXPECT_NE(page.find("<div id=\"root\">"), std::string::npos) << path;
+        EXPECT_NE(page.find("<script id=\"lake-viewer\" type=\"application/json\">{"),
+                  std::string::npos)
+            << path << ": the first paint needs no viewer round trip";
+        EXPECT_NE(page.find("\"signed_in\":false"), std::string::npos) << path;
         EXPECT_TRUE(response_header(page, "set-cookie").empty())
             << path << ": no lake_workspace cookie remembers a page any more";
         const std::string other = get(connection, path, false);

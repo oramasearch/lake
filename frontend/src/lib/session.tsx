@@ -2,9 +2,9 @@
  * resolved viewer the server used to render navigation (signed in, operator, the spaces and
  * workspaces the person can choose, whether sign-in is Clerk). The workspace in the URL
  * (`/w/<id>/…`) is the context for Design, Train and Ship; the server enforces scope regardless. */
-import { createContext, type ReactNode, useContext, useEffect, useMemo } from "react";
+import { createContext, type ReactNode, useContext, useEffect, useMemo, useRef } from "react";
 import { useLocation } from "react-router-dom";
-import { setSignedIn, setWorkspace, useRead } from "./api";
+import { prefetchRead, setSignedIn, setWorkspace, useRead } from "./api";
 
 /** A workspace the viewer can choose. */
 export type WorkspaceChoice = { id: string; name: string; customer_id: string; status?: string };
@@ -72,6 +72,20 @@ function remember(id: string) {
   }
 }
 
+/** The `viewer` answer lake put in this page (index.html's `#lake-viewer`), once. */
+let embedded: Viewer | null | undefined;
+function embeddedViewer(): Viewer | null {
+  if (embedded !== undefined) return embedded;
+  try {
+    const node = document.getElementById("lake-viewer");
+    const envelope = node ? JSON.parse(node.textContent ?? "") : null;
+    embedded = envelope && envelope.ok ? (envelope.value as Viewer) : null;
+  } catch {
+    embedded = null;
+  }
+  return embedded;
+}
+
 /** The workspace id in a page path: `/w/<id>/…`. */
 export function workspaceFromPath(pathname: string): string | null {
   const match = /^\/w\/([^/]+)/.exec(pathname);
@@ -82,7 +96,22 @@ export function SessionProvider({ children, fallback }: { children: ReactNode; f
   const location = useLocation();
   const fromPath = workspaceFromPath(location.pathname);
   const asked = fromPath ?? rememberedWorkspace();
-  const q = useRead<Viewer>("viewer", asked ? { workspace_id: asked } : undefined, { workspace: null, staleTime: 60_000 });
+  // Lake embeds this request's `viewer` answer in index.html: the first paint needs no round trip.
+  // It answers for the page's /w/<id>; asked for another (remembered) workspace, it still paints
+  // at once and is read again in the background.
+  // Only the first read, for the page lake answered, starts from the embedded answer; a later
+  // workspace's read must not briefly show the first one's.
+  const first = useRef<string | null | undefined>(undefined);
+  if (first.current === undefined) first.current = asked ?? null;
+  const fromPage = useMemo(() => embeddedViewer(), []);
+  const initial = (asked ?? null) === first.current ? fromPage : null;
+  const exact = !!initial && (asked ?? null) === (fromPath ?? null);
+  const q = useRead<Viewer>("viewer", asked ? { workspace_id: asked } : undefined, {
+    workspace: null,
+    staleTime: 60_000,
+    initialData: initial ?? undefined,
+    initialDataUpdatedAt: exact ? Date.now() : 0,
+  });
   const viewer = q.data ?? (q.isError ? ANONYMOUS : null);
   const workspaceId = fromPath ?? viewer?.workspace_id ?? null;
   // Every capability called from a workspace page (/w/<id>/…) is called under the same prefix.
@@ -95,6 +124,11 @@ export function SessionProvider({ children, fallback }: { children: ReactNode; f
   useEffect(() => {
     if (fromPath) remember(fromPath);
   }, [fromPath]);
+  // A workspace page's gate reads workspace_status first; start it with the page's code.
+  const spaceForPath = viewer?.spaces.find((s) => s.workspaces.some((w) => w.id === fromPath))?.id;
+  useEffect(() => {
+    if (fromPath && spaceForPath) prefetchRead("workspace_status", { customer_id: spaceForPath, workspace_id: fromPath });
+  }, [fromPath, spaceForPath]);
   const value = useMemo<Session | null>(() => {
     if (!viewer) return null;
     const workspaces = (viewer.spaces ?? []).flatMap((s) => s.workspaces ?? []);

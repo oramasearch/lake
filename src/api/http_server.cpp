@@ -11559,6 +11559,43 @@ struct ApiServer::Impl {
     }
 
     // A file of the embedded web app (docs/ui/web-app.md); 404 when the build has no such file.
+    // The app's index.html with the `viewer` answer for this request embedded in it
+    // (docs/ui/web-app.md#the-first-paint): the same capability the app would call first, so the
+    // first paint needs no round trip. Personal, so never stored by a cache.
+    boost::http::route_task serve_web_app_index(boost::http::route_params& route,
+                                                const std::string& path) {
+        std::string html(web_app_index());
+        if (html.empty()) {
+            return serve_web_app_file(route, "/index.html");
+        }
+        ApiContext context = context_for(route);
+        nlohmann::json input = nlohmann::json::object();
+        const std::string workspace = workspace_path_id(path);
+        if (!workspace.empty()) {
+            input["workspace_id"] = workspace;
+        }
+        const ApiResult viewer = registry.call("viewer", input, context);
+        if (viewer.ok) {
+            std::string data = viewer.envelope().dump();
+            // Inside <script>, "<" is the only character that could end the element early.
+            std::string escaped;
+            escaped.reserve(data.size());
+            for (const char c : data) {
+                escaped += c == '<' ? std::string("\\u003c") : std::string(1, c);
+            }
+            const std::string tag =
+                "<script id=\"lake-viewer\" type=\"application/json\">" + escaped + "</script>";
+            if (const std::size_t head = html.find("</head>"); head != std::string::npos) {
+                html.insert(head, tag);
+            }
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         std::move(html),
+                         "text/html; charset=utf-8",
+                         "private, no-store");
+    }
+
     boost::http::route_task serve_web_app_file(boost::http::route_params& route, std::string path) {
         const WebAppAsset* asset = web_app_asset(path);
         if (asset == nullptr) {
@@ -12739,7 +12776,7 @@ bool ApiServer::start() {
         const auto timing = request_timing(route);
         const auto start = timing ? timing->started : std::chrono::steady_clock::now();
         const RequestTimingScope timing_scope(route, start);
-        auto result = co_await impl.serve_web_app_file(route, "/index.html");
+        auto result = co_await impl.serve_web_app_index(route, path);
         impl.record_request(route, "web_app", start);
         co_return result;
     }));

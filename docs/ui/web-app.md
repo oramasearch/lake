@@ -42,6 +42,39 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 | `src/components/WorkspaceGate.tsx` | The gate a Design, Train or Ship page shows while its workspace Zetta is not ready: why, Start, or the page. |
 | `src/lib/markdown.tsx` | Markdown with lake's heading anchors; raw HTML stays text. |
 
+## The look
+
+The app follows rev-os's visual language on lake's own colours and type (Steve, 2026-10-10):
+
+- a 2px brand strip;
+- a 232px rail of lake's groups with lucide icons, where the current group is open and lists its
+  pages on a hairline;
+- a slim, blurred top bar with the breadcrumb, a workspace pill, a search box (⌘K) and Ask Orama;
+- mono uppercase kickers for eyebrows, section titles, table heads and field labels;
+- 6px hairline cards and tables;
+- 32px controls;
+- dashed empty states;
+- a dark sign-in plane with the brand on the left and the form card on the right.
+
+`src/styles/look.css` restyles lake's component classes in place, so every page built from them
+takes the look without being rewritten. The shell (`components/Shell.tsx`), the workspace picker
+and the sign-in frame (`pages/account/AuthFrame.tsx`) draw themselves with Tailwind utilities bound
+to the same tokens. The colours stay lake's: the action blue, the light and dark surfaces, and IBM
+Plex. The look adds one token, `--lake-rule`, a softer control border.
+
+## The first paint
+
+Lake answers a page request with `index.html` and this request's `viewer` answer embedded as
+`<script id="lake-viewer" type="application/json">`. It is the same capability the app would
+call first, so the shell and the page start without a round trip. Because the answer is personal,
+the page is sent `Cache-Control: private, no-store`. Three more things keep later steps short:
+
+- **The workspace status starts with the page's code.** A workspace page's gate reads
+  `workspace_status` first; the session starts that read alongside the code.
+- **Every page's code is fetched while the browser is idle**, after the first page is up, so
+  later navigation does not wait on a chunk.
+- **One shell stays mounted across navigation**, as a layout route; only the page area waits.
+
 ## Rules for a page
 
 - **Keep lake's URLs.** Every page keeps its path and query parameters (`/repository?id=…`,

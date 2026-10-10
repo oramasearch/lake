@@ -7,9 +7,9 @@
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities);
 @import "./styles/tokens.css" layer(base);
-@import "./styles/fonts.css" layer(base);
 @import "./styles/lake.css" layer(components);
 @import "./styles/app.css" layer(components);
+@import "./styles/look.css" layer(components);
 
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
@@ -27,7 +27,8 @@
   --color-ink-disabled: var(--lake-text-disabled);
   --color-on-action: var(--lake-text-on-action);
   --color-hairline: var(--lake-border-subtle);
-  --color-rule: var(--lake-border-strong);
+  --color-rule: var(--lake-rule);
+  --color-raised: var(--lake-raised);
   --color-action: var(--lake-action);
   --color-action-soft: var(--lake-action-soft);
   --color-action-filled: var(--lake-action-filled);
