@@ -515,9 +515,20 @@ export function Form({
         void onSubmit();
       }}
     >
-      {error ? <ErrorBlock error={error} what={undefined} /> : null}
+      {error ? <FormError error={error} /> : null}
       {children}
     </form>
+  );
+}
+
+/** A refused write, in lake's words: the API's message (a field's own error sits under it). */
+export function FormError({ error }: { error: unknown }) {
+  if (!error) return null;
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    <p className="error" role="alert">
+      {message}
+    </p>
   );
 }
 

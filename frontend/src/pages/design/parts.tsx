@@ -3,8 +3,6 @@
  * workspace breadcrumb. */
 import { type ReactNode, useCallback, useState } from "react";
 import { Link } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { Badge } from "@/lib/ui";
 import { useTrail, entityCrumb, type Crumb } from "@/lib/trail";
 import { useWsPath, qs } from "./api";
@@ -20,14 +18,7 @@ export function Panel({ title, children, id, className, role }: { title?: ReactN
   );
 }
 
-/** Markdown rendered in the browser, never as raw HTML. */
-export function Markdown({ children, inline }: { children: string; inline?: boolean }) {
-  return (
-    <div className={inline ? "markdown-body markdown-inline" : "markdown-body"}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
-    </div>
-  );
-}
+export { Markdown } from "@/lib/markdown";
 
 /** A run, check or monitor status as lake's badge (run_status_badge). */
 export function RunBadge({ status }: { status: string }) {

@@ -7,13 +7,11 @@
  * POST go through `postRead`, which answers like `read` and refreshes nothing. */
 import { type ReactNode, useState } from "react";
 import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { act, useRead, type Row } from "@/lib/api";
+import { WorkspaceGate, useWorkspaceStatus, type WorkspaceState } from "@/components/WorkspaceGate";
 import { postRead as libPostRead } from "@/lib/api";
 import { useSession } from "@/lib/session";
-import { Button, ErrorBlock, Page, Skeleton } from "@/lib/ui";
+import { Page } from "@/lib/ui";
 
 /* ------------------------------------------------------------------ calls */
 
@@ -76,89 +74,16 @@ export function qs(values: Record<string, string | number | null | undefined>): 
 
 /* ------------------------------------------------------------------ the workspace frame */
 
-export type WorkspaceState = { requested?: boolean; phase?: string; message?: string; ready?: boolean; workspace_id?: string };
+export type { WorkspaceState } from "@/components/WorkspaceGate";
 
-/** `workspace_status` for the page's workspace; checks again every 15 seconds while the workspace
- * is being prepared (the gate's meta refresh). */
+/** `workspace_status` for the page's workspace (the shared gate's read). */
 export function useWorkspaceState() {
-  return useSpaceRead<WorkspaceState>("workspace_status", {}, {
-    refetchInterval: (query) => {
-      const state = query.state.data as WorkspaceState | undefined;
-      return state && state.requested && !state.ready && state.phase !== "Failed" ? 15_000 : false;
-    },
-  });
+  return useWorkspaceStatus().q;
 }
 
-/** Lake's workspace gate (web_ui.cpp workspace_gate): the workspace failed, is being prepared, or
- * has not been asked for yet. */
-export function WorkspaceGate({ state }: { state: WorkspaceState }) {
-  const { customerId } = useWorkspace();
-  const { refresh } = useSession();
-  if (state.requested) {
-    if (state.phase === "Failed") {
-      const message = state.message ?? "";
-      const quota = message.startsWith("workspace quota reached");
-      return (
-        <>
-          <div className="panel notice status-danger">
-            <h2>Your Workspace Could Not Be Prepared</h2>
-            <p>
-              {quota
-                ? `This lake already runs as many workspaces as it allows (${message}). An operator can raise the limit; yours starts as soon as there is room, or cancel the request below.`
-                : message}
-            </p>
-          </div>
-          <section className="panel">
-            <h2>Cancel This Workspace</h2>
-            <p>Withdraw the request so you can start again later.</p>
-            <Link to={`/workspaces?${qs({ customer_id: customerId })}`}>Cancel workspace</Link>
-          </section>
-        </>
-      );
-    }
-    return (
-      <div className="panel" role="status">
-        <h2>Preparing Your Workspace</h2>
-        <p>
-          lake asked for a Zetta cluster of your own, where your projects, data and models live apart from every other customer's.{" "}
-          {state.phase ? `Status: ${state.phase}.` : "It has not been picked up yet."}
-        </p>
-        <p className="muted">This page checks again every 15 seconds.</p>
-      </div>
-    );
-  }
-  return <StartWorkspace customerId={customerId} onStarted={refresh} />;
-}
-
-function StartWorkspace({ customerId, onStarted }: { customerId: string; onStarted: () => void }) {
-  const start = useAsync();
-  return (
-    <div className="panel">
-      <h2>Start Your Workspace</h2>
-      <p>
-        Design, Train and Ship run on a Zetta cluster of your own, so your projects, data and models are never shared with another customer. It
-        takes a minute or two to prepare.
-      </p>
-      {start.error ? <ErrorBlock error={start.error} /> : null}
-      <Button
-        variant="primary"
-        loading={start.busy}
-        onClick={() =>
-          void start.run(async () => {
-            await act("start_workspace", { customer_id: customerId });
-            onStarted();
-          })
-        }
-      >
-        Start your workspace
-      </Button>
-    </div>
-  );
-}
-
-/** A Design, Train or Ship page (web_ui_workspace): eyebrow, heading, sub, the error, then either
- * why it is unavailable, the workspace gate, or the content. `always` is shown ready or not (the
- * Data page's Storage, the Agents page's Agent Library). */
+/** A Design, Train or Ship page (web_ui_workspace): eyebrow, heading, sub, then the shared
+ * workspace gate (components/WorkspaceGate.tsx) around the content. `always` is shown ready or not
+ * (the Data page's Storage, the Agents page's Agent Library). */
 export function WorkspaceFrame({
   eyebrow,
   title,
@@ -176,30 +101,11 @@ export function WorkspaceFrame({
   always?: ReactNode;
   actions?: ReactNode;
 }) {
-  const { customerId } = useWorkspace();
-  const status = useWorkspaceState();
-  let body: ReactNode;
-  if (!customerId) body = <div className="panel empty">You have no space to work in yet.</div>;
-  else if (status.isLoading) body = <Skeleton />;
-  else if (status.isError) body = <div className="panel empty">{(status.error as Error).message}</div>;
-  else if (!status.data?.ready)
-    body = (
-      <>
-        {before}
-        <WorkspaceGate state={status.data ?? {}} />
-      </>
-    );
-  else
-    body = (
-      <>
-        {before}
-        {children(status.data)}
-      </>
-    );
   return (
     <Page eyebrow={eyebrow} title={title} sub={sub} actions={actions}>
-      {body}
-      {customerId && !status.isError ? always : null}
+      <WorkspaceGate before={before} after={always}>
+        {(state) => children(state)}
+      </WorkspaceGate>
     </Page>
   );
 }
@@ -230,14 +136,7 @@ export function useAsync() {
   };
 }
 
-/** Markdown rendered in the browser (an agent's reply, a proposal's description), never raw HTML. */
-export function Markdown({ children }: { children: string }) {
-  return (
-    <div className="markdown-body">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
-    </div>
-  );
-}
+export { Markdown } from "@/lib/markdown";
 
 /** A value as table text (web_ui.cpp cell_text): strings bare, numbers trimmed, the rest as JSON. */
 export function cellText(value: unknown): string {

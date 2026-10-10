@@ -11,6 +11,7 @@ import { useSession } from "@/lib/session";
 import { useTrailState, type Crumb } from "@/lib/trail";
 import { cx, Kbd, Skeleton } from "@/lib/ui";
 import { isRepeat } from "@/lib/clicks";
+import { useTheme } from "@/lib/theme";
 import { currentNav, matchScreen, navFor, sectionLabel, workspacePath, isWorkspacePath, localPath, type NavItem, type SectionKey } from "@/routes";
 import { Icon } from "./Icon";
 import { CommandPalette } from "./CommandPalette";
@@ -21,22 +22,6 @@ import { AskPanel } from "./AskPanel";
 /** G then this letter jumps to the group's first page. */
 const JUMPS: Record<string, SectionKey> = { d: "design", t: "train", s: "ship", o: "organization", a: "administration" };
 
-export function useTheme(): [string, () => void] {
-  const current = () =>
-    document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  const [theme, setTheme] = useState(current);
-  const toggle = () => {
-    const next = current() === "dark" ? "light" : "dark";
-    document.documentElement.dataset.theme = next;
-    try {
-      localStorage.setItem("lake-theme", next);
-    } catch {
-      /* ignore */
-    }
-    setTheme(next);
-  };
-  return [theme, toggle];
-}
 
 function useMediaQuery(query: string): boolean {
   const [matches, setMatches] = useState(() => matchMedia(query).matches);

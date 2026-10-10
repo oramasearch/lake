@@ -3,8 +3,6 @@
  * tabs and stale banner, and small text helpers. Candidates to hoist into `lib/`. */
 import { type ReactNode, useCallback, useState } from "react";
 import { Link } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { ApiError, read, useRead, type Row } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
@@ -148,14 +146,7 @@ export function useAgentDeployed(key: string): { deployed: boolean; loading: boo
 
 /* ------------------------------------------------------------------ markdown */
 
-/** Agent replies and other Markdown, rendered in the browser (never as raw HTML). */
-export function Markdown({ children }: { children: string }) {
-  return (
-    <div className="markdown-body">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
-    </div>
-  );
-}
+export { Markdown } from "@/lib/markdown";
 
 /* ------------------------------------------------------------------ actions */
 

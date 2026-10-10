@@ -2,7 +2,7 @@
  * with no rail, so a visitor signing in sees only the sign-in. */
 import { type ReactNode, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { useTheme } from "@/components/Shell";
+import { useTheme } from "@/lib/theme";
 import { Icon } from "@/components/Icon";
 import { useSession } from "@/lib/session";
 import { isLeaving, leaveFor, returnTarget } from "./signIn";
