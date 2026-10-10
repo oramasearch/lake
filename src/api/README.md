@@ -123,6 +123,14 @@ non-consuming browse through service credentials. The shared agent views use dur
 without per-topic Zetta reads. The web app's Train → Streams pages call those same capabilities. Read `post_alias` routes preserve read classification, and MCP tools
 carry read/destructive annotations. See `docs/api/streams.md` and `docs/ui/streams.md`.
 
+`transcript_capabilities.cpp` registers speech-to-text (`transcribe`) and the five workspace
+transcript capabilities (lake#561): transcripts are sealed `lake_transcripts` records in the
+workspace Zetta, audio is sent through `ApiContext::transcriber` on the blocking pool and never
+kept. `transcription.cpp` holds the pure parts: audio decoding, file names, `.vtt`/`.srt`
+cleaning, and OpenAI's multipart request and answer. The HTTP exchange is the injected
+`TranscriptPost`, which `http_server.cpp` builds over its outbound client when
+`LAKE_OPENAI_API_KEY` is set. See `docs/api/transcripts.md`.
+
 Repository terminal instructions receive a validated explicit `ServerOptions::external_origin` or
 the HTTPS fallback derived from trusted `public_host`. Request and proxy headers cannot select
 their URL; the web app shows the commands. Existing registry sync operations implement clone and

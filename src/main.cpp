@@ -74,6 +74,8 @@ int usage() {
                  "(default $LAKE_INSTANCE_KEK)");
     std::println("  --clerk-publishable-key Clerk key; browser sign-in goes through Clerk "
                  "(default $LAKE_CLERK_PUBLISHABLE_KEY)");
+    std::println("  LAKE_OPENAI_API_KEY OpenAI key for speech-to-text; LAKE_TRANSCRIBE_MODEL its "
+                 "model (default gpt-4o-transcribe)");
     std::println("  LAKE_LOG_MODE air-gapped, witnessed (default), or anchored when "
                  "LAKE_STORE_ROOT is set");
     std::println("  LAKE_LOG_WITNESSES JSON witness endpoint/public_key records; "
@@ -143,6 +145,9 @@ int main(int argc, char** argv) {
     opts.identity_seed = env_or("LAKE_IDENTITY_SEED", "");
     opts.instance_kek = env_or("LAKE_INSTANCE_KEK", "");
     opts.clerk_publishable_key = env_or("LAKE_CLERK_PUBLISHABLE_KEY", "");
+    // Speech-to-text (docs/api/transcripts.md): without a key, transcribe answers not_supported.
+    opts.openai_api_key = env_or("LAKE_OPENAI_API_KEY", "");
+    opts.transcribe_model = env_or("LAKE_TRANSCRIBE_MODEL", "");
     opts.store_root = env_or("LAKE_STORE_ROOT", "");
     opts.store_owner_wait = std::chrono::seconds{env_u64("LAKE_STORE_OWNER_WAIT_SECONDS", 90)};
     opts.drain_timeout = std::chrono::seconds{env_u64("LAKE_DRAIN_SECONDS", 20)};

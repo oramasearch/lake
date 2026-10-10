@@ -391,13 +391,19 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     lake::test::StreamWorkspace streams(store, customer.id);
     lake::test::ExperimentWorkspace experiments(store, customer.id);
     experiments.caller->fallback = streams.caller;
-    lake::api::ApiServer server({.port = 0,
-                                 .node_name = "schema-test",
-                                 .store = store,
-                                 .workspaces = experiments.service,
-                                 .admin_token = "schema-test",
-                                 .instance_kek = kek,
-                                 .store_root = root.string()});
+    lake::api::ApiServer server(
+        {.port = 0,
+         .node_name = "schema-test",
+         .store = store,
+         .workspaces = experiments.service,
+         .admin_token = "schema-test",
+         .instance_kek = kek,
+         // A fake: tests never call OpenAI (docs/api/transcripts.md).
+         .transcriber = [](const lake::api::TranscriptionRequest&)
+             -> std::expected<lake::api::Transcription, lake::api::ApiError> {
+             return lake::api::Transcription{"schema words", 1.5, "gpt-4o-transcribe"};
+         },
+         .store_root = root.string()});
     ASSERT_TRUE(server.start()) << server.reason();
     HttpEvidence http(server.port());
     for (const auto& tool : http.document.at("tools")) {
@@ -431,6 +437,25 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("delete_stream_messages", stream_delete);
     stream["confirm_name"] = "schema-orders";
     http.call("delete_stream", stream);
+    http.call("transcribe", {{"name", "memo.webm"}, {"audio_base64", "c3BlZWNo"}});
+    const json transcript_scope{{"customer_id", customer.id}, {"workspace_id", experiments.id}};
+    auto transcript_input = transcript_scope;
+    transcript_input.update({{"title", "Schema call"}, {"source", "text"}, {"text", "words"}});
+    const auto transcript = http.call("create_transcript", transcript_input);
+    auto from_audio = transcript_scope;
+    from_audio.update(
+        {{"title", "Schema memo"}, {"source", "recording"}, {"audio_base64", "c3BlZWNo"}});
+    http.call("create_transcript", from_audio);
+    http.call("list_transcripts", transcript_scope);
+    http.read("list_transcripts",
+              "?customer_id=" + customer.id + "&workspace_id=" + experiments.id + "&q=schema");
+    auto transcript_id = transcript_scope;
+    transcript_id["id"] = transcript.at("id");
+    http.call("get_transcript", transcript_id);
+    auto transcript_edit = transcript_id;
+    transcript_edit["title"] = "Schema call, edited";
+    http.call("update_transcript", transcript_edit);
+    http.call("delete_transcript", transcript_id);
     http.read("server_info");
     http.call("set_storage_quota", {{"customer_id", customer.id}, {"quota_bytes", 0}});
     http.call("metering_usage", {{"customer_id", customer.id}});

@@ -41,6 +41,17 @@ constexpr std::array group_rules{
                    n == "get_run_metrics" || n == "compare_runs" || n == "start_study" ||
                    n == "stop_study" || n == "promote_trial";
         }},
+    GroupRule{"Transcripts",
+              "What people said, added to a workspace from a recording, an uploaded audio or "
+              "caption file, or pasted text, and kept in its workspace Zetta. Ask Orama and "
+              "agents read them with list_transcripts (q searches title and text) and "
+              "get_transcript. transcribe turns audio into text and keeps nothing; the audio is "
+              "never stored.",
+              [](std::string_view n) {
+                  return n == "transcribe" || n == "create_transcript" || n == "list_transcripts" ||
+                         n == "get_transcript" || n == "update_transcript" ||
+                         n == "delete_transcript";
+              }},
     GroupRule{"Streams",
               "Ask Orama and ApplicationAgent may freely read list_streams, get_stream and "
               "browse_stream. Stream writes require the person's confirmation; deletes require "
@@ -167,8 +178,9 @@ constexpr std::array group_rules{
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 12> group_order{"Workspace: Design, Train and Ship",
+constexpr std::array<std::string_view, 13> group_order{"Workspace: Design, Train and Ship",
                                                        "Experiments",
+                                                       "Transcripts",
                                                        "Streams",
                                                        "Agents",
                                                        "Services",

@@ -10,6 +10,10 @@ failure's page, and the pure helpers capabilities share (`web_ui_escape`, `web_u
 read policy and identical OpenAPI/MCP schemas. See `docs/api/streams.md` and `docs/ui/streams.md`
 for the Streams contracts and `docs/api/experiments.md` for the Experiments operations.
 
+`transcription.hpp` declares speech-to-text's pure helpers (audio decoding, caption cleaning,
+OpenAI's request and answer) and `openai_transcriber`. `registry.hpp` declares the `Transcriber`
+injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/transcripts.md`).
+
 `ServerOptions::external_origin` is trusted instance configuration for repository terminal
 instructions (`repository_external_origin`). It takes precedence over `https://` plus the trusted
 identity/platform `public_host`; with neither value, lake names no origin. See

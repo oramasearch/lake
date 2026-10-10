@@ -1,6 +1,9 @@
 # The `/v1` API and MCP
 
-lake#561: [web-app.md](web-app.md) documents the capabilities the web app reads that the pages
+lake#561: [transcripts.md](transcripts.md) documents speech-to-text (`transcribe`) and the
+workspace transcripts kept in the workspace Zetta (`create_transcript`, `list_transcripts`,
+`get_transcript`, `update_transcript`, `delete_transcript`), the audio never kept.
+[web-app.md](web-app.md) documents the capabilities the web app reads that the pages
 computed themselves (`viewer`, `my_permissions`, `list_packages`, `list_docs`, `get_doc`,
 `mcp_setup`, `resolve_model`, `latest_agent_task`, `compile_pipeline`, `render_pipeline`);
 [ask-orama.md](ask-orama.md#capabilities-lake561) the conversation capabilities
@@ -160,6 +163,8 @@ credentials.
 | `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`, `resolve_model` | read (`list_docs`, `get_doc` and a public `resolve_model` need no credential) | see the page | permission flags, the Packages catalog, the Docs guides, Developer → MCP, a model's repository by name | [web-app.md](web-app.md) |
 | `latest_agent_task`, `render_pipeline` / `compile_pipeline` | read / action | `customer_id`, `workspace_id`, then `subject`, or `project` and `graph`, or `project` and `intent` | a project's background task, a pipeline drawn as SVG, a pipeline compiled from a description | [web-app.md](web-app.md) |
 | `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `approve_agent_proposal` | action | `customer_id`, `workspace_id`, `conversation_id`, … | the Ask Orama and Agent Factory conversation, written only by lake | [ask-orama.md](ask-orama.md#capabilities-lake561) |
+| `transcribe` | action, any signed-in caller | `name`, `audio_base64`, `language?` | `{text, seconds?, model}`: speech-to-text through OpenAI with lake's key; keeps nothing; `not_supported` without `LAKE_OPENAI_API_KEY` | [transcripts.md](transcripts.md) |
+| `create_transcript`, `list_transcripts`, `get_transcript`, `update_transcript`, `delete_transcript` | action / read / read / action / action | `customer_id`, `workspace_id`, then `title`, `source`, `text` or `audio_base64`; `q`, `limit`, `cursor`; or `id` | a transcript kept as a sealed `lake_transcripts` record in the workspace Zetta (the audio never kept), a searchable page of them, or `{deleted: true}` | [transcripts.md](transcripts.md) |
 | `list_users` | read | `limit` (≤1000, default 100) | `{items: [user]}` | [customers.md](customers.md) |
 | `get_user` | read | `id` | user | [customers.md](customers.md) |
 | `create_user` | action | `taap_id?`, `email?`, `display_name?` | user | [customers.md](customers.md) |

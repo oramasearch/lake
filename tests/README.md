@@ -401,6 +401,13 @@ space with two is left alone and reported once; a rerun changes nothing; and eve
 `workspace_id` is refused in the migration's transaction, afterwards, and with the setting alone. `repository_test_support.hpp` (`repository_workspace`) gives other tests the
 space's first live workspace for the repositories they create.
 
+`test_transcripts.cpp` covers the pure parts of speech-to-text and transcripts (lake#561):
+`.vtt`/`.srt` cleaning, audio decoding and its 25 MiB limit, file names, the OpenAI multipart
+request and its errors through a fake `TranscriptPost`, paging, excerpts and the audit
+classification. `test_workspace_records.cpp`'s `TranscriptsLiveInTheirWorkspaceAndKeepNoAudio`
+runs the six capabilities with a fake `Transcriber` over the memory and PostgreSQL stores; no test
+calls OpenAI.
+
 `test_workspace_records.cpp` covers workspace records (lake#370,
 [workspace-records.md](../docs/architecture/workspace-records.md)): sealed records and blind
 indexes, paged listing, records that open only in their own workspace and lookup, conditional

@@ -99,6 +99,9 @@ the retired `ask_messages` table was copied and then dropped by migration `0050_
 collection (lake#376): a scan's Opportunities keyed by scan and rank and written only if absent,
 status changes conditional on the revision read; the retired table (migration
 `0046_opportunity_workspaces`) is dropped by `0070_drop_moved_tables` with its legacy reads.
+`transcripts.cpp` is the transcripts collection (lake#561): one record per transcript, found by the
+space, edited and deleted at the revision read, with the paging and excerpt helpers
+`list_transcripts` uses; it was never a PostgreSQL table.
 `stream_owners.cpp` is the second
 (lake#379): one `if_absent` record per topic, keyed by the topic's blind index; the stores hold no
 topic creator (the retired table is dropped by `0070`). `drive_share_links.cpp` is the drive share

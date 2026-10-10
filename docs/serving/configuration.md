@@ -64,6 +64,8 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | `LAKE_TSA_RENEWAL_SECONDS`, `LAKE_TSA_RENEW_BEFORE_SECONDS` | renewal policy for RFC 4998 evidence records; defaults 31536000 and 2592000 | [`../api/transparency.md`](../api/transparency.md) |
 | `LAKE_PRICE_CURRENCY` (default `USD`), `LAKE_PRICE_STORAGE_GIB_HOUR_MICROS`, `LAKE_PRICE_TRANSFER_IN_GIB_MICROS`, `LAKE_PRICE_TRANSFER_OUT_GIB_MICROS`, `LAKE_PRICE_COMPUTE_SECOND_MICROS` | integer pricing applied by `metering_usage` and `/metering`; the storage price is reported but applies to nothing since repository storage has no hourly history (lake#348) | [`../api/metering.md`](../api/metering.md) |
 | `LAKE_STORAGE_QUOTA_BYTES` | default per-customer storage quota; per-customer overrides are capability-backed | [`../api/metering.md`](../api/metering.md) |
+| `LAKE_OPENAI_API_KEY` | OpenAI API key for speech-to-text (`transcribe`, and `create_transcript` from audio); unset, both answer `not_supported`. On a Lake CR it comes from a Secret through `spec.env` `valueFrom.secretKeyRef` | [`../api/transcripts.md`](../api/transcripts.md), [`../deployment/aks.md`](../deployment/aks.md#speech-to-text-key) |
+| `LAKE_TRANSCRIBE_MODEL` | OpenAI transcription model; default `gpt-4o-transcribe` | [`../api/transcripts.md`](../api/transcripts.md) |
 
 Startup refuses to run when `LAKE_OPERATOR_ZETTA_URL` and `LAKE_OPERATOR_ZETTA_TOKEN` are not set
 together, when the operator client is enabled without `LAKE_PUBLIC_HOST`, when
