@@ -332,6 +332,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "list_reviews",
     "list_runs",
     "list_secret_mounts",
+    "list_secrets",
     "list_stores",
     "list_streams",
     "list_transcripts",

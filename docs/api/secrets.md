@@ -16,6 +16,7 @@ layout.
 | `put_secret` | `write` on the mount | `mount_id`, `name`, object `value`, object `custom_metadata?`, `check_and_set?` | the new version and supplied value |
 | `read_secret` | `read` on the mount | `mount_id`, `name`, `version?` | the selected live version and value |
 | `secret_metadata` | `read` on the mount | `mount_id`, `name` | current version, custom metadata and every version's state |
+| `list_secrets` | `read` on the mount | `mount_id`, `prefix?`, `cursor?`, `limit?` (1-500, default 100) | `items` (path and metadata, never a value), `next_cursor` when more follow |
 | `delete_secret_versions` | `write` on the mount | `mount_id`, `name`, positive `versions[]` | updated metadata |
 | `undelete_secret_versions` | `write` on the mount | same | updated metadata |
 | `destroy_secret_versions` | `write` on the mount | same | updated metadata |
@@ -24,6 +25,15 @@ layout.
 current version or the put returns `conflict`; zero makes no concurrency assertion. Creating the
 first value starts at version 1. Supplying nonempty custom metadata replaces the entry metadata;
 omitting it preserves existing metadata.
+
+`list_secrets` (lake#561) answers a mount's secrets in name order: each item's `name`,
+`current_version`, `created_at`, `updated_at`, and the current version's state, `deleted`
+(true once it is deleted or destroyed) with `deleted_at` and `destroyed_at` (null while live). It
+never returns a value, never decrypts and never reads the data key. `prefix` keeps the names that
+start with it. When more names follow, `next_cursor` is the last name answered; pass it back as
+`cursor` for the next page, which starts after it. It is read-only (`readOnlyHint` in MCP),
+authorizes the one mount itself before the workspace is reached (like every `list_*`), and its
+event goes to the mount's workspace audit, naming the mount and the prefix.
 
 Delete is reversible: it sets `deleted_at`, makes that version unreadable and retains ciphertext.
 Undelete clears `deleted_at` unless the version was destroyed. Destroy clears the ciphertext and
@@ -46,7 +56,7 @@ is not ready answers `workspace_not_ready`; a deleted workspace took its mounts 
 | Where | What |
 |---|---|
 | Workspace Zetta, `lake_secrets_mounts` | The mount (name, description, organization), keyed by its id, and a name claim keyed by the blind index of organization and name, written `if_absent` |
-| `lake_secrets_entries` | One record per secret name: current version and custom metadata |
+| `lake_secrets_entries` | One record per secret name: current version and custom metadata. `list_secrets` reads the mount's entries by their lookup, then each one's current version record for its state |
 | `lake_secrets_versions` | One record per version: the existing AES-256-GCM ciphertext, soft-delete and destroy instants |
 | `lake_secrets_encryption_keys` | One record per named key: its id (which every transit ciphertext names), current version, derivation parent |
 | `lake_secrets_data_keys` | One record per data key version: the mount's data key and each named-key version, wrapped by the customer KEK, with the KEK version that wraps it |
@@ -192,13 +202,18 @@ revocation leaf's compact inclusion proof with libliquid's verifier.
 
 ## Page and verification
 
-`GET /secret-mounts?workspace_id=<uuid>` lists the readable mounts of one workspace (without the
-parameter, the workspace the viewer last chose, or a prompt to choose one).
-`GET /secrets?mount_id=<uuid>&name=<name>` shows custom metadata and version states but
-deliberately does not render values. Mutations remain capability calls.
+The web app manages secrets through these capabilities ([../ui/secrets.md](../ui/secrets.md)):
+`/secret-mounts?workspace_id=<uuid>` lists the readable mounts of one workspace and creates one;
+`/secrets?mount_id=<uuid>` lists a mount's secrets (`list_secrets`) and writes a new one;
+`/secrets?mount_id=<uuid>&name=<name>` shows a secret's versions, writes the next one with
+check-and-set, reveals one version's value on a deliberate click (`read_secret`, held only in the
+page's memory) and deletes, undeletes or destroys versions; `/encryption-keys?mount_id=<uuid>`
+creates, derives and rotates keys and tries encrypt, decrypt, rewrap, sign, verify and HMAC. A value
+never appears in a URL, a log or browser storage.
 
 | Test | Covers |
 |---|---|
+| `SecretsCapabilities.ListSecretsAnswersNamesAndStateNeverValues` | `list_secrets`: name order, current version, times and deleted/destroyed state, no value in the answer, `prefix`, the cursor walking every name once, `limit` bounds, an unknown mount, read-only and candidate-authorizing, classified as workspace audit, an ungranted caller refused and audited before any workspace call |
 | `SecretsCapabilities.*` | The capability contract on workspace records: history, delete/undelete/destroy, number reuse, a stopped put completed by the next, transit, KEK rotation finished after a workspace was not ready, dynamic leases, denial and audit, an ungranted list reaching no workspace |
 | `Stores/WorkspaceRecordStores.SecretsLiveInTheirMountsWorkspace/{Memory,Postgres}` | Two spaces with two workspaces each, records sealed only at their own endpoint and absent from PostgreSQL, duplicate names, missing, malformed, unknown and foreign `workspace_id`, unknown `mount_id`, another space's person, a record copied elsewhere not opening, a workspace not ready, KEK rotation across workspaces, workspace deletion |
 | `Stores/WorkspaceRecordStores.TheOneShotCopyMovesSecretsIntoTheirMountsWorkspace/{Memory,Postgres}` | The five collections: plan, copy, rerun, verify, legacy ciphertexts read and decrypted through the capabilities, a later put, undelete and KEK rotation accepted, `needs_selection` resolved, `workspace_deleted` not blocking, tamper detection, operator only |

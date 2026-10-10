@@ -505,6 +505,52 @@ SecretTask<control::SecretMetadata> MountSecrets::metadata(std::string name) {
     co_return Result(std::move(metadata));
 }
 
+SecretTask<SecretPage>
+MountSecrets::list(std::string prefix, std::string after, std::size_t limit) {
+    using Result = ZettaControlResult<SecretPage>;
+    const std::string& mount_id = route_.mount_id;
+    auto listed = control::settled(co_await records_.list(
+        control::SecretEntryCodec::collection, control::SecretEntryCodec::lookup(mount_id)));
+    if (!listed) {
+        co_return Result(std::unexpected(listed.error()));
+    }
+    std::vector<control::SecretEntry> entries;
+    for (const StoredRecord& stored : *listed) {
+        auto entry = control::SecretEntryCodec::decode(stored);
+        if (entry && entry->mount_id == mount_id && entry->name.starts_with(prefix) &&
+            (after.empty() || entry->name > after)) {
+            entries.push_back(std::move(*entry));
+        }
+    }
+    std::ranges::sort(entries, {}, &control::SecretEntry::name);
+    SecretPage page;
+    for (const control::SecretEntry& entry : entries) {
+        if (page.items.size() == limit) {
+            page.next_cursor = page.items.back().name;
+            break;
+        }
+        SecretListing item{
+            entry.name, entry.current_version, entry.created_at, entry.updated_at, "", ""};
+        if (entry.current_version > 0) {
+            auto stored = control::settled(
+                co_await records_.get(control::SecretVersionCodec::collection,
+                                      control::SecretVersionCodec::key(
+                                          records_, mount_id, entry.name, entry.current_version)));
+            if (!stored) {
+                co_return Result(std::unexpected(stored.error()));
+            }
+            const auto version =
+                *stored ? control::SecretVersionCodec::decode(**stored) : std::nullopt;
+            if (version && version->mount_id == mount_id && version->name == entry.name) {
+                item.deleted_at = version->deleted_at;
+                item.destroyed_at = version->destroyed_at;
+            }
+        }
+        page.items.push_back(std::move(item));
+    }
+    co_return Result(std::move(page));
+}
+
 SecretTask<control::SecretMetadata> MountSecrets::change(std::string name,
                                                          std::vector<std::uint64_t> versions,
                                                          control::SecretVersionAction action) {

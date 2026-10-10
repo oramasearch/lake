@@ -27,6 +27,23 @@ namespace lake::api {
 // claimed by a put that never moved the entry completes that put first.
 template <class T> using SecretTask = liquid::runtime::task<control::ZettaControlResult<T>>;
 
+// One secret of a mount as list_secrets answers it: its name and metadata, never a value. The
+// state is the current version's: `deleted_at` and `destroyed_at` are empty while it is live.
+struct SecretListing {
+    std::string name;
+    std::uint64_t current_version = 0;
+    std::string created_at;
+    std::string updated_at;
+    std::string deleted_at;
+    std::string destroyed_at;
+};
+// A page of a mount's secrets, by name. `next_cursor` is the last name answered when more follow,
+// empty otherwise.
+struct SecretPage {
+    std::vector<SecretListing> items;
+    std::string next_cursor;
+};
+
 class MountSecrets {
 public:
     // `not_found` at /mount_id when no route names the mount.
@@ -49,6 +66,10 @@ public:
     SecretTask<control::SecretVersion> put(control::PutSecret input);
     SecretTask<control::SecretVersion> read(std::string name, std::uint64_t version);
     SecretTask<control::SecretMetadata> metadata(std::string name);
+    // The mount's secrets whose name starts with `prefix`, after `after` in name order, at most
+    // `limit` of them: the entries found by the mount, and each one's current version record for
+    // its state. Nothing is decrypted.
+    SecretTask<SecretPage> list(std::string prefix, std::string after, std::size_t limit);
     SecretTask<control::SecretMetadata> change(std::string name, std::vector<std::uint64_t> versions,
                                                control::SecretVersionAction action);
 
