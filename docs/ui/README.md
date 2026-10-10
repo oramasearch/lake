@@ -7,6 +7,7 @@ capabilities, the same ones REST and MCP callers use, with the same authorizatio
 can do nothing the API cannot.
 
 - How the app is built, its kit and the rules for a page: [web-app.md](web-app.md).
+- The Organization, Administration and Account pages: [organization.md](organization.md).
 - The capabilities added for the app (`viewer`, `my_permissions`, `list_packages`, `list_docs`,
   `get_doc`, `mcp_setup`, `resolve_model`, `latest_agent_task`, `compile_pipeline`,
   `render_pipeline`): [../api/web-app.md](../api/web-app.md).
