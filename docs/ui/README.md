@@ -151,7 +151,7 @@ Workspaces)
 | `/customers` | `admin/CustomersPage.tsx` | every space | `list_customers` |
 | `/applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | `admin/Application*.tsx` | identity applications ([identity.md](identity.md#application-identity)) | `list_applications`, `register_application`, `get_application`, `list_application_users`, `suspend_application_user`, `list_application_organizations`, `create_application_organization`, `delete_application_organization`, `list_application_webhook_events`, `create_application_webhook` |
 | `/metering?customer_id=` | `admin/MeteringPage.tsx` | a space's usage and storage limit | `metering_usage`, `set_storage_quota` |
-| `/secret-mounts`, `/secrets`, `/encryption-keys` | `admin/SecretMountsPage.tsx`, `SecretsPage.tsx`, `EncryptionKeysPage.tsx` | secret mounts, a secret's version metadata, named keys; never values or key material | `list_secret_mounts`, `get_secret_mount`, `secret_metadata`, `list_encryption_keys` |
+| `/secret-mounts`, `/secrets`, `/encryption-keys` | `admin/SecretMountsPage.tsx`, `SecretsPage.tsx`, `EncryptionKeysPage.tsx` | secret mounts and New mount; a mount's secrets and New secret; a secret's versions, New version, a deliberate Reveal, delete, undelete and a typed-confirmation destroy; keys with New key, Rotate and Try it ([secrets.md](secrets.md)); never key material | `list_secret_mounts`, `create_secret_mount`, `get_secret_mount`, `list_secrets`, `put_secret`, `read_secret`, `secret_metadata`, `delete_secret_versions`, `undelete_secret_versions`, `destroy_secret_versions`, `list_encryption_keys`, `create_encryption_key`, `derive_encryption_key`, `rotate_encryption_key`, `encrypt`, `decrypt`, `rewrap`, `sign`, `verify`, `hmac` |
 | `/activity`, `/audit` | `admin/AuditPage.tsx` | the person's own events; the operator's whole log | `my_audit`, `audit`, `transparency_log_configuration` |
 | `/transparency?identity=` | `admin/TransparencyPage.tsx` | the public checkpoint-verified scan for one TAAP identity | `transparency_identity_scan` |
 | any other path | `home/NotFoundPage.tsx` | *not found* in lake's words | none |
@@ -162,7 +162,9 @@ Workspaces)
   monitor and share links open without a session. A refused repository read for a visitor goes to
   `/sign-in?next=…`, so a private repository's existence is not disclosed
   (`RepositoryError` in `pages/repositories/forge.tsx`).
-- **Secrets never reach the page.** The secrets and encryption-key pages show metadata only. A new
+- **Secrets are shown only when asked for.** The secrets pages list metadata; a secret's value is
+  read only by a deliberate Reveal, held in that page's memory, masked until shown and never put in a
+  URL, a log or browser storage ([secrets.md](secrets.md)). Key material is never returned. A new
   token, an MFA secret and recovery codes are shown once and held only in that page's memory.
 - **Lifecycle writes stay capability-only.** The repository page shows a deletion tombstone and its
   retention deadline; it has no lifecycle form.

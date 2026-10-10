@@ -1,14 +1,16 @@
 /** Secret Mounts (`/secret-mounts?workspace_id=&organization_id=`): the secret mounts the viewer
- * may read in one workspace (web_ui_secret_mounts, serve_secret_mounts_page). The workspace is the
- * one named in the query, else the session's current workspace; the toolbar's choice of workspace
- * changes the query. */
+ * may read in one workspace (web_ui_secret_mounts, serve_secret_mounts_page), and New Mount
+ * (`create_secret_mount`, docs/ui/secrets.md). The workspace is the one named in the query, else
+ * the session's current workspace; the toolbar's choice of workspace changes the query. */
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { KeyRound, Lock, Vault } from "lucide-react";
-import { ApiError, useList, type Row } from "@/lib/api";
+import { KeyRound, Lock, Plus, Vault } from "lucide-react";
+import { ApiError, act, useList, useRead, type Row } from "@/lib/api";
+import { Modal, SheetActions } from "@/lib/overlay";
 import { useSession } from "@/lib/session";
-import { Button, DataTable, ErrorBlock, Empty, Mono, Page, SearchInput, Stat, StatRow, Toolbar } from "@/lib/ui";
-import { NameCell, PanelEmpty, When, matches, useMetaTrail, useParam } from "@/pages/organizations/shared";
+import { useToast } from "@/lib/toast";
+import { Banner, Button, DataTable, ErrorBlock, Empty, Field, Form, Mono, Page, SearchInput, Stat, StatRow, Toolbar, fieldError } from "@/lib/ui";
+import { HANDLE_PATTERN, NameCell, PanelEmpty, When, matches, useMetaTrail, useParam } from "@/pages/organizations/shared";
 
 export default function SecretMountsPage() {
   const session = useSession();
@@ -25,6 +27,7 @@ export default function SecretMountsPage() {
     { pick: "items", workspace: null },
   );
   const [search, setSearch] = useState("");
+  const [creating, setCreating] = useState(false);
   useMetaTrail(mounts.data ? `${mounts.data.length} mounts` : null, "Secret Mounts");
   const rows = mounts.data?.filter((m) => matches(search, m.name, m.description, m.organization_id));
   const choose = (id: string) => {
@@ -33,11 +36,17 @@ export default function SecretMountsPage() {
     if (organizationId) next.set("organization_id", organizationId);
     navigate(`/secret-mounts${next.toString() ? `?${next}` : ""}`);
   };
+  const newMount = (
+    <Button variant="primary" onClick={() => setCreating(true)} disabled={session.workspaces.length === 0}>
+      <Plus size={14} aria-hidden /> New mount
+    </Button>
+  );
   return (
     <Page
       eyebrow="Organization"
       title="Secret Mounts"
       sub="Organization-scoped static secrets and named encryption keys, kept in the workspace each mount was created in. Key material remains inside lake."
+      actions={newMount}
     >
       {session.workspaces.length > 1 && (
         <Toolbar>
@@ -80,8 +89,8 @@ export default function SecretMountsPage() {
               mounts.data?.length ? (
                 <PanelEmpty title="No mount matches">Clear the search to see every mount.</PanelEmpty>
               ) : (
-                <Empty icon={Lock} title="No secret mounts">
-                  No secret mounts you can read in workspace <code>{workspace.id}</code> yet. An organization administrator creates them.
+                <Empty icon={Lock} title="No secret mounts" action={newMount}>
+                  No secret mounts you can read in {workspace.name} yet. A mount holds an organization's secrets and keys; an organization administrator creates one.
                 </Empty>
               )
             }
@@ -108,6 +117,94 @@ export default function SecretMountsPage() {
           />
         </>
       )}
+      {creating && <NewMount workspaceId={workspace?.id ?? ""} organizationId={organizationId} onClose={() => setCreating(false)} />}
     </Page>
+  );
+}
+
+/** New Mount: one workspace, chosen here and never changed, and the organization that owns it. */
+function NewMount({ workspaceId: initialWorkspace, organizationId: initialOrganization, onClose }: { workspaceId: string; organizationId: string; onClose: () => void }) {
+  const session = useSession();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const [workspaceId, setWorkspaceId] = useState(initialWorkspace || session.workspaces[0]?.id || "");
+  const [organizationId, setOrganizationId] = useState(initialOrganization);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+  const workspace = session.workspaces.find((w) => w.id === workspaceId);
+  const organizations = useList<Row>("list_organizations", { limit: 500 }, { pick: "items", workspace: null });
+  // An organization's own workspaces belong to it: offer it first.
+  const customer = useRead<Row>(workspace ? "get_customer" : null, { customer_id: workspace?.customer_id }, { workspace: null });
+  const owner = customer.data?.organization_id as string | undefined;
+  const chosen = organizationId || owner || "";
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const input: Row = { customer_id: workspace?.customer_id ?? "", workspace_id: workspaceId, organization_id: chosen, name };
+      if (description.trim()) input.description = description.trim();
+      const mount = await act<Row>("create_secret_mount", input);
+      toast(`Created mount ${mount.name}`);
+      onClose();
+      navigate(`/secrets?mount_id=${encodeURIComponent(mount.id)}`);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const fieldFault = ["workspace_id", "customer_id", "organization_id", "name", "description"].some((f) => fieldError(error, f));
+  return (
+    <Modal title="New Secret Mount" subtitle="A mount holds secrets and encryption keys for one organization, in one workspace." onClose={onClose} sheet>
+      <Form onSubmit={submit} error={fieldFault ? null : error}>
+        <Field label="Workspace" required help="Its secrets and keys are sealed in this workspace's Zetta. It cannot be changed later." error={fieldError(error, "workspace_id") ?? fieldError(error, "customer_id")}>
+          <select value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)}>
+            {session.viewer.spaces.map((space) =>
+              space.workspaces.length ? (
+                <optgroup key={space.id} label={space.label}>
+                  {space.workspaces.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null,
+            )}
+          </select>
+        </Field>
+        {organizations.isError ? (
+          <ErrorBlock error={organizations.error} retry={() => void organizations.refetch()} what="your organizations" />
+        ) : organizations.data && organizations.data.length === 0 ? (
+          <Banner tone="warn" title="No organization">
+            A mount belongs to an organization. Create one under Organization → Organizations first.
+          </Banner>
+        ) : (
+          <Field label="Organization" required help="Its administrators create mounts; access is granted on the mount through it." error={fieldError(error, "organization_id")}>
+            <select value={chosen} onChange={(e) => setOrganizationId(e.target.value)}>
+              {!chosen && <option value="">Choose an organization</option>}
+              {(organizations.data ?? []).map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.display_name || o.name || o.id}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        <Field label="Name" required help="Lowercase letters, digits and dashes; unique in this workspace and organization." error={fieldError(error, "name")}>
+          <input value={name} onChange={(e) => setName(e.target.value)} pattern={HANDLE_PATTERN} placeholder="payments" autoComplete="off" spellCheck={false} />
+        </Field>
+        <Field label="Description" help="Optional." error={fieldError(error, "description")}>
+          <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Payment service credentials" />
+        </Field>
+        <SheetActions className="flex justify-end gap-2">
+          <Button onClick={onClose}>Cancel</Button>
+          <Button type="submit" variant="primary" loading={busy} disabled={!workspace || !chosen || !name}>
+            Create mount
+          </Button>
+        </SheetActions>
+      </Form>
+    </Modal>
   );
 }

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -196,6 +197,32 @@ template <class T> ApiResult one_result(const control::ZettaControlResult<T>& ro
 
 using SecretHandler = std::function<liquid::runtime::task<ApiResult>(const json&, ApiContext&,
                                                                      MountSecrets&)>;
+
+// A list on one mount authorizes that mount itself (every list is candidate-authorizing): the
+// mount's route and policy object, read from PostgreSQL, decide before its workspace is reached.
+// Answers the refusal, or nullopt when the caller may read the mount.
+std::optional<ApiResult>
+refuse_unreadable_mount(const json& input, const std::string& audit_kind, ApiContext& context) {
+    const auto object = resolve_mount(input.at("mount_id"), audit_kind, context);
+    if (!object) {
+        return refused(object.error());
+    }
+    if (context.acting_identity != "admin") {
+        const auto decisions = control::authorize_batch(*context.store,
+                                                        context.acting_identity,
+                                                        {*object},
+                                                        "read",
+                                                        context.authorization_cache);
+        if (!decisions) {
+            return from_store_error(decisions.error());
+        }
+        if (!decisions->at(*object).allowed) {
+            return ApiResult::failure("unauthorized",
+                                      "principal is not allowed to read secret_mount");
+        }
+    }
+    return std::nullopt;
+}
 
 // A capability on one mount: the mount's records are opened in the workspace its route names.
 AsyncCapabilityHandler on_mount(SecretHandler handler) {
@@ -447,6 +474,68 @@ void register_static_secret_capabilities(Registry& registry) {
             }
             co_return one_result(result);
         })});
+    registry.add(Capability{
+        .name = "list_secrets",
+        .title = "List secrets",
+        .description = "List a mount's secrets by name, with each one's current version, times and "
+                       "deleted state. Values are never returned.",
+        .input_schema =
+            mount_input({{"prefix", {{"type", "string"}}},
+                         {"cursor", {{"type", "string"}}},
+                         {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 500}}}},
+                        json::array()),
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"items", {{"type", "array"}}},
+                            {"next_cursor", {{"type", "string"}}}}}},
+        .kind = CapabilityKind::Read,
+        .object = "secret_mount",
+        .action = "read",
+        .resolve_object = mount_object("secret"),
+        // Like every list, it authorizes what it returns itself: here the one mount, before the
+        // mount's workspace is reached.
+        .authorizes_candidates = true,
+        .resolves_operator_audit_target = true,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.store) {
+                co_return no_store();
+            }
+            if (auto refusal = refuse_unreadable_mount(input, "secret", context)) {
+                co_return std::move(*refusal);
+            }
+            auto mount = MountSecrets::open(context, input.at("mount_id"));
+            if (!mount) {
+                co_return refused(mount.error());
+            }
+            const std::string prefix = input.value("prefix", "");
+            if (!prefix.empty()) {
+                context.audit_details["prefix"] = prefix;
+            }
+            auto page = control::settled(co_await mount->list(
+                prefix, input.value("cursor", ""), static_cast<std::size_t>(limit_of(input))));
+            if (!page) {
+                co_return secret_records_failure(page.error());
+            }
+            json items = json::array();
+            for (const auto& item : page->items) {
+                items.push_back(
+                    {{"name", item.name},
+                     {"current_version", item.current_version},
+                     {"created_at", item.created_at},
+                     {"updated_at", item.updated_at},
+                     {"deleted", !item.deleted_at.empty()},
+                     {"deleted_at",
+                      item.deleted_at.empty() ? json(nullptr) : json(item.deleted_at)},
+                     {"destroyed_at",
+                      item.destroyed_at.empty() ? json(nullptr) : json(item.destroyed_at)}});
+            }
+            json value = {{"items", std::move(items)}};
+            if (!page->next_cursor.empty()) {
+                value["next_cursor"] = page->next_cursor;
+            }
+            co_return ApiResult::success(std::move(value));
+        }});
     const auto add_version_action = [&registry](std::string name,
                                                 std::string title,
                                                 std::string description,
@@ -597,23 +686,8 @@ void register_encryption_key_capabilities(Registry& registry) {
             if (!context.store) {
                 co_return no_store();
             }
-            const auto object = resolve_mount(input.at("mount_id"), "encryption", context);
-            if (!object) {
-                co_return refused(object.error());
-            }
-            if (context.acting_identity != "admin") {
-                const auto decisions = control::authorize_batch(*context.store,
-                                                                context.acting_identity,
-                                                                {*object},
-                                                                "read",
-                                                                context.authorization_cache);
-                if (!decisions) {
-                    co_return from_store_error(decisions.error());
-                }
-                if (!decisions->at(*object).allowed) {
-                    co_return ApiResult::failure("unauthorized",
-                                                 "principal is not allowed to read secret_mount");
-                }
+            if (auto refusal = refuse_unreadable_mount(input, "encryption", context)) {
+                co_return std::move(*refusal);
             }
             auto mount = MountSecrets::open(context, input.at("mount_id"));
             if (!mount) {

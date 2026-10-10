@@ -813,6 +813,12 @@ TEST(PostgresCapabilities, SecretsAndEncryptionRoundTrip) {
         call("secret_metadata", {{"mount_id", mount_id}, {"name", "database"}});
     ASSERT_TRUE(metadata.ok) << metadata.error.message;
     EXPECT_EQ(metadata.value.at("versions").size(), 2);
+    const ApiResult secrets = call("list_secrets", {{"mount_id", mount_id}});
+    ASSERT_TRUE(secrets.ok) << secrets.error.message;
+    ASSERT_EQ(secrets.value.at("items").size(), 1u);
+    EXPECT_EQ(secrets.value.at("items").at(0).at("name"), "database");
+    EXPECT_EQ(secrets.value.at("items").at(0).at("current_version"), 2);
+    EXPECT_EQ(secrets.value.dump().find("\"two\""), std::string::npos) << "no value is secrets";
     ASSERT_TRUE(call("delete_secret_versions",
                      {{"mount_id", mount_id}, {"name", "database"}, {"versions", {1}}})
                     .ok);

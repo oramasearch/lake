@@ -6,7 +6,7 @@
  * inside the safe areas, its body scrolling on its own, the focused field brought above the
  * keyboard, and `SheetActions` pinned to its bottom. On a wide screen it is the same dialog as any
  * other. */
-import { createContext, type CSSProperties, type ReactNode, useContext, useEffect, useRef, useState } from "react";
+import { createContext, type CSSProperties, type ReactNode, useContext, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { Button, cx } from "./ui";
@@ -158,7 +158,8 @@ export function Drawer({
 }
 
 /** A consequential action that asks once, in words. The dialog names what happens ("Delete the
- * repository?"), never "Are you sure?". An error from the action stays in the dialog. */
+ * repository?"), never "Are you sure?". An error from the action stays in the dialog. With `typed`,
+ * the action is irreversible: Confirm stays disabled until that exact text is typed. */
 export function ConfirmButton({
   children,
   confirm,
@@ -167,6 +168,8 @@ export function ConfirmButton({
   confirmLabel = "Confirm",
   title,
   disabled,
+  typed,
+  danger,
 }: {
   children: ReactNode;
   confirm: ReactNode;
@@ -175,13 +178,27 @@ export function ConfirmButton({
   confirmLabel?: string;
   title?: ReactNode;
   disabled?: boolean;
+  /** Text the person must type before Confirm is enabled (a name, for an action that cannot be undone). */
+  typed?: string;
+  /** The Confirm button reads as destructive even when the trigger is quiet (a row's ghost button). */
+  danger?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [entered, setEntered] = useState("");
+  const typedId = useId();
   return (
     <>
-      <Button variant={variant} onClick={() => setOpen(true)} disabled={disabled}>
+      <Button
+        variant={variant}
+        onClick={() => {
+          setEntered("");
+          setError(null);
+          setOpen(true);
+        }}
+        disabled={disabled}
+      >
         {children}
       </Button>
       {open && (
@@ -193,8 +210,9 @@ export function ConfirmButton({
             <>
               <Button onClick={() => setOpen(false)}>Cancel</Button>
               <Button
-                variant={variant === "danger" ? "danger" : "primary"}
+                variant={variant === "danger" || danger ? "danger" : "primary"}
                 loading={busy}
+                disabled={typed !== undefined && entered !== typed}
                 onClick={async () => {
                   setBusy(true);
                   setError(null);
@@ -214,6 +232,14 @@ export function ConfirmButton({
           }
         >
           <div className="muted">{confirm}</div>
+          {typed !== undefined && (
+            <div className="field mt-3 mb-0">
+              <label htmlFor={typedId}>
+                Type <code>{typed}</code> to confirm
+              </label>
+              <input id={typedId} value={entered} onChange={(e) => setEntered(e.target.value)} autoComplete="off" spellCheck={false} />
+            </div>
+          )}
           {error && (
             <div className="error mt-3" role="alert">
               {error}
