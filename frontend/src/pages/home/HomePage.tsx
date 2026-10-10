@@ -1,0 +1,84 @@
+/** Home (`/`): what lake is for, and the next step for this viewer. The landing copy is pinned by
+ * docs/ui/front-door.md (`WebUi.FrontDoorDocQuotesTheRenderedHomePage`); keep its bold quotes
+ * word for word. */
+import { Link } from "react-router-dom";
+import { useSession } from "@/lib/session";
+import { useTrail } from "@/lib/trail";
+import { Actions, Button, Page } from "@/lib/ui";
+import { INVITATION_NOTE } from "@/pages/account/signIn";
+
+export default function HomePage() {
+  useTrail([{ label: "Home", to: "/" }, { label: "Welcome to lake" }], "design, train, and ship AI");
+  const { viewer } = useSession();
+  const signedIn = viewer.signed_in;
+  return (
+    <Page
+      eyebrow="lake by Orama"
+      title="Design, train, and ship AI on your own data."
+      sub="Load your data into your own workspace, train models on it, and call them from your code, in Orama's cloud or your own."
+    >
+      {signedIn ? (
+        <Actions>
+          <Button to="/docs" variant="primary">
+            Getting started
+          </Button>
+          <Button to="/train/data">Load your data</Button>
+        </Actions>
+      ) : viewer.clerk.enabled ? (
+        <>
+          <Actions>
+            <Button to="/sign-in" variant="primary">
+              Sign in
+            </Button>
+            <Button to="/docs">Read the docs</Button>
+          </Actions>
+          <p className="muted">{INVITATION_NOTE}</p>
+        </>
+      ) : (
+        <Actions>
+          <Button to="/sign-up" variant="primary">
+            Create account
+          </Button>
+          <Button to="/sign-in">Sign in</Button>
+          <Button to="/docs">Read the docs</Button>
+        </Actions>
+      )}
+      <div className="grid">
+        <section className="card">
+          <h3>Design</h3>
+          <p>Start from the business question and the decision it should improve. A project turns it into a pipeline you can read, change and approve.</p>
+          {signedIn && (
+            <p>
+              <Link to="/design/projects">Projects</Link>
+            </p>
+          )}
+        </section>
+        <section className="card">
+          <h3>Train</h3>
+          <p>
+            Your data lives in your workspace: upload a file, connect a database or generate a dataset, then train on it and read what each run found.
+          </p>
+          {signedIn && (
+            <p>
+              <Link to="/train/data">Data</Link> · <Link to="/train/runs">Runs</Link>
+            </p>
+          )}
+        </section>
+        <section className="card">
+          <h3>Ship</h3>
+          <p>Publish a model and call it from your code, publish a search index, or run databases for your team. Files and code live in repositories.</p>
+          {signedIn && (
+            <p>
+              <Link to="/ship/models">Models</Link> · <Link to="/repositories">Repositories</Link>
+            </p>
+          )}
+          {signedIn && !viewer.administrator && (
+            <p>
+              <Link to="/tokens">Create a token</Link>
+            </p>
+          )}
+        </section>
+      </div>
+    </Page>
+  );
+}
