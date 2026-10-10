@@ -1715,6 +1715,10 @@ legend {
 .docs-page pre {
   overflow-x: auto;
 }
+/* The Docs reader is not held to the page container's 1240px: it grows with the window. */
+.page-container.docs-reader {
+  max-width: none;
+}
 /* The reader fills the width beside the navigation; paragraphs stop at a readable measure, while
    tables and code use the whole width. */
 .docs-page :is(p, ul, ol, blockquote) {
