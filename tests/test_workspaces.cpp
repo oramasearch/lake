@@ -289,7 +289,7 @@ TEST(Workspaces, StartWorkspaceAnswersItsIdBesideTheSpacesOtherWorkspaces) {
     }
     for (const auto& page : lake::api::web_ui_guide()) {
         if (page.slug == "concepts") {
-            EXPECT_NE(page.markdown.find("A space can have many"), std::string::npos);
+            EXPECT_NE(page.markdown.find("can have many workspaces"), std::string::npos);
             EXPECT_NE(page.markdown.find("`workspace_id`"), std::string::npos);
         }
     }

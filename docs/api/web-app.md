@@ -13,8 +13,8 @@ calls the capability or the shared function, so the two cannot disagree.
 | `viewer` | read | **anyone** | `workspace_id?`, `customer_id?` | who is calling and how this lake signs people in (below) |
 | `my_permissions` | read (also `POST`) | signed in | `object_type`, `object_id`, `actions`, `ref?`, `path?` | `{allowed: {<action>: bool}}` |
 | `list_packages` | read | signed in | `customer_id?` | `{available, origin, npm, python, oci}` |
-| `list_docs` | read | **anyone** | — | `{pages: [{slug, title}]}` |
-| `get_doc` | read | **anyone** | `page?` | `{slug, title, markdown, next?: {slug, title}}` |
+| `list_docs` | read | **anyone** | `q?` | `{pages: [{slug, title, section, headings, match?, anchor?, excerpt?}], sections}` |
+| `get_doc` | read | **anyone** | `page?` | `{slug, title, section, markdown, previous?, next?}` (each `{slug, title, section}`) |
 | `mcp_setup` | read | signed in | — | `{origin, mcp_url, tool_groups, flows, scopes}` |
 | `resolve_model` | read | anyone, for a public model | `namespace?`, `name` | `{repository_id, revision}` |
 | `latest_agent_task` | read | read on the space | `customer_id`, `workspace_id`, `subject` | `{task: <get_agent_task value> \| null}` |
@@ -86,7 +86,30 @@ else empty). The Packages page reads this capability.
 
 The Docs guides (`docs/guide/*.md`, embedded at build time) in reading order. `get_doc` without
 `page` is the first, Getting Started; an unknown page is `not_found` at `/page`. The browser renders
-the Markdown; the server-rendered `/docs` renders the same pages.
+the Markdown.
+
+**Sections (lake#561).** `cmake/embed_guide.cmake`'s `GUIDE_SECTIONS` puts every page under a
+section (Get Started, Data, Design, Train, Ship, Organization, Developer, Reference), and a
+section's pages are adjacent. `list_docs` answers `sections`, the names in order, and each page's
+`section`; `slug` and `title` are unchanged. `get_doc` answers the page's `section` and the
+`previous` and `next` pages, each `{slug, title, section}`, absent at either end.
+
+**Headings.** Each `list_docs` page carries `headings`: its level 2 and 3 headings as
+`{level, text, anchor}`. `anchor` is the id both renderers give the heading (`markdown_anchor`,
+with a repeated heading numbered `-2`, `-3`, counted over every `#`–`####` heading outside code
+blocks), so `/docs/<slug>#<anchor>` opens it. `text` drops inline-code and emphasis markers.
+
+**Search.** With `q` (at most 200 characters, else `invalid_input` at `/q`), `list_docs` keeps the
+pages whose title, a heading or the text contains it, ignoring ASCII case. Title matches come
+first, then heading matches, then text matches, each in reading order. A match says what matched
+(`match`: `title`, `heading` or `text`), the `anchor` of the matching heading or of the heading
+above the first text match, and an `excerpt` of the text around the first match (whitespace
+collapsed, never splitting a character). The Docs page's search box and Data → Search's Docs place
+both read it.
+
+Tested by `Api.*` in `tests/test_api.cpp` (the docs block), and `Docs.*` in
+`tests/test_markdown.cpp`: every guide file is embedded once under one section, links between
+guides and their anchors resolve, and no guide says "space".
 
 ## mcp_setup
 

@@ -414,7 +414,9 @@ table + .panel,
 .card > :last-child {
   margin-bottom: 0;
 }
-.grid {
+/* The kit's auto-fitting card grid. Not `.grid`: that is Tailwind's utility, which this rule
+   (unlayered) would override everywhere, squeezing every `grid grid-cols-*` into 18rem columns. */
+.lake-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr));
   gap: var(--lake-space-4);
@@ -1694,37 +1696,16 @@ legend {
 .waterfall-bar.failed {
   background: var(--lake-danger);
 }
-.docs {
-  display: grid;
-  grid-template-columns: minmax(10rem, 13rem) minmax(0, 1fr);
-  gap: 2rem;
-  align-items: start;
-}
-.docs-contents ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  position: sticky;
-  top: 1rem;
-}
-.docs-contents a {
-  display: block;
-  padding: 0.35rem 0.6rem;
-  border-radius: var(--lake-radius-control);
-  color: var(--lake-text-secondary);
-  text-decoration: none;
-}
-.docs-contents a[aria-current="page"] {
-  background: var(--lake-layer);
-  color: var(--lake-text-primary);
-  font-weight: var(--lake-weight-semibold);
-}
+/* The Docs reader (pages/developer/DocsPage.tsx, lake#561): the layout is Tailwind utilities; these
+   are the guide's own prose rules. */
 .docs-page {
-  max-width: 46rem;
   line-height: 1.6;
 }
 .docs-page h1 {
   margin-top: 0;
+}
+.docs-page :is(h2, h3, h4) {
+  scroll-margin-top: 1rem;
 }
 .docs-page h2 {
   margin-top: 2rem;
@@ -1734,17 +1715,63 @@ legend {
 .docs-page pre {
   overflow-x: auto;
 }
-.docs-next {
-  margin-top: 2.5rem;
-  color: var(--lake-text-secondary);
+/* The Docs reader is not held to the page container's 1240px: it grows with the window. */
+.page-container.docs-reader {
+  max-width: none;
 }
-@media (max-width: 720px) {
-  .docs {
-    grid-template-columns: 1fr;
+/* …and neither is its Markdown, which elsewhere stops at 78ch: text and tables share one width. */
+.docs-page .markdown-body {
+  max-width: none;
+}
+/* A table spans the page; on a phone it scrolls in its own box. */
+.docs-page table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+@media (min-width: 48rem) {
+  .docs-page table {
+    display: table;
+    width: 100%;
   }
-  .docs-contents ul {
-    position: static;
+}
+/* Words wrap whole: `anywhere` let a table squeeze its term column until "Account" broke mid-word. */
+.docs-page :is(p, li, td) {
+  overflow-wrap: break-word;
+}
+.docs-page td:first-child {
+  min-width: 9rem;
+}
+/* A heading's "#": quiet until the heading is pointed at or the link is focused; always shown on a
+   touch screen, where there is no hover. */
+.heading-link {
+  margin-left: 0.4em;
+  color: var(--lake-text-tertiary);
+  font-weight: var(--lake-weight-regular);
+  text-decoration: none;
+  opacity: 0;
+}
+:is(h2, h3, h4, h5, h6):hover > .heading-link,
+.heading-link:focus-visible {
+  opacity: 1;
+}
+.heading-link:hover {
+  color: var(--lake-action);
+}
+@media (hover: none) {
+  .heading-link {
+    opacity: 0.6;
   }
+}
+.docs-mark {
+  border-radius: 2px;
+  background: var(--lake-action-soft);
+  color: var(--lake-text-primary);
+  padding: 0 0.1em;
+}
+.docs-reader a.docs-nav-link,
+.docs-reader a.docs-step {
+  text-decoration: none;
 }
 .ask-dock {
   position: relative;

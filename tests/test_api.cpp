@@ -42,6 +42,7 @@
 #include "api/workspace_records_api.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
+#include "lake/api/markdown.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
@@ -7401,10 +7402,54 @@ TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
     EXPECT_EQ(first.value["slug"], guide.front().slug);
     EXPECT_EQ(first.value["markdown"], guide.front().markdown);
     EXPECT_EQ(first.value["next"]["slug"], guide.at(1).slug);
+    EXPECT_EQ(first.value["section"], guide.front().section);
+    EXPECT_FALSE(first.value.contains("previous"));
     const ApiResult last = s.call("get_doc", {{"page", guide.back().slug}});
     ASSERT_TRUE(last.ok);
     EXPECT_FALSE(last.value.contains("next"));
+    EXPECT_EQ(last.value["previous"]["slug"], guide.at(guide.size() - 2).slug);
     EXPECT_EQ(s.call("get_doc", {{"page", "no-such-guide"}}).error.code, "not_found");
+
+    // lake#561: sections in reading order, each page under its section with its headings.
+    ASSERT_TRUE(pages.value["sections"].is_array());
+    EXPECT_EQ(pages.value["sections"][0], guide.front().section);
+    std::vector<std::string> sections;
+    for (const auto& page : guide) {
+        if (sections.empty() || sections.back() != page.section) {
+            sections.emplace_back(page.section);
+        }
+    }
+    EXPECT_EQ(pages.value["sections"], json(sections));
+    for (std::size_t i = 0; i < guide.size(); ++i) {
+        EXPECT_EQ(pages.value["pages"][i]["slug"], guide[i].slug);
+        EXPECT_EQ(pages.value["pages"][i]["section"], guide[i].section);
+        EXPECT_TRUE(pages.value["pages"][i]["headings"].is_array());
+    }
+    // A heading of a page anchors as the renderer does; `q` finds it and says where.
+    const json train = *std::ranges::find_if(pages.value["pages"], [](const json& page) {
+        return page["slug"] == "train";
+    });
+    ASSERT_FALSE(train["headings"].empty());
+    const json heading = train["headings"][0];
+    EXPECT_NE(markdown_to_html(std::string(std::ranges::find(guide, "train", &WebUiGuidePage::slug)
+                                               ->markdown))
+                  .find("id=\"" + heading["anchor"].get<std::string>() + "\""),
+              std::string::npos);
+    const ApiResult found = s.call("list_docs", {{"q", heading["text"]}});
+    ASSERT_TRUE(found.ok) << found.error.message;
+    ASSERT_FALSE(found.value["pages"].empty());
+    const json hit = *std::ranges::find_if(found.value["pages"], [](const json& page) {
+        return page["slug"] == "train";
+    });
+    EXPECT_NE(hit["match"], "text");
+    const ApiResult text = s.call("list_docs", {{"q", "HELD_OUT_AUC"}});
+    ASSERT_TRUE(text.ok);
+    ASSERT_FALSE(text.value["pages"].empty());
+    EXPECT_TRUE(text.value["pages"][0].contains("excerpt"));
+    EXPECT_NE(text.value["pages"][0]["excerpt"].get<std::string>().find("held_out_auc"),
+              std::string::npos);
+    EXPECT_TRUE(s.call("list_docs", {{"q", "no guide says zqxwv"}}).value["pages"].empty());
+    EXPECT_EQ(s.call("list_docs", {{"q", std::string(201, 'a')}}).error.path, "/q");
     EXPECT_EQ(s.call("mcp_setup").error.code, "unauthenticated");
 
     s.ctx.authorized = true;

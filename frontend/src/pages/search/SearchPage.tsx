@@ -144,19 +144,16 @@ const PLACES: Place[] = [
     id: "docs",
     label: "Docs",
     icon: BookOpen,
+    // One read: list_docs searches every guide's title, headings and text, and says which heading
+    // to open (lake#561).
     run: async (q, _scope, _o, signal) => {
-      const list = await read<{ pages?: Row[] }>("list_docs", undefined, { workspace: null, signal });
-      const pages = await Promise.all(
-        (list.pages ?? []).map((p) => read<Row>("get_doc", { page: p.slug }, { workspace: null, signal }).catch((): Row => ({ ...p, markdown: "" }))),
-      );
-      return pages
-        .filter((p) => matches(q, p.title, p.markdown))
-        .map((p) => {
-          const text = String(p.markdown ?? "");
-          const at = text.toLowerCase().indexOf(q.toLowerCase());
-          const excerpt = at >= 0 ? `…${text.slice(Math.max(0, at - 60), at + 100).replace(/\s+/g, " ")}…` : undefined;
-          return { key: p.slug, title: p.title, detail: excerpt, to: `/docs/${encodeURIComponent(p.slug)}` };
-        });
+      const list = await read<{ pages?: Row[] }>("list_docs", { q }, { workspace: null, signal });
+      return (list.pages ?? []).map((p) => ({
+        key: `${p.slug}#${p.anchor ?? ""}`,
+        title: p.title,
+        detail: p.excerpt,
+        to: `/docs/${encodeURIComponent(p.slug)}${p.anchor ? `#${p.anchor}` : ""}`,
+      }));
     },
   },
 ];

@@ -1,3 +1,10 @@
+#include <algorithm>
+#include <filesystem>
+#include <map>
+#include <regex>
+#include <set>
+#include <string>
+
 #include <gtest/gtest.h>
 
 #include "lake/api/markdown.hpp"
@@ -38,9 +45,9 @@ TEST(Markdown, NeverPassesHtmlOrUnsafeLinksThrough) {
 
 TEST(Docs, EveryGuideHasItsTitleAndRenders) {
     const auto& pages = lake::api::web_ui_guide();
-    ASSERT_GE(pages.size(), 7U);
+    ASSERT_GE(pages.size(), 30U);
     EXPECT_EQ(pages.front().slug, "index");
-    EXPECT_EQ(pages.front().title, "Getting started");
+    EXPECT_EQ(pages.front().title, "Getting Started");
     for (const auto& page : pages) {
         EXPECT_FALSE(page.title.empty()) << page.slug;
         EXPECT_TRUE(page.markdown.starts_with("# " + std::string(page.title))) << page.slug;
@@ -71,4 +78,105 @@ TEST(Workspaces, TheWorkspaceOpenApiIsWrittenForCustomers) {
     EXPECT_EQ(shown["paths"]["/v1/list_datasets"]["get"]["description"],
               "Requires nothing special. The datasets.")
         << "only a permission note (with a colon) is removed";
+}
+
+namespace {
+
+// The guide's text a reader sees as prose: code blocks and inline code spans removed.
+std::string prose_of(std::string_view markdown) {
+    std::string out;
+    bool block = false;
+    std::size_t start = 0;
+    while (start <= markdown.size()) {
+        const std::size_t end = std::min(markdown.find('\n', start), markdown.size());
+        const std::string_view line = markdown.substr(start, end - start);
+        if (line.starts_with("```")) {
+            block = !block;
+        } else if (!block) {
+            bool span = false;
+            for (const char c : line) {
+                if (c == '`') {
+                    span = !span;
+                } else if (!span) {
+                    out += c;
+                }
+            }
+            out += '\n';
+        }
+        if (end == markdown.size()) {
+            break;
+        }
+        start = end + 1;
+    }
+    return out;
+}
+
+} // namespace
+
+// lake#561: the Docs navigation groups pages by section. Every page file is embedded, once, under a
+// section, and a section's pages are adjacent, so the navigation never repeats a section.
+TEST(Docs, EveryGuideFileIsEmbeddedOnceUnderASection) {
+    const auto& pages = lake::api::web_ui_guide();
+    std::set<std::string> slugs;
+    std::set<std::string> finished;
+    std::string current;
+    for (const auto& page : pages) {
+        EXPECT_TRUE(slugs.insert(std::string(page.slug)).second) << "twice: " << page.slug;
+        ASSERT_FALSE(page.section.empty()) << page.slug;
+        if (page.section != current) {
+            EXPECT_FALSE(finished.contains(std::string(page.section)))
+                << page.section << " is split around " << page.slug;
+            if (!current.empty()) {
+                finished.insert(current);
+            }
+            current = std::string(page.section);
+        }
+    }
+    EXPECT_EQ(pages.front().section, "Get Started");
+    const std::filesystem::path root =
+        std::filesystem::path(LAKE_TEST_SOURCE_DIR) / "docs" / "guide";
+    for (const auto& entry : std::filesystem::directory_iterator(root)) {
+        if (entry.path().extension() == ".md" && entry.path().filename() != "README.md") {
+            EXPECT_TRUE(slugs.contains(entry.path().stem().string()))
+                << entry.path().filename() << " is not in cmake/embed_guide.cmake's GUIDE_SECTIONS";
+        }
+    }
+}
+
+// Every link from one guide to another names a page that exists, and a #anchor names one of that
+// page's headings as the renderer anchors them.
+TEST(Docs, LinksBetweenGuidesResolve) {
+    const auto& pages = lake::api::web_ui_guide();
+    std::map<std::string, std::string> html;
+    for (const auto& page : pages) {
+        html[std::string(page.slug)] = markdown_to_html(page.markdown);
+    }
+    const std::regex link(R"re(href="/docs(?:/([a-z0-9-]+))?(?:#([a-z0-9-]+))?")re");
+    for (const auto& page : pages) {
+        const std::string& text = html[std::string(page.slug)];
+        for (auto it = std::sregex_iterator(text.begin(), text.end(), link);
+             it != std::sregex_iterator(); ++it) {
+            const std::string slug = (*it)[1].matched ? (*it)[1].str() : "index";
+            ASSERT_TRUE(html.contains(slug)) << page.slug << " links /docs/" << slug;
+            if ((*it)[2].matched) {
+                EXPECT_NE(html[slug].find("id=\"" + (*it)[2].str() + "\""), std::string::npos)
+                    << page.slug << " links /docs/" << slug << "#" << (*it)[2].str();
+            }
+        }
+    }
+}
+
+// The product speaks of workspaces, never of a "space" or a "personal space" (Steve, 2026-10-10),
+// and never uses the banned word. Code spans and blocks may name fields such as `customer_id`.
+TEST(Docs, GuidesSpeakOfWorkspaces) {
+    const std::regex space(R"re(\bspaces?\b)re", std::regex::icase);
+    const std::regex banned(R"re(\bseams?\b)re", std::regex::icase);
+    for (const auto& page : lake::api::web_ui_guide()) {
+        const std::string prose = prose_of(page.markdown);
+        std::smatch found;
+        EXPECT_FALSE(std::regex_search(prose, found, space))
+            << page.slug << " says \"" << found.str() << "\" near: "
+            << prose.substr(static_cast<std::size_t>(std::max<long>(0, found.position() - 40)), 100);
+        EXPECT_FALSE(std::regex_search(prose, banned)) << page.slug;
+    }
 }

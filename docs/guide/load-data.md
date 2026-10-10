@@ -1,59 +1,286 @@
-# Load data
+# Datasets and Loading Data
 
-Every dataset lives in your workspace (**Train → Data**). There are three ways to bring data in.
+A **dataset** is a table in your workspace: the data its pipelines train on, its search indexes
+cover and its agents read. Every dataset lives in the workspace Zetta of the workspace it was loaded
+into; another workspace never sees it.
 
-## Upload a file
+Open **Data → Datasets** to see them. The page has four figures (Datasets, Run outputs,
+Connections, Stores), the datasets table, the **Connections** card and the **Storage** card. Its
+header has **Query with SQL** and **Load data**, which appear once the workspace is ready.
 
-**Train → Data → Load data → Upload a file.** CSV (a header row, then one row per line) or JSONL
-(one JSON object per line), up to 16 MiB. The name you give becomes the dataset's name.
+There are three ways to bring data in, all under **Load data**:
 
-- **Names.** A dataset name is letters, digits and underscores, starting with a letter or an
-  underscore, at most 63 characters, and not a SQL keyword, so `SELECT * FROM datasets.<name>`
-  always works. `accounts-2026` is refused; `accounts_2026` is fine.
-- **A name that is taken** is refused and nothing is loaded. Tick *If the name is taken, save it
-  under the next free name* to have it saved as `accounts_2`; the page then says it was renamed.
-- **Malformed CSV is refused** with the line: a header that leaves a column unnamed or names one
-  twice, a quoted field that does not close on its line, or a row with more or fewer fields than
-  the header (`line 3: 3 fields, but the header has 2 columns`).
-- After the upload the page says how many rows arrived, from which kind of file, and into which
-  dataset.
-- REST/MCP: `workspace_act` with `{"customer_id": "<customer id>", "workspace_id": "<workspace
-  id>", "capability": "upload_dataset", "input": {"table_name": "accounts", "format": "csv",
-  "content": "<the file's text>"}}`; add `"if_exists": "rename"` to `input` to take the next free
-  name. A taken name answers `conflict`; a rename answers `renamed_from` with the name you asked
-  for. The answer's `id` (`datasets/<name>`) is the id `get_dataset` takes.
+| Way | What it does |
+|---|---|
+| **Upload** | loads one CSV or JSONL file of at most 16 MiB |
+| **Generate** | makes a dataset from one of the workspace engine's generators |
+| **From a connection** | pulls the result of one read-only `SELECT` from a database the workspace connects to |
 
-Every workspace call names `customer_id` and `workspace_id`; [Getting started](/docs) says where to
-find them.
+Every REST and MCP call on this page names your workspace: `customer_id` is the id of the account
+that owns your workspaces (yours, or your organization's) and `workspace_id` is the workspace.
+[Getting Started](/docs) says where to find both.
 
-## Connect a database
+## Upload a File
 
-1. Create a service: **Ship → Services → New service** (for example Postgres), or `create_service`.
-2. When it is Ready, **Train → Data → Connect One of Your Services** makes it a connection
-   (`connect_service`).
-3. Pull a table from it into a dataset from the connection's row.
+1. Open **Data → Datasets** and press **Load data**.
+2. Keep **Upload** selected.
+3. Choose the file (CSV or JSONL, up to 16 MiB). A CSV has a header row, then one row per line; a
+   JSONL file has one JSON object per line.
+4. Leave the format as **From the file name**, or choose **CSV** or **JSONL**.
+5. Name the dataset, for example `accounts`.
+6. Tick *If the name is taken, save it under the next free name (accounts_2)* if you want that.
+7. Press **Upload**.
 
-## Generate a dataset
+The page returns to Datasets with a banner saying how many rows arrived, from which kind of file,
+and into which dataset, with a link to it. When the name was taken and you ticked the box, it says
+the dataset was saved under the next free name.
 
-**Train → Data → Load data → Generate a dataset** makes realistic synthetic data from a
-description, useful for demos and tests (`workspace_act` with `generate_dataset`).
+The same upload through the API is `upload_dataset` inside `workspace_act`:
 
-## Look at it
+`POST /v1/workspace_act`
 
-Open a dataset to see its columns and types, its first rows, and **Query it** with SQL (`SELECT`
-or `WITH`, read-only). REST/MCP: `workspace_sql` with
-`{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "statement": "SELECT * FROM accounts LIMIT 20"}`.
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "upload_dataset", "input": {"table_name": "accounts", "format": "csv", "content": "account_id,plan,churned\n1,pro,false\n2,free,true\n"}}
+```
 
-- **Type** is the value type SQL sees in the first rows (integer, decimal, text, boolean; a CSV
-  cell is typed as it loads). **Reads as** is the workspace's analysis of the column (identifier,
+- Put the file's text in `content`, and `"csv"` or `"jsonl"` in `format`.
+- Add `"if_exists": "rename"` to `input` to take the next free name; the answer then carries
+  `renamed_from` with the name you asked for.
+- The answer's `id` (`datasets/<name>`) is the id other calls take.
+- From an AI agent, the MCP tool `workspace_act` takes the same JSON.
+
+### Name Rules
+
+- A dataset name is letters, digits and underscores, starts with a letter or an underscore, is at
+  most 63 characters, and is not a SQL keyword, so `SELECT * FROM datasets.<name>` always works.
+  `accounts-2026` is refused; `accounts_2026` is fine.
+- A name that is taken is refused with `conflict` and nothing is loaded, unless you asked for the
+  next free name.
+
+### What a CSV Must Look Like
+
+Lake checks a CSV before loading it and refuses it, naming the line, when:
+
+- the header leaves a column unnamed or names one twice;
+- a quoted field does not close on its line;
+- a row has more or fewer fields than the header (`line 3: 3 fields, but the header has 2
+  columns`).
+
+A cell is typed as it loads: integers, decimals, booleans and text.
+
+## Generate a Dataset
+
+1. Press **Load data** and choose **Generate**.
+2. Pick a **Generator**. The list is the workspace engine's own generators; when it has none, the
+   drawer says *No generators*.
+3. Optionally set **Variants per subject** (1 to 50).
+4. Press **Generate**. The page confirms with *Dataset generated*.
+
+Through the API it is `generate_dataset` inside `workspace_act`, with the generator's `kind` and
+optional `variants_per_subject`. `list_dataset_generators` inside `workspace_query` lists the
+generators.
+
+`POST /v1/workspace_act`
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "generate_dataset", "input": {"kind": "<generator kind>"}}
+```
+
+Generated data is for demos and tests: it is synthetic, not drawn from your records.
+
+## Connect a Database
+
+A **connection** is a database the workspace reads from. The **Connections** card on
+**Data → Datasets** (*Databases Your Data Lives In*) lists them with where they point, the service
+they came from and when they were saved.
+
+### Connect One of Your Services
+
+When the workspace runs a Postgres service (**Ship → Services**), the Connections card offers it
+under **Connect One of Your Services**. Press **Connect** beside a Ready service, or **Refresh** for
+one already connected. The workspace reaches it inside the cluster with the credential lake already
+holds; you type no password, and none is shown. Other service kinds are not connectable yet and say
+so.
+
+`POST /v1/connect_service`
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "service_id": "<service id>"}
+```
+
+Add `"name"` to choose the connection's name; it defaults to the service's name. The MCP tool is
+`connect_service`.
+
+### Add a Connection to Another Database
+
+1. On the Connections card press **Add connection**.
+2. Fill in **Name** (letters, digits, `_` and `-`), **Type** (**Postgres** or **Snowflake**), the
+   host and port or the Snowflake account, warehouse and role, **Database**, **Schema**, **User**
+   and **Password or access token**.
+3. Press **Save connection**.
+
+Use a read-only account: only a single `SELECT` ever runs against it. The password is sent to the
+workspace once, which stores it and never returns it; lake keeps no copy. Through the API this is
+`create_connection` inside `workspace_act`; `list_connections` inside `workspace_query` lists
+connections without their credentials.
+
+### Browse a Connection's Tables
+
+**Browse tables** on a connection's row lists its tables with their kind and columns, without
+pulling anything. Through the API it is `list_source_tables` inside `workspace_query`.
+
+### Pull a Table Into a Dataset
+
+1. Press **Load data** and choose **From a connection**.
+2. Choose the connection under **From**.
+3. Write one read-only **Query**, for example `SELECT account_id, plan, seats FROM accounts`.
+4. Name the dataset under **Dataset name**.
+5. Optionally limit **At most this many rows** (a whole number).
+6. Press **Pull dataset**.
+
+`POST /v1/workspace_act`
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_dataset_from_query", "input": {"connection": "warehouse", "query": "SELECT account_id, plan, seats FROM accounts", "table_name": "accounts"}}
+```
+
+The credential stays with the workspace: the pull names the saved connection, so the password does
+not travel again.
+
+### Remove a Connection
+
+**Remove** on a connection's row asks first, then removes it (`delete_connection` inside
+`workspace_act`). Datasets already pulled from it stay.
+
+## Look at a Dataset
+
+The datasets table lists each dataset with its database, kind and, when the engine reports them,
+its rows and size. The filter chips switch between **Datasets** (data you can train on), **Run
+outputs** and **All tables**; search filters by name.
+
+Open a dataset for its page:
+
+- **Figures**: Rows, Size, Columns and Copies.
+- **Columns** tab: each column's **Type** (the value type SQL sees in the first rows: integer,
+  decimal, text, boolean) and **Reads as** (the workspace's analysis of the column: identifier,
   categorical, numeric, datetime, free text …).
-- **Stored as** is how the workspace keeps the rows (JSON rows for every dataset); the workspace
-  does not record which file format a dataset came from, so the upload notice is where that is
-  shown.
-- **Copies** is the fewest copies any part of the dataset has. With one copy the page offers *Keep
-  durable*.
-- **Results.** Tables the engine writes as a run's output (entity pairs, churn scores, segment
-  assignments, decisions — everything in a `*_results` database, plus `forecasts`) are listed apart
-  under *Results* and are not offered as training data.
-- **One id.** `list_datasets` gives each dataset an `id` of `<database>/<name>` and a `kind` (`data`
-  or `result`); `get_dataset` takes that id (and `<database>.<name>`).
+- **First Rows** tab: the first 20 rows.
+- **Partitions** tab, when the dataset has partitions.
+- **Facts**: database, **Stored as** (how the workspace keeps the rows, JSON rows for every
+  dataset), rows, bytes, partitions and copies.
+- **Actions**: **Query it** and **All datasets**.
+
+The upload banner is where the original file format is shown; the workspace does not record it.
+
+Through the API, `get_dataset` reads one dataset by its id:
+
+`GET /v1/get_dataset?customer_id=<customer id>&workspace_id=<workspace id>&id=datasets/accounts`
+
+`list_datasets` lists them all, each with an `id` of `<database>/<name>` and a `kind` (`data` or
+`result`).
+
+### Run Outputs
+
+Tables the engine writes as the output of a run (entity pairs, churn scores, segment assignments,
+decisions: everything in a `*_results` database, plus `forecasts`, `feedback` and `system`) are
+**Run outputs**. They are listed apart and are not offered as training data. Their page says *A
+table the engine wrote as the output of a run*.
+
+### Keep a Dataset Durable
+
+**Copies** is the fewest copies any part of the dataset has. When a partition has only one copy,
+the dataset page offers **Keep durable**, which asks the workspace to keep more so the dataset
+survives losing a node (`promote_dataset` inside `workspace_act`).
+
+## Query a Dataset
+
+**Query with SQL** on Datasets, or **Query it** on a dataset, opens **Query**: read-only SQL over
+the workspace's data, one `SELECT` or `WITH` query at a time. ⌘ Enter (Ctrl Enter) runs it; the
+statement and database stay in the address so a query can be shared. Results show the first 500
+rows.
+
+`POST /v1/workspace_sql`
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "statement": "SELECT plan, COUNT(*) FROM datasets.accounts GROUP BY plan"}
+```
+
+`workspace_sql` is a read: REST also accepts it as `GET` with the same inputs as query
+parameters. The MCP tool is `workspace_sql`.
+
+The workspace speaks a subset of SQL:
+
+- one `WHERE` comparison;
+- `COUNT(*)`, `COUNT(col)`, `SUM`, `AVG`, `MIN` and `MAX`, with or without `GROUP BY` (on any
+  column, including text);
+- `ORDER BY`, `LIMIT` and `OFFSET`;
+- no joins and no expressions.
+
+Anything that does not start with `SELECT` or `WITH`, several statements, and writes are refused
+before they reach the workspace. A column no row carries is an error that names the table's
+columns.
+
+## Storage
+
+The **Storage** card (*Buckets, Filesystems and Volumes*) holds storage for your services, private
+to this workspace. It shows whether or not the workspace is ready.
+
+1. Press **New storage**.
+2. Choose **Type and provider**. Today one pair is offered: **Volume — cluster disk**. The others
+   are listed, disabled, with the reason they are not offered.
+3. Enter a **Name** (lowercase letters, digits and `-`, starting with a letter, at most 31
+   characters) and a **Size (GiB)** from 1 to 100 (default 10).
+4. Press **Create storage**. The card checks again every 3 seconds while a store is changing; it reads *Waiting
+   for the operator*, then *Connecting*, then Ready.
+5. Once Ready, **Show connection** shows what a service mounts to use it. It is shown once and
+   not stored by lake.
+
+`POST /v1/create_store`
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "type": "volume", "provider": "cluster", "name": "scratch", "size_gi": 10}
+```
+
+`list_stores` lists them, `store_connection` reads a Ready store's connection, and `delete_store`
+deletes one when `confirm` is its exact name (**Delete** on the card). Deleting a store deletes the data in it, which
+cannot be recovered; the page asks you to type the name first.
+
+## Permissions
+
+| To | You need, on the account that owns the workspace |
+|---|---|
+| See datasets, connections, stores and query | `read` |
+| Upload, generate, pull, connect, add or remove a connection, keep durable, create storage | `write` |
+| Delete storage or read a store's connection | `admin` |
+
+You hold `admin` on your own workspaces. In an organization, owners and admins hold `admin`;
+members hold `read` unless they were granted more ([Grants and Effective Access](/docs/access)).
+
+## Limits
+
+- An upload is one file of at most 16 MiB.
+- The dataset list shows names; row counts and sizes are on each dataset's page.
+- A query shows at most 500 rows; the dataset page samples 20.
+- Workspace reads time out after 15 seconds and actions after 60.
+
+## Troubleshooting
+
+| What you see | Why, and what to do |
+|---|---|
+| `conflict` at `/input/table_name` | The name is taken. Choose another, or add `"if_exists": "rename"`. |
+| `invalid_input` naming a line | The CSV is malformed at that line; fix the header, the quoting or the field count. |
+| `invalid_input` at `/input/table_name` | The name is not a valid SQL name; use letters, digits and underscores. |
+| `invalid_input` at `/statement` | The query does not start with `SELECT` or `WITH` (the message quotes how it starts), or holds several statements. |
+| *This workspace requires an approval before it reaches an outside database* | The workspace enforces consent for outside sources, which lake cannot give (`consent_required`). |
+| `workspace_not_ready` | The workspace is starting. Wait until **Ship → Workspaces** shows it Ready, or press **Start** on the page. |
+| *Connecting* on a store for a long time | The operator has made it but its connection has not reached lake yet. |
+| `unauthorized` | You have `read` but not `write` on the account; ask an owner or admin. |
+
+## Related Pages
+
+- [Getting Started](/docs)
+- [Workspaces](/docs/workspaces)
+- [Services and Storage](/docs/services)
+- [AI Projects and Pipelines](/docs/design): train on a dataset
+- [Search](/docs/search)
+- [Models and Search Indexes](/docs/ship): make a dataset searchable
