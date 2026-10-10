@@ -73,7 +73,8 @@ Files are under `frontend/src/pages/`.
 | `/login` | `account/LoginPage.tsx` | the operator-token form, posted to `POST /session` | none |
 | `/settings`, `/sessions`, `/passkeys`, `/tokens` | `account/SettingsPage.tsx`, `SessionsPage.tsx`, `PasskeysPage.tsx`, `TokensPage.tsx` | profile, sessions and devices, passkeys, tokens ([settings.md](settings.md#personal-settings)) | `list_sessions`, `revoke_session`, `list_devices`, `revoke_device`, `begin_passkey_registration`, `register_passkey`, `create_token` |
 | `/docs`, `/docs/:page` | `developer/DocsPage.tsx` | lake's guides (`docs/guide/*.md`) | `list_docs`, `get_doc` |
-| `/developer/mcp` | `developer/McpPage.tsx` | the MCP endpoint, tool groups, worked flows and a key ([../api/mcp.md](../api/mcp.md)) | `mcp_setup`, `create_token` |
+| `/developer/api` | `developer/ApiPage.tsx` | tabs Keys (make, list and revoke API keys), Quick start (curl and fetch against the viewer's origin) and Operations (every `/v1/openapi.json` operation, grouped, searchable, with its schemas and a curl line); downloads `openapi.json` ([../api/mcp.md](../api/mcp.md#developer--api-and-developer--mcp-lake561)) | `mcp_setup`, `create_token`, `list_sessions`, `revoke_session`, `GET /v1/openapi.json` |
+| `/developer/mcp` | `developer/McpPage.tsx` | tabs Connect (the setup for each client, the skill, `llms.txt`), Keys (as on API) and Tools (every tool by group, read or write, and the worked flows) ([../api/mcp.md](../api/mcp.md)) | `mcp_setup`, `create_token`, `list_sessions`, `revoke_session` |
 
 **Repositories, Drive and sharing** ([repositories.md](repositories.md), [forge.md](forge.md),
 [drive.md](drive.md), [sharing.md](sharing.md))

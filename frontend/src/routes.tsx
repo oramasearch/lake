@@ -56,7 +56,7 @@ export function sectionLabel(key: SectionKey): string {
   return SECTION_LABELS[key];
 }
 
-/** One rail item. `external` opens a non-page URL (the OpenAPI document). */
+/** One rail item. `external` opens a non-page URL instead of a page. */
 export type NavItem = { section: SectionKey; path: string; label: string; icon: string; audience: Audience[]; external?: boolean };
 
 const AO: Audience[] = ["account", "operator"];
@@ -98,7 +98,7 @@ export const NAV: NavItem[] = [
   { section: "administration", path: "/metering", label: "Usage", icon: "metering", audience: ["operator"] },
   { section: "administration", path: "/secret-mounts", label: "Secrets", icon: "secrets", audience: ["operator"] },
   { section: "administration", path: "/audit", label: "Audit", icon: "audit", audience: ["operator"] },
-  { section: "developer", path: "/v1/openapi.json", label: "API", icon: "api", audience: AO, external: true },
+  { section: "developer", path: "/developer/api", label: "API", icon: "api", audience: AO },
   { section: "developer", path: "/developer/mcp", label: "MCP", icon: "api", audience: AO },
   { section: "developer", path: "/docs", label: "Docs", icon: "docs", audience: ALL },
 ];

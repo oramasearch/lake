@@ -55,7 +55,8 @@ The rail and top bar come from `NAV` in `frontend/src/routes.tsx` and `component
 - **Activity** (`/activity`) is the account's own audit events through `my_audit`: newest first,
   principals by name, a workspace call's inner capability, successful reads hidden unless
   **Include reads** is ticked ([audit.md](../api/audit.md#reading-the-log-as-a-person-lake445)).
-  **Usage** opens on the account's own space. **API** opens `/v1/openapi.json`.
+  **Usage** opens on the account's own space. **API** opens Developer → API (`/developer/api`), whose
+  Operations tab renders `/v1/openapi.json` and whose header downloads it.
 - **Design, Train and Ship** run on the workspace in the URL, one of the space's workspace Zettas
   ([workspace-selection.md](workspace-selection.md), [`../api/workspaces.md`](../api/workspaces.md)).
 - **The current item is chosen by path.** `currentNav` compares the path, without any `/w/<id>`

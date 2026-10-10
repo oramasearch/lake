@@ -20,4 +20,4 @@ The words lake uses, in the order you meet them. Checked against the running ser
 | **Search index** | A searchable index over a dataset; published indexes answer outside searches. |
 | **Agent** | An AI helper. The **Agent Library** holds the ones Orama provides; you can build your own in Train → Agents. |
 | **Ask Orama** | The agent at the top of every page. It reads what you can read and proposes changes for you to confirm. |
-| **Key** | A lake API token for scripts and AI agents (Developer → MCP). |
+| **Key** | A lake API token for scripts and AI agents (Developer → API or Developer → MCP). |
