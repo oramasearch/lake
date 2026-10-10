@@ -9,6 +9,8 @@ const DTCG_ROOT = join(ROOT, "vendor", "orama-design", "tokens", "dtcg");
 const MAP_PATH = join(ROOT, "design-tokens.map.json");
 const INVENTORY_PATH = join(ROOT, "design-tokens.inventory.json");
 const OUTPUT_PATH = join(ROOT, "src", "api", "web_ui_tokens.inc");
+// The web app (frontend/) imports the same token layer as plain CSS.
+const CSS_OUTPUT_PATH = join(ROOT, "frontend", "src", "styles", "tokens.css");
 const ALIAS = /^\{([^}]+)\}$/;
 
 function fail(message) {
@@ -210,19 +212,33 @@ function compile() {
     "  }",
     "}",
   ];
-  const css = `${lines.join("\n")}\n`;
+  return `${lines.join("\n")}\n`;
+}
+
+function wrapForServer(css) {
   return `R"lake_tokens(\n${css})lake_tokens"`;
 }
 
 const arguments_ = parseArguments(process.argv.slice(2));
-const generated = compile();
+const css = compile();
+const outputs = [
+  [OUTPUT_PATH, wrapForServer(css)],
+  [CSS_OUTPUT_PATH, css],
+];
 if (arguments_.check) {
-  const checkedPath = arguments_.checkFile || OUTPUT_PATH;
-  if (!existsSync(checkedPath) || readFileSync(checkedPath, "utf8") !== generated) {
-    fail(`${relative(ROOT, checkedPath)} does not match a fresh compile`);
+  // --check-file compares one file (the server form, or the CSS form for a .css path).
+  const checked = arguments_.checkFile
+    ? [[arguments_.checkFile, arguments_.checkFile.endsWith(".css") ? css : wrapForServer(css)]]
+    : outputs;
+  for (const [path, generated] of checked) {
+    if (!existsSync(path) || readFileSync(path, "utf8") !== generated) {
+      fail(`${relative(ROOT, path)} does not match a fresh compile`);
+    }
+    console.log(`build-tokens: ok — ${relative(ROOT, path)} matches the vendored tokens`);
   }
-  console.log(`build-tokens: ok — ${relative(ROOT, checkedPath)} matches the vendored tokens`);
 } else {
-  writeFileSync(OUTPUT_PATH, generated);
-  console.log(`build-tokens: wrote ${relative(ROOT, OUTPUT_PATH)}`);
+  for (const [path, generated] of outputs) {
+    writeFileSync(path, generated);
+    console.log(`build-tokens: wrote ${relative(ROOT, path)}`);
+  }
 }

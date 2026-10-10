@@ -81,6 +81,43 @@ add_custom_command(
   DEPENDS ${LAKE_GUIDE_FILES} cmake/embed_guide.cmake
   VERBATIM)
 
+# The web app (frontend/, React + Vite): built with npm and embedded into the binary, so lake
+# serves its whole UI with no files at run time (docs/ui/README.md). LAKE_FRONTEND_DIST points
+# at an already-built dist/ instead (the image's Node stage); empty builds it here.
+set(LAKE_FRONTEND_DIST "" CACHE PATH "A built frontend/dist to embed; empty builds it with npm")
+find_program(LAKE_NODE_EXECUTABLE node REQUIRED)
+set(LAKE_EMBEDDED_WEB_APP_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/web_app_assets.cpp")
+if(LAKE_FRONTEND_DIST)
+  set(LAKE_WEB_APP_DIST "${LAKE_FRONTEND_DIST}")
+  file(GLOB_RECURSE LAKE_WEB_APP_DEPENDS CONFIGURE_DEPENDS "${LAKE_FRONTEND_DIST}/*")
+else()
+  find_program(LAKE_NPM_EXECUTABLE npm REQUIRED)
+  set(LAKE_WEB_APP_DIST "${CMAKE_CURRENT_BINARY_DIR}/frontend-dist")
+  file(GLOB_RECURSE LAKE_FRONTEND_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/frontend/src/*"
+    "${CMAKE_CURRENT_SOURCE_DIR}/frontend/scripts/*"
+    "${CMAKE_CURRENT_SOURCE_DIR}/frontend/tests/*")
+  set(LAKE_WEB_APP_STAMP "${CMAKE_CURRENT_BINARY_DIR}/frontend-dist.stamp")
+  add_custom_command(
+    OUTPUT "${LAKE_WEB_APP_STAMP}"
+    COMMAND "${LAKE_NPM_EXECUTABLE}" ci --no-audit --no-fund
+    COMMAND "${LAKE_NPM_EXECUTABLE}" run build -- --outDir "${LAKE_WEB_APP_DIST}" --emptyOutDir
+    COMMAND "${CMAKE_COMMAND}" -E touch "${LAKE_WEB_APP_STAMP}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/frontend"
+    DEPENDS ${LAKE_FRONTEND_SOURCES}
+      frontend/package.json frontend/package-lock.json frontend/index.html
+      frontend/vite.config.ts frontend/tsconfig.json
+    COMMENT "Building the web app (frontend/)"
+    VERBATIM)
+  set(LAKE_WEB_APP_DEPENDS "${LAKE_WEB_APP_STAMP}")
+endif()
+add_custom_command(
+  OUTPUT "${LAKE_EMBEDDED_WEB_APP_CPP}"
+  COMMAND "${LAKE_NODE_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/ui/embed-frontend.mjs"
+    "${LAKE_WEB_APP_DIST}" "${LAKE_EMBEDDED_WEB_APP_CPP}"
+  DEPENDS ${LAKE_WEB_APP_DEPENDS} tools/ui/embed-frontend.mjs
+  VERBATIM)
+
 # -----------------------------------------------------------------------------
 # Sibling and vendored modules — libliquid is library-only and provides Capy, Corosio
 # and HTTP to its consumers. Beast2 remains lake's Zetta-shaped serving stack.
@@ -178,6 +215,8 @@ add_library(lake-core STATIC
   ${LAKE_EMBEDDED_FONTS_CPP}
   ${LAKE_EMBEDDED_EXPERIMENTS_CPP}
   ${LAKE_EMBEDDED_GUIDE_CPP}
+  ${LAKE_EMBEDDED_WEB_APP_CPP}
+  src/api/web_app.cpp
   src/control/lake_identity.cpp
   src/control/saml.cpp
   src/control/callers.cpp
@@ -319,7 +358,6 @@ foreach(lake_target lake-core lake-control-postgres lake-api lake lake-ui-fixtur
 endforeach()
 
 if(LAKE_BUILD_TESTS)
-  find_program(LAKE_NODE_EXECUTABLE node REQUIRED)
   FetchContent_Declare(googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
     GIT_TAG        v1.17.0)
