@@ -102,6 +102,12 @@ workspace's Zetta with the existing envelope (instance KEK, customer KEK, data k
 keeps only the content-free `secret_mount_routes`, the policy objects and the customer KEK. Version
 numbers are claimed `if_absent`, and a customer KEK rotation rewraps every workspace's data keys
 before it forgets the replaced KEK. See `docs/api/secrets.md`.
+A mount's owner is the account that owns its workspace or, as before, an organization inside it
+(lake#561, migration `0071_secret_mount_owners`): `create_secret_mount` without `organization_id`
+needs `admin` on the customer, hangs the mount under `customer → environment secrets/<customer>`,
+claims its name for `customer:<id>`, and stores a NULL organization in its route. Not deployed; the
+operator must vendor the schema and select `secret_mount_owners_guard`. See
+`docs/api/secrets.md#who-owns-a-mount-lake561`.
 Dynamic-secret leases follow (lake#362, migration `0058`): each lease is a sealed record in its
 mount's workspace, and PostgreSQL keeps only `secret_lease_routes` (lease → mount, workspace, and
 `due_at`), the content-free route and due index. Renew, revoke and the owner loop's expiry pass
@@ -554,7 +560,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `agent_task_leases_guard` in the source tree, versioned by content hash).
+  `secret_mount_owners_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means
