@@ -321,7 +321,7 @@ export function useQueryTab<T extends string>(ids: readonly T[]): T {
 }
 
 /** Underlined tabs that are links to `?tab=<id>`, keeping every other query parameter (an app's
- * `app_id`, a study's `study`), so back and a shared address open the same tab. */
+ * `app_id`, an experiment's `experiment`), so back and a shared address open the same tab. */
 export function QueryTabs<T extends string>({ tabs, value, label = "Sections" }: { tabs: { id: T; label: ReactNode; count?: number }[]; value: T; label?: string }) {
   const [params] = useSearchParams();
   const href = (id: T, first: boolean) => {

@@ -170,7 +170,7 @@ Who has access to one object, with the source of each grant, is
   **Confirm** runs it, as you, through the ordinary permission check and audit. Only a proposal lake
   stored in your own conversation can be confirmed.
 - **Builders show the exact result first.** ApplicationAgent and ExperimentsAgent show the complete
-  app or study before anything is written, and only a second turn carrying the exact proposal you
+  app or experiment before anything is written, and only a second turn carrying the exact proposal you
   reviewed gets the write tools. A public app needs its own confirmation.
 - **The audit names the agent.** An agent acting for you is recorded with your identity and the
   agent's name, for example *Project Agent for Ada Lovelace*.

@@ -4,40 +4,64 @@ Experiments follows Runs in Train. The pages are in `frontend/src/pages/experime
 
 | Route | File | What |
 |---|---|---|
-| `/w/<id>/train/experiments` | `ExperimentsPage.tsx` | Run an Experiment (ExperimentsAgent), the filter, Start a Study, the studies, tracked runs outside studies |
-| `/w/<id>/train/experiment?study=` | `StudyPage.tsx` | one study: status, Stop, optimization history, parallel coordinates, parameter importance, the leaderboard, the latest eight trials' curves |
+| `/w/<id>/train/experiments` | `ExperimentsPage.tsx` | Run an Experiment (ExperimentsAgent), the filter, Start an Experiment, the experiments, tracked runs outside experiments |
+| `/w/<id>/train/experiment?experiment=` | `ExperimentPage.tsx` | one experiment: status, Stop, optimization history, parallel coordinates, parameter importance, the leaderboard, the latest eight trials' curves. An address from before lake#561 (`?study=`) still opens it |
 | `/w/<id>/train/experiment/run?run=` | `RunPage.tsx` | one run's curves, parameters and artifacts |
 | `/w/<id>/train/experiments/compare?runs=run-a,run-b` | `ComparePage.tsx` | two to eight runs on shared charts with their parameter differences |
 
-All four mark Experiments current in the rail. Runs and Run reports link to the metric charts.
+All four mark Experiments current in the rail. The experiment page's title is the experiment's name,
+and **Experiment** while it loads. Runs and Run reports link to the metric charts.
 `common.tsx` holds what they share (the heading, the trail, the confirmed actions, the live loop,
 the metric charts and their toolbar); `transforms.ts` the chart arithmetic; `Chart.tsx` one uPlot
 chart.
 
-The list reads `list_experiments` (studies and tracked runs, with every summary field the page
-shows, so it never calls `get_run_metrics` once per run). It shows each study's state, objective,
+The list reads `list_experiments` (experiments and tracked runs, with every summary field the page
+shows, so it never calls `get_run_metrics` once per run). It shows each experiment's state, objective,
 best complete-trial value, trial counts and trial/cost budgets. Objectives are labelled by Zetta's
 canonical held-out metric names (`held_out_auc`, `held_out_log_loss`, `held_out_accuracy`,
-`held_out_rmse`, `held_out_mae`); a study recorded under an older spelling such as `validation.auc`
+`held_out_rmse`, `held_out_mae`); an experiment recorded under an older spelling such as `validation.auc`
 is shown under its canonical name. The start form defaults the objective to `held_out_auc` and
 offers those names (lake#463). An error names the field at fault when Zetta does, for example
-`/objective: required; …`. Project and state filters are in the URL. Starting a study shows its
-parameters and budgets in a confirmation dialog before `start_study` is called with `confirm: true`.
-Study and trial stop buttons are shown to writers; Promote to space administrators
+`/objective: required; …`. Project and state filters are in the URL. Starting an experiment shows its
+parameters and budgets in a confirmation dialog before `start_experiment` is called with
+`confirm: true`. Experiment and trial stop buttons are shown to writers; Promote to space administrators
 (`my_permissions` on the space: `write`, `admin`). No page shows a credential or contacts Zetta
 directly.
 
+## Words: Experiment, Trial and Run (lake#561)
+
+The pages speak as an AI experiment tracker does (Weights & Biases, MLflow): a person runs an
+**experiment**, never a "study" (Steve, 2026-10-10: *there is no such thing as a study… it's an
+experiment… like an AI model training experiment*). The Zetta engine's name for the same record is
+*study*; lake's capabilities translate it ([API names](../api/experiments.md#names)), so the pages
+never see the engine's word except in its own field names.
+
+- **Experiment**: one search over settings for one objective, within budgets, keeping the best
+  model. Its id is `experiment_id`.
+- **Trial**: one attempt of the experiment with one set of settings. A trial is the unit the
+  experiment ranks, stops and promotes, so the leaderboard, its states (`running`, `pruned`,
+  `failed`, `complete`), **Stop trial**, **Promote** and *Trial N of experiment <name>* say trial.
+- **Run**: the training run a trial (or a tracked run outside any experiment) records: its curves,
+  parameters and artifacts. Charts, comparison and the run page say run, because a person opens,
+  charts and compares runs whether or not they belong to an experiment; a trial's link opens its run.
+
+So "trial" stays where the experiment's choice of settings is the subject, and "run" where the
+recorded training is. The check is `frontend/tests/wording.test.ts`: it fails when a string or JSX
+text in `frontend/src` says study or studies; code may still name the engine's `list_studies`,
+`study_id`, `study-events.*`, the `study.id` run parameter and ExperimentsAgent's `study` field. The
+guides have the same check in `Docs.GuidesSpeakOfExperiments`.
+
 ## Layout (lake#561)
 
-- **The list** opens with figures (Studies, Running, Trials, Tracked runs). Below them, a search
-  over studies and runs, the state as filter chips (kept in `state=`) and the project filter
-  (kept in `project=`). Studies are rich rows: the name, then the project and objective, the state
+- **The list** opens with figures (Experiments, Running, Trials, Tracked runs). Below them, a
+  search over experiments and runs, the state as filter chips (kept in `state=`) and the project
+  filter (kept in `project=`). Experiments are rich rows: the name, then the project and objective, the state
   chip, the best value with its direction, trials against the budget with complete/pruned/failed
   counts, cost against the cap, and Stop. Tracked runs have a compare checkbox and
   **Compare selected runs** in the card header.
-- **Ask ExperimentsAgent** and **Start a study** open drawers from the header. The study form is
-  unchanged and still confirms its parameters in a dialog.
-- **Study** has the name and state in its header, figures (best objective, trials, running, cost),
+- **Ask ExperimentsAgent** and **Start experiment** open drawers from the header (**Start an
+  Experiment**). The form still confirms its parameters in a dialog.
+- **Experiment** has the name and state in its header, figures (best objective, trials, running, cost),
   and a Split. The charts and the leaderboard (state chips as filters, Compare in its toolbar) are
   in the main column. Status, budgets with meters, and trials by state are in the side column.
   The latest trial curves come below.
@@ -50,38 +74,40 @@ directly.
 The list begins with a **Run an Experiment** box. A person describes a training or tuning goal;
 the form starts an `agent_turn` for `agent-experiments` with kind `experiment`, puts the task in
 the URL (`?task=`), and follows it with `get_agent_task` every two seconds. A completed proposal
-shows the agent's explanation and its complete `study` JSON in an editable text area.
+shows the agent's explanation and, as **Proposed Experiment**, the complete experiment (the agent's
+`study` object) as JSON in an editable text area.
 
 If the completed turn asks a question or returns no proposal, its answer is followed by a
 **Reply** box, which starts another `experiment` turn in the same conversation, so ExperimentsAgent
 can use the answer without the person restating the goal.
 
-**Confirm and start study** reads the task again and checks, in the browser, that it is still a
+**Confirm and start experiment** reads the task again and checks, in the browser, that it is still a
 succeeded ExperimentsAgent `experiment` proposal and that it is the proposal that was shown (its
-JSON with sorted keys); then it parses the edited study and starts a second `agent_turn` carrying it
-as `context.confirmed_proposal`. Malformed JSON or a changed proposal starts nothing. The first task
-has no study action. Only a turn carrying a confirmed proposal gets `create_study` and
-`start_study`; the agent then reaches the ordinary `start_study` policy, validation, confirmation
-and audit path through its workspace adapter.
+JSON with sorted keys); then it parses the edited experiment and starts a second `agent_turn`
+carrying it as `context.confirmed_proposal` (at the agent's `study`). Malformed JSON or a changed
+proposal starts nothing. The first task has no experiment action. Only a turn carrying a confirmed
+proposal gets the engine's `create_study` and lake's `start_experiment`; the agent then reaches the
+ordinary `start_experiment` policy, validation, confirmation and audit path through its workspace
+adapter.
 
 **What changed (lake#561).** The server's form checked the proposal digest against the stored task
 for the same person and space before starting the turn. That check now runs in the page against a
-fresh read; `agent_turn` grants the study tools to a turn whose `confirmed_proposal` has a study,
-as it does for a REST or MCP caller.
+fresh read; `agent_turn` grants the experiment tools to a turn whose `confirmed_proposal` has an
+experiment, as it does for a REST or MCP caller.
 
 ExperimentsAgent must be deployed (the Agent Library says so). Otherwise the box stays visible,
 explains that it is unavailable, and disables submission. Ask Orama and the Project Agent can
 delegate the same goal through `agent_turn`; there is no page-only experiment operation.
 
-## Studies and Runs
+## Experiments and Runs
 
-A study shows objective history and its best-so-far line, normalized parallel coordinates,
+An experiment shows objective history and its best-so-far line, normalized parallel coordinates,
 parameter importance, trial states and a sortable leaderboard. The column picker includes trial
 parameters and recorded final metrics. Confidence bounds come from the engine analysis. Each trial
 links to its Run charts; two to eight selected trials can be compared. The latest eight trial
-curves are drawn on the study page; a trial whose curves cannot be read is left out rather than
+curves are drawn on the experiment page; a trial whose curves cannot be read is left out rather than
 failing the page. Each of optimization history, parallel coordinates and parameter importance is a
-chart over a table of its exact values. A promoted trial and the study's promoted model are marked
+chart over a table of its exact values. A promoted trial and the experiment's promoted model are marked
 **promoted**. Leaderboard metric values are loaded for every trial with at most four concurrent
 `get_run_metrics` requests.
 
@@ -106,14 +132,14 @@ privacy* and is excluded from curve drawing and live metric requests.
 |---|---|
 | Run an Experiment goal, task state, editable proposal and confirmation | `agent_turn`, `get_agent_task` |
 | Project and state filters and the list | `list_experiments` |
-| Start form and confirmation | `start_study` |
-| Study status and trial links | `get_experiment_study` |
+| Start form and confirmation | `start_experiment` |
+| Experiment status and trial links | `get_experiment` |
 | Trial states | `list_experiment_trials` |
 | History, parallel coordinates, importance, sorting and columns | `get_experiment_analysis` |
 | Single-run metrics, artifacts and presentation controls | `get_run_metrics` |
 | Compare selection, overlays and parameter differences | `compare_runs` |
 | Live toggle and polling | `tail_experiment_events` |
-| Stop study or trial | `stop_study`, `stop_experiment_trial` |
+| Stop experiment or trial | `stop_experiment`, `stop_experiment_trial` |
 | Promote and its confirmation | `promote_trial` |
 | Which buttons show | `my_permissions` |
 
@@ -126,10 +152,10 @@ examples, including the naming distinction from solution holdouts.
 ## Live Updates
 
 While **Live** is on and the tab is visible, each page long-polls `tail_experiment_events` for its
-study and runs (`study-events.<study>`, `run-metrics.<run>`; at most 100 events, 10-second waits),
+experiment and runs (the engine's `study-events.<experiment>` and `run-metrics.<run>`; at most 100 events, 10-second waits),
 refreshes its durable state on any event and once more per cycle, at most every 10 seconds and at
 least 1 second apart. The periodic refresh also repairs gaps when an ephemeral topic is absent.
-At most eight run topics and one study topic are followed. A hidden tab or Live off pauses; a
+At most eight run topics and one experiment topic are followed. A hidden tab or Live off pauses; a
 failure shows *Reconnecting* and keeps trying.
 
 ## Charts
@@ -148,7 +174,7 @@ the server.
 
 The chart arithmetic in `transforms.ts` has no unit test yet: `frontend/tests/` covers clicks,
 the Design rules and formatting, and the CTest `lake-experiment-charts` still tests the old
-`assets/experiments/experiments.js`. In a workspace with a trainer: start a study, watch trials and metric points arrive with Live on,
+`assets/experiments/experiments.js`. In a workspace with a trainer: start an experiment, watch trials and metric points arrive with Live on,
 compare two runs, change the axis, smoothing and log scale, zoom and pan, open **Chart Data**,
 cancel a promotion and then confirm it, and check both themes and a narrow width. The capabilities
 are tested in `tests/test_experiments.cpp` and by `SchemaConformance.*`
@@ -158,10 +184,10 @@ Keep chart arithmetic in `transforms.ts`, rendering in `Chart.tsx`, and every re
 write in a registered capability. Updating uPlot is a `package.json` and `package-lock.json`
 change; check the charts in both themes after it.
 
-Deployment acceptance must separately start a real study on the live site, observe real trial
+Deployment acceptance must separately start a real experiment on the live site, observe real trial
 curves, compare two real runs with smoothing and log scale, and exercise promotion confirmation.
 
-Study deletion is deferred to [Zetta #1158](https://github.com/oramasearch/zetta/issues/1158),
+Experiment deletion is deferred to [Zetta #1158](https://github.com/oramasearch/zetta/issues/1158),
 as agreed for lake#303. The engine contract has no deletion operation, so the pages have no delete
 control, not even a disabled one, and lake has no local-only hiding. Add the registered REST/MCP
 operation and its UI control together once the engine contract exists.
