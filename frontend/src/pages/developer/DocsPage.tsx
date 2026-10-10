@@ -201,7 +201,7 @@ function SearchPanel({ q, pages, first, onPick }: { q: string; pages: DocPage[];
   const more = (full.data?.pages ?? []).filter((p) => p.match === "text" && !instantKeys.has(`${p.slug}#${p.anchor ?? ""}`));
 
   return (
-    <div className="max-w-[760px]">
+    <div>
       <div className="label mb-3">Search · “{query}”</div>
       {instant.length > 0 && (
         <ResultList label="Pages and sections">
@@ -294,7 +294,7 @@ function Article({ doc, headings, first, hash }: { doc: Doc; headings: DocHeadin
   };
 
   return (
-    <div className="grid grid-cols-1 gap-10 xl:grid-cols-[minmax(0,760px)_200px]">
+    <div className="grid grid-cols-1 gap-10 xl:grid-cols-[minmax(0,1fr)_220px]">
       <article className="min-w-0">
         <nav aria-label="Breadcrumb" className="mb-3 flex flex-wrap items-center gap-1.5 text-[12px] text-ink-3">
           <Link to="/docs" className="text-ink-3 no-underline hover:text-ink">
