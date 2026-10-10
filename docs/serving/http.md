@@ -325,6 +325,50 @@ that the live instance is repaired; this source change does not redeploy it.
 `ctest --test-dir build`. The focused idle-close proof is
 `ctest --test-dir build -R HttpServer.IdleKeepAliveCloseWritesNothingToStderr --output-on-failure`.
 
+## Cross-site requests
+
+**What.** An unsafe request (`POST`, `PUT`, `PATCH`, `DELETE`) that the browser session
+authenticates must come from lake's own origin (lake#561). "The browser session authenticates it"
+means what `context_for` resolves as `authentication_method: session`: no `Authorization: Bearer`,
+and a `lake_session` cookie. Such a request is refused with `403`
+`{"ok": false, "error": {"code": "unauthorized", "message": "Cross-site requests cannot use the
+browser session."}}` when:
+
+- `Sec-Fetch-Site` is present and is anything but `same-origin` (`same-site`, `cross-site`,
+  `none`); or
+- `Origin` is present and is not lake's origin: the configured `LAKE_EXTERNAL_ORIGIN`,
+  `https://<LAKE_PUBLIC_HOST>`, or the `Host` the request was sent to (under `http` or `https`, as a
+  proxy in front of lake terminates TLS). `Origin: null` is refused; or
+- it is a `POST` to a JSON capability (`/v1/<capability>`, under `/w/<id>/` too) or to `/mcp` and
+  its `Content-Type` is not `application/json` (parameters such as `charset` are allowed). The
+  binary repository sync routes under `/v1/repositories/` are not JSON and are not checked for it.
+
+A missing `Origin` and a missing `Sec-Fetch-Site` pass: a non-browser client sends neither, and a
+browser sends `Origin` on every cross-origin unsafe request. Bearer-authenticated calls are not
+affected, from any origin. The check is a router middleware that runs right after the response
+reset and CORS, before any route, so it covers `/v1`, `/mcp` and every remaining form route
+(`/logout`, `/drive/delete`, `/ask/send`, …) alike.
+
+**Why.** Ship apps are hosted one label below the platform's zone (`<name>.oramadev.net` beside
+`lake.oramadev.net`), so customer app code is *same-site* with lake and a browser sends
+`lake_session` with its requests whatever the cookie's `SameSite`. Before this, an app page could
+make a signed-in person's browser run any action as a "simple" `text/plain` request or a form post
+(inventory §4.4). Requiring JSON forces a CORS preflight, which lake's wildcard CORS cannot satisfy
+with credentials; the `Origin` and `Sec-Fetch-Site` check refuses the request itself.
+
+**Lake's own pages** keep working: a same-origin form post carries a same-origin `Origin`, and the
+pages' scripts already post JSON (`application/json`) to `/v1`.
+
+**Verify.** `HttpServer/HttpResponseIsolation.TheWebAppTalksToAskOramaThroughCapabilities` refuses a
+foreign `Origin`, `Origin: null`, `Sec-Fetch-Site: same-site` and `cross-site`, `text/plain` and
+form bodies to `/v1` and `/mcp`, and a foreign form post to `/ask/send`, and accepts the same calls
+from lake's origin and a bearer call from a foreign origin. By hand:
+`curl -i -X POST localhost:4900/v1/enroll_mfa -H 'Cookie: lake_session=<secret>' -H 'Origin: https://other.example' -H 'Content-Type: application/json' -d '{}'`
+answers 403.
+
+**Change.** The middleware is `refuse_cross_site` in `src/api/http_server.cpp`. A new route that a
+browser must post to from another origin is a bearer route, never an exemption here.
+
 ## Bearer-link recipient delivery
 
 `GET /share/:token` renders the shared root or its requested descendant folder. The sibling routes

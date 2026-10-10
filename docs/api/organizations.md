@@ -8,7 +8,7 @@ through `accept_invitation`.
 
 | Capability | Kind | Required input | Result |
 |---|---|---|---|
-| `list_organizations` / `get_organization` | read | `limit` / `id` | organizations |
+| `list_organizations` / `get_organization` | read | `limit` / `id` | organizations; `get_organization` also names the organization's own space as `customer_id` (null when it has none, lake#561) |
 | `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization |
 | `list_teams` / `get_team` | read | `organization_id` / `id` | teams |
 | `create_team` | action | `organization_id`, `name`, `display_name?` | team |

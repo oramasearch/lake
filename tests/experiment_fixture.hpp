@@ -125,6 +125,8 @@ public:
     std::vector<json> calls;
     std::string last_token, last_url;
     std::shared_ptr<control::WorkspaceCaller> fallback;
+    // Canned answers for engine capabilities the fixture does not model (get_graph, chat, …).
+    std::map<std::string, json> answers;
     std::mutex mutex;
     bool live = false;
     std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
@@ -284,6 +286,9 @@ public:
         }
         if (capability == "compare_runs") {
             co_return comparison(input);
+        }
+        if (const auto canned = answers.find(capability); canned != answers.end()) {
+            co_return canned->second;
         }
         if (capability == "receive_events") {
             const int sequence = input.value("from_sequence", 1);

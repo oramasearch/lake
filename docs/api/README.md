@@ -1,5 +1,14 @@
 # The `/v1` API and MCP
 
+lake#561: [web-app.md](web-app.md) documents the capabilities the web app reads that the pages
+computed themselves (`viewer`, `my_permissions`, `list_packages`, `list_docs`, `get_doc`,
+`mcp_setup`, `resolve_model`, `latest_agent_task`, `compile_pipeline`, `render_pipeline`);
+[ask-orama.md](ask-orama.md#capabilities-lake561) the conversation capabilities
+(`send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `approve_agent_proposal`);
+[repositories.md](repositories.md) `repository_file`'s `units`; and
+[../serving/http.md](../serving/http.md#cross-site-requests) the refusal of cross-site requests that
+use the browser session.
+
 lake#452: [services.md](services.md) documents `list_services`' shared `status` and
 `status_reason`; [web-apps.md](web-apps.md) the public acknowledgement `create_app` requires;
 [workspaces.md](workspaces.md) the two `create_project` name refusals.
@@ -147,11 +156,15 @@ credentials.
 | Capability | Kind | Input | Value | Page |
 |---|---|---|---|---|
 | `server_info` | read, **no auth** | — | `{name, node, version, revision, api, store}`; `revision` is the embedded full source commit or `unknown` | [../deployment/production-2026-09-08.md](../deployment/production-2026-09-08.md) |
+| `viewer` | read, **no auth** | `workspace_id?`, `customer_id?` | who is signed in, their spaces and current workspace, Clerk, sign-up, origin, agent models, version | [web-app.md](web-app.md) |
+| `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`, `resolve_model` | read (`list_docs`, `get_doc` and a public `resolve_model` need no credential) | see the page | permission flags, the Packages catalog, the Docs guides, Developer → MCP, a model's repository by name | [web-app.md](web-app.md) |
+| `latest_agent_task`, `render_pipeline` / `compile_pipeline` | read / action | `customer_id`, `workspace_id`, then `subject`, or `project` and `graph`, or `project` and `intent` | a project's background task, a pipeline drawn as SVG, a pipeline compiled from a description | [web-app.md](web-app.md) |
+| `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `approve_agent_proposal` | action | `customer_id`, `workspace_id`, `conversation_id`, … | the Ask Orama and Agent Factory conversation, written only by lake | [ask-orama.md](ask-orama.md#capabilities-lake561) |
 | `list_users` | read | `limit` (≤1000, default 100) | `{items: [user]}` | [customers.md](customers.md) |
 | `get_user` | read | `id` | user | [customers.md](customers.md) |
 | `create_user` | action | `taap_id?`, `email?`, `display_name?` | user | [customers.md](customers.md) |
 | `list_organizations` | read | `limit` | `{items: [organization]}` | [customers.md](customers.md) |
-| `get_organization` | read | `id` | organization | [customers.md](customers.md) |
+| `get_organization` | read | `id` | organization, with its own space's `customer_id` (null when none) | [customers.md](customers.md) |
 | `create_organization` | action | `taap_id?`, `display_name?`, `customer_id?` | organization | [organizations.md](organizations.md) |
 | `list_customers` | read | `limit` | `{items: [customer]}` | [customers.md](customers.md) |
 | `get_customer` | read | `customer_id` (`id` deprecated) | customer | [customers.md](customers.md) |

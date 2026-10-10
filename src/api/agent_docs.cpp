@@ -28,27 +28,25 @@ struct GroupRule {
 
 // First match wins, so the narrow groups come before Repositories, which takes the rest.
 constexpr std::array group_rules{
-    GroupRule{"Experiments",
-              "Read training studies, run metrics, comparisons and bounded live events in a space. "
-              "These tools are distinct from the solutions holdout get_experiment. Start and stop "
-              "require write permission and the person's confirmation; promote_trial requires "
-              "space administration and confirmation. Curves are suppressed for differential privacy.",
-              [](std::string_view n) {
-                  return n == "list_experiments" || n == "get_experiment_study" ||
-                         n == "list_experiment_trials" || n == "get_experiment_analysis" ||
-                         n == "tail_experiment_events" || n == "stop_experiment_trial" ||
-                         n == "get_run_metrics" ||
-                         n == "compare_runs" || n == "start_study" || n == "stop_study" ||
-                         n == "promote_trial";
-              }},
+    GroupRule{
+        "Experiments",
+        "Read training studies, run metrics, comparisons and bounded live events in a space. "
+        "These tools are distinct from the solutions holdout get_experiment. Start and stop "
+        "require write permission and the person's confirmation; promote_trial requires "
+        "space administration and confirmation. Curves are suppressed for differential privacy.",
+        [](std::string_view n) {
+            return n == "list_experiments" || n == "get_experiment_study" ||
+                   n == "list_experiment_trials" || n == "get_experiment_analysis" ||
+                   n == "tail_experiment_events" || n == "stop_experiment_trial" ||
+                   n == "get_run_metrics" || n == "compare_runs" || n == "start_study" ||
+                   n == "stop_study" || n == "promote_trial";
+        }},
     GroupRule{"Streams",
               "Ask Orama and ApplicationAgent may freely read list_streams, get_stream and "
               "browse_stream. Stream writes require the person's confirmation; deletes require "
               "space administration. System streams are browse-only. browse_stream never "
               "consumes messages; use wait_ms for bounded live reads over REST or MCP.",
-              [](std::string_view n) {
-                  return n.find("stream") != std::string_view::npos;
-              }},
+              [](std::string_view n) { return n.find("stream") != std::string_view::npos; }},
     GroupRule{"Agents",
               "The Agent Library of specialized agents Orama ships, and the agents you build in "
               "Train > Agents: create them through workspace_act, talk to any of them with "
@@ -64,7 +62,10 @@ constexpr std::array group_rules{
                          n == "unschedule_agent" || n == "agent_turn" ||
                          n == "create_agent_from_proposal" ||
                          n == "create_projects_from_opportunities" || n == "start_solution" ||
-                         n == "confirm_solution" || n == "get_ask_conversation";
+                         n == "confirm_solution" || n == "get_ask_conversation" ||
+                         n == "send_ask_message" || n == "settle_ask_turn" ||
+                         n == "confirm_ask_proposal" || n == "approve_agent_proposal" ||
+                         n == "latest_agent_task";
               }},
     GroupRule{"Workspace: Design, Train and Ship",
               "Your Zetta workspace: projects and pipelines, data, runs, models and search "
@@ -135,27 +136,30 @@ constexpr std::array group_rules{
               "Organizations, teams, members, invitations, grants, customers, SSO and SCIM, "
               "applications, usage and quotas.",
               [](std::string_view n) {
-                  return contains_any(n,
-                                      {"organization",
-                                       "team",
-                                       "member",
-                                       "invitation",
-                                       "grant",
-                                       "effective_access",
-                                       "customer",
-                                       "user",
-                                       "sso",
-                                       "scim",
-                                       "federation",
-                                       "application",
-                                       "quota",
-                                       "metering",
-                                       "role",
-                                       "admin"});
+                  return n == "my_permissions" || contains_any(n,
+                                                               {"organization",
+                                                                "team",
+                                                                "member",
+                                                                "invitation",
+                                                                "grant",
+                                                                "effective_access",
+                                                                "customer",
+                                                                "user",
+                                                                "sso",
+                                                                "scim",
+                                                                "federation",
+                                                                "application",
+                                                                "quota",
+                                                                "metering",
+                                                                "role",
+                                                                "admin"});
               }},
     GroupRule{"Server",
               "What this lake is.",
-              [](std::string_view n) { return n == "server_info" || n == "mcp"; }},
+              [](std::string_view n) {
+                  return n == "server_info" || n == "mcp" || n == "viewer" || n == "list_docs" ||
+                         n == "get_doc" || n == "mcp_setup";
+              }},
     GroupRule{"Repositories",
               "Repositories and their files, changes, reviews, issues, releases, webhooks, "
               "artifacts, drive, models and datasets, environments and search.",

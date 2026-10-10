@@ -31,9 +31,12 @@ every page and API call is resolved by `context_for` as before.
    refused; only the template token is accepted.
 4. `Store::sign_in_clerk` finds the lake user for the Clerk subject, links or creates them (below),
    and issues a 30-day session. The handler records an `authentication` audit event with object
-   `clerk` and method `clerk`, success or denied, then redirects to `/repositories` with the
-   `lake_session` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` over HTTPS). A failure redirects to
-   `/sign-in?error=<message>`.
+   `clerk` and method `clerk`, success or denied, then redirects with the `lake_session` cookie
+   (`HttpOnly`, `SameSite=Lax`, `Secure` over HTTPS) to the posted `next` field when it is a
+   same-origin path (one leading `/`, never `//` or `/\`) or a Ship app return
+   (`/apps/authorize?app=…&rd=…`), else to the `lake_sign_in_return` app return, else to
+   `/repositories` (lake#561: the web app posts the page that sent the person to sign in). A
+   failure redirects to `/sign-in?error=<message>`.
 5. `POST /logout` clears `lake_session` and, with Clerk on, redirects to `/sign-in?signed_out=1`,
    which signs the browser out of Clerk as well. Without that, the next visit would sign the person
    straight back in.

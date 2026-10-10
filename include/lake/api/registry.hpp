@@ -352,6 +352,14 @@ struct ApiContext {
     bool operator_credential = false;
     bool session_credential = false;
     std::string public_host;
+    // The configured browser-facing origin (LAKE_EXTERNAL_ORIGIN); empty when only public_host is
+    // set. The web app's `viewer` reports it with the clone and push origin (lake#561).
+    std::string external_origin;
+    // LAKE_CLERK_PUBLISHABLE_KEY as configured; `viewer` derives Clerk's frontend host from it.
+    std::string clerk_publishable_key;
+    // The instance registries' catalog (npm, Python, one-component OCI) as {available, oci, npm,
+    // python}, read from the store root by the HTTP server (list_packages). Empty outside HTTP.
+    std::function<nlohmann::json()> artifact_catalog;
     std::string request_origin;
     std::string caller_origin;
     std::string pool_id = "lake";

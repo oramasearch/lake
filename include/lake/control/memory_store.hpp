@@ -30,6 +30,7 @@ public:
     Result<std::vector<Customer>> list_customers(int limit,
                                                  const std::string& user_id = {}) override;
     Result<Customer> get_customer(const std::string& id) override;
+    Result<Customer> organization_customer(const std::string& organization_id) override;
     Result<Repository> create_repository(const NewRepository&) override;
     Result<std::vector<Repository>> list_repositories(const std::string& customer_id,
                                                       int limit,
@@ -334,6 +335,7 @@ public:
     Result<void> disable_mfa(const std::string& user_id,
                              const std::string& pool_id,
                              const std::string& code) override;
+    Result<bool> mfa_enrolled(const std::string& user_id, const std::string& pool_id) override;
     Result<IssuedSession> sign_in_totp(const PasswordSignIn&) override;
     Result<WebAuthnChallenge> begin_passkey_registration(const std::string& user_id,
                                                          const std::string& pool_id,

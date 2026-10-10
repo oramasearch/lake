@@ -104,8 +104,13 @@ on every request. Invalid, expired, cross-app, or no-longer-authorized tokens re
 
 When no app cookie is usable, nginx sends the browser to
 `GET /apps/authorize?app=<app id>&rd=<original URL>` on Lake's own host. Lake's normal browser
-session is required; a signed-out request goes through `/sign-in` and returns to the authorize
-request after authentication. The redirect destination must be HTTPS on exactly the stored app
+session is required; a signed-out request goes through `/sign-in?return_to=<the authorize request>`
+and returns to it after authentication. The return travels twice (lake#561): in the URL, which the
+web app reads and honours after it signs the person in, and in the two-minute HttpOnly
+`lake_sign_in_return` cookie, which the no-JavaScript hosted pages and the form sign-ins read. A
+signed-in visit to `/sign-in?return_to=…` (or `?next=<same-origin path>`) goes straight there; only
+an `/apps/authorize` return or a same-origin path is honoured, anything else goes to the usual
+page. The redirect destination must be HTTPS on exactly the stored app
 host, and the user must still belong to the app workspace. Lake then creates a random, 60-second,
 single-use code and redirects to `rd` with `__lake_code` appended. The forward-auth endpoint
 atomically spends that code, returns the identity headers, and sets:

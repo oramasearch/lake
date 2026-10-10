@@ -64,13 +64,54 @@ shows it and keeps it honest.
   optional) and reads the person's conversation in that workspace; a missing, malformed, unknown or
   foreign `workspace_id` is `invalid_input` at `/workspace_id`.
 
+## Capabilities (lake#561)
+
+The conversation is written only by lake. The web app, and the server-rendered page's forms, go
+through four capabilities, so a browser never writes a message and only a proposal lake stored can
+be run. Each takes `customer_id` and `workspace_id` (the workspace whose Zetta holds the
+conversation) and is audited in that workspace's log.
+
+| Capability | Kind | Input | Value |
+|---|---|---|---|
+| `send_ask_message` | action | `message`; `conversation_id` (absent: a new one); `kind` `ask` (default) or `factory`; `agent` (default `agent-ask-orama`; the Agent Factory always talks to `agent-creator`, any other `agent` is `invalid_input`); `page` `{path, <query values>}` (Ask Orama only) | `{conversation_id, message_id, task_id?, reply_id?}` |
+| `settle_ask_turn` | action | `conversation_id`, `task_id`, `kind` | `{settled, task}` |
+| `confirm_ask_proposal` | action | `conversation_id`, `message_id`, `index` | `{ok, message_id, capability, error?}` |
+| `approve_agent_proposal` | action | `conversation_id`, `message_id`, `proposal_sha256` | `{agent_id, name, schedule_error?, check_launch_id?}` ([agent-factory.md](agent-factory.md)) |
+
+- **`send_ask_message`** stores the person's message first; a message the workspace did not store
+  is an error and nothing is asked. It then calls `agent_turn`. A library agent answers in the
+  background: the value carries `task_id`. An agent of the space answers at once: its reply is
+  stored and `reply_id` names it.
+- **`settle_ask_turn`** reads the turn as `get_agent_task` does (`task` is that value). While the
+  turn is `pending` or `running`, `settled` is false and nothing is written. Once it finished, the
+  agent's message is stored exactly once, under an id derived from the task, so two calls (or the
+  page and the web app together) store one message. Ask Orama's message is `answer.reply` with
+  `{task_id, agent, proposals, reads, delegations, trace_id}`; AgentCreator's is its question,
+  *Here is the agent I propose. Review it below.* or its reply, with `{task_id, agent, answer,
+  proposal_sha256?}`; a failed turn is *That did not finish: …*. A task of another conversation is
+  `invalid_input` at `/task_id`. The web app polls `get_agent_task` every 2 s and calls this once
+  the status is final, then rereads the conversation with `get_ask_conversation`.
+- **`confirm_ask_proposal`** takes `payload.proposals[index]` of that stored message (anything else
+  is `not_found` *That proposal is not in this conversation.*), calls its capability with its input
+  as the person, and stores *Done: {capability}.* or *That did not work: {error}* with
+  `{agent: "agent-ask-orama", confirmed: {message_id, index}, ok}`. The value's `message_id` is
+  that outcome message. A capability that refuses is still a successful confirm with `ok: false`.
+  The call's own audit event carries `{ask_confirm: true, conversation_id, capability, ok}`; the
+  proposal's capability records its own event.
+
+For example, the web app's `send_ask_message` (`POST /w/<workspace_id>/v1/send_ask_message`):
+
+```json
+{"customer_id": "8f1c…", "workspace_id": "4b2e…", "message": "What do I have?", "page": {"path": "/design/project", "name": "churn"}}
+```
+
 ## Routes
 
 | Route | What it does |
 |---|---|
-| `GET /ask?customer_id=&conversation=&from=&agent=` | the conversation |
-| `POST /ask/send` | stores the message, sends one `agent_turn` to the chosen agent with `page.path`, stores the answer |
-| `POST /ask/confirm` | runs one stored proposal (`message_id`, `index`) as the person and records the outcome |
+| `GET /ask?customer_id=&conversation=&from=&agent=` | the conversation; with `task=`, it calls `settle_ask_turn` |
+| `POST /ask/send` | `send_ask_message` with the page's `from` as `page` |
+| `POST /ask/confirm` | `confirm_ask_proposal` |
 
 ## Verify
 
@@ -85,6 +126,12 @@ Orama's turn key delegates to Auto-Suggest, and the person's turn shows the dele
 subagent's progress (also published on the workspace's `agent-events` for the asking turn) and its
 finish; the answer replaces the working notice. `Workspaces.TalkToOffersOnlyRunningAgentsAPersonUses`
 covers the list on its own.
+
+`HttpServer/HttpResponseIsolation.TheWebAppTalksToAskOramaThroughCapabilities` (lake#561): the same
+conversation over `/v1` with the browser session: `send_ask_message` with a page, `settle_ask_turn`
+writing nothing while the turn waits and the answer once over two calls, a forged
+`confirm_ask_proposal` refused, cross-site requests refused, and the real confirm creating the
+repository with its outcome stored.
 
 `HttpServer/HttpResponseIsolation.AskOramaAnswersProposesAndRunsOnlyWhatThePersonConfirms`: the link
 on every page, a turn carrying the page and a turn key, the proposal shown, nothing created before

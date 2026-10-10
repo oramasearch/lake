@@ -992,12 +992,11 @@ const RepositoryBlameLine* blame_for_line(const std::vector<RepositoryBlameLine>
 std::string source_view(const RepositoryFile& file, const std::vector<RepositoryBlameLine>& blame) {
     std::set<std::uint64_t> syntax_lines;
     const auto language = syntax_language(file.path);
-    if (language) {
-        const auto* first = reinterpret_cast<const std::uint8_t*>(file.contents.data());
-        const auto units = liquid_frontend::parse_units(
-            *language, std::span<const std::uint8_t>{first, file.contents.size()});
-        for (const liquid_frontend::syntax_unit& unit : units) {
-            for (std::uint64_t line = unit.start.line; line <= unit.end.line; ++line) {
+    if (const auto units = web_ui_source_units(file.path, file.contents)) {
+        for (const nlohmann::json& unit : *units) {
+            for (std::uint64_t line = unit.at("start_line").get<std::uint64_t>();
+                 line <= unit.at("end_line").get<std::uint64_t>();
+                 ++line) {
                 syntax_lines.insert(line);
             }
         }
@@ -1274,6 +1273,29 @@ std::string application_shell(const control::Application& application,
 }
 
 } // namespace
+
+std::string web_ui_space_label(const control::Customer& customer, std::string_view user_id) {
+    if (customer.customer_type == "individual" && !user_id.empty() && customer.user_id == user_id) {
+        return "Personal space";
+    }
+    return customer.name;
+}
+
+std::optional<nlohmann::json> web_ui_source_units(std::string_view path,
+                                                  std::string_view contents) {
+    const auto language = syntax_language(path);
+    if (!language) {
+        return std::nullopt;
+    }
+    const auto* first = reinterpret_cast<const std::uint8_t*>(contents.data());
+    nlohmann::json units = nlohmann::json::array();
+    for (const liquid_frontend::syntax_unit& unit : liquid_frontend::parse_units(
+             *language, std::span<const std::uint8_t>{first, contents.size()})) {
+        units.push_back(
+            {{"start_line", unit.start.line}, {"end_line", unit.end.line}, {"kind", unit.kind}});
+    }
+    return units;
+}
 
 WebUiCrumb web_ui_entity_crumb(std::string_view value, std::string href) {
     const bool hex_like = value.size() >= 16 && std::ranges::all_of(value, [](char c) {

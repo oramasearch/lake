@@ -45,8 +45,11 @@
 
 #include <boost/url.hpp>
 
+#include "api/route_guard.hpp"
+#include "lake/api/capabilities.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/server.hpp"
+#include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_runs.hpp"
@@ -54,12 +57,10 @@
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/web_apps.hpp"
 #include "lake/control/zetta_workspace.hpp"
-#include "temporary_directory.hpp"
-#include "stream_fixture.hpp"
-#include "workspace_fixture.hpp"
-#include "lake/api/web_ui.hpp"
-#include "api/route_guard.hpp"
 #include "repository_test_support.hpp"
+#include "stream_fixture.hpp"
+#include "temporary_directory.hpp"
+#include "workspace_fixture.hpp"
 
 #include <boost/beast2/http_server.hpp>
 #include <boost/corosio/endpoint.hpp>
@@ -1269,9 +1270,15 @@ TEST_P(HttpResponseIsolation, TheMcpPageMakesAKeyThatWorksOverMcp) {
                            key + "&quot;"),
               std::string::npos);
 
-    const std::string key_cookie = "lake_session=" + key;
-    const std::string tools = connection->request(
-        "POST", "/mcp", R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})", key_cookie);
+    // An MCP client presents the key as its bearer, with a JSON body.
+    const std::string tools =
+        connection->request("POST",
+                            "/mcp",
+                            R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})",
+                            "",
+                            "HTTP/1.1",
+                            key,
+                            "application/json");
     ASSERT_TRUE(tools.starts_with("HTTP/1.1 200")) << tools.substr(0, 300);
     EXPECT_NE(tools.find("\"server_info\""), std::string::npos);
     // llms-full.txt documents every MCP tool.
@@ -1284,13 +1291,19 @@ TEST_P(HttpResponseIsolation, TheMcpPageMakesAKeyThatWorksOverMcp) {
         "POST",
         "/mcp",
         R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_sessions","arguments":{}}})",
-        key_cookie);
+        "",
+        "HTTP/1.1",
+        key,
+        "application/json");
     EXPECT_NE(read.find("\"isError\":false"), std::string::npos) << read.substr(0, 600);
     const std::string write = connection->request(
         "POST",
         "/mcp",
         R"({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_token","arguments":{"name":"x","scopes":["*"]}}})",
-        key_cookie);
+        "",
+        "HTTP/1.1",
+        key,
+        "application/json");
     EXPECT_NE(write.find("credential does not grant create_token"), std::string::npos)
         << write.substr(0, 600);
 
@@ -3151,6 +3164,406 @@ TEST_P(HttpResponseIsolation, TheAgentFactoryCreatesOnlyTheExactProposalThePerso
     EXPECT_EQ(record["definition"]["files"][0]["path"], "agent/tools.py");
     const auto launches = memory->list_agent_launches(customer_id, "a-new", 10);
     ASSERT_TRUE(launches && launches->size() == 1U) << "a first check run starts";
+}
+
+// lake#561: the web app holds Ask Orama and Agent Factory conversations through /v1 alone, with the
+// browser session, and only from lake's own origin.
+TEST_P(HttpResponseIsolation, TheWebAppTalksToAskOramaThroughCapabilities) {
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    ASSERT_TRUE(sign_in.starts_with("HTTP/1.1 302"));
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const std::string secret = cookie.substr(cookie.find('=') + 1);
+    const std::string customer_id =
+        nlohmann::json::parse(
+            response_body(connection->request("GET", "/v1/list_customers", "", cookie)))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    // What a browser's fetch from lake's own page sends.
+    const std::vector<std::pair<std::string, std::string>> same_origin{
+        {"Origin", "http://localhost"}, {"Sec-Fetch-Site", "same-origin"}};
+    const auto call = [&](const std::string& name, nlohmann::json input) {
+        input["customer_id"] = customer_id;
+        input["workspace_id"] = workspace_id;
+        const std::string response = connection->request("POST",
+                                                         "/v1/" + name,
+                                                         input.dump(),
+                                                         cookie,
+                                                         "HTTP/1.1",
+                                                         {},
+                                                         "application/json",
+                                                         same_origin);
+        return std::pair{response, nlohmann::json::parse(response_body(response))};
+    };
+
+    agents_->answer = {{"ok", true},
+                       {"reply", "You have no repositories yet. I can create one."},
+                       {"proposals",
+                        nlohmann::json::array({{{"capability", "create_repository"},
+                                                {"input",
+                                                 {{"customer_id", customer_id},
+                                                  {"workspace_id", workspace_id},
+                                                  {"name", "web-notes"}}}}})},
+                       {"reads", nlohmann::json::array()},
+                       {"delegations", nlohmann::json::array()}};
+    const auto [sent_response, sent] = call(
+        "send_ask_message",
+        {{"message", "what do I have?"}, {"page", {{"path", "/repositories"}, {"tab", "all"}}}});
+    ASSERT_TRUE(sent_response.starts_with("HTTP/1.1 200")) << sent_response;
+    const std::string conversation = sent["value"]["conversation_id"];
+    const std::string task = sent["value"]["task_id"];
+    ASSERT_FALSE(task.empty());
+    EXPECT_FALSE(sent["value"]["message_id"].get<std::string>().empty());
+
+    const nlohmann::json settle{
+        {"conversation_id", conversation}, {"task_id", task}, {"kind", "ask"}};
+    const auto [waiting_response, waiting] = call("settle_ask_turn", settle);
+    ASSERT_TRUE(waiting_response.starts_with("HTTP/1.1 200")) << waiting_response;
+    EXPECT_EQ(waiting["value"]["settled"], false) << "nothing is written while the turn runs";
+    EXPECT_EQ(waiting["value"]["task"]["status"], "pending");
+    run_agent_task(*connection, task);
+    EXPECT_EQ(agents_->turns.back()["page"]["tab"], "all") << "the page is handed to the agent";
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto [settled_response, settled] = call("settle_ask_turn", settle);
+        ASSERT_TRUE(settled_response.starts_with("HTTP/1.1 200")) << settled_response;
+        EXPECT_EQ(settled["value"]["settled"], true);
+        EXPECT_EQ(settled["value"]["task"]["status"], "succeeded");
+    }
+    const std::string listed = connection->request(
+        "GET",
+        "/v1/get_ask_conversation?customer_id=" + customer_id + "&workspace_id=" + workspace_id +
+            "&conversation_id=" + conversation,
+        "",
+        cookie);
+    const auto messages = nlohmann::json::parse(response_body(listed))["value"]["messages"];
+    ASSERT_EQ(messages.size(), 2U) << "the answer is stored exactly once: " << listed;
+    EXPECT_EQ(messages[1]["content"], "You have no repositories yet. I can create one.");
+    EXPECT_EQ(messages[1]["payload"]["task_id"], task);
+    const std::string message_id = messages[1]["id"];
+
+    const auto [forged_response, forged] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 7}});
+    EXPECT_TRUE(forged_response.starts_with("HTTP/1.1 404")) << forged_response;
+    EXPECT_EQ(forged["error"]["message"], "That proposal is not in this conversation.");
+    EXPECT_TRUE(store_->list_repositories(customer_id, 10)->empty());
+
+    // Cross-site requests cannot use the browser session; a bearer is unaffected.
+    const nlohmann::json confirm{{"customer_id", customer_id},
+                                 {"workspace_id", workspace_id},
+                                 {"conversation_id", conversation},
+                                 {"message_id", message_id},
+                                 {"index", 0}};
+    const std::vector<std::vector<std::pair<std::string, std::string>>> foreign{
+        {{"Origin", "https://reports.example.test"}},
+        {{"Origin", "null"}},
+        {{"Sec-Fetch-Site", "same-site"}},
+        {{"Origin", "http://localhost"}, {"Sec-Fetch-Site", "cross-site"}}};
+    for (const auto& headers : foreign) {
+        const std::string refused = connection->request("POST",
+                                                        "/v1/confirm_ask_proposal",
+                                                        confirm.dump(),
+                                                        cookie,
+                                                        "HTTP/1.1",
+                                                        {},
+                                                        "application/json",
+                                                        headers);
+        EXPECT_TRUE(refused.starts_with("HTTP/1.1 403")) << refused;
+        EXPECT_NE(refused.find("Cross-site requests cannot use the browser session."),
+                  std::string::npos);
+    }
+    for (const std::string type : {"text/plain", "application/x-www-form-urlencoded"}) {
+        const std::string refused = connection->request(
+            "POST", "/v1/confirm_ask_proposal", confirm.dump(), cookie, "HTTP/1.1", {}, type);
+        EXPECT_TRUE(refused.starts_with("HTTP/1.1 403")) << type << "\n" << refused;
+        const std::string mcp =
+            connection->request("POST",
+                                "/mcp",
+                                R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})",
+                                cookie,
+                                "HTTP/1.1",
+                                {},
+                                type);
+        EXPECT_TRUE(mcp.starts_with("HTTP/1.1 403")) << type << "\n" << mcp;
+    }
+    const std::string form_refused =
+        connection->request("POST",
+                            "/ask/send",
+                            "customer_id=" + customer_id + "&message=hi",
+                            cookie,
+                            "HTTP/1.1",
+                            {},
+                            "application/x-www-form-urlencoded",
+                            {{"Origin", "https://reports.example.test"}});
+    EXPECT_TRUE(form_refused.starts_with("HTTP/1.1 403")) << form_refused;
+    EXPECT_TRUE(store_->list_repositories(customer_id, 10)->empty()) << "nothing ran";
+    const std::string bearer_listed =
+        connection->request("POST",
+                            "/mcp",
+                            R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})",
+                            "",
+                            "HTTP/1.1",
+                            secret,
+                            "text/plain",
+                            {{"Origin", "https://reports.example.test"}});
+    EXPECT_TRUE(bearer_listed.starts_with("HTTP/1.1 200")) << bearer_listed.substr(0, 300);
+
+    const auto [confirmed_response, confirmed] =
+        call("confirm_ask_proposal",
+             {{"conversation_id", conversation}, {"message_id", message_id}, {"index", 0}});
+    ASSERT_TRUE(confirmed_response.starts_with("HTTP/1.1 200")) << confirmed_response;
+    EXPECT_EQ(confirmed["value"]["ok"], true) << confirmed_response;
+    EXPECT_EQ(confirmed["value"]["capability"], "create_repository");
+    ASSERT_EQ(store_->list_repositories(customer_id, 10)->size(), 1U);
+    const auto after = nlohmann::json::parse(response_body(connection->request(
+        "GET",
+        "/v1/get_ask_conversation?customer_id=" + customer_id + "&workspace_id=" + workspace_id +
+            "&conversation_id=" + conversation,
+        "",
+        cookie)))["value"]["messages"];
+    ASSERT_EQ(after.size(), 3U);
+    EXPECT_EQ(after[2]["id"], confirmed["value"]["message_id"]);
+    EXPECT_EQ(after[2]["content"], "Done: create_repository.");
+    EXPECT_EQ(after[2]["payload"]["confirmed"]["message_id"], message_id);
+
+    // The project page's background tasks: none yet.
+    const auto latest = [&](const std::string& subject) {
+        return connection->request("GET",
+                                   "/v1/latest_agent_task?customer_id=" + customer_id +
+                                       "&workspace_id=" + workspace_id + "&subject=" + subject,
+                                   "",
+                                   cookie);
+    };
+    const std::string none = latest("build%3Achurn");
+    ASSERT_TRUE(none.starts_with("HTTP/1.1 200")) << none;
+    EXPECT_TRUE(nlohmann::json::parse(response_body(none))["value"]["task"].is_null());
+    EXPECT_TRUE(latest("churn").starts_with("HTTP/1.1 400"));
+
+    // The server-rendered page still works from its own origin.
+    const std::string page_sent = connection->request(
+        "POST",
+        "/ask/send",
+        "customer_id=" + customer_id + "&conversation=" + conversation + "&message=thanks",
+        cookie,
+        "HTTP/1.1",
+        {},
+        "application/x-www-form-urlencoded",
+        same_origin);
+    ASSERT_TRUE(page_sent.starts_with("HTTP/1.1 302")) << page_sent;
+    EXPECT_EQ(response_header(page_sent, "location").find("error="), std::string::npos)
+        << response_header(page_sent, "location");
+    EXPECT_FALSE(task_of(page_sent).empty());
+}
+
+TEST_P(HttpResponseIsolation, TheWebAppApprovesOnlyTheAgentFactoryProposalItWasShown) {
+    auto* memory = dynamic_cast<lake::control::InMemoryStore*>(store_.get());
+    if (memory == nullptr) {
+        GTEST_SKIP() << "the operator's status is written directly only on the memory store";
+    }
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const std::string customer_id =
+        nlohmann::json::parse(
+            response_body(connection->request("GET", "/v1/list_customers", "", cookie)))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    const auto call = [&](const std::string& name, nlohmann::json input) {
+        input["customer_id"] = customer_id;
+        input["workspace_id"] = workspace_id;
+        const std::string response = connection->request("POST",
+                                                         "/v1/" + name,
+                                                         input.dump(),
+                                                         cookie,
+                                                         "HTTP/1.1",
+                                                         {},
+                                                         "application/json",
+                                                         {{"Origin", "http://localhost"}});
+        return std::pair{response, nlohmann::json::parse(response_body(response))};
+    };
+    workspace_caller_->answers["create_agent"] = {{"id", "a-web"}, {"name", "Renewal watcher"}};
+    // A float the browser would serialize differently (2.0 is "2" in JavaScript): the digest is
+    // lake's, stored with the proposal, never recomputed by the page.
+    const nlohmann::json proposal = {
+        {"type", "native"},
+        {"threshold", 2.0},
+        {"agent", {{"name", "Renewal watcher"}, {"purpose", "Flag renewals at risk"}}}};
+    agents_->answer = {
+        {"ok", true},
+        {"reply", "I propose an agent."},
+        {"result",
+         {{"kind", "proposal"}, {"proposal", proposal}, {"defects", nlohmann::json::array()}}}};
+    const auto [sent_response, sent] =
+        call("send_ask_message", {{"kind", "factory"}, {"message", "flag renewals"}});
+    ASSERT_TRUE(sent_response.starts_with("HTTP/1.1 200")) << sent_response;
+    const std::string conversation = sent["value"]["conversation_id"];
+    const std::string task = sent["value"]["task_id"];
+    const auto [refused_agent, refused] = call(
+        "send_ask_message", {{"kind", "factory"}, {"agent", "agent-ask-orama"}, {"message", "x"}});
+    EXPECT_TRUE(refused_agent.starts_with("HTTP/1.1 400")) << refused_agent;
+    run_agent_task(*connection, task);
+    EXPECT_EQ(agents_->turns.back()["message"], "flag renewals");
+    const auto [settled_response, settled] =
+        call("settle_ask_turn",
+             {{"conversation_id", conversation}, {"task_id", task}, {"kind", "factory"}});
+    ASSERT_TRUE(settled_response.starts_with("HTTP/1.1 200")) << settled_response;
+    const auto messages = nlohmann::json::parse(response_body(connection->request(
+        "GET",
+        "/v1/get_ask_conversation?customer_id=" + customer_id + "&workspace_id=" + workspace_id +
+            "&conversation_id=" + conversation,
+        "",
+        cookie)))["value"]["messages"];
+    ASSERT_EQ(messages.size(), 2U);
+    const nlohmann::json& answer = messages[1];
+    EXPECT_EQ(answer["content"], "Here is the agent I propose. Review it below.");
+    const std::string sha = answer["payload"].value("proposal_sha256", std::string());
+    EXPECT_EQ(sha, lake::api::agent_proposal_digest(proposal));
+
+    const nlohmann::json approve{{"conversation_id", conversation},
+                                 {"message_id", answer["id"]},
+                                 {"proposal_sha256", std::string(64, '0')}};
+    const auto [stale_response, stale] = call("approve_agent_proposal", approve);
+    EXPECT_TRUE(stale_response.starts_with("HTTP/1.1 409")) << stale_response;
+    EXPECT_EQ(stale["error"]["message"], "The proposal changed since you saw it; review it again.");
+    auto missing = approve;
+    missing["message_id"] = messages[0]["id"];
+    const auto [missing_response, missing_body] = call("approve_agent_proposal", missing);
+    EXPECT_TRUE(missing_response.starts_with("HTTP/1.1 404")) << missing_response;
+    EXPECT_FALSE(std::ranges::any_of(workspace_caller_->calls, [](const auto& c) {
+        return std::get<0>(c) == "create_agent";
+    })) << "nothing is created for another proposal";
+
+    auto exact = approve;
+    exact["proposal_sha256"] = sha;
+    const auto [approved_response, approved] = call("approve_agent_proposal", exact);
+    ASSERT_TRUE(approved_response.starts_with("HTTP/1.1 200")) << approved_response;
+    EXPECT_EQ(approved["value"]["agent_id"], "a-web");
+    EXPECT_EQ(approved["value"]["name"], "Renewal watcher");
+    const auto after = nlohmann::json::parse(response_body(connection->request(
+        "GET",
+        "/v1/get_ask_conversation?customer_id=" + customer_id + "&workspace_id=" + workspace_id +
+            "&conversation_id=" + conversation,
+        "",
+        cookie)))["value"]["messages"];
+    ASSERT_EQ(after.size(), 3U);
+    EXPECT_EQ(after[2]["content"], "Created Renewal watcher.");
+}
+
+// lake#561: who the web app is talking to, for a visitor and for a person.
+TEST_P(HttpResponseIsolation, TheViewerSaysWhoIsSignedInAndWhereTheyAre) {
+    auto connection = connect();
+    const std::string visitor = connection->request("GET", "/v1/viewer");
+    ASSERT_TRUE(visitor.starts_with("HTTP/1.1 200")) << visitor;
+    const auto anonymous = nlohmann::json::parse(response_body(visitor))["value"];
+    EXPECT_EQ(anonymous["signed_in"], false);
+    EXPECT_EQ(anonymous["spaces"], nlohmann::json::array());
+    EXPECT_FALSE(anonymous.contains("user_id"));
+    EXPECT_EQ(anonymous["clerk"]["enabled"], false);
+    EXPECT_EQ(anonymous["password_sign_up"], true);
+    EXPECT_EQ(anonymous["external_origin"], "http://localhost");
+    const std::string stale = connection->request("GET", "/v1/viewer", "", "lake_session=nope");
+    EXPECT_TRUE(stale.starts_with("HTTP/1.1 200")) << "a dead cookie is a visitor, not a 401";
+
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const std::string customer_id =
+        nlohmann::json::parse(
+            response_body(connection->request("GET", "/v1/list_customers", "", cookie)))
+            .at("value")
+            .at("items")
+            .at(0)
+            .at("id");
+    select_workspace(*connection, customer_id);
+    const std::string workspace_id = connection->workspace_id;
+    const auto viewer = [&](const std::string& query) {
+        const std::string response = connection->request("GET", "/v1/viewer" + query, "", cookie);
+        EXPECT_TRUE(response.starts_with("HTTP/1.1 200")) << response;
+        return nlohmann::json::parse(response_body(response))["value"];
+    };
+    const auto signed_in = viewer("");
+    EXPECT_EQ(signed_in["signed_in"], true);
+    EXPECT_EQ(signed_in["administrator"], false);
+    EXPECT_EQ(signed_in["email"], email_);
+    EXPECT_EQ(signed_in["display_name"], "Isolation test");
+    EXPECT_EQ(signed_in["mfa_enrolled"], false);
+    EXPECT_FALSE(signed_in["credential_kind"].get<std::string>().empty());
+    EXPECT_FALSE(signed_in["session_id"].get<std::string>().empty());
+    EXPECT_EQ(signed_in["customer_id"], customer_id);
+    EXPECT_EQ(signed_in["workspace_id"], workspace_id) << "the space's only workspace";
+    ASSERT_EQ(signed_in["spaces"].size(), 1U);
+    EXPECT_EQ(signed_in["spaces"][0]["label"], "Personal space");
+    EXPECT_EQ(signed_in["spaces"][0]["personal"], true);
+    EXPECT_EQ(signed_in["spaces"][0]["workspaces"][0]["id"], workspace_id);
+    EXPECT_FALSE(signed_in["config"]["frontier_model"].get<std::string>().empty());
+    // A workspace the person cannot see is never the current one.
+    const auto other =
+        store_->create_user({"taap:viewer-other-" + lake::control::new_uuid_v4(), "", "Other"});
+    ASSERT_TRUE(other);
+    const auto other_space = store_->create_customer(
+        {"individual", other->id, "", "viewer-other-" + lake::control::new_uuid_v4().substr(0, 8)});
+    ASSERT_TRUE(other_space);
+    const auto other_workspace = liquid::runtime::block_on(workspaces_->request(other_space->id));
+    ASSERT_TRUE(other_workspace && *other_workspace);
+    const auto elsewhere = viewer("?workspace_id=" + (*other_workspace)->workspace_id);
+    EXPECT_EQ(elsewhere["customer_id"], customer_id);
+    EXPECT_EQ(elsewhere["workspace_id"], workspace_id);
+    const auto chosen = viewer("?workspace_id=" + workspace_id);
+    EXPECT_EQ(chosen["workspace_id"], workspace_id);
+
+    const std::string enrolled = connection->request(
+        "POST", "/v1/enroll_mfa", "{}", cookie, "HTTP/1.1", {}, "application/json");
+    ASSERT_TRUE(enrolled.starts_with("HTTP/1.1 200")) << enrolled;
+    EXPECT_EQ(viewer("")["mfa_enrolled"], true);
+
+    const std::string operator_view =
+        connection->request("GET", "/v1/viewer", "", "", "HTTP/1.1", "front-door-operator");
+    const auto administrator = nlohmann::json::parse(response_body(operator_view))["value"];
+    EXPECT_EQ(administrator["administrator"], true);
+    EXPECT_FALSE(administrator.contains("user_id"));
+}
+
+// lake#561: a signed-in person sent to /sign-in by /apps/authorize goes back there from the URL;
+// any other return is refused. A wrong operator token returns to /login with the reason.
+TEST_P(HttpResponseIsolation, SignInReturnsWhereTheUrlSaysAndOnlyThere) {
+    auto connection = connect();
+    const std::string sign_in = connection->request(
+        "POST", "/identity/sign-in", "email=" + email_ + "&password=" + password_);
+    const std::string issued = response_header(sign_in, "set-cookie");
+    const std::string cookie = issued.substr(0, issued.find(';'));
+    const std::string authorize = "/apps/authorize?app=a1&rd=https%3A%2F%2Freports.example.test%2F";
+    const std::string back = connection->request(
+        "GET", "/sign-in?return_to=" + lake::api::oauth_url_encode(authorize), "", cookie);
+    ASSERT_TRUE(back.starts_with("HTTP/1.1 302")) << back;
+    EXPECT_EQ(response_header(back, "location"), authorize);
+    const std::string next =
+        connection->request("GET", "/sign-in?next=%2Fdrive%3Fpath%3Dx", "", cookie);
+    EXPECT_EQ(response_header(next, "location"), "/drive?path=x");
+    for (const std::string elsewhere : {"https%3A%2F%2Fevil.example.test%2F",
+                                        "%2F%2Fevil.example.test",
+                                        "%2F%5Cevil.example.test"}) {
+        const std::string refused =
+            connection->request("GET", "/sign-in?next=" + elsewhere, "", cookie);
+        EXPECT_EQ(response_header(refused, "location"), "/sessions") << elsewhere;
+    }
+    const std::string wrong = connection->request("POST", "/session", "token=nope");
+    ASSERT_TRUE(wrong.starts_with("HTTP/1.1 302")) << wrong;
+    EXPECT_EQ(response_header(wrong, "location"), "/login?error=That%20token%20did%20not%20match.");
+    const std::string login = connection->request("GET", response_header(wrong, "location"));
+    EXPECT_NE(login.find("That token did not match."), std::string::npos);
 }
 
 TEST_P(HttpResponseIsolation, ProtectedAppAuthorizationHandsOffAHostOnlySession) {

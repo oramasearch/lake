@@ -36,6 +36,9 @@ void register_experiment_capabilities(Registry& registry);
 // The operator's volumes (migration 0069, docs/api/volumes.md): set_workspace_storage,
 // request_volume_snapshot, volume_snapshots.
 void register_volume_capabilities(Registry& registry);
+// The reads lake's web app needs (lake#561, docs/api/web-app.md): viewer, my_permissions,
+// list_packages, list_docs, get_doc, mcp_setup.
+void register_console_capabilities(Registry& registry, std::string_view version);
 // The live workspace a new repository is created in (lake#315): `input.workspace_id` must name a
 // workspace of `input.customer_id`'s space that is not deleted. Anything else, including a missing
 // id, is invalid_input at /workspace_id; there is no default workspace.
@@ -58,6 +61,19 @@ boost::capy::task<std::invoke_result_t<Callable>> blocking_call(Callable callabl
     }
     co_return std::move(*ran);
 }
+// The repository a Hub-compatible id names: a repository id, `models/<id>`, `<space>/<name>` or
+// a bare `<name>` unique across spaces (the model page and the Hub routes, lake#561).
+control::Result<control::Repository> find_hub_repository(control::Store& store,
+                                                         std::string_view hub_id);
+// The spaces the caller may read, newest first, as list_customers answers them ({items}); the
+// web app's `viewer` lists the same spaces without a second audited call (lake#561).
+ApiResult readable_customers(ApiContext& context, int limit);
+// AgentCreator's structured answer, a question or a proposal: its `result` (agent-creator#1), or,
+// from an AgentCreator that answered before it had one, the JSON in its reply.
+nlohmann::json agent_creator_answer(const nlohmann::json& turn);
+// The digest a proposal is approved by: SHA-256 of its compact JSON as lake serializes it. Stored
+// with each Agent Factory proposal message, and checked by approve_agent_proposal (lake#561).
+std::string agent_proposal_digest(const nlohmann::json& proposal);
 // Customer Zetta workspaces: status, start, and allow-listed calls (docs/api/workspaces.md).
 void register_workspace_capabilities(Registry& registry);
 // The operator's one-shot copy of retired control-store tables into workspace Zettas

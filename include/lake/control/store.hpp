@@ -1089,6 +1089,8 @@ public:
     virtual Result<std::vector<Customer>> list_customers(int limit,
                                                          const std::string& user_id = {}) = 0;
     virtual Result<Customer> get_customer(const std::string& id) = 0;
+    // The organization's own space; not_found when it has none (lake#561, get_organization).
+    virtual Result<Customer> organization_customer(const std::string& organization_id) = 0;
 
     // Refuses a workspace_id that is not a live workspace of customer_id's space (invalid_input).
     virtual Result<Repository> create_repository(const NewRepository&) = 0;
@@ -1480,6 +1482,9 @@ public:
     virtual Result<void> disable_mfa(const std::string& user_id,
                                      const std::string& pool_id,
                                      const std::string& code) = 0;
+    // Whether the user has an active TOTP enrollment in the pool (the web app's `viewer`,
+    // lake#561).
+    virtual Result<bool> mfa_enrolled(const std::string& user_id, const std::string& pool_id) = 0;
     virtual Result<IssuedSession> sign_in_totp(const PasswordSignIn&) = 0;
     virtual Result<WebAuthnChallenge> begin_passkey_registration(const std::string& user_id,
                                                                  const std::string& pool_id,

@@ -26,6 +26,7 @@
 #include "lake/api/forge.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/sync_store.hpp"
+#include "lake/api/web_ui.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/handles.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -1196,9 +1197,12 @@ json session_schema() {
               {"kind", {{"type", "string"}}},
               {"name", {{"type", "string"}}},
               {"scopes", {{"type", "array"}}},
+              // Why the token exists (create_token's `reason`); empty for a sign-in session.
+              {"reason", {{"type", "string"}}},
               {"expires_at", {{"type", {"string", "null"}}}},
               {"revoked_at", {{"type", {"string", "null"}}}},
-              {"created_at", {{"type", "string"}}}}}};
+              {"created_at", {{"type", "string"}}},
+              {"last_used_at", {{"type", {"string", "null"}}}}}}};
 }
 json device_schema() {
     return {{"type", "object"},
@@ -2056,14 +2060,29 @@ void register_identity_capabilities(Registry& registry) {
         .title = "Get organization",
         .description = "Read one organization: its name, the space it owns and when it was made.",
         .input_schema = id_input(),
-        .output_schema = organization_schema(),
+        .output_schema =
+            [] {
+                json schema = organization_schema();
+                // The organization's own space (lake#561), so a page need not scan list_customers.
+                schema["properties"]["customer_id"] = {{"type", json::array({"string", "null"})}};
+                return schema;
+            }(),
         .kind = CapabilityKind::Read,
         .object = "organization",
         .action = "read",
         .resolve_object = entity_object("organization", "id"),
-        .handler = [](const json& in, ApiContext& ctx) {
-            return ctx.store ? one_result(ctx.store->get_organization(in["id"])) : no_store();
-        }});
+        .handler =
+            [](const json& in, ApiContext& ctx) {
+                if (!ctx.store) {
+                    return no_store();
+                }
+                ApiResult result = one_result(ctx.store->get_organization(in["id"]));
+                if (result.ok) {
+                    const auto space = ctx.store->organization_customer(in["id"]);
+                    result.value["customer_id"] = space ? json(space->id) : json(nullptr);
+                }
+                return result;
+            }});
     registry.add(Capability{.name = "create_organization",
                             .title = "Create organization",
                             .description =
@@ -2103,9 +2122,7 @@ void register_identity_capabilities(Registry& registry) {
         .resolve_object = global_object,
         .authorizes_candidates = true,
         .handler = [](const json& in, ApiContext& ctx) {
-            return ctx.store ? authorized_entity_list_result(
-                                   ctx.store->list_customers(limit_of(in)), ctx, "customer")
-                             : no_store();
+            return readable_customers(ctx, limit_of(in));
         }});
     // One name for a space across every capability: customer_id. `id` was get_customer's own
     // spelling and stays as a deprecated alias (lake#443, lake#450).
@@ -3913,14 +3930,17 @@ void register_repository_capabilities(Registry& registry) {
         .name = "repository_file",
         .title = "Read a repository file",
         .description =
-            "Read one file of a repository at a branch, tag or change, with its contents and size.",
+            "Read one file of a repository at a branch, tag or change, with its contents and size. "
+            "With `units: true`, also the file's syntax units (`start_line`, `end_line`, `kind`) "
+            "for the formats lake parses (C and C++); `units` is absent for any other format.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"id", {{"type", "string"}}},
                            {"ref", {{"type", "string"}}},
                            {"repository", {{"type", "string"}}},
                            {"revision", {{"type", "string"}}},
-                           {"path", {{"type", "string"}}}}},
+                           {"path", {{"type", "string"}}},
+                           {"units", {{"type", "boolean"}}}}},
                          {"required", json::array({"path"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"},
@@ -3929,7 +3949,17 @@ void register_repository_capabilities(Registry& registry) {
                             {"blob", {{"type", "string"}}},
                             {"contents", {{"type", "string"}}},
                             {"content_base64", {{"type", "string"}}},
-                            {"size", {{"type", "integer"}}}}}},
+                            {"size", {{"type", "integer"}}},
+                            {"units",
+                             {{"type", "array"},
+                              {"items",
+                               {{"type", "object"},
+                                {"properties",
+                                 {{"start_line", {{"type", "integer"}}},
+                                  {"end_line", {{"type", "integer"}}},
+                                  {"kind", {{"type", "integer"}}}}},
+                                {"required", json::array({"start_line", "end_line", "kind"})},
+                                {"additionalProperties", false}}}}}}}},
         .kind = CapabilityKind::Read,
         .object = "repository",
         .action = "read",
@@ -3953,7 +3983,13 @@ void register_repository_capabilities(Registry& registry) {
             if (!file) {
                 return from_sync_store_error(file.error());
             }
-            return ApiResult::success(repository_file_json(*file));
+            json out = repository_file_json(*file);
+            if (in.value("units", false)) {
+                if (auto units = web_ui_source_units(file->path, file->contents)) {
+                    out["units"] = std::move(*units);
+                }
+            }
+            return ApiResult::success(std::move(out));
         }});
     registry.add(Capability{
         .name = "list_changes",
@@ -5721,8 +5757,15 @@ void register_audit_capabilities(Registry& registry) {
         }});
 }
 
+ApiResult readable_customers(ApiContext& context, int limit) {
+    return context.store ? authorized_entity_list_result(
+                               context.store->list_customers(limit), context, "customer")
+                         : no_store();
+}
+
 void register_core_capabilities(Registry& registry, std::string_view version) {
     register_server_info(registry, version);
+    register_console_capabilities(registry, version);
     register_identity_capabilities(registry);
     register_sso_capabilities(registry);
     register_repository_capabilities(registry);

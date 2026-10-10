@@ -224,6 +224,11 @@ public:
     control::Result<control::Customer> get_customer(const std::string& id) override {
         return call("get_customer", [&] { return store_->get_customer(id); });
     }
+    control::Result<control::Customer>
+    organization_customer(const std::string& organization_id) override {
+        return call("organization_customer",
+                    [&] { return store_->organization_customer(organization_id); });
+    }
     control::Result<control::Repository>
     create_repository(const control::NewRepository& value) override {
         return call("create_repository", [&] { return store_->create_repository(value); });
@@ -912,6 +917,10 @@ public:
     control::Result<control::MfaEnrollment> enroll_mfa(const std::string& user_id,
                                                        const std::string& pool_id) override {
         return call("enroll_mfa", [&] { return store_->enroll_mfa(user_id, pool_id); });
+    }
+    control::Result<bool> mfa_enrolled(const std::string& user_id,
+                                       const std::string& pool_id) override {
+        return call("mfa_enrolled", [&] { return store_->mfa_enrolled(user_id, pool_id); });
     }
     control::Result<void> disable_mfa(const std::string& user_id,
                                       const std::string& pool_id,

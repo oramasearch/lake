@@ -52,6 +52,14 @@ struct WebUiViewer {
 };
 
 std::string web_ui_escape(std::string_view text);
+// The space selector's label: the viewer's own personal space is "Personal space", not its
+// generated handle (lake#452); every other space keeps its name. The `viewer` capability labels
+// spaces the same way (lake#561).
+std::string web_ui_space_label(const control::Customer& customer, std::string_view user_id);
+// The syntax units of a source file, as the File page shades them (lake#561): an array of
+// {start_line, end_line, kind} from liquid's parser for the formats it parses (C and C++ by
+// extension), or nothing when the format has none. repository_file returns it with `units: true`.
+std::optional<nlohmann::json> web_ui_source_units(std::string_view path, std::string_view contents);
 std::string web_ui_markdown(std::string_view markdown);
 std::string
 web_ui_error(std::string_view code, std::string_view message, WebUiViewer viewer = false);

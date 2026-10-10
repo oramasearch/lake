@@ -503,6 +503,11 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
   never add a second path. Protected pages redirect to `/sign-in` without a valid credential; `/metrics`
   uses the same check. `/healthz` and `/readyz` are deliberately unauthenticated Kubernetes probes.
+- **Cross-site requests.** An unsafe request the `lake_session` cookie authenticates must come from
+  lake's own origin (`Origin` and `Sec-Fetch-Site`), and a cookie-authenticated `/v1` or `/mcp`
+  `POST` must be `application/json`; bearer calls are unaffected (`refuse_cross_site`,
+  `docs/serving/http.md#cross-site-requests`, lake#561). Tests that post with a cookie send the
+  headers a browser would.
 - **One registry.** Every capability is registered from `src/api/capabilities.cpp` or its
   area-specific registration file; REST,
   OpenAPI and MCP are renderings of it and never special-case an entry. `Registry::call` is the
