@@ -7,7 +7,7 @@ import { useState } from "react";
 import { act } from "@/lib/api";
 import { ConfirmButton } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
-import { Button, ErrorBlock, Field, Form, Skeleton } from "@/lib/ui";
+import { Banner, Button, DataTable, ErrorBlock, Field, Form, KeyValue, Skeleton, Stat, StatRow, Status } from "@/lib/ui";
 import { useScope, useWq, wa, useScopedRead } from "./api";
 import {
   a1Queue,
@@ -29,7 +29,7 @@ import {
   type J,
   type SolutionProject,
 } from "./logic";
-import { CheckTable, FormError, JsonDisclosure, Panel, Refusal, RunBadge, useSubmit } from "./parts";
+import { CheckTable, FormError, JsonDisclosure, Panel, Refusal, RunBadge, When, useSubmit } from "./parts";
 
 /* ------------------------------------------------------------------ the foundation proposal */
 
@@ -38,30 +38,19 @@ export function ProposalContent({ project, task }: { project: string; task: J })
   const status = text(task, "status");
   if (status === "pending" || status === "running") {
     return (
-      <section className="panel notice" role="status">
-        <h2>Foundation Proposal</h2>
-        <p>
-          <strong>The Project Agent is reading the dataset…</strong> It is proposing the snapshot boundary, column roles, methodology inputs and policy predicates. Nothing is
-          created until you confirm. This page checks again every 3 seconds.
-        </p>
-        <p>{text(task, "message")}</p>
-      </section>
+      <Banner title="Foundation proposal: the Project Agent is reading the dataset…">
+        It is proposing the snapshot boundary, column roles, methodology inputs and policy predicates. Nothing is created until you confirm. This page checks again every 3
+        seconds.
+        {text(task, "message") && <div className="mt-1">{text(task, "message")}</div>}
+      </Banner>
     );
   }
   if (status === "failed") {
-    return (
-      <p className="error" role="alert">
-        The Project Agent could not propose the foundation: {text(task, "message")}
-      </p>
-    );
+    return <Banner tone="warn">The Project Agent could not propose the foundation: {text(task, "message")}</Banner>;
   }
   const proposal = proposedFoundation(task);
   if (!Object.keys(proposal).length) {
-    return status === "succeeded" ? (
-      <p className="error" role="alert">
-        The Project Agent returned no foundation proposal.
-      </p>
-    ) : null;
+    return status === "succeeded" ? <Banner tone="warn">The Project Agent returned no foundation proposal.</Banner> : null;
   }
   return <FoundationForm project={project} task={task} proposal={proposal} />;
 }
@@ -87,21 +76,21 @@ function FoundationForm({ project, task, proposal }: { project: string; task: J;
       toast(`Solution confirmed for ${project}`);
     });
   return (
-    <Panel title="Foundation Proposal">
-      <p>Review and edit the exact foundation sent to the engine. Delivery and economics are your inputs from Start.</p>
+    <Panel title="Foundation Proposal" label="Review before anything is created" tone="active">
+      <p className="mt-0 text-[13px] text-ink-2">Review and edit the exact foundation sent to the engine. Delivery and economics are your inputs from Start.</p>
       {missing && (
-        <p className="error" role="alert">
-          <strong>Actions will remain blocked.</strong> The dataset is missing these exclusion predicates: {missing}. They are not treated as false.
-        </p>
+        <Banner tone="warn" title="Actions will remain blocked.">
+          The dataset is missing these exclusion predicates: {missing}. They are not treated as false.
+        </Banner>
       )}
       <Form onSubmit={submit}>
         <FormError error={error} />
         <Field label="Foundation (JSON)" required>
-          <textarea name="foundation" rows={28} value={foundation} onChange={(e) => setFoundation(e.target.value)} />
+          <textarea name="foundation" rows={24} className="font-mono text-[12.5px]" value={foundation} onChange={(e) => setFoundation(e.target.value)} />
         </Field>
-        <label>
-          <input type="checkbox" name="confirm" value="yes" required checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} /> I reviewed this snapshot, these
-          roles, predicates, delivery settings and economics.
+        <label className="flex items-start gap-2 text-[13px]">
+          <input type="checkbox" name="confirm" value="yes" required checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
+          <span>I reviewed this snapshot, these roles, predicates, delivery settings and economics.</span>
         </label>
         <div>
           <Button type="submit" variant="primary" loading={busy}>
@@ -135,34 +124,24 @@ export function ActiveSolution({ project, solution, task, runs, live }: { projec
   const loading = policy.isLoading || experiment.isLoading || ledger.isLoading || monitor.isLoading || roi.isLoading;
   return (
     <>
-      <Panel title="Solution Stages">
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Stage</th>
-                <th>Name</th>
-                <th>Kind</th>
-              </tr>
-            </thead>
-            <tbody>
-              {solution.stages.map((stage) => (
-                <tr key={stage.id}>
-                  <td>{cellText(stage.stage)}</td>
-                  <td>{stage.name}</td>
-                  <td>{stage.kind}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      <Panel title="Solution Stages" label={solution.graph}>
+        <DataTable
+          rows={solution.stages}
+          caption="Solution stages"
+          rowKey={(stage) => stage.id}
+          columns={[
+            { key: "stage", label: "Stage", render: (stage) => <span className="font-mono">{cellText(stage.stage)}</span> },
+            { key: "name", label: "Name", render: (stage) => <span className="font-semibold">{stage.name}</span> },
+            { key: "kind", label: "Kind", render: (stage) => <span className="text-ink-2">{stage.kind}</span> },
+          ]}
+        />
+        <div className="mt-3">
+          {missing.length === 0 ? (
+            <RunSolution project={project} graph={solution.graph} />
+          ) : (
+            <Banner tone="warn">Run is blocked because an exclusion predicate is missing. Missing evidence is never treated as false.</Banner>
+          )}
         </div>
-        {missing.length === 0 ? (
-          <RunSolution project={project} graph={solution.graph} />
-        ) : (
-          <p className="error" role="alert">
-            Run is blocked because an exclusion predicate is missing. Missing evidence is never treated as false.
-          </p>
-        )}
       </Panel>
       {loading && <Skeleton />}
       {policy.data && Object.keys(policy.data).length > 0 && <PolicyPanel project={project} policy={policy.data} />}
@@ -221,42 +200,30 @@ function PolicyPanel({ project, policy }: { project: string; policy: J }) {
   const tiers: J[] = Array.isArray(config?.tiers) ? config.tiers : [];
   return (
     <Panel title="Decision Policy">
-      <dl>
-        <dt>Version</dt>
-        <dd>{cellText(policy.current_version ?? 0)}</dd>
-        <dt>Autonomy</dt>
-        <dd>{text(config, "autonomy") || "—"}</dd>
-        <dt>Score threshold</dt>
-        <dd>{config && "threshold" in config ? cellText(config.threshold) : "—"}</dd>
-      </dl>
+      <KeyValue
+        rows={[
+          ["Version", <span key="v" className="font-mono">{cellText(policy.current_version ?? 0)}</span>],
+          ["Autonomy", text(config, "autonomy") || "—"],
+          ["Score threshold", <span key="t" className="font-mono">{config && "threshold" in config ? cellText(config.threshold) : "—"}</span>],
+        ]}
+      />
       {tiers.length > 0 && (
         <>
           <h3>Tiers and Thresholds</h3>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Tier</th>
-                  <th>Minimum Score</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tiers.map((tier, index) => (
-                  <tr key={index}>
-                    <td>{text(tier, "name")}</td>
-                    <td>{cellText(tier.minimum_score ?? 0)}</td>
-                    <td>{text(tier, "action")}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            rows={tiers}
+            caption="Tiers and thresholds"
+            columns={[
+              { key: "name", label: "Tier", render: (tier) => text(tier, "name") },
+              { key: "minimum_score", label: "Minimum Score", numeric: true, render: (tier) => <span className="font-mono">{cellText(tier.minimum_score ?? 0)}</span> },
+              { key: "action", label: "Action", render: (tier) => text(tier, "action") },
+            ]}
+          />
         </>
       )}
       <JsonDisclosure value={policy} />
-      <details>
-        <summary>Propose a New Policy Version</summary>
+      <details className="mt-2">
+        <summary className="cursor-pointer text-[12.5px] text-ink-2">Propose a New Policy Version</summary>
         <PolicyForm key={JSON.stringify(config)} project={project} policyId={text(policy, "id")} config={config} />
       </details>
     </Panel>
@@ -289,13 +256,14 @@ function PolicyForm({ project, policyId, config }: { project: string; policyId: 
     <Form onSubmit={submit}>
       <FormError error={error} />
       <Field label="Configuration (JSON)" required>
-        <textarea name="config" rows={16} value={value} onChange={(e) => setValue(e.target.value)} />
+        <textarea name="config" rows={16} className="font-mono text-[12.5px]" value={value} onChange={(e) => setValue(e.target.value)} />
       </Field>
       <Field label="Reason" required>
         <input name="reason" value={reason} onChange={(e) => setReason(e.target.value)} />
       </Field>
-      <label>
-        <input type="checkbox" name="confirm" value="yes" required checked={approved} onChange={(e) => setApproved(e.target.checked)} /> I approve creating this policy version.
+      <label className="flex items-start gap-2 text-[13px]">
+        <input type="checkbox" name="confirm" value="yes" required checked={approved} onChange={(e) => setApproved(e.target.checked)} />
+        <span>I approve creating this policy version.</span>
       </label>
       <div>
         <Button type="submit" loading={busy}>
@@ -308,41 +276,28 @@ function PolicyForm({ project, policyId, config }: { project: string; policyId: 
 
 function ExperimentSummary({ experiment }: { experiment: J }) {
   const allocations = experimentAllocations(experiment);
-  if (!allocations.length) return <p>No allocations have been configured.</p>;
+  if (!allocations.length) return <p className="m-0 text-[13px] text-ink-2">No allocations have been configured.</p>;
   const sizes = experiment.sizes && typeof experiment.sizes === "object" && !Array.isArray(experiment.sizes) ? experiment.sizes : null;
   return (
     <>
       {sizes && (
-        <p>
-          <strong>{countText(Number(sizes.assignments ?? 0))} assignments.</strong> {countText(Number(sizes.holdout_assignments ?? 0))} holdout assignments.
-        </p>
+        <StatRow cols={2}>
+          <Stat label="Assignments" value={countText(Number(sizes.assignments ?? 0))} />
+          <Stat label="Holdout assignments" value={countText(Number(sizes.holdout_assignments ?? 0))} />
+        </StatRow>
       )}
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Allocation</th>
-              <th>Tier</th>
-              <th>Share</th>
-              <th>Assignments</th>
-              <th>Expected</th>
-              <th>Balanced</th>
-            </tr>
-          </thead>
-          <tbody>
-            {allocations.map((allocation, index) => (
-              <tr key={index}>
-                <td>{text(allocation, "name")}</td>
-                <td>{text(allocation, "tier")}</td>
-                <td>{allocationShare(allocation)}</td>
-                <td>{"assignments" in allocation ? countText(Number(allocation.assignments)) : "—"}</td>
-                <td>{"expected" in allocation ? cellText(allocation.expected) : "—"}</td>
-                <td>{allocation.balanced === true ? "Yes" : "No"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        rows={allocations}
+        caption="Allocations"
+        columns={[
+          { key: "name", label: "Allocation", render: (a) => <span className="font-semibold">{text(a, "name")}</span> },
+          { key: "tier", label: "Tier", render: (a) => text(a, "tier") },
+          { key: "share", label: "Share", numeric: true, render: (a) => <span className="font-mono">{allocationShare(a)}</span> },
+          { key: "assignments", label: "Assignments", numeric: true, render: (a) => <span className="font-mono">{"assignments" in a ? countText(Number(a.assignments)) : "—"}</span> },
+          { key: "expected", label: "Expected", numeric: true, render: (a) => <span className="font-mono">{"expected" in a ? cellText(a.expected) : "—"}</span> },
+          { key: "balanced", label: "Balanced", render: (a) => (a.balanced === true ? <Status value="Yes" tone="success" /> : <Status value="No" tone="warning" />) },
+        ]}
+      />
     </>
   );
 }
@@ -355,93 +310,59 @@ function DecisionsPanel({ ledger, decisions, scope }: { ledger: J | undefined; d
   if (counts.decisions === 0 && !hasDecisions) {
     return (
       <Panel title="Actions and A1 Queue">
-        <p>No decisions have been produced yet. Run the solution to populate delivered, held and approval-pending actions.</p>
+        <p className="m-0 text-[13px] text-ink-2">No decisions have been produced yet. Run the solution to populate delivered, held and approval-pending actions.</p>
       </Panel>
     );
   }
   const latest = latestActions(entries);
   return (
-    <Panel title="Actions and A1 Queue">
-      <h3>Decision and Action Counts</h3>
-      <dl>
-        <dt>Decisions</dt>
-        <dd>{countText(counts.decisions)}</dd>
-        <dt>Actions</dt>
-        <dd>{countText(counts.actions)}</dd>
-        <dt>Held</dt>
-        <dd>{countText(counts.held)}</dd>
-      </dl>
+    <Panel title="Actions and A1 Queue" footer="Approvals change the decision state; they do not silently deliver an action.">
+      <StatRow cols={3}>
+        <Stat label="Decisions" value={countText(counts.decisions)} />
+        <Stat label="Actions" value={countText(counts.actions)} />
+        <Stat label="Held" value={countText(counts.held)} />
+      </StatRow>
       <h3>Latest Actions</h3>
-      {latest.length === 0 ? (
-        <p>No delivered actions are recorded for this solution.</p>
-      ) : (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Entity</th>
-                <th>Action</th>
-                <th>Cell</th>
-                <th>Score</th>
-                <th>Model / Policy</th>
-                <th>Recorded</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {latest.map((entry, index) => (
-                <tr key={text(entry, "id") || index}>
-                  <td>{text(entry, "subject")}</td>
-                  <td>{text(entry, "action")}</td>
-                  <td>{text(entry, "cell")}</td>
-                  <td>{"score" in entry ? cellText(entry.score) : "—"}</td>
-                  <td>
-                    {text(entry, "model_version")}
-                    <br />
-                    {text(entry, "policy_version")}
-                  </td>
-                  <td>{text(entry, "recorded_at")}</td>
-                  <td>
-                    <OutcomeForm entry={entry} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <DataTable
+        rows={latest}
+        caption="Latest actions"
+        rowKey={(entry, index) => text(entry, "id") || String(index)}
+        empty={<p className="m-0 text-[13px] text-ink-2">No delivered actions are recorded for this solution.</p>}
+        columns={[
+          { key: "subject", label: "Entity", render: (entry) => <span className="font-semibold">{text(entry, "subject")}</span> },
+          { key: "action", label: "Action", render: (entry) => text(entry, "action") },
+          { key: "cell", label: "Cell", render: (entry) => text(entry, "cell") },
+          { key: "score", label: "Score", numeric: true, render: (entry) => <span className="font-mono">{"score" in entry ? cellText(entry.score) : "—"}</span> },
+          {
+            key: "versions",
+            label: "Model / Policy",
+            render: (entry) => (
+              <span className="font-mono text-[11.5px] text-ink-2">
+                {text(entry, "model_version")}
+                <br />
+                {text(entry, "policy_version")}
+              </span>
+            ),
+          },
+          { key: "recorded_at", label: "Recorded", render: (entry) => <When value={text(entry, "recorded_at")} /> },
+          { key: "outcome", label: "", render: (entry) => <OutcomeForm entry={entry} /> },
+        ]}
+      />
       <h3>A1 Queue</h3>
-      {queue.length === 0 ? (
-        <p>No held or approval-pending decisions are recorded for this solution.</p>
-      ) : (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Entity</th>
-                <th>Proposed Action</th>
-                <th>Cell</th>
-                <th>Score</th>
-                <th>Governance</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {queue.map((row) => (
-                <tr key={row.key}>
-                  <td>{row.entity}</td>
-                  <td>{row.proposed}</td>
-                  <td>{row.cell}</td>
-                  <td>{row.score}</td>
-                  <td>{row.governance}</td>
-                  <td>{row.decisionId ? <ApproveA1 decisionId={row.decisionId} entity={row.entity} action={row.proposed} /> : "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      <p className="sub">Approvals change the decision state; they do not silently deliver an action.</p>
+      <DataTable
+        rows={queue}
+        caption="A1 queue"
+        rowKey={(row) => row.key}
+        empty={<p className="m-0 text-[13px] text-ink-2">No held or approval-pending decisions are recorded for this solution.</p>}
+        columns={[
+          { key: "entity", label: "Entity", render: (row) => <span className="font-semibold">{row.entity}</span> },
+          { key: "proposed", label: "Proposed Action", render: (row) => row.proposed },
+          { key: "cell", label: "Cell", render: (row) => row.cell },
+          { key: "score", label: "Score", numeric: true, render: (row) => <span className="font-mono">{row.score}</span> },
+          { key: "governance", label: "Governance", render: (row) => <Status value={row.governance} /> },
+          { key: "approve", label: "", render: (row) => (row.decisionId ? <ApproveA1 decisionId={row.decisionId} entity={row.entity} action={row.proposed} /> : "—") },
+        ]}
+      />
     </Panel>
   );
 }
@@ -485,7 +406,7 @@ function OutcomeForm({ entry }: { entry: J }) {
     });
   return (
     <details>
-      <summary>Record outcome</summary>
+      <summary className="cursor-pointer whitespace-nowrap text-[12.5px] text-action">Record outcome</summary>
       <Form onSubmit={submit}>
         <FormError error={error} />
         <Field label="Outcome" required>
@@ -514,40 +435,26 @@ function MonitorSummary({ monitor }: { monitor: J }) {
   const guardrails: J[] = Array.isArray(monitor.guardrails) ? monitor.guardrails : [];
   return (
     <>
-      <p>
-        <RunBadge status={monitorHealthy(monitor) ? "within bounds" : "attention needed"} />
-      </p>
-      <dl>
-        <dt>Input drift threshold</dt>
-        <dd>{"psi_threshold" in monitor ? cellText(monitor.psi_threshold) : "—"}</dd>
-        <dt>Calibration error threshold</dt>
-        <dd>{"calibration_error_threshold" in monitor ? cellText(monitor.calibration_error_threshold) : "—"}</dd>
-      </dl>
+      <KeyValue
+        className="mb-3"
+        rows={[
+          ["Health", <RunBadge key="h" status={monitorHealthy(monitor) ? "within bounds" : "attention needed"} />],
+          ["Input drift threshold", <span key="p" className="font-mono">{"psi_threshold" in monitor ? cellText(monitor.psi_threshold) : "—"}</span>],
+          ["Calibration error threshold", <span key="c" className="font-mono">{"calibration_error_threshold" in monitor ? cellText(monitor.calibration_error_threshold) : "—"}</span>],
+        ]}
+      />
       {guardrails.length > 0 && (
         <>
           <h3>Guardrails</h3>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Guardrail</th>
-                  <th>Observed</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {guardrails.map((guardrail, index) => (
-                  <tr key={index}>
-                    <td>{text(guardrail.bound ?? {}, "name")}</td>
-                    <td>{"value" in guardrail ? cellText(guardrail.value) : "Not observed"}</td>
-                    <td>
-                      <RunBadge status={guardrail.breached === true ? "failed" : "within bounds"} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            rows={guardrails}
+            caption="Guardrails"
+            columns={[
+              { key: "name", label: "Guardrail", render: (g) => text(g.bound ?? {}, "name") },
+              { key: "value", label: "Observed", numeric: true, render: (g) => <span className="font-mono">{"value" in g ? cellText(g.value) : "Not observed"}</span> },
+              { key: "status", label: "Status", render: (g) => <RunBadge status={g.breached === true ? "failed" : "within bounds"} /> },
+            ]}
+          />
         </>
       )}
     </>
@@ -564,14 +471,15 @@ function RoiSummary({ readout }: { readout: J }) {
   return (
     <>
       {statement.claimable === true ? (
-        <p>
-          <strong>{(Number(statement.return_on_investment ?? 0) * 100).toFixed(1)}% return on investment.</strong> Net value {currency} {cellText(statement.net_value ?? 0)} from
-          gross value {currency} {cellText(statement.gross_value ?? 0)}.
-        </p>
+        <StatRow cols={3}>
+          <Stat label="Return on investment" value={`${(Number(statement.return_on_investment ?? 0) * 100).toFixed(1)}%`} tone="ok" />
+          <Stat label="Net value" value={`${currency} ${cellText(statement.net_value ?? 0)}`} />
+          <Stat label="Gross value" value={`${currency} ${cellText(statement.gross_value ?? 0)}`} />
+        </StatRow>
       ) : (
-        <p>
-          <strong>ROI cannot be claimed yet.</strong> {reason || "No measured reason is available."}
-        </p>
+        <Banner tone="quiet" title="ROI cannot be claimed yet.">
+          {reason || "No measured reason is available."}
+        </Banner>
       )}
       {readout.correctness_certificate && <Certificate certificate={readout.correctness_certificate} solution={text(readout, "solution")} />}
     </>
@@ -583,20 +491,21 @@ function Certificate({ certificate, solution }: { certificate: J; solution: stri
   return (
     <>
       <h3>Correctness Certificate</h3>
-      <p>
-        <strong>Verdict:</strong> <RunBadge status={text(certificate, "verdict")} />
+      <p className="text-[13px]">
+        <span className="text-ink-3">Verdict </span>
+        <RunBadge status={text(certificate, "verdict")} />
       </p>
       {groups.map(([group, checks]) => (
-        <details key={group}>
-          <summary>
+        <details key={group} className="mt-1">
+          <summary className="cursor-pointer text-[13px]">
             {group} ({checks.length} checks)
           </summary>
           <CheckTable checks={checks} runTone />
         </details>
       ))}
       {hidden.length > 0 && (
-        <details>
-          <summary>Show all checks ({hidden.length} not applicable)</summary>
+        <details className="mt-1">
+          <summary className="cursor-pointer text-[13px] text-ink-2">Show all checks ({hidden.length} not applicable)</summary>
           <CheckTable checks={hidden} runTone />
         </details>
       )}

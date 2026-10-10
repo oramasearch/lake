@@ -44,7 +44,9 @@ export function useScopedRead<T = Row>(name: string | null, input: Params = {}, 
   const scope = useScope();
   return useRead<T>(name, { customer_id: scope.customerId, workspace_id: scope.workspaceId, ...input }, {
     ...options,
-    enabled: !!scope.customerId && !!scope.workspaceId && (options?.enabled ?? true),
+    // A null name reads nothing: useRead spreads these options over its own `enabled`, so the
+    // name is checked here too (else it would call `/v1/null`).
+    enabled: !!name && !!scope.customerId && !!scope.workspaceId && (options?.enabled ?? true),
   });
 }
 

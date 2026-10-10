@@ -1,0 +1,34 @@
+/* Design and Workspaces pages (lake#561). Overlays are portalled outside `main`, so look.css's
+ * `main form.stack .field > label { display: block }` does not reach a form in a Modal or Drawer
+ * and lake.css's `form.stack label { display: grid }` puts a label's words, its code and its
+ * required mark on separate rows. Keep them on one line there too. A candidate for look.css. */
+:is(.dialog, .drawer) form.stack .field > label {
+  display: block;
+}
+
+/* look.css's `.dialog button` / `.drawer button` (0,1,1) outranks `.button-primary` and
+ * `.button-danger` (0,1,0), so an overlay's primary or danger action reads as a plain button.
+ * Restore the variants inside overlays. A candidate for look.css. */
+:is(.dialog, .drawer) .button-primary {
+  border-color: var(--lake-action-filled);
+  color: var(--lake-text-on-action);
+  background: var(--lake-action-filled);
+}
+:is(.dialog, .drawer) .button-danger {
+  border-color: var(--lake-danger);
+  color: var(--lake-text-on-danger);
+  background: var(--lake-danger);
+}
+:is(.dialog, .drawer) :is(.button-primary, .button-danger):hover {
+  filter: brightness(1.1);
+}
+:is(.dialog, .drawer) .button-primary:hover {
+  border-color: var(--lake-action-filled);
+  color: var(--lake-text-on-action);
+  background: var(--lake-action-filled);
+}
+:is(.dialog, .drawer) .button-danger:hover {
+  border-color: var(--lake-danger);
+  color: var(--lake-text-on-danger);
+  background: var(--lake-danger);
+}

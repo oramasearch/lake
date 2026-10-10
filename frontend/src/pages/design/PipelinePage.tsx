@@ -3,12 +3,13 @@
  * markup it answers); selecting a step keeps it in the URL (`step=`). A Project Agent turn is
  * followed by its task (`task=`), polled every 3 seconds while it works. Gate and deploy answers
  * are shown once, never put in the URL. */
-import { type MouseEvent, useEffect, useRef, useState } from "react";
+import { type MouseEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { act, type Row } from "@/lib/api";
 import { useToast } from "@/lib/toast";
-import { Badge, Button, ErrorBlock, Field, Form, Page, Skeleton } from "@/lib/ui";
-import { WorkspaceGate } from "@/components/WorkspaceGate";
+import { MousePointerClick } from "lucide-react";
+import { Banner, Button, Chip, DataTable, Empty, ErrorBlock, Field, Form, KeyValue, Page, Skeleton, Split, Status } from "@/lib/ui";
+import { WorkspaceGate, useWorkspaceStatus } from "@/components/WorkspaceGate";
 import { qs, useScope, useScopedRead, useWq, useWsPath, wa } from "./api";
 import {
   EDGE_KINDS,
@@ -23,12 +24,13 @@ import {
   runsOf,
   taskIsActive,
   text,
+  whenUtc,
   type Graph,
   type J,
 } from "./logic";
-import { FormError, GatePanel, Markdown, Panel, PipelineSvg, Refusal, entityCrumb, useDesignTrail, useSubmit } from "./parts";
+import { FormError, GatePanel, Identifier, Markdown, Panel, PipelineSvg, Refusal, RunBadge, When, entityCrumb, useDesignTrail, useSubmit } from "./parts";
 
-const SUB = "The steps Zetta runs, how data flows between them, and what the last run did. Change it here; a changed pipeline is approved again before it runs.";
+const SUB = "The steps Zetta runs and how data flows between them. A changed pipeline is approved again before it runs.";
 
 export default function PipelinePage() {
   const [params] = useSearchParams();
@@ -40,8 +42,20 @@ export default function PipelinePage() {
     [project ? entityCrumb(project, ws(`/design/project?${qs({ name: project })}`)) : null, entityCrumb(graph || "Pipeline")],
     graph ? `Pipeline: ${graph}` : "Pipeline",
   );
+  // The same read the body makes: the header carries the approval.
+  const ready = useWorkspaceStatus().q.data?.ready === true;
+  const read = useWq<J>("get_graph", { project, graph }, { enabled: ready });
+  const approval = graphOf(read.data)?.approval;
   return (
-    <Page eyebrow="Design" title={graph ? `Pipeline: ${graph}` : "Pipeline"} sub={SUB}>
+    <Page
+      eyebrow={project ? `Design · Pipeline of ${project}` : "Design · Pipeline"}
+      title={
+        <span className="inline-flex flex-wrap items-center gap-2">
+          {graph || "Pipeline"} {approval && <Status value={approval === "approved" ? "approved" : "proposed"} tone={approval === "approved" ? "success" : "warning"} />}
+        </span>
+      }
+      sub={SUB}
+    >
       <WorkspaceGate>
         <PipelineBody key={`${project}\u0000${graph}`} project={project} graphName={graph} />
       </WorkspaceGate>
@@ -53,6 +67,7 @@ export default function PipelinePage() {
 type Shown = { gate?: J; deploy?: J };
 
 function PipelineBody({ project, graphName }: { project: string; graphName: string }) {
+  const ws = useWsPath();
   const [params] = useSearchParams();
   const location = useLocation();
   const navigate = useNavigate();
@@ -83,7 +98,13 @@ function PipelineBody({ project, graphName }: { project: string; graphName: stri
   if (read.isLoading) return <Skeleton />;
   if (read.isError) return <ErrorBlock error={read.error} retry={() => void read.refetch()} what="this pipeline" />;
   const graph = graphOf(read.data);
-  if (!graph) return <div className="panel empty">This pipeline could not be read from the workspace.</div>;
+  if (!graph) {
+    return (
+      <Empty title="Pipeline Not Readable" action={<Button to={ws(`/design/project?${qs({ name: project })}`)}>Back to the project</Button>}>
+        This pipeline could not be read from the workspace.
+      </Empty>
+    );
+  }
 
   const pipelineRuns = runsOf(runs.data?.runs, graph.name, graph.graph_id);
   const latest = pipelineRuns[0];
@@ -103,79 +124,93 @@ function PipelineBody({ project, graphName }: { project: string; graphName: stri
   const runnable = read.data && "runnable" in read.data;
   const methodology = text(read.data ?? {}, "methodology");
 
+  const selected = step && graph.steps.some((x) => x.id === step) ? step : "";
   return (
-    <>
-      <p className="sub">
-        Project <ProjectLink project={project} /> · <Badge tone={approved ? "success" : "warning"}>{approved ? "approved" : "proposed — approve before it runs"}</Badge>
-        {graph.approved_at ? ` ${graph.approved_at.slice(0, 16)} UTC` : ""} · {graph.steps.length} steps · {graph.edges.length} edges
-      </p>
-      {runnable &&
-        (read.data!.runnable === true ? (
-          <p className="sub">
-            Trains with <Badge tone="success">{methodology || "its model step"}</Badge>
-          </p>
-        ) : (
-          <section className="panel notice" role="status">
-            <h2>This Pipeline Trains Nothing Yet</h2>
-            <p>
-              {methodology ? `It needs ${methodology}, which this workspace's engine does not run yet.` : "It has no model step the engine can run, so a run only passes through its steps."}{" "}
-              Build a pipeline with a methodology that runs, or ask the Project Agent below to change it.
-            </p>
-          </section>
-        ))}
+    <div className="space-y-4">
+      {runnable && read.data!.runnable !== true && (
+        <Banner tone="quiet" title="This Pipeline Trains Nothing Yet">
+          {methodology ? `It needs ${methodology}, which this workspace's engine does not run yet.` : "It has no model step the engine can run, so a run only passes through its steps."}{" "}
+          Build a pipeline with a methodology that runs, or ask the Project Agent to change it.
+        </Banner>
+      )}
       {shown.gate && <GatePanel gate={shown.gate} heading="Checks" />}
       {shown.deploy && (
         <>
-          <section className="panel notice" role="status">
-            <h2>Deployed</h2>
-            <p>
-              Deployment <code>{text(shown.deploy, "deployment_id")}</code> to <code>{text(shown.deploy, "target")}</code>.
-            </p>
-          </section>
+          <Banner tone="ok" title="Deployed">
+            Deployment <code>{text(shown.deploy, "deployment_id")}</code> to <code>{text(shown.deploy, "target")}</code>.
+          </Banner>
           <GatePanel gate={shown.deploy.gate ?? {}} heading="Its Checks" />
         </>
       )}
       {taskId && <ProjectAgentTurn project={project} graph={graph} task={task.data} taskError={task.error} taskLoading={task.isLoading} onDiscard={() => go({ task: null })} />}
-      <AskProjectAgent project={project} graph={graph.name} onAsked={(id) => go({ task: id }, "proposal")} />
-
-      <Panel title="Graph">
-        {graph.steps.length === 0 ? (
-          <p>No steps yet. Add the first one below.</p>
-        ) : svg.isError ? (
-          <ErrorBlock error={svg.error} retry={() => void svg.refetch()} what="the graph" />
-        ) : !svg.data?.svg ? (
-          <Skeleton />
-        ) : (
-          <ServerSvg markup={svg.data.svg} onStep={(id) => go({ step: id })} />
-        )}
-        <p className="muted">Solid arrows carry data; dashed arrows only order steps. Select a step to inspect or change it.</p>
-      </Panel>
-
-      {step && graph.steps.some((s) => s.id === step) && (
-        <SelectedStep key={step} project={project} graph={graph} stepId={step} lastRun={lastRunOf.get(step)} go={go} />
-      )}
-      <ChangePipeline project={project} graph={graph} go={go} />
-      <Govern
-        project={project}
-        graph={graph}
-        approved={approved}
-        datasets={datasetChoices(datasets.data?.datasets).map((d) => d.path)}
-        dataset={params.get("dataset") ?? ""}
-        holdout={params.get("holdout") ?? ""}
-        onShown={setShown}
-      />
-      <Panel title="Runs">
-        {runs.isError ? (
-          <ErrorBlock error={runs.error} retry={() => void runs.refetch()} what="runs" />
-        ) : runs.isLoading ? (
-          <Skeleton />
-        ) : pipelineRuns.length === 0 ? (
-          <p>No runs of this pipeline yet.</p>
-        ) : (
-          <RunsTable runs={pipelineRuns} />
-        )}
-      </Panel>
-    </>
+      <Split
+        side={
+          <>
+            {selected ? (
+              <SelectedStep key={selected} project={project} graph={graph} stepId={selected} lastRun={lastRunOf.get(selected)} go={go} />
+            ) : (
+              <Panel label="Step">
+                <Empty compact icon={MousePointerClick} title="Select a Step">
+                  Select a step in the graph to inspect or change it.
+                </Empty>
+              </Panel>
+            )}
+            <Panel label="Pipeline" title={graph.name}>
+              <KeyValue
+                rows={[
+                  ["Project", <ProjectLink key="p" project={project} />],
+                  [
+                    "Approval",
+                    <span key="a" className="inline-flex flex-wrap items-center gap-2">
+                      <Status value={approved ? "approved" : "proposed"} tone={approved ? "success" : "warning"} />
+                      {approved ? (graph.approved_at ? <span className="text-[12px] text-ink-3">{whenUtc(graph.approved_at)}</span> : null) : <span className="text-[12px] text-ink-3">approve before it runs</span>}
+                    </span>,
+                  ],
+                  ["Steps", <span key="s" className="font-mono">{graph.steps.length}</span>],
+                  ["Edges", <span key="e" className="font-mono">{graph.edges.length}</span>],
+                  ...(runnable && read.data!.runnable === true ? ([["Trains with", <Chip key="t" tone="ok">{methodology || "its model step"}</Chip>]] as [string, ReactNode][]) : []),
+                  ["Latest run", latest ? <RunBadge key="l" status={text(latest, "status")} /> : "none yet"],
+                ]}
+              />
+            </Panel>
+            <Govern
+              project={project}
+              graph={graph}
+              approved={approved}
+              datasets={datasetChoices(datasets.data?.datasets).map((d) => d.path)}
+              dataset={params.get("dataset") ?? ""}
+              holdout={params.get("holdout") ?? ""}
+              onShown={setShown}
+            />
+          </>
+        }
+      >
+        <Panel title="Graph" label={`${graph.steps.length} steps · ${graph.edges.length} edges`} footer="Solid arrows carry data; dashed arrows only order steps. Select a step to inspect or change it.">
+          {graph.steps.length === 0 ? (
+            <Empty compact title="No Steps Yet">
+              Add the first one under Change the Pipeline.
+            </Empty>
+          ) : svg.isError ? (
+            <ErrorBlock error={svg.error} retry={() => void svg.refetch()} what="the graph" />
+          ) : !svg.data?.svg ? (
+            <Skeleton />
+          ) : (
+            <ServerSvg markup={svg.data.svg} onStep={(id) => go({ step: id })} />
+          )}
+        </Panel>
+        <AskProjectAgent project={project} graph={graph.name} onAsked={(id) => go({ task: id }, "proposal")} />
+        <ChangePipeline project={project} graph={graph} go={go} />
+        <Panel title="Runs">
+          {runs.isError ? (
+            <ErrorBlock error={runs.error} retry={() => void runs.refetch()} what="runs" />
+          ) : runs.isLoading ? (
+            <Skeleton />
+          ) : (
+            <RunsTable runs={pipelineRuns} />
+          )}
+        </Panel>
+      </Split>
+    </div>
   );
 }
 
@@ -187,35 +222,26 @@ function ProjectLink({ project }: { project: string }) {
 function RunsTable({ runs }: { runs: J[] }) {
   const ws = useWsPath();
   return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Run</th>
-            <th>Status</th>
-            <th>Started</th>
-            <th>Outputs</th>
-          </tr>
-        </thead>
-        <tbody>
-          {runs.map((run, index) => {
-            const id = text(run, "id");
-            return (
-              <tr key={id || index}>
-                <td>
-                  <Link to={ws(`/train/run?${qs({ id })}`)}>{id}</Link>
-                </td>
-                <td>
-                  <Badge>{text(run, "status")}</Badge>
-                </td>
-                <td>{text(run, "created")}</td>
-                <td>{text(run, "output_count")}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+    <DataTable<J>
+      rows={runs}
+      caption="Runs of this pipeline"
+      rowKey={(run, index) => text(run, "id") || String(index)}
+      empty={<p className="m-0 text-[13px] text-ink-2">No runs of this pipeline yet.</p>}
+      columns={[
+        {
+          key: "id",
+          label: "Run",
+          render: (run) => (
+            <Link to={ws(`/train/run?${qs({ id: text(run, "id") })}`)}>
+              <Identifier value={text(run, "id")} />
+            </Link>
+          ),
+        },
+        { key: "status", label: "Status", sort: (run) => text(run, "status"), render: (run) => <RunBadge status={text(run, "status")} /> },
+        { key: "created", label: "Started", sort: (run) => text(run, "created"), render: (run) => <When value={text(run, "created")} /> },
+        { key: "outputs", label: "Outputs", numeric: true, render: (run) => <span className="font-mono">{text(run, "output_count") || "—"}</span> },
+      ]}
+    />
   );
 }
 
@@ -243,13 +269,12 @@ function ProjectAgentTurn({ project, graph, task, taskError, taskLoading, onDisc
   const status = text(task, "status");
   if (taskIsActive(status)) {
     return (
-      <section className="panel notice" id="proposal" role="status">
-        <p>
-          <strong>The Project Agent is working on it…</strong> It reads your data and prepares the edits; nothing changes until you apply them. This page checks again every 3
-          seconds.
-        </p>
-        <p>{text(task, "message")}</p>
-      </section>
+      <div id="proposal" className="scroll-mt-4">
+        <Banner title="The Project Agent is working on it…">
+          It reads your data and prepares the edits; nothing changes until you apply them. This page checks again every 3 seconds.
+          {text(task, "message") && <div className="mt-1">{text(task, "message")}</div>}
+        </Banner>
+      </div>
     );
   }
   const answer = task.answer && typeof task.answer === "object" ? task.answer : null;
@@ -261,9 +286,11 @@ function ProjectAgentTurn({ project, graph, task, taskError, taskLoading, onDisc
   const said = answer && "result" in answer ? (typeof answer.result?.reply === "string" ? answer.result.reply : "no proposal") : text(task, "message") || "no proposal";
   if (projectAgentNeedsReply(task)) return <AgentQuestion project={project} graph={graph.name} task={task} question={said} />;
   return (
-    <p className="error" role="alert" id="proposal">
-      The Project Agent did not propose a change: {plainAgentFailure(said)} Ask it again below with more detail, or change the steps by hand.
-    </p>
+    <div id="proposal" className="scroll-mt-4">
+      <Banner tone="warn" title="The Project Agent did not propose a change">
+        {plainAgentFailure(said)} Ask it again with more detail, or change the steps by hand.
+      </Banner>
+    </div>
   );
 }
 
@@ -286,12 +313,10 @@ function Proposal({ project, graph, proposal, onDiscard }: { project: string; gr
       navigate(ws(`/design/pipeline?${qs({ project, graph: text(answer, "name") || graph.name, dataset: text(settings, "dataset"), holdout: holdout === null ? "" : String(holdout) })}#run`));
     });
   return (
-    <section className="panel notice" id="proposal">
-      <h2>Proposed by the Project Agent</h2>
-      <p>{text(proposal, "summary")}</p>
-      <p className="sub">Nothing has changed yet. Applying saves these edits; the pipeline then needs approval again before it runs.</p>
+    <Panel id="proposal" tone="active" label="Proposed by the Project Agent" title={text(proposal, "summary")}>
+      <p className="mt-0 text-[12.5px] text-ink-2">Nothing has changed yet. Applying saves these edits; the pipeline then needs approval again before it runs.</p>
       {steps.length === 0 ? (
-        <p>No edits to the graph.</p>
+        <p className="text-[13px] text-ink-2">No edits to the graph.</p>
       ) : (
         <>
           <h3>Edits</h3>
@@ -323,7 +348,7 @@ function Proposal({ project, graph, proposal, onDiscard }: { project: string; gr
               <li key={p}>{p}</li>
             ))}
           </ul>
-          <p>Ask the Project Agent again below, or change the steps by hand.</p>
+          <p className="text-[13px] text-ink-2">Ask the Project Agent again, or change the steps by hand.</p>
         </>
       )}
       {after && after.steps.length > 0 && (
@@ -343,7 +368,7 @@ function Proposal({ project, graph, proposal, onDiscard }: { project: string; gr
         )}
         <Button onClick={onDiscard}>Discard</Button>
       </div>
-    </section>
+    </Panel>
   );
 }
 
@@ -375,12 +400,10 @@ function AgentQuestion({ project, graph, task, question }: { project: string; gr
       setParams(next);
     });
   return (
-    <section className="panel notice" id="proposal">
-      <h2>Project Agent Question</h2>
-      <div className="ask-reply">
+    <Panel id="proposal" tone="active" title="Project Agent Question">
+      <div className="ask-reply text-[13.5px]">
         <Markdown>{question}</Markdown>
       </div>
-      <h3>Reply</h3>
       <Form onSubmit={submit}>
         <FormError error={error} />
         <Field label="Reply" required>
@@ -392,7 +415,7 @@ function AgentQuestion({ project, graph, task, question }: { project: string; gr
           </Button>
         </div>
       </Form>
-    </section>
+    </Panel>
   );
 }
 
@@ -414,7 +437,7 @@ function AskProjectAgent({ project, graph, onAsked }: { project: string; graph: 
       onAsked(text(answer, "task_id"));
     });
   return (
-    <Panel title="Ask the Project Agent">
+    <Panel title="Ask the Project Agent" label="It proposes edits for you to review">
       <Form onSubmit={submit}>
         <FormError error={error} />
         <Field label="What should change?" required>
@@ -426,7 +449,7 @@ function AskProjectAgent({ project, graph, onAsked }: { project: string; graph: 
           </Button>
         </div>
       </Form>
-      <p className="muted">It reads your data and proposes edits for you to review; nothing changes until you apply them.</p>
+      <p className="mb-0 mt-2 text-[12.5px] text-ink-3">It reads your data and proposes edits for you to review; nothing changes until you apply them.</p>
     </Panel>
   );
 }
@@ -500,53 +523,43 @@ function SelectedStep({ project, graph, stepId, lastRun, go }: { project: string
     </a>
   );
   return (
-    <Panel title={`Step ${s.name}`}>
-      <dl>
-        <dt>Id</dt>
-        <dd>
-          <code>{s.id}</code>
-        </dd>
-        <dt>Kind</dt>
-        <dd>{s.kind}</dd>
-        {Object.entries(s.attributes).map(([key, value]) => (
-          <div key={key} className="contents">
-            <dt>{key}</dt>
-            <dd>
-              <code>{typeof value === "string" ? value : JSON.stringify(value)}</code>
-            </dd>
-          </div>
-        ))}
-        <dt>Last run</dt>
-        <dd>{lastRun ?? "not in the last run"}</dd>
-        <dt>From</dt>
-        <dd>
-          <ul>
-            {incoming.length === 0 ? (
-              <li className="muted">nothing</li>
+    <Panel label={`Step · ${s.kind}`} title={s.name} actions={<code className="identifier">{s.id}</code>}>
+      <KeyValue
+        className="mb-3"
+        rows={[
+          ["Kind", s.kind],
+          ...Object.entries(s.attributes).map(([key, value]) => [key, <code key={key}>{typeof value === "string" ? value : JSON.stringify(value)}</code>] as [string, ReactNode]),
+          ["Last run", lastRun ? <RunBadge key="lr" status={lastRun} /> : "not in the last run"],
+          [
+            "From",
+            incoming.length === 0 ? (
+              <span key="f" className="text-ink-3">nothing</span>
             ) : (
-              incoming.map((e) => (
-                <li key={`${e.from}>${e.to}`}>
-                  {select(e.from)} <span className="muted">{e.kind}</span>
-                </li>
-              ))
-            )}
-          </ul>
-        </dd>
-        <dt>To</dt>
-        <dd>
-          <ul>
-            {outgoing.length === 0 ? (
-              <li className="muted">nothing</li>
+              <ul key="f" className="m-0 list-none space-y-0.5 pl-0">
+                {incoming.map((e) => (
+                  <li key={`${e.from}>${e.to}`}>
+                    {select(e.from)} <span className="text-[12px] text-ink-3">{e.kind}</span>
+                  </li>
+                ))}
+              </ul>
+            ),
+          ],
+          [
+            "To",
+            outgoing.length === 0 ? (
+              <span key="t" className="text-ink-3">nothing</span>
             ) : (
-              outgoing.map((e) => (
-                <li key={`${e.from}>${e.to}`}>
-                  {select(e.to)} <span className="muted">{e.kind}</span>
-                </li>
-              ))
-            )}
-          </ul>
-        </dd>
-      </dl>
+              <ul key="t" className="m-0 list-none space-y-0.5 pl-0">
+                {outgoing.map((e) => (
+                  <li key={`${e.from}>${e.to}`}>
+                    {select(e.to)} <span className="text-[12px] text-ink-3">{e.kind}</span>
+                  </li>
+                ))}
+              </ul>
+            ),
+          ],
+        ]}
+      />
       <div className="pipeline-edit">
         <Form onSubmit={() => rename.edit({ op: "rename_step", step: s.id, name }, () => s.id)}>
           <FormError error={rename.error} />
@@ -594,15 +607,15 @@ function SelectedStep({ project, graph, stepId, lastRun, go }: { project: string
             </Button>
           </div>
         </Form>
-        <Form onSubmit={() => remove.edit({ op: "remove_step", step: s.id }, () => null)}>
+        <div className="stack">
           <FormError error={remove.error} />
-          <p>Removing a step removes its edges too.</p>
+          <p className="m-0 text-[12.5px] text-ink-2">Removing a step removes its edges too.</p>
           <div>
-            <Button type="submit" variant="danger" loading={remove.busy}>
+            <Button variant="danger" loading={remove.busy} onClick={() => void remove.edit({ op: "remove_step", step: s.id }, () => null)}>
               Remove step
             </Button>
           </div>
-        </Form>
+        </div>
       </div>
     </Panel>
   );
@@ -693,32 +706,26 @@ function ChangePipeline({ project, graph, go }: { project: string; graph: Graph;
         <>
           <h3>Edges</h3>
           <FormError error={removeEdge.error} />
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>From</th>
-                  <th>To</th>
-                  <th>Carrying</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {graph.edges.map((e) => (
-                  <tr key={`${e.from}>${e.to}`}>
-                    <td>{select(e.from)}</td>
-                    <td>{select(e.to)}</td>
-                    <td>{e.kind}</td>
-                    <td>
-                      <Button loading={removeEdge.busy} onClick={() => void removeEdge.edit({ op: "remove_edge", from: e.from, to: e.to }, () => null)}>
-                        Remove
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            rows={graph.edges}
+            caption="Edges"
+            rowKey={(e) => `${e.from}>${e.to}`}
+            columns={[
+              { key: "from", label: "From", render: (e) => select(e.from) },
+              { key: "to", label: "To", render: (e) => select(e.to) },
+              { key: "kind", label: "Carrying", render: (e) => <span className="text-ink-2">{e.kind}</span> },
+              {
+                key: "remove",
+                label: "",
+                className: "text-right",
+                render: (e) => (
+                  <Button variant="ghost" loading={removeEdge.busy} onClick={() => void removeEdge.edit({ op: "remove_edge", from: e.from, to: e.to }, () => null)}>
+                    Remove
+                  </Button>
+                ),
+              },
+            ]}
+          />
         </>
       )}
     </Panel>
@@ -760,8 +767,7 @@ function Govern({
   const target = { project, graph: graph.name };
   const top = () => window.scrollTo({ top: 0, behavior: "smooth" });
   return (
-    <section className="panel" id="run">
-      <h2>Approve, Check, Run and Deploy</h2>
+    <Panel id="run" title="Approve, Check, Run and Deploy" tone={approved ? "default" : "active"}>
       <div className="pipeline-edit">
         {!approved && (
           <Form
@@ -773,7 +779,7 @@ function Govern({
             }
           >
             <FormError error={approve.error} />
-            <p>Zetta verifies and runs only an approved pipeline.</p>
+            <p className="m-0 text-[12.5px] text-ink-2">Zetta verifies and runs only an approved pipeline.</p>
             <div>
               <Button type="submit" variant="primary" loading={approve.busy}>
                 Approve
@@ -791,7 +797,7 @@ function Govern({
           }
         >
           <FormError error={check.error} />
-          <p>Run Zetta's correctness checks without running anything.</p>
+          <p className="m-0 text-[12.5px] text-ink-2">Run Zetta's correctness checks without running anything.</p>
           <div>
             <Button type="submit" loading={check.busy}>
               Check
@@ -854,7 +860,7 @@ function Govern({
           }
         >
           <FormError error={deploy.error} />
-          <p>Place it in the workspace behind its checks.</p>
+          <p className="m-0 text-[12.5px] text-ink-2">Place it in the workspace behind its checks.</p>
           <div>
             <Button type="submit" loading={deploy.busy} disabled={!approved}>
               Deploy
@@ -862,6 +868,6 @@ function Govern({
           </div>
         </Form>
       </div>
-    </section>
+    </Panel>
   );
 }

@@ -77,17 +77,20 @@ whether or not the workspace is ready, because it is lake's, not the workspace's
 ## The Workspaces page
 
 `/workspaces` (`pages/workspaces/WorkspacesPage.tsx`) is outside `/w/` so the first workspace can be
-created before one exists. It lists the chosen space's workspaces with name, environment, phase,
-namespace and created time, and creates one from a name and an environment (`create_workspace`;
-`dev`, `staging`, `prod` or a lowercase DNS label). It writes desired state; the operator
-provisions the namespace and Zetta.
+created before one exists. Figures on top count the chosen customer's workspaces, the ready and
+failed ones and the storage they request; the list shows each workspace's name, environment and
+namespace, its phase as a state chip, its storage (requested, and observed when it differs) and its
+age, with a search and a filter by phase. **New workspace** opens a dialog that creates one from a
+name and an environment (`create_workspace`; `dev`, `staging`, `prod` or a lowercase DNS label). It
+writes desired state; the operator provisions the namespace and Zetta.
 
-**Delete** opens a confirmation on the same page (`/workspaces?customer_id=…&delete=<workspace_id>`).
-It first reads `delete_workspace {dry_run: true}` and lists what goes with the workspace, with
-counts: its Zetta and every record in it, its repositories (live, and deleted but still retained),
-its apps, its unfinished builds and its images. It says the deletion cannot be undone and asks for
-the workspace's name; a wrong name is refused by the capability and shown on the field
-([deletion](../api/workspaces.md#deletion), lake#514).
+**Delete** opens a confirmation dialog (`/workspaces?customer_id=…&delete=<workspace_id>`, so the
+address still opens it). It first reads `delete_workspace {dry_run: true}` and lists what goes with
+the workspace, with counts: its Zetta and every record in it, its repositories (live, and deleted
+but still retained), its apps, its unfinished builds and its images, each by name under "Everything
+by name". It says the deletion cannot be undone and asks for the workspace's name; a wrong name is
+refused by the capability and shown on the field ([deletion](../api/workspaces.md#deletion),
+lake#514). Cancel or Escape closes it and drops `delete=`.
 
 ## How to verify
 

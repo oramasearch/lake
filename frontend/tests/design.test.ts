@@ -18,6 +18,7 @@ import {
   graphOf,
   groupOpportunities,
   layoutGraph,
+  projectState,
   ledgerEntries,
   missingPredicates,
   parseInteger,
@@ -255,4 +256,10 @@ test("the graph is laid out as render_svg lays it out", () => {
   assert.equal(layout.width, 618);
   assert.equal(layout.height, 36 + 2 * 84);
   assert.equal(graphOf("nope"), null);
+});
+
+test("a project's state comes from its pipelines: one approved makes it approved", () => {
+  assert.deepEqual(projectState([]), { state: "no pipelines", pipelines: 0, approved: 0 });
+  assert.deepEqual(projectState([{ approval: "proposed" }]), { state: "proposed", pipelines: 1, approved: 0 });
+  assert.deepEqual(projectState([{ approval: "proposed" }, { approval: "approved" }]), { state: "approved", pipelines: 2, approved: 1 });
 });

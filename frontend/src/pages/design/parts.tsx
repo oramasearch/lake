@@ -1,34 +1,57 @@
-/** The pieces several Design pages share, in lake's markup: the Runs panel, status badges, the
- * gate checks, a JSON disclosure, Markdown, the pipeline graph drawn in the browser, and the
- * workspace breadcrumb. */
+/** The pieces several Design pages share, in the kit's look: the card panel, the Runs table, status
+ * chips, the gate checks, a JSON disclosure, Markdown, the pipeline graph drawn in the browser,
+ * tabs kept in the address, and the workspace breadcrumb. */
 import { type ReactNode, useCallback, useState } from "react";
-import { Link } from "react-router-dom";
-import { Badge } from "@/lib/ui";
+import { Link, useSearchParams } from "react-router-dom";
+import { Card, DataTable, Status, cx } from "@/lib/ui";
+import { relative } from "@/lib/format";
 import { useTrail, entityCrumb, type Crumb } from "@/lib/trail";
 import { useWsPath, qs } from "./api";
 import { LAYOUT, layoutGraph, runIsActive, runStatusTone, runsBadge, text, verdictTone, whenUtc, type Graph, type J } from "./logic";
 
-/** A panel with its Title Case heading, as lake's `<section class="panel"><h2>`. */
-export function Panel({ title, children, id, className, role }: { title?: ReactNode; children?: ReactNode; id?: string; className?: string; role?: string }) {
+/** A titled card (the kit's Card) that keeps an anchor `id` and a `role`, so `#run` and
+ * `#proposal` still land on it. */
+export function Panel({
+  title,
+  label,
+  actions,
+  footer,
+  tone,
+  children,
+  id,
+  className,
+  role,
+}: {
+  title?: ReactNode;
+  label?: ReactNode;
+  actions?: ReactNode;
+  footer?: ReactNode;
+  tone?: "default" | "exception" | "active" | "quiet";
+  children?: ReactNode;
+  id?: string;
+  className?: string;
+  role?: string;
+}) {
   return (
-    <section className={className ? `panel ${className}` : "panel"} id={id} role={role}>
-      {title && <h2>{title}</h2>}
-      {children}
+    <section id={id} role={role} className={cx("min-w-0 scroll-mt-4", className)}>
+      <Card title={title} label={label} actions={actions} footer={footer} tone={tone}>
+        {children}
+      </Card>
     </section>
   );
 }
 
 export { Markdown } from "@/lib/markdown";
 
-/** A run, check or monitor status as lake's badge (run_status_badge). */
+/** A run, check or monitor status as a state chip (run_status_badge's words and tones). */
 export function RunBadge({ status }: { status: string }) {
-  return <Badge tone={runStatusTone(status)}>{status || "unknown"}</Badge>;
+  return <Status value={status || "unknown"} tone={runStatusTone(status)} />;
 }
 
 /** Whether a methodology or solution runs here (runs_badge_of). */
 export function RunsBadge({ entry }: { entry: J }) {
   const b = runsBadge(entry);
-  return <Badge tone={b.tone}>{b.label}</Badge>;
+  return <Status value={b.label} tone={b.tone} />;
 }
 
 /** An identifier in mono, abbreviated as lake did (12 characters … last 7), whole on hover. */
@@ -43,63 +66,86 @@ export function Identifier({ value }: { value: string }) {
 
 export function JsonDisclosure({ value }: { value: unknown }) {
   return (
-    <details>
-      <summary>View JSON</summary>
-      <pre>{JSON.stringify(value, null, 2)}</pre>
+    <details className="mt-2">
+      <summary className="cursor-pointer text-[12.5px] text-ink-2">View JSON</summary>
+      <pre className="mt-2 max-h-96 overflow-auto">{JSON.stringify(value, null, 2)}</pre>
     </details>
   );
 }
 
-/** The Runs panel of a project or solution (solution_runs_content). The page polls every 3 seconds
- * while a run is active; this says so. */
-export function RunsPanel({ runs }: { runs: J[] }) {
+/** A timestamp as "3h ago", the exact UTC time on hover. */
+export function When({ value }: { value: string }) {
+  if (!value) return <span className="text-ink-3">—</span>;
+  return (
+    <span title={whenUtc(value)} className="whitespace-nowrap">
+      {relative(value)}
+    </span>
+  );
+}
+
+/** Tabs that live in the address as `?tab=<id>`, keeping every other parameter of the page. The
+ * `fallback` tab (the first by default) is the one shown without `tab=`, so its link leaves it out. */
+export function QueryTabs<T extends string>({ tabs, value, fallback }: { tabs: { id: T; label: ReactNode; count?: number }[]; value: T; fallback?: T }) {
+  const [params] = useSearchParams();
+  const base = fallback ?? tabs[0]?.id;
+  const href = (id: T) => {
+    const next = new URLSearchParams(params);
+    if (id === base) next.delete("tab");
+    else next.set("tab", id);
+    return `?${next.toString()}`;
+  };
+  return (
+    <nav className="tabs" aria-label="Sections">
+      {tabs.map((tab) => (
+        <Link key={tab.id} to={href(tab.id)} replace aria-current={tab.id === value ? "page" : undefined}>
+          {tab.label}
+          {tab.count !== undefined && <span className="tab-count">{tab.count}</span>}
+        </Link>
+      ))}
+    </nav>
+  );
+}
+
+/** The `?tab=` a page shows: one of `ids`, else `fallback`. */
+export function useQueryTab<T extends string>(ids: readonly T[], fallback: T): T {
+  const [params] = useSearchParams();
+  const asked = params.get("tab") as T | null;
+  return asked && ids.includes(asked) ? asked : fallback;
+}
+
+/** The runs of a project or solution (solution_runs_content). The page polls every 3 seconds
+ * while a run is active; the footer says so. */
+export function RunsPanel({ runs, title = "Runs" }: { runs: J[]; title?: ReactNode }) {
   const ws = useWsPath();
-  if (!runs.length) {
-    return (
-      <Panel title="Runs">
-        <p>No runs yet.</p>
-      </Panel>
-    );
-  }
   const active = runs.some(runIsActive);
   return (
-    <Panel title="Runs">
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Run</th>
-              <th>Status</th>
-              <th>Stage Reached</th>
-              <th>Started</th>
-              <th>Error</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {runs.map((run, index) => {
-              const id = text(run, "id");
-              return (
-                <tr key={id || index}>
-                  <td>
-                    <Identifier value={id} />
-                  </td>
-                  <td>
-                    <RunBadge status={text(run, "status")} />
-                  </td>
-                  <td>{text(run, "stage") || "—"}</td>
-                  <td>{whenUtc(text(run, "created"))}</td>
-                  <td>{text(run, "error") ? <span className="error">{text(run, "error")}</span> : "—"}</td>
-                  <td>
-                    <Link to={ws(`/train/run?${qs({ id })}`)}>Open full run</Link>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      {active && <p className="muted">This page checks again every 3 seconds while a run is active.</p>}
+    <Panel title={title} footer={active ? "This page checks again every 3 seconds while a run is active." : undefined}>
+      <DataTable<J>
+        rows={runs}
+        what="runs"
+        caption="Runs"
+        empty={<p className="m-0 text-[13px] text-ink-2">No runs yet.</p>}
+        rowKey={(run, index) => text(run, "id") || String(index)}
+        columns={[
+          {
+            key: "id",
+            label: "Run",
+            render: (run) => (
+              <Link to={ws(`/train/run?${qs({ id: text(run, "id") })}`)} title="Open full run">
+                <Identifier value={text(run, "id")} />
+              </Link>
+            ),
+          },
+          { key: "status", label: "Status", sort: (run) => text(run, "status"), render: (run) => <RunBadge status={text(run, "status")} /> },
+          { key: "stage", label: "Stage Reached", render: (run) => text(run, "stage") || <span className="text-ink-3">—</span> },
+          { key: "created", label: "Started", sort: (run) => text(run, "created"), render: (run) => <When value={text(run, "created")} /> },
+          {
+            key: "error",
+            label: "Error",
+            render: (run) => (text(run, "error") ? <span className="text-bad">{text(run, "error")}</span> : <span className="text-ink-3">—</span>),
+          },
+        ]}
+      />
     </Panel>
   );
 }
@@ -110,42 +156,31 @@ export function GatePanel({ gate, heading }: { gate: J; heading: string }) {
   const blocked = gate?.block_deploy === true;
   const checks: J[] = Array.isArray(gate?.checks) ? gate.checks : [];
   return (
-    <section className={blocked ? "panel notice status-danger" : "panel notice"} role="status">
-      <h2>{heading}</h2>
-      <p>
-        <Badge tone={verdictTone(verdict)}>{verdict || (blocked ? "fail" : "pass")}</Badge>{" "}
-        {blocked ? "It cannot run or deploy until the failing checks pass." : "It may run and deploy."}
-      </p>
+    <Panel title={heading} tone={blocked ? "exception" : "active"} role="status" actions={<Status value={verdict || (blocked ? "fail" : "pass")} tone={verdictTone(verdict || (blocked ? "fail" : "pass"))} />}>
+      <p className={cx("mt-0 text-[13px]", blocked ? "text-bad" : "text-ink-2")}>{blocked ? "It cannot run or deploy until the failing checks pass." : "It may run and deploy."}</p>
       {checks.length > 0 && <CheckTable checks={checks} />}
-    </section>
+    </Panel>
   );
 }
 
 export function CheckTable({ checks, runTone }: { checks: J[]; runTone?: boolean }) {
   return (
-    <div className="table-wrap">
-      <table className="gate-checks">
-        <thead>
-          <tr>
-            <th>Check</th>
-            <th>Status</th>
-            <th>Why</th>
-          </tr>
-        </thead>
-        <tbody>
-          {checks.map((check, index) => {
+    <DataTable<J>
+      rows={checks}
+      caption="Checks"
+      columns={[
+        { key: "name", label: "Check", render: (check) => <span className="font-mono text-[12.5px]">{text(check, "name")}</span> },
+        {
+          key: "status",
+          label: "Status",
+          render: (check) => {
             const status = text(check, "status");
-            return (
-              <tr key={index}>
-                <td>{text(check, "name")}</td>
-                <td>{runTone ? <RunBadge status={status} /> : <Badge tone={verdictTone(status)}>{status}</Badge>}</td>
-                <td>{text(check, "reason")}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+            return runTone ? <RunBadge status={status} /> : <Status value={status} tone={verdictTone(status)} />;
+          },
+        },
+        { key: "reason", label: "Why", render: (check) => <span className="text-ink-2">{text(check, "reason")}</span> },
+      ]}
+    />
   );
 }
 
