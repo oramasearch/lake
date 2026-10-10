@@ -352,9 +352,9 @@ export default function CommandCenter() {
                   <ul className="m-0 list-none p-0">
                     {(activity.data?.items ?? []).slice(0, 12).map((e, i) => (
                       <li key={e.id ?? i} className="flex items-baseline gap-3 border-t border-hairline px-4 py-2">
-                        <span className="w-16 shrink-0 font-mono text-[11px] text-ink-3">{relative(e.timestamp ?? e.at ?? e.created_at)}</span>
+                        <span className="w-16 shrink-0 font-mono text-[11px] text-ink-3">{relative(e.occurred_at ?? e.timestamp)}</span>
                         <span className="min-w-0 flex-1 truncate text-[13px] text-ink">
-                          {String(e.action ?? "").replace(/_/g, " ")} <span className="text-ink-3">{String(e.object ?? "").replace(/^capability\//, "")}</span>
+                          {String(e.capability || e.action || "").replace(/_/g, " ")} <span className="text-ink-3">{String(e.object ?? "").replace(/^capability\//, "")}</span>
                         </span>
                         <Status value={String(e.outcome ?? "")} />
                       </li>
