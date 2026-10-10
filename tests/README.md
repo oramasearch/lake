@@ -11,9 +11,11 @@ thread through `one_thread_io.hpp`, never `liquid::runtime::block_on`, whose sev
 hit a corosio close race (lake#510). The runner's terminate handler prints the uncaught exception
 and its stack. See [testing.md](../docs/build/testing.md#test-clients-run-their-sockets-on-one-thread).
 
-`lake-ui-fixture-pages` (lake#497) starts `lake-ui-fixture` and requests every page it seeds and
-every registered GET route; a fixture that cannot start, a seeded page that is not 200 HTML, or a
-5xx anywhere fails the suite. See [tools/ui/README.md](../tools/ui/README.md).
+`test_web_app.cpp` and `WebAppHttp.*` cover what the server answers for the web app in `frontend/`
+(lake#561): `index.html` for a browser's page request, the hashed files, the routes that are never
+the app, and an identity application's custom sign-in host. `test_web_ui.cpp` covers only what lake
+still renders: the hosted pages' stylesheet link, the failure page, the assets and Drive previews.
+The web app's own tests are in `frontend/tests/`; see [web-app.md](../docs/ui/web-app.md).
 
 `test_shared_store.cpp` (lake#467, lake#479) checks that one lake process owns a store root and
 hands it over. The PostgreSQL cases start real `lake` binaries on one root: a successor started
@@ -29,83 +31,51 @@ kind before starting the successor, because a Debug push under the parallel suit
 fixed warm-up (lake#478).
 `test_thread.cpp` (lake#478) runs a 2 MiB frame on a `lake::Thread`, which a `std::thread` on
 macOS cannot hold, and checks that a moved thread joins once.
-lake#452: `WebUi.PhoneWidthGivesTheWorkspacePickerItsOwnRow` checks the top bar's rendered order
-and the 40rem rules; `WorkspaceNavigationHttp.SelectorRedirectsRememberedWorkspaceAndValidatesForms`
-covers workspace labels and the `/w/<workspace>/` home redirect;
-`Workspaces.CreateProjectSaysWhetherTheNameIsMissingOrTaken`,
-`Workspaces.ServiceStatusIsTheSameInListServicesAndOnThePage`,
+lake#452: `Workspaces.CreateProjectSaysWhetherTheNameIsMissingOrTaken`,
+`Workspaces.ListServicesSaysEachServicesStatusAndWhy`,
 `Workspaces.ADeletedWorkspacesZettaLeavesTheListWithItsWorkspace` and the PostgreSQL services test
-cover the rest; `AgentRuns.ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed` and
+cover the capabilities; `AgentRuns.ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed` and
 `HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp` cover the public acknowledgement.
 
 `test_agent_leases.cpp` runs the same claim, activity, expiry, re-claim, three-attempt exhaustion,
 workspace notice recovery and racing-terminal-write cases on memory and PostgreSQL stores.
-It checks Apps/Experiments/Project rendering, legacy migration adoption, schema reapplication,
-the partial expiry index, and duration bounds without clock sleeps. The Streams task-credential
-fixture takes a real claim before making calls. See [agent-bus.md](../docs/api/agent-bus.md).
+It checks that a retry notice is the task's message (the web app shows it), legacy migration
+adoption, schema reapplication, the partial expiry index, and duration bounds without clock sleeps.
+The Streams task-credential fixture takes a real claim before making calls. See
+[agent-bus.md](../docs/api/agent-bus.md).
 
-`HttpResponseIsolation.AskOramaOffersPeoplesAgentsAndSaysWhoIsWorkingOnALongTurn` (lake#451) runs a
-real Ask Orama claim, a delegation with its turn key, and the subagent's progress and result, and
-checks *Talk to*, the working notice and the asking turn's `agent-events`. The HTTP fixture runs
-`agent-eval-generator` too, so the test proves a running internal agent is not offered.
-`Workspaces.TalkToOffersOnlyRunningAgentsAPersonUses` checks the list builder.
+`HttpResponseIsolation.AskOramaSaysWhoIsWorkingOnALongTurn` (lake#451) runs a real Ask Orama
+claim, a delegation with its turn key, and the subagent's progress and result, and follows the turn
+through `settle_ask_turn`'s task message and the asking turn's `agent-events`.
+`Workspaces.TalkToOffersOnlyRunningAgentsAPersonUses` checks which agents *Talk to* offers.
 
 Lease regressions also cover delayed notice acknowledgements and stale waiting-deadline
 observations: neither may discard the final failure notice or fail a fresh retry.
 
-`PagePerformance.EveryRegisteredGetPageKeepsItsWorkspaceCallBudget` discovers HTML pages from the
-production GET router, resets the workspace definition cache before each render, and checks every
-route's exact `Server-Timing` call and sequential-round budget. Unlisted routes must make zero
-workspace calls; Project's bounded run details bring its populated fixture to nine calls in two
-rounds, Solution uses three calls in one round, and a dataset page three in one round (its
-metadata, first rows and `analyze_dataset` column types). The fake workspace answers the Data
-list with Zetta's real `system.datasets` column, `dataset`.
-The loose wall guard is p95 below 500 ms over 20 renders at 30 ms of workspace latency. Its
-populated fixtures include both 50- and 19-dataset Data cases and a first-request Metering case
-with four repositories and 128 files. The first Metering request checks populated-byte correctness;
-the measured Metering route receives the same p95 guard as every other page and a budget of four
-workspace calls in one round (its usage summary reads datasets, runs, and the repository transfer
-and build records of lake#348 and lake#349). `Workspaces.Registry*` and
-`Workspaces.PipelineDefinitionCache*` cover expiry, change invalidation, input isolation,
-readiness/credential changes, errors and stale in-flight replies. Run with PostgreSQL in both
-native builds; [performance.md](../docs/ui/performance.md) explains the evidence rows.
-It requires `LAKE_TEST_DB_URI`, uses a regular authenticated user, and rejects redirects or errors
-for canonical `/w/:workspace_id/...` pages and `/workspaces`.
-Since lake#446 it also fixes the exact Zetta capabilities of Ask Orama, Agents, Search Indexes,
-Models and Experiments, requires every response's `zetta_<capability>` `Server-Timing` entries to
-match what the fake observed, holds the three deferred panel routes to their own JSON budgets, and
-refuses any page that waits for `list_agents`, `get_agent`, `agent_training_status` or the full
-`list_datasets` outside the documented exceptions.
-`HttpServer/HttpResponseIsolation.SlowZettaPanelsLoadAfterTheirPage/*` proves in both stores that
-Ask Orama renders without `list_agents` and loads the space's chat agents from `/ask/agents`, and
-that Agents and Indexes defer their panels (and `?inline=1` waits).
-Non-workspace discovery also tries operator and signed-out profiles to include protected operator
-pages and public sign-in forms.
+`Workspaces.Registry*` and `Workspaces.PipelineDefinitionCache*` cover the workspace definition
+cache: expiry, change invalidation, input isolation, readiness/credential changes, errors and stale
+in-flight replies. The per-page workspace-call budget test went with the server pages (lake#561);
+[performance.md](../docs/ui/performance.md) explains the evidence rows.
 
-`Workspaces.SolutionProjectShowsRunFeedbackAndReadableOperatingState` pins a failed run's stage and
-error, an active run's status and three-second refresh, the full-run link, the lifecycle header,
-policy tiers, the engine's `balance.allocations` shape, scope-filtered ledger counts and actions,
-held and pending A1 rows, the no-holdout-outcomes ROI reason, monitor guardrails and the
-verdict-first grouped certificate. `Workspaces.EveryNewFeatureIsInOpenApiAndWorksOverMcp` calls the direct filtered
-`list_runs` capability and checks its completed status and stage.
+`Workspaces.EveryNewFeatureIsInOpenApiAndWorksOverMcp` calls the direct filtered `list_runs`
+capability and checks its completed status and stage.
 
-`test_examples.cpp` (lake#439) pulls every copy-paste example out of what a customer reads: the
-Ship → Models `curl`, the search index page's `curl` and Python calls, every `/docs` page, and the
-request bodies in `docs/api/*.md`. It names each example's capability from `/v1/<name>`, a code span
-of the name, or a JSON-RPC `tools/call`, and validates the body or query string with the registry's
-`validate_input`. A missing `workspace_id` therefore fails the build's tests rather than a first
-paste. Pages must fill in their own workspace; static Docs show `<workspace id>`.
+`test_examples.cpp` (lake#439) pulls every copy-paste example out of what a customer reads: every
+`/docs` page and the request bodies in `docs/api/*.md`. It names each example's capability from
+`/v1/<name>`, a code span of the name, or a JSON-RPC `tools/call`, and validates the body or query
+string with the registry's `validate_input`. A missing `workspace_id` therefore fails the build's
+tests rather than a first paste. The Docs show `<workspace id>`.
 
 `test_experiments.cpp` covers all eleven training operations, space permissions, confirmation,
-workspace alias checks, audit, REST/MCP parity and actual calls, hashed assets, navigation and
-control mappings, plus the editable ExperimentsAgent proposal, `start_study` with `from_defaults`
-and Zetta's error `path`, canonical metric labels, and the study page's server-rendered analysis
-tables and trial curves (lake#449, lake#463). `test_workspaces.cpp` covers trial runs and study
-models named by their study, the promoted marker, the run report's held-out score lead, and
-`ZettaWorkspaceCaller` keeping `error.path` behind a fake Zetta HTTP transport. `experiment_fixture.hpp` supplies
-a stateful fake caller against the authorized engine contract and an opt-in browser fixture.
-`experiment_charts.cjs` tests chart transformations and cursors without a browser. Independent
-response validation also uses these fixtures. See
+workspace alias checks, audit, REST/MCP parity and actual calls, `start_study` with
+`from_defaults` and Zetta's error `path`, and the agents' guide naming the live read and the
+confirmation (`Experiments.AgentDocsNameTheLiveReadAndTheConfirmation`; lake#449, lake#463).
+`test_workspaces.cpp` covers trial runs and study models named by their study, the promoted marker,
+the run report's held-out score lead, and `ZettaWorkspaceCaller` keeping `error.path` behind a fake
+Zetta HTTP transport. `experiment_fixture.hpp` supplies a stateful fake caller against the
+authorized engine contract and an opt-in browser fixture. `frontend/tests/experiments.test.ts` tests
+the chart transformations in `frontend/src/pages/experiments/transforms.ts` without a browser.
+Independent response validation also uses these fixtures. See
 [API](../docs/api/experiments.md) and [UI](../docs/ui/experiments.md) contracts.
 
 `test_audit_isolation.cpp` also runs `ActivityIsNewestFirstNamedAndQuiet` on both stores:
@@ -113,24 +83,27 @@ response validation also uses these fixtures. See
 capability and the hidden successful reads (lake#445).
 
 `test_streams.cpp` covers Streams space/system/creator permissions, non-consuming browse,
-retention, revisions, REST/MCP parity with one call per operation, UI control mappings and
-selected navigation. Its 1,000-topic case checks the 50-row default page, cursor and prefix
-filtering, sub-500 ms response, one list call per Zetta and no per-topic detail calls.
-`stream_fixture.hpp` is a stateful fake workspace caller using the exact Zetta CRUD wire shape;
-bus tests use `MemoryAgentBus`. `Streams.CreatorOwnershipLivesInTheTopicsWorkspaceZetta` keeps
-each topic's creator at its own workspace endpoint across two spaces and two workspaces, and covers
-missing and unknown workspace ids, a workspace that is not ready, workspace deletion and the
-immutable `if_absent` claim (lake#379). The schema conformance fixture exercises all nine successful outputs. See
+retention, revisions, and REST/MCP parity with one call per operation
+(`Streams.RestAndMcpOperateEveryStreamCapabilityAlike`). Its 1,000-topic case checks the 50-row
+default page, cursor and prefix filtering, sub-500 ms response, one list call per Zetta and no
+per-topic detail calls. `stream_fixture.hpp` is a stateful fake workspace caller using the exact
+Zetta CRUD wire shape; bus tests use `MemoryAgentBus`.
+`Streams.CreatorOwnershipLivesInTheTopicsWorkspaceZetta` keeps each topic's creator at its own
+workspace endpoint across two spaces and two workspaces, and covers missing and unknown workspace
+ids, a workspace that is not ready, workspace deletion and the immutable `if_absent` claim
+(lake#379). The schema conformance fixture exercises all nine successful outputs. See
 `docs/api/streams.md` and `docs/ui/streams.md`.
 
-`test_instance_origin.cpp` checks external-origin precedence, startup validation and repository
-command rendering. `InstanceOrigin.BrowserToTerminal` runs `instance_origin.mjs`: a native Chromium page
-supplies the actual clone/push text executed by the pinned Liquid CLI against the shared fixture's
-fresh database, non-default loopback port, store and credential. It refuses off-origin requests and compares
-cloned and pushed bytes. Set `LAKE_TEST_DB_URI` and `LAKE_TEST_LIQUID`, plus the native browser
-and Puppeteer paths where needed. See [private-install.md](../docs/deployment/private-install.md).
-It finds the panel by its exact heading, "Clone and Push" (Title Case since 94afa50); CI runs it
-(lake#547), which is how the stale "Clone and push" it still looked for was found.
+`test_instance_origin.cpp` checks external-origin precedence, startup validation, and that a
+missing configuration names no origin (`InstanceOrigin.MissingConfigurationNamesNoOrigin`).
+`InstanceOrigin.BrowserToTerminal` runs `instance_origin.mjs`: a native Chromium page supplies the
+actual clone/push text executed by the pinned Liquid CLI against the shared fixture's fresh
+database, non-default loopback port, store and credential. It refuses off-origin requests and
+compares cloned and pushed bytes. Set `LAKE_TEST_DB_URI` and `LAKE_TEST_LIQUID`, plus the native
+browser and Puppeteer paths where needed. See
+[private-install.md](../docs/deployment/private-install.md). It finds the panel by its exact
+heading, "Clone and Push" (Title Case since 94afa50); CI runs it (lake#547), which is how the stale
+"Clone and push" it still looked for was found.
 
 Every filesystem fixture lives below the process-unique directory returned by
 `lake::test::process_fixture_root()` in `temporary_directory.hpp`. Use `fixture_path()` for named
@@ -145,12 +118,12 @@ untouched. Each test receives a random `LAKE_INSTANCE_KEK`. See
 [`testing.md`](../docs/build/testing.md) for ownership, assertion patterns, and the sweep.
 `audit_test_support.hpp` exhausts append-order pages; use exact request filters for specific calls.
 `drive_history_support.hpp` is the Drive overwrite exercise of lake#123 (upload twice, history,
-comparison, restore, deletion, and the rendered history page) over any running Lake; the Postgres
+comparison, restore and deletion, through the HTTP API) over any running Lake; the Postgres
 scenario and `WorkspaceStoreDrive.*` (space store and switched workspace store) both run it.
 
 The `scenarios/` cases combine those production Postgres stores with an in-process Lake, public
 HTTP routes, and public client libraries. The drive scenario signs users up, synchronizes and
-shares a folder, checks API and rendered history, preserves both named results of concurrent
+shares a folder, checks history through the API, preserves both named results of concurrent
 offline edits, pulls the same repository through Liquid, and builds the project it contains. See
 `scenarios/README.md` for the named coverage.
 
@@ -216,26 +189,26 @@ the current response's HTTP version, connection policy, status and CORS headers 
 `HttpServer.AHandlerThatThrowsIsAnswered500AndLogged` runs `guard_route` handlers on a Beast2
 server and checks the HTML and JSON `500` answers, the request id, the logged route and message,
 and that the connection then serves a `200`. `lake-tests` adds `src/` to its include path for this
-private header. `HttpServer/HttpResponseIsolation.ShipPackagesListsABuildThatHasNoDigestYet/*` and
-`Workspaces.PackagesPageRendersABuildThatHasNoDigestYet` cover the Ship → Packages page with a
-queued build whose digest is null (lake#440).
+private header. `HttpServer/HttpResponseIsolation.ShipPackagesListsABuildThatHasNoDigestYet/*` reads
+what Ship → Packages shows, `list_packages` and `list_builds`, with a queued build whose digest is
+null (lake#440).
 
-Web UI string tests cover the content-hashed stylesheet link shared by the standard and hosted
-page heads, SHA-256 URL changes for different stylesheet bytes, content-hashed font references,
-and the immutable versus `no-cache` route policy. These checks use embedded or in-memory bytes and
-perform no filesystem or network I/O.
+Web UI string tests cover the content-hashed stylesheet link in the hosted page heads
+(`WebUi.HostedPagesLinkTheSharedStylesheetOnce`), the escaped failure page
+(`WebUi.AFailurePageEscapesWhatItSays`), SHA-256 URL changes for different stylesheet bytes,
+content-hashed font references, and the immutable versus `no-cache` route policy. These checks use
+embedded or in-memory bytes and perform no filesystem or network I/O.
 
 Conflict coverage pins the complete Liquid-derived kind and region, plain explanation, reasons,
 proposal visibility, generated OpenAPI schema, MCP resolution tool, preserved drive comparison
-values, and every advertised resolution input. Renderer checks require the forge and drive pages to
-show those words before their write-authorized forms.
+values, and every advertised resolution input.
 
 `test_forge_scenario.cpp` is the Postgres-backed forge lifecycle proof. It drives repository sync
-and review operations through a real Lake server with Liquid's sync and forge clients, opens the
-candidate and landed HTML pages, maps a line comment after an inserted line, and lands the approved
-target. The same case records a graph action with signed provenance in Lake's repository, rejects
-automation YAML in the source tree, and asserts the result identity, output path, and verified
-profile in the rendered change page.
+and review operations through a real Lake server with Liquid's sync and forge clients, reads the
+candidate and landed changes and the open review through `/v1`, maps a line comment after an
+inserted line, and lands the approved target. The same case records a graph action with signed
+provenance in Lake's repository, rejects automation YAML in the source tree, and asserts the result
+identity, output path, and verified profile in `list_artifacts`.
 
 `fixtures/transparency/fixture.json` is the deterministic transparency-log interoperability
 fixture. Its Python generator and independent C++ verifier cover entry and parent-hash tile bytes,
@@ -268,15 +241,15 @@ Platform coverage uses an append-only fake Zetta control source and fake Loki so
 `InMemoryStore`, with the repository in a Ready workspace of a `RecordWorkspaces` (lake#358,
 lake#359). It proves latest-wins sync, environment policy-object creation, signed phase audit,
 tombstones, mutation rows, secret detection, role checks, stale reads, degraded health state, log
-cursors, renderer strings, OpenAPI, and MCP discovery. A Beast2 Loki double verifies the real
-coroutine HTTP client, selector request, secret bearer, line conversion, and cursor.
-`test_workspace_records.cpp`'s `PlatformEnvironmentsLiveInTheirRepositorysWorkspace` covers two
-spaces with two workspaces each, sealed records only at the repository's workspace endpoint, a quiet
-sync writing nothing, an older row never replacing a newer one, a stale revision, one environment
-created once by two writers, least privilege without a workspace call, missing, malformed and
-unknown ids, a workspace that is not ready (only that repository stale), a repository without a
-workspace and workspace deletion. The copy's test and the `0060` migration test went with the
-retired tables (migration `0070`).
+cursors, OpenAPI, and MCP discovery (`PlatformFixture.DiscoveryExposesPlatformSurface`). A Beast2
+Loki double verifies the real coroutine HTTP client, selector request, secret bearer, line
+conversion, and cursor. `test_workspace_records.cpp`'s
+`PlatformEnvironmentsLiveInTheirRepositorysWorkspace` covers two spaces with two workspaces each,
+sealed records only at the repository's workspace endpoint, a quiet sync writing nothing, an older
+row never replacing a newer one, a stale revision, one environment created once by two writers,
+least privilege without a workspace call, missing, malformed and unknown ids, a workspace that is
+not ready (only that repository stale), a repository without a workspace and workspace deletion. The
+copy's test and the `0060` migration test went with the retired tables (migration `0070`).
 
 `test_web_apps.cpp` proves Ship App policy isolation, validation, desired-state generations,
 reserved platform and configured names, direct-zone default hosts, app/replica quotas,
@@ -286,8 +259,7 @@ operator hashes, including the pull purpose, and lifecycle event delivery with t
 `HttpServer/HttpResponseIsolation.ProtectedAppAuthorizationHandsOffAHostOnlySession/*` covers
 anonymous refusal, normal sign-in return, exact redirect-host validation, one-use code exchange,
 host-only cookie issuance, code reuse, cross-app and expired cookies, and membership revocation in
-both stores. `PagePerformance.EveryRegisteredGetPageKeepsItsWorkspaceCallBudget` includes the
-workspace-prefixed forward-auth route with no Zetta calls and a 100 ms p95 bound.
+both stores.
 `test_api.cpp` proves successful private repository tree/file reads with a source token.
 `PostgresWebApps.*` proves the production desired row, hash registration/rotation, customer
 locking, `lake_apps` notification, operator status and physical deletion. Both stores exercise
@@ -298,36 +270,34 @@ generated App Dockerfiles, purpose-scoped hashes and retained events in memory. 
 proves the same row shape, `lake_builds` notifications and credential revocation in Postgres.
 `RegistryProtocols.BuildPushCredentialIsLimitedToItsCustomerPrefix` pins the private OCI boundary;
 `RegistryProtocols.AppPullCredentialReadsOnlyItsOwnImage` pins Basic user `app`, exact app
-repository reads, and cross-app, cache and write refusal. The Web UI renderer check pins
-repository/App actions and live build followers.
+repository reads, and cross-app, cache and write refusal.
 Authorization assertions use well-formed input; malformed authenticated calls separately assert
 `invalid_input`. Postgres registry contexts supply the fixture's audit encryption key.
-`HttpServer/HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp/*` creates a repository
-app through the form routes, replies to an ApplicationAgent question in the same conversation,
-rejects a changed proposal digest, confirms the stored proposal, renders its deployed URL and the
-operating page, queues an app build from the runtime image supplied through real `ServerOptions`,
-publishes a deploy event, and uses restart through its POST adapter. `AgentRuns`
-proves app tasks use their own topic and credential, Ask Orama delegates to them, and App writes are
-absent before confirmation but usable after it. Memory variants add fake operator Ready status;
-renderer coverage verifies question replies, secret masking, rollback inputs, and live app/build
-polling markup.
-`HttpServer/HttpResponseIsolation.ExperimentsAgentRestMcpAndPageUseTheSameConfirmedTurn/*`
-compares the `agent_turn` OpenAPI/MCP schemas, continues one conversation across those transports,
-then replies to a page question, edits and confirms the proposal.
+`HttpServer/HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp/*` starts an
+ApplicationAgent turn through `agent_turn`, replies to its question in the same conversation,
+refuses a confirmation without `proposal_task_id`, for a turn that proposed nothing, with another or
+a changed `proposal_sha256`, and for an unacknowledged public app, confirms the stored proposal and
+reads its deployed URL, then creates a repository app, queues an app build from the runtime image
+supplied through real `ServerOptions`, publishes a deploy event and calls `restart_app`, all
+through `/v1`. `AgentRuns` proves app tasks use their own topic and credential, Ask Orama delegates
+to them, and App writes are absent before confirmation but usable after it. Memory variants add
+fake operator Ready status.
+`HttpServer/HttpResponseIsolation.ExperimentsAgentRestAndMcpUseTheSameConfirmedTurn/*` compares
+the `agent_turn` OpenAPI/MCP schemas, continues one conversation across those transports, then
+replies to a question, edits and confirms the proposal, and refuses a stale digest or a proposal
+changed beyond its study.
 `AgentRuns.ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations` verifies the
 three kinds, independent topic/credential, workspace URL and confirmation-limited study actions.
 `AgentRuns.AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun` covers lake#438: a pipeline
 change turn's credential runs `compile_intent` confined to lake's check graph on its own project
 (and reads it back on a repeat), is refused every other workspace action, and the person then
 applies the proposal with `edit_pipeline`, approves it and runs it with the proposal's settings.
-It also renders the project page and pins that the check graph is not listed as a pipeline.
+It also checks the proposal's `review_url` and that the check graph is not listed as a pipeline.
 `AgentRuns.AProjectAgentBuildChecksItsCompileAndThePickIgnoresTheCheckGraph` gives a build turn
 the same confined check and proves the pick after the build compiles the project's own pipeline
 rather than taking the check graph.
-`Workspaces.PipelinePageShowsTheGraphInspectorEditsGovernanceAndRuns` also pins that raw agent
-failures render as plain sentences with a next step and that the working panel reloads itself;
-`AgentLeases.RetryNoticeRendersOnAppsExperimentsAndProject` pins the same reload on the
-ExperimentsAgent working panel.
+`AgentLeases.RetryNoticeIsTheTasksMessage` pins that a retry notice is the task's message, which
+the web app's working panels show.
 `HttpServer/HttpResponseIsolation.LibraryAgentsFinishEveryTurnKindWithoutAWorkspaceEcho/*`
 claims and completes `app`, `solution:` and `experiment` tasks through the HTTP bus without a
 workspace field, publishes progress before the result, and exercises task-credential workspace
@@ -369,14 +339,13 @@ repository in both stores. `personal_customer_test_support.hpp` resolves the ten
 created by sign-up; fixtures must not create a second one. See
 [`../docs/api/provisioning.md`](../docs/api/provisioning.md).
 
-Front-door renderer checks cover the landing journey and visitor/account/operator navigation.
-`HttpServer/HttpResponseIsolation.NavigationUsesTheResolvedViewerOnEveryPage` runs with both
-stores, valid and invalid cookies, and operator credentials; each advertised global link must
-return HTTP 200 for that same viewer. It also pins customer redirects to `/sign-in`. The browser
-proof is in [front-door.md](../docs/ui/front-door.md).
+`HttpServer/HttpResponseIsolation.TheViewerSaysWhoIsSignedInAndWhereTheyAre` checks the `viewer`
+read the web app's navigation is built from, with both stores, a visitor, a stale cookie, a
+signed-in person, a workspace they cannot see, and operator credentials. The browser proof is in
+[front-door.md](../docs/ui/front-door.md).
 `HttpServer/HttpResponseIsolation.PersonCreatesAnOrganizationInvitesAndAColleagueJoins` and
-`.PersonalSpaceBecomesAnOrganizationAfterConfirmation` drive the Organizations page forms as two
-signed-up people against both stores; `Organizations.*` and
+`.PersonalSpaceBecomesAnOrganization` call the organization capabilities as two signed-up people
+against both stores (the type-the-handle confirmation is the web app's); `Organizations.*` and
 `PostgresCapabilities.OrganizationSpaceMembershipsCarryTheirGrantToTheSpace` cover the capabilities
 and the organization-space grants ([organizations.md](../docs/api/organizations.md)).
 `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls `create_organization_space`
@@ -396,11 +365,10 @@ measures 7,000 rows, checks actual tuple counts, password policy, stored-digest 
 precedence, migration idempotence, scopes, expiry and next-request bearer/cookie revocation.
 See [session authentication proof](../docs/build/session-authentication.md).
 
-`Workspaces.DatasetRulesNameCsvIdAndEngineResults`, `Workspaces.DatasetWritesAreCheckedAndIdsAgree`
-and `Workspaces.DataPageNamesResultsColumnTypesAndUploadNotice` pin lake#447: SQL-queryable
-names, malformed CSV refused with its line before any upload call, a taken name refused or
-reported as renamed, one `<database>/<name>` id across list and get, engine results kept out of
-pickers and grouped under Results, and typed columns. See
+`Workspaces.DatasetRulesNameCsvIdAndEngineResults` and
+`Workspaces.DatasetWritesAreCheckedAndIdsAgree` pin lake#447: SQL-queryable names, malformed CSV
+refused with its line before any upload call, a taken name refused or reported as renamed, one
+`<database>/<name>` id across list and get, and engine results told apart from datasets. See
 [workspaces.md](../docs/api/workspaces.md).
 `AgentRuns.LaunchesAndSchedulesBelongToTheirWorkspace`,
 `AgentRuns.AWaitingLaunchSaysWhyAndTimesOutWithAReason` and
@@ -409,10 +377,11 @@ pickers and grouped under Results, and typed columns. See
 filters and the start-timeout withdrawal. See [agent-launches.md](../docs/api/agent-launches.md).
 `test_docs_status.cpp` runs `tools/docs/check-status.py` on `docs/design/status.md` against the
 newest snapshot in `docs/deployment/observed/` and the in-tree registry's OpenAPI, and proves the
-script refuses each contradiction it looks for (lake#448). `WebUi.FrontDoorDocQuotesTheRenderedHomePage`
-holds `docs/ui/front-door.md` to the rendered homepage, and
-`Clerk.VisitorsAreNotOfferedAnAccountTheSignUpPageRefuses` keeps the homepage and `/sign-up`
-agreeing under Clerk.
+script refuses each contradiction it looks for (lake#448). `WebApp.FrontDoorDocQuotesTheHomePage`
+holds the bold quotes in `docs/ui/front-door.md` to `frontend/src/pages/home/HomePage.tsx` and
+`signIn.ts`. Under Clerk the `viewer` read says `password_sign_up: false`
+(`HttpServer.ClerkExchangeRefusesAForgedTokenAndSignOutEndsClerkToo`,
+`WebApp.ViewerNamesClerkAndAnOrganizationNamesItsSpace`).
 `OperatorContract.EveryStatementTheOperatorRunsPreparesAgainstTheSchema` and
 `OperatorContract.RowsLakeWritesAppearInTheOperatorsPolls` (`test_operator_contract.cpp`, in
 `lake-postgres-tests`) run a copy of every statement in orama-operator's
@@ -496,8 +465,7 @@ a lake without workspaces), and `TheOneShotCopyMovesWorkspaceAuditEvents` the co
 registered capability to one of the two tables. `PostgresAudit.MigrationRecordsEachWorkspaceEventsOwnerForTheCopy`
 covers `0063_audit_workspaces`. `PostgresSync.*` and `PlatformFixture.*` read pushes, branch
 protection decisions and deployment phases from the repository's workspace audit;
-`TokenAttenuation` finds an application's events there through `audit`; and
-`WebUi.AuditPagesSayWhichLogHoldsEachEvent` the pages.
+and `TokenAttenuation` finds an application's events there through `audit`.
 
 Forge records in workspace Zettas (lake#341): `test_workspace_records.cpp`'s
 `ForgeRecordsLiveInTheirRepositorysWorkspace` covers two spaces with two workspaces each, records
@@ -535,16 +503,15 @@ Repository descriptions and refs (lake#315 part 2, lake#319): `test_workspace_re
 records and routing rows without a description column, reads and one `list_records` per workspace,
 missing, malformed, unknown and foreign `workspace_id`, a refused create leaving nothing, least
 privilege, a raced change, a moved record, not ready and deletion;
-`PostgresRepositories.MigrationDropsRefsAndTheRowIsRoutingOnly` migration `0064_repository_records`. The sync tests in `test_api.cpp` and the forge scenario read
-refs through the `refs` capability (`served_refs`, `ref_head`), since lake keeps no copy, and
-`PagePerformance` holds `/repositories` at one `list_records`.
-Application settings (lake#351): `test_apps.cpp`
-(`SettingsLiveInTheApplicationsWorkspace`) covers two spaces with two workspaces each, sealed
-records and empty routing rows, reads and listings from the workspace, the theme with missing,
-malformed, unknown and foreign `workspace_id` and a raced change, origins checked from the record,
-least privilege, a moved record not opening, not ready and deletion. `stream_fixture.hpp`'s `seed_application_settings` writes
-the settings of an application a test creates directly in a store, and `test_webauthn.cpp` calls
-the passkey ceremonies asynchronously.
+`PostgresRepositories.MigrationDropsRefsAndTheRowIsRoutingOnly` migration `0064_repository_records`.
+The sync tests in `test_api.cpp` and the forge scenario read refs through the `refs` capability
+(`served_refs`, `ref_head`), since lake keeps no copy. Application settings (lake#351):
+`test_apps.cpp` (`SettingsLiveInTheApplicationsWorkspace`) covers two spaces with two workspaces
+each, sealed records and empty routing rows, reads and listings from the workspace, the theme with
+missing, malformed, unknown and foreign `workspace_id` and a raced change, origins checked from the
+record, least privilege, a moved record not opening, not ready and deletion. `stream_fixture.hpp`'s
+`seed_application_settings` writes the settings of an application a test creates directly in a
+store, and `test_webauthn.cpp` calls the passkey ceremonies asynchronously.
 Application authorization codes (lake#363): `test_apps.cpp`
 (`AuthorizationCodesLiveInTheApplicationsWorkspace`) covers two spaces with two workspaces each,
 sealed records under blind keys, retention, one redemption, racing exchanges (through
@@ -574,8 +541,6 @@ it without repeating an event. `OnlyAnAdministratorOfTheSpaceDeletes` refuses a 
 and another space's administrator, dry run included. `RegistryProtocols.DeletingAWorkspaceMakesItsImagesUnpullable`
 (`test_api.cpp`) pulls through a running lake before and after, and
 `Search.DroppingARepositoryRemovesItsSegmentsAndUnsharedBlobs` covers the index.
-`WorkspaceNavigationHttp.SelectorRedirectsRememberedWorkspaceAndValidatesForms` renders the
-confirmation with its counts.
 
 Tenant images (lake#383 phase A): `test_api.cpp`
 (`Stores/TenantImages.LiveInTheirRoutedWorkspaceAndKeepTheirAddresses`,

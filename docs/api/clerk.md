@@ -19,9 +19,10 @@ Clerk is a **sign-in method**, the way lake's OAuth providers are. It is not a s
 authentication path: after the exchange below, the browser holds an ordinary `lake_session`, and
 every page and API call is resolved by `context_for` as before.
 
-1. `GET /sign-in` (or `/sign-up`) renders `web_ui_clerk_sign_in`: Clerk's JavaScript from the
-   instance's own Frontend API host, `https://<frontend-api>/npm/@clerk/clerk-js@5/dist/clerk.browser.js`,
-   mounted with the publishable key. After Clerk signs the person in, it returns to `/sign-in`.
+1. The web app's `/sign-in` (or `/sign-up`, `frontend/src/pages/account/ClerkSignIn.tsx`) loads
+   Clerk's JavaScript from the instance's own Frontend API host, which the `viewer` read names
+   (`clerk.frontend_api`), and mounts it with the publishable key. After Clerk signs the person
+   in, it returns to `/sign-in`.
 2. With a Clerk session present, the page asks Clerk for a token from the **`lake` JWT template**
    and posts it once, as an ordinary form, to `POST /identity/clerk-session`.
 3. lake verifies the token with `identity_crypto::verify_oidc_id_token` against the instance JWKS
@@ -79,8 +80,9 @@ The Clerk instance needs:
   lifetime 300 seconds.
 - **Email sign-in** with verification at sign-up, so the email a token carries is verified.
 - **Sign-up mode** `restricted` while lake is in development: people are added in Clerk. The
-  sign-up page and the visitor homepage say the same sentence, `web_ui_invitation_note`, and no
-  page offers a visitor *Create account* (lake#448, `Clerk.VisitorsAreNotOfferedAnAccountTheSignUpPageRefuses`).
+  sign-up page and the visitor homepage say the same sentence, `INVITATION_NOTE` in
+  `frontend/src/pages/account/signIn.ts`, and no page offers a visitor *Create account* (lake#448):
+  the `viewer` read says `password_sign_up: false` under Clerk.
 
 ### The instance lake.oramadev.net uses
 
@@ -110,7 +112,7 @@ needs a real Clerk instance: sign in at `/sign-in` with an invited address and c
 
 - A different instance: change `LAKE_CLERK_PUBLISHABLE_KEY` and create the `lake` template there.
 - Public sign-up: set the instance's `auth_access_control.sign_up_mode` to `public`, then change
-  `web_ui_invitation_note` and the Clerk branches of `web_ui_home` and `session_control`
-  (`src/api/web_ui.cpp`) to offer *Create account* again, with that test.
+  `INVITATION_NOTE` and the Clerk branches of the web app's homepage and account menu to offer
+  *Create account* again.
 - Keep the verifier strict: any change to the claims lake reads belongs in both the template and
   `serve_clerk_session`, with a test in `tests/test_clerk.cpp`.

@@ -155,11 +155,7 @@ is lake's own account of the person (the `users` row, the pool's credentials and
 
 | Route | Purpose |
 |---|---|
-| `GET /applications`, `POST /applications` | list and register applications |
-| `GET /application?id=<id>` | registration and links to management pages |
-| `GET /application/users?id=<id>`, `POST /application/users/suspend` | list and suspend pool users |
-| `GET /application/organizations?id=<id>` and its POST actions | list, create, and delete organizations |
-| `GET /application/events?id=<id>`, `POST /application/webhooks` | event log and webhook registration |
+| the web app's `/applications`, `/application?id=<id>`, `/application/users`, `/application/organizations`, `/application/events` | registration and management, through the capabilities above (the server forms were retired in lake#561) |
 | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed hosted identity pages on lake's host |
 | the same `/sign-up`, `/sign-in`, and `/mfa` paths on the custom host | themed custom-domain entry pages |
 | `GET /v1/apps/<id>/.well-known/jwks.json` | raw public JWKS, cached for five minutes |

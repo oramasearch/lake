@@ -63,8 +63,7 @@ Encoding and CBOR errors say what failed and tell the visitor to export the comp
 After sign-up, `/repositories` offers a private repository form once the space has a workspace;
 before that it links to `/workspaces`, because every repository belongs to one workspace and there
 is no default (lake#315). The form chooses the workspace, which names its space.
-`POST /repository/create` calls `create_repository` through the registry and redirects to the
-created repository. An
+The web app calls `create_repository` through the registry and opens the created repository. An
 unauthenticated caller or a user naming another customer's ID cannot create a repository there.
 The homepage and navigation redesign remain [#135](https://github.com/oramasearch/lake/issues/135).
 

@@ -19,7 +19,7 @@ Lake no longer writes or reads the `opportunities` table; the operator's one-sho
 `WorkspaceRecords.AnOpportunityStatusChangeRereadsAfterAConcurrentWrite`.
 
 **Updated 2026-09-27 (lake#269):** Discover became **Design → Opportunities** (`/design/opportunities`;
-`/design/discover` still answers). *Scan my workspace* is a background Auto-Suggest turn
+the web app also opens `/design/discover`). *Scan my workspace* is a background Auto-Suggest turn
 (`agent_turn`, kind `discover`); the page follows it and the Opportunities it recommends (and the
 ones it declines, *Not yet*) are **kept** as rows of `opportunities`, across scans. Each can become a
 project draft (`create_projects_from_opportunities {opportunity_ids}`, on confirmation) or be dismissed
@@ -39,7 +39,9 @@ model step given the design's `target` (label) and `algo` (model kind). A projec
 is compiled from the design first, exactly as *Build a Pipeline* does. A pipeline that already reads
 the design's table is left alone. A design that cannot be compiled, or a failed task, is
 said on the page, with *Build a Pipeline* still there. `create_projects_from_opportunities` answers
-the tasks as `builds`. Verify: `HttpResponseIsolation.DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnConfirmation`.
+the tasks as `builds`. Verify: `HttpResponseIsolation.DiscoverOpportunitiesScansAndCreatesProjects`
+(`agent_turn` kind `discover`, `list_opportunities`, `create_projects_from_opportunities`,
+`dismiss_opportunity`, and `latest_agent_task` applying the Project Agent's design once).
 
 **Each project gets the methodology its Opportunity needs (lake#289).** lake resolves the Opportunity's methodology against the engine's `list_methodologies`: an `M-n` written in its `methodology`, else the methodology that serves its catalogue `solution`.
 
@@ -52,9 +54,9 @@ the tasks as `builds`. Verify: `HttpResponseIsolation.DiscoverOpportunitiesScans
 **The latest scan is the recommendation (lake#287).** *Recommended* lists the newest scan's
 Opportunities. What earlier scans recommended and nobody acted on folds under *Earlier scans (N)* in the
 same form, where it can still be picked or dismissed; *Not yet* is the newest scan's. Nothing is
-deleted or rewritten: the grouping is decided when the page is drawn, and everything a person acted on
-(made into a project, dismissed) keeps its own section. `list_opportunities` still returns every row,
-each with its `task_id`. Verify: `WebUi.TheLatestScanIsTheRecommendationAndEarlierOnesFold`.
+deleted or rewritten: the grouping is the web app's, decided when the page is drawn, and everything
+a person acted on (made into a project, dismissed) keeps its own section. `list_opportunities` still
+returns every row, each with its `task_id`, which is what the grouping reads.
 
 # Discover Opportunities
 
@@ -63,14 +65,14 @@ each with its `task_id`. Verify: `WebUi.TheLatestScanIsTheRecommendationAndEarli
 ([`oramasearch/agent-autosuggest`](https://github.com/oramasearch/agent-autosuggest)). It follows
 Studio's discovery journey (orama-design `src/studio/discovery/`).
 
-1. **Scan my workspace** (`POST /design/discover/scan`) sends one `agent_turn` to
+1. **Scan my workspace** sends one `agent_turn` (kind `discover`) to
    `agent-autosuggest`. lake builds the **Workspace Profile** from the approved data the workspace
    holds (`list_datasets`, then `get_dataset` for up to twelve: names and columns), so Auto-Suggest
    reads nothing itself and never changes anything.
 2. **Recommended Opportunities**: Auto-Suggest's `suggested` entries, each with its intent, solution
    id, methodology, why this data supports it, what must come first, and what it changes; **Not Yet**:
    its `declined` entries with the reason and *capture it first* or *cannot be done*.
-3. **Create project drafts** (`POST /design/discover/create`) needs the person's explicit
+3. **Create project drafts** (`create_projects_from_opportunities`) needs the person's explicit
    confirmation. Each selected Opportunity becomes a project whose intent is the Opportunity's and
    whose description carries its **Source Opportunity** (solution, methodology, evidence). Nothing
    runs until a plan is approved.
@@ -78,4 +80,4 @@ Studio's discovery journey (orama-design `src/studio/discovery/`).
 When Auto-Suggest is not running on the lake (`LAKE_AGENT_ENDPOINTS`), the page says so and offers
 nothing behind a mock. A scan that fails says why.
 
-Verify: `HttpServer/HttpResponseIsolation.DiscoverOpportunitiesScansAndCreatesDraftsOnlyOnConfirmation`.
+Verify: `HttpServer/HttpResponseIsolation.DiscoverOpportunitiesScansAndCreatesProjects`.

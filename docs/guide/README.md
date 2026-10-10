@@ -26,4 +26,5 @@ Rules for writing them:
   to its capability (`POST /v1/<tool>` or the tool's name in a code span);
   `Examples.EveryDocsExampleRunsAgainstTheRegistrySchema` (tests/test_examples.cpp, lake#439)
   validates each one against the registry's input schema.
-- `Docs.EveryGuideRendersWithContentsAndTheNextGuide` (tests/test_markdown.cpp) renders every page.
+- `Docs.EveryGuideHasItsTitleAndRenders` (tests/test_markdown.cpp) checks every page's title and
+  renders it; `get_doc` and `list_docs` are tested in tests/test_api.cpp.

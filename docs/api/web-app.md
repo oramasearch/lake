@@ -126,7 +126,7 @@ The project page's Build a Pipeline, as one call, with exactly what its form pos
 `methodology` that methodology's own pipeline), and with `dataset` (`"<database>.<table>"`) point
 the new pipeline's first connect step at it (`get_graph`, then `edit_pipeline`). The value names
 the new pipeline as `graph` (empty when the engine named none). Each step is its own audited
-capability call. The form `POST /design/project/compile` calls it. For example,
+capability call. The web app's project page calls it. For example,
 `POST /w/<workspace_id>/v1/compile_pipeline`:
 
 ```json
@@ -168,8 +168,9 @@ redirects to `/login?error=…` ([front-door.md](../ui/front-door.md)).
 - `HttpServer/HttpResponseIsolation.TheViewerSaysWhoIsSignedInAndWhereTheyAre` (memory and
   PostgreSQL): a visitor and a dead cookie, a person's identity, MFA before and after enrolling,
   spaces and the current workspace, a foreign workspace refused as current, the operator.
-- `HttpServer/HttpResponseIsolation.SignInReturnsWhereTheUrlSaysAndOnlyThere`: `return_to` and
-  `next` honoured, foreign returns refused, the operator token error.
+- `HttpServer/HttpResponseIsolation.OperatorSignInSaysWhyATokenWasRefused`: the operator token
+  error, and the right token's `SameSite=Strict` session cookie. `return_to` and `next` are
+  handled by the web app.
 - `Repositories.PublicRepositoryContentCapabilitiesUseTheRepositoryStore`: `units` and
   `resolve_model`.
 - `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls every one of these

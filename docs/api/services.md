@@ -97,15 +97,14 @@ service id, kind and name. `start_workspace` and `delete_workspace`
 ctest --test-dir build -R 'Workspaces|PostgresServices'
 ```
 
-`Workspaces.ServiceStatusIsTheSameInListServicesAndOnThePage` and
-`Workspaces.ADeletedWorkspacesZettaLeavesTheListWithItsWorkspace` cover the shared status, the
+`Workspaces.ListServicesSaysEachServicesStatusAndWhy` and
+`Workspaces.ADeletedWorkspacesZettaLeavesTheListWithItsWorkspace` cover each service's status, the
 unassigned and waiting-delete explanations, and the deleted workspace's Zetta (also against
 PostgreSQL in `PostgresServices.CreateListAndWithdrawFollowTheContract`).
-`Workspaces.ServicesAreNamedPerCustomerAndCapped`, `…CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer`
-and `…ServicesPageListsEveryServiceWithoutCredentials` cover naming, the per-customer cap,
-another customer being refused, the connection being Postgres-only and absent from lists, and the
-page. `PostgresServices.CreateListAndWithdrawFollowTheContract` runs the store against a real
-database: the default created once, the `ws-` slug for the first workspace and never reused, and
+`Workspaces.ServicesAreNamedPerCustomerAndCapped` and
+`…CapabilitiesAreAllowListedAndAuthorizedOnTheCustomer` cover naming, the per-customer cap,
+another customer being refused, and the connection being Postgres-only and absent from lists.
+`PostgresServices.CreateListAndWithdrawFollowTheContract` runs the store against a real database: the default created once, the `ws-` slug for the first workspace and never reused, and
 withdrawal bumping the generation. On a deployment: create a Postgres service on `/services`, wait
 for Ready, and **Show connection**.
 

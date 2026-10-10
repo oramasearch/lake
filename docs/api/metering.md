@@ -196,26 +196,19 @@ a workspace double (dataset bytes, run seconds rounded up, the `from`/`to` windo
 workspace reported as not measured, and only finished image builds counted).
 `RegistryProtocols.UsageCountsEachImageDigestOnceForItsSpace` pushes real OCI images through the
 server into two routed workspaces, including two tags and a cache image sharing a layer and another
-space's image, and checks `images_bytes` counts each of the space's digests exactly once. `WebUi.UsageUsesPlainUnits*`
-covers the page's units and names.
+space's image, and checks `images_bytes` counts each of the space's digests exactly once.
 `Stores/WorkspaceRecordStores.RepositoryUsageStaysInEachRepositorysWorkspace/{Memory,Postgres}`
 covers the recorder across two spaces with two workspaces each: nothing written on the request
 path, one hourly record per workspace, merged counters, a second replica's conditional increment,
 a workspace that is not ready (kept), a deleted or unknown workspace (dropped and counted), a repository
-without a workspace, the bound, and build records written once.
-`Stores/WorkspaceRecordStores.TheOneShotCopyMovesMeteringIntoEachSpacesWorkspace/{Memory,Postgres}`
-covers the copy, and `PostgresMetering.MigrationRecordsEachRowsOwnerForTheCopy` migration `0053`.
+without a workspace, the bound, and build records written once. The copy's test and the `0053`
+migration test went with the retired tables (migration `0070`).
 `PostgresSync.PushAndPullUsePostgresControlPlane` pushes and pulls through a real server and checks
 pending transfer in the report, the flush into the repository's workspace, nothing in PostgreSQL,
 and the flush on stop. `SyncHttp.StorageQuota*`
 pushes existing content, enables a quota, proves a new write returns `busy`, and then pulls the
-original bytes unchanged. `WebUi.Metering*` covers the renderer.
-
-`PagePerformance.EveryRegisteredGetPageKeepsItsWorkspaceCallBudget` creates four repositories
-with 128 files before starting a new server. Its very first request is Metering and must report
-nonzero stored bytes. That cold request is a correctness fixture rather than a scheduler-sensitive
-latency assertion. The same populated page participates in the router-derived 20-render p95 guard.
-See [page performance](../ui/performance.md).
+original bytes unchanged. The Usage page's units and names are the web app's; it reads
+`metering_usage`.
 
 ## Empty personal customers
 

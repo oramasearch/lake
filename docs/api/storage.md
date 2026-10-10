@@ -37,10 +37,9 @@ A store belongs to the workspace it was created in (lake#465, migration `0044_st
 the panel lists the current workspace's stores, and the operator places each store in its
 workspace's namespace.
 
-Form routes under the workspace's `/w/<id>/` path, each carrying `customer_id`: `POST /train/data/store-create` (`store`, `name`,
-`size_gi`), `POST /train/data/store-delete` (`store_id`, `confirm`), and
-`POST /train/data/store-connection` (`store_id`). A failure returns to the Data page with the
-reason.
+The web app's Data page calls `create_store`, `delete_store` (with `confirm`) and
+`store_connection` under the workspace's `/w/<id>/` path; a failure is shown with its reason. The
+server form routes were retired in lake#561.
 
 ## Capabilities
 
@@ -84,9 +83,6 @@ ctest --test-dir build -R 'Stor'
 - `Workspaces.StoreCapabilitiesRefuseUnavailablePairsAndCheckTheName`: authorization on the
   customer, an S3 bucket refused with its reason, size bounds, a mismatched `confirm` deleting
   nothing, and the connection only once Ready and delivered.
-- `Workspaces.DataPageShowsStorageWithTypedDeleteAndRefreshesWhileChanging`: the panel before the
-  workspace is ready, the disabled options with their reasons, typed-confirmation delete, the 3 s
-  refresh only while a store is changing, and the connection on the response page.
 - `Workspaces.EveryNewFeatureIsInOpenApiAndWorksOverMcp`: the five capabilities in OpenAPI and as
   MCP tools, a volume created over MCP.
 - `PostgresStores.CreateListWithdrawAndNotifyFollowTheContract`: the store against a real database

@@ -92,9 +92,11 @@ cannot substitute content from a different path.
 
 `revoke_drive_share_link` stops the next list, preview, or download, including a download clicked
 from a page opened before revocation. Expiry has the same effect. Browser responses use `no-store`.
-These controls cannot recall a copy already delivered. The recipient routes are
-`GET /share/:token[?ref=main&path=...]`, `/share/:token/preview`, and `/share/:token/download`;
-preview and download require `path`. Create and revoke remain POSTs under `/drive/share/`.
+These controls cannot recall a copy already delivered. A recipient opens
+`/share/:token[?ref=main&path=...]` and `/share/:token/preview` in the web app, which calls
+`resolve_drive_share_link` and `preview_drive_share_link`; `GET /share/:token/download` is the
+server's bytes route. Preview and download require `path`. Create and revoke are the
+`create_drive_share_link` and `revoke_drive_share_link` capabilities.
 
 `drive_shared_with_me` is an authenticated read capability. It lists only `path` objects with a
 direct grant to the caller's TAAP identity, resolves their current `main` path by stable node id,

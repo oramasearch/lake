@@ -114,9 +114,10 @@ coverage is in `tests/test_policy.cpp`; the production-store capability round tr
 `tests/test_postgres.cpp`. Self-service is covered by
 `Organizations.APersonCreatesAnOrganizationInvitesAndAColleagueJoinsItsSpace` and
 `Organizations.APersonalSpaceBecomesAnOrganizationAndItsOwnerGetsAFreshOne` (memory store),
-`PostgresCapabilities.OrganizationSpaceMembershipsCarryTheirGrantToTheSpace`, and the browser
-flows `HttpResponseIsolation.PersonCreatesAnOrganizationInvitesAndAColleagueJoins` and
-`HttpResponseIsolation.PersonalSpaceBecomesAnOrganizationAfterConfirmation` (memory and
-PostgreSQL). Add organization behavior in the store interface first, then expose a
-capability with object/action metadata and add its page renderer. Schema changes require the
+`PostgresCapabilities.OrganizationSpaceMembershipsCarryTheirGrantToTheSpace`, and the HTTP flows
+`HttpResponseIsolation.PersonCreatesAnOrganizationInvitesAndAColleagueJoins` and
+`HttpResponseIsolation.PersonalSpaceBecomesAnOrganization` (memory and PostgreSQL), which call the
+capabilities with a browser session; the type-the-handle confirmation is the web app's. Add
+organization behavior in the store interface first, then expose a capability with object/action
+metadata for the web app to call. Schema changes require the
 numbered migration and operator copy described in [`../control-plane/schema.md`](../control-plane/schema.md).

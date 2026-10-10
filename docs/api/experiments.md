@@ -272,15 +272,18 @@ confirmation before making the request.
 
 `Experiments.*` verifies space authorization, confirmation and alias refusal, bounds, DP behavior,
 service-credential proxying, audit targets, REST/MCP input and output schema parity, a successful
-call per transport per operation, and every rendered control's registered capability.
+call per transport per operation, and the agents' guide naming the live read and the confirmation
+(`Experiments.AgentDocsNameTheLiveReadAndTheConfirmation`).
 `AgentRuns.ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations` verifies the three turn kinds,
 the workspace task URL, confirmed write grants and cross-operation refusal.
-`HttpServer/HttpResponseIsolation.ExperimentsAgentRestMcpAndPageUseTheSameConfirmedTurn` compares
-the `agent_turn` REST/OpenAPI and MCP schemas, calls both transports, and proves an edited page
-proposal is the object granted `create_study`. The shared
+`HttpServer/HttpResponseIsolation.ExperimentsAgentRestAndMcpUseTheSameConfirmedTurn` compares
+the `agent_turn` REST/OpenAPI and MCP schemas, calls both transports, proves an edited proposal is
+the object granted `create_study`, and refuses a stale `proposal_sha256` or a proposal changed
+beyond its study. The shared
 `SchemaConformance.*` fixture validates successful responses using independent JSON Schema
-validation. `lake-experiment-charts` checks EMA, missing-step alignment, time axes, nonpositive
-log values, DP suppression, parameter differences and bounded-page cursors.
+validation. `frontend/tests/experiments.test.ts` (`npm test`, which the frontend build runs)
+checks the chart transformations in `frontend/src/pages/experiments/transforms.ts`: EMA,
+missing-step alignment, DP suppression, parameter differences and the live read's cursor.
 
 Keep `experiment_schemas.hpp`, registered handlers, these examples and the stateful fake caller
 consistent with the authorized engine contract. Run both PostgreSQL-backed native builds and the

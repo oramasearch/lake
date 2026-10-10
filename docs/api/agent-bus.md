@@ -286,9 +286,9 @@ Without the bus, a library agent's turn answers `store_unavailable`. A lake run 
 
 Native regression tests are `Stores/AgentLeases.*` (memory and PostgreSQL) and
 `AgentLeaseConfig.*`. They age clocks without sleeping, exercise three expiries, credential
-revocation, event/capability renewal, racing terminal writes, retry publication recovery, page
-messages, the indexed migration and schema reapplication. Run full CTest with local PostgreSQL
-in static and shared builds, including `PagePerformance.*`; see [local builds](../build/local.md).
+revocation, event/capability renewal, racing terminal writes, retry publication recovery, the
+retry notice as the task's message, the indexed migration and schema reapplication. Run full CTest
+with local PostgreSQL in static and shared builds; see [local builds](../build/local.md).
 To change policy, update both stores, config bounds, schema checks and these tests together.
 
 The [#389 regression](https://github.com/oramasearch/lake/issues/389) is covered locally by a fake

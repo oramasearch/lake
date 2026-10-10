@@ -15,8 +15,8 @@ AgentCreator put in `reply`.
 ## The conversation
 
 The conversation is held through `send_ask_message` and `settle_ask_turn` with `kind: factory`
-([ask-orama.md](ask-orama.md#capabilities-lake561)); the page's forms call the same capabilities.
-`POST /train/agents/new/send` sends one `agent_turn` to `agent-creator` (a turn key limited to the
+([ask-orama.md](ask-orama.md#capabilities-lake561)); the web app's Agent Factory page calls them.
+`send_ask_message` sends one `agent_turn` to `agent-creator` (a turn key limited to the
 workspace's reads). AgentCreator answers with one JSON object: a **question**, or a **proposal**
 with the **defects** its own rules found (skills, work area, approved Pipelines, code that compiles
 and imports only what agent-runtime ships, no secrets, storage that fits the code). The page shows a
@@ -26,7 +26,7 @@ tells AgentCreator what to change.
 
 ## Approve and create
 
-`approve_agent_proposal` (`POST /train/agents/new/approve` calls it) carries the proposal's message
+`approve_agent_proposal` carries the proposal's message
 id and the **SHA-256 of the proposal the page showed**: SHA-256 of the proposal's compact JSON as
 lake serializes it. `settle_ask_turn` stores that digest with the proposal message as
 `payload.proposal_sha256`, and `get_ask_conversation` returns it, so the web app sends it back as

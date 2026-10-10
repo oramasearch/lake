@@ -88,11 +88,11 @@ curl -H "Authorization: Bearer <token>" -H 'content-type: application/json' \
 
 ## Developer → MCP, llms.txt and the lake skill (lake#202)
 
-**What.** A signed-in person connects an agent from one page, `GET /developer/mcp` (sidebar
-Developer → MCP):
+**What.** A signed-in person connects an agent from one page of the web app, `/developer/mcp`
+(sidebar Developer → MCP), which reads `mcp_setup`:
 
-- **Create an MCP Key** (`POST /developer/mcp/key`) mints a lake API token through `create_token`,
-  the capability `/tokens` uses. *Every tool* scopes it `*`; *Read-only tools* scopes it to every
+- **Create an MCP Key** mints a lake API token through `create_token`, the capability `/tokens`
+  uses, with the scopes `mcp_setup` lists. *Every tool* scopes it `*`; *Read-only tools* scopes it to every
   read tool's name (`agent_docs::read_tool_names`; `workspace_query` counts as a read). The lifetime
   is 1 day, 7 days, or as long as the sign-in allows (at most 30 days): a token never outlives the
   sign-in that made it (lake#193). The key is shown once and revoked on `/tokens`.
@@ -130,6 +130,6 @@ list exactly the tools `tools/list` serves (the JSON capabilities; the liquid sy
 protocol capabilities are not MCP tools). A new capability appears everywhere with no edit; a new
 group or flow is an edit to `agent_docs.cpp`.
 
-**How to verify.** `HttpResponseIsolation.TheMcpPageMakesAKeyThatWorksOverMcp` (llms.txt public;
-llms-full.txt documents every `tools/list` tool; a read-only key lists tools, reads, and is refused
-a write; the skill downloads) and `WebUi.McpPageShowsTheKeyOnceInEveryBlockAndTheToolsByGroup`.
+**How to verify.** `HttpResponseIsolation.AnMcpKeyWorksOverMcp` (llms.txt public; llms-full.txt
+documents every `tools/list` tool; a key made with `create_token` and `mcp_setup`'s read-only
+scopes lists tools, reads, and is refused a write; the skill downloads).

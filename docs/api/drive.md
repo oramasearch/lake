@@ -52,15 +52,15 @@ current pure-renderer contract and fallback.
 
 ## HTTP surface
 
-The read routes are `GET /drive`, `/drive/preview`, `/drive/download`, `/drive/history`,
-`/drive/history/diff`, and `/drive/conflict`. Mutations are POST-only at `/drive/folder`,
-`/drive/upload`, `/drive/rename`, `/drive/move`, `/drive/delete`, `/drive/history/restore`, and
-`/drive/conflict/resolve`.
-Upload accepts `multipart/form-data`; the handler converts files to the capability's base64 input.
-All other handlers convert query or form values to capability inputs and redirect back to a drive
-read route after a successful change. Conflict resolution offers the left value, right value, an
-available reviewed proposal, or prepared replacement text. The form posts through
-`resolve_conflict`; it does not edit Liquid state directly.
+Drive's pages (`/drive`, `/drive/preview`, `/drive/history`, `/drive/history/diff`,
+`/drive/conflict`) are the web app's ([`../ui/web-app.md`](../ui/web-app.md)); every read and change
+is the capability above (`drive_browse`, `upload_drive_files` with base64 file contents,
+`move_drive_path`, `restore_drive_version`, `resolve_conflict`, …), so the app can do nothing REST
+and MCP cannot. The one server route is `GET /drive/download`, which answers a file's exact bytes
+as an attachment through `download_drive_file`; without a credential it redirects to `/sign-in`.
+The former HTML form handlers under `/drive/` were retired in lake#561. Conflict resolution
+offers the left value, right value, an available reviewed proposal, or prepared replacement text,
+and goes through `resolve_conflict`; it does not edit Liquid state directly.
 
 The consumer sync client, three-tree reconciliation, `liquid history <path>`, and first-class
 local conflict values belong to [liquid #195](https://github.com/oramasearch/liquid/issues/195).
@@ -68,9 +68,9 @@ Lake uses the push and pull protocol documented in [`sync.md`](sync.md).
 
 ## Verification
 
-`DrivePreview` and `WebUi.DrivePagesExposeBrowseMutationHistoryAndConflictControls` cover pure
-format and page rendering. `Drive.BrowseMutationsDownloadsDiffsAndConflictsUseRepositoryCapabilities`
-covers the capability boundary. The Postgres-backed suite, Linux image build, token gate, and live
+`DrivePreview` covers pure format rendering.
+`Drive.BrowseMutationsDownloadsDiffsAndConflictsUseRepositoryCapabilities` covers the capability
+boundary. The Postgres-backed suite, Linux image build, token gate, and live
 seeded screenshot run are the release proof.
 
 ## Upload input schema

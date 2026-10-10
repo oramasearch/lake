@@ -13,11 +13,9 @@ shows it and keeps it honest.
   chat agents a person uses, then the space's own chat-capable agents), and a message box. The
   library's internal tooling (Eval Generator and the two corpus generators, `internal: true` in
   `list_agent_library`) is never offered, even where it runs (lake#451); `control::talk_to_agents`
-  builds the list. The page renders
-  without any workspace call: the space's own agents come from Zetta's `list_agents`, which took
-  380–690 ms on the dev site, so the selector adds them after the page loads from the deferred
-  panel `GET /ask/agents` (JSON `{agents: [{id, name}]}`, never a library key), and the agent a
-  conversation talks to stays selected meanwhile (lake#446, [performance.md](../ui/performance.md)).
+  builds the list. The space's own agents come from Zetta's `list_agents`, which took 380–690 ms on
+  the dev site, so the web app adds them to the selector once that read answers, and the agent a
+  conversation talks to stays selected meanwhile (lake#446).
   *Start a new
   conversation* begins another. An agent's reply is rendered as markdown (tables, lists, code) through
   lake's one renderer, which escapes every character first, so a reply cannot inject HTML; what the
@@ -109,9 +107,7 @@ For example, the web app's `send_ask_message` (`POST /w/<workspace_id>/v1/send_a
 
 | Route | What it does |
 |---|---|
-| `GET /ask?customer_id=&conversation=&from=&agent=` | the conversation; with `task=`, it calls `settle_ask_turn` |
-| `POST /ask/send` | `send_ask_message` with the page's `from` as `page` |
-| `POST /ask/confirm` | `confirm_ask_proposal` |
+| the web app's `/ask?customer_id=&conversation=&from=&agent=` | the conversation; with `task=`, it calls `settle_ask_turn`; sending calls `send_ask_message` with the page's `from` as `page`, and confirming calls `confirm_ask_proposal` (the server forms were retired in lake#561) |
 
 ## Verify
 
@@ -120,20 +116,15 @@ conversation id apart per workspace; foreign, missing, malformed and unknown wor
 refused; a deleted workspace's conversations go with it; the operator copy moves and verifies
 earlier rows.
 
-`HttpResponseIsolation.AskOramaOffersPeoplesAgentsAndSaysWhoIsWorkingOnALongTurn` (lake#451): a
-running internal generator is not in *Talk to*; the page waits, then names Ask Orama working; Ask
-Orama's turn key delegates to Auto-Suggest, and the person's turn shows the delegation, the
-subagent's progress (also published on the workspace's `agent-events` for the asking turn) and its
-finish; the answer replaces the working notice. `Workspaces.TalkToOffersOnlyRunningAgentsAPersonUses`
-covers the list on its own.
+`HttpResponseIsolation.AskOramaSaysWhoIsWorkingOnALongTurn` (lake#451): `settle_ask_turn`'s task
+is pending, then running with Ask Orama's message; Ask Orama's turn key delegates to Auto-Suggest,
+and the person's turn carries the delegation, the subagent's progress (also published on the
+workspace's `agent-events` for the asking turn) and its finish as the task's message, until the
+turn settles with the answer. `Workspaces.TalkToOffersOnlyRunningAgentsAPersonUses` covers which
+agents *Talk to* offers.
 
 `HttpServer/HttpResponseIsolation.TheWebAppTalksToAskOramaThroughCapabilities` (lake#561): the same
 conversation over `/v1` with the browser session: `send_ask_message` with a page, `settle_ask_turn`
 writing nothing while the turn waits and the answer once over two calls, a forged
 `confirm_ask_proposal` refused, cross-site requests refused, and the real confirm creating the
 repository with its outcome stored.
-
-`HttpServer/HttpResponseIsolation.AskOramaAnswersProposesAndRunsOnlyWhatThePersonConfirms`: the link
-on every page, a turn carrying the page and a turn key, the proposal shown, nothing created before
-confirming, a forged confirm refused, the real one creating the repository as the person, and
-*Done* plus *Confirmed* afterwards.

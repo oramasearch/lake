@@ -25,6 +25,14 @@ against workspace Zetta `dev-a1d74b21`. The build's authorized bridge transport 
 unchanged. Deletion has no engine contract; deployed study/training acceptance is not claimed.
 See `docs/api/experiments.md` and `docs/ui/experiments.md`.
 
+The console is the web app in `frontend/` (lake#561), embedded in the binary and answered for every
+browser page request; it calls only `/v1`. The server-rendered console pages, their deferred panels
+and HTML form handlers, the `lake_workspace` cookie and the experiment chart assets are retired in
+the source tree; an identity application's hosted sign-in pages are the one server-rendered
+surface. `agent_turn` checks a confirmed ApplicationAgent or ExperimentsAgent proposal against the
+stored one (`proposal_task_id`, `proposal_sha256`). Not deployed yet. See `docs/ui/web-app.md` and
+`docs/serving/http.md`.
+
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in
 [`docs/build/container-image.md`](docs/build/container-image.md).
@@ -395,10 +403,9 @@ Protected Ship apps use `GET /v1/apps/auth` (also under `/w/<workspace_id>`) for
 forward-auth and `/apps/authorize` for the Lake-session handoff. The app cookie is host-only,
 expires after 12 hours, and rechecks workspace membership on every request. Migration
 `0041_app_forward_auth` stores only short-lived one-use code hashes.
-The server-rendered Ship → Apps list and detail pages use those capabilities for creation and all
-controls, mask Secret references, follow retained app/build events, and start ApplicationAgent app
-turns with exact proposal confirmation before repository or App writes. Their contract is
-`docs/ui/apps.md`.
+The Ship → Apps pages use those capabilities for creation and all controls, mask Secret references,
+follow retained app/build events, and start ApplicationAgent app turns with exact proposal
+confirmation before repository or App writes. Their contract is `docs/ui/apps.md`.
 
 In-cluster image builds add migration `0036_builds`, customer-scoped REST/MCP capabilities,
 queued/cancelled desired rows, operator status, build-specific source/push/event hashes and retained
@@ -479,30 +486,38 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
   `io_thread` runs `io_context.run()`; `stop()` = `server->stop()`, `io_context.stop()`,
   join. The owner loop calls `wait_for_work()` then `drain()` each tick; both are
   placeholders until lake has a node to marshal onto.
-- Pages are **server-rendered and self-contained**; renderers in `web_ui.cpp` are pure functions
-  and are the unit-tested surface. Every page has the two documented theme scripts; the two
-  passkey pages each add one script required to call `navigator.credentials`, and the MCP page
-  adds one (`copy-buttons`) for its Copy buttons (`docs/api/mcp.md`). Data pages call
-  capabilities through `Registry::call` and can never do what the API cannot.
+- **The console is the web app** in `frontend/` (React, Vite, Tailwind, TypeScript), built and
+  embedded by CMake and served by the `web_app` middleware: a browser's GET of any page path gets
+  its `index.html` (`Content-Security-Policy: frame-ancestors 'self'`), anything else the route or
+  the 404. It calls **only `/v1` capabilities**, so it can never do what the API cannot; do not add
+  a server page or an HTML form handler. Build, page rules and checks: `docs/ui/web-app.md`. The
+  server routes the app relies on (the cookie-setting sign-in routes and the download routes) are
+  listed there and in `docs/serving/http.md`.
+- **Hosted application pages are the one server-rendered surface**: an identity application's
+  sign-in pages (`/apps/<id>/*` and its custom sign-in host), rendered by the pure functions in
+  `web_ui.cpp` in the application's colours, with the theme scripts and, on the passkey page, one
+  script for `navigator.credentials`. They work without JavaScript otherwise.
 - **Nav items and headings are Title Case** — "Search Indexes", not "Search indexes": every
-  sidebar link and section label, page and section title (`workspace_sections`), and `<h1>`–`<h4>`.
+  rail item and section label, page and section title, and `<h1>`–`<h4>` in the web app and the
+  hosted pages.
   Capitalize every word except articles, coordinating conjunctions and prepositions of four
   letters or fewer (*a, an, the, and, but, or, for, as, at, by, in, of, on, to, via, with, from,
   into, over*), which stay lowercase unless first or last; acronyms stay as written ("API Tokens");
   phrasal verbs keep their particle ("Sign In"). Body text, buttons, form labels and eyebrows stay
   sentence case; a heading written as a full sentence ending in punctuation stays a sentence. Rules
   and examples: `docs/ui/design-system.md` → *Capitalization*.
-- IBM Plex Sans and Mono are self-hosted WOFF2 assets embedded into the binary and served below
-  content-hashed `/fonts/` URLs with immutable cache headers. Pages use the content-hashed
-  stylesheet URL; unhashed stylesheet and font aliases use `no-cache`. The browser never needs a
-  third-party font origin.
-- Static visual-direction references live under `docs/design/ui/mocks/`. The served design system
-  and its complete before/after screenshots are documented in `docs/ui/design-system.md`;
-  `tools/ui/screenshot.sh` reproduces the 1440×900 review images.
+- IBM Plex Sans and Mono are self-hosted WOFF2 assets: the web app bundles them under `/ui/`, and
+  the binary also serves them below content-hashed `/fonts/` URLs for the hosted pages, which link
+  the content-hashed stylesheet; unhashed stylesheet and font aliases use `no-cache`. The browser
+  never needs a third-party font origin. Both use the same Orama design tokens
+  (`tools/ui/build-tokens.mjs`, `docs/ui/design-system.md`).
+- Static visual-direction references live under `docs/design/ui/mocks/`;
+  `tools/ui/screenshot.sh` renders them at 1440×900.
 - **One auth check.** The API bearer and the UI session cookie (`lake_session`, set by
   `POST /session`) carry the same secret and are resolved by the same code (`context_for`);
-  never add a second path. Protected pages redirect to `/sign-in` without a valid credential; `/metrics`
-  uses the same check. `/healthz` and `/readyz` are deliberately unauthenticated Kubernetes probes.
+  never add a second path. The web app guards its own pages from the `viewer` read; a protected
+  server route that remains (a download) redirects to `/sign-in` without a valid credential;
+  `/metrics` uses the same check. `/healthz` and `/readyz` are deliberately unauthenticated Kubernetes probes.
 - **Cross-site requests.** An unsafe request the `lake_session` cookie authenticates must come from
   lake's own origin (`Origin` and `Sec-Fetch-Site`), and a cookie-authenticated `/v1` or `/mcp`
   `POST` must be `application/json`; bearer calls are unaffected (`refuse_cross_site`,
