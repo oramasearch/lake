@@ -455,8 +455,8 @@ export function parseInteger(value: string): number | null {
 }
 
 /** Where Start your workspace lands (serve_workspace_form "start"): the section's list page when it
- * is one of these, else Projects. */
-export const START_RETURNS = ["/design/projects", "/train/data", "/train/agents", "/train/runs", "/ship/models", "/ship/indexes"];
+ * is one of these, else Projects. Transcripts (lake#561) is the app's own addition. */
+export const START_RETURNS = ["/design/projects", "/train/data", "/train/agents", "/train/runs", "/ship/models", "/ship/indexes", "/transcripts"];
 
 /** A workspace page's list page (the server's workspace_sections `path`). */
 const LIST_OF: [RegExp, string][] = [
@@ -471,6 +471,7 @@ const LIST_OF: [RegExp, string][] = [
   [/^\/ship\/models?$/, "/ship/models"],
   [/^\/ship\/index(es)?$/, "/ship/indexes"],
   [/^\/ship\/apps?$/, "/ship/apps"],
+  [/^\/transcripts?$/, "/transcripts"],
 ];
 
 export function startReturn(localPath: string): string {

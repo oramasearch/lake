@@ -1,0 +1,201 @@
+/* Lake on a phone: rev-os's mobile-web rules (lake#561, docs/ui/mobile-web.md). Layered after
+   look.css, so on a narrow screen these win over the desktop look they adjust. Lake tokens only. */
+
+/* A control drawn entirely by utilities: lake.css and look.css style every <button> inside main and
+   dialogs; `plain` takes that back so the utilities alone decide. */
+.plain,
+button.plain,
+button.plain:hover,
+a.plain:hover {
+  min-height: 0;
+  border-width: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  font-weight: inherit;
+  line-height: inherit;
+  filter: none;
+}
+
+/* The page reaches the screen's edges (viewport-fit=cover, for the sheets' safe areas); on a phone
+   held sideways the content keeps clear of the notch. */
+body {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+/* While a sheet fills a phone, nothing behind it scrolls or bounces (lib/phoneSheet.ts). */
+html[data-sheet='open'],
+html[data-sheet='open'] body {
+  overscroll-behavior: none;
+}
+
+/* Touch targets below the desktop breakpoint. Every control gets an invisible hit box centred on
+   it: at least 24 px (WCAG 2.5.8) everywhere, at least 40 px on the kit's and the shell's controls
+   (`.hit`). The visual size stays. Zero specificity, so a control placed with absolute, fixed or
+   sticky keeps its own position. */
+@media (max-width: 1023.98px) {
+  :where(a[href], button, summary, label, .hit, [role='button'], [role='tab'], [role='switch'], [role='radio'], [role='checkbox']) {
+    position: relative;
+  }
+  :where(a[href], button, summary, [role='button'], [role='tab'], [role='switch'], [role='radio'], [role='checkbox'])::before,
+  .hit::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 24px);
+    height: max(100%, 24px);
+    transform: translate(-50%, -50%);
+  }
+  .hit::before {
+    width: max(100%, 40px);
+    height: max(100%, 40px);
+  }
+  :is(input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='hidden']):not([type='file']), select) {
+    min-height: 40px !important;
+  }
+  :where(input[type='checkbox'], input[type='radio']) {
+    width: 20px;
+    height: 20px;
+  }
+  /* a checkbox with its words: the whole row is the target */
+  :where(label:has(> input[type='checkbox'], > input[type='radio'])) {
+    min-height: 40px;
+  }
+  .button,
+  main button:not(.plain):not(.th-sort):not(.chip-button),
+  .dialog button:not(.plain),
+  .actions a {
+    min-height: 40px;
+  }
+}
+
+/* Phones. */
+@media (max-width: 47.99rem) {
+  /* 16 px in anything typed into: iOS Safari zooms the page on a smaller field and does not zoom
+     back. Never fixed with maximum-scale, which takes pinch-zoom from people who need it. */
+  :is(input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='hidden']):not([type='file']), select, textarea) {
+    font-size: 16px !important;
+    line-height: 1.3;
+  }
+  /* A select draws itself: iOS keeps its own text box in a native one and cuts 16 px text off. */
+  select {
+    -webkit-appearance: none;
+    appearance: none;
+    padding-top: 10px;
+    padding-right: 30px !important;
+    padding-bottom: 10px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238a8780' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 14px 14px;
+    text-overflow: ellipsis;
+  }
+  /* lake.css makes a filter row's inputs full width on a phone; a checkbox keeps its size and sits
+     beside its words. */
+  :is(.filters, form.search, main form) :is(input[type='checkbox'], input[type='radio']) {
+    width: 20px;
+    flex: none;
+  }
+  main label:has(> input[type='checkbox'], > input[type='radio']) {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  input[type='file'] {
+    max-width: 100%;
+  }
+  input[type='file']::file-selector-button {
+    min-height: 44px;
+  }
+  main .page-container {
+    padding: 16px 16px 48px;
+  }
+  main .search-input {
+    width: 100%;
+    flex: 1 1 100%;
+  }
+  /* A table scrolls inside its own box, never the page. */
+  main table:not(.table-wrap table):not(.source-view table) {
+    display: block;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  .table-wrap {
+    max-width: 100%;
+  }
+  /* Long ids, paths, links and file names wrap instead of widening the page. `break-word` leaves a
+     table's own column widths alone (its box scrolls); prose may break anywhere. */
+  main {
+    overflow-wrap: break-word;
+  }
+  main :is(h1, p, li, dd, dt, .sub, .muted, small) {
+    overflow-wrap: anywhere;
+  }
+  main pre {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+  main .page-actions {
+    width: 100%;
+  }
+  .dialog-foot {
+    flex-wrap: wrap;
+  }
+  .dialog-foot :is(.button, button),
+  .ask-composer .ask-send {
+    min-height: 44px;
+  }
+  /* The message box in Ask Orama: room for 16 px type, two lines on a phone. */
+  .ask-composer textarea {
+    min-height: 64px;
+  }
+}
+
+/* A Modal with `sheet`, on a phone: a full-screen sheet sized to the visual viewport, its body the
+   one scroller, its actions (SheetActions) pinned above the keyboard, inside the safe areas. */
+.dialog.dialog-sheet {
+  position: fixed;
+  top: var(--vv-top, 0px);
+  right: 0;
+  left: 0;
+  height: var(--vv-height, 100dvh);
+  max-width: none !important;
+  max-height: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  animation: none;
+}
+.dialog-sheet .dialog-head {
+  align-items: center;
+  padding: max(10px, env(safe-area-inset-top)) max(4px, env(safe-area-inset-right)) 8px max(16px, env(safe-area-inset-left));
+}
+.dialog-sheet .dialog-title {
+  font-size: 16px;
+}
+.dialog-sheet .dialog-close {
+  width: 44px;
+  min-height: 44px;
+  flex: 0 0 auto;
+}
+.dialog-sheet .dialog-body {
+  min-height: 0;
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px max(16px, env(safe-area-inset-right)) calc(16px + var(--sheet-safe-bottom)) max(16px, env(safe-area-inset-left));
+}
+.sheet-actions {
+  border-top: 1px solid var(--lake-border-subtle);
+  padding: 10px max(16px, env(safe-area-inset-right)) calc(10px + var(--sheet-safe-bottom)) max(16px, env(safe-area-inset-left));
+  background: var(--lake-overlay);
+}
+.dialog .sheet-actions :is(.button, button) {
+  min-height: 44px;
+}
+.dialog-sheet .dialog-foot {
+  padding-bottom: calc(12px + var(--sheet-safe-bottom));
+}

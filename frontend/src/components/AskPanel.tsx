@@ -4,12 +4,20 @@
  * (pages/ask/conversation.tsx); "Full view" opens it there.
  *
  * The panel works in the session's current workspace. Its conversation is remembered for this tab
- * per workspace, so closing and reopening the panel, or moving between pages, keeps it. */
-import { useCallback, useEffect, useRef, useState } from "react";
+ * per workspace, so closing and reopening the panel, or moving between pages, keeps it.
+ *
+ * On a phone it is a full-screen conversation (docs/ui/mobile-web.md): sized to the visual
+ * viewport so the message box sits just above the keyboard, the page behind locked, inside the safe
+ * areas, following each new answer unless the person scrolled up to read. A page can open it about
+ * something (`openAsk`, lib/ask.ts): the request's context goes with the next message. */
+import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { Maximize2, Plus, Sparkles, X } from "lucide-react";
+import { FileText, Maximize2, Plus, Sparkles, X } from "lucide-react";
 import { useSession } from "@/lib/session";
 import { ASK_DEFAULT_WIDTH, setResizingAsk } from "@/lib/askWidth";
+import type { AskRequest } from "@/lib/ask";
+import { useIsPhone, usePhoneSheet } from "@/lib/phoneSheet";
+import { NewReplyChip, useFollow } from "@/components/follow";
 import { qs, useAsync } from "@/pages/train/workspace";
 import { AskComposer, AskMessages, TurnInStreams, sendMessage, useAppPath, useConversation, useTalkTo } from "@/pages/ask/conversation";
 
@@ -86,18 +94,27 @@ export function AskPanel({
   width,
   onResize,
   overlay,
+  request,
+  onRequestDone,
 }: {
   onClose: () => void;
   from: string;
   width: number;
   onResize: (width: number) => void;
   overlay: boolean;
+  /** What a page opened the panel about, until it is sent or dismissed. */
+  request?: AskRequest | null;
+  onRequestDone?: () => void;
 }) {
   const { workspaceId, space } = useSession();
+  const phone = useIsPhone();
+  const keyboard = usePhoneSheet(phone);
+  // The home indicator's strip matters only while the keyboard is down.
+  const style = { width, ...(phone ? { "--sheet-safe-bottom": keyboard ? "0px" : "env(safe-area-inset-bottom)" } : {}) } as CSSProperties;
   return (
-    <aside className="ask-panel" data-overlay={overlay || undefined} style={{ width }} aria-label="Ask Orama">
+    <aside className="ask-panel" data-overlay={overlay || undefined} data-sheet={phone || undefined} style={style} aria-label="Ask Orama">
       <ResizeHandle width={width} onResize={onResize} />
-      <div className="flex items-center gap-2 border-b border-[var(--lake-border-subtle)] px-4 py-2">
+      <div className="ask-head flex items-center gap-2 border-b border-[var(--lake-border-subtle)] px-4 py-2">
         <Sparkles size={15} aria-hidden />
         <div className="min-w-0 flex-1">
           <h2 className="m-0 text-base">Ask Orama</h2>
@@ -111,7 +128,7 @@ export function AskPanel({
         </button>
       </div>
       {workspaceId && space ? (
-        <PanelConversation key={workspaceId} workspaceId={workspaceId} from={from} />
+        <PanelConversation key={workspaceId} workspaceId={workspaceId} from={from} request={request ?? null} onRequestDone={onRequestDone} />
       ) : (
         <div className="p-4">
           <p>Ask Orama works in a workspace, and you have none selected.</p>
@@ -166,7 +183,7 @@ function PanelActions({ workspaceId, from }: { workspaceId: string; from: string
   );
 }
 
-function PanelConversation({ workspaceId, from }: { workspaceId: string; from: string }) {
+function PanelConversation({ workspaceId, from, request, onRequestDone }: { workspaceId: string; from: string; request: AskRequest | null; onRequestDone?: () => void }) {
   const [state, update] = usePanelState(workspaceId);
   const { space } = useSession();
   const onSettled = useCallback(() => update({ task: "" }), [update]);
@@ -175,24 +192,26 @@ function PanelConversation({ workspaceId, from }: { workspaceId: string; from: s
   const send = useAsync();
   const scroller = useRef<HTMLDivElement>(null);
   const count = conversation.list.length;
-  useEffect(() => {
-    scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
-  }, [count, conversation.working]);
+  const working = conversation.working;
+  const follow = useFollow(scroller, `${count}/${working}/${conversation.task.data?.message ?? ""}`, !count && !working);
   return (
     <>
-      <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3">
-        <AskMessages
-          conversationId={state.conversation}
-          list={conversation.list}
-          loading={conversation.messages.isLoading}
-          error={conversation.messages.error ?? conversation.settleError ?? conversation.task.error}
-          working={conversation.working}
-          task={conversation.task.data}
-          agent={state.agent}
-        />
-        <TurnInStreams taskId={state.task} />
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div ref={scroller} onScroll={follow.onScroll} className="ask-scroll min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-4 py-3">
+          <AskMessages
+            conversationId={state.conversation}
+            list={conversation.list}
+            loading={conversation.messages.isLoading}
+            error={conversation.messages.error ?? conversation.settleError ?? conversation.task.error}
+            working={working}
+            task={conversation.task.data}
+            agent={state.agent}
+          />
+          <TurnInStreams taskId={state.task} />
+        </div>
+        <NewReplyChip show={follow.chip} onClick={() => follow.toLatest()} />
       </div>
-      <div className="border-t border-[var(--lake-border-subtle)] px-4 py-3">
+      <div className="ask-foot border-t border-[var(--lake-border-subtle)] px-4 py-3">
         <AskComposer
           compact
           agent={state.agent}
@@ -200,8 +219,23 @@ function PanelConversation({ workspaceId, from }: { workspaceId: string; from: s
           onAgent={(agent) => update({ agent })}
           busy={send.busy}
           error={send.error}
+          draft={request?.draft}
+          context={
+            request ? (
+              <div className="ask-context flex min-w-0 items-center gap-2 rounded-[6px] border border-hairline bg-raised px-2.5 py-1.5 text-[12.5px] text-ink-2">
+                <FileText size={13} className="shrink-0" aria-hidden />
+                <span className="min-w-0 flex-1 truncate" title={request.label}>
+                  {request.label}
+                </span>
+                <button type="button" className="plain hit shrink-0 rounded text-ink-3 hover:text-ink" onClick={onRequestDone} aria-label="Ask without this context">
+                  <X size={13} aria-hidden />
+                </button>
+              </div>
+            ) : null
+          }
           onSend={(message) =>
             send.run(async () => {
+              follow.markAsked();
               const answer = await sendMessage({
                 customerId: space?.id ?? "",
                 workspaceId,
@@ -210,8 +244,11 @@ function PanelConversation({ workspaceId, from }: { workspaceId: string; from: s
                 agent: state.agent,
                 message,
                 from,
+                page: request?.page,
               });
               update({ conversation: answer.conversation_id, task: answer.task_id ?? "" });
+              // The context went with this message; the next one is about the page again.
+              if (request) onRequestDone?.();
             })
           }
         />

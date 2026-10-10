@@ -101,7 +101,7 @@ const PLACES: Place[] = [
     workspace: true,
     run: async (q, scope, _o, signal) => {
       const value = await read<{ transcripts?: Row[] }>("list_transcripts", { customer_id: scope.customerId, workspace_id: scope.workspaceId, q, limit: 50 }, { workspace: null, signal });
-      return (value.transcripts ?? []).map((t) => ({ key: t.id, title: t.title, detail: t.excerpt, to: wsPath(scope, `/transcripts/${encodeURIComponent(t.id)}`) }));
+      return (value.transcripts ?? []).map((t) => ({ key: t.id, title: t.title, detail: t.excerpt, to: wsPath(scope, `/transcript?id=${encodeURIComponent(t.id)}`) }));
     },
   },
   {

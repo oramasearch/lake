@@ -51,17 +51,20 @@ export function WorkspacePicker() {
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="inline-flex h-8 max-w-[260px] items-center gap-1.5 rounded-[6px] border border-rule bg-surface px-2.5 text-[12.5px] text-ink transition-colors hover:border-action"
+        aria-label={`Workspace: ${label}`}
+        className="hit inline-flex h-8 max-w-[260px] shrink-0 items-center gap-1.5 rounded-[6px] border border-rule bg-surface px-2 text-[12.5px] text-ink transition-colors hover:border-action md:px-2.5"
         title={spaceLabel ? `${spaceLabel} · ${label}` : label}
       >
         <Layers size={14} className="shrink-0 text-ink-3" />
         {spaceLabel && <span className="hidden truncate text-ink-3 lg:inline">{spaceLabel}</span>}
         {spaceLabel && <span className="hidden text-rule lg:inline">/</span>}
-        <span className="truncate font-medium">{label}</span>
-        <ChevronDown size={14} className="shrink-0 text-ink-3" />
+        {/* On a phone the pill is its icon; the menu names the workspace. */}
+        <span className="hidden truncate font-medium md:inline">{label}</span>
+        <ChevronDown size={14} className="hidden shrink-0 text-ink-3 md:block" />
       </button>
       {open && (
-        <div role="listbox" className="absolute right-0 z-50 mt-1 max-h-[70vh] w-[280px] overflow-auto rounded-[6px] border border-hairline bg-overlay py-1 shadow-popover">
+        <div role="listbox" className="absolute right-0 z-50 mt-1 max-h-[70vh] w-[280px] max-w-[calc(100vw-1rem)] overflow-auto rounded-[6px] border border-hairline bg-overlay py-1 shadow-popover">
+          <div className="px-3 pt-1.5 pb-1 text-[12.5px] font-semibold text-ink md:hidden">{label}</div>
           {viewer.spaces.map((s) => (
             <div key={s.id} className="py-1">
               <div className="px-3 pt-1 pb-1 font-mono text-[10px] font-semibold tracking-[0.12em] text-ink-3 uppercase">{s.personal ? "Your workspaces" : s.label}</div>
@@ -73,7 +76,7 @@ export function WorkspacePicker() {
                   aria-selected={w.id === workspaceId}
                   onClick={() => go(w.id)}
                   className={cx(
-                    "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-raised",
+                    "flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-raised max-md:min-h-[44px]",
                     w.id === workspaceId ? "font-semibold text-action" : "text-ink",
                   )}
                 >
