@@ -74,11 +74,11 @@ gzip in brackets):
 
 | What | Size |
 |---|---|
-| Files in `dist/ui/` | 126: 118 scripts, 3 stylesheets, 5 fonts |
+| Files in `dist/ui/` | 132: 124 scripts, 3 stylesheets, 5 fonts |
 | Entry script `index-*.js` (React, the router, TanStack Query, the shell, the kit) | 369.57 kB (115.28 kB) |
 | Main stylesheet `index-*.css` | 63.87 kB (11.72 kB) |
 | The chart chunk (uPlot and the Experiments shared code) | 66.12 kB (28.63 kB) |
-| Largest page chunk, `ProjectPage-*.js` | 24.79 kB (7.19 kB) |
+| Largest page chunk, `ProjectPage-*.js` | 24.84 kB (7.20 kB) |
 | `index.html` | 0.58 kB (0.37 kB) |
 | Fonts, five IBM Plex WOFF2 files | 100.62 kB in total |
 | `dist/` on disk | 1.5 MB |
