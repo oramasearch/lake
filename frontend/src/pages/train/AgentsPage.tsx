@@ -234,9 +234,6 @@ function CreateAgent({ onClose }: { onClose: () => void }) {
       width={580}
       footer={
         <>
-          <Button to={ws(`/train/agents/new?${query}`)} className="mr-auto">
-            <Sparkles size={14} aria-hidden /> Use the Agent Factory instead
-          </Button>
           <Button onClick={onClose}>Cancel</Button>
           <Button variant="primary" type="submit" form="create-agent" loading={create.busy}>
             Create agent

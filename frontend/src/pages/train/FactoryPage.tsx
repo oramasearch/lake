@@ -137,7 +137,7 @@ export default function FactoryPage() {
                       type="button"
                       disabled={send.busy}
                       onClick={() => void ask(example)}
-                      className="block min-h-[44px] w-full rounded-[6px] border border-hairline bg-canvas px-3 py-2 text-left text-[13.5px] text-ink-2 transition-colors hover:border-action hover:text-ink md:min-h-0"
+                      className="flex h-auto min-h-[44px] w-full justify-start rounded-[6px] border border-hairline bg-canvas px-3 py-2 text-left whitespace-normal text-[13.5px] text-ink-2 transition-colors hover:border-action hover:text-ink md:min-h-0"
                     >
                       {example}
                     </button>
