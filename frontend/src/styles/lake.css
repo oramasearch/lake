@@ -1715,13 +1715,29 @@ legend {
 .docs-page pre {
   overflow-x: auto;
 }
+/* The reader fills the width beside the navigation; paragraphs stop at a readable measure, while
+   tables and code use the whole width. */
+.docs-page :is(p, ul, ol, blockquote) {
+  max-width: 88ch;
+}
+/* A table spans the page; on a phone it scrolls in its own box. */
 .docs-page table {
   display: block;
   max-width: 100%;
   overflow-x: auto;
 }
+@media (min-width: 48rem) {
+  .docs-page table {
+    display: table;
+    width: 100%;
+  }
+}
+/* Words wrap whole: `anywhere` let a table squeeze its term column until "Account" broke mid-word. */
 .docs-page :is(p, li, td) {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+}
+.docs-page td:first-child {
+  min-width: 9rem;
 }
 /* A heading's "#": quiet until the heading is pointed at or the link is focused; always shown on a
    touch screen, where there is no hover. */
