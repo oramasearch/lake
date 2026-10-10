@@ -128,23 +128,57 @@ export function CopyButton({ text, label = "Copy", className, copyId }: { text: 
   );
 }
 
-/** A copy-ready block of code on the dark plane, its title in a mono kicker, an optional note
- * under it. `id` names the code element (and its Copy button's `data-copy`). */
+/** A copy-ready block of code on a dark terminal plane: a title bar with three dots, the title in
+ * a mono kicker and Copy; an optional note under it. `id` names the code element (and its Copy
+ * button's `data-copy`). */
 export function CodeBlock({ title, code, note, id }: { title?: ReactNode; code: string; note?: ReactNode; id?: string }) {
   return (
-    <div className="min-w-0 overflow-hidden rounded-[7px] border border-[var(--orama-color-night-60)] bg-[var(--orama-color-night-90)]">
-      <div className="flex items-center gap-2 border-b border-[var(--orama-color-night-60)] px-3.5 py-2">
-        <span className="h-2 w-2 rounded-full bg-action opacity-80" aria-hidden />
-        <span className="font-mono text-[10.5px] tracking-[0.1em] text-[var(--orama-color-night-30)] uppercase">{title ?? "shell"}</span>
-        <CopyButton text={code} className="ml-auto" copyId={id} />
+    <div className="min-w-0 overflow-hidden rounded-[8px] border border-[var(--orama-color-night-60)] bg-[var(--orama-color-night-90)] shadow-[0_1px_2px_rgb(0_0_0/0.12)]">
+      <div className="flex items-center gap-2 border-b border-[var(--orama-color-night-60)] bg-[var(--orama-color-night-80)] px-3.5 py-2">
+        <span className="flex shrink-0 gap-1.5" aria-hidden>
+          <span className="h-2.5 w-2.5 rounded-full bg-[var(--orama-color-night-60)]" />
+          <span className="h-2.5 w-2.5 rounded-full bg-[var(--orama-color-night-60)]" />
+          <span className="h-2.5 w-2.5 rounded-full bg-action opacity-80" />
+        </span>
+        <span className="ml-1 min-w-0 truncate font-mono text-[10.5px] tracking-[0.1em] text-[var(--orama-color-night-30)] uppercase">{title ?? "shell"}</span>
+        <CopyButton text={code} className="ml-auto shrink-0" copyId={id} />
       </div>
       <pre className="m-0 overflow-x-auto border-0 bg-transparent px-4 py-3 font-mono text-[12.5px] leading-[1.65] text-[var(--orama-color-night-10)]">
         <code id={id} className="rounded-none border-0 bg-transparent p-0 text-current">
           {code}
         </code>
       </pre>
-      {note && <div className="border-t border-[var(--orama-color-night-60)] px-3.5 py-2 text-[12px] text-[var(--orama-color-night-30)]">{note}</div>}
+      {note && <div className="border-t border-[var(--orama-color-night-60)] px-3.5 py-2 text-[12px] leading-relaxed text-[var(--orama-color-night-30)]">{note}</div>}
     </div>
+  );
+}
+
+/** The strip at the top of both Developer pages: what to call, and the chips that say how. */
+export function EndpointStrip({ label, value, children }: { label: string; value: string; children?: ReactNode }) {
+  return (
+    <div className="mb-6 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-[7px] border border-hairline bg-surface px-4 py-2.5 text-[12.5px]">
+      <span className="label m-0">{label}</span>
+      <code className="min-w-0 border-0 bg-transparent p-0 font-mono text-[13px] break-all text-ink">{value}</code>
+      <CopyButton text={value} className="border-hairline bg-raised text-ink-2 hover:text-ink" />
+      <span className="flex flex-wrap items-center gap-1.5 md:ml-auto">{children}</span>
+    </div>
+  );
+}
+
+/** A numbered step: the number, its title and a line of advice in a left rail, the content on
+ * the right (rev-os's setup steps). One column on a phone. */
+export function Step({ n, title, aside, children, id }: { n: number; title: string; aside?: ReactNode; children: ReactNode; id?: string }) {
+  return (
+    <section id={id} className="grid scroll-mt-20 grid-cols-1 gap-4 border-t border-hairline pt-6 pb-2 first:border-t-0 first:pt-0 lg:grid-cols-[230px_minmax(0,1fr)] lg:gap-8">
+      <div>
+        <div className="flex items-center gap-2.5">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-action font-mono text-[11px] font-semibold text-on-action">{n}</span>
+          <h3 className="m-0 text-[14.5px] font-semibold text-ink">{title}</h3>
+        </div>
+        {aside && <div className="mt-2 pl-[34px] text-[12.5px] leading-relaxed text-ink-3">{aside}</div>}
+      </div>
+      <div className="min-w-0 space-y-3">{children}</div>
+    </section>
   );
 }
 
@@ -344,7 +378,7 @@ export function NewKeyCallout({ value, onDone, purpose }: { value: string; onDon
       </div>
       <p className="mt-0.5 mb-0 text-[12.5px] text-ink-2">
         This is the only time lake shows it. Keep it in a password manager or your client's secret settings.{" "}
-        {purpose === "mcp" ? "It is filled into every setup block on Connect until you leave this page." : "It is filled into Quick start and every operation's curl until you leave this page."}
+        {purpose === "mcp" ? "It is filled into every setup block below until you leave this page." : "It is filled into Quick start and every operation's curl until you leave this page."}
       </p>
       <div className="mt-2.5 flex items-center gap-2 rounded-[6px] border border-hairline bg-surface px-3 py-2">
         <code id={purpose === "mcp" ? "mcp-key" : "api-key"} className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-ink">
