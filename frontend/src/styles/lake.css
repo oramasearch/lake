@@ -1719,6 +1719,10 @@ legend {
 .page-container.docs-reader {
   max-width: none;
 }
+/* …and so is its Markdown, which elsewhere stops at 78ch: paragraphs keep their measure below. */
+.docs-page .markdown-body {
+  max-width: none;
+}
 /* The reader fills the width beside the navigation; paragraphs stop at a readable measure, while
    tables and code use the whole width. */
 .docs-page :is(p, ul, ol, blockquote) {
