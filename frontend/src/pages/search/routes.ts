@@ -1,6 +1,6 @@
 import type { Screen } from "@/routes/types";
-import { stub } from "@/components/ScreenStub";
+import { lazyPage } from "@/lib/lazyPage";
 
 export const screens: Screen[] = [
-  { path: "/search", title: "Search", section: "top", nav: true, icon: "search", component: stub("Search") },
+  { path: "/search", title: "Search", section: "top", nav: true, icon: "search", component: lazyPage(() => import("./SearchPage")) },
 ];
