@@ -1,11 +1,13 @@
 # Secrets and Encryption Keys
 
 Lake keeps an organization's secrets (passwords, API keys, connection strings) and its encryption
-keys. Secrets are versioned JSON values you write and read through the API. Encryption keys never
-leave lake: you send data to lake and get back ciphertext, a signature or an HMAC.
+keys. Secrets are versioned JSON values you manage in the web app, through the REST API or over MCP.
+Encryption keys never leave lake: you send data to lake and get back ciphertext, a signature or an
+HMAC.
 
-The web app shows only **metadata**: which mounts exist, a secret's version history, and a key's
-versions. Values and key material are never shown on a page.
+The web app lists **metadata**: which mounts exist, which secrets a mount holds, a secret's version
+history, and a key's versions. A secret's value appears only when you press **Reveal**, masked until
+you show it; key material is never shown anywhere.
 
 ## Concepts
 
@@ -29,12 +31,26 @@ Deleting the workspace deletes its mounts.
 2. If you have more than one workspace, choose it in **Workspace**.
 3. Each mount has **Secrets** and **Keys** buttons.
 
+Each mount's page lists its secrets by path, with their state (live or deleted), current version and
+when they changed. Search the paths, or filter **Live** or **Deleted**.
+
+- REST: `GET /v1/list_secrets?mount_id=<mount id>&limit=100`; add `&prefix=database/` for one group,
+  and pass the answer's `next_cursor` as `&cursor=` for the next page.
+- MCP: `list_secrets`. It never returns a value.
+
 - REST: `GET /v1/list_secret_mounts?customer_id=<customer id>&workspace_id=<workspace id>&limit=100`.
 - MCP: `list_secret_mounts` with the same input.
 
 ## Create a Mount
 
-An organization admin creates mounts; the page has no form for it.
+An organization admin creates mounts.
+
+1. Open **Organization → Secrets** and press **New mount**.
+2. Choose the **Workspace**. The mount's secrets and keys are sealed in that workspace, and it cannot
+   be changed later.
+3. Choose the **Organization** that owns the mount. An organization's own workspaces offer it first.
+4. Enter a **Name** (lowercase letters, digits and dashes) and, optionally, a **Description**.
+5. Press **Create mount**. Lake opens the new mount.
 
 - REST: `POST /v1/create_secret_mount` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "organization_id": "<organization id>", "name": "payments", "description": "Payment service credentials"}`.
@@ -45,6 +61,18 @@ The name is lowercase and unique within its workspace and organization. The answ
 workspace.
 
 ## Write a Secret
+
+1. Open the mount and press **New secret**.
+2. Enter the **Path**, such as `database/password`. Slashes group secrets.
+3. Write the **Value**: under **Key and value**, one row per field (press **Add a field** for more);
+   under **JSON**, any JSON object, including numbers and nested objects.
+4. Optionally open **Custom metadata** and write a JSON object, such as an owner.
+5. Press **Save secret**. The secret's page opens; the value is not shown back.
+
+To write the next version, open the secret, press **New version**, write the value and press **Save
+version**. The page checks against the current version, so if someone else wrote a newer one first,
+nothing is written and the page asks you to look at it and write again. A **New secret** whose path
+already exists becomes that secret's next version, checked the same way.
 
 - REST: `POST /v1/put_secret` with
   `{"mount_id": "<mount id>", "name": "database/password", "value": {"password": "<the password>"}}`.
@@ -59,6 +87,15 @@ The first write is version 1; each later write adds the next version. Two option
 
 ## Read a Secret
 
+1. Open the secret and press **Reveal value** for the current version, or **Reveal** on a version in
+   **Version history**.
+2. The value appears masked. Press **Show** to see it, the copy button beside a field to copy it,
+   or **Copy JSON** for the whole object.
+3. Press **Hide** when you are done. Leaving the page also forgets the value; it is never stored in
+   the browser.
+
+Every reveal is an audited read.
+
 - REST: `GET /v1/read_secret?mount_id=<mount id>&name=database/password` reads the current version;
   add `&version=2` for another one.
 - MCP: `read_secret` with `{"mount_id": "<mount id>", "name": "database/password", "version": 2}`.
@@ -66,16 +103,24 @@ The first write is version 1; each later write adds the next version. Two option
 ## Inspect a Secret's History
 
 1. On **Organization → Secrets**, press **Secrets** on the mount.
-2. Enter the **Secret name** and press **Inspect history**.
+2. Press the secret's path in the list.
 
-The page shows the current version, the number of versions, how many are destroyed, the custom
-metadata, and each version with its state (active, deleted or destroyed) and dates. It never shows a
-value.
+The page shows the current version, how many versions are live, deleted and destroyed, the custom
+metadata, and each version with its state (live, deleted or destroyed) and dates.
 
 - REST: `GET /v1/secret_metadata?mount_id=<mount id>&name=database/password`.
 - MCP: `secret_metadata`.
 
 ## Delete, Undelete or Destroy Versions
+
+On the secret's page, each version in **Version history** has its actions:
+
+- **Delete** asks once, then hides the version. Its data is kept.
+- **Undelete** brings a deleted version back at once.
+- **Destroy** erases the version's value for good. The dialog names what is lost and asks you to type
+  the secret's path before **Destroy for good** is enabled.
+
+Through the API:
 
 - Delete (reversible): `POST /v1/delete_secret_versions` with
   `{"mount_id": "<mount id>", "name": "database/password", "versions": [1, 2]}`.
@@ -95,6 +140,21 @@ mount's keys with their current version, whether each was derived from another, 
 created and updated. Key material is never returned.
 
 Create a key:
+
+1. Press **New key** and enter a **Name** (lowercase letters, digits and dashes). One key encrypts,
+   signs and computes HMACs; there is no key type to choose.
+2. To derive a child of another key instead, choose it in **Derive from** and enter a **Context**
+   (text such as a region), then press **Derive key**. Otherwise press **Create key**.
+
+Rotate a key: press **Rotate** on its row. The dialog names the version that becomes current; older
+versions still decrypt and verify.
+
+Try a key: press **Try it** on its row, choose **Encrypt**, **Decrypt**, **Rewrap**, **Sign**,
+**Verify** or **HMAC**, enter the text, and press the button. The page sends text as base64url for
+you. Encrypt fills the ciphertext for a following decrypt, and sign fills the signature for a
+following verify. Nothing you type there is kept.
+
+Through the API:
 
 - REST: `POST /v1/create_encryption_key` with `{"mount_id": "<mount id>", "name": "customer-data"}`.
 - MCP: `create_encryption_key`.
@@ -162,7 +222,7 @@ and the next rotation finishes it.
 | Call | Needs |
 |---|---|
 | `create_secret_mount` | `admin` on the organization |
-| `list_secret_mounts`, `get_secret_mount`, `read_secret`, `secret_metadata`, `list_encryption_keys`, `get_encryption_key` | `read` on the mount |
+| `list_secret_mounts`, `get_secret_mount`, `list_secrets`, `read_secret`, `secret_metadata`, `list_encryption_keys`, `get_encryption_key` | `read` on the mount |
 | `put_secret`, the version changes, every key operation, leases | `write` on the mount |
 | `rotate_customer_kek` | `admin` on the account |
 
@@ -180,7 +240,9 @@ lifecycle events are also appended to lake's transparency log ([Activity and Aud
 | What you see | Why, and what to do |
 |---|---|
 | **Choose a workspace** on the Secret Mounts page | You have several workspaces; pick the one the mount was created in. |
-| **No secret mounts** | None in that workspace that you can read. An organization admin creates them. |
+| **No secret mounts** | None in that workspace that you can read. An organization admin creates one with **New mount**. |
+| **No organization** in New mount | A mount belongs to an organization. Create one under **Organization → Organizations** first. |
+| **Someone wrote a newer version** | Another write changed the secret while you edited. Close the drawer, look at the new version, and write again. |
 | `invalid_input` at `/workspace_id` | The workspace is missing, unknown or not one of the account's. |
 | `conflict` at `/name` | A mount with that name already exists in that workspace and organization. |
 | `conflict` at `/check_and_set` | Another write changed the secret first. Read it again and retry. |
