@@ -6,8 +6,16 @@ import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
 import { Actions, Button, Page } from "@/lib/ui";
 import { INVITATION_NOTE } from "@/pages/account/signIn";
+import CommandCenter from "./CommandCenter";
 
 export default function HomePage() {
+  const { viewer } = useSession();
+  // A signed-in person sees the platform at a glance (CommandCenter); visitors see the landing.
+  if (viewer.signed_in && !viewer.administrator) return <CommandCenter />;
+  return <Landing />;
+}
+
+function Landing() {
   useTrail([{ label: "Home", to: "/" }, { label: "Welcome to lake" }], "design, train, and ship AI");
   const { viewer } = useSession();
   const signedIn = viewer.signed_in;
