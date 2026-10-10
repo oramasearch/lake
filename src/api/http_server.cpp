@@ -8209,6 +8209,7 @@ struct ApiServer::Impl {
             "/passkey-sign-in",
             "/sessions",
             "/tokens",
+            "/developer/api",
             "/developer/mcp",
             "/docs",
             "/docs/:page",

@@ -586,8 +586,9 @@ main :not(pre) > code {
 /* ---------------------------------------------------------------- the shell's own controls */
 
 /* lake.css styles every <button>; the shell draws its controls with utilities, which only set what
-   they name. Reset the rest here (components layer), so the utilities alone decide. */
-[data-shell] :is(header, nav) button {
+   they name. Reset the rest here (components layer), so the utilities alone decide. A page's own
+   header (`.page-header`, its actions) is not the shell's: its buttons keep the kit's look. */
+[data-shell] :is(header, nav):not(.page-header) button {
   min-height: 0;
   border-width: 0;
   padding: 0;
@@ -596,7 +597,7 @@ main :not(pre) > code {
   font-weight: inherit;
   line-height: inherit;
 }
-[data-shell] :is(header, nav) button:hover {
+[data-shell] :is(header, nav):not(.page-header) button:hover {
   color: inherit;
   background: transparent;
 }

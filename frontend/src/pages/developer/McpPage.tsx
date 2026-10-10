@@ -1,260 +1,340 @@
-/** Developer → MCP (`/developer/mcp`): connect an agent to lake. The endpoint, the tool groups, the
- * worked flows and the scope lists come from `mcp_setup`; the key is `create_token` with the
- * input the server's `/developer/mcp/key` handler built. The key is shown once and lives only in
- * this page's memory; every setup block carries it, or `$LAKE_KEY` before one is made. */
-import { useState } from "react";
-import { Link } from "react-router-dom";
-import { act, useRead } from "@/lib/api";
-import { Button, CopyBlock, Field, Form, Page, Query } from "@/lib/ui";
-import { messageOf } from "@/pages/account/signIn";
+/** Developer → MCP (`/developer/mcp`): connect an agent to lake, after rev-os's Developer → MCP.
+ * The endpoint, the tool groups, the worked flows and the read-only scopes come from `mcp_setup`;
+ * a key is `create_token` (the Keys tab, shared with Developer → API). Connect has the setup for
+ * each client with the new key filled in, or one pasted, or `$LAKE_KEY`; the skill, `llms.txt`
+ * and OpenAPI. Tools lists every tool `tools/list` serves, by group, read or write, and the flows.
+ * The key is shown once and lives only in this page's memory. */
+import { type ReactNode, useMemo, useState } from "react";
+import { ArrowUpRight, ChevronDown, ChevronRight, Code, KeyRound, Lock, PenLine, Search, Sparkles } from "lucide-react";
+import { useSession } from "@/lib/session";
+import { Button, Card, cx, Empty, Page, Query, StateTabs } from "@/lib/ui";
+import { CodeBlock, Chip, DownloadButton, KeysPanel, type McpSetup, originOf, PageTabs, useMcpSetup, useTab } from "./parts";
 
-/** A tool as `mcp_setup` lists it: its name, or the name with its description and access. */
-type ToolEntry = string | { name: string; title?: string; description?: string; writes?: boolean; access?: string };
-/** A flow step: the tool and what it is for, or a sentence. */
-type FlowStep = string | { tool: string; note?: string };
-
-type McpSetup = {
-  origin: string;
-  mcp_url: string;
-  tool_groups: { title: string; summary?: string; tools: ToolEntry[] }[];
-  flows: { title: string; summary?: string; steps: FlowStep[] }[];
-  scopes: { read_only: string[]; all: string[] };
-};
-
-const NO_WORKSPACE = { workspace: null } as const;
-
-type Access = "all" | "read";
-
-/** The `create_token` input the server's MCP key handler built (serve_mcp_key). */
-export function mcpKeyInput(access: Access, lifetime: string, reason: string, scopes: McpSetup["scopes"]) {
-  const readOnly = access === "read";
-  const input: Record<string, unknown> = {
-    name: readOnly ? "MCP key (read-only)" : "MCP key",
-    scopes: readOnly ? scopes.read_only : ["*"],
-    static: false,
-    reason: "created on Developer → MCP",
-  };
-  if (lifetime === "never") {
-    // A key that never expires needs named scopes: "every tool" names every capability.
-    input.never_expires = true;
-    if (reason.trim()) input.reason = reason.trim();
-    if (!readOnly) input.scopes = scopes.all;
-  } else if (lifetime) {
-    input.expires_in_seconds = Number.parseInt(lifetime, 10);
-  }
-  return input;
-}
-
-function toolName(tool: ToolEntry): string {
-  return typeof tool === "string" ? tool : tool.name;
-}
+const TABS = ["connect", "keys", "tools"] as const;
+type Tab = (typeof TABS)[number];
+type Client = "claude-code" | "cursor" | "claude-desktop" | "curl";
 
 export default function McpPage() {
-  const setup = useRead<McpSetup>("mcp_setup", undefined, NO_WORKSPACE);
-  const endpoint = setup.data?.mcp_url ?? "";
+  const tab = useTab(TABS);
+  const { viewer } = useSession();
+  const setup = useMcpSetup();
+  const [fresh, setFresh] = useState<string | null>(null);
+  const [pasted, setPasted] = useState("");
+  const endpoint = setup.data?.mcp_url ?? `${originOf(viewer)}/mcp`;
+  const toolCount = setup.data?.tool_groups.reduce((n, g) => n + g.tools.length, 0);
+
   return (
     <Page
       eyebrow="Developer"
       title="MCP"
       sub={
         <>
-          Connect an agent to lake. Every capability on this site is an MCP tool at <code>{endpoint || "…/mcp"}</code>, the same registry REST and OpenAPI serve,
-          checked and audited as your own calls.
+          Connect Claude Code, Cursor, Claude Desktop or any MCP client to lake. Every capability on this site is an MCP tool at <code>{endpoint}</code>, from the
+          same registry REST and OpenAPI serve, checked and audited as your own calls.
         </>
       }
+      actions={
+        <Button to="/developer/api">
+          <Code size={14} aria-hidden /> API keys and operations
+        </Button>
+      }
     >
-      <Query q={setup} what="the MCP setup" lines={6}>
-        {(value) => <McpBody setup={value} />}
-      </Query>
+      <div className="mb-5 flex flex-wrap items-center gap-2 rounded-[7px] border border-hairline bg-surface px-4 py-2.5 text-[12.5px]">
+        <span className="label m-0">Endpoint</span>
+        <code className="font-mono break-all text-ink">{endpoint}</code>
+        <Chip>JSON-RPC 2.0</Chip>
+        <Chip>protocol 2025-06-18</Chip>
+        <Chip tone="action">Authorization: Bearer &lt;key&gt;</Chip>
+      </div>
+      <PageTabs<Tab>
+        value={tab}
+        tabs={[
+          { id: "connect", label: "Connect" },
+          { id: "keys", label: "Keys" },
+          { id: "tools", label: "Tools", count: toolCount },
+        ]}
+      />
+      {tab === "connect" && <Connect endpoint={endpoint} fresh={fresh} pasted={pasted} onPaste={setPasted} admin={viewer.administrator} />}
+      {tab === "keys" && <KeysPanel purpose="mcp" setup={setup} fresh={fresh} onCreated={setFresh} onDone={() => setFresh(null)} />}
+      {tab === "tools" && (
+        <Query q={setup} what="the MCP setup" lines={8}>
+          {(value) => <Tools setup={value} />}
+        </Query>
+      )}
     </Page>
   );
 }
 
-function McpBody({ setup }: { setup: McpSetup }) {
-  const [access, setAccess] = useState<Access>("all");
-  const [lifetime, setLifetime] = useState("");
-  const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [key, setKey] = useState<string | null>(null);
-  const readOnly = new Set(setup.scopes.read_only);
-
-  const create = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const value = await act<{ secret?: string }>("create_token", mcpKeyInput(access, lifetime, reason, setup.scopes), NO_WORKSPACE);
-      setKey(value.secret ?? null);
-    } catch (e) {
-      setError(messageOf(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const endpoint = setup.mcp_url;
-  const bearer = key ?? "$LAKE_KEY";
-  const claudeCode = `claude mcp add --transport http lake ${endpoint} --header "Authorization: Bearer ${bearer}"`;
-  const cursor = `{\n  "mcpServers": {\n    "lake": {\n      "url": "${endpoint}",\n      "headers": { "Authorization": "Bearer ${bearer}" }\n    }\n  }\n}`;
-  const desktop = `{\n  "mcpServers": {\n    "lake": {\n      "command": "npx",\n      "args": ["-y", "mcp-remote", "${endpoint}", "--header", "Authorization: Bearer ${bearer}"]\n    }\n  }\n}`;
-  const curl =
-    `curl -s ${endpoint} -H "Authorization: Bearer ${bearer}" -H 'Content-Type: application/json' \\\n` +
-    `  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'\n` +
-    `curl -s ${endpoint} -H "Authorization: Bearer ${bearer}" -H 'Content-Type: application/json' \\\n` +
-    `  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'`;
-
+function Connect({ endpoint, fresh, pasted, onPaste, admin }: { endpoint: string; fresh: string | null; pasted: string; onPaste: (v: string) => void; admin: boolean }) {
+  const [client, setClient] = useState<Client>("claude-code");
+  const key = fresh || pasted.trim() || "$LAKE_KEY";
+  const real = !!(fresh || pasted.trim());
   return (
-    <>
-      {error && (
-        <div className="panel notice status-danger" role="alert">
-          <p>{error}</p>
-        </div>
-      )}
-      {key ? (
-        <section className="panel notice" role="status">
-          <h2>Your MCP Key</h2>
-          <p>
-            Shown once. It is in every block below; copy what you need now. Revoke it on <Link to="/tokens">Tokens</Link>.
-          </p>
-          <CopyBlock value={key} label="Key" />
-        </section>
-      ) : (
-        <section className="panel">
-          <h2>Create an MCP Key</h2>
-          <p>
-            A lake API token for your agent or script. It acts as you. By default it lasts as long as your sign-in, at most 30 days; choose <em>Never</em> for a
-            standing key, if your space allows keys that never expire. Revoke any key on <Link to="/tokens">Tokens</Link>.
-          </p>
-          <Form onSubmit={create}>
-            <fieldset>
-              <legend>Access</legend>
-              <label>
-                <input type="radio" name="access" value="all" checked={access === "all"} onChange={() => setAccess("all")} /> Every tool
-              </label>
-              <label>
-                <input type="radio" name="access" value="read" checked={access === "read"} onChange={() => setAccess("read")} /> Read-only tools
-              </label>
-            </fieldset>
-            <Field label="Lifetime">
-              <select name="expires_in_seconds" value={lifetime} onChange={(e) => setLifetime(e.target.value)}>
-                <option value="">As long as my sign-in allows (at most 30 days)</option>
-                <option value="86400">1 day</option>
-                <option value="604800">7 days</option>
-                <option value="never">Never (a standing key)</option>
-              </select>
-            </Field>
-            <Field label="Why this key exists" help="Needed for a key that never expires.">
-              <input name="reason" placeholder="the nightly sync from our data warehouse" value={reason} onChange={(e) => setReason(e.target.value)} />
-            </Field>
-            <div>
-              <Button type="submit" variant="primary" loading={busy}>
-                Create an MCP key
-              </Button>
+    <div className="space-y-6">
+      <Step n={1} title="Your Key" aside={admin ? "The operator connects with the admin token." : "Make one on the Keys tab, or paste one you have. It stays in this page only."}>
+        <Card>
+          {fresh ? (
+            <p className="m-0 flex items-center gap-2 text-[13px] text-ok">
+              <KeyRound size={14} aria-hidden /> Your new key is filled into every block below.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              <p className="m-0 text-[13px] text-ink-2">
+                {admin ? (
+                  <>Paste the admin token to fill the blocks, or leave them reading <code>$LAKE_KEY</code>.</>
+                ) : (
+                  <>
+                    <Button to="?tab=keys" variant="primary">
+                      <KeyRound size={14} aria-hidden /> Create an MCP key
+                    </Button>{" "}
+                    or paste a key you already have:
+                  </>
+                )}
+              </p>
+              <input
+                type="password"
+                autoComplete="off"
+                aria-label="A key you already have"
+                value={pasted}
+                onChange={(e) => onPaste(e.target.value)}
+                placeholder="Paste a key to fill the setup blocks"
+                className="w-full max-w-md"
+              />
             </div>
-          </Form>
-        </section>
-      )}
-      <section className="panel">
-        <h2>Set Up</h2>
-        {!key && (
-          <p className="muted">
-            Create a key above, or put yours in <code>$LAKE_KEY</code>.
-          </p>
-        )}
-        <CopyBlock label="Claude Code" value={claudeCode} />
-        <CopyBlock label="Cursor (mcp.json)" value={cursor} />
-        <CopyBlock label="Claude Desktop (claude_desktop_config.json)" value={desktop} />
-        <CopyBlock label="Any client: JSON-RPC over HTTP" value={curl} />
-        <h3 id="mcp-upgrades">After lake Upgrades</h3>
-        <p>
-          Reconnect your MCP client to lake, or restart it, after lake is upgraded. lake tells a connected client when its tools change (
+          )}
+        </Card>
+      </Step>
+      <Step n={2} title="Set Up Your Client" aside={real ? "Your key is in every block. Copy the one for your client." : <>The blocks read the key from <code>$LAKE_KEY</code> until you make or paste one.</>}>
+        <StateTabs<Client>
+          value={client}
+          onChange={setClient}
+          label="Client"
+          tabs={[
+            { value: "claude-code", label: "Claude Code" },
+            { value: "cursor", label: "Cursor" },
+            { value: "claude-desktop", label: "Claude Desktop" },
+            { value: "curl", label: "Any client (curl)" },
+          ]}
+        />
+        <SetupBlock client={client} endpoint={endpoint} keyValue={key} />
+        <h3 id="mcp-upgrades">After Lake Upgrades</h3>
+        <p className="m-0 text-[13px] text-ink-2">
+          Reconnect your MCP client to lake, or restart it, after lake is upgraded. Lake tells a connected client when its tools change (
           <code>notifications/tools/list_changed</code>), but a client connected before an upgrade, or one that ignores the notice, keeps the tools and schemas it
           first listed.
         </p>
-      </section>
-      <section className="panel">
-        <h2>Teach Your Agent</h2>
-        <ul>
-          <li>
-            <a href="/skills/lake/SKILL.md" download="SKILL.md">
+      </Step>
+      <Step n={3} title="Teach Your Agent" aside="The skill tells an agent what lake is, which tools to use for what, the worked flows and the rules.">
+        <Card>
+          <div className="flex flex-wrap items-center gap-2">
+            <DownloadButton path="/skills/lake/SKILL.md" filename="SKILL.md">
               Download the lake skill
-            </a>
-            : a Claude skill (<code>SKILL.md</code>) with the setup, which tools to use for what, the flows below and the rules. Put it in{" "}
-            <code>~/.claude/skills/lake/</code>.
-          </li>
-          <li>
-            <a href="/llms.txt">llms.txt</a>: lake in one page for any agent.
-          </li>
-          <li>
-            <a href="/llms-full.txt">llms-full.txt</a>: every tool with its input schema.
-          </li>
-          <li>
-            <a href="/v1/openapi.json">OpenAPI</a>: the same tools as REST, <code>GET /v1/&lt;tool&gt;</code> for a read and <code>POST /v1/&lt;tool&gt;</code> for
-            an action.
-          </li>
-        </ul>
-      </section>
-      <section className="panel">
-        <h2>Worked Flows</h2>
-        {setup.flows.map((flow) => (
-          <div key={flow.title}>
-            <h3>{flow.title}</h3>
-            {flow.summary && <p>{flow.summary}</p>}
-            <ol>
-              {flow.steps.map((step, index) => (
-                <li key={index}>
-                  {typeof step === "string" ? (
-                    step
-                  ) : (
-                    <>
-                      <code>{step.tool}</code>
-                      {step.note ? `: ${step.note}` : null}
-                    </>
-                  )}
-                </li>
-              ))}
-            </ol>
+            </DownloadButton>
+            <DownloadButton path="/llms-full.txt" filename="lake-llms-full.txt">
+              llms-full.txt
+            </DownloadButton>
+            <Button href="/llms.txt">
+              llms.txt <ArrowUpRight size={13} aria-hidden />
+            </Button>
+            <Button to="/developer/api?tab=operations">OpenAPI operations</Button>
           </div>
-        ))}
+          <ul className="mt-3 mb-0 space-y-1 pl-5 text-[12.5px] text-ink-2">
+            <li>
+              <b className="text-ink">The lake skill</b>: a Claude skill (<code>SKILL.md</code>) with the setup, the tools for each job, the flows and the rules. Put
+              it in <code>~/.claude/skills/lake/</code>.
+            </li>
+            <li>
+              <b className="text-ink">llms.txt</b>: lake in one page for any agent; <b className="text-ink">llms-full.txt</b> adds every tool with its input schema.
+            </li>
+            <li>
+              <b className="text-ink">OpenAPI</b>: the same tools as REST, <code>GET /v1/&lt;tool&gt;</code> for a read and <code>POST /v1/&lt;tool&gt;</code> for an
+              action.
+            </li>
+          </ul>
+          <div className="mt-3">
+            <CodeBlock title="install the skill for Claude Code" code={`mkdir -p ~/.claude/skills/lake && mv ~/Downloads/SKILL.md ~/.claude/skills/lake/SKILL.md`} />
+          </div>
+        </Card>
+      </Step>
+    </div>
+  );
+}
+
+/** One setup block per client, the key filled in. The ids are the ones the browser check reads. */
+function SetupBlock({ client, endpoint, keyValue }: { client: Client; endpoint: string; keyValue: string }) {
+  if (client === "claude-code")
+    return (
+      <CodeBlock
+        id="mcp-claude-code"
+        title="terminal"
+        code={`claude mcp add --transport http lake ${endpoint} --header "Authorization: Bearer ${keyValue}"`}
+        note="Then run /mcp inside Claude Code to see lake connected. Add --scope user to use it in every project."
+      />
+    );
+  if (client === "cursor")
+    return (
+      <CodeBlock
+        id="mcp-cursor"
+        title="~/.cursor/mcp.json"
+        code={JSON.stringify({ mcpServers: { lake: { url: endpoint, headers: { Authorization: `Bearer ${keyValue}` } } } }, null, 2)}
+        note="Cursor → Settings → MCP shows lake and its tools once the file is saved."
+      />
+    );
+  if (client === "claude-desktop")
+    return (
+      <CodeBlock
+        id="mcp-claude-desktop"
+        title="claude_desktop_config.json"
+        code={JSON.stringify({ mcpServers: { lake: { command: "npx", args: ["-y", "mcp-remote", endpoint, "--header", `Authorization: Bearer ${keyValue}`] } } }, null, 2)}
+        note="Claude Desktop → Settings → Developer → Edit Config. mcp-remote bridges the desktop app to lake over HTTP. Restart Claude Desktop afterwards."
+      />
+    );
+  return (
+    <div className="space-y-3">
+      <CodeBlock
+        id="mcp-curl-initialize"
+        title="initialize"
+        code={`curl -s ${endpoint} \\\n  -H "Authorization: Bearer ${keyValue}" \\\n  -H 'Content-Type: application/json' \\\n  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'`}
+      />
+      <CodeBlock
+        id="mcp-curl-tools"
+        title="tools/list"
+        code={`curl -s ${endpoint} \\\n  -H "Authorization: Bearer ${keyValue}" \\\n  -H 'Content-Type: application/json' \\\n  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'`}
+        note="tools/list needs no key; tools/call on anything but server_info does."
+      />
+      <CodeBlock
+        id="mcp-curl-call"
+        title="tools/call"
+        code={`curl -s ${endpoint} \\\n  -H "Authorization: Bearer ${keyValue}" \\\n  -H 'Content-Type: application/json' \\\n  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_customers","arguments":{"limit":5}}}'`}
+        note="A refused call is a result with isError: true and the same error envelope REST answers."
+      />
+    </div>
+  );
+}
+
+function Tools({ setup }: { setup: McpSetup }) {
+  const [needle, setNeedle] = useState("");
+  const [access, setAccess] = useState<"all" | "read" | "write">("all");
+  const [open, setOpen] = useState<string | null>(null);
+  const all = setup.tool_groups.flatMap((g) => g.tools);
+  const writes = all.filter((t) => t.writes).length;
+  const groups = useMemo(() => {
+    const q = needle.trim().toLowerCase();
+    return setup.tool_groups
+      .map((group) => ({
+        ...group,
+        tools: group.tools.filter(
+          (t) => (access === "all" || (access === "write") === t.writes) && (!q || `${t.name} ${t.title} ${group.title}`.toLowerCase().includes(q)),
+        ),
+      }))
+      .filter((group) => group.tools.length > 0);
+  }, [setup, needle, access]);
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <label className="relative flex w-full max-w-xs items-center">
+            <Search size={14} className="pointer-events-none absolute left-2.5 text-ink-3" aria-hidden />
+            <span className="sr-only">Find a tool</span>
+            <input type="search" value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="Find a tool" className="w-full pl-8" />
+          </label>
+          <StateTabs<"all" | "read" | "write">
+            value={access}
+            onChange={setAccess}
+            label="Access"
+            tabs={[
+              { value: "all", label: `All · ${all.length}` },
+              { value: "read", label: `Read · ${all.length - writes}` },
+              { value: "write", label: `Write · ${writes}` },
+            ]}
+          />
+        </div>
+        {!groups.length ? (
+          <Empty>{all.length ? "No tool matches." : "No tools are listed."}</Empty>
+        ) : (
+          <div className="space-y-3">
+            {groups.map((group) => {
+              const isOpen = open === group.title || !!needle.trim();
+              return (
+                <section key={group.title} className="overflow-hidden rounded-[6px] border border-hairline bg-surface">
+                  <button
+                    type="button"
+                    aria-expanded={isOpen}
+                    onClick={() => setOpen(open === group.title ? null : group.title)}
+                    className="flex min-h-0 w-full cursor-pointer items-start justify-start gap-3 border-0 bg-transparent px-4 py-2.5 text-left hover:bg-raised"
+                  >
+                    {isOpen ? <ChevronDown size={14} className="mt-[3px] shrink-0 text-ink-3" aria-hidden /> : <ChevronRight size={14} className="mt-[3px] shrink-0 text-ink-3" aria-hidden />}
+                    <span className="min-w-0">
+                      <span className="block text-[13.5px] font-semibold text-ink">
+                        {group.title} <span className="font-mono text-[11px] font-normal text-ink-3">{group.tools.length}</span>
+                      </span>
+                      {group.summary && <span className="block text-[12.5px] text-ink-2">{group.summary}</span>}
+                    </span>
+                  </button>
+                  {isOpen && (
+                    <ul className="m-0 list-none divide-y divide-hairline border-t border-hairline p-0">
+                      {group.tools.map((tool) => (
+                        <li key={tool.name} className="flex items-center gap-3 px-4 py-1.5">
+                          {tool.writes ? (
+                            <span className="inline-flex w-[52px] shrink-0 items-center gap-1 font-mono text-[10.5px] text-action">
+                              <PenLine size={10} aria-hidden /> write
+                            </span>
+                          ) : (
+                            <span className="inline-flex w-[52px] shrink-0 items-center gap-1 font-mono text-[10.5px] text-ok">
+                              <Lock size={10} aria-hidden /> read
+                            </span>
+                          )}
+                          <code className="min-w-0 border-0 bg-transparent p-0 font-mono text-[12.5px] break-all text-ink">{tool.name}</code>
+                          <span className="ml-auto hidden max-w-[55%] truncate text-[12px] text-ink-3 md:inline">{tool.title}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              );
+            })}
+          </div>
+        )}
+        <p className="mt-3 flex items-center gap-1.5 text-[12px] text-ink-3">
+          <Sparkles size={12} aria-hidden /> The same tools <code>tools/list</code> serves; a read-only key sees every tool but is refused the writes. Each call runs
+          as you and is recorded in the audit log.
+        </p>
+      </div>
+      <section>
+        <h2>Worked Flows</h2>
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          {setup.flows.map((flow) => (
+            <Card key={flow.title} title={flow.title}>
+              {flow.summary && <p className="text-[12.5px] text-ink-2">{flow.summary}</p>}
+              <ol className="m-0 space-y-1 pl-5 text-[12.5px]">
+                {flow.steps.map((step, index) => (
+                  <li key={index}>
+                    <code className="font-mono text-ink">{step.tool}</code>
+                    {step.note && <span className="text-ink-2">: {step.note}</span>}
+                  </li>
+                ))}
+              </ol>
+            </Card>
+          ))}
+        </div>
       </section>
-      <section className="panel">
-        <h2>What the Tools Do</h2>
-        {setup.tool_groups.map((group) => (
-          <details key={group.title}>
-            <summary>
-              {group.title} <span className="muted">{group.tools.length} tools</span>
-            </summary>
-            {group.summary && <p>{group.summary}</p>}
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Tool</th>
-                    <th>What it does</th>
-                    <th>Access</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {group.tools.map((tool) => {
-                    const name = toolName(tool);
-                    const what = typeof tool === "string" ? null : (tool.title ?? tool.description ?? null);
-                    const writes = typeof tool !== "string" && tool.writes !== undefined ? tool.writes : !readOnly.has(name);
-                    return (
-                      <tr key={name}>
-                        <td>
-                          <code>{name}</code>
-                        </td>
-                        <td>{what ?? <span className="muted">—</span>}</td>
-                        <td>{writes ? "write" : "read"}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </details>
-        ))}
-      </section>
-    </>
+    </div>
+  );
+}
+
+/** A numbered step with its title and a line of advice on the left (rev-os's setup steps). */
+function Step({ n, title, aside, children }: { n: number; title: string; aside?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="grid grid-cols-1 gap-4 border-t border-hairline pt-5 first:border-t-0 first:pt-0 lg:grid-cols-[220px_minmax(0,1fr)]">
+      <div>
+        <div className="flex items-center gap-2.5">
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-action font-mono text-[11px] font-semibold text-on-action">{n}</span>
+          <h3 className="m-0 text-[14.5px]">{title}</h3>
+        </div>
+        {aside && <div className={cx("mt-2 pl-[34px] text-[12.5px] leading-relaxed text-ink-3")}>{aside}</div>}
+      </div>
+      <div className="min-w-0">{children}</div>
+    </section>
   );
 }
