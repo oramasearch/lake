@@ -29,8 +29,8 @@ may wrap across source lines.
 | | `search` | Search |
 | | `load-data` | Datasets and Loading Data |
 | | `transcripts` | Transcripts and Speech-to-Text |
-| Design | `design` | Projects and Pipelines |
-| | `solutions` | Solutions, Methodologies and Opportunities |
+| Design | `design` | AI Projects and Pipelines |
+| | `solutions` | AI Solutions, Methodologies and Opportunities |
 | Train | `train` | Train a Model |
 | | `agents` | Agents |
 | | `experiments` | Experiments |

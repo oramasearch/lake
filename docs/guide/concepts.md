@@ -2,11 +2,31 @@
 
 Checked against lake's source on 2026-10-10.
 
+lake is where you **design, train and ship AI**. What you build is an **AI solution**: an AI
+system that answers one business problem end to end. You build it in an **AI project**, and the
+project's **pipeline** is the workflow that builds it: Design decides what to build, Train builds
+and measures it, Ship puts it in front of the people and systems that use it.
+
+## How an AI Solution Is Built
+
+| Step | What happens | Where |
+|---|---|---|
+| **1. Pick the problem** | Choose the business question and the decision the AI should improve. Start from a ready-made AI solution in Orama's catalogue, an opportunity Auto-Suggest found in your data, or a blank project. | **Design → Solutions**, **Opportunities**, **Projects** |
+| **2. Design the workflow** | The AI project's pipeline lays out the steps from your data to a result: connect, clean, model, index, serve, act. You review and approve it. | **Design → Projects** |
+| **3. Train and measure** | Running the pipeline trains the models and measures them on held-out data. Experiments try many settings to find the best. | **Train → Runs**, **Experiments** |
+| **4. Ship** | Publish the model or search index, and put it in an app or behind an API, for people and systems to use. | **Ship** |
+
+Agents help at every step: Ask Orama answers and hands work on; the Project Agent designs and
+changes pipelines; ExperimentsAgent and ApplicationAgent propose studies and apps. Nothing they
+propose changes anything until you confirm it.
+
+## Glossary
+
 The words lake uses, grouped by where you meet them. Each entry says what the thing is and which
 page covers it. Ids named in code (`customer_id`, `workspace_id`, …) are the inputs the REST API and
 MCP tools take.
 
-## Accounts and Workspaces
+### Accounts and Workspaces
 
 | Term | What it is |
 |---|---|
@@ -23,7 +43,7 @@ MCP tools take.
 | **Invitation** | An offer to join an organization as owner, admin or member, sent to an email or a handle, valid for 1 to 90 days. |
 | **SSO and SCIM** | Signing in through your company's identity provider (SAML or OIDC), and keeping members in step with it (SCIM). See [Single Sign-On and SCIM](/docs/sso). |
 
-## Data
+### Data
 
 | Term | What it is |
 |---|---|
@@ -41,18 +61,18 @@ MCP tools take.
 | **Transcript** | The text of a meeting, call or voice memo, kept in a workspace and searchable. Audio sent for speech-to-text is never kept. See [Transcripts and Speech-to-Text](/docs/transcripts). |
 | **Search** | One query across repositories, code, datasets, transcripts, projects, agents, models and these Docs. See [Search](/docs/search). |
 
-## Design and Train
+### Design and Train
 
 | Term | What it is |
 |---|---|
-| **Project** | A business question and the decision it should improve. It holds pipelines. See [Projects and Pipelines](/docs/design). |
-| **Pipeline** | The steps that turn data into a result: connect, clean, model, index, serve, act, joined by arrows. It must be **approved** before it runs, and again after any change. |
+| **AI project** | Where you build an AI solution: the business question, the decision it should improve, and the pipeline that builds it, with its runs and models. Called a *project* on the pages. See [AI Projects and Pipelines](/docs/design). |
+| **Pipeline** | The AI project's workflow: the steps that turn data into a result: connect, clean, model, index, serve, act, joined by arrows. It must be **approved** before it runs, and again after any change. |
 | **Run** | One execution of a pipeline, with its report, lineage, log and trace. See [Train a Model](/docs/train). |
 | **Hold-out** | The share of rows kept out of training to measure the model. A score without one is *in-sample* and flatters the model. |
 | **Held-out metrics** | Scores measured on the held-out rows, named as the run report names them: `held_out_auc`, `held_out_log_loss`, `held_out_accuracy`, `held_out_rmse`, `held_out_mae`. A run's report leads with its held-out score. |
 | **Methodology** | A modelling method the engine runs, such as segmentation, forecasting or anomaly detection. **Design → Methodologies** lists each one, what it needs and whether your workspace runs it. |
-| **Solution** | A module from Orama's catalogue that answers one business problem end to end: the methodologies it composes, the decision it drives and how its return is measured. See [Solutions, Methodologies and Opportunities](/docs/solutions). |
-| **Opportunity** | A project worth building that Auto-Suggest found by scanning your workspace's data. It is kept until you create a project from it or dismiss it. |
+| **AI solution** | An AI system that answers one business problem end to end: the decision it drives, the methodologies it composes and how its return is measured. You build one in an AI project; **Design → Solutions** is Orama's catalogue of ready-made ones to start from. See [AI Solutions, Methodologies and Opportunities](/docs/solutions). |
+| **Opportunity** | An AI project worth building that Auto-Suggest found by scanning your workspace's data. It is kept until you create a project from it or dismiss it. |
 | **Model** | What a training run produced. A **published** model can be called from outside lake with `predict`. |
 | **Search index** | A full-text index over a dataset's text columns. A published index answers outside searches with `search_index`. See [Models and Search Indexes](/docs/ship). |
 | **Study and trial** | An experiment: a study tries many settings for one objective; each attempt is a trial with its own run and curves. See [Experiments](/docs/experiments). |
@@ -63,7 +83,7 @@ MCP tools take.
 | **Proposal** | A change an agent wants to make, shown in full. Nothing changes until you confirm it. |
 | **Ask Orama** | The agent in the top bar of every page. It answers from what you can read and hands work to other agents. See [Ask Orama](/docs/ask-orama). |
 
-## Ship
+### Ship
 
 | Term | What it is |
 |---|---|
@@ -75,7 +95,7 @@ MCP tools take.
 | **Service** | A database, stream or engine lake runs for you: Postgres, Zetta, Kafka, ClickHouse, TiDB, Cassandra, Valkey. See [Services and Storage](/docs/services). |
 | **Storage** | A volume lake provisions for a workspace's services. |
 
-## Credentials, Audit and Usage
+### Credentials, Audit and Usage
 
 | Term | What it is |
 |---|---|

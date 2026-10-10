@@ -1,8 +1,8 @@
-# Projects and Pipelines
+# AI Projects and Pipelines
 
-**Design** is where you decide what to build. A **project** starts from a business question: the
-decision it should improve and how you will measure it. A project holds **pipelines**, the steps
-that turn your data into a result. You describe what a pipeline should predict or answer; the
+**Design** is where you decide what AI to build. An **AI project** is how you build an **AI
+solution**: it starts from a business question, the decision it should improve and how you will
+measure it, and holds the **pipelines**, the workflow that turns your data into a result. You describe what a pipeline should predict or answer; the
 workspace engine builds the steps; you review, approve and run it.
 
 Everything on this page happens in the workspace selected in the top bar. Every REST and MCP call
@@ -13,10 +13,10 @@ organization's) and `workspace_id`; [Getting Started](/docs) says where to find 
 
 | Term | What it is |
 |---|---|
-| **Project** | A business question and the decision it should improve. It has a name, a description, its intent and its pipelines. |
-| **Pipeline** | A graph of steps joined by arrows. Each step has a kind: `connect`, `clean`, `model`, `index`, `serve` or `act`. |
+| **AI project** | Where an AI solution is built: a business question and the decision it should improve, with a name, a description, its intent and its pipelines. The pages call it a *project*. |
+| **Pipeline** | The project's workflow: a graph of steps joined by arrows. Each step has a kind: `connect`, `clean`, `model`, `index`, `serve` or `act`. |
 | **Edge** | An arrow between two steps. A solid arrow carries data (`data_flow`); a dashed one only orders the steps (`control`). |
-| **Methodology** | The modelling method a pipeline uses, such as churn classification, segmentation or forecasting ([Solutions, Methodologies and Opportunities](/docs/solutions)). |
+| **Methodology** | The modelling method a pipeline uses, such as churn classification, segmentation or forecasting ([AI Solutions, Methodologies and Opportunities](/docs/solutions)). |
 | **Approval** | A pipeline runs only once approved, and must be approved again after any change. |
 | **Gate** | The engine's correctness checks, each with its reason. A run starts only when they pass. |
 | **Project Agent** | The agent that designs pipelines and proposes changes to them. It never changes a pipeline itself: you apply its proposal. |
@@ -235,7 +235,7 @@ members read unless they were granted `write` ([Grants and Effective Access](/do
 ## Related Pages
 
 - [Datasets and Loading Data](/docs/load-data)
-- [Solutions, Methodologies and Opportunities](/docs/solutions)
+- [AI Solutions, Methodologies and Opportunities](/docs/solutions)
 - [Train a Model](/docs/train)
 - [Agents](/docs/agents)
 - [Ask Orama](/docs/ask-orama)

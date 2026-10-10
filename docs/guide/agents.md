@@ -241,5 +241,5 @@ credential is generated for the run and is never stored in lake.
 - [Train a Model](/docs/train)
 - [Experiments](/docs/experiments)
 - [Apps](/docs/apps)
-- [Solutions, Methodologies and Opportunities](/docs/solutions)
+- [AI Solutions, Methodologies and Opportunities](/docs/solutions)
 - [Streams](/docs/streams)

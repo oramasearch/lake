@@ -1,7 +1,8 @@
 # Getting Started
 
-lake is where your organization keeps its data, designs and trains models on it, and ships what it
-builds. This page takes you from your first sign-in to a model you can call from your own code.
+lake is where you **design, train and ship AI**. You build an **AI solution** in an **AI project**,
+whose pipeline is the workflow from your data to a result; lake keeps the data it learns from and
+runs what you ship ([Concepts and Glossary](/docs/concepts)). This page takes you from your first sign-in to a model you can call from your own code.
 Each step says where to click, then gives the same step as a REST call and an MCP tool, for when
 you automate it.
 
@@ -22,7 +23,7 @@ The rail on the left groups lake's pages:
 |---|---|---|
 | **Home** | Home | Where to start and what is happening |
 | **Data** | Repositories, Shared with Me, Search, Datasets, Transcripts | Where your data lives and is found |
-| **Design** | Projects, Opportunities, Solutions, Methodologies, Agent Library | Deciding what to build |
+| **Design** | Projects, Opportunities, Solutions, Methodologies, Agent Library | Deciding what AI to build, and designing its workflow |
 | **Train** | Agents, Runs, Experiments, Streams | Training models and agents, and watching them work |
 | **Ship** | Models, Search Indexes, Packages, Apps, Deployments, Services, Workspaces | Putting what you built to work |
 | **Organization** | Organizations, Secrets, Usage, Activity | People, credentials, usage and history |
@@ -89,7 +90,7 @@ Data](/docs/load-data). Recordings and meeting notes go to **Data → Transcript
 
 - MCP: `workspace_act` with the same input.
 
-A name already in use answers `conflict`. More: [Projects and Pipelines](/docs/design).
+A name already in use answers `conflict`. More: [AI Projects and Pipelines](/docs/design).
 
 ## 4. Build and Approve a Pipeline
 
@@ -109,7 +110,7 @@ example, approving:
 ```
 
 To change the pipeline, use **Ask the Project Agent** on its page: it proposes edits you review,
-then apply or discard ([Projects and Pipelines](/docs/design)).
+then apply or discard ([AI Projects and Pipelines](/docs/design)).
 
 ## 5. Train It
 
@@ -153,7 +154,7 @@ From an AI agent it is the MCP tool `predict`. **Unpublish** stops every outside
 | Keep code and files in lake | [Repositories](/docs/repositories), [Sharing and Shared with Me](/docs/sharing) |
 | Find anything | [Search](/docs/search) |
 | Turn recordings into searchable text | [Transcripts and Speech-to-Text](/docs/transcripts) |
-| Start from a ready-made business solution | [Solutions, Methodologies and Opportunities](/docs/solutions) |
+| Start from a ready-made business solution | [AI Solutions, Methodologies and Opportunities](/docs/solutions) |
 | Build agents and tune models | [Agents](/docs/agents), [Experiments](/docs/experiments), [Streams](/docs/streams) |
 | Ship apps, images and databases | [Apps](/docs/apps), [Packages, Builds and the Registry](/docs/registry), [Deployments and Environments](/docs/deployments), [Services and Storage](/docs/services) |
 | Ask in plain words | [Ask Orama](/docs/ask-orama) |

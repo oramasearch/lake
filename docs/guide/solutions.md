@@ -1,13 +1,13 @@
-# Solutions, Methodologies and Opportunities
+# AI Solutions, Methodologies and Opportunities
 
 Three Design pages help you decide what to build before you build it:
 
-- **Design → Solutions**: Orama's catalogue of solutions. Each module answers one business problem
-  end to end. Start one and it becomes a project in your workspace.
+- **Design → Solutions**: Orama's catalogue of ready-made AI solutions. Each answers one business
+  problem end to end. Start one and it becomes an AI project in your workspace, with its pipeline.
 - **Design → Methodologies**: the modelling methods your workspace's engine knows, what each needs
   and makes, and whether it runs there today. Solutions compose them.
 - **Design → Opportunities**: what your data could be used for. Auto-Suggest reads your datasets and
-  recommends what to build from the solutions catalogue.
+  recommends AI projects to build from the solutions catalogue.
 
 Every REST and MCP call on this page names `customer_id` (the id of the account that owns your
 workspaces, yours or your organization's) and `workspace_id`; [Getting Started](/docs) says where
@@ -131,7 +131,7 @@ family; search filters them. A card that does not run here names its tracking is
 
 Open one to see what it needs, what it makes, how it is measured, the **Solutions That Use It**
 and, when it runs here, **Build a pipeline with it**, which opens Projects: open a project and
-choose the methodology under Build a Pipeline ([Projects and Pipelines](/docs/design#build-a-pipeline-from-a-sentence)).
+choose the methodology under Build a Pipeline ([AI Projects and Pipelines](/docs/design#build-a-pipeline-from-a-sentence)).
 
 Through the API it is `list_methodologies` inside `workspace_query`:
 
@@ -223,7 +223,7 @@ Only the person who started a solution (or the operator) can confirm its foundat
 
 ## Related Pages
 
-- [Projects and Pipelines](/docs/design)
+- [AI Projects and Pipelines](/docs/design)
 - [Datasets and Loading Data](/docs/load-data)
 - [Agents](/docs/agents): the Agent Library
 - [Train a Model](/docs/train)

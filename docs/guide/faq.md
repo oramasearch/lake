@@ -174,7 +174,7 @@ limit**. Details: [Usage and Metering](/docs/usage).
 - `gate_blocked`: a check refused the run, and nothing ran. The message names the check; **Check**
   on the pipeline page lists every check with its reason.
 
-Details: [Projects and Pipelines](/docs/design), [Train a Model](/docs/train).
+Details: [AI Projects and Pipelines](/docs/design), [Train a Model](/docs/train).
 
 ### Why does my run have no held-out score, or say *do not quote*?
 

@@ -51,7 +51,7 @@ You can also start a pipeline empty, from an n8n export or from Python:
 `content`.
 
 To begin from a complete business solution instead (the decision, the holdout, the actions and the
-return), see [Solutions, Methodologies and Opportunities](/docs/solutions).
+return), see [AI Solutions, Methodologies and Opportunities](/docs/solutions).
 
 ## Read a Pipeline
 
@@ -231,7 +231,7 @@ A scoped key needs each capability it calls by name ([Tokens and Keys](/docs/tok
 ## Related Pages
 
 - [Datasets and Loading Data](/docs/load-data)
-- [Projects and Pipelines](/docs/design)
+- [AI Projects and Pipelines](/docs/design)
 - [Experiments](/docs/experiments)
 - [Agents](/docs/agents)
 - [Models and Search Indexes](/docs/ship)

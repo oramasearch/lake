@@ -98,7 +98,7 @@ and a **Confirm** button.
 
 A change to an existing pipeline goes to the Project Agent instead, and the answer shows **Review
 the proposed change**, which opens the pipeline page where you apply or discard it
-([Projects and Pipelines](/docs/design)). An app goes to ApplicationAgent, whose full proposal you
+([AI Projects and Pipelines](/docs/design)). An app goes to ApplicationAgent, whose full proposal you
 review before **Confirm and deploy** ([Apps](/docs/apps)); a training study goes to ExperimentsAgent,
 whose study you edit and confirm before it starts ([Experiments](/docs/experiments)).
 

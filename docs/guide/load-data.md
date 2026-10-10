@@ -281,6 +281,6 @@ members hold `read` unless they were granted more ([Grants and Effective Access]
 - [Getting Started](/docs)
 - [Workspaces](/docs/workspaces)
 - [Services and Storage](/docs/services)
-- [Projects and Pipelines](/docs/design): train on a dataset
+- [AI Projects and Pipelines](/docs/design): train on a dataset
 - [Search](/docs/search)
 - [Models and Search Indexes](/docs/ship): make a dataset searchable
