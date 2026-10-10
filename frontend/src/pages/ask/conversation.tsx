@@ -7,6 +7,10 @@
  * agent's answer once and the conversation is read again. */
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { appendDictation } from "@/lib/dictation";
+import { useCoarsePointer } from "@/lib/phoneSheet";
+import { DictateButton, DictationError, RecordingBar, useRecorder } from "@/components/dictation/Dictate";
+import { FromYourPhoneLink, FromYourPhonePanel } from "@/components/phone/FromYourPhone";
 import { ApiError, act, useRead, type Row } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { Badge, Button, ErrorBlock, Skeleton, cx } from "@/lib/ui";
@@ -130,7 +134,7 @@ export function useConversation({
 
 /** Send a message: stores it and starts the turn. Answers the conversation and, for a turn on the
  * bus, its task. */
-export async function sendMessage(input: { customerId: string; workspaceId: string; conversationId: string; kind: AskKind; agent: string; message: string; from: string }) {
+export async function sendMessage(input: { customerId: string; workspaceId: string; conversationId: string; kind: AskKind; agent: string; message: string; from: string; page?: Row }) {
   const body: Row = {
     customer_id: input.customerId,
     workspace_id: input.workspaceId,
@@ -139,7 +143,8 @@ export async function sendMessage(input: { customerId: string; workspaceId: stri
     message: input.message,
   };
   if (input.conversationId) body.conversation_id = input.conversationId;
-  const page = pageOf(input.from);
+  // A page with something to ask about (the transcript page) sends its own context instead.
+  const page = input.page ?? pageOf(input.from);
   if (page) body.page = page;
   return act<{ conversation_id: string; task_id?: string; message_id?: string; reply_id?: string }>("send_ask_message", body);
 }
@@ -313,7 +318,9 @@ export function AskMessages({
   );
 }
 
-/** The message box: who to talk to, the message, Send. Enter sends; Shift+Enter is a new line. */
+/** The message box: who to talk to, the message, the microphone and Send. On a keyboard Enter
+ * sends and Shift+Enter is a new line; on a touch screen Return makes a new line and Send sends, as
+ * in messaging apps. Dictated text goes into the box to edit or send (components/dictation). */
 export function AskComposer({
   agent,
   onAgent,
@@ -324,6 +331,8 @@ export function AskComposer({
   label = "Message",
   placeholder = "What should I look at first?",
   compact,
+  draft,
+  context,
 }: {
   agent?: string;
   onAgent?: (agent: string) => void;
@@ -334,22 +343,43 @@ export function AskComposer({
   label?: string;
   placeholder?: string;
   compact?: boolean;
+  /** Put in the box when it changes (Ask Orama opened about a transcript). */
+  draft?: string;
+  /** Shown above the box: what the next message is about. */
+  context?: ReactNode;
 }) {
-  const [text, setText] = useState("");
+  const [text, setText] = useState(draft ?? "");
+  const box = useRef<HTMLTextAreaElement>(null);
+  const touch = useCoarsePointer();
+  const [phoneHelp, setPhoneHelp] = useState(false);
+  const path = useAppPath();
+  const rec = useRecorder({
+    onText: (said) => {
+      setText((prev) => appendDictation(prev, said));
+      box.current?.focus();
+    },
+  });
+  useEffect(() => {
+    if (draft) {
+      setText(draft);
+      box.current?.focus();
+    }
+  }, [draft]);
   const submit = async () => {
     const message = text.trim();
-    if (!message || busy) return;
+    if (!message || busy || rec.state !== "idle") return;
     if (await onSend(message)) setText("");
   };
   return (
     <form
-      className="stack"
+      className="stack ask-composer"
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
       }}
     >
       {error ? <ErrorBlock error={error} /> : null}
+      {context}
       {agents && onAgent && (
         <label>
           Talk to
@@ -365,24 +395,37 @@ export function AskComposer({
       <label>
         {label}
         <textarea
+          ref={box}
           name="message"
           rows={compact ? 2 : 3}
           required
-          placeholder={placeholder}
+          placeholder={rec.state === "transcribing" ? "Transcribing…" : placeholder}
           value={text}
+          enterKeyHint={touch ? "enter" : "send"}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            if (e.key === "Enter" && !e.shiftKey && !touch && !e.nativeEvent.isComposing) {
               e.preventDefault();
               void submit();
             }
           }}
         />
       </label>
-      <div>
-        <Button variant="primary" type="submit" loading={busy}>
-          Send
-        </Button>
+      <DictationError rec={rec} />
+      {phoneHelp && <FromYourPhonePanel where="ask" transcriptsPath={path("/transcripts")} onClose={() => setPhoneHelp(false)} className="max-h-[40vh] overflow-y-auto" />}
+      <div className="flex min-w-0 items-center gap-1.5">
+        {rec.state === "recording" ? (
+          <RecordingBar rec={rec} />
+        ) : (
+          <>
+            <DictateButton rec={rec} title="Dictate: speak your message" className="border border-rule" />
+            <FromYourPhoneLink open={phoneHelp} onToggle={() => setPhoneHelp((v) => !v)} className="ml-1" />
+            <span className="flex-1" />
+            <Button variant="primary" type="submit" loading={busy} disabled={rec.state !== "idle"} className="ask-send">
+              Send
+            </Button>
+          </>
+        )}
       </div>
     </form>
   );
