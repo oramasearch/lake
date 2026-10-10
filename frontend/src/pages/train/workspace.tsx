@@ -10,7 +10,8 @@ import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ApiError, SESSION_ENDED, act, currentWorkspace, useRead, type Row } from "@/lib/api";
+import { act, useRead, type Row } from "@/lib/api";
+import { postRead as libPostRead } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { Button, ErrorBlock, Page, Skeleton } from "@/lib/ui";
 
@@ -18,29 +19,9 @@ import { Button, ErrorBlock, Page, Skeleton } from "@/lib/ui";
 
 /** A read capability that must be POSTed (`workspace_query`, `get_agent_task` when posted): the
  * same envelope and errors as `read`, and no refresh of the reads on screen. */
-export async function postRead<T = Row>(name: string, input: Row, signal?: AbortSignal): Promise<T> {
-  const workspace = currentWorkspace();
-  const prefix = workspace ? `/w/${encodeURIComponent(workspace)}` : "";
-  let response: Response;
-  try {
-    response = await fetch(`${prefix}/v1/${name}`, {
-      method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      credentials: "same-origin",
-      body: JSON.stringify(input),
-      signal,
-    });
-  } catch (error) {
-    if ((error as Error).name === "AbortError") throw error;
-    throw new ApiError(0, "network", "Lake could not be reached. Check your connection and retry.");
-  }
-  const body = await response.json().catch(() => null);
-  if (!response.ok || !body || body.ok === false) {
-    const error = body?.error ?? {};
-    const message = response.status === 401 ? SESSION_ENDED : (error.message ?? response.statusText ?? "The request failed.");
-    throw new ApiError(response.status, error.code ?? "error", message, error.path ?? "");
-  }
-  return body.value as T;
+/** Lake's POSTed read (`@/lib/api` postRead), with the signal as the third argument. */
+export function postRead<T = Row>(name: string, input: Row, signal?: AbortSignal): Promise<T> {
+  return libPostRead<T>(name, input, { signal });
 }
 
 /** The space (customer) and workspace a workspace page works in. */
