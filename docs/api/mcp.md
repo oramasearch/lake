@@ -156,14 +156,59 @@ its own (`frontend/src/pages/developer/`). Before, the rail's **API** item opene
     `workspace_query`, is a read), the permission it needs, its parameters, its request body schema,
     the `value` schema inside the success envelope, and a **Copy as curl** block with the required
     fields as placeholders and the new key, if one was made on this page.
-- **Developer → MCP** (`/developer/mcp`, `McpPage.tsx`). An endpoint strip, then three tabs:
-  - **Connect**: the key (the one just made, one pasted, or `$LAKE_KEY`), the setup for Claude Code
-    (`claude mcp add --transport http lake <origin>/mcp --header "Authorization: Bearer <key>"`),
-    Cursor, Claude Desktop and JSON-RPC `curl` (`initialize`, `tools/list`, `tools/call`), After
-    Lake Upgrades, and Teach Your Agent (the skill, `llms.txt`, `llms-full.txt`, the operations).
-  - **Keys**: the same panel as Developer → API.
-  - **Tools**: every tool of `mcp_setup.tool_groups` by group with its summary, searchable and
-    filtered by read or write, then the worked flows.
+- **Developer → API** also opens with a strip: the base URL (`<origin>/v1`) with Copy, and chips for
+  REST · JSON, OpenAPI 3.1, the `{ok, value, duration_ms}` envelope and `Authorization: Bearer <key>`.
+  Operations filters by read or write with counts, beside the search.
+- **Developer → MCP** (`/developer/mcp`, `McpPage.tsx`) is one page, as rev-os's is: an endpoint
+  strip (the MCP URL with Copy; JSON-RPC 2.0, streamable HTTP, the protocol version, `Authorization:
+  Bearer <key>` and the tool count), then six numbered steps, each with its title and a line of
+  advice in a left rail and the content on the right (one column on a phone):
+  1. **Create an MCP Key**: the key form; the new key once, in a highlighted callout (`#mcp-key`);
+     or paste a key you have. The operator sees that its key is the admin token, and can paste it.
+  2. **Set Up Your Client**: a tile per client (a lucide icon, never a vendor logo; the name; how it
+     connects). The chosen tile shows the file the setup goes in (with Copy path), copyable blocks
+     with lake's origin and the key filled in, one line on how to check it worked, and what to know.
+     With no key the blocks read `LAKE_KEY` in the syntax each client expands. The clients, checked
+     against each vendor's documentation on 2026-10-10:
+     - *Claude Code*: `claude mcp add --transport http lake <origin>/mcp --header "Authorization:
+       Bearer <key>"` (`#mcp-claude-code`), `--scope user` or `project`; check with `/mcp` or
+       `claude mcp list`.
+     - *OpenAI Codex* (CLI and IDE): `~/.codex/config.toml` `[mcp_servers.lake]` with `url` and
+       `bearer_token_env_var = "LAKE_KEY"`, `export LAKE_KEY=…`, or `codex mcp add lake --url …
+       --bearer-token-env-var LAKE_KEY`; check with `codex mcp list` or `/mcp`.
+     - *Claude Desktop*: `claude_desktop_config.json` (macOS `~/Library/Application
+       Support/Claude/`, Windows `%APPDATA%\Claude\`) running `npx -y mcp-remote <origin>/mcp
+       --header Authorization:${LAKE_AUTH_HEADER}` with `env.LAKE_AUTH_HEADER = "Bearer <key>"`, the
+       form mcp-remote documents so the space survives on Windows.
+     - *Cursor*: `~/.cursor/mcp.json` `mcpServers.lake` with `url` and `headers` (`${env:LAKE_KEY}`
+       without a key).
+     - *VS Code* (Copilot agent mode): `.vscode/mcp.json` `servers.lake` `type: "http"`, the header
+       `Bearer ${input:lake-key}` and a `promptString` input with `password: true`, so the key is
+       never in the file; check with *MCP: List Servers*.
+     - *Windsurf*: `~/.codeium/windsurf/mcp_config.json` (Devin Desktop:
+       `~/.config/devin/mcp_config.json`) with `serverUrl` and `headers`.
+     - *Gemini CLI*: `~/.gemini/settings.json` `mcpServers.lake` with `httpUrl` (streamable HTTP)
+       and `headers` (`${LAKE_KEY}` expands), or `gemini mcp add --transport http --header …`; check
+       with `/mcp` or `gemini mcp list`.
+     - *Any client*: JSON-RPC `curl` for `initialize`, `tools/list` and `tools/call`.
+     - *ChatGPT and Claude.ai*: Claude.ai's custom connectors can send a fixed request header, so
+       lake connects there with `Authorization: Bearer <key>` when lake is reachable from the
+       internet (a read-only key is advised: Anthropic keeps it). ChatGPT's custom connectors sign
+       in with OAuth or no authentication and cannot carry a lake key, so the page sends ChatGPT
+       users to Codex. Lake has no OAuth flow for connectors.
+     Then *After lake upgrades*: reconnect or restart the client (lake#441).
+  3. **Teach Your Agent**: the downloads (the skill, `llms-full.txt`, `llms.txt`, OpenAPI
+     operations) and an install per agent, chosen to match the client in step 2: Claude Code's
+     skills folder (`~/.claude/skills/lake/SKILL.md`), an `AGENTS.md` section for Codex and a
+     `GEMINI.md` section for Gemini CLI that point at the downloaded skill, or the three public URLs.
+  4. **What the Tools Do** (`#tools`): search, read/write chips with counts, a chip per tool group
+     with its count; each group with its summary and read and write counts, each tool a row with its
+     read or write chip, its name in mono and its title; a group longer than eight shows six and
+     *Show all*, unless a filter is on.
+  5. **Worked Flows**: the flows from `mcp_setup`.
+  6. **Your Keys** (`#keys`): the keys table, as on Developer → API.
+  `?tab=keys` and `?tab=tools`, the former tabs' addresses, scroll to their step. The setups are
+  pure builders in `logic.ts` (`CLIENTS`, `clientSetup`, `skillInstall`).
 - **Keys** (`parts.tsx`, rules in `logic.ts`). One form for both pages calls `create_token` with
   what `/tokens` and the former MCP form sent: a name (default *API key* or *MCP key*, with
   *(read-only)*); access *every tool* (`*`), *read-only* (`mcp_setup.scopes.read_only`) or *named
@@ -181,11 +226,15 @@ its own (`frontend/src/pages/developer/`). Before, the rail's **API** item opene
 document in a new tab gave them only the contract.
 
 **How to verify.** From `frontend/`: `npx tsc --noEmit -p .`, `npm test` (`tests/developer.test.ts`
-checks the `create_token` inputs, how scopes read, the grouping, the envelope's `value` schema and
-the curl lines against the shape `openapi_document` renders) and `npm run build`. In a browser:
-make a read-only key on Developer → API, copy the Claude Code block on Developer → MCP, call
+checks the `create_token` inputs, how scopes read, the grouping, the envelope's `value` schema,
+the curl lines against the shape `openapi_document` renders, and that every client setup names the
+origin and the key or `LAKE_KEY`, that its JSON parses with the fields that client reads, and that
+every skill install fetches the public `SKILL.md`) and `npm run build`. In a browser:
+make a read-only key in step 1 of Developer → MCP, copy the Claude Code block, call
 `tools/list` with it, and revoke it from either Keys tab.
 
-**How to change.** A new capability appears in Operations and Tools with no edit. The page
+**How to change.** A new capability appears in Operations and Tools with no edit. A new MCP client
+is an entry in `CLIENTS` and a case in `clientSetup`, an icon in `McpPage.tsx`'s `ICONS`, and its
+syntax checked against the client's own documentation. The page
 structure is in `ApiPage.tsx` and `McpPage.tsx`; the key rules and the OpenAPI reading in
 `logic.ts`, which has no imports so the tests run it directly.

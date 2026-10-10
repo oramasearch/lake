@@ -10,8 +10,8 @@ import { BookOpen, ChevronDown, ChevronRight, Lock, PenLine, Plug, Search, Shiel
 import { ApiError, type Row } from "@/lib/api";
 import { plural } from "@/lib/format";
 import { useSession } from "@/lib/session";
-import { Button, Card, cx, Empty, ErrorBlock, Notice, Page, Skeleton } from "@/lib/ui";
-import { CodeBlock, Chip, DownloadButton, JsonBox, KeysPanel, originOf, PageTabs, prettyJson, useMcpSetup, useTab } from "./parts";
+import { Button, Card, cx, Empty, ErrorBlock, FilterChips, Notice, Page, Skeleton } from "@/lib/ui";
+import { CodeBlock, Chip, DownloadButton, EndpointStrip, JsonBox, KeysPanel, originOf, PageTabs, prettyJson, useMcpSetup, useTab } from "./parts";
 import { curlFor, groupOperations, type Operation, operationsOf, requestBodyOf, responseSchemaOf, schemaText } from "./logic";
 
 const TABS = ["keys", "start", "operations"] as const;
@@ -63,6 +63,12 @@ export default function ApiPage() {
         </>
       }
     >
+      <EndpointStrip label="Base URL" value={`${originOf(viewer)}/v1`}>
+        <Chip>REST · JSON</Chip>
+        <Chip>OpenAPI 3.1</Chip>
+        <Chip>{"{ok, value, duration_ms}"}</Chip>
+        <Chip tone="action">Authorization: Bearer &lt;key&gt;</Chip>
+      </EndpointStrip>
       <PageTabs<Tab>
         value={tab}
         tabs={[
@@ -181,10 +187,12 @@ const METHOD_TONE: Record<string, string> = {
 function Operations({ keyValue, groups }: { keyValue: string | null; groups?: { title: string; tools: { name: string }[] }[] }) {
   const doc = useOpenApi();
   const [needle, setNeedle] = useState("");
+  const [access, setAccess] = useState<"read" | "write" | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const all = useMemo(() => operationsOf(doc.data, groups), [doc.data, groups]);
   const order = useMemo(() => (groups ?? []).map((g) => g.title), [groups]);
-  const grouped = useMemo(() => groupOperations(all, needle, order), [all, needle, order]);
+  const grouped = useMemo(() => groupOperations(access ? all.filter((o) => (access === "write") === o.writes) : all, needle, order), [all, access, needle, order]);
+  const writes = all.filter((o) => o.writes).length;
 
   if (doc.isLoading) return <Skeleton lines={10} />;
   if (doc.isError) return <ErrorBlock error={doc.error} retry={() => void doc.refetch()} what="the OpenAPI document" />;
@@ -199,12 +207,21 @@ function Operations({ keyValue, groups }: { keyValue: string | null; groups?: { 
           <span className="sr-only">Find an operation</span>
           <input type="search" value={needle} onChange={(e) => setNeedle(e.target.value)} placeholder="Find an operation: path, name or group" className="w-full pl-8" />
         </label>
-        <span className="font-mono text-[12px] text-ink-3 tabular-nums">
-          {needle ? `${shown} of ${all.length}` : all.length} operations · {plural(grouped.length, "group")} · OpenAPI {String(doc.data?.openapi ?? "3.1")}
+        <FilterChips<"read" | "write">
+          value={access}
+          onChange={setAccess}
+          allLabel={`All ${all.length}`}
+          options={[
+            { id: "read", label: "read", count: all.length - writes },
+            { id: "write", label: "write", count: writes },
+          ]}
+        />
+        <span className="font-mono text-[12px] text-ink-3 tabular-nums sm:ml-auto">
+          {needle || access ? `${shown} of ${all.length}` : all.length} operations · {plural(grouped.length, "group")} · OpenAPI {String(doc.data?.openapi ?? "3.1")}
         </span>
       </div>
       {!grouped.length ? (
-        <Empty>{all.length ? `No operation matches “${needle}”.` : "The OpenAPI document lists no operations."}</Empty>
+        <Empty>{all.length ? (needle ? `No operation matches “${needle}”.` : "No operation matches.") : "The OpenAPI document lists no operations."}</Empty>
       ) : (
         <div className="space-y-3">
           {grouped.map(([group, ops]) => (
