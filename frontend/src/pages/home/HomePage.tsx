@@ -34,12 +34,19 @@ export default function HomePage() {
           </Actions>
           <p className="muted">{INVITATION_NOTE}</p>
         </>
-      ) : (
+      ) : viewer.password_sign_up ? (
         <Actions>
           <Button to="/sign-up" variant="primary">
             Create account
           </Button>
           <Button to="/sign-in">Sign in</Button>
+          <Button to="/docs">Read the docs</Button>
+        </Actions>
+      ) : (
+        <Actions>
+          <Button to="/sign-in" variant="primary">
+            Sign in
+          </Button>
           <Button to="/docs">Read the docs</Button>
         </Actions>
       )}

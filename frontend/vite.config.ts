@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath, URL } from "node:url";
 
-// One process in production: lake embeds dist/ into its binary (cmake/embed_frontend.cmake),
+// One process in production: lake embeds dist/ into its binary (tools/ui/embed-frontend.mjs, run by CMakeLists.txt),
 // serves the hashed files under /ui/ immutable and index.html for every page route. In
 // development, Vite proxies everything that is not the app to a local lake (LAKE_ORIGIN,
 // default http://127.0.0.1:4900).

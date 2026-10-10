@@ -5,7 +5,7 @@
  * their name and open their first page. Collapsible to icons; below 1024px an off-canvas drawer.
  * Top bar: the breadcrumb, the space and workspace picker, Go to (⌘K or /), the theme switch, Ask
  * Orama and the account menu. G then a group's letter jumps to it. */
-import { type ReactNode, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useSession } from "@/lib/session";
 import { useTrailState, type Crumb } from "@/lib/trail";
@@ -17,7 +17,9 @@ import { Icon } from "./Icon";
 import { CommandPalette } from "./CommandPalette";
 import { ScreenBoundary } from "./ScreenBoundary";
 import { WorkspacePicker } from "./WorkspacePicker";
-import { AskPanel } from "./AskPanel";
+
+// Ask Orama loads the first time it is opened, so the shell carries no Markdown or conversation code.
+const AskPanel = lazy(() => import("./AskPanel").then((m) => ({ default: m.AskPanel })));
 
 /** G then this letter jumps to the group's first page. */
 const JUMPS: Record<string, SectionKey> = { d: "design", t: "train", s: "ship", o: "organization", a: "administration" };
@@ -264,7 +266,11 @@ export function Shell({ children }: { children: ReactNode }) {
           </ScreenBoundary>
         </main>
       </div>
-      {ask && signedInPerson && <AskPanel onClose={() => setAsk(false)} from={localPath(location.pathname) + location.search} />}
+      {ask && signedInPerson && (
+        <Suspense fallback={null}>
+          <AskPanel onClose={() => setAsk(false)} from={localPath(location.pathname) + location.search} />
+        </Suspense>
+      )}
       {palette && <CommandPalette onClose={() => setPalette(false)} />}
     </div>
   );
