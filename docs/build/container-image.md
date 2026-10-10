@@ -68,3 +68,16 @@ Keep `Dockerfile` and `.dockerignore` as the image recipe; the context excludes 
 `.git/`. When the build-stage toolchain changes, update [`ci.yml`](../../.github/workflows/ci.yml),
 [`ci.md`](ci.md) and [`local.md`](local.md) in the same change so pull-request builds and local
 builds use the image toolchain.
+
+## The compiler cache
+
+The build stage compiles through `ccache` into a BuildKit cache mount (`id=lake-ccache`, 8 GiB),
+which outlives each image. The source always sits at `/src`, so a later build recompiles only the
+sources that changed rather than all of lake, libliquid and the vendored stack. The build revision
+is defined for `src/version.cpp` alone, so a new revision invalidates one object. `ccache
+--show-stats` at the end of the build step shows the hit rate. To start cold, prune the cache on
+the BuildKit pod (`buildctl prune --filter id=lake-ccache` is not selective; `buildctl prune
+--all` clears every cache).
+
+The web app is built in its own Node 22 stage (`frontend`) and embedded with
+`-DLAKE_FRONTEND_DIST`; see [docs/ui/web-app.md](../ui/web-app.md).
