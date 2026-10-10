@@ -205,8 +205,9 @@ export function useRead<T = Row>(name: string | null, input?: Params, options?: 
   return useQuery<T>({
     queryKey: [name, scope, input ?? {}],
     queryFn: ({ signal }) => read<T>(name!, input, { workspace, signal }),
-    enabled: !!name && (queryOptions.enabled ?? true),
     ...queryOptions,
+    // After the caller's options: a null name never reads, whatever `enabled` says.
+    enabled: !!name && (queryOptions.enabled ?? true),
   });
 }
 
@@ -233,8 +234,8 @@ export function useList<T = Row>(
   return useQuery<T[]>({
     queryKey: [name, scope, input ?? {}, pick ?? ""],
     queryFn: async ({ signal }) => listOf<T>(await read<unknown>(name!, input, { workspace, signal }), pick),
-    enabled: !!name && (queryOptions.enabled ?? true),
     ...queryOptions,
+    enabled: !!name && (queryOptions.enabled ?? true),
   });
 }
 
@@ -256,8 +257,8 @@ export function usePostRead<T = Row>(name: string | null, input: Row = {}, optio
   return useQuery<T>({
     queryKey: [name, scope, "post", input],
     queryFn: ({ signal }) => postRead<T>(name!, input, { workspace, signal }),
-    enabled: !!name && (queryOptions.enabled ?? true),
     ...queryOptions,
+    enabled: !!name && (queryOptions.enabled ?? true),
   });
 }
 

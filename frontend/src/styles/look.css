@@ -319,7 +319,7 @@ input[type='submit']:hover {
 }
 .button-primary,
 button.primary,
-main form.stack button[type='submit'],
+main form.stack button[type='submit']:not(.button),
 main form.login button,
 main .filters button,
 main form.search button {
@@ -329,7 +329,7 @@ main form.search button {
 }
 .button-primary:hover,
 button.primary:hover,
-main form.stack button[type='submit']:hover,
+main form.stack button[type='submit']:not(.button):hover,
 main form.login button:hover,
 main .filters button:hover,
 main form.search button:hover {
@@ -711,4 +711,11 @@ main .chip-button[aria-pressed='true'] {
   border-color: transparent;
   color: var(--lake-text-primary);
   background: var(--lake-raised);
+}
+
+/* Overlays are portalled outside `main`: a Field's label keeps its words and required mark on one
+   line there too (lake.css makes `form.stack label` a grid). */
+:is(.dialog, .drawer) form.stack .field > label,
+:is(.dialog, .drawer) .field > label {
+  display: block;
 }
