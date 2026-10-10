@@ -1,6 +1,7 @@
 /** A secret's value as the Secrets pages edit it (docs/ui/secrets.md). `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { accountLabel, administeredOrganizationIds, mountOwnerLabel, ownerOptions } from "../src/pages/admin/secretOwners.ts";
 import { fieldText, fromBase64Url, parseJsonObject, rowsToValue, toBase64Url, valueToRows, versionState } from "../src/pages/admin/secretValue.ts";
 
 test("rows make one JSON object, skipping blank rows", () => {
@@ -55,4 +56,50 @@ test("text travels to the transit capabilities as unpadded base64url and back", 
   assert.equal(fromBase64Url("w6k_Pg"), "é?>");
   assert.equal(fromBase64Url("not base64!"), null);
   assert.equal(fromBase64Url("_w"), null, "bytes that are not UTF-8");
+});
+
+test("a personal workspace's mount defaults to the account, and organizations of other spaces are not offered", () => {
+  const options = ownerOptions({
+    space: { label: "Your workspaces", personal: true },
+    workspaceCustomerId: "c-personal",
+    ownerOrganizationId: null,
+    administered: [
+      { id: "o-side", display_name: "Side project", customer_id: null },
+      { id: "o-orama", display_name: "Orama", customer_id: "c-orama" },
+    ],
+  });
+  assert.deepEqual(options, [
+    { organizationId: "", label: "Your account" },
+    { organizationId: "o-side", label: "Side project" },
+  ]);
+});
+
+test("an organization's workspace defaults to that organization, listed once", () => {
+  const options = ownerOptions({
+    space: { label: "Orama", personal: false },
+    workspaceCustomerId: "c-orama",
+    ownerOrganizationId: "o-orama",
+    administered: [{ id: "o-orama", display_name: "Orama", customer_id: "c-orama" }],
+  });
+  assert.deepEqual(options, [{ organizationId: "o-orama", label: "Orama (workspace owner)" }]);
+  // Someone else's account: named by its space, never blocked.
+  assert.deepEqual(ownerOptions({ space: { label: "dana", personal: false }, workspaceCustomerId: "c-dana", administered: [] }), [{ organizationId: "", label: "dana" }]);
+});
+
+test("only owner and admin memberships of the organization itself administer it", () => {
+  const ids = administeredOrganizationIds([
+    { organization_id: "a", role: "owner" },
+    { organization_id: "b", role: "admin" },
+    { organization_id: "c", role: "member" },
+    { organization_id: "d", team_id: "t", role: "admin" },
+  ]);
+  assert.deepEqual([...ids].sort(), ["a", "b"]);
+});
+
+test("a mount's owner reads as the organization's name or the account", () => {
+  const organizations = new Map([["o-1", { id: "o-1", display_name: "Payments" }]]);
+  assert.equal(mountOwnerLabel({ owner_type: "organization", organization_id: "o-1" }, organizations, null), "Payments");
+  assert.equal(mountOwnerLabel({ owner_type: "organization", organization_id: "o-2" }, organizations, null), "o-2");
+  assert.equal(mountOwnerLabel({ owner_type: "customer", organization_id: null }, organizations, { label: "Your workspaces", personal: true }), "Your account");
+  assert.equal(accountLabel({ label: "dana", personal: false }), "dana");
 });
