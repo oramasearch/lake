@@ -1,11 +1,15 @@
 /** Train → Experiments (web_ui_experiments.cpp list mode; serve_experiments_agent_form; the
- * start-study and compare scripts): ExperimentsAgent's turn with its editable proposal and
- * confirmed start, the filter, Start a Study, the studies with Stop, and the tracked runs. */
+ * start-study and compare scripts): the figures, ExperimentsAgent's turn (asked from a drawer) with
+ * its editable proposal and confirmed start, the filter, Start a Study in a drawer, the studies as
+ * rich rows with Stop, and the tracked runs to compare. */
 import { type FormEvent, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Bot, FlaskConical, GitCompare, Loader2, Play } from "lucide-react";
 import { ApiError, type Row } from "@/lib/api";
 import { useQuery } from "@tanstack/react-query";
-import { ErrorBlock, Notice, Skeleton } from "@/lib/ui";
+import { relative } from "@/lib/format";
+import { Drawer } from "@/lib/overlay";
+import { Banner, Button, Card, type Column, DataTable, Empty, ErrorBlock, FilterChips, Notice, SearchInput, Skeleton, Stat, StatRow, Status, Toolbar } from "@/lib/ui";
 import {
   AgentEventsLink,
   type AgentTask,
@@ -28,6 +32,21 @@ const STATES = ["", "pending", "running", "succeeded", "failed", "stopped", "com
 
 type Study = { id: string; spec: Row; status: string; trials: Row[]; spent_cost?: unknown };
 
+/** A study's figures: trials by state, and the best completed objective in its direction. */
+function studyFigures(study: Study) {
+  const spec = study.spec ?? {};
+  const objective = (spec.objective ?? {}) as Row;
+  const counts: Record<string, number> = {};
+  let best: number | null = null;
+  for (const trial of study.trials ?? []) {
+    counts[trial.state] = (counts[trial.state] ?? 0) + 1;
+    if (trial.state === "complete" && typeof trial.objective === "number") {
+      if (best === null || (objective.direction === "maximize" ? trial.objective > best : trial.objective < best)) best = trial.objective;
+    }
+  }
+  return { counts, best, objective, budgets: (spec.budgets ?? {}) as Row };
+}
+
 export default function ExperimentsPage() {
   const [params] = useSearchParams();
   const project = params.get("project") ?? "";
@@ -42,6 +61,8 @@ export default function ExperimentsPage() {
   const [notice, setNotice] = useState(params.get("error") ?? "");
   const [busy, setBusy] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [open, setOpen] = useState<"agent" | "study" | null>(null);
+  const [search, setSearch] = useState("");
   const [confirmDialog, confirm] = useConfirm();
   const listing = useQuery({
     queryKey: ["list_experiments", client.workspaceId, project, state],
@@ -71,7 +92,7 @@ export default function ExperimentsPage() {
   const filter = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    navigate(url("/train/experiments", { project: String(form.get("project") ?? ""), state: String(form.get("state") ?? "") }));
+    navigate(url("/train/experiments", { project: String(form.get("project") ?? ""), state }));
   };
 
   const startStudy = (event: FormEvent<HTMLFormElement>) => {
@@ -114,56 +135,304 @@ export default function ExperimentsPage() {
 
   const studies = listing.data?.studies ?? [];
   const runs = listing.data?.runs ?? [];
+  const needle = search.trim().toLowerCase();
+  const shownStudies = studies.filter((study) => !needle || `${cell(study.spec?.name)} ${cell(study.spec?.project)}`.toLowerCase().includes(needle));
+  const shownRuns = runs.filter((item) => !needle || `${cell(item.id)} ${cell(item.project)}`.toLowerCase().includes(needle));
+  const trialCount = studies.reduce((sum, study) => sum + (study.trials ?? []).length, 0);
+  const running = studies.filter((study) => study.status === "running").length;
+
+  const compare = () => {
+    const chosen = [...selected];
+    if (chosen.length < 2 || chosen.length > 8) {
+      setNotice("Select two to eight runs to compare.");
+      return;
+    }
+    navigate(url("/train/experiments/compare", { runs: chosen.join(",") }));
+  };
+
+  const studyColumns: Column<Study>[] = [
+    {
+      key: "name",
+      label: "Study",
+      sort: (study) => cell(study.spec?.name),
+      render: (study) => {
+        const { objective } = studyFigures(study);
+        return (
+          <div className="min-w-0">
+            <Link to={url("/train/experiment", { study: study.id })} className="font-semibold">
+              {cell(study.spec?.name)}
+            </Link>
+            <div className="truncate text-[12px] text-ink-3">
+              {cell(study.spec?.project)} · {metricLabel(objective.metric)}
+            </div>
+          </div>
+        );
+      },
+    },
+    { key: "state", label: "State", sort: (study) => study.status, render: (study) => <Status value={study.status} /> },
+    {
+      key: "best",
+      label: "Best",
+      numeric: true,
+      sort: (study) => studyFigures(study).best,
+      render: (study) => {
+        const { best, objective } = studyFigures(study);
+        return (
+          <div>
+            <div className="font-mono font-semibold text-ink">{best === null ? "—" : cell(best)}</div>
+            <div className="text-[11px] text-ink-3">{cell(objective.direction)}</div>
+          </div>
+        );
+      },
+    },
+    {
+      key: "trials",
+      label: "Trials / Budget",
+      numeric: true,
+      sort: (study) => (study.trials ?? []).length,
+      render: (study) => {
+        const { counts, budgets } = studyFigures(study);
+        return (
+          <div>
+            <div className="font-mono">
+              {(study.trials ?? []).length} / {cell(budgets.max_trials)}
+            </div>
+            <div className="text-[11px] text-ink-3" title="Complete / Pruned / Failed">
+              {counts.complete ?? 0} complete · {counts.pruned ?? 0} pruned · {counts.failed ?? 0} failed
+            </div>
+          </div>
+        );
+      },
+    },
+    {
+      key: "cost",
+      label: "Cost / Cap",
+      numeric: true,
+      render: (study) => (
+        <span className="font-mono">
+          {cell(study.spent_cost)} / {cell(studyFigures(study).budgets.cost_cap)}
+        </span>
+      ),
+    },
+    {
+      key: "actions",
+      label: "",
+      render: (study) =>
+        canWrite && study.status === "running" ? (
+          <Button variant="danger" disabled={actions.busy !== null} onClick={() => void actions.perform("stop_study", study.id)}>
+            Stop
+          </Button>
+        ) : null,
+    },
+  ];
+
+  const runColumns: Column<Row>[] = [
+    {
+      key: "compare",
+      label: "Compare",
+      render: (item) => {
+        const id = String(item.id ?? "");
+        return (
+          <input
+            type="checkbox"
+            aria-label={`Compare run ${id}`}
+            checked={selected.has(id)}
+            onChange={(e) =>
+              setSelected((current) => {
+                const next = new Set(current);
+                if (e.target.checked) next.add(id);
+                else next.delete(id);
+                return next;
+              })
+            }
+          />
+        );
+      },
+    },
+    {
+      key: "run",
+      label: "Run",
+      sort: (item) => String(item.id ?? ""),
+      render: (item) => (
+        <div className="min-w-0">
+          <Link to={url("/train/experiment/run", { run: String(item.id ?? "") })} className="font-mono">
+            {String(item.id ?? "")}
+          </Link>
+          <div className="truncate text-[12px] text-ink-3">{cell(item.project)}</div>
+        </div>
+      ),
+    },
+    {
+      key: "state",
+      label: "State",
+      sort: (item) => String(item.status ?? ""),
+      render: (item) => (
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          <Status value={String(item.status ?? "")} />
+          {item.metrics_suppressed !== undefined ? <span className="text-[12px] text-ink-3">curves suppressed for differential privacy</span> : null}
+        </span>
+      ),
+    },
+    { key: "created", label: "Created", sort: (item) => String(item.created ?? ""), render: (item) => <span title={cell(item.created)}>{relative(item.created, Date.now(), cell(item.created))}</span> },
+  ];
 
   return (
-    <ExperimentsShell mode="list" notice={notice}>
+    <ExperimentsShell
+      mode="list"
+      notice={open ? "" : notice}
+      actions={
+        <>
+          <Button onClick={() => setOpen("agent")}>
+            <Bot size={14} aria-hidden /> Ask ExperimentsAgent
+          </Button>
+          {canWrite && (
+            <Button variant="primary" onClick={() => setOpen("study")}>
+              <Play size={14} aria-hidden /> Start a study
+            </Button>
+          )}
+        </>
+      }
+    >
       {confirmDialog}
       {actions.dialog}
-      <section className="panel">
-        <h2>Run an Experiment</h2>
-        <p className="sub">Describe the training or tuning goal. ExperimentsAgent proposes a complete study for you to edit and confirm before it starts.</p>
-        <form
-          className="stack"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const goal = String(new FormData(event.currentTarget).get("goal") ?? "");
-            void run("goal", () => turn(goal));
-          }}
-        >
-          <label>
-            Goal
-            <textarea name="goal" rows={4} placeholder="Tune a churn model for validation AUC with a bounded trial budget." required disabled={!agent.deployed} />
-          </label>
-          <button type="submit" disabled={!agent.deployed || busy === "goal"}>
-            Ask ExperimentsAgent
-          </button>
-        </form>
-        {!agent.deployed && !agent.loading && <Notice tone="warning">ExperimentsAgent is not registered on this lake yet.</Notice>}
-      </section>
       {taskId && <TaskPanels taskId={taskId} q={task} busy={busy} run={run} turn={turn} />}
 
-      <form className="experiment-fields" onSubmit={filter}>
-        <label>
-          Project
-          <input name="project" defaultValue={project} key={`project-${project}`} />
-        </label>
-        <label>
-          State
-          <select name="state" defaultValue={state} key={`state-${state}`}>
-            {STATES.map((value) => (
-              <option key={value} value={value}>
-                {value || "All states"}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button type="submit">Filter</button>
-      </form>
+      {listing.isLoading ? (
+        <Skeleton />
+      ) : listing.isError ? (
+        <ErrorBlock error={listing.error} retry={() => void listing.refetch()} what="experiments" />
+      ) : (
+        <>
+          <StatRow>
+            <Stat label="Studies" value={studies.length} icon={FlaskConical} />
+            <Stat label="Running" value={running} tone={running ? "ok" : undefined} />
+            <Stat label="Trials" value={trialCount} sub="across these studies" />
+            <Stat label="Tracked runs" value={runs.length} sub="outside studies" />
+          </StatRow>
+          <Toolbar>
+            <SearchInput value={search} onChange={setSearch} placeholder="Search studies and runs…" label="Search studies and runs" />
+            <FilterChips
+              options={STATES.filter(Boolean).map((value) => ({ id: value, label: value }))}
+              value={state || null}
+              onChange={(value) => navigate(url("/train/experiments", { project, state: value ?? "" }))}
+              allLabel="All states"
+            />
+            <form className="ml-auto flex items-center gap-1.5" onSubmit={filter}>
+              <input name="project" defaultValue={project} key={`project-${project}`} placeholder="Project" aria-label="Project" className="search-input" />
+              <Button type="submit">Filter</Button>
+            </form>
+          </Toolbar>
 
-      {canWrite && (
-        <details className="panel">
-          <summary>Start a Study</summary>
-          <form onSubmit={startStudy}>
+          <div className="space-y-4">
+            <Card title="Studies" padded={false}>
+              <DataTable
+                rows={shownStudies}
+                q={listing}
+                what="studies"
+                columns={studyColumns}
+                rowKey={(study) => study.id}
+                caption="Studies"
+                empty={
+                  <div className="p-4">
+                    <Empty
+                      compact
+                      icon={FlaskConical}
+                      title="No Studies"
+                      action={
+                        canWrite ? (
+                          <Button variant="primary" onClick={() => setOpen("study")}>
+                            Start a study
+                          </Button>
+                        ) : undefined
+                      }
+                    >
+                      {studies.length ? "Clear the search to see more." : "Start a study, or ask ExperimentsAgent to propose one."}
+                    </Empty>
+                  </div>
+                }
+              />
+            </Card>
+            <Card
+              title="Tracked Runs Outside Studies"
+              padded={false}
+              actions={
+                <Button onClick={compare} disabled={selected.size === 0}>
+                  <GitCompare size={14} aria-hidden /> Compare selected runs{selected.size ? ` (${selected.size})` : ""}
+                </Button>
+              }
+              footer="Select two to eight runs. Trial runs can also be compared from their study."
+            >
+              <DataTable
+                rows={shownRuns}
+                q={listing}
+                what="runs"
+                columns={runColumns}
+                rowKey={(item) => String(item.id ?? "")}
+                caption="Tracked runs"
+                empty={<p className="muted m-0 px-4 py-3 text-[13px]">No tracked runs outside studies.</p>}
+              />
+            </Card>
+          </div>
+        </>
+      )}
+
+      {open === "agent" && (
+        <Drawer
+          title="Run an Experiment"
+          subtitle="Describe the training or tuning goal. ExperimentsAgent proposes a complete study for you to edit and confirm before it starts."
+          onClose={() => setOpen(null)}
+          footer={
+            <>
+              <Button onClick={() => setOpen(null)}>Cancel</Button>
+              <Button variant="primary" type="submit" form="experiment-goal" disabled={!agent.deployed} loading={busy === "goal"}>
+                Ask ExperimentsAgent
+              </Button>
+            </>
+          }
+        >
+          {notice && <Banner tone="info">{notice}</Banner>}
+          <form
+            id="experiment-goal"
+            className="stack"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const goal = String(new FormData(event.currentTarget).get("goal") ?? "");
+              void run("goal", async () => {
+                await turn(goal);
+                setOpen(null);
+              });
+            }}
+          >
+            <label>
+              Goal
+              <textarea name="goal" rows={5} placeholder="Tune a churn model for validation AUC with a bounded trial budget." required disabled={!agent.deployed} />
+            </label>
+          </form>
+          {!agent.deployed && !agent.loading && <Notice tone="warning">ExperimentsAgent is not registered on this lake yet.</Notice>}
+        </Drawer>
+      )}
+
+      {open === "study" && canWrite && (
+        <Drawer
+          title="Start a Study"
+          subtitle="Choose the pipeline, data, objective and budgets. You confirm the parameters before training starts."
+          width={640}
+          onClose={() => setOpen(null)}
+          footer={
+            <>
+              <Button onClick={() => setOpen(null)}>Cancel</Button>
+              <Button variant="primary" type="submit" form="start-study" loading={busy === "start"}>
+                Review and start study
+              </Button>
+            </>
+          }
+        >
+          {notice && <Banner tone="info">{notice}</Banner>}
+          <Banner tone="quiet">
+            Selection uses the validation split. The final test split is never used for tuning. Metrics are named as the run report names them: held_out_auc, held_out_log_loss,
+            held_out_accuracy, held_out_rmse, held_out_mae.
+          </Banner>
+          <form id="start-study" className="experiments" onSubmit={startStudy}>
             <div className="experiment-fields">
               <label>
                 Study name
@@ -253,149 +522,8 @@ export default function ExperimentsPage() {
               Released metrics for private studies (comma separated)
               <input name="released_metrics" />
             </label>
-            <p>
-              Selection uses the validation split. The final test split is never used for tuning. Metrics are named as the run report names them: held_out_auc, held_out_log_loss,
-              held_out_accuracy, held_out_rmse, held_out_mae.
-            </p>
-            <button type="submit" disabled={busy === "start"}>
-              Review and start study
-            </button>
           </form>
-        </details>
-      )}
-
-      {listing.isLoading ? (
-        <Skeleton />
-      ) : listing.isError ? (
-        <ErrorBlock error={listing.error} retry={() => void listing.refetch()} what="experiments" />
-      ) : (
-        <>
-          <section className="panel">
-            <h2>Studies</h2>
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>Project</th>
-                    <th>State</th>
-                    <th>Objective</th>
-                    <th>Best</th>
-                    <th>Complete / Pruned / Failed</th>
-                    <th>Trials / Budget</th>
-                    <th>Cost / Cap</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {studies.map((study) => {
-                    const spec = study.spec ?? {};
-                    const objective = (spec.objective ?? {}) as Row;
-                    const budgets = (spec.budgets ?? {}) as Row;
-                    const counts: Record<string, number> = {};
-                    let best: number | null = null;
-                    for (const trial of study.trials ?? []) {
-                      counts[trial.state] = (counts[trial.state] ?? 0) + 1;
-                      if (trial.state === "complete" && typeof trial.objective === "number") {
-                        if (best === null || (objective.direction === "maximize" ? trial.objective > best : trial.objective < best)) best = trial.objective;
-                      }
-                    }
-                    return (
-                      <tr key={study.id}>
-                        <td>
-                          <Link to={url("/train/experiment", { study: study.id })}>{cell(spec.name)}</Link>
-                        </td>
-                        <td>{cell(spec.project)}</td>
-                        <td>{cell(study.status)}</td>
-                        <td>{metricLabel(objective.metric)}</td>
-                        <td>{best === null ? "—" : cell(best)}</td>
-                        <td>
-                          {counts.complete ?? 0} / {counts.pruned ?? 0} / {counts.failed ?? 0}
-                        </td>
-                        <td>
-                          {(study.trials ?? []).length} / {cell(budgets.max_trials)}
-                        </td>
-                        <td>
-                          {cell(study.spent_cost)} / {cell(budgets.cost_cap)}
-                        </td>
-                        <td>
-                          {canWrite && study.status === "running" && (
-                            <button type="button" disabled={actions.busy !== null} onClick={() => void actions.perform("stop_study", study.id)}>
-                              Stop
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </section>
-          <section className="panel">
-            <h2>Tracked Runs Outside Studies</h2>
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                const chosen = [...selected];
-                if (chosen.length < 2 || chosen.length > 8) {
-                  setNotice("Select two to eight runs to compare.");
-                  return;
-                }
-                navigate(url("/train/experiments/compare", { runs: chosen.join(",") }));
-              }}
-            >
-              <div className="table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Compare</th>
-                      <th>Run</th>
-                      <th>Project</th>
-                      <th>State</th>
-                      <th>Created</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {runs.map((item) => {
-                      const id = String(item.id ?? "");
-                      return (
-                        <tr key={id}>
-                          <td>
-                            <input
-                              type="checkbox"
-                              aria-label={`Compare run ${id}`}
-                              checked={selected.has(id)}
-                              onChange={(e) =>
-                                setSelected((current) => {
-                                  const next = new Set(current);
-                                  if (e.target.checked) next.add(id);
-                                  else next.delete(id);
-                                  return next;
-                                })
-                              }
-                            />
-                          </td>
-                          <td>
-                            <Link to={url("/train/experiment/run", { run: id })}>{id}</Link>
-                          </td>
-                          <td>{cell(item.project)}</td>
-                          <td>
-                            {cell(item.status)}
-                            {item.metrics_suppressed !== undefined ? " · curves suppressed for differential privacy" : ""}
-                          </td>
-                          <td>{cell(item.created)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <button type="submit">Compare selected runs</button>
-              <p>Select two to eight runs. Trial runs can also be compared from their study.</p>
-            </form>
-          </section>
-        </>
+        </Drawer>
       )}
     </ExperimentsShell>
   );
@@ -434,14 +562,16 @@ function TaskPanels({
   const result = taskResult(task);
   if (taskWorking(task)) {
     return (
-      <>
-        {link}
-        <section className="panel" aria-live="polite">
-          <h2>ExperimentsAgent Is Working</h2>
-          <p>It keeps working if you leave; this page checks again every 2 seconds.</p>
-          <p role="status">{task.message ?? ""}</p>
-        </section>
-      </>
+      <div className="mb-5">
+        <Card tone="active" label="ExperimentsAgent" title="ExperimentsAgent Is Working" actions={<Loader2 size={16} className="animate-spin text-action" aria-hidden />} footer={link}>
+          <div aria-live="polite">
+            <p className="muted m-0">It keeps working if you leave; this page checks again every 2 seconds.</p>
+            <p role="status" className="mb-0">
+              {task.message ?? ""}
+            </p>
+          </div>
+        </Card>
+      </div>
     );
   }
   const studyObject = result.study && typeof result.study === "object" && !Array.isArray(result.study);
@@ -475,73 +605,74 @@ function TaskPanels({
       });
     };
     return (
-      <>
-        {link}
-        <section className="panel" id="experiment-proposal">
-          <h2>Proposed Study</h2>
+      <div className="mb-5" id="experiment-proposal">
+        <Card tone="active" label="ExperimentsAgent proposal" title="Proposed Study" footer={link}>
           <div className="ask-reply">
             <Markdown>{reply}</Markdown>
           </div>
-          <p>Edit the study JSON if needed. The reviewed object is validated again before the agent can start it.</p>
+          <p className="muted text-[13px]">Edit the study JSON if needed. The reviewed object is validated again before the agent can start it.</p>
           <form className="stack" onSubmit={confirmStudy}>
             <label>
               Study proposal (JSON)
-              <textarea name="study" rows={18} required defaultValue={JSON.stringify(result.study, null, 2)} />
+              <textarea name="study" rows={18} required defaultValue={JSON.stringify(result.study, null, 2)} className="font-mono" />
             </label>
             <details>
-              <summary>Why these choices</summary>
+              <summary className="cursor-pointer text-[13px] text-ink-2">Why these choices</summary>
               <pre>{JSON.stringify(result.explanations ?? {}, null, 2)}</pre>
             </details>
-            <button className="button button-primary" type="submit" disabled={busy === "confirm"}>
-              Confirm and start study
-            </button>
+            <div>
+              <Button variant="primary" type="submit" loading={busy === "confirm"}>
+                <Play size={14} aria-hidden /> Confirm and start study
+              </Button>
+            </div>
           </form>
-        </section>
-      </>
+        </Card>
+      </div>
     );
   }
   const study = (studyObject ? result.study : {}) as Row;
   return (
-    <>
-      {link}
-      <section className="panel">
-        <h2>ExperimentsAgent Result</h2>
+    <div className="mb-5">
+      <Card
+        label="ExperimentsAgent"
+        title="ExperimentsAgent Result"
+        actions={
+          result.kind === "running" && study.id ? (
+            <Button to={url("/train/experiment", { study: String(study.id) })}>Open the running study</Button>
+          ) : undefined
+        }
+        footer={link}
+      >
         <div className="ask-reply">
           <Markdown>{reply}</Markdown>
         </div>
-        {result.kind === "running" && study.id && (
-          <p>
-            <Link to={url("/train/experiment", { study: String(study.id) })}>Open the running study</Link>
-          </p>
-        )}
         {needsReply(task, "agent-experiments") && (
-          <>
-            <h3>Reply</h3>
-            <form
-              className="stack"
-              onSubmit={(event) => {
-                event.preventDefault();
-                const message = String(new FormData(event.currentTarget).get("reply") ?? "");
-                void run("reply", async () => {
-                  const fresh = await fetchAgentTask(taskId, client.customerId, client.workspaceId);
-                  if (fresh.agent !== "agent-experiments" || fresh.kind !== "experiment" || !needsReply(fresh, "agent-experiments") || !fresh.conversation_id) {
-                    throw new ApiError(400, "invalid_input", "That task has no ExperimentsAgent question to answer.");
-                  }
-                  await turn(message, { conversation_id: fresh.conversation_id });
-                });
-              }}
-            >
-              <label>
-                Reply
-                <textarea name="reply" rows={4} required />
-              </label>
-              <button className="button button-primary" type="submit" disabled={busy === "reply"}>
+          <form
+            className="stack mt-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const message = String(new FormData(event.currentTarget).get("reply") ?? "");
+              void run("reply", async () => {
+                const fresh = await fetchAgentTask(taskId, client.customerId, client.workspaceId);
+                if (fresh.agent !== "agent-experiments" || fresh.kind !== "experiment" || !needsReply(fresh, "agent-experiments") || !fresh.conversation_id) {
+                  throw new ApiError(400, "invalid_input", "That task has no ExperimentsAgent question to answer.");
+                }
+                await turn(message, { conversation_id: fresh.conversation_id });
+              });
+            }}
+          >
+            <label>
+              Reply
+              <textarea name="reply" rows={4} required />
+            </label>
+            <div>
+              <Button variant="primary" type="submit" loading={busy === "reply"}>
                 Reply to ExperimentsAgent
-              </button>
-            </form>
-          </>
+              </Button>
+            </div>
+          </form>
         )}
-      </section>
-    </>
+      </Card>
+    </div>
   );
 }

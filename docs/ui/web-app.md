@@ -67,6 +67,10 @@ to the same tokens. The colours stay lake's: the action blue, the light and dark
 Plex. The look adds one token, `--lake-rule`, a softer control border.
 The shell resets the buttons in its own header and navigation so its utilities alone draw them; a
 page's header (`.page-header`) is excluded, so the buttons in a page's actions keep the kit's look.
+Group styles a pattern needs beyond the kit live in one file per group with lake tokens only:
+`styles/experiments.css` (the charts) and `styles/ship.css`. `ship.css` holds the dark terminal panel
+for live logs and events, the Live switch and `form.row-form`, and is used by Ship, Experiments and
+Streams (`docs/ui/apps.md`).
 
 ## The first paint
 

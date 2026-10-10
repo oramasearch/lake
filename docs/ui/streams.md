@@ -24,6 +24,21 @@ Zetta or holds its service token. On the workspace's `agent-events` topic, **Tur
 filters (`task=`, `agent=`) are kept across jump, older/newest and Live reads. Other spaces'
 payloads and shared subscription identities do not reach the page.
 
+## Layout (lake#561)
+
+The list opens with figures from `list_streams` (Topics, Held messages, Subscribers; topics whose
+counts are unavailable are left out of the sums). Below them are the prefix and page-size filter,
+and a card of rows per Zetta. **New topic** opens a drawer from the header.
+
+The topic page is a message browser in a Split:
+
+- The main card holds the messages as rows, with **Live** as a switch in its header. The switch
+  starts *Paused*, and turning it off stops the poll. Jump and the agent-events filters sit above
+  the rows.
+- Editing a message and **Publish message** open dialogs. Edit Settings opens a drawer.
+- The side column holds the topic's facts, its settings, its subscriptions with lag, and Purge and
+  Delete Topic in a danger card.
+
 ## Controls and capabilities
 
 | Control | Capability |

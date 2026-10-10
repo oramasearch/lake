@@ -23,7 +23,18 @@ export default function RunPage() {
   }, [refresh, run]);
   const status = useFollow(live, () => details.filter((detail) => !detail.metrics_suppressed).map((detail) => ({ kind: "run" as const, id: detail.run })), refresh);
   return (
-    <ExperimentsShell mode="run" notice={notice} live={live} onLive={setLive} status={status}>
+    <ExperimentsShell
+      mode="run"
+      notice={notice}
+      live={live}
+      onLive={setLive}
+      status={status}
+      sub={
+        <>
+          Curves, parameters and artifacts of run <code>{run}</code>.
+        </>
+      }
+    >
       <MetricsView details={details} />
     </ExperimentsShell>
   );

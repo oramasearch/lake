@@ -2,11 +2,13 @@
  * agent-task turn (ApplicationAgent, ExperimentsAgent), Markdown, the platform pages' repository
  * tabs and stale banner, and small text helpers. Candidates to hoist into `lib/`. */
 import { type ReactNode, useCallback, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { ApiError, read, useRead, type Row } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
 import { workspacePath } from "@/routes";
+import { cx } from "@/lib/ui";
+import "@/styles/ship.css";
 
 /* ------------------------------------------------------------------ links */
 
@@ -202,7 +204,7 @@ export function PageError({ error }: { error: unknown }) {
 export function StaleBanner({ since }: { since?: string | null }) {
   if (!since) return null;
   return (
-    <div className="notice status-warning" role="status">
+    <div className="mb-3 rounded-[5px] border-l-[3px] border-l-warn bg-warn-soft px-3.5 py-2.5 text-[13px] text-ink" role="status">
       <strong>Platform data is stale.</strong> The operator control plane has been unreachable since {since}. Writes are disabled.
     </div>
   );
@@ -307,4 +309,80 @@ export function pause(ms: number, signal?: AbortSignal): Promise<void> {
       { once: true },
     );
   });
+}
+
+/* ------------------------------------------------------------------ page parts */
+
+/** The tab a page shows, from `?tab=` (the first tab when absent or unknown). */
+export function useQueryTab<T extends string>(ids: readonly T[]): T {
+  const [params] = useSearchParams();
+  const asked = params.get("tab") as T | null;
+  return asked && ids.includes(asked) ? asked : ids[0];
+}
+
+/** Underlined tabs that are links to `?tab=<id>`, keeping every other query parameter (an app's
+ * `app_id`, a study's `study`), so back and a shared address open the same tab. */
+export function QueryTabs<T extends string>({ tabs, value, label = "Sections" }: { tabs: { id: T; label: ReactNode; count?: number }[]; value: T; label?: string }) {
+  const [params] = useSearchParams();
+  const href = (id: T, first: boolean) => {
+    const next = new URLSearchParams(params);
+    if (first) next.delete("tab");
+    else next.set("tab", id);
+    const text = next.toString();
+    return text ? `?${text}` : "?";
+  };
+  return (
+    <nav className="tabs mb-4" aria-label={label}>
+      {tabs.map((tab, index) => (
+        <Link key={tab.id} to={href(tab.id, index === 0)} replace aria-current={tab.id === value ? "page" : undefined}>
+          {tab.label}
+          {tab.count !== undefined && <span className="tab-count">{tab.count}</span>}
+        </Link>
+      ))}
+    </nav>
+  );
+}
+
+/** A dark terminal panel for live logs and events: a mono heading, actions on its right, and the
+ * lines (or `empty` while there are none). */
+export function Terminal({
+  title,
+  actions,
+  children,
+  empty,
+  live,
+  className,
+}: {
+  title?: ReactNode;
+  actions?: ReactNode;
+  children?: ReactNode;
+  empty?: ReactNode;
+  live?: boolean;
+  className?: string;
+}) {
+  const blank = children === undefined || children === null || children === "" || (Array.isArray(children) && children.length === 0);
+  return (
+    <div className={cx("terminal", className)}>
+      {(title || actions) && (
+        <div className="terminal-head">
+          {live !== undefined && <span className={cx("live-dot", live && "is-live")} aria-hidden />}
+          <span>{title}</span>
+          {actions && <div className="terminal-actions">{actions}</div>}
+        </div>
+      )}
+      <div className="terminal-body" role="log" aria-live="polite">
+        {blank ? <span className="terminal-empty">{empty ?? "Nothing yet."}</span> : children}
+      </div>
+    </div>
+  );
+}
+
+/** The Live switch: a prominent toggle with a pulsing dot while it follows. */
+export function LiveSwitch({ live, onChange, label = "Live", pausedLabel = "Paused" }: { live: boolean; onChange: (value: boolean) => void; label?: string; pausedLabel?: string }) {
+  return (
+    <button type="button" className="live-switch" aria-pressed={live} onClick={() => onChange(!live)} title={live ? "Pause live updates" : "Follow live updates"}>
+      <span className="live-dot" aria-hidden />
+      {live ? label : pausedLabel}
+    </button>
+  );
 }

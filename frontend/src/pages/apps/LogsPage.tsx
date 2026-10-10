@@ -1,12 +1,13 @@
-/** An environment's logs (web_ui.cpp web_ui_logs; serve_logs_page). The page reads
- * `environment_logs` with GET and polls it every 3 seconds from `next_since`, appending lines (the
- * server page's script POSTed to a GET-only read and never appended anything). */
+/** An environment's logs (web_ui.cpp web_ui_logs; serve_logs_page), in a terminal panel. The page
+ * reads `environment_logs` with GET and polls it every 3 seconds from `next_since`, appending lines
+ * (the server page's script POSTed to a GET-only read and never appended anything). */
 import { useEffect, useState } from "react";
 import { Link, Navigate, useSearchParams } from "react-router-dom";
+import { ArrowLeft, RefreshCw } from "lucide-react";
 import { read, type Row } from "@/lib/api";
-import { ErrorBlock, Page, Skeleton } from "@/lib/ui";
+import { Button, ErrorBlock, Page, Skeleton } from "@/lib/ui";
 import { usePlatformRepository } from "./EnvironmentsPage";
-import { pause, RepositoryTabs, StaleBanner } from "./shared";
+import { pause, RepositoryTabs, StaleBanner, Terminal } from "./shared";
 
 type LogPage = { items?: Row[]; next_since?: string; stale_since?: string | null };
 
@@ -67,8 +68,24 @@ export default function LogsPage() {
   }, [repositoryId, environment, since]);
 
   if (!repositoryId || !environment) return <Navigate to="/repositories" replace />;
+  const environmentHref = `/environment?repository_id=${encodeURIComponent(repositoryId)}&name=${encodeURIComponent(environment)}`;
+  const refreshHref = `/logs?repository_id=${encodeURIComponent(repositoryId)}&environment=${encodeURIComponent(environment)}&since=${encodeURIComponent(cursor)}`;
   return (
-    <Page eyebrow="environment logs" title={environment}>
+    <Page
+      eyebrow="Data · Environment logs"
+      title={environment}
+      sub="The environment's container logs, followed every 3 seconds."
+      actions={
+        <>
+          <Button to={environmentHref}>
+            <ArrowLeft size={14} aria-hidden /> Environment
+          </Button>
+          <Button to={refreshHref}>
+            <RefreshCw size={14} aria-hidden /> Refresh
+          </Button>
+        </>
+      }
+    >
       <RepositoryTabs repositoryId={repositoryId} current="platform" />
       <StaleBanner since={stale} />
       {!loaded ? (
@@ -76,14 +93,10 @@ export default function LogsPage() {
       ) : error && !lines ? (
         <ErrorBlock error={error} what="logs" />
       ) : (
-        <section className="panel" id="platform-logs">
-          <h2>Logs</h2>
-          <pre aria-live="polite">
-            <code>{lines}</code>
-          </pre>
-          <p>
-            <Link to={`/logs?repository_id=${encodeURIComponent(repositoryId)}&environment=${encodeURIComponent(environment)}&since=${encodeURIComponent(cursor)}`}>Refresh</Link>
-          </p>
+        <section id="platform-logs" aria-label="Logs">
+          <Terminal title={`${environment} · logs`} live actions={<Link to={refreshHref} className="text-inherit">Refresh</Link>} empty="No log lines yet. New lines appear here as they are written.">
+            {lines}
+          </Terminal>
         </section>
       )}
     </Page>

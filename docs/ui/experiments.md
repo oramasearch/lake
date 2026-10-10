@@ -27,6 +27,24 @@ Study and trial stop buttons are shown to writers; Promote to space administrato
 (`my_permissions` on the space: `write`, `admin`). No page shows a credential or contacts Zetta
 directly.
 
+## Layout (lake#561)
+
+- **The list** opens with figures (Studies, Running, Trials, Tracked runs). Below them, a search
+  over studies and runs, the state as filter chips (kept in `state=`) and the project filter
+  (kept in `project=`). Studies are rich rows: the name, then the project and objective, the state
+  chip, the best value with its direction, trials against the budget with complete/pruned/failed
+  counts, cost against the cap, and Stop. Tracked runs have a compare checkbox and
+  **Compare selected runs** in the card header.
+- **Ask ExperimentsAgent** and **Start a study** open drawers from the header. The study form is
+  unchanged and still confirms its parameters in a dialog.
+- **Study** has the name and state in its header, figures (best objective, trials, running, cost),
+  and a Split. The charts and the leaderboard (state chips as filters, Compare in its toolbar) are
+  in the main column. Status, budgets with meters, and trials by state are in the side column.
+  The latest trial curves come below.
+- **Run** and **Compare** put the charts' toolbar in a card and each metric group in a card.
+  Compare adds figures and the runs compared, as links. On every page except the list, the header
+  holds All experiments and the **Live updates** switch with its status.
+
 ## Run an Experiment
 
 The list begins with a **Run an Experiment** box. A person describes a training or tuning goal;
