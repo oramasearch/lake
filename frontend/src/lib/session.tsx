@@ -85,8 +85,10 @@ export function SessionProvider({ children, fallback }: { children: ReactNode; f
   const q = useRead<Viewer>("viewer", asked ? { workspace_id: asked } : undefined, { workspace: null, staleTime: 60_000 });
   const viewer = q.data ?? (q.isError ? ANONYMOUS : null);
   const workspaceId = fromPath ?? viewer?.workspace_id ?? null;
-  // Every capability called from a workspace page is called under the same /w/<id> prefix.
-  setWorkspace(workspaceId);
+  // Every capability called from a workspace page (/w/<id>/…) is called under the same prefix.
+  // Other pages call unscoped: the registry fills `workspace_id` from the prefix and refuses a
+  // different one, so a remembered workspace must never scope them.
+  setWorkspace(fromPath);
   useEffect(() => {
     setSignedIn(!!viewer?.signed_in);
   }, [viewer?.signed_in]);
