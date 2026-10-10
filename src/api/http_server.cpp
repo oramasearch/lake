@@ -3251,7 +3251,11 @@ public:
         std::set<std::string> staged_uploads;
         std::set<std::string> source_paths;
         for (const RepositoryWriteOperation& operation : operations) {
-            if (!valid_repository_path(operation.path)) {
+            // A folder at the top (an empty path) is the repository's own empty-folder marker:
+            // create_drive writes it as a new repository's first change (docs/api/drives.md).
+            const bool top_folder =
+                operation.kind == RepositoryWriteKind::Folder && operation.path.empty();
+            if (!top_folder && !valid_repository_path(operation.path)) {
                 return std::unexpected(
                     SyncStoreError{"invalid_input", "invalid repository path", operation.path});
             }
@@ -3293,8 +3297,10 @@ public:
                 continue;
             }
             if (operation.kind == RepositoryWriteKind::Folder) {
-                const auto written = liquid::runtime::block_on(
-                    (*state)->subject->write(operation.path + "/.lake-folder", {}));
+                const auto written = liquid::runtime::block_on((*state)->subject->write(
+                    operation.path.empty() ? std::string(".lake-folder")
+                                           : operation.path + "/.lake-folder",
+                    {}));
                 if (!written) {
                     return std::unexpected(error_of(written.error()));
                 }
@@ -7051,6 +7057,9 @@ struct ApiServer::Impl {
     // Speech-to-text (docs/api/transcripts.md): the injected one, else OpenAI over outbound_http
     // when a key is configured, else empty.
     Transcriber transcriber;
+    // The workspace Zettas' object transport (configure_workspace_stores), for workspace files;
+    // null without workspaces.
+    std::shared_ptr<control::ObjectTransport> object_transport;
     struct CachedJwks {
         std::string document;
         std::chrono::steady_clock::time_point fetched_at;
@@ -7607,6 +7616,8 @@ struct ApiServer::Impl {
         };
         config.transport =
             options.object_transport ? options.object_transport : control::make_zetta_object_transport();
+        // Workspace files (docs/api/drives.md) reach the same Zettas over the same connections.
+        object_transport = config.transport;
         config.instance_kek = options.instance_kek;
         config.lease_ttl = options.workspace_store_lease_ttl;
         // Bounded labels only (lake#527): the request's kind and its outcome class, never a
@@ -8383,6 +8394,7 @@ struct ApiServer::Impl {
         ctx.external_origin = options.external_origin;
         ctx.clerk_publishable_key = options.clerk_publishable_key;
         ctx.transcriber = transcriber;
+        ctx.object_transport = object_transport;
         ctx.artifact_catalog = [this] {
             nlohmann::json catalog = artifacts.catalog();
             catalog["available"] = artifacts.available();
@@ -9793,6 +9805,88 @@ struct ApiServer::Impl {
                                       "\"" + json_string(result.value, "blob") + "\"");
     }
 
+    // GET /drive/files/download?customer_id=&workspace_id=&drive_id=&id=[&inline=1]: a workspace
+    // file (docs/api/drives.md). get_drive_entry authorizes and audits the read; the bytes stream
+    // from the workspace Zetta's `lake_files` bucket one 1 MiB block at a time, opened as they go,
+    // so a file is never held whole. `inline=1` asks to show it in the browser, which is honoured
+    // only for media types a browser cannot run as a page.
+    boost::http::route_task serve_workspace_file_download(boost::http::route_params& route) {
+        ApiContext context = context_for(route);
+        const std::string customer_id = query_value(route, "customer_id");
+        const std::string workspace_id = query_value(route, "workspace_id");
+        const std::string drive_id = query_value(route, "drive_id");
+        const std::string id = query_value(route, "id");
+        const ApiResult entry = unwrap(co_await registry.call_async("get_drive_entry",
+                                                                    {{"customer_id", customer_id},
+                                                                     {"workspace_id", workspace_id},
+                                                                     {"drive_id", drive_id},
+                                                                     {"id", id}},
+                                                                    context));
+        if (!entry.ok) {
+            co_return co_await serve_download_error(route, context, entry);
+        }
+        if (entry.value.value("kind", "") != "file" || entry.value.value("state", "") != "ready") {
+            co_return co_await serve_download_error(
+                route,
+                context,
+                ApiResult::failure("not_found", "no such file in this drive", "/id"));
+        }
+        auto found = control::settled(
+            co_await find_workspace_file(context, customer_id, workspace_id, drive_id, id));
+        if (!found) {
+            co_return co_await serve_download_error(
+                route, context, ApiResult::failure(found.error().code, found.error().message));
+        }
+        static constexpr std::array inline_types =
+            std::to_array<std::string_view>({"image/png",
+                                             "image/jpeg",
+                                             "image/gif",
+                                             "image/webp",
+                                             "application/pdf",
+                                             "text/plain",
+                                             "text/csv",
+                                             "text/markdown",
+                                             "audio/mpeg",
+                                             "audio/mp4",
+                                             "audio/wav",
+                                             "video/mp4",
+                                             "video/webm"});
+        const bool show =
+            query_value(route, "inline") == "1" &&
+            std::ranges::find(inline_types, found->content_type) != inline_types.end();
+        std::string filename = found->name;
+        for (char& c : filename) {
+            if (c == '"' || c == '\\' || c == '\r' || c == '\n') {
+                c = '_';
+            }
+        }
+        route.res.set("content-disposition",
+                      std::string(show ? "inline" : "attachment") + "; filename=\"" + filename +
+                          "\"");
+        // Only the file's own bytes, never a page: it is shown in the browser as data at most.
+        route.res.set("Content-Security-Policy", "sandbox; default-src 'none'");
+        auto shared = std::make_shared<ApiContext>(context);
+        const std::string key = found->object_key;
+        const std::uint64_t size = found->size;
+        co_return co_await stream_blob(
+            route,
+            "\"" + found->sha256 + "\"",
+            size,
+            [shared, customer_id, workspace_id, key, size](
+                std::uint64_t offset, std::span<std::byte> into) -> SyncStoreResult<std::uint64_t> {
+                auto window = control::settled(liquid::runtime::block_on(read_workspace_file(
+                    *shared, customer_id, workspace_id, key, size, offset, into.size())));
+                if (!window) {
+                    return std::unexpected(
+                        SyncStoreError{window.error().code, window.error().message});
+                }
+                std::memcpy(into.data(), window->data(), window->size());
+                return static_cast<std::uint64_t>(window->size());
+            },
+            false,
+            StreamedFile{show ? found->content_type : std::string("application/octet-stream")});
+    }
+
     liquid::runtime::task<ApiResult>
     page_call(std::string capability, nlohmann::json input, ApiContext& context) {
         co_return unwrap(co_await registry.call_async(capability, input, context));
@@ -10480,12 +10574,37 @@ struct ApiServer::Impl {
     // short body and retries.
     using BlobReader =
         std::function<SyncStoreResult<std::uint64_t>(std::uint64_t, std::span<std::byte>)>;
+    //
+    // A workspace file (GET /drive/files/download, docs/api/drives.md) streams the same way with
+    // `file` set: its media type and ETag are the file's, no registry header is sent, and a refusal
+    // is lake's JSON error rather than the registry's.
+    struct StreamedFile {
+        std::string content_type;
+    };
     boost::http::route_task stream_blob(boost::http::route_params& route,
                                         std::string digest,
                                         std::uint64_t size,
                                         BlobReader read,
-                                        bool head) {
+                                        bool head,
+                                        std::optional<StreamedFile> file = std::nullopt) {
         namespace http = boost::http;
+        const auto refuse = [&](const SyncStoreError& error) -> http::route_task {
+            if (!file) {
+                return registry_store_error(route, error);
+            }
+            const auto status = error.code == "not_found" ? http::status::not_found
+                                : error.code == "store_unavailable" || error.code == "busy"
+                                    ? http::status::service_unavailable
+                                    : http::status::internal_server_error;
+            if (status == http::status::service_unavailable) {
+                route.res.set(http::field::retry_after, "1");
+            }
+            return send_text(route,
+                             status,
+                             error_body(error.code, error.message),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        };
         struct Slot {
             std::atomic<int>& count;
             ~Slot() {
@@ -10494,8 +10613,9 @@ struct ApiServer::Impl {
         };
         if (blob_streams.fetch_add(1) >= blob_stream_limit) {
             blob_streams.fetch_sub(1);
-            co_return co_await registry_store_error(
-                route, SyncStoreError{"store_unavailable", "too many image pulls in progress"});
+            co_return co_await refuse(SyncStoreError{"store_unavailable",
+                                                     file ? "too many downloads in progress"
+                                                          : "too many image pulls in progress"});
         }
         Slot slot{blob_streams};
         const auto window_read = [&](std::uint64_t offset, std::span<std::byte> into) {
@@ -10511,20 +10631,26 @@ struct ApiServer::Impl {
             buffer.resize(static_cast<std::size_t>(std::min(blob_window, size)));
             auto first = co_await window_read(0, buffer);
             if (!first) {
-                co_return co_await registry_store_error(route, first.error());
+                co_return co_await refuse(first.error());
             }
             if (*first == 0) {
-                co_return co_await registry_store_error(route, SyncStoreError{"not_found", ""});
+                co_return co_await refuse(
+                    SyncStoreError{"not_found", "the file's bytes are missing"});
             }
             filled = *first;
         }
         route.status(http::status::ok);
-        route.res.set(http::field::content_type, "application/octet-stream");
+        route.res.set(http::field::content_type,
+                      file ? file->content_type : std::string("application/octet-stream"));
         route.res.set(http::field::cache_control, "no-store");
         route.res.erase(http::field::etag);
         route.res.erase(http::field::content_length);
         route.res.set(http::field::etag, digest);
-        route.res.set("Docker-Content-Digest", digest);
+        if (file) {
+            route.res.set("X-Content-Type-Options", "nosniff");
+        } else {
+            route.res.set("Docker-Content-Digest", digest);
+        }
         route.res.set_payload_size(size);
         if (head || size == 0) {
             auto [send_error] = co_await route.res_body.commit_eof(0);
@@ -13020,6 +13146,12 @@ bool ApiServer::start() {
               [&impl](http::route_params& route) -> http::route_task {
                   return impl.observe_request(
                       route, "/drive/download", impl.serve_drive_download(route));
+              });
+    add_route(http::method::get,
+              "/drive/files/download",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/drive/files/download", impl.serve_workspace_file_download(route));
               });
     add_route(http::method::get, "/share/:token/download", [&impl](http::route_params& route) {
         return impl.observe_request(

@@ -26,6 +26,7 @@
 #include "repository_test_support.hpp"
 #include "stream_fixture.hpp"
 #include "temporary_directory.hpp"
+#include "zetta_object_fixture.hpp"
 
 extern char** environ;
 
@@ -391,11 +392,15 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     lake::test::StreamWorkspace streams(store, customer.id);
     lake::test::ExperimentWorkspace experiments(store, customer.id);
     experiments.caller->fallback = streams.caller;
+    const auto objects = std::make_shared<lake::test::FakeZettaObjects>();
+    objects->add_node("http://experiments.test", "experiment-service-secret");
     lake::api::ApiServer server(
         {.port = 0,
          .node_name = "schema-test",
          .store = store,
          .workspaces = experiments.service,
+         // Workspace files (drives) in the workspace Zetta's object routes, faked.
+         .object_transport = objects,
          .admin_token = "schema-test",
          .instance_kek = kek,
          // A fake: tests never call OpenAI (docs/api/transcripts.md).
@@ -456,6 +461,59 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     transcript_edit["title"] = "Schema call, edited";
     http.call("update_transcript", transcript_edit);
     http.call("delete_transcript", transcript_id);
+    // Drives (docs/api/drives.md): a workspace-files drive in the workspace Zetta's fake object
+    // store, and a virtual one.
+    auto drive_input = transcript_scope;
+    drive_input.update({{"name", "Schema files"}, {"storage", "files"}});
+    const auto drive = http.call("create_drive", drive_input);
+    auto drive_scope = transcript_scope;
+    drive_scope["drive_id"] = drive.at("id");
+    auto virtual_input = transcript_scope;
+    virtual_input.update({{"name", "Schema links"}, {"storage", "virtual"}});
+    http.call("create_drive", virtual_input);
+    http.call("list_drives", transcript_scope);
+    http.read("list_drives", "?customer_id=" + customer.id + "&workspace_id=" + experiments.id);
+    auto drive_id = transcript_scope;
+    drive_id["id"] = drive.at("id");
+    http.call("get_drive", drive_id);
+    auto drive_rename = drive_id;
+    drive_rename["name"] = "Schema files, renamed";
+    http.call("rename_drive", drive_rename);
+    auto folder_input = drive_scope;
+    folder_input["path"] = "Reports/2026";
+    const auto folder = http.call("create_drive_folder_entry", folder_input);
+    auto small_input = drive_scope;
+    small_input["files"] = json::array({{{"path", "notes.txt"}, {"content", "aGVsbG8="}}});
+    const auto small = http.call("upload_drive_entries", small_input);
+    auto begin_input = drive_scope;
+    begin_input.update({{"path", "Reports/data.csv"}, {"size", 4}});
+    const auto begun = http.call("begin_drive_upload", begin_input);
+    auto chunk = drive_scope;
+    chunk.update({{"id", begun.at("entry").at("id")}, {"offset", 0}, {"content", "YSxiCg=="}});
+    http.call("append_drive_upload", chunk);
+    auto finish = drive_scope;
+    finish["id"] = begun.at("entry").at("id");
+    http.call("finish_drive_upload", finish);
+    http.call("list_drive_entries", drive_scope);
+    http.read("list_drive_entries",
+              "?customer_id=" + customer.id + "&workspace_id=" + experiments.id +
+                  "&drive_id=" + drive.at("id").get<std::string>());
+    auto entry_id = drive_scope;
+    entry_id["id"] = small.at("items").at(0).at("id");
+    http.call("get_drive_entry", entry_id);
+    http.call("read_drive_file", entry_id);
+    http.call("recent_drive_entries", transcript_scope);
+    auto shortcut_input = drive_scope;
+    shortcut_input.update(
+        {{"name", "Orama"}, {"target", {{"kind", "url"}, {"url", "https://orama.test/"}}}});
+    http.call("create_drive_shortcut", shortcut_input);
+    auto move_input = entry_id;
+    move_input["parent_id"] = folder.at("id");
+    http.call("move_drive_entry", move_input);
+    http.call("delete_drive_entry", entry_id);
+    auto drive_delete = drive_id;
+    drive_delete["confirm_name"] = "Schema files, renamed";
+    http.call("delete_drive", drive_delete);
     http.read("server_info");
     http.call("set_storage_quota", {{"customer_id", customer.id}, {"quota_bytes", 0}});
     http.call("metering_usage", {{"customer_id", customer.id}});
