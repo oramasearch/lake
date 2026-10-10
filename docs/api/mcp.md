@@ -95,7 +95,8 @@ curl -H "Authorization: Bearer <token>" -H 'content-type: application/json' \
   uses, with the scopes `mcp_setup` lists. *Every tool* scopes it `*`; *Read-only tools* scopes it to every
   read tool's name (`agent_docs::read_tool_names`; `workspace_query` counts as a read). The lifetime
   is 1 day, 7 days, or as long as the sign-in allows (at most 30 days): a token never outlives the
-  sign-in that made it (lake#193). The key is shown once and revoked on `/tokens`.
+  sign-in that made it (lake#193). The key is shown once and revoked on either Developer page's
+  Keys tab or on `/tokens` (lake#561, below).
 - **Set Up**: copy-ready blocks with the viewer's key and lake's origin for Claude Code (`claude
   mcp add --transport http lake <origin>/mcp --header "Authorization: Bearer <key>"`), Cursor
   (`mcp.json` with `url` and `headers`), Claude Desktop (`mcp-remote` through `npx`), and plain
@@ -133,3 +134,58 @@ group or flow is an edit to `agent_docs.cpp`.
 **How to verify.** `HttpResponseIsolation.AnMcpKeyWorksOverMcp` (llms.txt public; llms-full.txt
 documents every `tools/list` tool; a key made with `create_token` and `mcp_setup`'s read-only
 scopes lists tools, reads, and is refused a write; the skill downloads).
+
+## Developer → API and Developer → MCP (lake#561)
+
+**What.** The web app's Developer section is two full pages, built the way oramasearch/rev-os builds
+its own (`frontend/src/pages/developer/`). Before, the rail's **API** item opened the raw
+`/v1/openapi.json` and MCP was one long page.
+
+- **Developer → API** (`/developer/api`, `ApiPage.tsx`). The header downloads `openapi.json`
+  (pretty-printed), opens the API guide (`/docs/developer`) and Developer → MCP. Three tabs, kept in
+  `?tab=` so a link opens one:
+  - **Keys**: the key form, the new key once, and the viewer's keys (below).
+  - **Quick start**: copy-ready `curl` and `fetch` against `viewer.external_origin` (else the page's
+    origin) for `GET /v1/viewer`, a list read (`list_repositories`), an action
+    (`create_repository`, with the viewer's space and workspace filled in) and a workspace-scoped
+    call under `/w/<workspace id>/v1`, with the envelope and the error codes explained.
+  - **Operations**: every operation of `/v1/openapi.json` as the browser's session receives it,
+    grouped by the product group `mcp_setup` gives its tool (liquid sync and the operations that
+    are not MCP tools get groups of their own), searchable by path, name, summary or group. Each
+    opens to its description, read or write (an action with `x-lake-action: read`, such as
+    `workspace_query`, is a read), the permission it needs, its parameters, its request body schema,
+    the `value` schema inside the success envelope, and a **Copy as curl** block with the required
+    fields as placeholders and the new key, if one was made on this page.
+- **Developer → MCP** (`/developer/mcp`, `McpPage.tsx`). An endpoint strip, then three tabs:
+  - **Connect**: the key (the one just made, one pasted, or `$LAKE_KEY`), the setup for Claude Code
+    (`claude mcp add --transport http lake <origin>/mcp --header "Authorization: Bearer <key>"`),
+    Cursor, Claude Desktop and JSON-RPC `curl` (`initialize`, `tools/list`, `tools/call`), After
+    Lake Upgrades, and Teach Your Agent (the skill, `llms.txt`, `llms-full.txt`, the operations).
+  - **Keys**: the same panel as Developer → API.
+  - **Tools**: every tool of `mcp_setup.tool_groups` by group with its summary, searchable and
+    filtered by read or write, then the worked flows.
+- **Keys** (`parts.tsx`, rules in `logic.ts`). One form for both pages calls `create_token` with
+  what `/tokens` and the former MCP form sent: a name (default *API key* or *MCP key*, with
+  *(read-only)*); access *every tool* (`*`), *read-only* (`mcp_setup.scopes.read_only`) or *named
+  capabilities* (comma separated, with the liquid push and pull set one click away); a lifetime of
+  the sign-in's (at most 30 days), 1 day, 7 days, a number of seconds or **Never**; and *static*. A
+  standing or static key needs a reason, and a standing *every tool* key names every capability
+  (`scopes.all`) because a key that never expires cannot be `*`. The secret is shown once in a
+  callout and fills the page's code blocks until the page is left. The table lists the viewer's
+  `api_token` and `static` sessions from `list_sessions` (name, access, expiry, last used, created,
+  state) and revokes one through `revoke_session` after a confirmation.
+- **The operator** has no tokens: its key is the instance's admin token (`LAKE_ADMIN_TOKEN`). Both
+  Keys tabs say so instead of offering the form.
+
+**Why.** A developer needs the keys, the contract and a first call in one place; a raw JSON
+document in a new tab gave them only the contract.
+
+**How to verify.** From `frontend/`: `npx tsc --noEmit -p .`, `npm test` (`tests/developer.test.ts`
+checks the `create_token` inputs, how scopes read, the grouping, the envelope's `value` schema and
+the curl lines against the shape `openapi_document` renders) and `npm run build`. In a browser:
+make a read-only key on Developer → API, copy the Claude Code block on Developer → MCP, call
+`tools/list` with it, and revoke it from either Keys tab.
+
+**How to change.** A new capability appears in Operations and Tools with no edit. The page
+structure is in `ApiPage.tsx` and `McpPage.tsx`; the key rules and the OpenAPI reading in
+`logic.ts`, which has no imports so the tests run it directly.

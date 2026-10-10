@@ -61,6 +61,8 @@ takes the look without being rewritten. The shell (`components/Shell.tsx`), the 
 and the sign-in frame (`pages/account/AuthFrame.tsx`) draw themselves with Tailwind utilities bound
 to the same tokens. The colours stay lake's: the action blue, the light and dark surfaces, and IBM
 Plex. The look adds one token, `--lake-rule`, a softer control border.
+The shell resets the buttons in its own header and navigation so its utilities alone draw them; a
+page's header (`.page-header`) is excluded, so the buttons in a page's actions keep the kit's look.
 
 ## The first paint
 

@@ -62,4 +62,4 @@ curl -s https://lake.oramadev.net/v1/predict \
   -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model_id": "<model id>", "rows": [{"support_tickets": 11}]}'
 ```
 
-Create the key on **Developer → MCP**. Details: [Ship](/docs/ship).
+Create the key on **Developer → API** or **Developer → MCP**. Details: [Ship](/docs/ship).
