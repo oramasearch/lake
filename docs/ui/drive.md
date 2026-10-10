@@ -9,10 +9,12 @@ opened through a share link is in [sharing.md](sharing.md).
 ## Browse and change
 
 `/drive?repository_id=<id>&ref=<ref>&path=<path>[&view=list|grid&sort=name|size|modified&direction=asc|desc]`
-(`DrivePage.tsx`, `drive_browse`) shows breadcrumbs and the folder's children. The display controls
-choose list or grid and sort folders and files by name, size or last structural change; they are
-kept in the URL. List view shows size and modified columns; grid view shows the same values on
-cards. Each entry links to its history, and a folder to **Share**.
+(`DrivePage.tsx`, `drive_browse`) is a file manager: the path bar, the folder's figures (folders,
+files, their size), a toolbar, a drop zone and the folder's children. The toolbar filters by name in
+the page and chooses the sort (name, size or last structural change), its direction and list or
+grid; those three are written to the URL at once. List view shows kind, size and modified columns;
+grid view shows the same values on cards. Each item's menu holds History, Download (files), Rename,
+Move and Delete; the header holds Share, New folder, Upload and a menu with History and Conflicts.
 
 | Control | Capability | History behaviour |
 |---|---|---|
@@ -23,8 +25,9 @@ cards. Each entry links to its history, and a folder to **Share**.
 | Delete, after a confirmation | `delete_drive_path` | removes the current path in a new change |
 
 Upload sends the files as base64 inside one JSON body, so the page refuses a selection larger than
-the REST body limit (64 MiB, encoding included) before sending it. Dropping files on the drop zone
-uploads them at once. Before lake#561 upload was a multipart form posted to `/drive/upload`, with
+the REST body limit (64 MiB, encoding included) before sending it. Choosing files (Upload, or pressing the drop
+zone) or dropping them on the drop zone uploads them at once. New folder, Rename and Move are
+dialogs; Delete is a confirmation dialog. Before lake#561 upload was a multipart form posted to `/drive/upload`, with
 drag and drop added by a script. Empty folders use a reserved `.lake-folder` marker hidden from
 drive results. Deleting or moving a current path never removes its prior versions from liquid
 history; the delete confirmation says so.

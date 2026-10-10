@@ -159,6 +159,40 @@ server pages guaranteed (the tree as `details`, the file range and diff toggle a
 scripts) no longer applies: the app needs JavaScript. Markdown and C/C++ highlighting moved to the
 browser with the same rules; syntax units still come from lake.
 
+## Layout (lake#561 redesign)
+
+The repository, forge and Drive pages follow the app's rev-os look (`web-app.md` → *The look*) and
+share one frame, `ForgePage` in `forge.tsx`:
+
+- **Header.** The eyebrow is the rail group, **Data**; the `<h1>` names the page or entity; under it
+  the repository it belongs to (`RepositoryLine`: its name as the way back and its visibility chip);
+  one sentence; the actions on the right. Then the repository tabs (`tab`), and above the header,
+  on tree, file and Drive pages, the path bar (`PathBreadcrumbs`, `DriveBreadcrumbs`, styled as a
+  location bar in `styles/repositories.css`).
+- **Figures.** A `StatRow` from the reads the page already makes, never a new read: files, changes,
+  references and releases on the repository home; files changed, lines and checks on a change;
+  open, closed, labels and unassigned on Issues; and so on. No figure is invented.
+- **Lists.** A toolbar over every list (a search that filters in the page, filter chips for the
+  states and kinds the rows carry) and rich rows: the name as a link with a muted second line,
+  states as state chips (`ForgeStatus`: lake's forge colour, else the word's usual colour), tags
+  as chips, times relative with the full time on hover.
+- **Detail pages are split.** Main content on the left; a side column of cards with the facts,
+  state and secondary actions. The repository home puts the files, recent changes and README on the
+  left and Clone and Push (copy blocks), About, references, releases, languages (meters) and
+  effective access on the right; Clone also opens the same commands in a dialog. A change review
+  puts its description and file list beside its details, reviews and checks, then the diffs in
+  full width with lake's diff classes.
+- **Creation and edits in dialogs.** New repository is a drawer from the list header; Drive's New
+  folder, Rename and Move, and Sharing's People, Organization and Link deliveries are dialogs;
+  deleting a Drive item, revoking a link from its page and restoring a version are confirmations
+  that say what happens.
+- **Empty states** have an icon, a title, one sentence and the next action; a failed read still
+  shows lake's error page, never an empty list.
+
+The one pattern the kit does not draw is the item menu (`Menu` in `forge.tsx`): a "⋯" button
+whose menu is drawn in a portal at the button, so a scrolling table does not clip it. Drive uses
+it for each item and for the folder's History and Conflicts.
+
 ## Verify
 
 `npm run build` in `frontend/` type-checks the pages. With a schema-loaded `LAKE_TEST_DB_URI`,

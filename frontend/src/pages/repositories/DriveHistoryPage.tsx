@@ -1,13 +1,15 @@
 /** /drive/history?repository_id=&ref=&path= (web_ui_drive_history): every change that touched a
- * Drive path. Two text versions can be compared; a version can be restored, which writes a new
- * change and rewrites nothing. */
+ * Drive path. Two text versions can be compared (pick "from" and "to"); a version can be restored,
+ * which writes a new change and rewrites nothing. */
 import { useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { ArrowLeft, Clock, GitCompareArrows, History as HistoryIcon, RotateCcw } from "lucide-react";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
-import { Button } from "@/lib/ui";
-import { dateTime } from "@/lib/format";
-import { DriveBreadcrumbs, driveHref, forgeAct, ForgePage, itemsOf, parentPath, pending, ToRepositories, useForgeRead, useRepositoryTrail, type Repository } from "./forge";
+import { ConfirmButton } from "@/lib/overlay";
+import { Banner, Button, Chip, DataTable, Empty, Stat, StatRow, Toolbar } from "@/lib/ui";
+import { dateTime, relative } from "@/lib/format";
+import { DriveBreadcrumbs, driveHref, forgeAct, ForgePage, ForgeStatus, Identifier, itemsOf, parentPath, pathName, pending, ToRepositories, useForgeRead, useRepositoryTrail, type Repository } from "./forge";
 
 type Version = { id: string; occurred_at: string; message: string; changes: string[]; new_blob: string; new_conflicts: string[] };
 type History = { repository: Repository; path: string; items: Version[] };
@@ -28,8 +30,6 @@ function DriveHistory({ id, refName, path }: { id: string; refName: string; path
   // The first version is "to" and the second "from", as the page checked them.
   const [left, setLeft] = useState<string | null>(null);
   const [right, setRight] = useState<string | null>(null);
-  const [restoring, setRestoring] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   useRepositoryTrail(history.data?.repository, "File History");
   const wait = pending(history);
   if (wait) return wait;
@@ -37,118 +37,140 @@ function DriveHistory({ id, refName, path }: { id: string; refName: string; path
   const from = left ?? versions[1]?.id ?? "";
   const to = right ?? versions[0]?.id ?? "";
   const restore = async (changeId: string) => {
-    setRestoring(changeId);
-    setError(null);
-    try {
-      await forgeAct("restore_drive_version", { repository_id: id, ref: refName, path, change_id: changeId });
-      toast("Version restored");
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setRestoring(null);
-    }
+    await forgeAct("restore_drive_version", { repository_id: id, ref: refName, path, change_id: changeId });
+    toast("Version restored");
   };
   const rows = itemsOf(h);
+  const deletions = rows.length - versions.length;
+  const compare = () => navigate(driveHref("/drive/history/diff", id, refName, path, { left: from, right: to }));
   return (
     <ForgePage
       above={<DriveBreadcrumbs repository={h.repository} refName={refName} path={parentPath(path)} />}
-      eyebrow="drive history"
-      title={path}
-      sub="Every version is a history query. Restoring writes a new change and does not rewrite prior versions."
+      title={`History of ${pathName(path) || "/"}`}
+      repository={h.repository}
+      tab="files"
+      sub={
+        <>
+          <code>{path || "/"}</code>. Restoring writes a new change and does not rewrite prior versions.
+        </>
+      }
+      actions={
+        <Button to={driveHref("/drive", id, refName, parentPath(path))} variant="ghost">
+          <ArrowLeft size={14} aria-hidden /> Back to folder
+        </Button>
+      }
     >
-      <div className="actions">
-        <Link to={driveHref("/drive", id, refName, parentPath(path))}>Back to folder</Link>
-      </div>
-      {error && (
-        <p className="error" role="alert">
-          {error}
-        </p>
+      {rows.length > 0 && (
+        <StatRow cols={3}>
+          <Stat label="Changes" value={rows.length} icon={HistoryIcon} sub="touch this path" />
+          <Stat label="Versions" value={versions.length} icon={RotateCcw} sub={deletions ? `${deletions} deletions` : "restorable"} />
+          <Stat label="Latest" value={relative(rows[0]?.occurred_at)} icon={Clock} sub={dateTime(rows[0]?.occurred_at)} />
+        </StatRow>
+      )}
+      {versions.length >= 2 && (
+        <Toolbar>
+          <Banner tone="quiet">
+            Pick a version to compare <strong>from</strong> and one to compare <strong>to</strong>, then compare them line by line.
+          </Banner>
+          <div className="ml-auto">
+            <Button variant="primary" onClick={compare}>
+              <GitCompareArrows size={14} aria-hidden /> Compare selected text versions
+            </Button>
+          </div>
+        </Toolbar>
       )}
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          navigate(driveHref("/drive/history/diff", id, refName, path, { left: from, right: to }));
+          compare();
         }}
       >
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>When</th>
-                <th>Change</th>
-                <th>What changed</th>
-                <th>Compare from</th>
-                <th>Compare to</th>
-                <th>Restore</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((change, index) => (
-                <tr key={change.id + index}>
-                  <td>{dateTime(change.occurred_at)}</td>
-                  <td>
-                    <code>{change.id}</code>
-                    <br />
-                    {change.message}
-                  </td>
-                  <td>
-                    {(change.changes ?? []).join(", ")}
-                    {change.new_conflicts?.length > 0 && (
-                      <>
-                        <br />
-                        <span className="muted">Conflict records:</span>
-                        <ul>
-                          {change.new_conflicts.map((conflict) => (
-                            <li key={conflict}>
-                              <code>{conflict}</code>
-                            </li>
-                          ))}
-                        </ul>
-                      </>
-                    )}
-                  </td>
-                  {change.new_blob ? (
-                    <>
-                      <td>
-                        <input aria-label={`Compare from ${change.id}`} type="radio" name="left" value={change.id} checked={from === change.id} onChange={() => setLeft(change.id)} />
-                      </td>
-                      <td>
-                        <input aria-label={`Compare to ${change.id}`} type="radio" name="right" value={change.id} checked={to === change.id} onChange={() => setRight(change.id)} />
-                      </td>
-                      <td>
-                        {viewer.signed_in ? (
-                          <Button loading={restoring === change.id} disabled={!!restoring} onClick={() => void restore(change.id)}>
-                            Restore
-                          </Button>
-                        ) : (
-                          "—"
-                        )}
-                      </td>
-                    </>
-                  ) : (
-                    <>
-                      <td>—</td>
-                      <td>—</td>
-                      <td>Deleted</td>
-                    </>
+        <DataTable<Version>
+          what="history"
+          caption="Versions of this path"
+          rows={rows}
+          rowKey={(change, index) => change.id + index}
+          empty={
+            <Empty icon={HistoryIcon} title="No history">
+              No changes touch this path.
+            </Empty>
+          }
+          columns={[
+            {
+              key: "change",
+              label: "Change",
+              render: (change) => (
+                <div className="min-w-0">
+                  <div className="font-semibold">{change.message || "Untitled change"}</div>
+                  <div className="text-[12px] text-ink-3">
+                    <Identifier value={change.id} /> · <span title={dateTime(change.occurred_at)}>{relative(change.occurred_at)}</span>
+                  </div>
+                </div>
+              ),
+            },
+            {
+              key: "what",
+              label: "What changed",
+              render: (change) => (
+                <div>
+                  <span className="flex flex-wrap gap-1">
+                    {(change.changes ?? []).map((what) => (
+                      <ForgeStatus key={what} value={what} />
+                    ))}
+                    {!change.new_blob && <Chip tone="bad">deleted</Chip>}
+                  </span>
+                  {change.new_conflicts?.length > 0 && (
+                    <div className="mt-1 text-[12px]">
+                      <span className="muted">Conflict records:</span>
+                      <ul className="m-0 pl-4">
+                        {change.new_conflicts.map((conflict) => (
+                          <li key={conflict}>
+                            <code>{conflict}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   )}
-                </tr>
-              ))}
-              {rows.length === 0 && (
-                <tr>
-                  <td colSpan={6} className="empty">
-                    No changes touch this path.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        {versions.length >= 2 && (
-          <p>
-            <Button type="submit">Compare selected text versions</Button>
-          </p>
-        )}
+                </div>
+              ),
+            },
+            {
+              key: "from",
+              label: "From",
+              render: (change) =>
+                change.new_blob ? <input aria-label={`Compare from ${change.id}`} type="radio" name="left" value={change.id} checked={from === change.id} onChange={() => setLeft(change.id)} /> : "—",
+            },
+            {
+              key: "to",
+              label: "To",
+              render: (change) =>
+                change.new_blob ? <input aria-label={`Compare to ${change.id}`} type="radio" name="right" value={change.id} checked={to === change.id} onChange={() => setRight(change.id)} /> : "—",
+            },
+            {
+              key: "restore",
+              label: <span className="sr-only">Restore</span>,
+              render: (change) =>
+                !change.new_blob ? (
+                  <span className="muted">Deleted</span>
+                ) : viewer.signed_in ? (
+                  <ConfirmButton
+                    title="Restore this version?"
+                    confirmLabel="Restore"
+                    confirm={
+                      <>
+                        Writes a new change that puts <code>{path}</code> back as it was in <Identifier value={change.id} />. No earlier version is rewritten.
+                      </>
+                    }
+                    onConfirm={() => restore(change.id)}
+                  >
+                    Restore
+                  </ConfirmButton>
+                ) : (
+                  "—"
+                ),
+            },
+          ]}
+        />
       </form>
     </ForgePage>
   );

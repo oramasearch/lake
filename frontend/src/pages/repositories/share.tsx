@@ -1,6 +1,8 @@
 /** What the Drive sharing and public share pages share: link state and wording
  * (`share_link_state`, `share_link_actions`), the bearer-link addresses and the share error. */
+import { Link2Off as LinkIcon } from "lucide-react";
 import { useSession } from "@/lib/session";
+import { Empty, Page } from "@/lib/ui";
 import { useTrail } from "@/lib/trail";
 import type { AccessEntry, PolicyObject, Repository } from "./forge";
 
@@ -31,11 +33,13 @@ export function useShareTrail(title: string) {
 /** `serve_drive_share_error`: a bad, expired or revoked link, or a path outside it. */
 export function ShareError({ title, message }: { title: string; message: string }) {
   return (
-    <div className="page-container">
-      <p className="eyebrow">shared drive folder</p>
-      <h1>{title}</h1>
-      <p className="error">{message}</p>
-    </div>
+    <Page eyebrow="Shared drive folder" title={title}>
+      <Empty icon={LinkIcon} title="This link does not open a folder">
+        <span className="text-bad" role="alert">
+          {message}
+        </span>
+      </Empty>
+    </Page>
   );
 }
 

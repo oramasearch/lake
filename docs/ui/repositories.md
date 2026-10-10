@@ -7,7 +7,7 @@ authorization and audit recording have one path. Their presentation rules are in
 
 | Page | Route | File | Capabilities | Contents |
 |---|---|---|---|---|
-| Repository list | `/repositories` | `RepositoriesPage.tsx` | `list_repositories`, `create_repository` | repositories the caller may open, and Create a Repository |
+| Repository list | `/repositories` | `RepositoriesPage.tsx` | `list_repositories`, `create_repository` | repositories the caller may open with their figures, search and workspace and visibility filters, and New repository (a drawer) |
 | Repository | `/repository?id=<id>` | `RepositoryPage.tsx` | `get_repository`, `repository_tree`, `repository_refs`, `repository_file`, `list_changes`, `list_releases`, `get_customer`, `get_workspace`, `entity_effective_access`, `build_image` | tree, recent changes, README, refs and releases, clone/push commands, language and size totals, lifecycle, workspace and access |
 | Tree | `/repository/tree?id=<id>&ref=<ref>` | `TreePage.tsx` | `repository_tree`, `list_changes`, `change_diff` | paths, kinds, modes and sizes at the ref, with each path's newest change |
 | File | `/file?repository_id=<id>&ref=<ref>&path=<path>` | `FilePage.tsx` | `repository_file`, `list_changes`, `change_diff` | highlighted or plain source, line/range anchors, blame, backing blob, raw/download links |

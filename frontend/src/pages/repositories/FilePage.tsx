@@ -4,17 +4,19 @@
  * Download are lake's byte routes. */
 import { type ReactNode, useEffect, useMemo, useRef } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { Download, FileCode } from "lucide-react";
 import { useTrail } from "@/lib/trail";
+import { Button, Chip } from "@/lib/ui";
 import { dateTime } from "@/lib/format";
 import {
   byteCount,
   fileLanguage,
-  ForgeTabs,
+  ForgePage,
   Identifier,
   itemsOf,
   pending,
   PathBreadcrumbs,
-  repositoryName,
+  pathName,
   ToRepositories,
   useChangeDiffs,
   useForgeRead,
@@ -203,31 +205,45 @@ function SourceFile({ id, refName, path }: { id: string; refName: string; path: 
     navigate({ search: location.search, hash: `L${line}` }, { replace: true });
   };
 
+  const language = highlighted ? fileLanguage(f.path) : "Plain text";
+  const blamed = new Set(blame.filter(Boolean).map((who) => who!.change));
   return (
-    <div className="page-container">
-      <PathBreadcrumbs repository={r} refName={refName} path={f.path} />
-      <p className="eyebrow">file</p>
-      <div className="file-heading">
-        <div>
-          <h1>{f.path}</h1>
-          <p className="sub">
-            {repositoryName(r)} at <code>{refName}</code>
-          </p>
-        </div>
-        <div className="actions">
-          <a href={`/file/raw?${q}`}>Raw</a>
-          <a href={`/file/download?${q}`}>Download</a>
-        </div>
-      </div>
-      <ForgeTabs repository={r} current="code" />
-      <div className="file-meta">
+    <ForgePage
+      above={<PathBreadcrumbs repository={r} refName={refName} path={f.path} />}
+      title={pathName(f.path)}
+      repository={r}
+      tab="code"
+      sub={
+        <>
+          <code>{f.path}</code> at <code>{refName}</code>
+        </>
+      }
+      actions={
+        <>
+          <Button href={`/file/raw?${q}`}>
+            <FileCode size={14} aria-hidden /> Raw
+          </Button>
+          <Button href={`/file/download?${q}`}>
+            <Download size={14} aria-hidden /> Download
+          </Button>
+        </>
+      }
+    >
+      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-[6px] border border-hairline bg-surface px-3 py-2 text-[12.5px] text-ink-2">
+        <Chip>{language}</Chip>
+        <span className="font-mono">{lines.length} lines</span>
+        <span aria-hidden>·</span>
+        <span className="font-mono">{byteCount(f.size)}</span>
+        <span aria-hidden>·</span>
         <span>
+          {blamed.size} {blamed.size === 1 ? "change" : "changes"} in its blame
+        </span>
+        <span className="ml-auto flex items-center gap-1.5">
+          <span className="label m-0">Blob</span>
           <Identifier value={f.blob} />
         </span>
-        <span>{byteCount(f.size)}</span>
-        <span>{highlighted ? fileLanguage(f.path) : "Plain text"}</span>
       </div>
-      <div className={`source-view ${highlighted ? "syntax-highlighted" : "plain-text"}`} data-language={highlighted ? fileLanguage(f.path) : "Plain text"}>
+      <div className={`source-view ${highlighted ? "syntax-highlighted" : "plain-text"}`} data-language={language}>
         <table>
           <thead className="sr-only">
             <tr>
@@ -274,7 +290,7 @@ function SourceFile({ id, refName, path }: { id: string; refName: string; path: 
           </tbody>
         </table>
       </div>
-    </div>
+    </ForgePage>
   );
 }
 
