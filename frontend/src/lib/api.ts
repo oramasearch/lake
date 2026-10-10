@@ -35,6 +35,10 @@ let announceSessionEnd = false;
 export function setSignedIn(value: boolean) {
   announceSessionEnd = value;
 }
+/** Whether someone is signed in: a 401 then means their session ended, not a failed sign-in. */
+export function isSignedIn(): boolean {
+  return announceSessionEnd;
+}
 
 function failure(status: number, code: string, message: string, path = ""): ApiError {
   if (status === 401) {
