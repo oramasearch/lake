@@ -1,13 +1,17 @@
 /** Ship → Search Index (web_ui.cpp index_content): what one index covers, publish and unpublish,
- * a search box whose question stays in the URL (`q`, `field`, `top_k`), and how to call it from
- * outside with a key that can only search. */
+ * a search playground whose question stays in the URL (`q`, `field`, `top_k`), and how to call it
+ * from outside with a key that can only search. Laid out as a Split: the playground and the code
+ * on the left; the facts, publishing and the search key on the right. */
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Globe, KeyRound, Search, SearchX } from "lucide-react";
 import { act, type Row } from "@/lib/api";
-import { useSession } from "@/lib/session";
+import { relative } from "@/lib/format";
+import { ConfirmButton } from "@/lib/overlay";
 import { entityCrumb, useTrail } from "@/lib/trail";
-import { Badge, Button, CopyBlock, DataTable, ErrorBlock, Field, Query, Skeleton } from "@/lib/ui";
+import { Banner, Button, Card, Chip, CopyBlock, Empty, ErrorBlock, KeyValue, Meter, Query, Skeleton, Split, StateTabs, Status } from "@/lib/ui";
 import { WorkspaceFrame, cellText, qs, text, useAsync, useWorkspace, useWq, useWsPath, wa } from "../train/workspace";
+import { CopyMono, useOrigin } from "./parts";
 
 const SUB = "Search it here, publish it, and call it from your own code with a key that can only search.";
 
@@ -17,13 +21,30 @@ export default function IndexPage() {
   const { customerId } = useWorkspace();
   const ws = useWsPath();
   const space = qs({ customer_id: customerId });
+  // The same read the content makes (one cache entry): the header names the table and the state.
+  const index = useWq<Row>("get_index", { index_id: id }, { enabled: !!id });
+  const table = index.data ? text(index.data, "table") : "";
   useTrail([
     { label: "Ship", to: ws(`/ship/models?${space}`) },
     { label: "Search Indexes", to: ws(`/ship/indexes?${space}`) },
     entityCrumb(id || "Search Index"),
   ]);
   return (
-    <WorkspaceFrame eyebrow="Ship" title={id ? `Search Index: ${id}` : "Search Index"} sub={SUB}>
+    <WorkspaceFrame
+      eyebrow="Ship"
+      title={
+        <span className="inline-flex flex-wrap items-center gap-2">
+          {table ? `Index on ${table}` : "Search Index"}
+          {index.data && <Status value={index.data.exposed === true ? "published" : "not published"} tone={index.data.exposed === true ? "success" : "neutral"} />}
+        </span>
+      }
+      sub={SUB}
+      actions={
+        <Button to={ws(`/ship/indexes?${space}`)} variant="ghost">
+          All indexes
+        </Button>
+      }
+    >
       {() => <Index id={id} />}
     </WorkspaceFrame>
   );
@@ -31,9 +52,14 @@ export default function IndexPage() {
 
 function Index({ id }: { id: string }) {
   const index = useWq<Row>("get_index", { index_id: id }, { enabled: !!id });
-  if (!id) return <div className="panel empty">This index could not be read from the workspace.</div>;
+  const unread = (
+    <Empty icon={SearchX} title="Index not found">
+      This index could not be read from the workspace.
+    </Empty>
+  );
+  if (!id) return unread;
   return (
-    <Query q={index} what="the index" isEmpty={(v) => !v || Object.keys(v).length === 0} empty={<div className="panel empty">This index could not be read from the workspace.</div>}>
+    <Query q={index} what="the index" isEmpty={(v) => !v || Object.keys(v).length === 0} empty={unread}>
       {(value) => <IndexContent id={id} index={value} />}
     </Query>
   );
@@ -44,35 +70,65 @@ function IndexContent({ id, index }: { id: string; index: Row }) {
   const published = index.exposed === true;
   const fields: string[] = Array.isArray(index.fields) ? index.fields.map(cellText) : [];
   const publish = useAsync();
+  const toggle = () => publish.run(() => wa(scope, published ? "unexpose_index" : "expose_index", { index: id }));
   return (
-    <>
-      <section className="panel">
-        <dl>
-          <dt>Table</dt>
-          <dd>{text(index, "table")}</dd>
-          <dt>Kind</dt>
-          <dd>{text(index, "kind")}</dd>
-          <dt>Backend</dt>
-          <dd>{text(index, "backend")}</dd>
-          <dt>Fields</dt>
-          <dd>{fields.join(", ")}</dd>
-          <dt>Created</dt>
-          <dd>{text(index, "created")}</dd>
-          <dt>Published</dt>
-          <dd>{published ? <Badge tone="success">published</Badge> : <Badge>not published</Badge>}</dd>
-        </dl>
-        {publish.error ? <ErrorBlock error={publish.error} /> : null}
-        <Button
-          variant={published ? "secondary" : "primary"}
-          loading={publish.busy}
-          onClick={() => void publish.run(() => wa(scope, published ? "unexpose_index" : "expose_index", { index: id }))}
-        >
-          {published ? "Unpublish" : "Publish"}
-        </Button>
-      </section>
+    <Split
+      side={
+        <>
+          <Card label="Index" title="Facts">
+            <KeyValue
+              rows={[
+                ["Id", <CopyMono key="id" value={id} short={12} label="Copy the index id" />],
+                ["Table", text(index, "table")],
+                ["Kind", text(index, "kind") ? <Chip>{text(index, "kind")}</Chip> : null],
+                ["Backend", text(index, "backend")],
+                [
+                  "Fields",
+                  fields.length ? (
+                    <span className="inline-flex flex-wrap gap-1">
+                      {fields.map((f) => (
+                        <Chip key={f}>{f}</Chip>
+                      ))}
+                    </span>
+                  ) : null,
+                ],
+                ["Created", <span title={text(index, "created")}>{relative(text(index, "created"), Date.now(), text(index, "created"))}</span>],
+              ]}
+            />
+          </Card>
+          <Card
+            label="Outside calls"
+            title="Publishing"
+            tone={published ? "active" : "default"}
+            actions={<Status value={published ? "published" : "not published"} tone={published ? "success" : "neutral"} />}
+          >
+            <p className="mt-0 text-[13px] text-ink-2">
+              {published ? "Answering outside calls with a search key." : "Only published indexes answer outside calls. Searching here works either way."}
+            </p>
+            {publish.error ? <ErrorBlock error={publish.error} /> : null}
+            {published ? (
+              <ConfirmButton
+                title="Unpublish this index?"
+                confirm="Unpublishing the index stops every outside call at once. Searching here keeps working, and you can publish it again later."
+                confirmLabel="Unpublish"
+                disabled={publish.busy}
+                onConfirm={toggle}
+              >
+                Unpublish
+              </ConfirmButton>
+            ) : (
+              <Button variant="primary" loading={publish.busy} onClick={() => void toggle()}>
+                <Globe size={14} aria-hidden /> Publish
+              </Button>
+            )}
+          </Card>
+          <SearchKey table={text(index, "table")} published={published} />
+        </>
+      }
+    >
       <TrySearch id={id} fields={fields} />
-      <CallIt id={id} table={text(index, "table")} published={published} />
-    </>
+      <CallIt id={id} published={published} />
+    </Split>
   );
 }
 
@@ -93,98 +149,91 @@ function TrySearch({ id, fields }: { id: string; fields: string[] }) {
     { target: id, query: asked, ...(field ? { field } : {}), top_k: topK },
     { enabled: !!asked },
   );
+  const hits = search.data?.hits ?? [];
+  const top = hits.reduce((m, hit) => Math.max(m, Number(hit.score ?? 0) || 0), 0);
   return (
-    <section className="panel">
-      <h2>Try a Search</h2>
+    <Card
+      label="Playground"
+      title="Try a Search"
+      actions={
+        asked && search.isSuccess ? (
+          <span className="font-mono text-[11.5px] text-ink-3 tabular-nums">
+            {hits.length} hits in {cellText(search.data?.duration_ms ?? 0)} ms
+          </span>
+        ) : null
+      }
+    >
       <form
-        className="stack"
+        className="flex flex-wrap items-end gap-2"
+        role="search"
         onSubmit={(e) => {
           e.preventDefault();
           navigate(ws(`/ship/index?${qs({ customer_id: customerId, id, q, field: f, top_k: k })}`));
         }}
       >
-        <Field label="Search for" required>
-          <input name="q" value={q} onChange={(e) => setQ(e.target.value)} placeholder="renewal risk" />
-        </Field>
-        <Field label="In">
-          <select name="field" value={f} onChange={(e) => setF(e.target.value)}>
+        <label className="min-w-[12rem] flex-[3_1_14rem]">
+          <span className="label m-0 block">Search for</span>
+          <input name="q" required aria-required className="w-full" value={q} onChange={(e) => setQ(e.target.value)} placeholder="renewal risk" />
+        </label>
+        <label className="min-w-[8rem] flex-[1_1_9rem]">
+          <span className="label m-0 block">In</span>
+          <select name="field" className="w-full" value={f} onChange={(e) => setF(e.target.value)}>
             <option value="">all fields</option>
             {fields.map((name) => (
               <option key={name}>{name}</option>
             ))}
           </select>
-        </Field>
-        <Field label="Hits">
-          <input name="top_k" type="number" min={1} max={100} value={k} onChange={(e) => setK(e.target.value)} />
-        </Field>
-        <div>
-          <Button type="submit" variant="primary">
-            Search
-          </Button>
-        </div>
+        </label>
+        <label className="w-[5.5rem]">
+          <span className="label m-0 block">Hits</span>
+          <input name="top_k" type="number" min={1} max={100} className="w-full" value={k} onChange={(e) => setK(e.target.value)} />
+        </label>
+        <Button type="submit" variant="primary">
+          <Search size={14} aria-hidden /> Search
+        </Button>
       </form>
-      {asked &&
-        (search.isLoading ? (
+      <div className="mt-3">
+        {!asked ? (
+          <Empty compact icon={Search} title="Ask the index something">
+            Results appear here, ranked, with each document's score.
+          </Empty>
+        ) : search.isLoading ? (
           <Skeleton />
         ) : search.isError ? (
           <ErrorBlock error={search.error} retry={() => void search.refetch()} what="the search" />
+        ) : hits.length === 0 ? (
+          <Empty compact icon={SearchX} title="Nothing matched">
+            Try other words, or search all fields.
+          </Empty>
         ) : (
-          <>
-            <p className="muted">
-              {(search.data?.hits ?? []).length} hits in {cellText(search.data?.duration_ms ?? 0)} ms.
-            </p>
-            {(search.data?.hits ?? []).length === 0 ? (
-              <p>Nothing matched.</p>
-            ) : (
-              <DataTable
-                rows={(search.data?.hits ?? []).map((hit, i): Row => ({ ...hit, rank: i + 1 }))}
-                caption="Search hits"
-                columns={[
-                  { key: "rank", label: "#", render: (row) => String(row.rank) },
-                  { key: "id", label: "Document", render: (row) => <code>{text(row, "id")}</code> },
-                  { key: "score", label: "Score", render: (row) => cellText(row.score ?? 0) },
-                ]}
-              />
-            )}
-          </>
-        ))}
-    </section>
+          <ol className="m-0 list-none divide-y divide-hairline rounded-[6px] border border-hairline p-0" aria-label="Search hits">
+            {hits.map((hit, i) => (
+              <li key={`${text(hit, "id")}-${i}`} className="grid grid-cols-[2rem_minmax(0,1fr)_minmax(6rem,10rem)] items-center gap-3 px-3 py-2">
+                <span className="font-mono text-[12px] text-ink-3 tabular-nums">{i + 1}</span>
+                <code className="truncate" title={text(hit, "id")}>
+                  {text(hit, "id")}
+                </code>
+                <Meter value={Number(hit.score ?? 0) || 0} max={top || 1} label={cellText(hit.score ?? 0)} />
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+    </Card>
   );
 }
 
-/** The origin outside callers use: lake's configured external origin, its public host, else this
- * page's origin (the server page fell back to lake.oramadev.net). */
-function useOrigin(): string {
-  const { viewer } = useSession();
-  if (viewer.external_origin) return viewer.external_origin;
-  if (viewer.public_host) return `https://${viewer.public_host}`;
-  return window.location.origin;
-}
-
-function CallIt({ id, table, published }: { id: string; table: string; published: boolean }) {
-  const { customerId, workspaceId } = useWorkspace();
-  const origin = useOrigin();
+/** Calling it from outside, the key: a key that can only search published indexes. */
+function SearchKey({ table, published }: { table: string; published: boolean }) {
   const create = useAsync();
   const [secret, setSecret] = useState<string | null>(null);
-  if (!published) {
-    return (
-      <section className="panel">
-        <h2>Call It from Your Code</h2>
-        <p>Publish the index first: only published indexes answer outside calls.</p>
-      </section>
-    );
-  }
-  const workspace = workspaceId || "<workspace id>";
-  const url = `${origin}/v1/search_index?customer_id=${encodeURIComponent(customerId)}&workspace_id=${encodeURIComponent(workspace)}&index_id=${encodeURIComponent(id)}&query=`;
-  const curl = `curl -s -H "Authorization: Bearer $LAKE_SEARCH_KEY" \\\n  "${url}renewal%20risk&top_k=10"`;
-  const js = `// JavaScript\nconst res = await fetch("${url}" + encodeURIComponent("renewal risk"), {\n  headers: { Authorization: \`Bearer \${process.env.LAKE_SEARCH_KEY}\` },\n});\nconst { value } = await res.json(); // value.hits: [{ id, score }]`;
-  const py = `# Python\nimport os, requests\nr = requests.get("${origin}/v1/search_index", params={"customer_id": "${customerId}", "workspace_id": "${workspace}", "index_id": "${id}", "query": "renewal risk"},\n    headers={"Authorization": f"Bearer {os.environ['LAKE_SEARCH_KEY']}"})\nhits = r.json()["value"]["hits"]`;
   return (
-    <section className="panel">
-      <h2>Call It from Your Code</h2>
-      <ol>
-        <li>
-          <p>Create a key that can only search published indexes, and copy it; it is shown once.</p>
+    <Card label="Outside calls" title="Search Key">
+      {!published ? (
+        <p className="m-0 text-[13px] text-ink-2">Publish the index first: only published indexes answer outside calls.</p>
+      ) : (
+        <>
+          <p className="mt-0 text-[13px] text-ink-2">Create a key that can only search published indexes, and copy it; it is shown once.</p>
           {create.error ? <ErrorBlock error={create.error} /> : null}
           {secret ? (
             <CopyBlock value={secret} label="Your search key" />
@@ -198,32 +247,56 @@ function CallIt({ id, table, published }: { id: string; table: string; published
                 })
               }
             >
-              Create a search key
+              <KeyRound size={14} aria-hidden /> Create a search key
             </Button>
           )}
-        </li>
-        <li>
-          <p>Call lake with it. The search runs in your own workspace; lake checks the key and records every query.</p>
-          <pre>
-            <code>{curl}</code>
-          </pre>
-          <pre>
-            <code>{js}</code>
-          </pre>
-          <pre>
-            <code>{py}</code>
-          </pre>
-        </li>
-        <li>
-          <p>
-            From an AI agent, the same search is the MCP tool <code>search_index</code> at <code>{origin}/mcp</code>.
+          <p className="mb-0 text-[12px] text-ink-3">
+            The key keeps working for other published indexes until you revoke it on <Link to="/tokens">Tokens</Link>. A key lasts as long as the session that made
+            it, at most 30 days.
           </p>
-        </li>
-      </ol>
-      <p className="muted">
-        Unpublishing the index stops every outside call at once; the key keeps working for other published indexes until you revoke it on{" "}
-        <Link to="/tokens">Tokens</Link>. A key lasts as long as the session that made it, at most 30 days.
+        </>
+      )}
+    </Card>
+  );
+}
+
+type Lang = "curl" | "js" | "py";
+
+/** Calling it from outside: the call itself, in curl, JavaScript and Python, and the MCP tool. */
+function CallIt({ id, published }: { id: string; published: boolean }) {
+  const { customerId, workspaceId } = useWorkspace();
+  const origin = useOrigin();
+  const [lang, setLang] = useState<Lang>("curl");
+  if (!published) {
+    return (
+      <Card label="Outside calls" title="Call It from Your Code">
+        <Banner tone="quiet">Publish the index first: only published indexes answer outside calls.</Banner>
+      </Card>
+    );
+  }
+  const workspace = workspaceId || "<workspace id>";
+  const url = `${origin}/v1/search_index?customer_id=${encodeURIComponent(customerId)}&workspace_id=${encodeURIComponent(workspace)}&index_id=${encodeURIComponent(id)}&query=`;
+  const curl = `curl -s -H "Authorization: Bearer $LAKE_SEARCH_KEY" \\\n  "${url}renewal%20risk&top_k=10"`;
+  const js = `// JavaScript\nconst res = await fetch("${url}" + encodeURIComponent("renewal risk"), {\n  headers: { Authorization: \`Bearer \${process.env.LAKE_SEARCH_KEY}\` },\n});\nconst { value } = await res.json(); // value.hits: [{ id, score }]`;
+  const py = `# Python\nimport os, requests\nr = requests.get("${origin}/v1/search_index", params={"customer_id": "${customerId}", "workspace_id": "${workspace}", "index_id": "${id}", "query": "renewal risk"},\n    headers={"Authorization": f"Bearer {os.environ['LAKE_SEARCH_KEY']}"})\nhits = r.json()["value"]["hits"]`;
+  return (
+    <Card label="Outside calls" title="Call It from Your Code">
+      <p className="mt-0 text-[13px] text-ink-2">Call lake with the search key. The search runs in your own workspace; lake checks the key and records every query.</p>
+      <StateTabs<Lang>
+        value={lang}
+        onChange={setLang}
+        label="Language"
+        tabs={[
+          { value: "curl", label: "curl" },
+          { value: "js", label: "JavaScript" },
+          { value: "py", label: "Python" },
+        ]}
+      />
+      <CopyBlock value={lang === "curl" ? curl : lang === "js" ? js : py} multiline />
+      <p className="text-[13px] text-ink-2">
+        From an AI agent, the same search is the MCP tool <code>search_index</code> at <code>{origin}/mcp</code>.
       </p>
-    </section>
+      <Banner tone="quiet">Unpublishing the index stops every outside call at once.</Banner>
+    </Card>
   );
 }

@@ -276,3 +276,274 @@ export function curlFor(op: Operation, origin: string, key: string, components?:
 export function schemaText(schema: unknown): string {
   return JSON.stringify(schema ?? {}, null, 2);
 }
+
+/* ------------------------------------------------------------------ MCP clients */
+
+/** The MCP clients Developer → MCP sets up, in the order its picker shows them. */
+export type ClientId = "claude-code" | "codex" | "claude-desktop" | "cursor" | "vscode" | "windsurf" | "gemini" | "curl" | "web";
+
+export const CLIENTS: { id: ClientId; name: string; how: string }[] = [
+  { id: "claude-code", name: "Claude Code", how: "One command: HTTP, the key as a header" },
+  { id: "codex", name: "OpenAI Codex", how: "CLI and IDE: config.toml, the key from your environment" },
+  { id: "claude-desktop", name: "Claude Desktop", how: "Its config file, through mcp-remote" },
+  { id: "cursor", name: "Cursor", how: "mcp.json: the URL and a header" },
+  { id: "vscode", name: "VS Code", how: "Copilot agent mode: asks for the key once" },
+  { id: "windsurf", name: "Windsurf", how: "mcp_config.json: serverUrl and a header" },
+  { id: "gemini", name: "Gemini CLI", how: "settings.json: httpUrl and a header" },
+  { id: "curl", name: "Any client", how: "JSON-RPC 2.0 over HTTP, shown with curl" },
+  { id: "web", name: "ChatGPT and Claude.ai", how: "Web connectors: what works today" },
+];
+
+/** One copyable block of a client's setup. `id` names the code element and its Copy button. */
+export type SetupBlock = { id: string; title: string; code: string; note?: string };
+
+/** A client's whole setup: where it goes, the blocks, how to see it worked, and what to know. */
+export type ClientSetup = {
+  /** The file (or files, per platform) the configuration goes in; none for a command. */
+  where: { label: string; path: string }[];
+  blocks: SetupBlock[];
+  /** One line on how to see lake connected. */
+  check: string;
+  notes: string[];
+};
+
+/** The name every client knows lake's server by. */
+export const SERVER_NAME = "lake";
+/** The environment variable the setups read the key from when none was made or pasted. */
+export const KEY_ENV = "LAKE_KEY";
+
+const json = (value: unknown) => JSON.stringify(value, null, 2);
+
+/** The exact setup for one client against `endpoint` (lake's `/mcp`), with `key` filled in, or
+ * read from `$LAKE_KEY` (in the syntax each client expands) when there is no key yet. */
+export function clientSetup(client: ClientId, endpoint: string, key: string | null): ClientSetup {
+  const shellKey = key ?? `$${KEY_ENV}`;
+  switch (client) {
+    case "claude-code":
+      return {
+        where: [{ label: "Saved by the command in", path: "~/.claude.json" }],
+        blocks: [
+          {
+            id: "mcp-claude-code",
+            title: "terminal",
+            code: `claude mcp add --transport http ${SERVER_NAME} ${endpoint} --header "Authorization: Bearer ${shellKey}"`,
+            note: "Add --scope user to use lake in every project, or --scope project to share it through the project's .mcp.json (without your key in it).",
+          },
+        ],
+        check: "Run /mcp inside Claude Code, or claude mcp list in a terminal: lake shows ✔ Connected.",
+        notes: [],
+      };
+    case "codex":
+      return {
+        where: [{ label: "Configuration", path: "~/.codex/config.toml" }],
+        blocks: [
+          {
+            id: "mcp-codex-config",
+            title: "~/.codex/config.toml",
+            code: `[mcp_servers.${SERVER_NAME}]\nurl = "${endpoint}"\nbearer_token_env_var = "${KEY_ENV}"`,
+            note: "The CLI and the IDE extension share this file. Codex reads the key from the environment, so it is never written into the file.",
+          },
+          {
+            id: "mcp-codex-env",
+            title: "your shell profile",
+            code: `export ${KEY_ENV}="${key ?? "<your lake key>"}"`,
+          },
+          {
+            id: "mcp-codex-add",
+            title: "or add it with one command",
+            code: `codex mcp add ${SERVER_NAME} --url ${endpoint} --bearer-token-env-var ${KEY_ENV}`,
+          },
+        ],
+        check: "Run codex mcp list in a terminal, or /mcp inside Codex: lake is listed with its tools.",
+        notes: [],
+      };
+    case "claude-desktop":
+      return {
+        where: [
+          { label: "macOS", path: "~/Library/Application Support/Claude/claude_desktop_config.json" },
+          { label: "Windows", path: "%APPDATA%\\Claude\\claude_desktop_config.json" },
+        ],
+        blocks: [
+          {
+            id: "mcp-claude-desktop",
+            title: "claude_desktop_config.json",
+            code: json({
+              mcpServers: {
+                [SERVER_NAME]: {
+                  command: "npx",
+                  args: ["-y", "mcp-remote", endpoint, "--header", "Authorization:${LAKE_AUTH_HEADER}"],
+                  env: { LAKE_AUTH_HEADER: `Bearer ${key ?? `<${KEY_ENV}>`}` },
+                },
+              },
+            }),
+            note: "Claude Desktop → Settings → Developer → Edit Config opens the file. mcp-remote (Node.js 18 or later) bridges the app to lake over HTTP; the header goes through env so the space in it survives on Windows.",
+          },
+        ],
+        check: "Restart Claude Desktop; lake appears under the tools menu of a new chat, and Settings → Developer shows it running.",
+        notes: key ? [] : [`Put your key in place of <${KEY_ENV}>: Claude Desktop does not read your shell's environment.`],
+      };
+    case "cursor":
+      return {
+        where: [
+          { label: "Every project", path: "~/.cursor/mcp.json" },
+          { label: "One project", path: ".cursor/mcp.json" },
+        ],
+        blocks: [
+          {
+            id: "mcp-cursor",
+            title: "~/.cursor/mcp.json",
+            code: json({ mcpServers: { [SERVER_NAME]: { url: endpoint, headers: { Authorization: `Bearer ${key ?? `\${env:${KEY_ENV}}`}` } } } }),
+          },
+        ],
+        check: "Cursor → Settings → Tools & Integrations (MCP) lists lake with a green dot and its tools.",
+        notes: key ? [] : [`\${env:${KEY_ENV}} is read from the environment Cursor was started in.`],
+      };
+    case "vscode":
+      return {
+        where: [{ label: "The workspace", path: ".vscode/mcp.json" }],
+        blocks: [
+          {
+            id: "mcp-vscode",
+            title: ".vscode/mcp.json",
+            code: json({
+              servers: { [SERVER_NAME]: { type: "http", url: endpoint, headers: { Authorization: "Bearer ${input:lake-key}" } } },
+              inputs: [{ type: "promptString", id: "lake-key", description: "lake MCP key", password: true }],
+            }),
+            note: key
+              ? "VS Code asks for the key the first time lake starts and keeps it in its secret storage: paste the key from step 1. It never goes into the file."
+              : "VS Code asks for the key the first time lake starts and keeps it in its secret storage. It never goes into the file, so the file is safe to commit.",
+          },
+        ],
+        check: "Run MCP: List Servers from the Command Palette: lake is Running. Its tools appear in Copilot Chat's agent mode tool picker.",
+        notes: [],
+      };
+    case "windsurf":
+      return {
+        where: [
+          { label: "Windsurf", path: "~/.codeium/windsurf/mcp_config.json" },
+          { label: "Devin Desktop", path: "~/.config/devin/mcp_config.json" },
+        ],
+        blocks: [
+          {
+            id: "mcp-windsurf",
+            title: "mcp_config.json",
+            code: json({ mcpServers: { [SERVER_NAME]: { serverUrl: endpoint, headers: { Authorization: `Bearer ${key ?? `\${env:${KEY_ENV}}`}` } } } }),
+            note: "Remote servers take serverUrl, not url. Cascade → MCP servers → Refresh picks the file up.",
+          },
+        ],
+        check: "Cascade's MCP panel lists lake as enabled, with its tools.",
+        notes: [],
+      };
+    case "gemini":
+      return {
+        where: [
+          { label: "Every project", path: "~/.gemini/settings.json" },
+          { label: "One project", path: ".gemini/settings.json" },
+        ],
+        blocks: [
+          {
+            id: "mcp-gemini",
+            title: "~/.gemini/settings.json",
+            code: json({ mcpServers: { [SERVER_NAME]: { httpUrl: endpoint, headers: { Authorization: `Bearer ${key ?? `\${${KEY_ENV}}`}` } } } }),
+            note: "httpUrl is streamable HTTP (url would be SSE). Merge mcpServers into the settings you have.",
+          },
+          {
+            id: "mcp-gemini-add",
+            title: "or add it with one command",
+            code: `gemini mcp add --transport http --header "Authorization: Bearer ${shellKey}" ${SERVER_NAME} ${endpoint}`,
+          },
+        ],
+        check: "Run /mcp inside Gemini CLI, or gemini mcp list in a terminal: lake is Connected.",
+        notes: [],
+      };
+    case "curl":
+      return {
+        where: [],
+        blocks: [
+          {
+            id: "mcp-curl-initialize",
+            title: "initialize",
+            code: `curl -s ${endpoint} \\\n  -H "Authorization: Bearer ${shellKey}" \\\n  -H 'Content-Type: application/json' \\\n  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'`,
+          },
+          {
+            id: "mcp-curl-tools",
+            title: "tools/list",
+            code: `curl -s ${endpoint} \\\n  -H "Authorization: Bearer ${shellKey}" \\\n  -H 'Content-Type: application/json' \\\n  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'`,
+            note: "tools/list needs no key; tools/call on anything but server_info does.",
+          },
+          {
+            id: "mcp-curl-call",
+            title: "tools/call",
+            code: `curl -s ${endpoint} \\\n  -H "Authorization: Bearer ${shellKey}" \\\n  -H 'Content-Type: application/json' \\\n  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_customers","arguments":{"limit":5}}}'`,
+            note: "A refused call is a result with isError: true and the same error envelope REST answers.",
+          },
+        ],
+        check: "initialize answers lake's serverInfo; tools/list answers every tool.",
+        notes: ["Any client that speaks MCP's streamable HTTP transport and can send an Authorization header connects the same way."],
+      };
+    case "web":
+      return {
+        where: [],
+        blocks: [
+          {
+            id: "mcp-claude-ai",
+            title: "Claude.ai → Customize → Connectors → Add custom connector",
+            code: `Name:            ${SERVER_NAME}\nRemote MCP URL:  ${endpoint}\nRequest header:  Authorization: Bearer ${key ?? `<${KEY_ENV}>`}`,
+            note: "Claude.ai's custom connectors can send a fixed request header on every call. Claude's servers call lake, so lake must be reachable from the internet, and the key is kept by Anthropic: give it a read-only key.",
+          },
+        ],
+        check: "The connector shows lake's tools; turn it on in a chat from the tools menu.",
+        notes: [
+          "ChatGPT's custom connectors (developer mode) sign in with OAuth or no authentication, and a lake key is a bearer token, so ChatGPT cannot connect to lake yet. Use OpenAI Codex, which takes the key from your environment.",
+          "Lake has no OAuth sign-in for connectors.",
+        ],
+      };
+  }
+}
+
+/** How to give an agent the lake skill: the public `SKILL.md` and where each agent reads it. */
+export type SkillTarget = "claude-code" | "codex" | "gemini" | "other";
+
+export const SKILL_TARGETS: { id: SkillTarget; label: string }[] = [
+  { id: "claude-code", label: "Claude Code" },
+  { id: "codex", label: "Codex (AGENTS.md)" },
+  { id: "gemini", label: "Gemini CLI (GEMINI.md)" },
+  { id: "other", label: "Any agent" },
+];
+
+/** The skill install for one agent, from lake's public `/skills/lake/SKILL.md`. */
+export function skillInstall(target: SkillTarget, origin: string): SetupBlock[] {
+  const skill = `${origin}/skills/lake/SKILL.md`;
+  const pointer = (file: string, home: string) =>
+    `mkdir -p ${home} && curl -fsSL ${skill} -o ${home}/lake-SKILL.md\n` +
+    `cat >> ${home}/${file} <<'EOF'\n\n` +
+    `## lake\n` +
+    `lake is connected as the MCP server "lake". Before using its tools, read\n` +
+    `${home}/lake-SKILL.md: what lake is, which tool does what, the worked flows\n` +
+    `and the rules (an edited pipeline is proposed again; deleting destroys data).\n` +
+    `EOF`;
+  switch (target) {
+    case "claude-code":
+      return [
+        {
+          id: "skill-claude-code",
+          title: "install the skill for Claude Code",
+          code: `mkdir -p ~/.claude/skills/lake && curl -fsSL ${skill} -o ~/.claude/skills/lake/SKILL.md`,
+          note: "Claude Code loads ~/.claude/skills/lake/SKILL.md in every project; use .claude/skills/lake/ for one project.",
+        },
+      ];
+    case "codex":
+      return [{ id: "skill-codex", title: "point Codex at the skill (~/.codex/AGENTS.md)", code: pointer("AGENTS.md", "~/.codex"), note: "Codex reads ~/.codex/AGENTS.md in every session; a repository's own AGENTS.md works the same way." }];
+    case "gemini":
+      return [{ id: "skill-gemini", title: "point Gemini CLI at the skill (~/.gemini/GEMINI.md)", code: pointer("GEMINI.md", "~/.gemini"), note: "Gemini CLI loads ~/.gemini/GEMINI.md as context in every session." }];
+    case "other":
+      return [
+        {
+          id: "skill-other",
+          title: "lake for any agent",
+          code: `curl -fsSL ${origin}/llms.txt\ncurl -fsSL ${origin}/llms-full.txt   # every tool with its input schema\ncurl -fsSL ${skill}`,
+          note: "All three are public. Put the one your agent can hold in its context or rules file.",
+        },
+      ];
+  }
+}

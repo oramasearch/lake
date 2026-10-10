@@ -674,3 +674,42 @@ main .chip-button[aria-pressed='true'] {
   color: var(--lake-action);
   font-weight: var(--lake-weight-semibold);
 }
+
+/* Variants and icon buttons inside pages and overlays: as specific as the `main button` /
+   `.dialog button` base above, so a primary, danger or icon button keeps its own look there. */
+:is(main, .dialog, .drawer, .palette) :is(.button-primary, button.primary) {
+  border-color: var(--lake-action-filled);
+  color: var(--lake-text-on-action);
+  background: var(--lake-action-filled);
+}
+:is(main, .dialog, .drawer, .palette) :is(.button-primary, button.primary):hover {
+  border-color: var(--lake-action-filled);
+  color: var(--lake-text-on-action);
+  background: var(--lake-action-filled);
+  filter: brightness(1.1);
+}
+:is(main, .dialog, .drawer, .palette) :is(.button-danger, button.danger) {
+  border-color: var(--lake-danger);
+  color: var(--lake-text-on-danger);
+  background: var(--lake-danger);
+}
+:is(main, .dialog, .drawer, .palette) :is(.button-danger, button.danger):hover {
+  border-color: var(--lake-danger);
+  color: var(--lake-text-on-danger);
+  background: var(--lake-danger);
+  filter: brightness(1.1);
+}
+:is(main, .dialog, .drawer, .palette) :is(.button-ghost, .icon-button) {
+  border-color: transparent;
+  color: var(--lake-text-secondary);
+  background: transparent;
+}
+:is(main, .dialog, .drawer, .palette) .icon-button {
+  width: 32px;
+  padding: 0;
+}
+:is(main, .dialog, .drawer, .palette) :is(.button-ghost, .icon-button):hover {
+  border-color: transparent;
+  color: var(--lake-text-primary);
+  background: var(--lake-raised);
+}

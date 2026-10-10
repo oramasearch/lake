@@ -48,8 +48,8 @@ const PLACES: Place[] = [
     label: "Repositories",
     icon: BookMarked,
     run: async (q, _scope, _o, signal) => {
-      const value = await read<{ repositories?: Row[] }>("list_repositories", { limit: 500 }, { workspace: null, signal });
-      return (value.repositories ?? [])
+      const value = await read<{ items?: Row[] }>("list_repositories", { limit: 500 }, { workspace: null, signal });
+      return (value.items ?? [])
         .filter((r) => matches(q, r.name, r.description, r.customer_name, r.owner))
         .map((r) => ({ key: r.id, title: `${r.customer_name ?? r.owner ?? ""}${r.customer_name || r.owner ? "/" : ""}${r.name}`, detail: r.description, to: `/repository?id=${encodeURIComponent(r.id)}` }));
     },

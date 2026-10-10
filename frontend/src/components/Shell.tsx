@@ -338,7 +338,7 @@ export function Shell({ children }: { children: ReactNode }) {
           style={askPushes ? { marginRight: askWidth } : undefined}
         >
           <header className="sticky top-[2px] z-30 flex h-12 items-center gap-2 border-b border-hairline bg-canvas/90 px-3 backdrop-blur sm:gap-3 sm:px-6">
-            <button type="button" onClick={() => setDrawer(true)} className="-ml-1 rounded-[5px] p-2 text-ink-2 hover:bg-raised hover:text-ink lg:hidden" aria-label="Open the navigation">
+            <button type="button" onClick={() => setDrawer(true)} className="-ml-1 inline-flex h-8 w-8 items-center justify-center rounded-[5px] text-ink-2 hover:bg-raised hover:text-ink lg:hidden" aria-label="Open the navigation">
               <Menu size={18} />
             </button>
             <Breadcrumb trail={trail} />
@@ -355,7 +355,7 @@ export function Shell({ children }: { children: ReactNode }) {
                   <span className="flex-1 text-left">Search</span>
                   <Kbd>⌘K</Kbd>
                 </button>
-                <button type="button" onClick={() => setPalette(true)} className="rounded-[5px] p-2 text-ink-2 hover:bg-raised hover:text-ink md:hidden" aria-label="Search">
+                <button type="button" onClick={() => setPalette(true)} className="inline-flex h-8 w-8 items-center justify-center rounded-[5px] text-ink-2 hover:bg-raised hover:text-ink md:hidden" aria-label="Search">
                   <Search size={16} />
                 </button>
               </>
@@ -363,7 +363,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <button
               type="button"
               onClick={toggleTheme}
-              className="rounded-[5px] p-2 text-ink-2 hover:bg-raised hover:text-ink"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-[5px] text-ink-2 hover:bg-raised hover:text-ink"
               aria-label={`Use ${theme === "dark" ? "light" : "dark"} theme`}
               aria-pressed={theme === "dark"}
               title="Theme"

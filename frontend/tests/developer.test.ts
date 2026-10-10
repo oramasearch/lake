@@ -7,6 +7,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   accessOf,
+  CLIENTS,
+  clientSetup,
+  skillInstall,
+  SKILL_TARGETS,
   curlFor,
   groupOperations,
   type KeyForm,
@@ -195,4 +199,70 @@ test("copy as curl: a read with its bearer, an action with a JSON body, sync wit
   );
   assert.match(curlFor(by.push, "https://lake.example", "K"), /\/v1\/repositories\/<repository_id>\/sync\/push[\s\S]*--data-binary @request\.bin/);
   assert.equal(curlFor(by.server_info, "https://lake.example", "K"), "curl -s https://lake.example/v1/server_info");
+});
+
+const endpoint = "https://lake.example/mcp";
+const textOf = (client: Parameters<typeof clientSetup>[0], key: string | null) =>
+  clientSetup(client, endpoint, key)
+    .blocks.map((b) => b.code)
+    .join("\n");
+
+test("every client's setup names lake's endpoint and the key, or where the key comes from", () => {
+  for (const { id } of CLIENTS) {
+    const made = textOf(id, "lake_tok_K123");
+    const none = textOf(id, null);
+    assert.ok(made.includes(endpoint), `${id} names the endpoint`);
+    assert.ok(none.includes(endpoint), `${id} names the endpoint without a key`);
+    if (id === "vscode") {
+      // VS Code asks for the key and keeps it out of the file, either way.
+      assert.ok(made.includes("${input:lake-key}") && !made.includes("lake_tok_K123"));
+      continue;
+    }
+    assert.ok(made.includes("lake_tok_K123"), `${id} carries the key`);
+    assert.ok(/LAKE_KEY/.test(none), `${id} reads LAKE_KEY without a key`);
+    assert.ok(clientSetup(id, endpoint, null).check.length > 0, `${id} says how to check it`);
+  }
+});
+
+test("every JSON setup parses, and each client's fields are the ones it reads", () => {
+  for (const { id } of CLIENTS) {
+    for (const block of clientSetup(id, endpoint, null).blocks) {
+      if (block.code.trimStart().startsWith("{")) assert.doesNotThrow(() => JSON.parse(block.code), `${id}: ${block.title}`);
+    }
+  }
+  const parse = (id: Parameters<typeof clientSetup>[0]) => JSON.parse(clientSetup(id, endpoint, "K").blocks[0].code);
+  assert.deepEqual(parse("cursor").mcpServers.lake, { url: endpoint, headers: { Authorization: "Bearer K" } });
+  assert.equal(parse("windsurf").mcpServers.lake.serverUrl, endpoint);
+  assert.equal(parse("gemini").mcpServers.lake.httpUrl, endpoint);
+  const vscode = parse("vscode");
+  assert.equal(vscode.servers.lake.type, "http");
+  assert.deepEqual(vscode.inputs[0], { type: "promptString", id: "lake-key", description: "lake MCP key", password: true });
+  const desktop = parse("claude-desktop").mcpServers.lake;
+  assert.deepEqual(desktop.args, ["-y", "mcp-remote", endpoint, "--header", "Authorization:${LAKE_AUTH_HEADER}"]);
+  assert.equal(desktop.env.LAKE_AUTH_HEADER, "Bearer K");
+  assert.equal(JSON.parse(clientSetup("cursor", endpoint, null).blocks[0].code).mcpServers.lake.headers.Authorization, "Bearer ${env:LAKE_KEY}");
+});
+
+test("Claude Code keeps the one-line command the browser check copies; Codex keeps the key out of its file", () => {
+  const [block] = clientSetup("claude-code", endpoint, "K").blocks;
+  assert.equal(block.id, "mcp-claude-code");
+  assert.equal(block.code, `claude mcp add --transport http lake ${endpoint} --header "Authorization: Bearer K"`);
+  const codex = clientSetup("codex", endpoint, "K").blocks;
+  assert.equal(codex[0].code, `[mcp_servers.lake]\nurl = "${endpoint}"\nbearer_token_env_var = "LAKE_KEY"`);
+  assert.equal(codex[1].code, 'export LAKE_KEY="K"');
+  assert.equal(codex[2].code, `codex mcp add lake --url ${endpoint} --bearer-token-env-var LAKE_KEY`);
+});
+
+test("block ids are unique across every client, so each Copy button is addressable", () => {
+  const ids = CLIENTS.flatMap(({ id }) => clientSetup(id, endpoint, null).blocks.map((b) => b.id));
+  assert.equal(new Set(ids).size, ids.length);
+});
+
+test("each skill install fetches the public SKILL.md from lake's origin", () => {
+  for (const { id } of SKILL_TARGETS) {
+    const code = skillInstall(id, "https://lake.example").map((b) => b.code).join("\n");
+    assert.ok(code.includes("https://lake.example/skills/lake/SKILL.md"), id);
+  }
+  assert.match(skillInstall("claude-code", "https://lake.example")[0].code, /~\/\.claude\/skills\/lake\/SKILL\.md$/);
+  assert.match(skillInstall("codex", "https://lake.example")[0].code, /~\/\.codex\/AGENTS\.md/);
 });
