@@ -37,10 +37,10 @@ export default function FactoryPage() {
 
   // AgentCreator's latest structured answer: the last agent message that carries one.
   const latest = useMemo(() => {
-    let found: { answer: Row; messageId: string } | null = null;
+    let found: { answer: Row; messageId: string; digest?: string } | null = null;
     for (const message of conversation.list) {
       const answer = message.payload && typeof message.payload === "object" ? message.payload.answer : undefined;
-      if (message.role === "assistant" && answer !== undefined) found = { answer: answer && typeof answer === "object" ? answer : {}, messageId: message.id };
+      if (message.role === "assistant" && answer !== undefined) found = { answer: answer && typeof answer === "object" ? answer : {}, messageId: message.id, digest: message.payload?.proposal_sha256 };
     }
     return found;
   }, [conversation.list]);
@@ -82,7 +82,8 @@ export default function FactoryPage() {
                 workspace_id: workspaceId,
                 conversation_id: conversationId,
                 message_id: latest.messageId,
-                proposal_sha256: proposalDigest(latest.answer.proposal ?? null),
+                // The digest lake stored with the proposal; computed here only for a message stored before it did.
+                proposal_sha256: latest.digest ?? proposalDigest(latest.answer.proposal ?? null),
               });
               let words = `Created ${created.name ?? "the agent"}.`;
               if (created.schedule_error) words += ` Its trigger was not scheduled: ${created.schedule_error}`;

@@ -53,7 +53,9 @@ function ChooseWorkspace({ id, refName, path }: { id: string; refName: string; p
   const object = folder.data?.object;
   const permission = useForgeRead<{ allowed: Record<string, boolean> }>(
     object ? "my_permissions" : null,
-    { object_type: object?.object_type, object_id: object?.external_id, actions: ["share"] },
+    // A Drive folder is named by its repository, ref and path, resolved as the Drive capabilities
+    // authorize it; a GET takes `actions` as a JSON array (docs/api/web-app.md).
+    { object_type: "drive folder", object_id: id, ref: refName, path, actions: JSON.stringify(["share"]) },
     { retry: false },
   );
   const { choices, loading } = useShareWorkspaces(repository.data?.customer_id);
