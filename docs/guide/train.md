@@ -1,8 +1,10 @@
 # Train a Model
 
-A model in lake is what a **pipeline run** produces. You describe what to predict, lake builds a
-pipeline in your workspace, you approve it, and a run trains it on your data and measures it on rows
-it did not see. This page covers building the pipeline, changing it, running it, and reading what
+This page is about training models with a **pipeline**, an execution graph of steps from your data
+to a result. A pipeline can hold one model or several, and a model need not come from a pipeline at
+all ([Concepts and Glossary](/docs/concepts)). You describe what to predict, lake builds a pipeline in
+your workspace, you approve it, and a run trains its models on your data and measures them on rows
+they did not see. This page covers building the pipeline, changing it, running it, and reading what
 the run says. Studies that try many settings are on [Experiments](/docs/experiments).
 
 Everything here happens in one workspace: the one in the page address (`/w/<workspace id>/…`) and
@@ -15,14 +17,14 @@ of the account that owns your workspaces (yours, or your organization's).
 | Term | What it means |
 |---|---|
 | **Project** | A business question and the decision it should improve (**Design → Projects**). It holds pipelines. |
-| **Pipeline** | The steps that turn data into a result (connect, clean, model, index, serve, act), joined by edges. Its id is the `graph` of every call. |
+| **Pipeline** | An execution graph: the steps that turn data into a result (connect, clean, model, index, serve, act), joined by edges. Its id is the `graph` of every call. |
 | **Methodology** | The modelling method a pipeline uses: churn classification, segmentation, forecasting, anomaly detection, survival, uplift and the rest (**Design → Methodologies**). |
 | **Approval** | A pipeline runs only once it is approved, and must be approved again after any change. |
 | **Check** | Zetta's correctness checks, run without training anything. |
 | **Run** | One execution of a pipeline, with its report, lineage, outputs, log and trace. |
 | **Hold-out** | The share of rows kept out of training to measure the model honestly. |
 | **Held-out score** | The score on those rows: `held_out_auc`, `held_out_log_loss`, `held_out_accuracy`, `held_out_rmse` or `held_out_mae`. A score measured on the rows the model learned from is *in-sample* and flatters it. |
-| **Model** | What a successful training run registers. It appears on **Ship → Models**. |
+| **Model** | A learned function inside the pipeline: a `model` step. A pipeline may have several. Each model a successful run trains is registered and appears on **Ship → Models**; a model can also be uploaded on its own, with no pipeline. |
 
 ## Build a Pipeline from a Sentence
 

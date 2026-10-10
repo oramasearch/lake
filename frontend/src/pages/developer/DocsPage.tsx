@@ -40,7 +40,7 @@ export default function DocsPage() {
 
   return (
     <div className="page-container docs-reader">
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[232px_minmax(0,1fr)] lg:gap-8">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_minmax(0,1fr)] lg:gap-8">
         <aside className="docs-nav lg:sticky lg:top-4 lg:max-h-[calc(100vh-6rem)] lg:self-start lg:overflow-y-auto lg:pr-1">
           <div className="mb-3 flex items-center gap-2">
             <BookOpen size={15} className="text-action" aria-hidden />

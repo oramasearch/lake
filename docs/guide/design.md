@@ -14,7 +14,7 @@ organization's) and `workspace_id`; [Getting Started](/docs) says where to find 
 | Term | What it is |
 |---|---|
 | **AI project** | Where an AI solution is built: a business question and the decision it should improve, with a name, a description, its intent and its pipelines. The pages call it a *project*. |
-| **Pipeline** | The project's workflow: a graph of steps joined by arrows. Each step has a kind: `connect`, `clean`, `model`, `index`, `serve` or `act`. |
+| **Pipeline** | The project's workflow, an execution graph of steps joined by arrows. Each step has a kind: `connect`, `clean`, `model`, `index`, `serve` or `act`. |
 | **Edge** | An arrow between two steps. A solid arrow carries data (`data_flow`); a dashed one only orders the steps (`control`). |
 | **Methodology** | The modelling method a pipeline uses, such as churn classification, segmentation or forecasting ([AI Solutions, Methodologies and Opportunities](/docs/solutions)). |
 | **Approval** | A pipeline runs only once approved, and must be approved again after any change. |

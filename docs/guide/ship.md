@@ -13,7 +13,7 @@ address `/w/<workspace id>/…`. [Getting Started](/docs) says where to find bot
 
 | Term | What it is |
 |---|---|
-| **Model** | What a training run produced: its name, project and pipeline, the run, its score on held-out rows, the features it reads and when it was trained. |
+| **Model** | A learned function that makes a prediction. **Ship → Models** lists the models your workspace trained: each one's name, the project, pipeline and run it came from, its score on held-out rows, the features it reads and when it was trained. A pipeline can train several models. A model uploaded on its own lives as a model repository, with no pipeline ([Repositories](/docs/repositories)). |
 | **Published** | A model or index that answers calls from outside lake. Anything not published can still be used inside lake, but `predict` and `search_index` refuse it. |
 | **Promoted** | The model a study chose as its best trial ([Experiments](/docs/experiments)). It is marked **promoted** on Ship → Models. |
 | **Search index** | A full-text (BM25F) index over one dataset's columns. |

@@ -66,14 +66,14 @@ MCP tools take.
 | Term | What it is |
 |---|---|
 | **AI project** | Where you build an AI solution: the business question, the decision it should improve, and the pipeline that builds it, with its runs and models. Called a *project* on the pages. See [AI Projects and Pipelines](/docs/design). |
-| **Pipeline** | The AI project's workflow: the steps that turn data into a result: connect, clean, model, index, serve, act, joined by arrows. It must be **approved** before it runs, and again after any change. |
+| **Pipeline** | The AI project's workflow, an execution graph: the steps that turn data into a result: connect, clean, model, index, serve, act, joined by arrows. It must be **approved** before it runs, and again after any change. |
 | **Run** | One execution of a pipeline, with its report, lineage, log and trace. See [Train a Model](/docs/train). |
 | **Hold-out** | The share of rows kept out of training to measure the model. A score without one is *in-sample* and flatters the model. |
 | **Held-out metrics** | Scores measured on the held-out rows, named as the run report names them: `held_out_auc`, `held_out_log_loss`, `held_out_accuracy`, `held_out_rmse`, `held_out_mae`. A run's report leads with its held-out score. |
 | **Methodology** | A modelling method the engine runs, such as segmentation, forecasting or anomaly detection. **Design → Methodologies** lists each one, what it needs and whether your workspace runs it. |
 | **AI solution** | An AI system that answers one business problem end to end: the decision it drives, the methodologies it composes and how its return is measured. You build one in an AI project; **Design → Solutions** is Orama's catalogue of ready-made ones to start from. See [AI Solutions, Methodologies and Opportunities](/docs/solutions). |
 | **Opportunity** | An AI project worth building that Auto-Suggest found by scanning your workspace's data. It is kept until you create a project from it or dismiss it. |
-| **Model** | What a training run produced. A **published** model can be called from outside lake with `predict`. |
+| **Model** | A learned function that turns inputs into a prediction, a score or a ranking. A model can be one step inside a pipeline, and one pipeline can hold several models (a segmentation feeding a churn classifier, for example). A model also stands on its own: you can upload one as a model repository (weights, card and history) without any pipeline. Models a workspace trains are listed on **Ship → Models**; a **published** model can be called from outside lake with `predict`. See [Models and Search Indexes](/docs/ship). |
 | **Search index** | A full-text index over a dataset's text columns. A published index answers outside searches with `search_index`. See [Models and Search Indexes](/docs/ship). |
 | **Study and trial** | An experiment: a study tries many settings for one objective; each attempt is a trial with its own run and curves. See [Experiments](/docs/experiments). |
 | **Stream and topic** | A topic is a named sequence of messages in a workspace Zetta (agent events, app events, build logs, your own). Streams browses and publishes to them. See [Streams](/docs/streams). |
