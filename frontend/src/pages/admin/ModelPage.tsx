@@ -1,11 +1,15 @@
 /** Model (`/models/:namespace/:id`, `/models/:id`): a model repository's storage, training
  * provenance, files and revisions (web_ui_model, serve_model_page). The name is resolved with
  * resolve_model, then read with get_model. Public models open signed out. */
+import { useState } from "react";
 import { useParams } from "react-router-dom";
+import { Database, FileStack, GitCommitHorizontal, HardDrive } from "lucide-react";
 import { useRead, type Row } from "@/lib/api";
+import { bytes } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
-import { DataTable, ErrorBlock, Page, Skeleton } from "@/lib/ui";
+import { Card, DataTable, ErrorBlock, KeyValue, Mono, Page, SearchInput, Skeleton, Split, Stat, StatRow, Status, Toolbar } from "@/lib/ui";
+import { PanelEmpty, matches } from "@/pages/organizations/shared";
 
 export default function ModelPage() {
   const { namespace, id = "" } = useParams();
@@ -22,21 +26,21 @@ export default function ModelPage() {
   // Any failure to find the repository reads as not found, as on the server.
   if (resolved.isError) {
     return (
-      <Page eyebrow="model" title="Model Not Found">
+      <Page eyebrow="Model" title="Model Not Found">
         <ErrorBlock error={resolved.error} what="the model" />
       </Page>
     );
   }
   if (model.isError) {
     return (
-      <Page eyebrow="model" title="Model Unavailable">
+      <Page eyebrow="Model" title="Model Unavailable">
         <ErrorBlock error={model.error} retry={() => void model.refetch()} what="the model" />
       </Page>
     );
   }
   if (!model.data) {
     return (
-      <Page eyebrow="model" title={id}>
+      <Page eyebrow="Model" title={id}>
         <Skeleton lines={6} />
       </Page>
     );
@@ -44,101 +48,124 @@ export default function ModelPage() {
   return <Model model={model.data} />;
 }
 
+/** A byte count in words, the exact count on hover. */
+function Bytes({ value }: { value: unknown }) {
+  const n = Number(value ?? 0);
+  return <span title={`${n} bytes`}>{bytes(n)}</span>;
+}
+
 function Model({ model }: { model: Row }) {
   const storage: Row = model.storage ?? {};
   const provenance: Row | null = model.training_provenance && typeof model.training_provenance === "object" ? model.training_provenance : null;
   const code = (value: unknown) => <code>{String(value ?? "")}</code>;
+  const files = (model.siblings ?? []) as Row[];
+  const revisions = (storage.revisions ?? []) as Row[];
+  const [search, setSearch] = useState("");
+  const shownFiles = files.filter((f) => matches(search, f.rfilename));
   return (
     <Page
-      eyebrow="model"
+      eyebrow="Model"
       title={model.modelId}
       sub={
-        <>
-          Revision <code>{model.sha}</code>
-        </>
+        <span className="inline-flex flex-wrap items-center gap-2">
+          Revision <Mono short={16}>{model.sha}</Mono>
+          {provenance ? <Status value={provenance.verified ? "verified" : "not verified"} tone={provenance.verified ? "success" : "warning"} /> : null}
+        </span>
       }
     >
-      <div className="grid">
-        <section className="panel">
-          <h2>Storage</h2>
-          <dl>
-            <dt>Logical bytes</dt>
-            <dd>{storage.logical_bytes ?? 0}</dd>
-            <dt>Unique bytes</dt>
-            <dd>{storage.unique_bytes ?? 0}</dd>
-            <dt>Deduplicated bytes</dt>
-            <dd>{storage.deduplicated_bytes ?? 0}</dd>
-            <dt>Deduplication ratio</dt>
-            <dd>{Number(storage.dedup_ratio ?? 0).toFixed(6)}</dd>
-          </dl>
-        </section>
-        <section className="panel">
-          <h2>Training Provenance</h2>
-          {provenance ? (
-            <>
-              <p>
-                <span className="badge">{provenance.verified ? "verified" : "not verified"}</span>
-              </p>
-              <dl>
-                <dt>Dataset</dt>
-                <dd>{code(provenance.dataset_repository_id)}</dd>
-                <dt>Dataset revision</dt>
-                <dd>{code(provenance.dataset_revision)}</dd>
-                <dt>Code revision</dt>
-                <dd>{code(provenance.code_revision)}</dd>
-                <dt>Run</dt>
-                <dd>{code(provenance.invocation_id)}</dd>
-                <dt>Runner</dt>
-                <dd>{code(provenance.runner)}</dd>
-                <dt>Builder</dt>
-                <dd>{code(provenance.builder)}</dd>
-                <dt>Environment digest</dt>
-                <dd>{code(provenance.environment_digest)}</dd>
-                <dt>Parameters</dt>
-                <dd>{code(JSON.stringify(provenance.parameters ?? []))}</dd>
-                <dt>Environment</dt>
-                <dd>{code(JSON.stringify(provenance.environment ?? {}))}</dd>
-                <dt>Model attestation</dt>
-                <dd>{code(provenance.model_attestation)}</dd>
-                <dt>Run attestation</dt>
-                <dd>{code(provenance.run_attestation)}</dd>
-                {provenance.reason ? (
-                  <>
-                    <dt>Reason</dt>
-                    <dd>{provenance.reason}</dd>
-                  </>
-                ) : null}
-              </dl>
-            </>
-          ) : (
-            <p className="empty">No training provenance is attached.</p>
+      <StatRow>
+        <Stat label="Logical bytes" value={<Bytes value={storage.logical_bytes} />} icon={HardDrive} />
+        <Stat label="Unique bytes" value={<Bytes value={storage.unique_bytes} />} icon={Database} />
+        <Stat label="Deduplicated bytes" value={<Bytes value={storage.deduplicated_bytes} />} tone={Number(storage.deduplicated_bytes ?? 0) > 0 ? "ok" : undefined} />
+        <Stat label="Deduplication ratio" value={Number(storage.dedup_ratio ?? 0).toFixed(6)} />
+      </StatRow>
+      <Split
+        side={
+          <Card label="Training provenance" actions={provenance ? <Status value={provenance.verified ? "verified" : "not verified"} tone={provenance.verified ? "success" : "warning"} /> : undefined}>
+            {provenance ? (
+              <KeyValue
+                rows={[
+                  ["Dataset", code(provenance.dataset_repository_id)],
+                  ["Dataset revision", code(provenance.dataset_revision)],
+                  ["Code revision", code(provenance.code_revision)],
+                  ["Run", code(provenance.invocation_id)],
+                  ["Runner", code(provenance.runner)],
+                  ["Builder", code(provenance.builder)],
+                  ["Environment digest", code(provenance.environment_digest)],
+                  ["Parameters", code(JSON.stringify(provenance.parameters ?? []))],
+                  ["Environment", code(JSON.stringify(provenance.environment ?? {}))],
+                  ["Model attestation", code(provenance.model_attestation)],
+                  ["Run attestation", code(provenance.run_attestation)],
+                  ...(provenance.reason ? ([["Reason", provenance.reason]] as [string, string][]) : []),
+                ]}
+              />
+            ) : (
+              <PanelEmpty>No training provenance is attached.</PanelEmpty>
+            )}
+          </Card>
+        }
+      >
+        <Card label="Files" padded={false} actions={<span className="font-mono text-[11.5px] text-ink-3">{files.length}</span>}>
+          {files.length > 6 && (
+            <div className="px-4 pt-3">
+              <Toolbar>
+                <SearchInput value={search} onChange={setSearch} placeholder="Search files…" />
+              </Toolbar>
+            </div>
           )}
-        </section>
-      </div>
-      <h2>Files</h2>
-      <DataTable
-        rows={(model.siblings ?? []) as Row[]}
-        rowKey={(f) => f.rfilename}
-        empty={<p className="empty">No files.</p>}
-        columns={[
-          { key: "path", label: "Path", render: (f) => f.rfilename },
-          { key: "size", label: "Size", render: (f) => f.size ?? 0, numeric: true },
-          { key: "stored", label: "Stored", render: (f) => f.storedSize ?? 0, numeric: true },
-          { key: "saved", label: "Saved", render: (f) => f.deduplicatedBytes ?? 0, numeric: true },
-        ]}
-      />
-      <h2>Revisions</h2>
-      <DataTable
-        rows={(storage.revisions ?? []) as Row[]}
-        rowKey={(r) => r.revision}
-        empty={<p className="empty">No revisions.</p>}
-        columns={[
-          { key: "revision", label: "Revision", render: (r) => <code>{r.revision}</code> },
-          { key: "logical", label: "Logical", render: (r) => r.logical_bytes ?? 0, numeric: true },
-          { key: "unique", label: "Unique", render: (r) => r.unique_bytes ?? 0, numeric: true },
-          { key: "saved", label: "Saved", render: (r) => r.deduplicated_bytes ?? 0, numeric: true },
-        ]}
-      />
+          <DataTable
+            rows={shownFiles}
+            rowKey={(f) => f.rfilename}
+            empty={
+              <div className="p-4">
+                <PanelEmpty>No files.</PanelEmpty>
+              </div>
+            }
+            columns={[
+              {
+                key: "path",
+                label: "Path",
+                sort: (f) => f.rfilename,
+                render: (f) => (
+                  <span className="inline-flex items-center gap-1.5">
+                    <FileStack size={14} className="text-ink-3" aria-hidden />
+                    <span className="font-mono text-[12.5px]">{f.rfilename}</span>
+                  </span>
+                ),
+              },
+              { key: "size", label: "Size", sort: (f) => Number(f.size ?? 0), render: (f) => <Bytes value={f.size} />, numeric: true },
+              { key: "stored", label: "Stored", sort: (f) => Number(f.storedSize ?? 0), render: (f) => <Bytes value={f.storedSize} />, numeric: true },
+              { key: "saved", label: "Saved", sort: (f) => Number(f.deduplicatedBytes ?? 0), render: (f) => <Bytes value={f.deduplicatedBytes} />, numeric: true },
+            ]}
+          />
+        </Card>
+        <Card label="Revisions" padded={false}>
+          <DataTable
+            rows={revisions}
+            rowKey={(r) => r.revision}
+            empty={
+              <div className="p-4">
+                <PanelEmpty>No revisions.</PanelEmpty>
+              </div>
+            }
+            columns={[
+              {
+                key: "revision",
+                label: "Revision",
+                render: (r) => (
+                  <span className="inline-flex items-center gap-1.5">
+                    <GitCommitHorizontal size={14} className="text-ink-3" aria-hidden />
+                    <Mono short={16}>{r.revision}</Mono>
+                  </span>
+                ),
+              },
+              { key: "logical", label: "Logical", render: (r) => <Bytes value={r.logical_bytes} />, numeric: true },
+              { key: "unique", label: "Unique", render: (r) => <Bytes value={r.unique_bytes} />, numeric: true },
+              { key: "saved", label: "Saved", render: (r) => <Bytes value={r.deduplicated_bytes} />, numeric: true },
+            ]}
+          />
+        </Card>
+      </Split>
     </Page>
   );
 }
