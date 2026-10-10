@@ -7,7 +7,8 @@ import { act } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
 import { useTrail } from "@/lib/trail";
-import { Button, Field, fieldError, Form, Notice, Page } from "@/lib/ui";
+import { ShieldCheck } from "lucide-react";
+import { Banner, Button, Card, CopyBlock, Field, fieldError, Form, Notice, Page, Split, Status } from "@/lib/ui";
 import { leaveFor, messageOf, NO_WORKSPACE, returnTarget } from "./signIn";
 import "@/styles/account.css";
 
@@ -56,53 +57,66 @@ function Manage() {
     }
   };
 
+  const { viewer } = useSession();
   return (
     <Page
-      eyebrow="identity"
+      eyebrow="Account"
       title="Multi-Factor Authentication"
       sub="Enroll or replace a TOTP authenticator for password sign-in. A new enrollment replaces existing recovery codes."
     >
       {error ? <Notice tone="danger">{messageOf(error)}</Notice> : null}
       {enrollment && (
-        <>
-          <p className="notice">
-            Save this authenticator URI now: <code>{enrollment.otpauth_uri}</code>
-          </p>
-          <h2>Recovery Codes</h2>
-          <p>Save these now. Each code works once.</p>
-          <ul className="recovery-codes">
-            {enrollment.recovery_codes.map((recovery) => (
-              <li key={recovery}>
-                <code>{recovery}</code>
-              </li>
-            ))}
-          </ul>
-        </>
+        <Banner tone="ok" title="Save these now. They are not shown again.">
+          <div className="mt-2 space-y-3 text-ink">
+            <CopyBlock value={enrollment.otpauth_uri} label="Authenticator URI" multiline />
+            <div>
+              <div className="label">Recovery codes · each code works once</div>
+              <ul className="recovery-codes">
+                {enrollment.recovery_codes.map((recovery) => (
+                  <li key={recovery}>
+                    <code>{recovery}</code>
+                  </li>
+                ))}
+              </ul>
+              <CopyBlock value={enrollment.recovery_codes.join("\n")} label="All recovery codes" multiline />
+            </div>
+          </div>
+        </Banner>
       )}
-      <form
-        className="stack"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void enroll();
-        }}
+      <Split
+        side={
+          <Card label="Disable MFA" tone="exception">
+            <Form onSubmit={disable}>
+              <Field label="Current TOTP or recovery code" error={fieldError(error, "code")} required>
+                <input type="text" name="code" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} />
+              </Field>
+              <div>
+                <Button type="submit" variant="danger" loading={disabling}>
+                  Disable MFA
+                </Button>
+              </div>
+            </Form>
+          </Card>
+        }
       >
-        <div>
-          <Button type="submit" variant="primary" loading={enrolling}>
-            Enroll or replace MFA
-          </Button>
-        </div>
-      </form>
-      <h2>Disable MFA</h2>
-      <Form onSubmit={disable}>
-        <Field label="Current TOTP or recovery code" error={fieldError(error, "code")} required>
-          <input type="text" name="code" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} />
-        </Field>
-        <div>
-          <Button type="submit" loading={disabling}>
-            Disable MFA
-          </Button>
-        </div>
-      </Form>
+        <Card
+          label="Authenticator"
+          title="TOTP authenticator"
+          actions={viewer.mfa_enrolled !== undefined ? <Status value={viewer.mfa_enrolled ? "enabled" : "not enrolled"} tone={viewer.mfa_enrolled ? "success" : "warning"} /> : undefined}
+        >
+          <p className="mt-0 text-[13px] text-ink-2">Add the authenticator URI to your authenticator app, and keep the recovery codes somewhere safe.</p>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void enroll();
+            }}
+          >
+            <Button type="submit" variant="primary" loading={enrolling}>
+              <ShieldCheck size={14} aria-hidden /> Enroll or replace MFA
+            </Button>
+          </form>
+        </Card>
+      </Split>
     </Page>
   );
 }
@@ -128,27 +142,29 @@ function Challenge() {
     }
   };
   return (
-    <Page eyebrow="identity" title="Multi-Factor Authentication" sub="Verify your password with a current TOTP or unused recovery code.">
+    <Page eyebrow="Account" title="Multi-Factor Authentication" sub="Verify your password with a current TOTP or unused recovery code.">
       {error ? <Notice tone="danger">{messageOf(error)}</Notice> : null}
-      <Form onSubmit={verify}>
-        <Field label="Email" error={fieldError(error, "email")} required>
-          <input type="email" name="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} />
-        </Field>
-        <Field label="Password" error={fieldError(error, "password")} required>
-          <input type="password" name="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
-        </Field>
-        <Field label="TOTP or recovery code" error={fieldError(error, "code")} required>
-          <input type="text" name="code" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} />
-        </Field>
-        <Field label="Device name" error={fieldError(error, "device_name")} required>
-          <input type="text" name="device_name" value={deviceName} onChange={(e) => setDeviceName(e.target.value)} />
-        </Field>
-        <div>
-          <Button type="submit" variant="primary" loading={busy}>
-            Verify and sign in
-          </Button>
-        </div>
-      </Form>
+      <Card className="max-w-[32rem]">
+        <Form onSubmit={verify}>
+          <Field label="Email" error={fieldError(error, "email")} required>
+            <input type="email" name="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} />
+          </Field>
+          <Field label="Password" error={fieldError(error, "password")} required>
+            <input type="password" name="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          </Field>
+          <Field label="TOTP or recovery code" error={fieldError(error, "code")} required>
+            <input type="text" name="code" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} />
+          </Field>
+          <Field label="Device name" error={fieldError(error, "device_name")} required>
+            <input type="text" name="device_name" value={deviceName} onChange={(e) => setDeviceName(e.target.value)} />
+          </Field>
+          <div>
+            <Button type="submit" variant="primary" loading={busy}>
+              Verify and sign in
+            </Button>
+          </div>
+        </Form>
+      </Card>
     </Page>
   );
 }

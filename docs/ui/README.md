@@ -12,6 +12,7 @@ can do nothing the API cannot.
 - The Ship pages (Models, Search Indexes, Search Index, Services): [ship.md](ship.md).
 - How it works on a phone, and how to check it at 390×844: [mobile-web.md](mobile-web.md).
 - Data → Transcripts, with dictation, recording and upload: [transcripts.md](transcripts.md).
+- The Organization, Administration and Account pages: [organization.md](organization.md).
 - The capabilities added for the app (`viewer`, `my_permissions`, `list_packages`, `list_docs`,
   `get_doc`, `mcp_setup`, `resolve_model`, `latest_agent_task`, `compile_pipeline`,
   `render_pipeline`): [../api/web-app.md](../api/web-app.md).

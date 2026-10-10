@@ -1,12 +1,13 @@
 /** Application organizations (`/application/organizations?id=`): one application's
- * organizations, with Delete and the create form (web_ui_application_organizations and its two
+ * organizations, with Delete and the create dialog (web_ui_application_organizations and its two
  * POST handlers). */
 import { useState } from "react";
+import { Plus } from "lucide-react";
 import { act, useList, type Row } from "@/lib/api";
-import { ConfirmButton } from "@/lib/overlay";
+import { ConfirmButton, Modal } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
-import { Button, DataTable, Field, Form, fieldError } from "@/lib/ui";
-import { When, useMetaTrail, useParam } from "@/pages/organizations/shared";
+import { Button, DataTable, Field, Form, Mono, SearchInput, Toolbar, fieldError } from "@/lib/ui";
+import { NameCell, PanelEmpty, When, matches, useMetaTrail, useParam } from "@/pages/organizations/shared";
 import { ApplicationFrame, useApplication } from "./applicationShared";
 
 export default function ApplicationOrganizationsPage() {
@@ -14,23 +15,49 @@ export default function ApplicationOrganizationsPage() {
   const application = useApplication(id);
   const workspaceId: string | undefined = application.data?.workspace_id ?? undefined;
   const organizations = useList<Row>(workspaceId ? "list_application_organizations" : null, { application_id: id, workspace_id: workspaceId, limit: 500 }, { pick: "items", workspace: null });
+  const [creating, setCreating] = useState(false);
+  const [search, setSearch] = useState("");
   useMetaTrail(organizations.data ? `${organizations.data.length} organizations` : null, "Application Organizations");
+  const rows = organizations.data?.filter((o) => matches(search, o.name, o.taap_id));
   return (
-    <ApplicationFrame application={application} eyebrow="application organizations" title={(name) => `${name} Organizations`}>
+    <ApplicationFrame
+      application={application}
+      title={(name) => `${name} Organizations`}
+      sub="The organizations of this application's customers."
+      actions={() => (
+        <Button variant="primary" onClick={() => setCreating(true)}>
+          <Plus size={14} aria-hidden /> New organization
+        </Button>
+      )}
+    >
       {(app) => (
         <>
+          <Toolbar>
+            <SearchInput value={search} onChange={setSearch} placeholder="Search organizations…" />
+          </Toolbar>
           <DataTable
             q={organizations}
             what="application organizations"
-            rows={organizations.data}
+            rows={rows}
             rowKey={(o) => o.id}
+            empty={
+              <PanelEmpty
+                title="No organizations"
+                action={
+                  <Button variant="primary" onClick={() => setCreating(true)}>
+                    New organization
+                  </Button>
+                }
+              >
+                {organizations.data?.length ? "Clear the search to see every organization." : "Create the application's first organization."}
+              </PanelEmpty>
+            }
             columns={[
-              { key: "name", label: "Name", render: (o) => o.name },
-              { key: "taap", label: "TAAP identity", render: (o) => <code>{o.taap_id}</code> },
-              { key: "updated", label: "Updated", render: (o) => <When value={o.updated_at} /> },
+              { key: "name", label: "Organization", sort: (o) => o.name, render: (o) => <NameCell name={o.name} sub={<Mono short={36}>{o.taap_id}</Mono>} /> },
+              { key: "updated", label: "Updated", sort: (o) => o.updated_at, render: (o) => <When value={o.updated_at} /> },
               {
                 key: "delete",
-                label: "",
+                label: <span className="sr-only">Actions</span>,
                 render: (o) => (
                   <ConfirmButton
                     title="Delete the organization?"
@@ -45,14 +72,14 @@ export default function ApplicationOrganizationsPage() {
               },
             ]}
           />
-          <CreateOrganization applicationId={app.id} workspaceId={app.workspace_id ?? ""} />
+          {creating && <CreateOrganization applicationId={app.id} workspaceId={app.workspace_id ?? ""} onClose={() => setCreating(false)} />}
         </>
       )}
     </ApplicationFrame>
   );
 }
 
-function CreateOrganization({ applicationId, workspaceId }: { applicationId: string; workspaceId: string }) {
+function CreateOrganization({ applicationId, workspaceId, onClose }: { applicationId: string; workspaceId: string; onClose: () => void }) {
   const toast = useToast();
   const [name, setName] = useState("");
   const [taapId, setTaapId] = useState("");
@@ -63,9 +90,8 @@ function CreateOrganization({ applicationId, workspaceId }: { applicationId: str
     setError(null);
     try {
       await act("create_application_organization", { application_id: applicationId, workspace_id: workspaceId, name, taap_id: taapId });
-      setName("");
-      setTaapId("");
       toast("Organization created");
+      onClose();
     } catch (e) {
       setError(e);
     } finally {
@@ -75,21 +101,26 @@ function CreateOrganization({ applicationId, workspaceId }: { applicationId: str
   const nameError = fieldError(error, "name");
   const taapError = fieldError(error, "taap_id");
   return (
-    <div className="panel">
-      <h2>Create Organization</h2>
-      <Form onSubmit={submit} error={nameError || taapError ? null : error}>
+    <Modal
+      title="New Organization"
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" type="submit" form="create-application-organization" loading={busy}>
+            Create
+          </Button>
+        </>
+      }
+    >
+      <Form id="create-application-organization" onSubmit={submit} error={nameError || taapError ? null : error}>
         <Field label="Name" required error={nameError}>
-          <input name="name" value={name} onChange={(e) => setName(e.target.value)} />
+          <input name="name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
         </Field>
         <Field label="TAAP identity" required error={taapError}>
           <input name="taap_id" value={taapId} onChange={(e) => setTaapId(e.target.value)} />
         </Field>
-        <div>
-          <Button variant="primary" type="submit" loading={busy}>
-            Create
-          </Button>
-        </div>
       </Form>
-    </div>
+    </Modal>
   );
 }

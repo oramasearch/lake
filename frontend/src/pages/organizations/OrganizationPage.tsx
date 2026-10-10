@@ -3,16 +3,41 @@
  * serve_organization_page and the team, invitation and SSO form handlers). */
 import { useState } from "react";
 import { Link, Navigate } from "react-router-dom";
+import { HardDrive, Mail, Plus, ScrollText, Timer, UserPlus, Users, UsersRound } from "lucide-react";
 import { act, ApiError, useList, useRead, type Row } from "@/lib/api";
-import { bytes } from "@/lib/format";
+import { bytes, plural } from "@/lib/format";
+import { usageDuration } from "@/pages/admin/usageFormat";
+import { Drawer, Modal } from "@/lib/overlay";
+import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
-import { Button, DataTable, ErrorBlock, Field, Form, Page, Skeleton, Status, fieldError, type Column } from "@/lib/ui";
-import { HANDLE_PATTERN, Panel, PanelEmpty, RoleBadge, When, useMetaTrail, useParam } from "./shared";
+import {
+  Button,
+  Card,
+  DataTable,
+  ErrorBlock,
+  Field,
+  FilterChips,
+  Form,
+  KeyValue,
+  Meter,
+  Mono,
+  Page,
+  SearchInput,
+  Skeleton,
+  Split,
+  Stat,
+  StatRow,
+  Status,
+  Toolbar,
+  fieldError,
+  type Column,
+} from "@/lib/ui";
+import { HANDLE_PATTERN, NameCell, ObjectChip, PanelEmpty, QueryTabs, RoleBadge, When, countBy, matches, useMetaTrail, useParam } from "./shared";
 
 const TABS: [string, string][] = [
   ["overview", "Overview"],
-  ["teams", "Teams"],
   ["members", "Members"],
+  ["teams", "Teams"],
   ["invitations", "Invitations"],
   ["access", "Access"],
   ["sso", "SSO"],
@@ -34,69 +59,187 @@ export function invitationExpiry(days: string, now = Date.now()): string {
 export default function OrganizationPage() {
   const id = useParam("id");
   const tab = useParam("tab") || "overview";
+  const { viewer } = useSession();
   const organization = useRead<Row>(id ? "get_organization" : null, { id });
   const teams = useList<Row>(id ? "list_teams" : null, { organization_id: id, limit: 500 }, { pick: "items" });
   const memberships = useList<Row>(id ? "list_memberships" : null, { organization_id: id, limit: 500 }, { pick: "items" });
-  // Admin-only: a plain member sees its 403 in the invitations panel, not instead of the page.
+  // Admin-only: a plain member sees its 403 in the invitations tab, not instead of the page.
   const invitations = useList<Row>(id && (tab === "overview" || tab === "invitations") ? "list_invitations" : null, { organization_id: id, limit: 500 }, { pick: "items" });
+  const [inviting, setInviting] = useState(false);
   useMetaTrail(organization.data?.display_name, "Organization Settings");
 
   if (!id) return <Navigate to="/organizations" replace />;
   const fatal = [organization, teams, memberships].find((q) => q.isError);
   if (fatal) {
     return (
-      <Page eyebrow="organization settings" title="Organization Settings">
+      <Page eyebrow="Organization" title="Organization Settings">
         <ErrorBlock error={fatal.error} retry={() => void fatal.refetch()} what="the organization" />
       </Page>
     );
   }
   if (!organization.data || !teams.data || !memberships.data) {
     return (
-      <Page eyebrow="organization settings" title="Organization Settings">
-        <Skeleton />
+      <Page eyebrow="Organization" title="Organization Settings">
+        <Skeleton lines={6} />
       </Page>
     );
   }
   const org = organization.data;
   const base = `/organization?id=${encodeURIComponent(id)}&tab=`;
+  const own = memberships.data.find((m) => !m.team_id && viewer.taap_id && m.principal_taap_id === viewer.taap_id);
+  const counts: Record<string, number | undefined> = {
+    members: memberships.data.length,
+    teams: teams.data.length,
+    invitations: invitations.data?.length,
+  };
   return (
-    <Page eyebrow="organization settings" title={org.display_name} sub="Organization administration, identity, access, and evidence.">
-      <nav className="tabs" aria-label="Organization settings">
-        {TABS.map(([name, label]) => (
-          <Link key={name} to={base + name} aria-current={tab === name ? "page" : undefined}>
-            {label}
-          </Link>
-        ))}
-      </nav>
-      {tab === "overview" && (
-        <Panel>
-          <dl>
-            <dt>Identity</dt>
-            <dd>
-              <code>{org.taap_id ?? "—"}</code>
-            </dd>
-            <dt>Teams</dt>
-            <dd>{teams.data.length}</dd>
-            <dt>Members</dt>
-            <dd>{memberships.data.length}</dd>
-            <dt>Pending invitations</dt>
-            <dd>{invitations.isLoading ? "…" : invitations.data ? invitations.data.length : "—"}</dd>
-          </dl>
-        </Panel>
-      )}
-      {tab === "teams" && <TeamsTab organizationId={id} teams={teams.data} />}
-      {tab === "members" && <MembersTab base={base} memberships={memberships.data} />}
-      {tab === "invitations" && <InvitationsTab organizationId={id} invitations={invitations} />}
+    <Page
+      eyebrow="Organization"
+      title={org.display_name}
+      sub={
+        <span className="inline-flex flex-wrap items-center gap-2">
+          {own ? <RoleBadge role={own.role} /> : null}
+          <span>{own ? "Your role here." : "Organization administration, identity, access and evidence."}</span>
+        </span>
+      }
+      actions={
+        <Button variant="primary" onClick={() => setInviting(true)}>
+          <UserPlus size={14} aria-hidden /> Invite people
+        </Button>
+      }
+    >
+      <QueryTabs label="Organization settings" tabs={TABS.map(([name, label]) => ({ to: base + name, label, active: tab === name, count: counts[name] }))} />
+      {tab === "overview" && <Overview org={org} base={base} teams={teams.data} memberships={memberships.data} invitations={invitations} />}
+      {tab === "teams" && <TeamsTab organizationId={id} teams={teams.data} memberships={memberships.data} />}
+      {tab === "members" && <MembersTab teams={teams.data} memberships={memberships.data} onInvite={() => setInviting(true)} />}
+      {tab === "invitations" && <InvitationsTab invitations={invitations} onInvite={() => setInviting(true)} />}
       {tab === "access" && <AccessTab organizationId={id} />}
       {tab === "sso" && <SsoTab organizationId={id} />}
       {tab === "applications" && <ApplicationsTab organizationId={id} />}
       {tab === "metering" && <UsageTab organizationId={id} />}
       {tab === "audit" && <AuditTab organizationId={id} />}
+      {inviting && <InviteDialog organizationId={id} onClose={() => setInviting(false)} />}
     </Page>
   );
 }
 
-function TeamsTab({ organizationId, teams }: { organizationId: string; teams: Row[] }) {
+function Overview({ org, base, teams, memberships, invitations }: { org: Row; base: string; teams: Row[]; memberships: Row[]; invitations: ReturnType<typeof useList<Row>> }) {
+  const id = encodeURIComponent(org.id);
+  const owners = memberships.filter((m) => !m.team_id && m.role === "owner").length;
+  return (
+    <>
+      <StatRow cols={3}>
+        <Stat label="Members" value={memberships.length} icon={Users} to={base + "members"} sub={`${plural(owners, "owner")}`} />
+        <Stat label="Teams" value={teams.length} icon={UsersRound} to={base + "teams"} />
+        <Stat
+          label="Pending invitations"
+          value={invitations.isLoading ? "…" : invitations.data ? invitations.data.length : "—"}
+          icon={Mail}
+          to={base + "invitations"}
+          sub={invitations.isError ? "admins only" : undefined}
+        />
+      </StatRow>
+      <Split
+        side={
+          <Card label="Pages">
+            <ul className="m-0 list-none space-y-1.5 p-0 text-[13px]">
+              <li>
+                <Link to={`/teams?organization_id=${id}`}>Teams</Link>
+              </li>
+              <li>
+                <Link to={`/members?organization_id=${id}`}>Members and their attestations</Link>
+              </li>
+              <li>
+                <Link to={`/invitations?organization_id=${id}`}>Invitations</Link>
+              </li>
+              <li>
+                <Link to={`/organization/access?id=${id}`}>Effective access</Link>
+              </li>
+              <li>
+                <Link to={`/sso?organization_id=${id}`}>Enterprise SSO and provisioning log</Link>
+              </li>
+            </ul>
+          </Card>
+        }
+      >
+        <Card label="Organization" title={org.display_name}>
+          <KeyValue
+            rows={[
+              ["Identity", org.taap_id ? <code>{org.taap_id}</code> : null],
+              ["ID", <code>{org.id}</code>],
+              ["Teams", teams.length],
+              ["Members", memberships.length],
+              ["Pending invitations", invitations.isLoading ? "…" : invitations.data ? invitations.data.length : "—"],
+              ["Created", <When value={org.created_at} />],
+            ]}
+          />
+        </Card>
+      </Split>
+    </>
+  );
+}
+
+function TeamsTab({ organizationId, teams, memberships }: { organizationId: string; teams: Row[]; memberships: Row[] }) {
+  const [search, setSearch] = useState("");
+  const [creating, setCreating] = useState(false);
+  const shown = teams.filter((t) => matches(search, t.name, t.display_name));
+  const size = (teamId: string) => memberships.filter((m) => m.team_id === teamId).length;
+  return (
+    <>
+      <Toolbar>
+        <SearchInput value={search} onChange={setSearch} placeholder="Search teams…" />
+        <div className="ml-auto">
+          <Button variant="primary" onClick={() => setCreating(true)}>
+            <Plus size={14} aria-hidden /> New team
+          </Button>
+        </div>
+      </Toolbar>
+      <DataTable
+        rows={shown}
+        rowKey={(t) => t.id}
+        empty={
+          teams.length === 0 ? (
+            <PanelEmpty
+              title="No teams yet"
+              action={
+                <Button variant="primary" onClick={() => setCreating(true)}>
+                  New team
+                </Button>
+              }
+            >
+              No teams in this organization yet. A team groups members so access can be granted to all of them at once.
+            </PanelEmpty>
+          ) : (
+            <PanelEmpty title="No team matches">Clear the search to see every team.</PanelEmpty>
+          )
+        }
+        columns={[
+          {
+            key: "team",
+            label: "Team",
+            sort: (t) => t.display_name || t.name,
+            render: (t) => <NameCell to={`/team?id=${encodeURIComponent(t.id)}`} name={t.display_name || t.name} sub={<code>{t.name}</code>} />,
+          },
+          { key: "members", label: "Members", numeric: true, sort: (t) => size(t.id), render: (t) => <span className="font-mono">{size(t.id)}</span> },
+          {
+            key: "links",
+            label: <span className="sr-only">Links</span>,
+            render: (t) => (
+              <span className="flex flex-wrap gap-3 text-[12.5px]">
+                <Link to={`/members?organization_id=${encodeURIComponent(organizationId)}&team_id=${encodeURIComponent(t.id)}`}>members</Link>
+                <Link to={`/team/access?id=${encodeURIComponent(t.id)}`}>effective access</Link>
+              </span>
+            ),
+          },
+          { key: "created", label: "Created", sort: (t) => t.created_at, render: (t) => <When value={t.created_at} /> },
+        ]}
+      />
+      {creating && <CreateTeam organizationId={organizationId} onClose={() => setCreating(false)} />}
+    </>
+  );
+}
+
+function CreateTeam({ organizationId, onClose }: { organizationId: string; onClose: () => void }) {
   const toast = useToast();
   const [name, setName] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -109,9 +252,8 @@ function TeamsTab({ organizationId, teams }: { organizationId: string; teams: Ro
       const input: Row = { organization_id: organizationId, name };
       if (displayName) input.display_name = displayName;
       await act("create_team", input);
-      setName("");
-      setDisplayName("");
       toast("Team created");
+      onClose();
     } catch (e) {
       setError(e);
     } finally {
@@ -120,56 +262,124 @@ function TeamsTab({ organizationId, teams }: { organizationId: string; teams: Ro
   };
   const nameError = fieldError(error, "name");
   return (
+    <Modal
+      title="New Team"
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" type="submit" form="create-team" loading={busy}>
+            Create team
+          </Button>
+        </>
+      }
+    >
+      <Form id="create-team" onSubmit={submit} error={nameError ? null : error}>
+        <Field label="Team name" required error={nameError} help="Lowercase letters, numbers and inner hyphens.">
+          <input name="name" pattern={HANDLE_PATTERN} placeholder="reviewers" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+        </Field>
+        <Field label="Display name">
+          <input name="display_name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+        </Field>
+      </Form>
+    </Modal>
+  );
+}
+
+function MembersTab({ teams, memberships, onInvite }: { teams: Row[]; memberships: Row[]; onInvite: () => void }) {
+  const [search, setSearch] = useState("");
+  const [role, setRole] = useState<string | null>(null);
+  const teamName = (teamId: string) => {
+    const t = teams.find((x) => x.id === teamId);
+    return t ? t.display_name || t.name : teamId;
+  };
+  const shown = memberships.filter((m) => matches(search, m.principal_taap_id, m.principal_type) && (!role || m.role === role));
+  return (
     <>
-      <Panel title="Teams">
-        {teams.map((team) => (
-          <p key={team.id}>
-            <Link to={`/team?id=${encodeURIComponent(team.id)}`}>{team.display_name || team.name}</Link>
-          </p>
-        ))}
-        {teams.length === 0 && <p className="empty">No teams in this organization yet.</p>}
-      </Panel>
-      <Panel title="Create a Team">
-        <Form onSubmit={submit} error={nameError ? null : error}>
-          <Field label="Team name" required error={nameError}>
-            <input name="name" pattern={HANDLE_PATTERN} placeholder="reviewers" value={name} onChange={(e) => setName(e.target.value)} />
-          </Field>
-          <Field label="Display name">
-            <input name="display_name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
-          </Field>
-          <div>
-            <Button variant="primary" type="submit" loading={busy}>
-              Create team
-            </Button>
-          </div>
-        </Form>
-      </Panel>
+      <Toolbar>
+        <SearchInput value={search} onChange={setSearch} placeholder="Search members…" />
+        <FilterChips options={countBy(memberships, (m) => m.role)} value={role} onChange={setRole} allLabel="Any role" />
+      </Toolbar>
+      <DataTable
+        rows={shown}
+        rowKey={(m) => m.id}
+        empty={
+          memberships.length === 0 ? (
+            <PanelEmpty
+              title="No members yet"
+              action={
+                <Button variant="primary" onClick={onInvite}>
+                  Invite people
+                </Button>
+              }
+            >
+              Invite people by email address or handle.
+            </PanelEmpty>
+          ) : (
+            <PanelEmpty title="No member matches">Clear the search or the role filter to see more.</PanelEmpty>
+          )
+        }
+        columns={[
+          {
+            key: "principal",
+            label: "Member",
+            sort: (m) => m.principal_taap_id,
+            render: (m) => <NameCell to={`/member?id=${encodeURIComponent(m.id)}`} name={<Mono short={34}>{m.principal_taap_id}</Mono>} sub={m.principal_type} />,
+          },
+          { key: "role", label: "Role", sort: (m) => m.role, render: (m) => <RoleBadge role={m.role} /> },
+          { key: "scope", label: "Scope", render: (m) => (m.team_id ? <Link to={`/team?id=${encodeURIComponent(m.team_id)}`}>{teamName(m.team_id)}</Link> : <span className="text-ink-3">Organization</span>) },
+          { key: "attestation", label: "Attestation", render: (m) => <Mono short={12}>{m.attestation_digest}</Mono> },
+        ]}
+      />
     </>
   );
 }
 
-function MembersTab({ base, memberships }: { base: string; memberships: Row[] }) {
+function InvitationsTab({ invitations, onInvite }: { invitations: ReturnType<typeof useList<Row>>; onInvite: () => void }) {
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+  const rows = invitations.data;
+  const shown = rows?.filter((i) => matches(search, i.invitee, i.invitee_type) && (!status || i.status === status));
+  const columns: Column<Row>[] = [
+    { key: "invitee", label: "Invitee", sort: (i) => i.invitee, render: (i) => <NameCell name={i.invitee} sub={i.invitee_type} /> },
+    { key: "role", label: "Role", render: (i) => <RoleBadge role={i.role} /> },
+    { key: "status", label: "Status", render: (i) => <Status value={i.status} /> },
+    { key: "expires", label: "Expires", render: (i) => <When value={i.expires_at} />, sort: (i) => i.expires_at },
+  ];
   return (
-    <Panel title="Members">
-      {memberships.map((member) => (
-        <p key={member.id}>
-          <Link to={`/member?id=${encodeURIComponent(member.id)}`}>{member.principal_taap_id}</Link> <RoleBadge role={member.role} />
-        </p>
-      ))}
-      {memberships.length === 0 ? (
-        <p className="empty">
-          No members yet. <Link to={base + "invitations"}>Invite people</Link> by email address or handle.
-        </p>
-      ) : (
-        <p>
-          <Link to={base + "invitations"}>Invite more people</Link>
-        </p>
-      )}
-    </Panel>
+    <>
+      <Toolbar>
+        <SearchInput value={search} onChange={setSearch} placeholder="Search invitations…" />
+        <FilterChips options={countBy(rows, (i) => i.status)} value={status} onChange={setStatus} allLabel="Any status" />
+      </Toolbar>
+      <DataTable
+        q={invitations}
+        what="invitations"
+        rows={shown}
+        columns={columns}
+        rowKey={(i) => i.id}
+        empty={
+          (rows?.length ?? 0) === 0 ? (
+            <PanelEmpty
+              title="No invitations yet"
+              action={
+                <Button variant="primary" onClick={onInvite}>
+                  Invite people
+                </Button>
+              }
+            >
+              Invitations you send appear here until they are accepted or expire.
+            </PanelEmpty>
+          ) : (
+            <PanelEmpty title="No invitation matches">Clear the search or the status filter to see more.</PanelEmpty>
+          )
+        }
+      />
+    </>
   );
 }
 
-function InvitationsTab({ organizationId, invitations }: { organizationId: string; invitations: ReturnType<typeof useList<Row>> }) {
+function InviteDialog({ organizationId, onClose }: { organizationId: string; onClose: () => void }) {
   const toast = useToast();
   const [invitee, setInvitee] = useState("");
   const [inviteeType, setInviteeType] = useState("email");
@@ -185,6 +395,7 @@ function InvitationsTab({ organizationId, invitations }: { organizationId: strin
       await act("create_invitation", { organization_id: organizationId, invitee_type: inviteeType, invitee, role, expires_at: expiresAt });
       setInvitee("");
       toast("Invitation sent");
+      onClose();
     } catch (e) {
       setError(e);
     } finally {
@@ -193,31 +404,29 @@ function InvitationsTab({ organizationId, invitations }: { organizationId: strin
   };
   const inviteeError = fieldError(error, "invitee");
   const daysError = fieldError(error, "expires_in_days") ?? fieldError(error, "expires_at");
-  const columns: Column<Row>[] = [
-    { key: "invitee", label: "Invitee", render: (i) => `${i.invitee_type}: ${i.invitee}` },
-    { key: "role", label: "Role", render: (i) => <RoleBadge role={i.role} /> },
-    { key: "status", label: "Status", render: (i) => <Status value={i.status} /> },
-    { key: "expires", label: "Expires", render: (i) => <When value={i.expires_at} />, sort: (i) => i.expires_at },
-  ];
   return (
-    <>
-      <Panel title="Invite a Member">
-        <p>The person joins from their Organizations page once they sign in with that email address, or with the workspace that has that handle.</p>
-        <Form onSubmit={submit} error={inviteeError || daysError ? null : error}>
-          <Field label="Email or handle" required error={inviteeError}>
-            <input name="invitee" value={invitee} onChange={(e) => setInvitee(e.target.value)} />
-          </Field>
+    <Modal
+      title="Invite a Member"
+      subtitle="They join from their Organizations page once they sign in with that email address, or with the workspace that has that handle."
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" type="submit" form="invite-member" loading={busy}>
+            Send invitation
+          </Button>
+        </>
+      }
+    >
+      <Form id="invite-member" onSubmit={submit} error={inviteeError || daysError ? null : error}>
+        <Field label="Email or handle" required error={inviteeError}>
+          <input name="invitee" value={invitee} onChange={(e) => setInvitee(e.target.value)} autoFocus />
+        </Field>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <Field label="Type">
             <select name="invitee_type" value={inviteeType} onChange={(e) => setInviteeType(e.target.value)}>
               <option value="email">Email</option>
               <option value="handle">Handle</option>
-            </select>
-          </Field>
-          <Field label="Role">
-            <select name="role" value={role} onChange={(e) => setRole(e.target.value)}>
-              <option value="member">Member: can read the organization</option>
-              <option value="admin">Admin: can manage people, teams and access</option>
-              <option value="owner">Owner: can manage; an organization always keeps at least one</option>
             </select>
           </Field>
           <Field label="Expires in" error={daysError}>
@@ -227,51 +436,97 @@ function InvitationsTab({ organizationId, invitations }: { organizationId: strin
               <option value="30">30 days</option>
             </select>
           </Field>
-          <div>
-            <Button variant="primary" type="submit" loading={busy}>
-              Send invitation
-            </Button>
-          </div>
-        </Form>
-      </Panel>
-      <DataTable
-        q={invitations}
-        what="invitations"
-        rows={invitations.data}
-        columns={columns}
-        rowKey={(i) => i.id}
-        empty={<PanelEmpty>No invitations yet. Invitations you send appear here until they are accepted or expire.</PanelEmpty>}
-      />
-    </>
+        </div>
+        <Field label="Role">
+          <select name="role" value={role} onChange={(e) => setRole(e.target.value)}>
+            <option value="member">Member: can read the organization</option>
+            <option value="admin">Admin: can manage people, teams and access</option>
+            <option value="owner">Owner: can manage; an organization always keeps at least one</option>
+          </select>
+        </Field>
+      </Form>
+    </Modal>
   );
 }
 
 function AccessTab({ organizationId }: { organizationId: string }) {
   const access = useRead<Row>("entity_effective_access", { object_type: "organization", id: organizationId });
-  const items: Row[] = access.data?.items ?? [];
+  const [search, setSearch] = useState("");
+  const items: Row[] | undefined = access.data ? ((access.data.items ?? []) as Row[]).filter((e) => matches(search, e.principal_taap_id, e.role)) : undefined;
   return (
-    <Panel title="Effective Access">
-      {access.isLoading ? (
-        <Skeleton />
-      ) : access.isError ? (
-        <ErrorBlock error={access.error} retry={() => void access.refetch()} what="effective access" />
-      ) : (
-        <>
-          {items.map((entry, index) => (
-            <p key={index}>
-              <code>{entry.principal_taap_id}</code> <RoleBadge role={entry.role} />
-            </p>
-          ))}
-          {items.length === 0 && <p className="empty">No effective access entries.</p>}
-        </>
-      )}
-    </Panel>
+    <>
+      <Toolbar>
+        <SearchInput value={search} onChange={setSearch} placeholder="Search principals…" />
+        <div className="ml-auto">
+          <Button to={`/organization/access?id=${encodeURIComponent(organizationId)}`}>Open effective access</Button>
+        </div>
+      </Toolbar>
+      <DataTable
+        q={access}
+        what="effective access"
+        rows={items}
+        rowKey={(e, i) => `${e.principal_taap_id}:${e.role}:${i}`}
+        empty={<PanelEmpty title="No effective access entries">Nobody reaches this organization yet.</PanelEmpty>}
+        columns={[
+          { key: "principal", label: "Principal", sort: (e) => e.principal_taap_id, render: (e) => <Mono short={40}>{e.principal_taap_id}</Mono> },
+          { key: "role", label: "Role", sort: (e) => e.role, render: (e) => <RoleBadge role={e.role} /> },
+          { key: "source", label: "Source", render: (e) => (e.source_object_id ? <span className="text-ink-2">{e.inherited ? "inherited" : "direct"}</span> : <span className="muted">—</span>) },
+        ]}
+      />
+    </>
   );
 }
 
 function SsoTab({ organizationId }: { organizationId: string }) {
-  const toast = useToast();
   const providers = useList<Row>("list_sso_providers", { organization_id: organizationId, limit: 100 }, { pick: "items" });
+  const [adding, setAdding] = useState(false);
+  return (
+    <>
+      <Toolbar>
+        <span className="text-[13px] text-ink-2">Provider secrets and SCIM tokens are never shown.</span>
+        <div className="ml-auto flex flex-wrap gap-2">
+          <Button to={`/sso?organization_id=${encodeURIComponent(organizationId)}`}>
+            <ScrollText size={14} aria-hidden /> Provisioning log
+          </Button>
+          <Button variant="primary" onClick={() => setAdding(true)}>
+            <Plus size={14} aria-hidden /> Add provider
+          </Button>
+        </div>
+      </Toolbar>
+      <DataTable
+        q={providers}
+        what="SSO providers"
+        rows={providers.data}
+        rowKey={(p) => p.id}
+        empty={
+          <PanelEmpty
+            title="No SSO providers"
+            action={
+              <Button variant="primary" onClick={() => setAdding(true)}>
+                Add provider
+              </Button>
+            }
+          >
+            Connect an OpenID Connect or SAML identity provider so members sign in with it.
+          </PanelEmpty>
+        }
+        columns={[
+          {
+            key: "name",
+            label: "Provider",
+            render: (p) => <NameCell to={`/sso?organization_id=${encodeURIComponent(organizationId)}&provider_id=${encodeURIComponent(p.id)}`} name={p.name} sub={p.issuer} />,
+          },
+          { key: "protocol", label: "Protocol", render: (p) => <span className="font-mono text-[12px] uppercase">{p.protocol}</span> },
+          { key: "tested", label: "Tested", render: (p) => (p.tested_at ? <When value={p.tested_at} /> : <Status value="not tested" tone="warning" />) },
+        ]}
+      />
+      {adding && <SsoProviderDrawer organizationId={organizationId} onClose={() => setAdding(false)} />}
+    </>
+  );
+}
+
+function SsoProviderDrawer({ organizationId, onClose }: { organizationId: string; onClose: () => void }) {
+  const toast = useToast();
   const [form, setForm] = useState({ name: "", protocol: "oidc", issuer: "", scim_token: "" });
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
@@ -281,8 +536,8 @@ function SsoTab({ organizationId }: { organizationId: string }) {
     setError(null);
     try {
       await act("register_sso_provider", { organization_id: organizationId, ...form });
-      setForm({ name: "", protocol: "oidc", issuer: "", scim_token: "" });
       toast("Provider saved");
+      onClose();
     } catch (e) {
       setError(e);
     } finally {
@@ -291,46 +546,41 @@ function SsoTab({ organizationId }: { organizationId: string }) {
   };
   const errors = { name: fieldError(error, "name"), issuer: fieldError(error, "issuer"), scim_token: fieldError(error, "scim_token") };
   return (
-    <>
-      <Panel title="Configure SSO Provider">
-        <Form onSubmit={submit} error={errors.name || errors.issuer || errors.scim_token ? null : error}>
-          <Field label="Name" required error={errors.name}>
-            <input name="name" value={form.name} onChange={set("name")} />
-          </Field>
-          <Field label="Protocol">
-            <select name="protocol" value={form.protocol} onChange={set("protocol")}>
-              <option value="oidc">OpenID Connect</option>
-              <option value="saml">SAML 2.0</option>
-            </select>
-          </Field>
-          <Field label="Issuer" required error={errors.issuer}>
-            <input name="issuer" value={form.issuer} onChange={set("issuer")} />
-          </Field>
-          <Field label="SCIM token" required error={errors.scim_token}>
-            <input name="scim_token" autoComplete="off" value={form.scim_token} onChange={set("scim_token")} />
-          </Field>
-          <div>
-            <Button variant="primary" type="submit" loading={busy}>
-              Save provider
-            </Button>
-          </div>
-        </Form>
-      </Panel>
-      {providers.isError ? (
-        <ErrorBlock error={providers.error} retry={() => void providers.refetch()} what="SSO providers" />
-      ) : (
-        (providers.data ?? []).map((provider) => (
-          <p key={provider.id} className="panel">
-            <code>{provider.name}</code> {provider.protocol}
-          </p>
-        ))
-      )}
-    </>
+    <Drawer
+      title="Configure SSO Provider"
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" type="submit" form="sso-provider" loading={busy}>
+            Save provider
+          </Button>
+        </>
+      }
+    >
+      <Form id="sso-provider" onSubmit={submit} error={errors.name || errors.issuer || errors.scim_token ? null : error}>
+        <Field label="Name" required error={errors.name}>
+          <input name="name" value={form.name} onChange={set("name")} autoFocus />
+        </Field>
+        <Field label="Protocol">
+          <select name="protocol" value={form.protocol} onChange={set("protocol")}>
+            <option value="oidc">OpenID Connect</option>
+            <option value="saml">SAML 2.0</option>
+          </select>
+        </Field>
+        <Field label="Issuer" required error={errors.issuer}>
+          <input name="issuer" value={form.issuer} onChange={set("issuer")} />
+        </Field>
+        <Field label="SCIM token" required error={errors.scim_token}>
+          <input name="scim_token" autoComplete="off" value={form.scim_token} onChange={set("scim_token")} />
+        </Field>
+      </Form>
+    </Drawer>
   );
 }
 
-/** The organization's own space: no capability maps an organization to it, so find the customer
- * whose `organization_id` is this one, as the server page did. */
+/** The organization's own workspace: no capability maps an organization to it, so find the
+ * customer whose `organization_id` is this one, as the server page did. */
 function useOrganizationSpace(organizationId: string) {
   const customers = useList<Row>("list_customers", { limit: 500 }, { pick: "items" });
   const space = customers.data?.find((customer) => customer.organization_id === organizationId);
@@ -341,23 +591,29 @@ function ApplicationsTab({ organizationId }: { organizationId: string }) {
   const { customers, space } = useOrganizationSpace(organizationId);
   const applications = useList<Row>(space ? "list_applications" : null, { customer_id: space?.id, limit: 100 }, { pick: "items" });
   const failed = customers.isError ? customers : applications.isError ? applications : null;
+  if (customers.isLoading || applications.isLoading) return <Skeleton />;
+  if (failed) return <ErrorBlock error={failed.error} retry={() => void failed.refetch()} what="applications" />;
+  const rows = applications.data ?? [];
+  if (rows.length === 0) {
+    return (
+      <PanelEmpty title="No applications" action={<Button to="/applications">Applications</Button>}>
+        No applications belong to this organization customer.
+      </PanelEmpty>
+    );
+  }
   return (
-    <Panel title="Applications">
-      {customers.isLoading || applications.isLoading ? (
-        <Skeleton />
-      ) : failed ? (
-        <ErrorBlock error={failed.error} retry={() => void failed.refetch()} what="applications" />
-      ) : (
-        <>
-          {(applications.data ?? []).map((application) => (
-            <p key={application.id}>
-              <Link to={`/application?id=${encodeURIComponent(application.id)}`}>{application.name || application.id}</Link>
-            </p>
-          ))}
-          {(applications.data ?? []).length === 0 && <p className="empty">No applications belong to this organization customer.</p>}
-        </>
-      )}
-    </Panel>
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+      {rows.map((application) => (
+        <Card key={application.id} label="Application" title={<Link to={`/application?id=${encodeURIComponent(application.id)}`}>{application.name || application.id}</Link>}>
+          <KeyValue
+            rows={[
+              ["Pool", application.pool_id ? <Mono short={20}>{application.pool_id}</Mono> : null],
+              ["Domain", application.custom_sign_in_domain || "lake domain"],
+            ]}
+          />
+        </Card>
+      ))}
+    </div>
   );
 }
 
@@ -365,46 +621,53 @@ function UsageTab({ organizationId }: { organizationId: string }) {
   const { customers, space } = useOrganizationSpace(organizationId);
   const usage = useRead<Row>(space ? "metering_usage" : null, { customer_id: space?.id });
   const failed = customers.isError ? customers : usage.isError ? usage : null;
-  let body;
-  if (customers.isLoading || usage.isLoading) body = <Skeleton />;
-  else if (failed) body = <ErrorBlock error={failed.error} retry={() => void failed.refetch()} what="usage" />;
-  else if (!space) body = <p className="empty">No workspace is attached to this organization.</p>;
-  else {
-    const quota = Number(usage.data?.quota_bytes ?? 0);
-    const total = usage.data?.summary?.storage?.total_bytes ?? 0;
-    body = (
-      <>
-        <p>
-          Stored: {bytes(total)}. Repository storage limit: {quota === 0 ? "no limit" : bytes(quota)}.
-        </p>
-        <p>
-          <Link to={`/metering?customer_id=${encodeURIComponent(space.id)}`}>Open usage</Link>
-        </p>
-      </>
-    );
-  }
-  return <Panel title="Usage">{body}</Panel>;
+  if (customers.isLoading || usage.isLoading) return <Skeleton />;
+  if (failed) return <ErrorBlock error={failed.error} retry={() => void failed.refetch()} what="usage" />;
+  if (!space) return <PanelEmpty title="No workspace">No workspace is attached to this organization.</PanelEmpty>;
+  const quota = Number(usage.data?.quota_bytes ?? 0);
+  const storage: Row = usage.data?.summary?.storage ?? {};
+  const total = storage.total_bytes ?? 0;
+  const repositories = Number(storage.repositories_bytes ?? 0);
+  return (
+    <>
+      <StatRow cols={3}>
+        <Stat label="Stored" value={bytes(total)} icon={HardDrive} sub="repositories, images and workspace data" />
+        <Stat label="Repository storage limit" value={quota === 0 ? "No limit" : bytes(quota)} sub={quota === 0 ? "writes are never refused for size" : <Meter value={repositories} max={quota} label={`${Math.round((repositories / quota) * 100)}%`} tone={repositories > quota ? "bad" : undefined} />} />
+        <Stat label="Compute" value={usageDuration(usage.data?.summary?.compute?.total_seconds)} icon={Timer} sub="builds and workspace runs" />
+      </StatRow>
+      <Button variant="primary" to={`/metering?customer_id=${encodeURIComponent(space.id)}`}>
+        Open usage
+      </Button>
+    </>
+  );
 }
 
 function AuditTab({ organizationId }: { organizationId: string }) {
   // Organization events are control-plane events: the central log alone (decision 52).
   const audit = useList<Row>("audit", { object: `organization/${organizationId}`, limit: 100, log: "central" }, { pick: "items" });
+  const [outcome, setOutcome] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const shown = audit.data?.filter((e) => (!outcome || e.outcome === outcome) && matches(search, e.action, e.capability, e.principal, e.principal_name));
   return (
-    <Panel title="Recent Audit Outcomes">
-      {audit.isLoading ? (
-        <Skeleton />
-      ) : audit.isError ? (
-        <ErrorBlock error={audit.error} retry={() => void audit.refetch()} what="audit events" />
-      ) : (
-        <>
-          {(audit.data ?? []).map((event) => (
-            <p key={event.id}>
-              <code>{event.action}</code> <Status value={event.outcome} />
-            </p>
-          ))}
-          {(audit.data ?? []).length === 0 && <p className="empty">No matching audit events.</p>}
-        </>
-      )}
-    </Panel>
+    <>
+      <Toolbar>
+        <SearchInput value={search} onChange={setSearch} placeholder="Search actions…" />
+        <FilterChips options={countBy(audit.data, (e) => e.outcome)} value={outcome} onChange={setOutcome} allLabel="Any outcome" />
+      </Toolbar>
+      <DataTable
+        q={audit}
+        what="audit events"
+        rows={shown}
+        rowKey={(e) => e.id}
+        empty={<PanelEmpty title="No matching audit events">Changes to this organization are recorded here.</PanelEmpty>}
+        columns={[
+          { key: "when", label: "When", sort: (e) => e.occurred_at, render: (e) => <When value={e.occurred_at} /> },
+          { key: "action", label: "Action", render: (e) => <NameCell name={<code>{e.action}</code>} sub={e.capability} /> },
+          { key: "principal", label: "By", render: (e) => (e.principal_name && e.principal_name !== e.principal ? <span title={e.principal}>{e.principal_name}</span> : <Mono short={24}>{e.principal}</Mono>) },
+          { key: "object", label: "Object", render: (e) => <ObjectChip value={e.object} /> },
+          { key: "outcome", label: "Outcome", render: (e) => <Status value={e.outcome} /> },
+        ]}
+      />
+    </>
   );
 }

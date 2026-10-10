@@ -1,69 +1,69 @@
-/** Usage (`/metering?customer_id=`): what a space stores and the compute it used, its estimated
+/** Usage (`/metering?customer_id=`): what a customer stores and the compute it used, its estimated
  * charge and its repository storage limit (web_ui_metering, serve_metering_page,
- * serve_metering_quota). */
-import { useEffect, useState } from "react";
+ * serve_metering_quota). Figures first; the limit is set in a dialog. */
+import { type ReactNode, useEffect, useState } from "react";
+import { ArrowDownToLine, ArrowUpFromLine, Gauge, Hammer, HardDrive, Play, Receipt } from "lucide-react";
 import { act, ApiError, useRead, type Row } from "@/lib/api";
-import { bytes } from "@/lib/format";
+import { bytes, plural } from "@/lib/format";
+import { Modal } from "@/lib/overlay";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
-import { Button, ErrorBlock, Field, Form, Page, Skeleton, fieldError } from "@/lib/ui";
-import { Panel, PanelEmpty, useMetaTrail, useParam, useQuerySubmit } from "@/pages/organizations/shared";
+import { Banner, Button, Card, DataTable, Empty, ErrorBlock, Field, Form, KeyValue, Meter, Page, Skeleton, Split, Stat, StatRow, fieldError } from "@/lib/ui";
+import { PanelEmpty, useMetaTrail, useParam, useQuerySubmit } from "@/pages/organizations/shared";
+import { usageDuration, usageHour, usageMoney } from "./usageFormat";
 
-/** "0 s", "45 s", "12 min 5 s", "3 h 4 min": compute time in plain units (usage_duration). */
-export function usageDuration(value: unknown): string {
-  const seconds = Math.max(0, Math.floor(Number(value) || 0));
-  if (seconds < 60) return `${seconds} s`;
-  if (seconds < 3600) return seconds % 60 === 0 ? `${seconds / 60} min` : `${Math.floor(seconds / 60)} min ${seconds % 60} s`;
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  return minutes === 0 ? `${hours} h` : `${hours} h ${minutes} min`;
-}
-
-/** Integer micro-units of a currency as an amount a person reads: "12.35 USD", "less than 0.01
- * USD" (usage_money). */
-export function usageMoney(micros: unknown, currency: string): string {
-  const value = Math.max(0, Math.floor(Number(micros) || 0));
-  if (value !== 0 && value < 10_000) return `less than 0.01 ${currency}`;
-  const cents = Math.floor((value + 5_000) / 10_000);
-  return `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")} ${currency}`;
-}
-
-/** "2026-09-04T00:00:00Z" as "2026-09-04 00:00 UTC" (usage_hour). */
-export function usageHour(hour: string): string {
-  return hour.length >= 16 && hour[10] === "T" ? `${hour.slice(0, 10)} ${hour.slice(11, 16)} UTC` : hour;
-}
+export { usageDuration, usageHour, usageMoney };
 
 export default function MeteringPage() {
   const { viewer, space } = useSession();
   const asked = useParam("customer_id");
-  // With no space named, a person sees their current space; the operator chooses one.
+  // With no customer named, a person sees their current one; the operator chooses one.
   const customerId = asked || (viewer.administrator ? "" : (space?.id ?? viewer.customer_id ?? ""));
   const usage = useRead<Row>(customerId ? "metering_usage" : null, { customer_id: customerId });
   const submit = useQuerySubmit("/metering");
+  const [limitOpen, setLimitOpen] = useState(false);
   useMetaTrail(customerId || null, "Usage");
   return (
-    <Page eyebrow="Storage and compute" title="Usage" sub="What this space stores and the compute it has used, measured from its repositories, container images and workspaces.">
-      <form className="filters" onSubmit={submit} key={customerId}>
-        <label>
-          Space ID
+    <Page
+      eyebrow="Organization"
+      title="Usage"
+      sub={
+        viewer.administrator
+          ? "What a customer stores and the compute it has used, measured from its repositories, container images and workspaces."
+          : "What you store and the compute you have used, measured from your repositories, container images and workspaces."
+      }
+      actions={
+        usage.data ? (
+          <Button variant="primary" onClick={() => setLimitOpen(true)}>
+            <Gauge size={14} aria-hidden /> Set storage limit
+          </Button>
+        ) : undefined
+      }
+    >
+      <form className="mb-4 flex flex-wrap items-end gap-2" onSubmit={submit} key={customerId}>
+        <label className="field m-0 min-w-0 flex-1 basis-[16rem] sm:max-w-[26rem]">
+          <span className="field-label">Customer ID</span>
           <input name="customer_id" defaultValue={customerId} required />
         </label>
-        <button type="submit">Show usage</button>
+        <Button type="submit">Show usage</Button>
       </form>
       {!customerId ? (
-        <PanelEmpty>Choose a space.</PanelEmpty>
+        <Empty icon={HardDrive} title="Choose a customer">
+          Enter a customer's ID to see what it stores and the compute it has used.
+        </Empty>
       ) : usage.isError ? (
         <ErrorBlock error={usage.error} retry={() => void usage.refetch()} what="usage" />
       ) : !usage.data ? (
         <Skeleton lines={6} />
       ) : (
-        <Usage customerId={customerId} usage={usage.data} />
+        <Usage usage={usage.data} onSetLimit={() => setLimitOpen(true)} />
       )}
+      {limitOpen && usage.data && <StorageLimit customerId={customerId} quota={Number(usage.data.quota_bytes ?? 0)} onClose={() => setLimitOpen(false)} />}
     </Page>
   );
 }
 
-function Usage({ customerId, usage }: { customerId: string; usage: Row }) {
+function Usage({ usage, onSetLimit }: { usage: Row; onSetLimit: () => void }) {
   const summary: Row = usage.summary ?? {};
   const storage: Row = summary.storage ?? {};
   const compute: Row = summary.compute ?? {};
@@ -73,136 +73,182 @@ function Usage({ customerId, usage }: { customerId: string; usage: Row }) {
   const workspaces: Row[] = summary.workspaces ?? [];
   const notMeasured: unknown[] = summary.not_measured ?? [];
   const items: Row[] = usage.items ?? [];
+  const total = Number(storage.total_bytes ?? 0);
+  const repositories = Number(storage.repositories_bytes ?? 0);
+  const imagesMeasured = typeof storage.images_bytes === "number";
+  const uploaded = items.reduce((s, r) => s + Number(r.transfer_in_bytes ?? 0), 0);
+  const downloaded = items.reduce((s, r) => s + Number(r.transfer_out_bytes ?? 0), 0);
+  const buildSeconds = Number(compute.repository_build_seconds ?? 0) + Number(compute.image_build_seconds ?? 0);
+  const share = (value: number) => (total > 0 ? `${Math.round((value / total) * 100)}%` : "0%");
   return (
     <>
-      {usage.over_quota && <p className="notice">{usage.warning}</p>}
-      <Panel title="Storage">
-        <dl>
-          <dt>Repositories</dt>
-          <dd>{bytes(storage.repositories_bytes ?? 0)}</dd>
-          <dt>Container images</dt>
-          <dd>{typeof storage.images_bytes === "number" ? bytes(storage.images_bytes) : "Not measured"}</dd>
-          <dt>Workspace data</dt>
-          <dd>{bytes(storage.workspace_data_bytes ?? 0)}</dd>
-          <dt>Total</dt>
-          <dd>
-            <strong>{bytes(storage.total_bytes ?? 0)}</strong>
-          </dd>
-          <dt>Repository storage limit</dt>
-          <dd>{quota === 0 ? "No limit" : bytes(quota)}</dd>
-        </dl>
-      </Panel>
-      <Panel title="Compute">
-        <dl>
-          <dt>Repository builds</dt>
-          <dd>{usageDuration(compute.repository_build_seconds)}</dd>
-          <dt>Image builds</dt>
-          <dd>
-            {usageDuration(compute.image_build_seconds)} across {compute.image_builds ?? 0} builds, including time queued
-          </dd>
-          <dt>Workspace runs, training included</dt>
-          <dd>
-            {usageDuration(compute.workspace_run_seconds)} across {compute.workspace_runs ?? 0} runs
-          </dd>
-          <dt>Total</dt>
-          <dd>
-            <strong>{usageDuration(compute.total_seconds)}</strong>
-          </dd>
-        </dl>
-      </Panel>
-      {workspaces.length > 0 && (
-        <Panel title="Workspaces">
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Workspace</th>
-                  <th>Data</th>
-                  <th>Datasets</th>
-                  <th>Run Time</th>
-                  <th>Runs</th>
-                </tr>
-              </thead>
-              <tbody>
-                {workspaces.map((workspace, index) =>
-                  workspace.measured ? (
-                    <tr key={index}>
-                      <td>{workspace.name}</td>
-                      <td>{bytes(workspace.data_bytes ?? 0)}</td>
-                      <td>{workspace.datasets ?? 0}</td>
-                      <td>{usageDuration(workspace.run_seconds)}</td>
-                      <td>{workspace.runs ?? 0}</td>
-                    </tr>
-                  ) : (
-                    <tr key={index}>
-                      <td>{workspace.name}</td>
-                      <td colSpan={4}>Not measured: {workspace.message}</td>
-                    </tr>
-                  ),
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Panel>
-      )}
-      {notMeasured.length > 0 && (
-        <Panel title="Not Measured Yet">
-          <ul>
-            {notMeasured.map((line, index) => (
-              <li key={index}>{typeof line === "string" ? line : ""}</li>
-            ))}
-          </ul>
-        </Panel>
-      )}
-      <Panel title="Estimated Charge">
-        {priced ? (
+      {usage.over_quota && <Banner tone="warn">{usage.warning}</Banner>}
+      <StatRow>
+        <Stat label="Stored" value={bytes(total)} icon={HardDrive} sub={quota === 0 ? "no repository storage limit" : `repositories ${bytes(repositories)} of ${bytes(quota)}`} tone={usage.over_quota ? "bad" : undefined} />
+        <Stat label="Transfer" value={bytes(uploaded + downloaded)} icon={ArrowUpFromLine} sub={`${bytes(uploaded)} up · ${bytes(downloaded)} down, by the hours below`} />
+        <Stat label="Builds" value={usageDuration(buildSeconds)} icon={Hammer} sub={`${plural(Number(compute.image_builds ?? 0), "image build")}, repository builds included`} />
+        <Stat label="Run time" value={usageDuration(compute.workspace_run_seconds)} icon={Play} sub={`${plural(Number(compute.workspace_runs ?? 0), "workspace run")}, training included`} />
+      </StatRow>
+      <Split
+        side={
           <>
-            <p>
-              <strong>{usageMoney(usage.cost_micros, currency)}</strong>
-            </p>
-            <p className="sub">Repository transfer and repository build time at this lake's prices. Storage, images, image builds and workspaces are not priced.</p>
+            <Card
+              label="Repository storage limit"
+              tone={usage.over_quota ? "exception" : "default"}
+              actions={
+                <Button variant="ghost" onClick={onSetLimit}>
+                  Change
+                </Button>
+              }
+            >
+              <div className="font-mono text-[20px] font-semibold text-ink">{quota === 0 ? "No limit" : bytes(quota)}</div>
+              {quota > 0 && (
+                <div className="mt-2">
+                  <Meter value={repositories} max={quota} label={`${bytes(repositories)} used`} tone={repositories > quota ? "bad" : undefined} />
+                </div>
+              )}
+              <p className="mb-0 text-[12.5px] text-ink-3">New repository writes are refused above this limit; existing content stays readable.</p>
+            </Card>
+            <Card label="Estimated charge">
+              {priced ? (
+                <>
+                  <div className="flex items-center gap-2 font-mono text-[20px] font-semibold text-ink">
+                    <Receipt size={16} className="text-ink-3" aria-hidden />
+                    {usageMoney(usage.cost_micros, currency)}
+                  </div>
+                  <p className="mb-0 text-[12.5px] text-ink-3">Repository transfer and repository build time at this lake's prices. Storage, images, image builds and workspaces are not priced.</p>
+                </>
+              ) : (
+                <p className="m-0 text-[13px] text-ink-2">This lake has no prices set, so there is no charge to show.</p>
+              )}
+            </Card>
           </>
-        ) : (
-          <p>This lake has no prices set, so there is no charge to show.</p>
-        )}
-      </Panel>
-      <StorageLimit customerId={customerId} quota={quota} />
-      <h2>Repository Usage by Hour</h2>
-      {items.length === 0 ? (
-        <PanelEmpty>No hourly usage.</PanelEmpty>
-      ) : (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Hour</th>
-                <th>Uploaded</th>
-                <th>Downloaded</th>
-                <th>Build Time</th>
-                {priced && <th>Charge</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((row) => (
-                <tr key={row.hour}>
-                  <td>
-                    <time dateTime={row.hour}>{usageHour(row.hour ?? "")}</time>
-                  </td>
-                  <td>{bytes(row.transfer_in_bytes ?? 0)}</td>
-                  <td>{bytes(row.transfer_out_bytes ?? 0)}</td>
-                  <td>{usageDuration(row.compute_seconds)}</td>
-                  {priced && <td>{usageMoney(row.cost_micros, currency)}</td>}
-                </tr>
+        }
+      >
+        <Card label="Storage" title={bytes(total)}>
+          <div className="space-y-3">
+            <MeterRow label="Repositories" value={bytes(repositories)} meter={<Meter value={repositories} max={total || 1} label={share(repositories)} />} />
+            <MeterRow
+              label="Container images"
+              value={imagesMeasured ? bytes(storage.images_bytes) : "Not measured"}
+              meter={imagesMeasured ? <Meter value={Number(storage.images_bytes)} max={total || 1} label={share(Number(storage.images_bytes))} /> : null}
+            />
+            <MeterRow
+              label="Workspace data"
+              value={bytes(storage.workspace_data_bytes ?? 0)}
+              meter={<Meter value={Number(storage.workspace_data_bytes ?? 0)} max={total || 1} label={share(Number(storage.workspace_data_bytes ?? 0))} />}
+            />
+          </div>
+        </Card>
+        <Card label="Compute" title={usageDuration(compute.total_seconds)}>
+          <KeyValue
+            rows={[
+              ["Repository builds", usageDuration(compute.repository_build_seconds)],
+              ["Image builds", `${usageDuration(compute.image_build_seconds)} across ${compute.image_builds ?? 0} builds, including time queued`],
+              ["Workspace runs, training included", `${usageDuration(compute.workspace_run_seconds)} across ${compute.workspace_runs ?? 0} runs`],
+              ["Total", <strong>{usageDuration(compute.total_seconds)}</strong>],
+            ]}
+          />
+        </Card>
+      </Split>
+      {notMeasured.length > 0 && (
+        <div className="mt-4">
+          <Banner tone="quiet" title="Not Measured Yet">
+            <ul className="m-0 pl-4">
+              {notMeasured.map((line, index) => (
+                <li key={index}>{typeof line === "string" ? line : ""}</li>
               ))}
-            </tbody>
-          </table>
+            </ul>
+          </Banner>
         </div>
       )}
+      {workspaces.length > 0 && (
+        <Card label="Workspaces" padded={false} className="mt-4">
+          <DataTable
+            rows={workspaces}
+            rowKey={(w, i) => `${w.name}:${i}`}
+            columns={[
+              { key: "name", label: "Workspace", sort: (w) => w.name, render: (w) => <span className="font-semibold text-ink">{w.name}</span> },
+              {
+                key: "data",
+                label: "Data",
+                numeric: true,
+                sort: (w) => Number(w.data_bytes ?? 0),
+                render: (w) => (w.measured ? bytes(w.data_bytes ?? 0) : <span className="text-ink-3">Not measured: {w.message}</span>),
+              },
+              { key: "datasets", label: "Datasets", numeric: true, render: (w) => (w.measured ? <span className="font-mono">{w.datasets ?? 0}</span> : null) },
+              { key: "run", label: "Run Time", numeric: true, sort: (w) => Number(w.run_seconds ?? 0), render: (w) => (w.measured ? usageDuration(w.run_seconds) : null) },
+              { key: "runs", label: "Runs", numeric: true, render: (w) => (w.measured ? <span className="font-mono">{w.runs ?? 0}</span> : null) },
+            ]}
+          />
+        </Card>
+      )}
+      <Card label="Repository usage by hour" padded={false} className="mt-4">
+        <DataTable
+          rows={items}
+          rowKey={(r) => r.hour}
+          empty={
+            <div className="p-4">
+              <PanelEmpty>No hourly usage.</PanelEmpty>
+            </div>
+          }
+          columns={[
+            {
+              key: "hour",
+              label: "Hour",
+              sort: (r) => r.hour,
+              render: (r) => (
+                <time dateTime={r.hour} className="whitespace-nowrap">
+                  {usageHour(r.hour ?? "")}
+                </time>
+              ),
+            },
+            {
+              key: "in",
+              label: "Uploaded",
+              numeric: true,
+              sort: (r) => Number(r.transfer_in_bytes ?? 0),
+              render: (r) => (
+                <span className="inline-flex items-center gap-1">
+                  <ArrowUpFromLine size={12} className="text-ink-3" aria-hidden />
+                  {bytes(r.transfer_in_bytes ?? 0)}
+                </span>
+              ),
+            },
+            {
+              key: "out",
+              label: "Downloaded",
+              numeric: true,
+              sort: (r) => Number(r.transfer_out_bytes ?? 0),
+              render: (r) => (
+                <span className="inline-flex items-center gap-1">
+                  <ArrowDownToLine size={12} className="text-ink-3" aria-hidden />
+                  {bytes(r.transfer_out_bytes ?? 0)}
+                </span>
+              ),
+            },
+            { key: "compute", label: "Build Time", numeric: true, sort: (r) => Number(r.compute_seconds ?? 0), render: (r) => usageDuration(r.compute_seconds) },
+            ...(priced ? [{ key: "cost", label: "Charge", numeric: true, render: (r: Row) => usageMoney(r.cost_micros, currency) }] : []),
+          ]}
+        />
+      </Card>
     </>
   );
 }
 
-function StorageLimit({ customerId, quota }: { customerId: string; quota: number }) {
+function MeterRow({ label, value, meter }: { label: string; value: string; meter: ReactNode }) {
+  return (
+    <div>
+      <div className="mb-1 flex items-baseline justify-between gap-3 text-[13px]">
+        <span className="text-ink-2">{label}</span>
+        <span className="font-mono text-ink">{value}</span>
+      </div>
+      {meter}
+    </div>
+  );
+}
+
+function StorageLimit({ customerId, quota, onClose }: { customerId: string; quota: number; onClose: () => void }) {
   const toast = useToast();
   const [value, setValue] = useState(String(quota));
   const [error, setError] = useState<unknown>(null);
@@ -221,6 +267,7 @@ function StorageLimit({ customerId, quota }: { customerId: string; quota: number
     try {
       await act("set_storage_quota", { customer_id: customerId, quota_bytes: Number(value) });
       toast("Limit set");
+      onClose();
     } catch (e) {
       setError(e);
     } finally {
@@ -228,20 +275,27 @@ function StorageLimit({ customerId, quota }: { customerId: string; quota: number
     }
   };
   const quotaError = fieldError(error, "quota_bytes");
+  const parsed = /^\d+$/.test(value.trim()) ? Number(value) : null;
   return (
-    <div className="panel">
-      <h2>Repository Storage Limit</h2>
-      <p className="sub">New repository writes are refused above this limit; existing content stays readable.</p>
-      <Form onSubmit={submit} error={quotaError ? null : error}>
-        <Field label="Limit in bytes (0 for no limit)" required error={quotaError}>
-          <input type="number" name="quota_bytes" min={0} value={value} onChange={(e) => setValue(e.target.value)} />
-        </Field>
-        <div>
-          <Button variant="primary" type="submit" loading={busy}>
+    <Modal
+      title="Repository Storage Limit"
+      subtitle="New repository writes are refused above this limit; existing content stays readable."
+      onClose={onClose}
+      width={480}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" type="submit" form="storage-limit" loading={busy}>
             Set limit
           </Button>
-        </div>
+        </>
+      }
+    >
+      <Form id="storage-limit" onSubmit={submit} error={quotaError ? null : error}>
+        <Field label="Limit in bytes (0 for no limit)" required error={quotaError} help={parsed === null ? undefined : parsed === 0 ? "No limit." : `${bytes(parsed)}.`}>
+          <input type="number" name="quota_bytes" min={0} value={value} onChange={(e) => setValue(e.target.value)} autoFocus />
+        </Field>
       </Form>
-    </div>
+    </Modal>
   );
 }

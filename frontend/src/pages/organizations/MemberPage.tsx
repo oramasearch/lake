@@ -1,12 +1,15 @@
 /** Member settings (`/member?id=&confirm_removal=yes`): one membership, its role and its removal
- * in two steps (web_ui_member, serve_member_page, serve_member_role, serve_member_remove). */
+ * behind a confirmation (web_ui_member, serve_member_page, serve_member_role,
+ * serve_member_remove). `confirm_removal=yes` opens the confirmation at once. */
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { UserMinus } from "lucide-react";
 import { act, useRead, type Row } from "@/lib/api";
+import { Modal } from "@/lib/overlay";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
-import { Button, ErrorBlock, Page, Skeleton } from "@/lib/ui";
-import { Panel, useMetaTrail, useParam } from "./shared";
+import { Banner, Button, Card, Chip, DataTable, ErrorBlock, KeyValue, Mono, Page, Skeleton, Split } from "@/lib/ui";
+import { PanelEmpty, RoleBadge, useMetaTrail, useParam } from "./shared";
 
 export default function MemberPage() {
   const id = useParam("id");
@@ -21,44 +24,88 @@ export default function MemberPage() {
 
   if (membership.isError) {
     return (
-      <Page eyebrow="organization settings" title="Member">
+      <Page eyebrow="Organization" title="Member">
         <ErrorBlock error={membership.error} retry={() => void membership.refetch()} what="the member" />
       </Page>
     );
   }
   if (!m) {
     return (
-      <Page eyebrow="organization settings" title="Member">
-        <Skeleton />
+      <Page eyebrow="Organization" title="Member">
+        <Skeleton lines={5} />
       </Page>
     );
   }
-  const entries = ((access.data?.items ?? []) as Row[]).filter((entry) => entry.principal_taap_id === m.principal_taap_id);
+  const entries = access.data ? ((access.data.items ?? []) as Row[]).filter((entry) => entry.principal_taap_id === m.principal_taap_id) : undefined;
   return (
-    <Page eyebrow="organization settings" title="Member">
-      <Panel>
-        <dl>
-          <dt>Principal</dt>
-          <dd>
-            <code>{m.principal_taap_id}</code>
-          </dd>
-          <dt>Role</dt>
-          <dd>{m.role}</dd>
-          <dt>Attestation evidence</dt>
-          <dd>
-            <code>{m.attestation_digest}</code>
-          </dd>
-        </dl>
-        <ChangeRole id={m.id} role={m.role} />
-        <RemoveMember id={m.id} confirming={confirmRemoval} />
-      </Panel>
-      <Panel title="Effective Access">
-        {access.isError ? (
-          <ErrorBlock error={access.error} retry={() => void access.refetch()} what="effective access" />
-        ) : (
-          <p>{access.data ? `${entries.length} entries at this scope.` : "…"}</p>
-        )}
-      </Panel>
+    <Page
+      eyebrow="Organization"
+      title="Member"
+      sub={
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <Mono short={48}>{m.principal_taap_id}</Mono> <RoleBadge role={m.role} />
+        </span>
+      }
+    >
+      <Split
+        side={
+          <>
+            <Card label="Membership">
+              <KeyValue
+                rows={[
+                  ["Principal", <code>{m.principal_taap_id}</code>],
+                  ["Role", <RoleBadge role={m.role} />],
+                  ["Scope", m.team_id ? <Link to={`/team?id=${encodeURIComponent(m.team_id)}`}>Team</Link> : m.organization_id ? <Link to={`/organization?id=${encodeURIComponent(m.organization_id)}`}>Organization</Link> : null],
+                  ["Attestation evidence", <code>{m.attestation_digest}</code>],
+                ]}
+              />
+            </Card>
+            <Card label="Change role">
+              <ChangeRole id={m.id} role={m.role} />
+            </Card>
+            <Card label="Remove" tone="exception">
+              <RemoveMember id={m.id} confirming={confirmRemoval} />
+            </Card>
+          </>
+        }
+      >
+        <Card label="Effective access" title={entries ? `${entries.length} entries at this scope.` : undefined} padded={false}>
+          {access.isError ? (
+            <div className="p-4">
+              <ErrorBlock error={access.error} retry={() => void access.refetch()} what="effective access" />
+            </div>
+          ) : !entries ? (
+            <div className="p-4">
+              <Skeleton lines={2} />
+            </div>
+          ) : (
+            <DataTable
+              rows={entries}
+              rowKey={(e, i) => `${e.role}:${i}`}
+              empty={
+                <div className="p-4">
+                  <PanelEmpty>No access entries for this member at this scope.</PanelEmpty>
+                </div>
+              }
+              columns={[
+                { key: "role", label: "Role", render: (e) => <RoleBadge role={e.role} /> },
+                {
+                  key: "actions",
+                  label: "Actions",
+                  render: (e) => (
+                    <span className="flex flex-wrap gap-1">
+                      {((e.actions ?? []) as string[]).map((a) => (
+                        <Chip key={a}>{a}</Chip>
+                      ))}
+                    </span>
+                  ),
+                },
+                { key: "source", label: "Source", render: (e) => <span className="text-[12.5px] text-ink-2">{e.inherited ? "inherited" : "direct"}</span> },
+              ]}
+            />
+          )}
+        </Card>
+      </Split>
     </Page>
   );
 }
@@ -86,28 +133,27 @@ function ChangeRole({ id, role }: { id: string; role: string }) {
   };
   return (
     <form
-      className="inline"
+      className="flex flex-wrap items-end gap-2"
       onSubmit={(e) => {
         e.preventDefault();
         void submit();
       }}
     >
-      <label>
-        Role{" "}
+      <label className="field m-0 min-w-0 flex-1">
+        <span className="sr-only">Role</span>
         <select name="role" value={value} onChange={(e) => setValue(e.target.value)}>
           <option value="member">member</option>
           <option value="admin">admin</option>
           <option value="owner">owner</option>
         </select>
-      </label>{" "}
-      <Button type="submit" loading={busy}>
+      </label>
+      <Button type="submit" loading={busy} disabled={value === role}>
         Change role
       </Button>
       {error && (
-        <span className="field-error" role="alert">
-          {" "}
+        <p className="field-error m-0 w-full" role="alert">
           {error}
-        </span>
+        </p>
       )}
     </form>
   );
@@ -135,29 +181,34 @@ function RemoveMember({ id, confirming }: { id: string; confirming: boolean }) {
       setBusy(false);
     }
   };
-  if (!step) {
-    return (
-      <p>
-        <Button variant="danger" onClick={() => setStep(true)}>
-          Remove member
-        </Button>
-      </p>
-    );
-  }
   return (
     <>
-      <p className="notice">Removing this member revokes their membership and derived grants immediately.</p>
-      {error && (
-        <p className="error" role="alert">
-          {error}
-        </p>
+      <p className="mt-0 text-[13px] text-ink-2">Revokes the membership and the grants derived from it.</p>
+      <Button variant="danger" onClick={() => setStep(true)}>
+        <UserMinus size={14} aria-hidden /> Remove member
+      </Button>
+      {step && (
+        <Modal
+          title="Remove the member?"
+          onClose={() => setStep(false)}
+          width={460}
+          footer={
+            <>
+              <Button onClick={() => setStep(false)}>Cancel</Button>
+              <Button variant="danger" loading={busy} onClick={() => void remove()}>
+                Confirm removal
+              </Button>
+            </>
+          }
+        >
+          <Banner tone="warn">Removing this member revokes their membership and derived grants immediately.</Banner>
+          {error && (
+            <p className="error" role="alert">
+              {error}
+            </p>
+          )}
+        </Modal>
       )}
-      <p className="flex gap-2">
-        <Button variant="danger" loading={busy} onClick={() => void remove()}>
-          Confirm removal
-        </Button>
-        <Button onClick={() => setStep(false)}>Cancel</Button>
-      </p>
     </>
   );
 }

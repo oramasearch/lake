@@ -364,7 +364,7 @@ export default function CommandCenter() {
                   <p className="muted m-0 border-t border-hairline px-4 py-3 text-[13px]">Nothing yet.</p>
                 )}
               </Card>
-              <Card label="Get going">
+              <Card label="Quick Launch">
                 <div className="grid grid-cols-2 gap-2">
                   <Button to="/train/data">Load data</Button>
                   <Button to="/transcripts">Add a transcript</Button>
