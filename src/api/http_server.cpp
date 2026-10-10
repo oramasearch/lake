@@ -93,6 +93,7 @@
 #include "lake/api/rest.hpp"
 #include "lake/api/store_owner.hpp"
 #include "lake/api/sync_store.hpp"
+#include "lake/api/web_app.hpp"
 #include "lake/api/web_ui.hpp"
 #include "agent_task_records_api.hpp"
 #include "request_log.hpp"
@@ -19152,6 +19153,24 @@ struct ApiServer::Impl {
                                      "no-store");
     }
 
+    // A file of the embedded web app (docs/ui/web-app.md); 404 when the build has no such file.
+    boost::http::route_task serve_web_app_file(boost::http::route_params& route,
+                                               std::string path) {
+        const WebAppAsset* asset = web_app_asset(path);
+        if (asset == nullptr) {
+            return send_text(route,
+                             boost::http::status::not_found,
+                             error_body("not_found", "no such route"),
+                             "application/json; charset=utf-8",
+                             "no-store");
+        }
+        return send_text(route,
+                         boost::http::status::ok,
+                         std::string(asset->body),
+                         asset->content_type,
+                         web_app_cache_control(asset->path));
+    }
+
     boost::http::route_task serve_style(boost::http::route_params& route) {
         const std::string path(route.url.path());
         return send_text(route,
@@ -20176,6 +20195,24 @@ bool ApiServer::start() {
         }
         co_return result;
     }));
+    // The web app (docs/ui/web-app.md): a browser opening any page is answered with the app's
+    // index.html, before the workspace redirects and the npm catch-all, which would otherwise
+    // claim single-segment paths. The app routes, guards and renders the page itself.
+    router.use(guarded("web_app", [&impl](http::route_params& route) -> http::route_task {
+        const std::string path(route.url.path());
+        const std::string accept(route.req.value_or(http::field::accept, ""));
+        const bool custom_domain =
+            !impl.options.public_host.empty() && request_host(route) != impl.options.public_host;
+        if (!web_app_serves(route.req.method_text(), path, accept, custom_domain)) {
+            co_return http::route_next;
+        }
+        const auto timing = request_timing(route);
+        const auto start = timing ? timing->started : std::chrono::steady_clock::now();
+        const RequestTimingScope timing_scope(route, start);
+        auto result = co_await impl.serve_web_app_file(route, "/index.html");
+        impl.record_request(route, "web_app", start);
+        co_return result;
+    }));
     router.use(guarded("workspace", [&impl](http::route_params& route) -> http::route_task {
         auto result = co_await impl.workspace_route(route);
         if (result.what() != http::route_what::next) {
@@ -20188,6 +20225,11 @@ bool ApiServer::start() {
     }));
     add_route(http::method::get, "/", [&impl](http::route_params& route) -> http::route_task {
         return impl.observe_request(route, "/", impl.serve_web_root(route));
+    });
+    add_route(http::method::get, "/ui/:file", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route,
+                                    "/ui/:file",
+                                    impl.serve_web_app_file(route, std::string(route.url.path())));
     });
     add_route(
         http::method::get, "/style.css", [&impl](http::route_params& route) -> http::route_task {

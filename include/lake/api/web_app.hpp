@@ -24,4 +24,17 @@ const WebAppAsset* web_app_asset(std::string_view path);
 // The app's entry document (/index.html).
 std::string_view web_app_index();
 
+// Whether a request is a browser opening a page of the app, answered with index.html: a GET or
+// HEAD that accepts text/html, for a path no server route owns (the API, downloads, protocol
+// routes, the hosted application pages). `custom_domain` is true when the request's host is not
+// lake's own host; there an identity application's hosted sign-in pages own /sign-in, /sign-up,
+// /mfa and /passkey-sign-in.
+bool web_app_serves(std::string_view method,
+                    std::string_view path,
+                    std::string_view accept,
+                    bool custom_domain);
+
+// The Cache-Control for an embedded file: hashed /ui/ files are immutable, index.html is not.
+std::string_view web_app_cache_control(std::string_view path);
+
 } // namespace lake::api

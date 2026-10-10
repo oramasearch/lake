@@ -156,7 +156,7 @@ export function Shell({ children }: { children: ReactNode }) {
       crumbs.push({ label: sectionLabel(current.section), to: first && !first.external ? withWorkspace(first, workspaceId) : undefined });
     }
     if (current) crumbs.push({ label: current.label, to: withWorkspace(current, workspaceId) });
-    if (screen && screen.path !== "*" && (!current || screen.title !== current.label)) {
+    if (screen && screen.path !== "*" && (!current || (screen.path !== current.path && screen.title !== current.label))) {
       if (screen.section === "account" && signedInPerson) crumbs.unshift({ label: "Account", to: "/settings" });
       crumbs.push({ label: screen.title });
     }
