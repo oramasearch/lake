@@ -1,0 +1,108 @@
+/* Ship, Experiments and Streams: the dark terminal panel for live logs and events, and the Live
+   switch. Lake tokens only (the terminal is dark in both themes, from lake's night scale). */
+
+.terminal {
+  overflow: hidden;
+  border: 1px solid var(--orama-color-night-70);
+  border-radius: 6px;
+  background: var(--orama-color-night-90);
+  color: var(--orama-color-night-10);
+}
+.terminal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--orama-color-night-70);
+  color: var(--orama-color-night-20);
+  font-family: var(--lake-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.terminal-head .terminal-actions {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.terminal-body {
+  max-height: 26rem;
+  min-height: 6rem;
+  margin: 0;
+  overflow: auto;
+  padding: 10px 12px;
+  font-family: var(--lake-font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+main .terminal-body,
+main pre.terminal-body {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+}
+.terminal-empty {
+  color: var(--orama-color-night-30);
+}
+.terminal-line-muted {
+  color: var(--orama-color-night-30);
+}
+
+.live-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--lake-rule);
+  border-radius: 9999px;
+  background: var(--lake-surface);
+  color: var(--lake-text-secondary);
+  font-weight: var(--lake-weight-semibold);
+  cursor: pointer;
+}
+.live-switch[aria-pressed='true'] {
+  border-color: var(--lake-success);
+  background: var(--lake-success-soft);
+  color: var(--lake-text-primary);
+}
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  background: var(--lake-text-tertiary);
+}
+.live-switch[aria-pressed='true'] .live-dot,
+.live-dot.is-live {
+  background: var(--lake-success);
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-switch[aria-pressed='true'] .live-dot,
+  .live-dot.is-live {
+    animation: none;
+  }
+}
+
+/* A compact form laid out by its own flex or grid classes (a key and value with Set, a jump to a
+   sequence): each label stacks its words over its control, as form.stack does. Danger forms use it
+   too, so their submit keeps the danger colour form.stack would override. */
+main form.row-form label:not(:has(input[type='checkbox'])) {
+  display: grid;
+  gap: 4px;
+}
+main form.row-form textarea {
+  min-height: 6rem;
+}

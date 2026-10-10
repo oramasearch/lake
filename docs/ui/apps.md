@@ -15,6 +15,31 @@ confirmed delete control.
 Every control calls its capability directly, as REST and MCP callers do, with the signed-in
 person's authorization and audit. The page writes no app rows or operator state of its own.
 
+## Layout (lake#561)
+
+The pages follow the console's rich layout (`docs/ui/web-app.md`, *The look*):
+
+- **Apps** opens with figures from `list_apps` (Apps, Ready, Failed, With Zetta), then a search and a
+  phase filter over a card grid: each card shows the app's name, phase chip, URL, revision, bindings
+  and when it was last updated (`updated_at`). **New app** opens a drawer with *From a repository* and
+  *From an image*. **Build with ApplicationAgent** opens a drawer for the description. A task named
+  by `?task=` is shown above the grid.
+- **App** is a Split. The main column has tabs in `?tab=` (Overview, Builds, Logs, Events, Settings,
+  Services), and every other query parameter is kept. Overview holds the deploy history with
+  Rollback, which now asks once in a dialog, and the latest events. Logs and Events are dark
+  terminal panels. The side column has the rollout status, Scale, Deploy with Restart, Stop and
+  Start, and the typed-name delete.
+- **Packages** has a tab per registry kind (Container Images, npm, Python) and a Builds tab. Each
+  package is a card with its versions as chips and its install command in a copy block.
+- **Deployments** and a repository's **Environments** show figures, a search and a phase filter,
+  and rows with the phase as a state chip and relative times. **Environment** is a Split.
+  Deleting a domain now asks once.
+- **Logs** follows in a terminal panel.
+
+`apps/shared.tsx` holds the group's parts: `QueryTabs`/`useQueryTab`, `Terminal` and
+`LiveSwitch`. Their styles are in `styles/ship.css`, along with `form.row-form` (compact forms whose
+labels stack over their controls).
+
 ## Controls
 
 | Control | Capability |
