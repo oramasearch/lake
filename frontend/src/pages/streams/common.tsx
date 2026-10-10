@@ -38,13 +38,13 @@ export function useStreamsTrail() {
 export const STREAMS_SUB = "Browse retained messages without consuming them. Live reads leave subscriber positions unchanged.";
 
 /** A confirmation asked in words before a change (the server page's `confirm(...)`). */
-export function useConfirm(): [ReactNode, (message: string, label?: string) => Promise<boolean>] {
-  const [asked, setAsked] = useState<{ message: string; label: string } | null>(null);
+export function useConfirm(): [ReactNode, (message: string, label?: string, details?: string) => Promise<boolean>] {
+  const [asked, setAsked] = useState<{ message: string; label: string; details?: string } | null>(null);
   const resolver = useRef<((value: boolean) => void) | null>(null);
-  const ask = useCallback((message: string, label = "Confirm") => {
+  const ask = useCallback((message: string, label = "Confirm", details?: string) => {
     return new Promise<boolean>((resolve) => {
       resolver.current = resolve;
-      setAsked({ message, label });
+      setAsked({ message, label, details });
     });
   }, []);
   const settle = (value: boolean) => {
@@ -67,6 +67,7 @@ export function useConfirm(): [ReactNode, (message: string, label?: string) => P
       }
     >
       <p className="m-0">{asked.message}</p>
+      {asked.details && <pre className="mt-3 whitespace-pre-wrap">{asked.details}</pre>}
     </Modal>
   ) : null;
   return [element, ask];
