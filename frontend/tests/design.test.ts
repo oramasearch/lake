@@ -101,6 +101,7 @@ test("Start your workspace lands on an allowed list page, else Projects", () => 
   assert.equal(startReturn("/design/solution"), "/design/projects");
   assert.equal(startReturn("/ship/index"), "/ship/indexes");
   assert.equal(startReturn("/ship/apps"), "/design/projects");
+  assert.equal(startReturn("/transcript"), "/transcripts");
 });
 
 test("runs badges", () => {

@@ -7,6 +7,8 @@ capabilities, the same ones REST and MCP callers use, with the same authorizatio
 can do nothing the API cannot.
 
 - How the app is built, its kit and the rules for a page: [web-app.md](web-app.md).
+- How it works on a phone, and how to check it at 390×844: [mobile-web.md](mobile-web.md).
+- Data → Transcripts, with dictation, recording and upload: [transcripts.md](transcripts.md).
 - The capabilities added for the app (`viewer`, `my_permissions`, `list_packages`, `list_docs`,
   `get_doc`, `mcp_setup`, `resolve_model`, `latest_agent_task`, `compile_pipeline`,
   `render_pipeline`): [../api/web-app.md](../api/web-app.md).
@@ -43,7 +45,13 @@ operator sign-in, passkey sign-in and the public share pages).
   first page.
 - **Ask Orama** opens beside the page (`components/AskPanel.tsx`) in the current workspace. The
   conversation is kept per workspace for the browser tab (`sessionStorage`). **Full view** opens
-  the same conversation on `/ask`. Before, this was a docked iframe of the server's Ask page.
+  the same conversation on `/ask`. Before, this was a docked iframe of the server's Ask page. Its
+  message box has the microphone (dictation, `components/dictation/Dictate.tsx`) and **From your
+  phone**; a page can open it about something (`openAsk`, `lib/ask.ts`), as the transcript page
+  does.
+- **On a phone** the top bar is compact, Ask Orama is a full-screen conversation, a `Modal sheet`
+  fills the screen with its actions above the keyboard, and every page fits 390 px:
+  [mobile-web.md](mobile-web.md).
 - **A 401 means the session ended.** Any read or write answering 401 while someone is signed in
   shows *Your session has ended* with **Sign in again**, which returns to the same address. The
   page stays as it was (`components/SessionEnded.tsx`).
@@ -113,6 +121,7 @@ Workspaces)
 | `/design/agent-library` | `design/AgentLibraryPage.tsx` | the agents Orama provides | `list_agent_library` |
 | `/train/agents`, `/train/agent`, `/train/agents/new` | `train/AgentsPage.tsx`, `AgentPage.tsx`, `FactoryPage.tsx` | the space's agents, one agent, the Agent Factory | `schedule_agent`, `unschedule_agent`, `launch_agent`, `stop_agent_launch`, `list_agent_launches`, `list_agent_schedules`, `approve_agent_proposal`; engine `list_agents`, `create_agent`, `get_agent`, `update_agent`, `delete_agent`, `agent_training_status` |
 | `/train/data`, `/train/dataset`, `/train/query` | `train/DataPage.tsx`, `DatasetPage.tsx`, `QueryPage.tsx` | load data, connections, datasets, storage; one dataset; read-only SQL | `list_stores`, `create_store`, `delete_store`, `store_connection`, `list_services`, `connect_service`, `workspace_sql`; engine connection, dataset and generator calls |
+| `/transcripts`, `/transcript?id=` | `transcripts/TranscriptsPage.tsx`, `TranscriptPage.tsx`, `NewTranscript.tsx` | Data → Transcripts: record, upload or paste a transcript; search, read, edit, copy, delete, Ask Orama about it ([transcripts.md](transcripts.md)) | `list_transcripts`, `get_transcript`, `create_transcript`, `update_transcript`, `delete_transcript`, `transcribe` |
 | `/train/runs`, `/train/run` | `train/RunsPage.tsx`, `RunPage.tsx` | pipeline runs; one run's report, lineage, log and trace | engine `list_runs`, `list_studies`, `get_run`, `get_run_report`, `list_traces` |
 | `/train/experiments`, `/train/experiment`, `/train/experiment/run`, `/train/experiments/compare` | `experiments/*.tsx` | studies and runs with live charts ([experiments.md](experiments.md)) | see experiments.md |
 | `/train/streams`, `/train/stream` | `streams/StreamsPage.tsx`, `TopicPage.tsx` | topics and messages ([streams.md](streams.md)) | see streams.md |

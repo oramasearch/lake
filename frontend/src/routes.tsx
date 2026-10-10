@@ -16,6 +16,7 @@ import { screens as search } from "@/pages/search/routes";
 import { screens as ship } from "@/pages/ship/routes";
 import { screens as streams } from "@/pages/streams/routes";
 import { screens as train } from "@/pages/train/routes";
+import { screens as transcripts } from "@/pages/transcripts/routes";
 import { screens as workspaces } from "@/pages/workspaces/routes";
 
 export type { Screen, SectionKey, Audience };
@@ -29,6 +30,7 @@ export const SCREENS: Screen[] = [
   ...workspaces,
   ...design,
   ...train,
+  ...transcripts,
   ...experiments,
   ...streams,
   ...ship,
@@ -72,6 +74,8 @@ export const NAV: NavItem[] = [
   { section: "data", path: "/shared-with-me", label: "Shared with Me", icon: "repository", audience: ["account"] },
   { section: "data", path: "/search", label: "Search", icon: "search", audience: AO },
   { section: "data", path: "/train/data", label: "Datasets", icon: "metering", audience: AO },
+  // Recordings, uploads and pasted text made into searchable transcripts (lake#561).
+  { section: "data", path: "/transcripts", label: "Transcripts", icon: "audit", audience: AO },
   { section: "design", path: "/design/projects", label: "Projects", icon: "audit", audience: AO },
   { section: "design", path: "/design/opportunities", label: "Opportunities", icon: "search", audience: AO },
   { section: "design", path: "/design/solutions", label: "Solutions", icon: "audit", audience: AO },
@@ -161,7 +165,7 @@ export function workspacePath(workspaceId: string | null, path: string): string 
 /** Whether a page path is a workspace page (lake's workspace_page_path). */
 export function isWorkspacePath(path: string): boolean {
   if (["/workspaces", "/workspaces/create", "/workspaces/delete", "/workspace/select"].includes(path)) return false;
-  return ["/design", "/train", "/ship", "/ask", "/workspace", "/workspaces"].some((p) => path === p || path.startsWith(p + "/"));
+  return ["/design", "/train", "/ship", "/ask", "/workspace", "/workspaces", "/transcripts", "/transcript"].some((p) => path === p || path.startsWith(p + "/"));
 }
 
 /** The pages the palette offers: rail items the viewer can open, plus account pages. */
