@@ -1,171 +1,212 @@
 # The web UI
 
-lake#452: the selectors' labels, the `/w/<workspace>/` home redirect and the phone-width top bar
-are in [workspace-selection.md](workspace-selection.md); the public-app acknowledgement on an
-ApplicationAgent proposal is in [apps.md](apps.md).
+lake's console is a React single-page app in `frontend/` (lake#561). It replaced the
+server-rendered pages (`src/api/web_ui*.cpp`). Lake embeds the built app in its binary and
+answers every browser page request with `index.html`. The app then calls only lake's `/v1`
+capabilities, the same ones REST and MCP callers use, with the same authorization and audit. It
+can do nothing the API cannot.
 
-lake#514: the `/workspaces` delete confirmation, which lists what a workspace deletion destroys with
-counts, is in [workspace-selection.md](workspace-selection.md).
+- How the app is built, its kit and the rules for a page: [web-app.md](web-app.md).
+- The capabilities added for the app (`viewer`, `my_permissions`, `list_packages`, `list_docs`,
+  `get_doc`, `mcp_setup`, `resolve_model`, `latest_agent_task`, `compile_pipeline`,
+  `render_pipeline`): [../api/web-app.md](../api/web-app.md).
 
-The live 100 ms p95 page rule, deterministic per-route workspace call budgets, loose 500 ms
-regression guard, `Server-Timing` fields (including one `zetta_<capability>` entry per call),
-route-derived coverage, registry invalidation, populated cold-start fixtures, the deferred panels
-and the dev-site measurements of slow Zetta reads (lake#446) are in
-[performance.md](performance.md).
+## What lake serves
 
-Train → Experiments' ExperimentsAgent questions, conversation replies, proposals, studies, run
-charts, comparison, local chart assets, accessibility and control-to-capability mappings are in
-[experiments.md](experiments.md). It also covers canonical held-out metric names and the study
-page's server-rendered analysis tables and trial curves.
+| Request | Answer |
+|---|---|
+| A browser `GET`/`HEAD` that accepts `text/html`, for a path no server route owns | `index.html`, `Cache-Control: no-cache`; the app routes it (`web_app_serves`, `src/api/web_app.cpp`) |
+| `/ui/<file>` | the content-hashed scripts, styles and fonts Vite built, `public, max-age=31536000, immutable` |
+| `/v1/<capability>`, `/w/<workspace_id>/v1/<capability>`, `/mcp` | the API ([../api/README.md](../api/README.md)) |
+| `POST /session`, `POST /logout`, `POST /identity/clerk-session`, the OAuth callback | sign-in and sign-out, which set or clear the HttpOnly `lake_session` cookie |
+| `/file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | bytes, as attachments or plain text |
+| `/apps/<id>/*`, custom sign-in domains, `/apps/authorize`, `/v1/apps/auth` | an identity application's own hosted pages, still rendered by lake ([identity.md](identity.md#application-identity)) |
+| `/llms.txt`, `/llms-full.txt`, `/skills/…`, `/developer/mcp/skill`, `/v1/openapi.json` | documents for agents and API clients |
 
-Repository clone/push instructions use the configured external origin and a valid first checkout.
-See [forge.md](forge.md) and the [private-instance runbook](../deployment/private-install.md).
+The tests are `WebApp.*` in `tests/test_web_app.cpp`. A request that does not accept HTML (npm,
+pip, git, API clients) never gets the app.
 
-Drive browsing, preview, sharing, conflict history, end-to-end scenarios, and documented Linux client states are in
-[drive.md](drive.md). The sharing decision and management screens are in
-[sharing.md](sharing.md).
-The forge page hierarchy and no-script behavior are in [`forge.md`](forge.md).
-Organization and personal settings are in [`settings.md`](settings.md).
-The top-bar breadcrumb (every page's trail, mirroring its URL) is in [`breadcrumb.md`](breadcrumb.md).
-Developer → MCP (keys, copy-ready agent setup, the lake skill and `llms.txt`) is in [`../api/mcp.md`](../api/mcp.md).
-Ship → Apps list, detail, ApplicationAgent question replies and proposal confirmation, controls,
-and live event behavior are in [`apps.md`](apps.md).
-Train → Streams topic/message CRUD, Live/pause, paging and capability mappings are in
-[`streams.md`](streams.md). Apps, build logs and Runs link into that space's Streams pages.
+## The shell
 
-Design → Solution and solution-backed Project pages show their five latest runs, including status,
-reached stage, first error line and a full run link. Active runs refresh every three seconds. The
-Project status follows the solution lifecycle instead of its creation-time description. Decision
-policy, experiment, actions, A1 queue, monitor and ROI are summarized for reading, retain JSON
-disclosures, and keep unrelated correctness checks collapsed under **Show all**. Experiment rows
-show the engine's balanced allocation counts. Action counts and latest actions include only ledger
-cells below the foundation scope; held entries and pending A1 approvals stay visible. An
-unclaimable ROI states the engine's reason on the summary line. The capability and page-read
-contract is in [`../api/workspaces.md`](../api/workspaces.md).
+`frontend/src/components/Shell.tsx` frames every page except the bare ones (sign-in, sign-up,
+operator sign-in, passkey sign-in and the public share pages).
 
-**What.** Server-rendered pages from pure renderers (`include/lake/api/web_ui.hpp`,
-`src/api/web_ui.cpp`): one token-driven stylesheet at a content-hashed URL, content-hashed
-self-hosted font URLs, an accessible shared shell, and a persisted light/dark theme control,
-unit-tested as strings. Navigation uses the resolved viewer: visitors can browse public
-repositories, account holders see workspace and account links, and operators see Administration.
-The landing copy, navigation matrix, and browser proof are in [front-door.md](front-door.md);
-its bold landing quotes are checked against the rendered homepage by
-`WebUi.FrontDoorDocQuotesTheRenderedHomePage`.
-Contextual links lead to exports, SSO, repository content, and drive views. The unhashed stylesheet and font routes remain compatibility aliases with
-`Cache-Control: no-cache`.
+- **The rail** lists lake's groups in order: the top items, Design, Train, Ship, then Organization
+  for an account or Administration for the operator, then Developer. The items come from `NAV` in
+  `frontend/src/routes.tsx`, and the viewer matrix is in [front-door.md](front-door.md#navigation).
+  The current group is open; the others show their name and open their first page. The rail
+  collapses to icons (remembered in `localStorage["lake-rail"]`). Below 1024 px it is an
+  off-canvas drawer opened from the menu button.
+- **The top bar** holds the space and workspace picker ([workspace-selection.md](workspace-selection.md)),
+  the breadcrumb ([breadcrumb.md](breadcrumb.md)), **Go to…** (⌘K or `/`), the theme switch, Ask
+  Orama and the account menu. **G** then **D**, **T**, **S**, **O** or **A** jumps to that group's
+  first page.
+- **Ask Orama** opens beside the page (`components/AskPanel.tsx`) in the current workspace. The
+  conversation is kept per workspace for the browser tab (`sessionStorage`). **Full view** opens
+  the same conversation on `/ask`. Before, this was a docked iframe of the server's Ask page.
+- **A 401 means the session ended.** Any read or write answering 401 while someone is signed in
+  shows *Your session has ended* with **Sign in again**, which returns to the same address. The
+  page stays as it was (`components/SessionEnded.tsx`).
+- **A render error stays in its page.** `components/ScreenBoundary.tsx` shows the error and keeps
+  the shell working.
+- **Who may open a page** is the screen's `audience` in its `routes.ts`. A visitor opening an
+  account page is sent to `/sign-in?next=<the page>`. The capability still decides what the page
+  can read.
 
-| Page | Route | Shows |
-|---|---|---|
-| Home | `GET /` | hosted repositories, the account → repository → push journey, and usable next actions |
-| User identity | `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in`, `/settings`, `/sessions`, `/passkeys`, `/tokens` | password, TOTP, OAuth, profile, passkeys, sessions/devices, notifications, and scoped tokens; see [identity.md](identity.md) |
-| Applications | `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | registration, theme, pool users, organizations, webhooks, and delivery history; see [identity.md](identity.md) |
-| Application identity | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed pool-specific identity on lake's host or a configured custom host |
-| Operator sign in | `GET /login`, `POST /session` (form field `token`), `POST /logout` | the operator-token form; a match sets the session cookie and redirects to Repositories |
-| Customers | `GET /customers` | every tenant: handle (links to its repositories), type, identity id, created |
-| Organization settings | `GET /organization?id=<uuid>&tab=<tab>` | overview, teams, members, invitations, access, SSO, applications, usage (`tab=metering`), and audit; see [settings.md](settings.md) |
-| Team settings | `GET /team?id=<uuid>` | team memberships and effective access; see [settings.md](settings.md) |
-| Member settings | `GET /member?id=<uuid>` | role, attestation evidence, effective access, role change, and confirmed removal; see [settings.md](settings.md) |
-| Organizations | `GET /organizations`; `POST /organizations/create`, `/organizations/convert`, `/invitations/accept` | every authorized organization with the viewer's role and settings/invite links; for a signed-in person, invitations addressed to them (Join), Create an organization, and the confirmed conversion of their personal space; see [settings.md](settings.md) |
-| Teams | `GET /teams?organization_id=<uuid>` | the organization's authorized teams with member and effective-access links |
-| Enterprise SSO | `GET /sso?organization_id=<uuid>[&provider_id=<uuid>]` | SAML/OIDC provider configuration, federation issuer claims, and one provider's SCIM provisioning log |
-| Members | `GET /members?organization_id=<uuid>[&team_id=<uuid>]` | direct memberships, their role, principal and attestation evidence |
-| Invitations | `GET /invitations?organization_id=<uuid>[&team_id=<uuid>]` | invitee, role, expiry and status |
-| Grants | `GET /grants?object_id=<uuid>` | direct policy grants and their attestation evidence |
-| Effective access | `GET /access?object_id=<uuid>` | direct and inherited principals, roles and allowed actions; object pages link to entity-specific views |
-| Repositories | `GET /repositories[?customer_id=<uuid>]` | public repositories for anonymous readers, or authorized repositories for a signed-in caller |
-| Repository | `GET /repository?id=<uuid>` | forge home with tree, recent changes, rendered README, refs and releases, clone/push commands, language/size summary, lifecycle state, and effective access |
-| Environments | `GET /environments?repository_id=<uuid>` | current mirrored phase, change, short image digest, URL, domains, update time, and stale warning |
-| Environment | `GET /environment?repository_id=<uuid>&name=<name>` | deployment history, URL and namespace, environment-variable and domain capability forms, and logs link |
-| Environment logs | `GET /logs?repository_id=<uuid>&environment=<name>[&since=<cursor>]` | server-rendered last page and refresh link, enhanced by a small polling island using `environment_logs` |
-| Model | `GET /models/<namespace>/<name>` or `/models/<uuid>` | card, revisions, file sizes and deduplication savings, storage totals, and the verified dataset-to-model provenance chain |
-| Exports | `GET /exports?repository_id=<uuid>` | signed archive requests and prior export manifests; its download form calls the export capability |
-| Repository tree | `GET /repository/tree?id=<uuid>&ref=<ref>` | the recursive libliquid tree with breadcrumbs, sizes, modes, and per-path last changes |
-| File | `GET /file?repository_id=<uuid>&ref=<ref>&path=<path>`, `/file/raw`, `/file/download` | highlighted or plain source, line/range anchors, blame, backing blob, and raw/download responses |
-| Changes | `GET /changes?repository_id=<uuid>` | the libliquid change log |
-| Change | `GET /change?repository_id=<uuid>&id=<change>` | title and rendered message, compact identities, review state, file stats, unified/side-by-side text hunks, anchored comments, conflicts, checks, and attestations |
-| Issues | `GET /issues?repository_id=<uuid>[&state=<state>&label=<label>&assignee=<identity>]` | filterable issue list with state, labels, assignees, and compact identities |
-| Issue | `GET /issue?repository_id=<uuid>&id=<issue>` | sanitized Markdown body and discussion, labels, assignees, and linked changes |
-| Releases | `GET /releases?repository_id=<uuid>` | sanitized release notes, change identity, artifacts, output counts, and verified attestations |
-| Webhooks | `GET /webhooks?repository_id=<uuid>` | sanitized endpoints and events with delivery status, attempts, errors, and failed-delivery retry |
-| Branch protection | `GET /protection?repository_id=<uuid>` | ref rules, required review and verification, update mode, pushers, and signed refusal audit |
-| Conflicts | `GET /conflicts?repository_id=<uuid>`, `POST /conflicts/resolve` | conflict kind, exact region, explanation, suspicious-merge reasons, values, and resolution controls |
-| Artifacts | `GET /artifacts?repository_id=<uuid>[&action=<digest>&output=<path>&content=<digest>&cursor=<cursor>&limit=<n>]` | filtered cursor pages of build results |
-| Artifact | `GET /artifact?repository_id=<uuid>&id=<result>` | one result, outputs, timing, cache/divergence state, verified attestations, and trace summary |
-| Search | `GET /search?query=<text>[&customer=<id>&repository=<id>&ref=<name>&change=<digest>&history=1]` | authorized hot branch-tip, immutable tag-snapshot, exact-change, or complete-history results with the selected query mode |
-| Transparency monitor | `GET /transparency?identity=<taap-id>` | public checkpoint-verified bulk-tile scan and every matching TAAP attestation |
-| Secret mounts | `GET /secret-mounts[?workspace_id=<uuid>&organization_id=<uuid>]` | mounts the caller may read in one workspace (the one named, else the one last chosen), with links to static secrets and named keys |
-| Static secrets | `GET /secrets?mount_id=<uuid>[&name=<name>]` | custom metadata and version lifecycle; never secret values |
-| Encryption keys | `GET /encryption-keys?mount_id=<uuid>` | key names, current versions and derivation parent; never key material |
-| Drive folder | `GET /drive?repository_id=<uuid>&ref=<ref>&path=<path>[&view=list|grid&sort=name|size|modified&direction=asc|desc]` | breadcrumbs, folder and file cards or rows, size, modified time, and capability-backed create, upload, rename, move, and delete controls |
-| Drive preview | `GET /drive/preview`, `/drive/download` | server-rendered or browser-native preview for registered formats, with exact-byte download, size, and digest fallback |
-| Drive history | `GET /drive/history`, `/drive/history/diff`, `/drive/conflict`; `POST /drive/conflict/resolve` | retained path versions, restore-as-new-change controls, explained two-version conflicts, and write-authorized resolution |
-| Drive sharing | GET /drive/share, /drive/share/link, /share/<token>, /share/<token>/preview, /share/<token>/download | effective access before sharing, People/Organization/Link choices, link state and revocation consequence, individual link detail, and signed-out scoped traversal, preview, and exact-byte download; see [sharing.md](sharing.md) |
-| Shared with me | GET /shared-with-me | live folders granted directly to the signed-in identity, their grantor, allowed actions, and current availability; see [sharing.md](sharing.md) |
-| Ship Apps | `GET /ship/apps`, `/ship/app`; `POST /ship/apps/*`, `/ship/app/*` | customer app creation, status, deploy and rollback history, logs, builds, environment, bindings, authentication, lifecycle controls, and deletion; see [apps.md](apps.md) |
+## Pages
 
-**Session.** `POST /session` compares the form token with the operator token in constant time; on
-a match it sets `lake_session=<token>; HttpOnly; SameSite=Strict; Path=/` (`Secure` when the
-request arrived over HTTPS, read from `X-Forwarded-Proto`) and redirects. Protected pages require a resolved credential and redirect to `/sign-in` otherwise; `POST /logout` clears it. The cookie
-value is the same secret the API takes as a bearer, resolved by the same code (`context_for`), so
-the UI never has a second auth path. User sign-in forms call registry capabilities and set the
-same cookie. A wrong operator token answers `401` with the form and a message.
-Public repository routes are the deliberate exception: they render without a session only after
-the repository capability verifies `visibility=public`; other object pages redirect to sign-in.
-The transparency monitor is also public because independent checkpoint and tile verification must
-not depend on a Lake account.
+Every page is registered once, in its group's `frontend/src/pages/<group>/routes.ts`. The router,
+the rail, the breadcrumb and Go to read that registry. A page marked `workspace: true` is served at
+`/w/<workspace_id><path>`, and its unprefixed address opens the current workspace
+([workspace-selection.md](workspace-selection.md)). Design, Train and Ship reach the workspace's
+engine through `workspace_query` (a read sent as `POST`) and `workspace_act`. In the table, *engine*
+names the engine capability passed to them.
 
-**Data.** Data pages call the same registry capabilities as REST and MCP, with the session's
-principal and one per-request authorization cache. Lists are capped by their capability limits
-and returned newest first. Nothing on a page can do what the API cannot.
+Files are under `frontend/src/pages/`.
 
-**Lifecycle.** The repository page renders a deletion tombstone and its retention deadline when
-present. The signed audit page exposes the registry outcomes for lifecycle capability calls.
-Lifecycle mutations remain capability-only; the page has no mutation form.
+**Front door, account and developer**
 
-Repository-page details and the liquid #166 deferrals are recorded in
-[`repositories.md`](repositories.md).
+| Route | File | Shows | Capabilities |
+|---|---|---|---|
+| `/` | `home/HomePage.tsx` | what lake is for and the viewer's next step ([front-door.md](front-door.md)) | `viewer` |
+| `/sign-in`, `/sign-up`, `/mfa`, `/passkey-sign-in` | `account/SignInPage.tsx`, `SignUpPage.tsx`, `MfaPage.tsx`, `PasskeySignInPage.tsx` | lake's own sign-in and sign-up, or Clerk's (`account/ClerkSignIn.tsx`); see [identity.md](identity.md) | `sign_in_password`, `verify_mfa`, `start_oauth`, `sign_up_password`, `begin_passkey_sign_in`, `sign_in_passkey`, `enroll_mfa`, `disable_mfa` |
+| `/login` | `account/LoginPage.tsx` | the operator-token form, posted to `POST /session` | none |
+| `/settings`, `/sessions`, `/passkeys`, `/tokens` | `account/SettingsPage.tsx`, `SessionsPage.tsx`, `PasskeysPage.tsx`, `TokensPage.tsx` | profile, sessions and devices, passkeys, tokens ([settings.md](settings.md#personal-settings)) | `list_sessions`, `revoke_session`, `list_devices`, `revoke_device`, `begin_passkey_registration`, `register_passkey`, `create_token` |
+| `/docs`, `/docs/:page` | `developer/DocsPage.tsx` | lake's guides (`docs/guide/*.md`) | `list_docs`, `get_doc` |
+| `/developer/mcp` | `developer/McpPage.tsx` | the MCP endpoint, tool groups, worked flows and a key ([../api/mcp.md](../api/mcp.md)) | `mcp_setup`, `create_token` |
 
-The reproducible seeded screenshot workflow and complete before/after page inventory are recorded
-in [`design-system.md`](design-system.md). The fixture uses the production HTTP and renderer paths;
-it does not add a fixture route to the server. The `lake-ui-fixture-pages` test starts it and fails
-on a startup error, a seeded page that is not 200, or a 5xx from any registered GET route (lake#497).
-Its shell section also records the root scroll padding that keeps a `#fragment` target below the
-sticky top bar (lake#438).
+**Repositories, Drive and sharing** ([repositories.md](repositories.md), [forge.md](forge.md),
+[drive.md](drive.md), [sharing.md](sharing.md))
 
-Secret mutations and cryptographic operations are also capability-only. The secrets page renders
-metadata and lifecycle timestamps, while the encryption page renders key metadata. Neither page
-puts protected input or output into HTML.
+| Route | File | Shows | Capabilities |
+|---|---|---|---|
+| `/repositories` | `repositories/RepositoriesPage.tsx` | readable repositories (public ones for a visitor) and Create a Repository | `list_repositories`, `create_repository` |
+| `/repository?id=` | `repositories/RepositoryPage.tsx` | the repository home | `get_repository`, `repository_tree`, `repository_refs`, `repository_file`, `list_changes`, `get_customer`, `get_workspace`, `list_releases`, `entity_effective_access`, `build_image` |
+| `/repository/tree?id=&ref=` | `repositories/TreePage.tsx` | every path with its newest change | `get_repository`, `repository_tree`, `list_changes` |
+| `/file?repository_id=&ref=&path=` | `repositories/FilePage.tsx` | one file, line anchors, blame | `get_repository`, `repository_file`, `list_changes`, `change_diff` |
+| `/changes`, `/change` | `repositories/ChangesPage.tsx`, `ChangePage.tsx` | the change log; one change under review | `list_changes`, `get_change`, `change_diff`, `list_reviews`, `list_review_comments`, `list_artifacts` |
+| `/issues`, `/issue` | `repositories/IssuesPage.tsx`, `IssuePage.tsx` | issues; one issue and its discussion | `list_issues`, `list_issue_comments` |
+| `/releases` | `repositories/ReleasesPage.tsx` | releases with notes and attested artifacts | `list_releases` |
+| `/webhooks` | `repositories/WebhooksPage.tsx` | webhooks and their deliveries, with retry | `list_webhooks`, `list_webhook_deliveries`, `retry_webhook_delivery` |
+| `/protection` | `repositories/ProtectionPage.tsx` | branch protection rules and refused updates | `list_branch_protections`, `audit` |
+| `/conflicts` | `repositories/ConflictsPage.tsx` | unresolved conflicts and their resolution | `list_conflicts`, `resolve_conflict` |
+| `/artifacts`, `/artifact` | `repositories/ArtifactsPage.tsx`, `ArtifactPage.tsx` | build results; one result | `list_artifacts`, `get_artifact` |
+| `/environments`, `/environment`, `/logs`, `/exports` | `apps/EnvironmentsPage.tsx`, `EnvironmentPage.tsx`, `LogsPage.tsx`, `ExportsPage.tsx` | a repository's environments, one environment, its logs, its exports | `list_environments`, `get_environment`, `list_deployments`, `create_domain`, `delete_domain`, `environment_logs`, `list_exports` |
+| `/drive`, `/drive/preview`, `/drive/history`, `/drive/history/diff`, `/drive/conflict` | `repositories/DrivePage.tsx`, `DrivePreviewPage.tsx`, `DriveHistoryPage.tsx`, `DriveDiffPage.tsx`, `DriveConflictPage.tsx` | folders, preview, history, version comparison, conflicts | `drive_browse`, `create_drive_folder`, `upload_drive_files`, `move_drive_path`, `delete_drive_path`, `drive_preview`, `drive_history`, `restore_drive_version`, `diff_drive_versions`, `drive_conflict`, `resolve_conflict` |
+| `/drive/share`, `/drive/share/link` | `repositories/DriveSharePage.tsx`, `DriveShareLinkPage.tsx` | who can reach a folder, sharing, links | `drive_effective_access`, `my_permissions`, `share_drive_folder`, `create_drive_share_link`, `revoke_drive_share_link`, `list_workspaces` |
+| `/shared-with-me` | `repositories/SharedWithMePage.tsx` | folders shared with the viewer | `drive_shared_with_me` |
+| `/share/:token`, `/share/:token/preview` | `repositories/SharePage.tsx`, `SharePreviewPage.tsx` | a folder or file opened through a link, signed out | `resolve_drive_share_link`, `preview_drive_share_link` |
+| `/models/:namespace/:id`, `/models/:id` | `admin/ModelPage.tsx` | a model repository's storage, provenance, files and revisions | `resolve_model`, `get_model` |
+| `/search` | `search/SearchPage.tsx` | ranked, substring or regex search | `search` |
 
-**Verify.** `./build/lake --listen 127.0.0.1:4902 --memory-store --admin-token t`, then with a
-cookie jar: `curl -c j -d token=t /session` (302), `curl -b j /organizations` (200, the table),
-`curl -b j -X POST /logout` (302), `curl -b j /repositories` (public repository list; protected pages redirect to `/sign-in`).
+**Design, Train and Ship** (all under `/w/<workspace_id>/` except Deployments, Services and
+Workspaces)
 
-**Next.** A customer detail page and mutation forms for the remaining control-plane actions.
+| Route | File | Shows | Capabilities |
+|---|---|---|---|
+| `/design/projects` | `design/ProjectsPage.tsx` | projects, New Project | engine `list_projects`, `create_project` |
+| `/design/project?name=` | `design/ProjectPage.tsx`, `SolutionPanels.tsx` | one project, its solution panels, runs, background tasks, pipelines | `latest_agent_task`, `list_runs`, `compile_pipeline`, `create_pipeline`, `run_pipeline`, `confirm_solution`, `workspace_sql`; engine `get_project`, `get_graph`, `list_datasets`, `list_methodologies`, `approve_plan`, `delete_project`, solution reads and actions |
+| `/design/pipeline?project=&graph=&step=` | `design/PipelinePage.tsx` | the pipeline graph, a step, changes, gate and deploy | `render_pipeline`, `edit_pipeline`, `run_pipeline`, `agent_turn`, `get_agent_task`; engine `get_graph`, `list_datasets`, `list_runs`, `gate`, `deploy`, `approve_plan` |
+| `/design/opportunities`, `/design/discover` | `design/OpportunitiesPage.tsx` | Auto-Suggest's opportunities, drafts on confirmation | `list_opportunities`, `create_projects_from_opportunities`, `dismiss_opportunity`, `agent_turn`, `get_agent_task` |
+| `/design/solutions`, `/design/solution` | `design/SolutionsPage.tsx`, `SolutionPage.tsx` | the solutions catalogue; Start This Solution | `start_solution`; engine `list_solutions`, `get_solution`, `list_datasets` |
+| `/design/methodologies`, `/design/methodology` | `design/MethodologiesPage.tsx`, `MethodologyPage.tsx` | modelling methods | engine `list_methodologies`, `list_solutions` |
+| `/design/agent-library` | `design/AgentLibraryPage.tsx` | the agents Orama provides | `list_agent_library` |
+| `/train/agents`, `/train/agent`, `/train/agents/new` | `train/AgentsPage.tsx`, `AgentPage.tsx`, `FactoryPage.tsx` | the space's agents, one agent, the Agent Factory | `schedule_agent`, `unschedule_agent`, `launch_agent`, `stop_agent_launch`, `list_agent_launches`, `list_agent_schedules`, `approve_agent_proposal`; engine `list_agents`, `create_agent`, `get_agent`, `update_agent`, `delete_agent`, `agent_training_status` |
+| `/train/data`, `/train/dataset`, `/train/query` | `train/DataPage.tsx`, `DatasetPage.tsx`, `QueryPage.tsx` | load data, connections, datasets, storage; one dataset; read-only SQL | `list_stores`, `create_store`, `delete_store`, `store_connection`, `list_services`, `connect_service`, `workspace_sql`; engine connection, dataset and generator calls |
+| `/train/runs`, `/train/run` | `train/RunsPage.tsx`, `RunPage.tsx` | pipeline runs; one run's report, lineage, log and trace | engine `list_runs`, `list_studies`, `get_run`, `get_run_report`, `list_traces` |
+| `/train/experiments`, `/train/experiment`, `/train/experiment/run`, `/train/experiments/compare` | `experiments/*.tsx` | studies and runs with live charts ([experiments.md](experiments.md)) | see experiments.md |
+| `/train/streams`, `/train/stream` | `streams/StreamsPage.tsx`, `TopicPage.tsx` | topics and messages ([streams.md](streams.md)) | see streams.md |
+| `/ship/models` | `ship/ModelsPage.tsx` | trained models and their prediction endpoints | engine `list_models`, `expose_model`, `unexpose_model` |
+| `/ship/indexes`, `/ship/index` | `ship/IndexesPage.tsx`, `IndexPage.tsx` | search indexes, one index, search it | `search_index`, `create_token`; engine `list_indexes`, `create_index`, `get_index`, `expose_index`, `unexpose_index` |
+| `/ship/packages` | `apps/PackagesPage.tsx` | the instance registry, the space's images and builds | `list_packages`, `list_image_repositories`, `list_builds`, `receive_build_events` |
+| `/ship/apps`, `/ship/app` | `apps/AppsPage.tsx`, `AppPage.tsx` | apps, ApplicationAgent, one app ([apps.md](apps.md)) | see apps.md |
+| `/deployments` | `apps/DeploymentsPage.tsx` | every environment across readable repositories | `list_repositories`, `list_environments` |
+| `/services` | `ship/ServicesPage.tsx` | the space's databases, streams and engines | `list_services`, `list_service_kinds`, `create_service`, `delete_service`, `service_connection` |
+| `/workspaces` | `workspaces/WorkspacesPage.tsx` | a space's workspaces, create, delete ([workspace-selection.md](workspace-selection.md#the-workspaces-page)) | `list_workspaces`, `create_workspace`, `delete_workspace` |
+| `/ask` | `ask/AskPage.tsx` | Ask Orama, full page ([../api/ask-orama.md](../api/ask-orama.md)) | `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal`, `get_ask_conversation`, `get_agent_task`, `list_agent_library` |
 
-The [sign-up walkthrough](sign-up-walkthrough.md) covers public identity export, personal customer
-ownership, zero initial metering, and creating a first private repository at both requested widths
-and themes. The `POST /repository/create` form adapter calls the existing registry capability.
+**Organization and administration** ([settings.md](settings.md), [identity.md](identity.md))
 
-Repository pages expose `POST /repository/build`, which calls `build_image`. Ship → Packages
-shows authorized tenant images and the selected space's build rows (a build without an image yet
-has a null digest and shows an empty digest cell; lake#440), while `/ship/app` shows one
-App's build history and calls `build_app`. Both build tables long-poll the audited
-`receive_build_events` capability for live phase and retained log updates.
+| Route | File | Shows | Capabilities |
+|---|---|---|---|
+| `/organizations` | `organizations/OrganizationsPage.tsx` | organizations, invitations for you, create, convert | `list_organizations`, `list_invitations`, `join_organization`, `create_organization_space`, `convert_personal_space`, `get_customer` |
+| `/organization?id=&tab=` | `organizations/OrganizationPage.tsx` | one organization's tabs | `get_organization`, `list_teams`, `create_team`, `list_memberships`, `list_invitations`, `create_invitation`, `entity_effective_access`, `list_sso_providers`, `register_sso_provider`, `list_applications`, `metering_usage`, `audit` |
+| `/team`, `/teams`, `/member`, `/members`, `/invitations`, `/grants` | `organizations/TeamPage.tsx`, `TeamsPage.tsx`, `MemberPage.tsx`, `MembersPage.tsx`, `InvitationsPage.tsx`, `GrantsPage.tsx` | teams, memberships, invitations, direct grants | `get_team`, `list_teams`, `get_membership`, `set_member_role`, `remove_member`, `list_memberships`, `list_invitations`, `list_grants`, `get_object` |
+| `/access`, `/repository/access`, `/organization/access`, `/team/access` | `organizations/AccessPage.tsx` | effective access to one object | `effective_access`, `entity_effective_access`, `get_object` |
+| `/sso` | `organizations/SsoPage.tsx` | SSO providers, federation issuers, a SCIM log | `list_sso_providers`, `list_federation_issuers`, `list_sso_provisioning_logs` |
+| `/customers` | `admin/CustomersPage.tsx` | every space | `list_customers` |
+| `/applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | `admin/Application*.tsx` | identity applications ([identity.md](identity.md#application-identity)) | `list_applications`, `register_application`, `get_application`, `list_application_users`, `suspend_application_user`, `list_application_organizations`, `create_application_organization`, `delete_application_organization`, `list_application_webhook_events`, `create_application_webhook` |
+| `/metering?customer_id=` | `admin/MeteringPage.tsx` | a space's usage and storage limit | `metering_usage`, `set_storage_quota` |
+| `/secret-mounts`, `/secrets`, `/encryption-keys` | `admin/SecretMountsPage.tsx`, `SecretsPage.tsx`, `EncryptionKeysPage.tsx` | secret mounts, a secret's version metadata, named keys; never values or key material | `list_secret_mounts`, `get_secret_mount`, `secret_metadata`, `list_encryption_keys` |
+| `/activity`, `/audit` | `admin/AuditPage.tsx` | the person's own events; the operator's whole log | `my_audit`, `audit`, `transparency_log_configuration` |
+| `/transparency?identity=` | `admin/TransparencyPage.tsx` | the public checkpoint-verified scan for one TAAP identity | `transparency_identity_scan` |
+| any other path | `home/NotFoundPage.tsx` | *not found* in lake's words | none |
 
-Repository pages stay at their repository addresses and name the workspace the repository belongs
-to; the `/repositories` form chooses that workspace (lake#315). See
-[repositories.md](repositories.md#the-owning-workspace).
+## Rules the pages keep
 
-Forge records live in the repository's workspace Zetta (lake#341): the repository pages read them
-through the same capabilities, and the home page and change view say when that workspace cannot be
-read instead of failing. See [repositories.md](repositories.md).
+- **Public reads open signed out.** Public repositories, public models, the Docs, the transparency
+  monitor and share links open without a session. A refused repository read for a visitor goes to
+  `/sign-in?next=…`, so a private repository's existence is not disclosed
+  (`RepositoryError` in `pages/repositories/forge.tsx`).
+- **Secrets never reach the page.** The secrets and encryption-key pages show metadata only. A new
+  token, an MFA secret and recovery codes are shown once and held only in that page's memory.
+- **Lifecycle writes stay capability-only.** The repository page shows a deletion tombstone and its
+  retention deadline; it has no lifecycle form.
+- **Workspace data is read where it lives.** Forge records, environments and deployments, app
+  records and repository descriptions are in the owning workspace's Zetta. A page that can show
+  the rest says when that workspace cannot be read, instead of failing
+  ([repositories.md](repositories.md), [../api/platform.md](../api/platform.md#where-environments-live-lake358-lake359)).
+  Activity and Audit read the central log and each workspace's audit, name the log each event came
+  from, and name a workspace whose audit could not be read ([../api/audit.md](../api/audit.md#reading-both-logs)).
 
-Environments and deployments live in the repository's workspace Zetta (lake#358, lake#359): the
-Deployments, Environments and Environment pages read them through the same capabilities, and the
-Deployments overview skips a repository whose workspace cannot be read. See
-[platform.md](../api/platform.md#where-environments-live-lake358-lake359).
+## What changed from the server pages
 
-Activity and Audit read the central log and each workspace's own audit (decision 52, lake#317):
-each event says which log holds it, an event still being written has no digest yet, and a workspace
-whose audit could not be read is named. The budget is one round, one `list_records` call per
-workspace. See [audit.md](../api/audit.md#reading-both-logs).
+- No page refreshes itself. Pages that followed work with `<meta http-equiv="refresh">` now poll
+  or long-poll the capability the server page's script called, and show the change in place.
+- The deferred panels (`/ask/agents`, `/train/agents/list`, `/ship/indexes/datasets`) are gone. The
+  page reads the capability itself and fills the panel in when it answers.
+- The form `POST` adapters (`/identity/*` form posts, `/drive/*`, `/ship/app/*`, `/design/*`,
+  `/train/*`, `/organization/*`, …) are gone. Every change is a `POST /v1/<capability>` with a
+  JSON body. The confirmations those handlers enforced (typed names, counts, the reviewed
+  proposal) are enforced by the page before the call, and by the capability where it has its own
+  check.
+- The `lake_workspace` cookie and the server's rewriting of links and forms into `/w/<id>/` are
+  gone. The workspace is in the page URL ([workspace-selection.md](workspace-selection.md)).
+- Markdown, file highlighting and the charts are drawn in the browser. The pipeline graph
+  (`render_pipeline`), Drive previews and syntax units (`repository_file {units: true}`) are still
+  produced by lake.
+- Lake had no HTML 404; the app has one. Defects the inventory found in the server pages are not
+  carried over: device revoke sends `id`, the environment log page appends lines, the app log
+  panel reads `items`, a plain member opens an organization, and Docs is marked current in the rail.
+
+## Screenshots
+
+`docs/ui/screenshots/` holds images of the **server-rendered UI**. They are kept for comparison
+with the web app and are not regenerated.
+
+| Folder | What |
+|---|---|
+| `before/` | 120 PNGs: the seeded fixture's pages before the Orama design system was applied (#87), light and dark |
+| `after/` | 124 PNGs: the same pages after it, light and dark, at 1440 × 900 ([design-system.md](design-system.md#seeded-screenshot-fixture)) |
+| `front-door/` | 16 PNGs and a README: the 2026-09-08 homepage journey at 1280 and 640 px ([front-door.md](front-door.md#browser-evidence)) |
+| `sign-up/` | 16 PNGs and a README: the 2026-09-08 sign-up walkthrough ([sign-up-walkthrough.md](sign-up-walkthrough.md)) |
+| `issue-122/` | 8 PNGs: a share link's folder and nested preview ([sharing.md](sharing.md#recipient-walkthrough-evidence)) |
+
+## Verify
+
+```sh
+cd frontend && npm ci && npm run build      # types, unit tests, the bundle and the source checks
+cmake --build build && ctest --test-dir build -R '^WebApp\.'
+./build/lake --listen 127.0.0.1:4902 --memory-store --admin-token t
+curl -s -H 'Accept: text/html' localhost:4902/repositories | head -3   # index.html
+curl -s localhost:4902/v1/viewer                                        # a visitor
+```
+
+Then open `http://127.0.0.1:4902/login`, sign in with `t`, and walk the rail.
+
+## Change
+
+Add a page by adding a screen to its group's `routes.ts` and its component under `pages/<group>/`;
+it then appears in the router, the rail (when `nav` is set), the breadcrumb and Go to. Anything the
+page needs that no capability returns is a new capability first ([../api/web-app.md](../api/web-app.md#change)).
+Update the page table above in the same change.

@@ -1,24 +1,24 @@
 # Customer entry and navigation
 
-Status: checked on 2026-10-01 against lake `36679e1` on the dev cluster (lake.oramadev.net, Clerk
-sign-in), and pinned by `WebUi.FrontDoorDocQuotesTheRenderedHomePage`.
+Status: the homepage and navigation of the web app (lake#561). The copy is unchanged from the
+server-rendered homepage checked on 2026-10-01 against lake `36679e1` on the dev cluster.
 
-The homepage says what lake is for: designing, training and shipping AI on the customer's own
-data, in a workspace of their own. It uses the existing design-system shell, panels, grid, and
-theme controls. The earlier repository and `liquid push` homepage (2026-09-08, below under
-*Browser evidence*) no longer exists; repositories are one link under Ship.
+The homepage (`/`, `frontend/src/pages/home/HomePage.tsx`) says what lake is for: designing,
+training and shipping AI on the customer's own data, in a workspace of their own. It reads only
+`viewer`. Repositories are one link under Ship.
 
-**Sign-in.** When `LAKE_CLERK_PUBLISHABLE_KEY` is set, Sign in opens Clerk's form and lake's own
-password, TOTP, passkey and identity-document pages leave the navigation; see
+**Sign-in.** When `LAKE_CLERK_PUBLISHABLE_KEY` is set (`viewer.clerk.enabled`), Sign in opens
+Clerk's form and lake's own password, TOTP and passkey pages leave the navigation; see
 [`../api/clerk.md`](../api/clerk.md). Clerk's sign-up is restricted while lake is in development,
 so a visitor is offered **Sign in** only, never Create account, and the homepage and `/sign-up`
-say the same sentence about invitations (`web_ui_invitation_note`). Without Clerk, which is what an
-on-prem install uses, password sign-up is open and the visitor is offered **Create account** too.
+say the same sentence about invitations. Without Clerk, which is what an on-prem install uses,
+password sign-up is open and the visitor is offered **Create account** too.
 
 ## Landing copy
 
-Every bold phrase in this section is quoted from `web_ui_home` (`src/api/web_ui.cpp`); the test
-named above fails when one stops appearing on the rendered page.
+Every bold phrase in this section is quoted word for word from `frontend/src/pages/home/HomePage.tsx`
+(the invitation sentence is `INVITATION_NOTE` in `frontend/src/pages/account/signIn.ts`). Change
+the page and this section together; the check is under [Verify and change](#verify-and-change).
 
 **lake by Orama**
 
@@ -27,9 +27,9 @@ named above fails when one stops appearing on the rendered page.
 **Load your data into your own workspace, train models on it, and call them from your code, in
 Orama's cloud or your own.**
 
-The visitor actions are **Sign in** and **Read the docs**. Under Clerk they are followed by
-**Accounts are added by invitation while lake is in development.** Without Clerk the first action
-is **Create account**. A signed-in account instead gets **Getting started** (the Docs) and
+Under Clerk the visitor actions are **Sign in** and **Read the docs**, followed by
+**Accounts are added by invitation while lake is in development.** Without Clerk they are
+**Create account**, Sign in and Read the docs. A signed-in account instead gets **Getting started** (the Docs) and
 **Load your data**.
 
 Three cards follow, one per verb. Each states only what lake does today:
@@ -44,86 +44,73 @@ Three cards follow, one per verb. Each states only what lake does today:
 
 ## Navigation
 
-| Viewer | Sidebar | Top bar |
+The rail and top bar come from `NAV` in `frontend/src/routes.tsx` and `components/Shell.tsx`.
+
+| Viewer | Rail | Top bar |
 |---|---|---|
-| Signed out or invalid credential | Home, Public Repositories · **Developer:** Docs | Sign in; also Create account when Clerk is off |
-| Ordinary account | Home, Repositories, Shared with Me, Search · **Design:** Projects, Opportunities, Solutions, Methodologies, Agent Library · **Train:** Agents, Data, Runs, Experiments, Streams · **Ship:** Models, Search Indexes, Packages, Apps, Deployments, Services, Workspaces · **Organization:** Organizations, Secrets, Usage (opens on the account's own space), Activity (`/activity`, the account's own audit events via `my_audit`: newest first, principals by name, a workspace call's inner capability, successful reads hidden unless **Include reads** is ticked; see [audit.md](../api/audit.md#reading-the-log-as-a-person-lake445)) · **Developer:** API, MCP, Docs | Space and workspace selectors, Ask Orama, **Account** menu: Settings, Sessions, Passkeys (omitted when Clerk is on), Tokens, Sign out |
-| Operator | Home, Repositories, Search · **Design** · **Train** · **Ship** (as an account) · **Administration:** Customers, Organizations, Applications, Usage, Secrets, Audit · **Developer:** API, MCP, Docs | Sign out |
+| Signed out or dead credential | Home, Public Repositories · **Developer:** Docs | Sign in; also Create account when Clerk is off and password sign-up is open |
+| Ordinary account | Home, Repositories, Shared with Me, Search · **Design:** Projects, Opportunities, Solutions, Methodologies, Agent Library · **Train:** Agents, Data, Runs, Experiments, Streams · **Ship:** Models, Search Indexes, Packages, Apps, Deployments, Services, Workspaces · **Organization:** Organizations, Secrets, Usage, Activity · **Developer:** API, MCP, Docs | Space and workspace picker, Go to, theme, Ask Orama, the account menu: Settings, Sessions, Passkeys (omitted when Clerk is on), Tokens, Sign out |
+| Operator | Home, Repositories, Search · **Design** · **Train** · **Ship** (as an account) · **Administration:** Customers, Organizations, Applications, Usage, Secrets, Audit · **Developer:** API, MCP, Docs | the picker when the operator can see a space, Go to, theme, Sign out |
 
-**Design, Train and Ship** run on the workspace selected in the top bar, one of the space's
-workspace Zettas; see
-[`../api/workspaces.md`](../api/workspaces.md). Their pages live under `/design`, `/train` and
-`/ship`. The repositories list and the create-repository form mark the viewer's own personal space
-with *(you)* and *your personal space*, since its generated handle is otherwise unrecognisable.
+- **Activity** (`/activity`) is the account's own audit events through `my_audit`: newest first,
+  principals by name, a workspace call's inner capability, successful reads hidden unless
+  **Include reads** is ticked ([audit.md](../api/audit.md#reading-the-log-as-a-person-lake445)).
+  **Usage** opens on the account's own space. **API** opens `/v1/openapi.json`.
+- **Design, Train and Ship** run on the workspace in the URL, one of the space's workspace Zettas
+  ([workspace-selection.md](workspace-selection.md), [`../api/workspaces.md`](../api/workspaces.md)).
+- **The current item is chosen by path.** `currentNav` compares the path, without any `/w/<id>`
+  prefix, with each item's path and the paths its screen `owns`: an exact match or a parent
+  (`/drive` owns `/drive/preview`, and a repository's `/environments` belongs to Repositories). The
+  first match wins. The path is never used to authorize.
+- **Operators** have no personal pages and get Sign out alone. An operator opening an account page
+  is told it belongs to an account.
+- **Deployments** (`/deployments`) lists every environment across the repositories the caller may
+  list, from `list_repositories` and `list_environments`, and skips a repository whose
+  environments the caller may not read.
+- Inside a repository the first tab is **Files** (the Drive view) for signed-in viewers, then
+  **Code**; the platform tab is **Deployments** (`ForgeTabs` in `pages/repositories/forge.tsx`).
+  Anonymous readers get no Files, Deployments or Webhooks tab and no access-details link;
+  Protection is offered to operators only, because its page reads the instance audit. Direct
+  requests still go through each capability's authorization.
 
-**The current item is chosen by request path.** `context_for` records the route path on
-`ApiContext::request_path`, `viewer_for` copies it into `WebUiViewer::path`, and `nav` compares
-it against each item's routes: an exact match, or a parent (`/drive` owns `/drive/preview`, and a
-repository's own `/environments` belongs to Repositories). A renderer called without a request, as
-in the unit tests, falls back to matching the page title. The path is never used to authorize.
-
-The account menu is a `<details>` element, so it needs no script. Operators have no personal pages
-and get Sign out alone.
-
-**Deployments** (`GET /deployments`) lists every environment across the repositories the caller may
-list, from the same `list_repositories` and `list_environments` capabilities the per-repository
-pages call. A repository whose environments the caller may not read is skipped. Signed-out
-requests redirect to `/sign-in`.
-
-Inside a repository, the first tab is **Files** (the drive view) for signed-in viewers, then
-**Code**. The tab formerly labelled Platform is **Deployments**.
-
-Before 2026-09-08, every viewer saw Home, Repositories, Shared with me, Search, Customers, Organizations,
-Applications, Usage, Secrets, Audit, and API, plus an implementation label in the sidebar footer.
-The footer is removed. The public repository list is filtered by the existing registry policy.
-
-Repository tabs also omit Platform and Webhooks for anonymous readers. Protection requires the
-instance audit read and is offered only to operators. Anonymous repository homes omit the access
-details link. Direct requests still use the existing capability authorization.
-
-`WebUiViewer` carries authenticated and operator state from the common `context_for` resolver
-through every shared-shell renderer, including error and public pages. Renderers remain pure.
-Where a handler has already resolved its context, it supplies that context's viewer; there is no
-second authorization mechanism. Boolean renderer arguments remain source compatible and identify
-an ordinary account. Application-specific hosted identity pages retain their separate themed shell.
-
-Customer authentication redirects lead to `/sign-in`. `/login` remains a direct, explicitly named
-operator entry with the existing `POST /session` contract. Its copy points account holders to their
-own sign-in. A wrong operator token is recorded as a failed sign-in and redirects to
-`/login?error=That%20token%20did%20not%20match.`, which `/login` shows (lake#561: the web app reads
-`error` the same way); before, the form answered `401` with the page. OpenAPI now describes account tokens and public operations accurately.
+**Customer and operator entry.** A protected page sends a visitor to `/sign-in?next=<page>`.
+`/login` is the explicit operator entry (`account/LoginPage.tsx`): an ordinary form posted to
+`POST /session`, which compares the token, sets the HttpOnly cookie and redirects. A wrong token
+is recorded as a failed sign-in and redirects to `/login?error=That%20token%20did%20not%20match.`,
+which the page shows. Its copy points account holders to their own sign-in.
 
 ## Verify and change
 
-Run the complete native static and shared suites with distinct fresh PostgreSQL databases,
-`LAKE_TEST_DB_URI`, and `LAKE_INSTANCE_KEK`, as described in [the test contract](../build/testing.md).
-`WebUi` tests pin the explanation, ordinary credential path, and viewer navigation. The parameterized
-HTTP navigation test covers both stores, absent and invalid cookies, user sessions, operator
-credentials, cross-page consistency, and HTTP 200 for every offered global destination. Its
-PostgreSQL variant creates a UUID-named schema, loads `db/schema.sql` there, uses that schema in
-its connection URI, and removes it after each case. Its audit records cannot enter another test's
-audit window.
+The landing quotes must match the source. From the repository root:
 
-`PostgresCapabilities.OrganizationAndPolicyRoundTrip` gives a repository deletion the audit object
-`repository/<id>` and asks the `audit` capability for that exact successful record. It does not rely
-on a bounded page of unrelated audit events. The capability registry remains the shared source for
-REST, OpenAPI, and MCP.
+```sh
+python3 - <<'PY'
+import re
+doc = open("docs/ui/front-door.md").read()
+section = doc[doc.index("## Landing copy"):]
+section = section[:section.index("\n## ", 1)]
+source = re.sub(r"\s+", " ", open("frontend/src/pages/home/HomePage.tsx").read()
+                + open("frontend/src/pages/account/signIn.ts").read())
+missing = [p for p in (re.sub(r"\s+", " ", q) for q in re.findall(r"\*\*([^*]+)\*\*", section))
+           if p not in source]
+print("missing:", missing) if missing else print("all quotes present")
+PY
+```
 
-To change navigation, update `nav` and `forge_tabs` in `src/api/web_ui.cpp` together with this
-matrix and the HTTP assertions. New data operations must still be capabilities in the registry.
-Do not infer operator status from a page name, a nonempty cookie, or a customer's repository role.
+Then open the app as a visitor (with and without `LAKE_CLERK_PUBLISHABLE_KEY`), as an account and
+as the operator, at 1280 and 640 px in both themes, and compare the rail and top bar with the
+table above. `HttpServer/HttpResponseIsolation.TheViewerSaysWhoIsSignedInAndWhereTheyAre` checks
+the `viewer` read the navigation is built from.
 
-For browser verification of an install without Clerk, start the native server on a separate fresh
-database. Open a new profile at each of 1280 and 640 pixels in light and dark, follow the homepage's
-Create account action,
-export a fresh public Liquid identity document, submit the form, and create the first private
-repository. Save the rendered customer pages and check their text for implementation names and
-operator-credential instructions. The recorded browser evidence follows.
+To change the navigation, edit `NAV` in `frontend/src/routes.tsx` (and the screen's `owns` for its
+current-item paths) together with this table. New data operations must still be capabilities in the
+registry. Do not infer operator status from a page name or a cookie; it is `viewer.administrator`.
 
 ## Browser evidence
 
-Historical: this records the 2026-09-08 repository homepage, which has since been replaced by the
-landing copy above. It is kept as the evidence of that change.
+Historical: this records the 2026-09-08 server-rendered repository homepage, which has since been
+replaced twice: by the landing copy above, and by the web app. It is kept as the evidence of that
+change; the images show the server-rendered UI.
 
 Recorded on 2026-09-08 against the native server at `http://127.0.0.1:4935`, using a separate
 `lake_walkthrough_135` PostgreSQL 17.7 database. Local Chrome completed the journey in four fresh
@@ -186,6 +173,8 @@ grep -Ein 'Zetta|Beast2|Capy|Corosio|admin token' .cache/issue-135/rendered/*.ht
 ```
 
 ## Native proof
+
+Historical, recorded with the 2026-09-08 change.
 
 The complete static and shared PostgreSQL suites ran against distinct freshly created databases
 with separate generated `LAKE_INSTANCE_KEK` values:

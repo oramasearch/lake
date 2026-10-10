@@ -10,10 +10,15 @@ commit plus a SHA-256 digest for every file.
 `design-tokens.map.json` is the reviewed boundary between Lake names and upstream DTCG paths.
 `design-tokens.inventory.json` is the stable list of Lake custom properties; the compiler refuses
 an unreviewed addition or removal. `tools/ui/build-tokens.mjs` is dependency-free Node and writes
-`src/api/web_ui_tokens.inc`, the generated token layer included in the served stylesheet. Do not
-edit the generated file or vendored JSON by hand.
+the same token layer twice:
 
-To update the snapshot and generated layer:
+- `frontend/src/styles/tokens.css`, which the web app imports;
+- `src/api/web_ui_tokens.inc`, the server's copy, still used by the pages lake renders itself
+  (an identity application's hosted sign-in pages).
+
+Do not edit either generated file or the vendored JSON by hand.
+
+To update the snapshot and generated layers:
 
 ```sh
 node tools/ui/sync-design-system.mjs \
@@ -21,9 +26,10 @@ node tools/ui/sync-design-system.mjs \
 node tools/ui/build-tokens.mjs
 ```
 
-To verify the snapshot, generated output, and negative tamper cases:
+To verify the snapshot, both generated outputs, and negative tamper cases:
 
 ```sh
+node tools/ui/build-tokens.mjs --check
 ./tools/ui/test-token-gates.sh
 ```
 
@@ -32,73 +38,83 @@ extension. An explicit `data-theme` setting wins over `prefers-color-scheme`; wi
 setting, the browser preference selects the theme. Reduced-motion collapses all three upstream
 duration tokens.
 
+## How the app uses it
+
+`frontend/src/index.css` is the whole stylesheet, in four cascade layers:
+
+| Layer | Source | What |
+|---|---|---|
+| `theme` | `tailwindcss/theme.css` | Tailwind's theme variables, then lake's binding (below) |
+| `base` | `styles/tokens.css`, `styles/fonts.css` | the generated tokens and the IBM Plex faces |
+| `components` | `styles/lake.css`, `styles/app.css` | lake's component classes, moved from `src/api/web_ui_styles.inc`; what the app adds (overlays, the collapsible rail and drawer, the command palette, fields, the account menu and Ask Orama panel) |
+| `utilities` | `tailwindcss/utilities.css` | layout utilities |
+
+Two pages import their own small sheet, both in lake tokens only: `styles/account.css` (the bare
+sign-in frame) and `styles/experiments.css` (the chart pages, scoped to `.experiments`).
+
+- **Tailwind without preflight.** Only Tailwind's theme and utilities are imported, never its
+  base reset, so lake's own base styles in `lake.css` stay authoritative.
+- **Tailwind is bound to the tokens.** `@theme inline` clears Tailwind's colours
+  (`--color-*: initial`) and maps every colour, both font families, the three radii and the two
+  shadows to `--lake-*` roles (`bg-surface`, `text-ink-2`, `border-hairline`, `rounded-panel`, …).
+  A utility cannot bring in a colour outside the design system.
+- **Dark mode** is `data-theme="dark"` on `<html>` (`@custom-variant dark`).
+- **Lake's class names are the kit's vocabulary.** The kit in `src/lib/ui.tsx` renders lake's
+  markup (`panel`, `card`, `badge`, `button`, `notice`, `empty`, …), so a page reads like the
+  server pages did. Overlays (`src/lib/overlay.tsx`: modal, drawer, confirmation) are the only
+  surfaces with a shadow.
+
 ## Fonts
 
 IBM Plex Sans 400, 500, and 600 and IBM Plex Mono 400 and 500 are self-hosted Latin WOFF2
 subsets under `assets/fonts/`. They are sourced from the Fontsource versions pinned by the design
-system, and the Sans and Mono OFL-1.1 notices ship beside them. CMake embeds the files into the
-binary. At startup Lake computes the first 16 lowercase hexadecimal characters of each file's
-SHA-256 and serves `/fonts/<face>-<hash>.woff2` as `font/woff2` with `Cache-Control: public,
-max-age=31536000, immutable`. The stylesheet declares every face with `font-display: swap` and
-uses those content-hashed URLs. No browser request reaches a third-party origin.
+system, and the Sans and Mono OFL-1.1 notices ship beside them. `styles/fonts.css` declares every
+face with `font-display: swap` and points at those files; Vite copies them into `/ui/` under
+content-hashed names (`ibm-plex-sans-400-<hash>.woff2`). No browser request reaches a third-party
+origin. The server still serves the same files at `/fonts/<face>-<hash>.woff2` for its own pages.
 
 ## Asset URLs and caching
 
-Lake builds the final stylesheet bytes from the committed token and component layers after
-substituting the content-hashed font URLs. At server startup it computes the stylesheet SHA-256
-from those final bytes and registers `/style-<hash>.css`. The shared page-head helper links that
-URL in the standard shell and hosted application identity shell, so no renderer assembles an
-asset URL itself.
-
-The content-hashed stylesheet and font routes use `Cache-Control: public, max-age=31536000,
-immutable`. `/style.css` and `/fonts/<face>.woff2` remain aliases for direct use and older pages;
-both use `Cache-Control: no-cache`, so a cache must revalidate them before reuse. A stylesheet or
-font byte change produces a different URL and leaves old immutable URLs valid for pages that still
-reference them.
+Every file the app loads after `index.html` is a content-hashed name under `/ui/`, served
+`Cache-Control: public, max-age=31536000, immutable`; `index.html` is `no-cache`, so a new build is
+picked up on the next page load while unchanged chunks stay cached. A byte change produces a new
+name. The files are embedded in the binary; nothing is read from disk at run time
+([web-app.md](web-app.md)).
 
 ## Components and pages
 
 Lake follows the design system's high-density, low-variance product direction: flat surfaces,
 hairline boundaries, blue action and focus, green/yellow/red status, violet model and agent
-context, and restrained motion. `src/api/web_ui_styles.inc` is the hand-authored component layer;
-it consumes only the governed `--lake-*` roles from the generated token include.
+context, and restrained motion.
 
-Every renderer uses the same application recipe:
+Every page in the shell uses the same frame (`components/Shell.tsx`):
 
 1. A skip link enters the focusable main landmark.
-2. A sticky sidebar shows the viewer's usable workspace, account, administration, and developer
-   destinations, and marks the current page with `aria-current="page"`.
-   [Front-door navigation](front-door.md) records the visitor, account, and operator matrix.
-3. A sticky top bar carries page context, session controls, and the theme control. The root's
-   `scroll-padding-top` (top-bar height plus `--lake-space-4`) lands a `#fragment` target, such as
-   a pipeline's `#proposal` notice, below the bar instead of under it (lake#438).
+2. A rail shows the viewer's destinations and marks the current page with `aria-current="page"`.
+   [Front-door navigation](front-door.md#navigation) records the visitor, account, and operator
+   matrix.
+3. A sticky top bar carries the picker, the breadcrumb, Go to, the theme switch and the session
+   controls. The root's `scroll-padding-top` (top-bar height plus `--lake-space-4`) lands a
+   `#fragment` target below the bar instead of under it (lake#438).
 4. A bounded content area presents the eyebrow, one `h1`, supporting copy, actions, panels, and
-   dense data regions.
+   dense data regions (`Page` in `src/lib/ui.tsx`).
 
 The component contract covers panels and cards; primary, secondary, and destructive buttons;
-text, select, checkbox, and textarea controls; compact tables with sticky headers, hover rows,
-sort indicators, and expandable identifiers; neutral and semantic badges with status dots; tabs,
-empty states, notices, toasts, code blocks, diffs, pagination, breadcrumbs, and inline SVG icons.
-Existing page markup uses these shared selectors, so the operator and Lake identity routes move
-together without adding renderer-side CSS.
-The public transparency monitor uses the same shell and the two shared theme scripts; it adds no
-page-specific script. File pages add one local script for line-range selection. The page remains
-readable, and each individual line anchor works, when that script does not run. Change pages add
-one local script for the diff-layout toggle and full-identity copy control; unified review and
-hover disclosure remain available without it.
-Forge empty states name the absent record type. The shared pending state is a polite busy status,
-and repository errors are alerts with an ordinary recovery link; both use the same shell, focus
-order, tokens, and reduced-motion rule as completed pages.
+text, select, checkbox, and textarea controls; compact tables with sticky headers and hover rows;
+neutral and semantic badges with status dots; tabs, empty states, notices, toasts, code blocks,
+diffs, pagination, breadcrumbs, and icons. Empty states name the absent record type, and a failed
+read is shown as an error, never as an empty list (`npm run build` refuses a list without its
+error state, `scripts/check-list-errors.mjs`).
 
-Hosted application identity pages use a compact version of the same token, font, form, focus,
-theme, and motion contracts. Their validated application accent is a decorative rule and their
-background color is mixed lightly into the governed canvas; readable text and controls retain the
-design-system roles in both themes. Application management tables use the shared horizontal
-scroll container so their identifiers cannot overlap neighboring forms.
+Icons: `components/Icon.tsx` draws lake's own 16 × 16 navigation and theme icons and returns
+nothing for an unknown name, so an unreviewed icon cannot slip in. The app also uses
+`lucide-react` for a few controls (the Ask Orama panel's buttons). Icons are decorative
+(`aria-hidden`); the accessible name stays on the surrounding link or button.
 
-`web_ui_icon(name)` returns decorative, focus-disabled SVG for the approved navigation and theme
-names. Accessible names stay on the surrounding link or button. Unknown names return an empty
-string so an unreviewed icon cannot silently enter the interface.
+Hosted application identity pages are still rendered by lake. They use a compact version of the
+same token, font, form, focus, theme, and motion contracts. Their validated application accent is a
+decorative rule and their background colour is mixed lightly into the governed canvas; readable
+text and controls retain the design-system roles in both themes.
 
 ## Capitalization
 
@@ -107,9 +123,9 @@ indexes").
 
 | Where | Case | Examples |
 |---|---|---|
-| Sidebar links (`nav()`), sidebar section labels | Title Case | Projects, Search Indexes, Shared with Me, Public Repositories |
-| Page and section titles (`workspace_sections`), `<h1>`–`<h4>` | Title Case | API Tokens, Connect One of Your Services, Sign In with a Passkey, Who Can Access This Folder Now |
-| Body text, buttons, form labels, table headers, eyebrows, `<title>` | Sentence case | *Start your workspace* (button), *The decision it should improve* (label) |
+| Rail links and group labels (`NAV` in `frontend/src/routes.tsx`) | Title Case | Projects, Search Indexes, Shared with Me, Public Repositories |
+| Screen titles (`routes.ts`), page and section titles, `<h1>`–`<h4>` | Title Case | API Tokens, Connect One of Your Services, Sign In with a Passkey, Who Can Access This Folder Now |
+| Body text, buttons, form labels, table headers, eyebrows | Sentence case | *Start your workspace* (button), *The decision it should improve* (label) |
 | A heading that is a full sentence ending in `.`, `?` or `!` | Sentence | *Design, train, and ship AI on your own data.* |
 
 Title Case here: capitalize every word except articles (*a, an, the*), coordinating conjunctions
@@ -123,37 +139,34 @@ Tests that look for a heading search for its Title Case text.
 
 ## Themes and responsive behavior
 
-The sidebar is sticky and one viewport tall; `.app-shell` paints its column (surface and right
-border) as a background, so the column runs the full height of a long page. Below `58rem` the
-sidebar becomes a top strip and the shell paints nothing.
-
 The light theme is the default and `prefers-color-scheme` selects dark when there is no explicit
-choice. The theme button stores `light` or `dark` in `localStorage["lake-theme"]`; a short script in
-the document head applies that preference before CSS loads, avoiding a wrong-theme flash. The
-second shared script owns the button and its changing accessible label. No page data is read or
-mutated by either script.
+choice. The theme button stores `light` or `dark` in `localStorage["lake-theme"]`; a short script
+in `index.html` applies it before the styles load, avoiding a wrong-theme flash. Charts redraw
+when the theme changes.
 
-Below 58rem, the sidebar becomes a horizontally scrollable navigation region above the page. At
-40rem, gutters and headings compact, definition lists stack, and filters fill the available width.
-Wide tables remain horizontally scrollable rather than clipping identifiers. Reduced-motion users
-get effectively immediate transitions and no smooth scrolling.
+At 1024 px and wider the rail is a sticky column that can collapse to icons. Below 1024 px it is
+an off-canvas drawer, opened from the menu button and closed by Escape, the scrim or navigation.
+At 40rem, gutters and headings compact, definition lists stack, filters fill the width, the
+breadcrumb shows its last two levels, and the picker takes its own row
+([workspace-selection.md](workspace-selection.md#the-picker)). Wide tables scroll horizontally
+rather than clipping identifiers. Reduced-motion users get effectively immediate transitions and
+no smooth scrolling.
 
 ## Accessibility contract
 
 - Page structure uses labeled navigation plus `header`, `main`, and supporting `aside` landmarks.
-- The skip link, visible focus rings, and source-ordered navigation support keyboard-only use.
+- The skip link, visible focus rings, and source-ordered navigation support keyboard-only use;
+  Go to opens with ⌘K or `/`, and **G** then a letter jumps to a rail group.
 - Visible controls have associated labels; icon-only controls carry an accessible label.
 - Color is never the only status signal: semantic badges retain text and a dot.
 - Action, danger, focus, and status colors keep their governed meanings in both themes.
 - Native controls and shared buttons use at least the design system's small control height.
+- Overlays move focus inside when they open and return it to the opener when they close; Escape
+  closes them, and an Escape or Cancel on a confirmation sends no action.
 
-Lake keeps pure C++ renderers; the generated token layer is committed, so neither deployment nor
-request handling invokes Node. Renderer tests use in-memory byte strings to prove SHA-256 URL
-changes and cache-policy selection without filesystem or network access.
+## Contrast proof
 
-### Contrast proof
-
-`node tools/ui/check-contrast.mjs` resolves the committed generated tokens and fails if normal text
+`node tools/ui/check-contrast.mjs` (CTest `lake-ui-contrast`) resolves the committed generated tokens (`src/api/web_ui_tokens.inc`, identical to `tokens.css`) and fails if normal text
 or semantic status text is below 4.5:1, or if a focus indicator or strong boundary is below 3:1.
 The current output is:
 
@@ -186,6 +199,10 @@ dark   border/surface       #606270     #151519      3.02  3.0  PASS
 ```
 
 ## Seeded screenshot fixture
+
+**Historical: these images show the server-rendered UI**, before lake#561. They are kept for
+comparison with the web app and are not regenerated; the folder list is in
+[README.md](README.md#screenshots).
 
 `lake-ui-fixture` runs the production HTTP server with representative customer, organization,
 identity, repository, team, SSO, policy, secret, encryption, export, sharing, metering, and audit

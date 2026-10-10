@@ -2,72 +2,95 @@
 
 ## What
 
-`GET /ship/apps` lists the selected customer's apps with name, URL, observed phase, mode,
-revision or image, and binding summary. It also has separate forms for runtime apps sourced from
-a Lake repository and image apps. `GET /ship/app?customer_id=<id>&app_id=<id>` is the operating
-page for one app: desired and observed status, URL, deployment and rollback history, app and build
-logs, masked environment references, Zetta and managed-service bindings, authentication, and the
+`/w/<workspace_id>/ship/apps` (`frontend/src/pages/apps/AppsPage.tsx`) lists the space's apps
+(`list_apps`) with name, URL, observed phase, mode, revision or image, and binding summary. It has
+separate forms for runtime apps sourced from a lake repository (the repository choices come from
+`list_repositories`) and for image apps, both `create_app`.
+
+`/w/<workspace_id>/ship/app?app_id=<id>` (`AppPage.tsx`) is the operating page for one app
+(`get_app`): desired and observed status, URL, deployment and rollback history, app and build logs,
+masked environment references, Zetta and managed-service bindings, authentication, and the
 confirmed delete control.
 
-All forms are adapters over the customer-scoped app capabilities. They retain the signed-in
-principal, registry policy, audit record, and `x-lake-action` classification used by REST and MCP.
-The page does not write app rows or operator state directly.
-
-## Live state
-
-The app page starts at the retained `receive_app_events` history and long-polls that capability
-through its REST route. The next sequence is kept per app in browser local storage, so opening the
-page again resumes after the last event. Lake and the operator continue publishing to
-`app-events.<app>` while no page is open. The live log uses text nodes and never treats event data
-as HTML.
-
-When the independently delivered build capabilities are present, the page calls `list_builds`,
-`get_build`, and `build_logs`, offers `build_app` and `cancel_build`, and follows each
-`receive_build_events` stream with the same cursor behavior. An older lake answers
-`unknown_capability`; the page then says builds are unavailable and every app control still works.
-
-## ApplicationAgent
-
-The Apps list checks the Agent Library for the deployed `agent-application` registration. When it
-is available, **Build an App With the ApplicationAgent** starts an `agent_turn` with `agent:
-agent-application` and `kind: app`, redirects with the task id, and follows the background turn.
-The first turn has read tools only: workspace queries and SQL, datasets, services, the
-customer's repositories (`list_repositories`, `get_repository`, tree and files) and apps. The
-repository reads let a confirmed retry find the repository its earlier attempt created instead
-of creating a second one.
-
-If the turn asks a question or has no proposal, the result includes a **Reply** box. Its source
-task ID selects the same ApplicationAgent `app` conversation and supplies the preceding turn to
-the follow-up. Lake rejects tasks belonging to another person, space, agent or kind, and rejects a
-reply after a proposal is ready for confirmation.
-
-A successful proposal renders the agent's reply, App settings, and every proposed file. The
-confirmation form carries the SHA-256 of the exact stored proposal. Lake reloads the task for the
-same customer, verifies that it is a succeeded ApplicationAgent `app` task and that the digest is
-unchanged, then starts a second turn with the proposal at `context.confirmed_proposal`. Only that
-turn receives repository writes plus `create_app`, `deploy_app`, and the build chain (`build_app`, `get_build`, `receive_build_events`, `build_logs`) for apps whose dependencies need a built image. A changed digest, another kind
-of task, or a proposal that did not request confirmation is refused. A deployed result shows its
-URL.
-
-A proposal whose app has public access (`auth` `none` or `public`) shows **Access: Public — no
-sign-in**, a warning that anyone with the app's address can open it, and a required *I understand
-this app will be public* checkbox (lake#452). Confirming without it is refused and starts no turn;
-with it, the confirmed turn carries `context.confirm_public: true`, which `create_app` requires
-before it creates a public app for the agent.
+Every control calls its capability directly, as REST and MCP callers do, with the signed-in
+person's authorization and audit. The page writes no app rows or operator state of its own.
 
 ## Controls
 
-The app page exposes restart, scale, stop/start, deploy and history-bound rollback, build/cancel,
-plain or Secret-referenced environment updates, Zetta attach/detach, existing-service
-attach/detach, create-and-attach service, and authentication changes. Public authentication
-requires its separate confirmation checkbox. Delete requires the exact app name. Secret
-references render only as `••••••` and are not included in page source.
+| Control | Capability |
+|---|---|
+| Restart, Stop, Start | `restart_app`, `stop_app`, `start_app` |
+| Scale | `scale_app` |
+| Deploy, Rollback (to a revision in the history) | `deploy_app`, `rollback_app` |
+| Build, Cancel build, Deploy build | `build_app`, `cancel_build`, `deploy_app` |
+| Set or unset an environment variable, plain or Secret-referenced | `set_app_env`, `unset_app_env` |
+| Attach or detach the workspace Zetta | `set_app_zetta_binding` |
+| Attach or detach an existing service; create and attach one | `bind_service_to_app`, `unbind_service_from_app`, `create_service_and_bind_to_app` (choices from `list_services`) |
+| Authentication | `set_app_auth`; public access needs its own *Confirm public access* checkbox |
+| Delete | `delete_app`; requires the app's exact name |
+| Logs | `app_logs` (its `items`) |
+
+Secret references render only as `••••••` and never appear in the page.
+
+## Live state
+
+The app page reads the retained `receive_app_events` history and then long-polls it (25-second
+waits). The next sequence is kept per app in `localStorage["lake-app-events:<app>"]`, so opening the
+page again resumes after the last event. Lake and the operator keep publishing to
+`app-events.<app>` while no page is open. Event text is rendered as text, never as HTML.
+
+Builds come from `list_builds`. Each build shows its retained `build_logs` and then follows
+`receive_build_events` the same way, with its cursor in `localStorage["lake-build-events:<build>"]`.
+App event panels link to the `app-events.<app-id>` topic and builds to `build-events.<build-id>` in
+Train → Streams.
+
+## ApplicationAgent
+
+The Apps list checks the Agent Library (`list_agent_library`) for a deployed `agent-application`.
+When it is available, **Build an App With the ApplicationAgent** starts an `agent_turn` with
+`agent: agent-application` and `kind: app`, puts the task id in the URL (`?task=`), and follows the
+task with `get_agent_task` every two seconds. The first turn has read tools only: workspace queries
+and SQL, datasets, services, the space's repositories (`list_repositories`, `get_repository`, tree
+and files) and apps. The repository reads let a confirmed retry find the repository its earlier
+attempt created instead of creating a second one.
+
+If the turn asks a question or has no proposal, the result has a **Reply** box. The page reads the
+task again, checks that it still asks something in a conversation, and starts another turn in that
+`conversation_id`.
+
+A successful proposal shows the agent's reply, the App settings and every proposed file. **Confirm**
+reads the task again and checks, in the browser, that it is still a succeeded ApplicationAgent `app`
+proposal asking for confirmation and that it is the same proposal that was shown (its JSON with
+sorted keys compared to what is on screen); otherwise nothing starts. It then starts a second turn
+with the proposal at `context.confirmed_proposal`. Only a turn carrying a well-formed confirmed
+proposal receives repository writes plus `create_app`, `deploy_app` and the build chain
+(`build_app`, `get_build`, `receive_build_events`, `build_logs`) for apps whose dependencies need a
+built image ([../api/web-apps.md](../api/web-apps.md)). A deployed result shows its URL.
+
+**What changed (lake#561).** The server's confirm form recomputed the proposal's SHA-256 against
+the stored task before starting the turn. That check now runs in the page against a fresh
+`get_agent_task` read. `agent_turn` itself grants the write tools to any turn whose
+`confirmed_proposal` has the proposal's shape, as it always did for a REST or MCP caller.
+
+A proposal whose app has public access (`auth` `none` or `public`) shows **Access: Public — no
+sign-in**, a warning that anyone with the app's address can open it, and a required *I understand
+this app will be public* checkbox (lake#452). Confirming without it starts no turn; with it, the
+confirmed turn carries `context.confirm_public: true`, which `create_app` requires before it creates
+a public app for the agent.
 
 ## Verification
 
-`WebUi.ShipAppsRenderControlsMaskedSecretsAndLiveEvents` verifies the pure renderers, masking,
-history-bound rollback, build history, and both polling endpoints. The four
-`HttpServer/HttpResponseIsolation.ShipAppsCreatesOperatesAndFollowsAnApp/*` variants exercise the
-ApplicationAgent start, immutable proposal confirmation and deployed result, then the ordinary App
-routes, with memory and Postgres stores; the memory variants add fake operator status.
-`tools/ui/test-token-gates.sh` checks that the added styles use only design tokens.
+In a workspace with ApplicationAgent deployed: build an app with the agent, reply to a question,
+confirm the proposal (and a public one with and without the checkbox), then on the app page
+restart, scale, set and unset a Secret-referenced variable (it shows as `••••••`), attach and
+detach Zetta and a service, change authentication, follow a build's live log, reload the page and
+see the events resume, and delete with a wrong and then the right name.
+
+The capability contract and its tests are in [../api/web-apps.md](../api/web-apps.md) and
+[../api/builds.md](../api/builds.md).
+
+## Change
+
+A new control calls an existing capability, or a new one registered first. Keep the proposal
+checks before the confirmed `agent_turn`; any check the server must enforce belongs in the
+capability, not the page.

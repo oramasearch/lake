@@ -38,7 +38,9 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 | `src/lib/trail.tsx` | `useTrail([...])` sets a page's breadcrumb; `entityCrumb` shortens ids. |
 | `src/lib/format.ts` | Dates (a date-only value keeps its day in every time zone), numbers, `bytes`, `shortId`. |
 | `src/routes.tsx`, `src/routes/types.ts` | The route registry. Each page group owns `src/pages/<group>/routes.ts`; `routes.tsx` joins them and holds the rail (`NAV`) in lake's order. |
-| `src/components/Shell.tsx` | The rail, top bar, breadcrumb, workspace picker, Go to (⌘K or `/`), theme switch, Ask Orama panel and account menu. |
+| `src/components/Shell.tsx` | The rail, top bar, breadcrumb, workspace picker, Go to (⌘K or `/`), theme switch, Ask Orama panel and account menu ([README.md](README.md#the-shell)). |
+| `src/components/WorkspaceGate.tsx` | The gate a Design, Train or Ship page shows while its workspace Zetta is not ready: why, Start, or the page. |
+| `src/lib/markdown.tsx` | Markdown with lake's heading anchors; raw HTML stays text. |
 
 ## Rules for a page
 
@@ -61,6 +63,45 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
   HTML.
 - **Live views poll or long-poll the capability** that the server page's script called; nothing
   refreshes the whole page.
+
+## How a page runs
+
+- **The viewer comes first.** `SessionProvider` (`src/lib/session.tsx`) reads `viewer` once
+  (fresh for a minute) and renders nothing else until it answers. The rail, the picker, the guards
+  and the forms read it; a failed `viewer` read renders the app as a visitor.
+- **Pages are code-split.** Every screen is `lazyPage(() => import(...))` (`src/lib/lazyPage.ts`),
+  so a page's code loads the first time it is opened. A tab opened before a deploy asks for chunk
+  names the new build no longer has; the first failed import reloads the page once, and a second
+  within a minute shows the error instead of looping.
+- **Reads are cached for 15 seconds** and are not refetched on window focus. A `4xx` is shown at
+  once; only a network failure or a `5xx` is retried, twice (`queryClient` in `src/lib/api.ts`).
+- **Every successful write refreshes every read on screen.** Reads that must be sent as `POST`
+  (`workspace_query`, the `delete_workspace` dry run) go through `postRead`/`usePostRead`, which
+  refresh nothing; calling them through `act` would refetch themselves forever.
+- **Live views** poll or long-poll their capability and stop when the page closes:
+
+| What | How |
+|---|---|
+| An agent task (Ask Orama, Agent Factory, ApplicationAgent, ExperimentsAgent, Project Agent) | `get_agent_task` every 2 s while it works (3 s for the Project Agent's pipeline turns and the Opportunities scan) |
+| A project with a running build, proposal or run; a run page | every read again every 3 s; a run every 15 s while it runs |
+| A workspace being prepared | `workspace_status` every 15 s (`components/WorkspaceGate.tsx`) |
+| App events, build logs | `receive_app_events`, `receive_build_events` long polls, resuming from a cursor kept in `localStorage` |
+| Environment logs | `environment_logs` every 3 s from `next_since`, appending lines |
+| Experiments | `tail_experiment_events` long polls ([experiments.md](experiments.md#live-updates)) |
+| Streams Live | `browse_stream` forward long polls ([streams.md](streams.md)) |
+
+## What the browser keeps
+
+Nothing stored in the browser is a credential or an API default.
+
+| Key | Storage | What |
+|---|---|---|
+| `lake-theme` | `localStorage` | `light` or `dark`; absent follows the system. `index.html` applies it before the styles load. |
+| `lake-rail` | `localStorage` | whether the rail is collapsed |
+| `lake-workspace` | `localStorage` | the last workspace opened under `/w/<id>/`; navigation memory only ([workspace-selection.md](workspace-selection.md)) |
+| `lake-app-events:<app>`, `lake-build-events:<build>` | `localStorage` | the next event sequence to read, so reopening an app resumes |
+| `lake-ask-panel:<workspace>` | `sessionStorage` | the Ask Orama panel's conversation, task and agent for this tab |
+| `lake-chunk-reload` | `sessionStorage` | when the page last reloaded for a missing chunk |
 
 ## Build and check
 

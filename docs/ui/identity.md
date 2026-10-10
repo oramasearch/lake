@@ -2,98 +2,118 @@
 
 ## What
 
-The identity UI exposes the identity-core capabilities as server-rendered pages:
+The identity pages of the web app call the identity-core capabilities directly, as `POST /v1/<name>`
+with a JSON body. A page cannot do anything the REST and MCP surfaces cannot. Identity calls
+belong to no workspace and always go unprefixed. Files are under `frontend/src/pages/account/`.
 
-| Page | Route | Capability path |
-|---|---|---|
-| Sign up | `GET /sign-up`, `POST /identity/sign-up` | `sign_up_password` |
-| Sign in | `GET /sign-in`, `POST /identity/sign-in`, `POST /identity/oauth` | `sign_in_password`, `start_oauth` |
-| MFA challenge | `GET /mfa`, `POST /identity/mfa/verify` | `verify_mfa` with a TOTP or one-use recovery code |
-| MFA management | `GET /mfa`, `POST /identity/mfa/enroll`, `POST /identity/mfa/disable` | `enroll_mfa`, `disable_mfa` |
-| Passkey sign-in | `GET /passkey-sign-in` | `begin_passkey_sign_in`, `sign_in_passkey` |
-| Passkey registration | `GET /passkeys` | `begin_passkey_registration`, `register_passkey` |
-| Sessions and devices | `GET /sessions`, `POST /identity/session/revoke`, `POST /identity/device/revoke` | `list_sessions`, `revoke_session`, `list_devices`, `revoke_device` |
-| Tokens | `GET /tokens`, `POST /identity/token/create` | `create_token`, `list_sessions`, `revoke_session` |
+| Page | Route | File | Capabilities |
+|---|---|---|---|
+| Sign up | `/sign-up` | `SignUpPage.tsx` | `sign_up_password` |
+| Sign in | `/sign-in` | `SignInPage.tsx` | `sign_in_password` (then `verify_mfa` when it answers `mfa_required`), `start_oauth` |
+| Sign in under Clerk | `/sign-in`, `/sign-up` | `ClerkSignIn.tsx` | none; Clerk's token is posted to `POST /identity/clerk-session` |
+| MFA challenge (signed out) | `/mfa` | `MfaPage.tsx` | `verify_mfa` with a TOTP or one-use recovery code |
+| MFA management (signed in) | `/mfa` | `MfaPage.tsx` | `enroll_mfa`, `disable_mfa` |
+| Passkey sign-in | `/passkey-sign-in` | `PasskeySignInPage.tsx`, `webauthn.ts` | `begin_passkey_sign_in`, `sign_in_passkey` |
+| Passkey registration | `/passkeys` | `PasskeysPage.tsx`, `webauthn.ts` | `begin_passkey_registration`, `register_passkey` |
+| Sessions and devices | `/sessions` | `SessionsPage.tsx` | `list_sessions`, `revoke_session`, `list_devices`, `revoke_device` |
+| Tokens | `/tokens` | `TokensPage.tsx` | `list_sessions`, `create_token`, `revoke_session` |
+| Operator sign in | `/login` | `LoginPage.tsx` | none; an ordinary form posted to `POST /session` |
 
-The `POST /identity/*` routes are form adapters. They construct the same JSON input and call the
-single registry, so a page cannot perform an action the REST and MCP surfaces do not expose.
-Passwords and TAAP documents are never put in a URL. A newly created token is shown once, escaped
-inside the response page. MFA enrollment likewise shows the authenticator URI and recovery codes
-once, with every value HTML-escaped. Re-enrollment replaces the current seed and recovery codes;
-disablement requires a fresh TOTP or unused recovery code.
+- **Secrets are shown once and never stored.** A new token's secret, the MFA authenticator URI and
+  the recovery codes live only in that page's memory and are gone when it is left. Re-enrollment
+  replaces the current seed and recovery codes; disabling requires a fresh TOTP or an unused
+  recovery code.
+- **Passwords and identity documents never go in a URL.** They travel in the JSON body.
+- **The MFA step keeps its input in memory.** When `sign_in_password` answers `mfa_required`, the
+  page asks for the code and calls `verify_mfa` with the email and password it still holds.
+- **Sessions mark the current one.** `viewer.session_id` names the session this browser uses;
+  revoking it signs this browser out and opens `/sign-in`. Revoking a device invalidates both its sessions and its
+  linked passkey credential. Passkey devices carry the credential ID and lake-signed TAAP binding
+  on the `list_devices` response.
+- **Passkeys are hidden under Clerk.** The account menu omits Passkeys when `viewer.clerk.enabled`.
 
-The sessions page resolves session and device rows by the authenticated user ID. Passkey devices
-carry the credential ID and lake-signed TAAP binding on the `list_devices` API response; revoking
-one invalidates both its sessions and its linked passkey credential.
+## Where sign-in goes
 
-## Application identity
+Sign-in pages leave with a full page load (`leaveFor` in `signIn.ts`), so the whole app and its
+`viewer` read start again as the new session. The destination (`returnTarget`):
 
-An operator registers applications at `/applications`, choosing the workspace of a space that will
-hold the application's lifecycle events (it never changes), and follows the application detail
-page to pool users, application organizations, lifecycle events, and webhook registration. The
-event log reads the events and their delivery attempts from that workspace's Zetta (lake#356), and the
-users and organizations pages read theirs there too (lake#353, lake#354), and the webhook form
-registers the webhook, with its sealed secret, in the same workspace (lake#355). The application's
-name, origins, redirect URIs and theme are read from that workspace too (lake#351): the
-applications list shows an application whose settings cannot be read by its id, and the hosted
-and custom-domain pages answer the error instead of rendering. Those pages
-call the application capabilities through the registry and use the application policy object for
-authorization. Protected application mutations are recorded by the same signed audit path.
+1. `?return_to=` when it is a Ship app's `/apps/authorize?…` (set by that route, lake#561;
+   [web-apps.md](../api/web-apps.md#lake-protected-app-authentication));
+2. else `?next=` when it is a same-origin path (one leading `/`, never `//host` or `/\host`) — a
+   protected page sends a visitor to `/sign-in?next=<that page>`;
+3. else the page's default: `/sessions` after sign-in, `/repositories` after sign-up.
 
-End users enter through `/apps/<application-id>/sign-up`, `/sign-in`, `/mfa`, or
-`/passkey-sign-in`. A configured custom host serves the corresponding root entry paths and lake
-selects the application from the request host. Each form supplies the application's pool to the
-ordinary identity capability. Browser origins must match the hosted origin or an allowed origin;
-OAuth redirects must match a registered redirect URI. Successful sign-up and sign-in return the
-application access token as well as the HttpOnly session cookie.
+Links between sign-in pages carry `next` and `return_to` along. Under Clerk, the pending return is
+posted with Clerk's token as `next` ([clerk.md](../api/clerk.md#how-it-works)). OAuth sends the
+browser to the provider's `authorization_url`; lake's callback sets the cookie.
 
 ## Browser sessions
 
-Successful password, TOTP, OAuth, and passkey sign-in sets
+Successful password, TOTP, OAuth, Clerk and passkey sign-in sets
 `lake_session=<secret>; HttpOnly; SameSite=Lax; Path=/`, plus `Secure` when the request arrived
-through HTTPS. The REST session-issuing capabilities set the cookie too. Every protected page
-resolves it through `context_for`, so revoking its session or device takes effect on the next
-request. `/login` remains the separate operator-token form, but it resolves through that same
-request context. An operator credential is redirected to `/repositories` instead of entering the
-user-only identity pages.
+through HTTPS. The REST session-issuing capabilities set the cookie themselves, so the page never
+sees or stores the secret. Every request resolves the cookie through `context_for`, the same code
+that resolves an API bearer, so revoking a session or device takes effect on the next call. A
+cookie-authenticated write must come from lake's own origin and be `application/json`
+([cross-site requests](../serving/http.md#cross-site-requests)).
 
-## Passkey script exception
+**Sign out** is a form posted to `POST /logout` (account menu, `signOut` in `components/Shell.tsx`):
+it revokes the session and clears the cookie, then follows the server's redirect (under Clerk,
+its sign-out page).
 
-Every page includes the shared pre-paint theme preference and theme-toggle scripts described in
-[`design-system.md`](design-system.md). `/passkeys`, lake's `/passkey-sign-in`, and each application
-passkey sign-in page add exactly one inline script. The passkey script converts
-base64url fields to browser byte arrays, calls `navigator.credentials.create` or
-`navigator.credentials.get`, and posts the result to the registered REST capabilities. It does
-not write the session cookie; the REST response sets an `HttpOnly` cookie. Application themes
-change validated CSS colors and escaped text only.
+**The operator** signs in at `/login` with the operator token. `POST /session` compares it in
+constant time and sets the same cookie; the token never passes through the page's script. An
+operator credential has no account pages: they show *This page belongs to an account*.
 
-## How to verify
+## Application identity
 
-```sh
-cmake --build build
-ctest --test-dir build --output-on-failure -R 'WebUi|IdentityHttp|WebAuthn|Application'
-```
+An operator registers identity applications at `/applications` (`pages/admin/ApplicationsPage.tsx`),
+choosing the workspace of a space that will hold the application's records (it never changes). The
+application page (`/application?id=`) links its users (`/application/users`), organizations
+(`/application/organizations`), lifecycle events and webhook registration
+(`/application/events`). Its settings, users, organizations, events with their delivery attempts,
+and webhooks with their sealed secrets live in that workspace's Zetta (lake#351–lake#356); each
+page reads the application first (`get_application`) and then its list in that workspace. A new
+webhook's secret is shown once. Every call is an application capability, authorized on the
+application's policy object and recorded by the signed audit path.
 
-The renderer tests cover MFA enrollment, challenge and disable forms, one-use value escaping,
-the two shared theme scripts, and the additional passkey script. Application tests cover themed
-hosted forms, the raw JWKS route, pool isolation, JWT audience verification, webhook retry
-history, and operator user suspension.
-`IdentityHttp.PagesIssueAndResolveHttpOnlySessions` submits the sign-up form, checks the
-cookie attributes, loads the authenticated session row on the sessions page, and checks that a
-REST sign-up response also sets an HttpOnly cookie.
-
-## How to change
-
-Add behavior to the registry first. Keep HTML generation in the pure `web_ui` renderers and make
-the HTTP form adapter call that capability. Add its route to request metrics, renderer tests, this
-table, and the route tables in `README.md` and `docs/serving/http.md`. Theme behavior belongs in
-the shared shell; credential behavior belongs only on documented passkey pages.
+**End users never see the web app.** They enter through `/apps/<application-id>/sign-up`,
+`/sign-in`, `/mfa` or `/passkey-sign-in`, or a configured custom host's root entry paths, where lake
+picks the application from the request host. Lake still renders these pages itself, in the
+application's colours, and they work without JavaScript: their data cannot be read before sign-in,
+and they need the request host for the passkey relying party, the issuer and the OAuth callback.
+Each form supplies the application's pool to the ordinary identity capability. Browser origins
+must match the hosted origin or an allowed origin; OAuth redirects must match a registered redirect
+URI. Successful sign-up and sign-in return the application access token as well as the HttpOnly
+session cookie. See [../api/apps.md](../api/apps.md).
 
 ## First account
 
 `/sign-up` links Liquid installation and `liquid identity show --document`, describes the public
 base64url document, and states that the private key stays on the client. Invalid encoding and
-truncated CBOR get specific recovery instructions. Success redirects to `/repositories`, where
-the new customer owner can create a private repository through the registry-backed form. See
-[sign-up-walkthrough.md](sign-up-walkthrough.md) and
-[../api/provisioning.md](../api/provisioning.md).
+truncated CBOR get the capability's specific recovery message. Success opens `/repositories`, where
+the new owner creates a workspace and then a private repository. See
+[sign-up-walkthrough.md](sign-up-walkthrough.md) and [../api/provisioning.md](../api/provisioning.md).
+
+## How to verify
+
+```sh
+cmake --build build
+ctest --test-dir build --output-on-failure -R 'IdentityHttp|WebAuthn|Application|WebApp'
+```
+
+`HttpServer/HttpResponseIsolation.SignInReturnsWhereTheUrlSaysAndOnlyThere`
+checks `return_to` and `next` and refuses foreign returns. Application tests cover themed hosted
+forms, the raw JWKS route, pool isolation, JWT audience verification, webhook retry history, and
+operator user suspension.
+
+In a browser: sign up, enroll MFA on `/mfa`, sign out, sign in with the password and a code,
+register a passkey and sign in with it, create and revoke a token on `/tokens`, and revoke the
+current session on `/sessions` (the page goes to `/sign-in`). Revoke the session from another
+browser instead, and this one's next call shows *Your session has ended*.
+
+## How to change
+
+Add behaviour to the registry first, then call it from the page with `act`/`useRead` and
+`NO_WORKSPACE`. Never add a sign-in path that sets the cookie outside a capability or the server's
+sign-in routes ([README.md](README.md#what-lake-serves)). Update this table and the page table in [README.md](README.md#pages).

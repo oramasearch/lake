@@ -1,75 +1,111 @@
 # Workspace Selection and Navigation
 
-The top bar has one space selector and one workspace selector. Workspaces are non-deleted contract rows
-of that space. The viewer's own personal space is labelled *Personal space*, not its generated
-handle; other spaces keep their names. A workspace is labelled by its name alone (names are unique
-among a space's live workspaces); its environment is listed on `/workspaces` (lake#452). A sole workspace is selected but remains visible; selection is sent explicitly.
-Changing space refreshes its workspace choices. New workspace opens `/workspaces`, which lists
-name, environment, phase, namespace and created time, and accepts name/environment for creation.
-It writes desired state through `create_workspace`; the operator provisions the namespace and
-Zetta. Delete opens a confirmation on the same page (`/workspaces?delete=<workspace_id>`) that
-lists what goes with the workspace, with counts: its Zetta and every record in it, its repositories
-(live and deleted but still retained), its apps, its unfinished builds and its images. It states
-that the deletion cannot be undone and requires typing the workspace name; a wrong name returns to
-the confirmation with the error ([deletion](../api/workspaces.md#deletion), lake#514). Pending and
-stopped workspaces remain selectable.
-IDs are `workspaces.id`, not service IDs. This management page is outside the `/w/` prefix so the
-first workspace can be created before a selection exists.
-Switching from Workspaces stays on that management page. Explicit space selection takes
-precedence over a remembered workspace from another space on control-plane pages.
+**What.** Design, Train, Ship and Ask Orama work in one workspace of one space, and the page URL
+says which: `/w/<workspace_id>/design/projects`. The top bar's picker changes it. Everything else
+(repositories, organizations, account pages, Services, Deployments, Workspaces) is outside `/w/`
+and names its space or workspace in its own input.
 
-Design, Train, Ship, Ask and the workspace proxy use `/w/<workspace_id>/...`. `/w/<workspace_id>`
-and `/w/<workspace_id>/` (GET or HEAD) redirect to the workspace's home,
-`/w/<workspace_id>/design/projects`, keeping the query; the home request validates the ID as every
-workspace page does (lake#452). Navigation ownership
-is evaluated on the local page path, so `aria-current="page"` follows the selected page while
-links retain the workspace prefix. Shared rendering carries the ID into URL attributes, inline
-navigation scripts, and hidden form fields. It does not rewrite ordinary hidden field values.
-Live app/build, Streams and Experiments requests send the same ID to REST explicitly.
+**Why the URL.** The address is the whole context: it can be bookmarked, shared and opened in two
+tabs at once with two workspaces, and the capability calls a page makes follow from it. Before
+lake#561 the server remembered the choice in a `lake_workspace` cookie and rewrote every link and
+form into `/w/<id>/`; both are gone.
 
-URL rewriting uses one forward scan with tracked script state and append-only output. Hidden
-workspace fields use a separate forward pass over forms. Both are linear in document size:
-large run lists do not repeatedly search earlier HTML or shift the remaining document for each
-link. Already-prefixed URLs and forms with an existing workspace selector or hidden field remain
-unchanged, so applying the rewrite again is safe. Global links, external links and ordinary
-hidden values retain their original targets.
+## The URL
 
-When changing URL generation, run `ctest --test-dir build -R '^WebUi.Workspace'` and the
-`PagePerformance` test with PostgreSQL configured. The rewrite tests cover mixed script and
-attribute URLs, query strings and fragments, explicit other-workspace targets, incomplete forms,
-and 2,000-row documents. The [page budget](performance.md) includes this rendering work.
+- **A workspace page** (`workspace: true` in its `routes.ts`) answers at `/w/<workspace_id><path>`.
+  Its query parameters are unchanged (`/w/<id>/design/project?name=churn`).
+- **Its unprefixed address** (`/design/projects`, from an old link or the docs) opens the same page
+  in the current workspace: the remembered one when the `viewer` read accepts it, else the only
+  workspace across the viewer's spaces. With neither it shows *Choose a Workspace* with a link to
+  Workspaces. A visitor is sent to sign in (`WorkspaceRedirect` in `src/App.tsx`).
+- **`/w/<workspace_id>` and `/w/<workspace_id>/`** open the workspace's home,
+  `/w/<workspace_id>/design/projects`, keeping the query.
+- **The rail** marks the current item by the path without its `/w/<id>` prefix (`localPath` in
+  `routes.tsx`), and its Design, Train and Ship links carry the current prefix.
+
+## Only `/w/` pages scope API calls
+
+`src/lib/session.tsx` sets the prefix from the page URL, and `src/lib/api.ts` sends every
+capability called from a `/w/<id>/` page to `/w/<id>/v1/<name>`. Lake fills `workspace_id`
+from that prefix and answers `invalid_input` when the input names a different one
+([../serving/http.md](../serving/http.md#workspace-api-prefix)). A page outside `/w/`
+calls `/v1/<name>` unprefixed, whatever workspace was used last, and passes `customer_id` or
+`workspace_id` itself where the capability needs one (the Workspaces page, Services, the
+repository create form, Drive sharing, secret mounts).
+
+## The remembered workspace
+
+The browser keeps the last workspace it opened under `/w/` in `localStorage["lake-workspace"]`.
+It is navigation memory only:
+
+- it chooses where an unprefixed workspace link goes, and which workspace the rail's links open
+  from a page outside `/w/`;
+- it is sent as `workspace_id` to the `viewer` read, which accepts it only when it is live in one
+  of the caller's spaces and otherwise answers that space's only workspace, or none
+  ([../api/web-app.md](../api/web-app.md#viewer));
+- it never scopes an API call and is never a credential. Clearing it changes nothing a capability
+  does.
+
+## The picker
+
+`components/WorkspacePicker.tsx`, shown to a signed-in viewer with at least one space:
+
+- **Space** lists the viewer's spaces. The viewer's own personal space is labelled *Personal
+  space*, not its generated handle; other spaces keep their names. Choosing a space with exactly
+  one live workspace opens it; otherwise it opens `/workspaces?customer_id=<space>` to choose or
+  create one.
+- **Workspace** lists the chosen space's live workspaces by name (names are unique among a space's
+  live workspaces; the environment is on Workspaces, lake#452). Pending and stopped workspaces are
+  listed. When the URL names no workspace of that space it reads *Choose a workspace*.
+- Choosing a workspace keeps the page: a workspace page reopens at the same path and query under
+  the new workspace; any other page opens the new workspace's Projects.
+- **New workspace** opens `/workspaces?customer_id=<space>`.
 
 At phone width (`max-width: 40rem`) the top bar wraps: the actions keep the first row, and the
-selectors (`.workspace-picker`: two equal columns and *Switch*) and the trail take a full-width row
-below, so a 390 px viewport shows the whole space and workspace names instead of `gr…` and `wo…`.
-The taller bar is not sticky there, and table headers stick to the top. `WebUi.PhoneWidthGivesTheWorkspacePickerItsOwnRow`
-checks the rendered order and these rules; run `tools/ui/test-token-gates.sh` after changing them.
+picker (two equal columns and *New workspace*) and the trail take a full-width row below, so a
+390 px viewport shows whole space and workspace names. The taller bar is not sticky there, and
+table headers stick to the top (`lake.css`).
 
-The selection form submits to `/workspace/select`. Switching keeps the page and query filters,
-removing old customer/workspace query values. Lake records `lake_workspace`, an HttpOnly,
-SameSite=Lax navigation cookie. It is never an API default or an authorization credential.
-Every remembered selection is checked against the caller's accessible spaces and workspace rows.
-Within one GET request, middleware, the handler and navigation share the resolved credential
-context and the authorized customer-list result. A subsequent request resolves both again;
-session revocation, new spaces and workspace selection changes are not cached across requests.
-POST handlers do not reuse a pre-mutation page context. Capability authorization and auditing
-still run for each distinct capability call.
-Old GET routes redirect to the remembered workspace or the space's sole workspace. With several
-workspaces and no valid selection, Lake asks the person to choose. Old mutation URLs are refused.
+## A workspace that is not ready
 
-The canonical path is authoritative. A contradictory query workspace/customer is refused;
-workspace form posts require one `workspace_id` matching the path. REST/MCP callers do not get a
-cookie-based fallback. Task-bound and app credentials cannot cross workspace boundaries.
+`components/WorkspaceGate.tsx` wraps Design, Train and Ship content. It reads `workspace_status`
+and shows why the page is unavailable (no space, no workspace control plane, a failed status
+read), that the workspace Zetta is being prepared (checked again every 15 seconds), that it
+failed, or **Start** when it was never started (`start_workspace`). The Agent Library shows
+whether or not the workspace is ready, because it is lake's, not the workspace's.
 
-Coverage includes pure navigation/form rendering, raw HTTP legacy redirects, remembered selection,
-same-page switching with filters, explicit mismatched/missing form refusals, and new-workspace
-provisioning. Existing page scenarios select their test workspace explicitly before making
-requests; their workspace-aware HTTP helper sends the same path and hidden field a browser uses.
+## The Workspaces page
 
-`WorkspaceNavigationHttp.SelectorRedirectsRememberedWorkspaceAndValidatesForms` exercises the
-server without that helper's selection support. `WebUi.WorkspacePathOwnsNavigationAndEveryFormCarriesTheSelection`
-checks active navigation and repeated rendering. The HTTP page scenarios cover Ask, Agent Factory,
-pipelines, Streams, apps and experiments with explicitly selected workspaces.
+`/workspaces` (`pages/workspaces/WorkspacesPage.tsx`) is outside `/w/` so the first workspace can be
+created before one exists. It lists the chosen space's workspaces with name, environment, phase,
+namespace and created time, and creates one from a name and an environment (`create_workspace`;
+`dev`, `staging`, `prod` or a lowercase DNS label). It writes desired state; the operator
+provisions the namespace and Zetta.
 
-The storage rule, migration, retention, cleanup and cross-repository follow-ups are in the
+**Delete** opens a confirmation on the same page (`/workspaces?customer_id=…&delete=<workspace_id>`).
+It first reads `delete_workspace {dry_run: true}` and lists what goes with the workspace, with
+counts: its Zetta and every record in it, its repositories (live, and deleted but still retained),
+its apps, its unfinished builds and its images. It says the deletion cannot be undone and asks for
+the workspace's name; a wrong name is refused by the capability and shown on the field
+([deletion](../api/workspaces.md#deletion), lake#514).
+
+## How to verify
+
+- Open `/design/projects` signed in with one workspace: the address becomes
+  `/w/<id>/design/projects`. With two workspaces and no remembered one, the page asks.
+- In the Network panel, a call from `/w/<id>/train/data` goes to `/w/<id>/v1/…`, and a call from
+  `/repositories` goes to `/v1/…`, after either order of visits.
+- Switch workspace on `/w/<a>/train/runs?project=x`: the page reopens at `/w/<b>/train/runs?project=x`.
+- Clear `localStorage` and reload a `/w/<id>/` page: it opens the same workspace.
+- `HttpServer/HttpResponseIsolation.TheViewerSaysWhoIsSignedInAndWhereTheyAre` checks the `viewer`
+  read's workspace validation.
+
+## How to change
+
+A page that works in a workspace sets `workspace: true` in its `routes.ts` and builds its links
+with `workspacePath` (or the page group's `ws(...)` helper). Never read `lake-workspace` to decide
+what a capability call is about; take the workspace from the URL. A new top-level path prefix that
+holds workspace pages is added to `isWorkspacePath` in `routes.tsx`.
+
+The storage rule, migration, retention and cross-repository follow-ups are in the
 [workspace data-plane design](../architecture/workspace-data-plane.md).

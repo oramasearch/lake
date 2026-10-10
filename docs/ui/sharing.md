@@ -1,15 +1,19 @@
 # Drive sharing pages
 
-**Status: implemented for lake #44 and #122.** Sharing keeps the folder policy, live grants, expiring
-links, and signed audit outcomes defined in [the sharing API](../api/sharing.md). The pages do not
-introduce a second permission model or a browser-only mutation.
+**Status: implemented for lake #44 and #122; in the web app since lake#561.** Sharing keeps the
+folder policy, live grants, expiring links, and signed audit outcomes defined in
+[the sharing API](../api/sharing.md). The pages call those capabilities from the browser; they add
+no second permission model and no page-only change. Files are in
+`frontend/src/pages/repositories/`: `DriveSharePage.tsx`, `DriveShareLinkPage.tsx`,
+`SharePage.tsx`, `SharePreviewPage.tsx`, `SharedWithMePage.tsx` and `share.tsx` (link state and
+wording).
 
 ## Before a share is made
 
-GET /drive/share?repository_id=<id>&ref=<ref>&path=<folder> begins with the effective-access
-table from drive_effective_access. It identifies every current principal, role, allowed action,
+`/drive/share?repository_id=<id>&ref=<ref>&path=<folder>&workspace_id=<id>` begins with the
+effective-access table from `drive_effective_access`. It identifies every current principal, role, allowed action,
 and whether that access is direct or inherited. The delivery controls then make the four questions
-visible before any form is submitted:
+visible before anything is shared:
 
 | Question or known confusion | Screen answer |
 |---|---|
@@ -22,37 +26,39 @@ visible before any form is submitted:
 | Removing a local sync selection revokes access | The page names policy and link revocation as the access controls. Local sync selection does not appear as a share mutation. |
 | A downloaded copy can be recalled | The independent-copy panel and link-revoke message state that copied bytes cannot be recalled. |
 
-The People and Organization controls both call share_drive_folder with the named TAAP identity,
+The People and Organization controls both call `share_drive_folder` with the named TAAP identity,
 role, and attestation digest. An organization grant is made to that named identity; the table
 shows the identities that actually have effective access. The Link control calls
-create_drive_share_link with its role and required expiry.
+`create_drive_share_link` with its role and required expiry, and shows the new link's address.
 
-Lake does not currently expose a passcode field on create_drive_share_link. The form therefore
-shows a disabled passcode control and says that no passcode is sent or stored. It does not imply a
-passcode protection that the capability cannot enforce.
+Lake does not expose a passcode on `create_drive_share_link`. The form says that passcodes are not
+supported and that no passcode is sent or stored; it does not imply a protection the capability
+cannot enforce.
 
 ## Which workspace holds the links
 
 A folder's links live in one workspace of the repository's space (lake#350). The sharing pages
-carry it as `workspace_id` in every URL and form. GET /drive/share without one redirects to the same
-page with the person's remembered workspace, or the space's only workspace, written into the URL.
-When the space has several and none is remembered, the page asks which one, and only after the
-policy engine confirms that the person can share the folder. The management table names the
-workspace whose links it lists and links to the space's other workspaces.
+carry it as `workspace_id` in every URL and call. `/drive/share` without one first asks
+`my_permissions` whether the person may share the folder (`object_type: "drive folder"`) and shows
+the refusal if not. Then it opens the same page with the current workspace when it is one of the
+space's, else the space's only workspace, written into the URL. When the space has several and
+none is current, the page asks which one. The workspace choices are the space's
+`list_workspaces` when the person may read it, else their own view of the space from `viewer`.
+The management table names the workspace whose links it lists and links to the space's other
+workspaces. `my_permissions` only decides what the page shows; `drive_effective_access` and the
+share capabilities check again.
 
 ## Manage and inspect links
 
 The folder page lists every link on that folder with its audience, allowed use, expiry, and active,
-expired, or revoked state. GET /drive/share/link?...&workspace_id=<id>&link_id=<id> is the individual link page. Its handler
-keeps the query values in its own coroutine frame until the page renders; before lake#497 it passed
-temporaries by reference, and the page answered 400 with "workspace_id must name a workspace Zetta
-in this space".
-It repeats the four answers and provides POST /drive/share/revoke only while the link is active.
-That route calls revoke_drive_share_link; it never changes policy directly.
+expired or revoked state. `/drive/share/link?…&workspace_id=<id>&link_id=<id>` is one link's page.
+lake has no `get_drive_share_link`, so the page finds the link among the folder's links in
+`drive_effective_access`. It repeats the four answers and offers **Revoke** only while the link is
+active (`revoke_drive_share_link`); revoking never changes policy directly.
 
 ## Receive a link without signing in
 
-`GET /share/<token>` opens the live shared folder. Folder names and **Open folder** enter a child;
+`/share/<token>` opens the live shared folder, outside the shell and without a session. Folder names and **Open folder** enter a child;
 file names open the registered preview, and **Download** returns an attachment with the exact
 stored bytes. Unsupported preview formats retain the download action. The rendered role,
 **View – browse and download**, describes those available actions.
@@ -60,11 +66,10 @@ stored bytes. Unsupported preview formats retain the download action. The render
 A child folder provides **Up one folder** and **Shared folder** links. A preview provides
 **Back to folder** and **Download**. All navigation keeps the bearer token and selected ref;
 no control navigates to a broader repository page or asks the recipient to sign in. Navigation
-stops at the shared root. Table wrapping and the existing application shell support 1280 and
-640 pixel viewports in light and dark themes without a page script.
+stops at the shared root.
 
-The page calls `resolve_drive_share_link`; preview and attachment routes call
-`preview_drive_share_link` and `download_drive_share_link` through the registry. Every click checks
+The folder page calls `resolve_drive_share_link` and the preview page `preview_drive_share_link`;
+**Download** is lake's `/share/<token>/download` route, which calls `download_drive_share_link`. Every click checks
 the current link role, scope, expiry, revocation, and descendant policy. A guessed sibling or
 parent is refused. Revoking or expiring a link after listing also refuses the next preview and
 download. The error page has no file actions; an already downloaded independent copy remains
@@ -72,7 +77,7 @@ with its recipient. The complete contract is [the sharing API](../api/sharing.md
 
 ## Shared with me
 
-GET /shared-with-me calls drive_shared_with_me. The capability lists live folders granted
+`/shared-with-me` calls `drive_shared_with_me`. The capability lists live folders granted
 directly to the signed-in TAAP identity, resolves the current folder path from its stable node id,
 and returns only those folders. The page names the grantor, allowed actions, and whether that
 folder still exists at main. It does not present a link as a personal grant or claim that copied
@@ -80,26 +85,17 @@ bytes are revocable.
 
 ## Verification
 
-WebUi.DriveSharingAnswersAccessExpiryAndRevocationQuestions asserts the four questions, passcode
-limitation, revocation consequence, route forms, the workspace carried by every link form and the
-workspace chooser, and escaped sharing values.
-`SharedLinkScenario.SharingPagesNameTheWorkspaceThatHoldsTheLinks` checks the redirect to the
-space's only workspace, a second workspace without the links, the chooser, and its refusal to a
-person who cannot share the folder.
-Drive.FolderSharingMatchesAuthorizeAndLinksExpire also proves the recipient's
-drive_shared_with_me result. The seeded fixture captures the folder sharing page, an individual
-link page, and a recipient's shared-with-me page in both themes through the production HTTP
-server.
-
-`WebUi.SharedLinkProvidesScopedNavigationPreviewAndDownload` checks escaped links, descendant
-navigation, preview/download controls, and the error state. `SharedLinkScenario.*` covers those
-routes through a real Postgres-backed server without a recipient session. The `shared-link`
-seeded page includes a nested child folder and uses the production recipient renderer. Verify its
-folder and preview pages at 1280 and 640 pixels in both themes, and compare the downloaded bytes
-with the original. Repeat the preview and download after expiry and revocation.
-
+As a folder owner, open `/drive/share` on a space with two workspaces (the page asks) and with one
+(it opens it); share with a person, create a link, open its detail page and revoke it. As a person
+who cannot share, open `/drive/share` and see the refusal. As the recipient, open
+`/shared-with-me`. Signed out, open a link, enter a child folder, preview a file, download it and
+compare the bytes; then expire or revoke the link and repeat. `Drive.FolderSharingMatchesAuthorizeAndLinksExpire` and the
+`SharedLinkScenario` scope, revocation and expiry cases cover the link rules
+([../api/sharing.md](../api/sharing.md)).
 
 ## Recipient walkthrough evidence
+
+Historical: recorded against the server-rendered pages, which the captures show.
 
 The issue #122 native walkthrough uses a regular user's private repository with `shared/hello.txt`,
 a nested child folder, binary bytes, and an empty file. Recipient requests omit both cookies and

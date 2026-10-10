@@ -1,195 +1,174 @@
 # Forge pages
 
-Lake's forge is a set of server-rendered views over the repository and forge capabilities. Each
-view is a pure C++ renderer: it receives typed values, returns one HTML document, and performs no
-I/O. The HTTP adapter obtains every value through `Registry::call`, so the page follows the same
-authorization and audit path as REST, OpenAPI, and MCP.
+Lake's forge is a set of web-app pages over the repository and forge capabilities
+(`frontend/src/pages/repositories/`; shared markup in `forge.tsx`). Each page reads its values
+with `GET /v1/<capability>` and changes nothing except through a capability, so it follows the same
+authorization and audit path as REST, OpenAPI and MCP.
 
-Anonymous visitors can read issues, reviews, review comments, and releases for public
-repositories. Private and organization repositories retain their policy checks. Webhook
-configuration, delivery history, and branch protection evidence still require an authenticated
-reader.
+Anonymous visitors can read issues, reviews, review comments and releases of public repositories.
+Private and organization repositories keep their policy checks. Webhook configuration, delivery
+history and branch protection evidence need a signed-in reader (their screens' `audience`).
 
 ## Repository home
 
-`GET /repository?id=<id>` presents a repository as a working forge rather than a metadata record.
-The page leads with repository navigation, then shows the published tree, recent changes, a
-server-rendered README, references and releases, clone and push commands, indexed language and
-logical-size totals, and effective access. The first published reference is the default. An empty
-repository keeps the same layout and gives distinct empty states for files, changes, README,
-references, indexed sizes, and access.
+`/repository?id=<id>` (`RepositoryPage.tsx`) presents a repository as a working forge rather than
+a metadata record: repository tabs, then the published tree, recent changes and the README on the
+left; clone and push commands, references and releases, indexed language and size totals,
+effective access and About on the right. The first published reference is the default. An empty
+repository keeps the same layout with distinct empty states for files, changes, README, references,
+indexed sizes and access. A missing README is expected and shows its empty state; any other README
+failure is the page's error.
 
-README Markdown is parsed on the server. Raw input is escaped before the renderer emits any
-markup, inline code stays escaped, and headings receive stable lowercase anchors. Repeated headings
-receive numbered anchors. Raw content HTML is always text; it never enters the response as markup.
+**Markdown** (README, issues, releases, change messages) is rendered in the browser by
+`src/lib/markdown.tsx` with `react-markdown` and `remark-gfm`. Raw HTML in the source stays text,
+never markup; unsafe link schemes are dropped; every heading gets a stable lowercase anchor
+(letters and digits, a run of spaces or hyphens as one dash), and a repeated heading is numbered
+`-2`, `-3`. Links to app pages stay in the app; other links are ordinary links.
 
-Long repository, change, and reference identities use the shared compact form: values of 20 or
-fewer characters remain complete; longer values show the first 12 characters, an ellipsis, and the
-last 7 characters. The full value remains in the element's `title` and `data-full-identifier`
-attributes. Pages use the complete value for links and capability calls.
+**Identifiers.** Long repository, change and reference identities use one compact form (`Identifier`
+in `forge.tsx`): 20 characters or fewer stay whole; longer values show the first 12 characters, an
+ellipsis and the last 7. The full value is in `title` and `data-full-identifier`; links and calls
+use the full value.
 
-The tree uses native `details` and `summary` elements for expansion, so the structure remains
-available without JavaScript. Clone and push examples use the repository sync URL documented in
-[`../api/sync.md`](../api/sync.md) and keep credentials in `LIQUID_TOKEN`, never in the URL.
-The URL comes first from `LAKE_EXTERNAL_ORIGIN` (or `--external-origin`), including its scheme and
-non-default port. When that is unset, Lake uses `https://` plus `LAKE_PUBLIC_HOST`, the hostname
-already used for OAuth callbacks. Request and proxy headers cannot replace either value. With
-neither configured the panel explains the missing setting and omits commands. See
-[`../serving/configuration.md`](../serving/configuration.md) for validation and proxy configuration.
-
-The first block runs `liquid clone` into a new directory and then enters that directory. The
-second runs `liquid push` from that checkout after changes have been captured and named. The
-panel tells the user to export an account token issued by this instance as `LIQUID_TOKEN` before
-running either block. URLs and directory names are shell-quoted before HTML escaping.
-
-`tests/instance_origin.mjs` opens the actual PostgreSQL-backed page in Chromium, copies the two
-blocks from its DOM, and executes those exact strings. It uses an explicitly configured,
-non-default loopback port, rejects off-origin browser requests and terminal URLs before execution,
-and compares binary and empty-file bytes after clone and a binary edit after push into a fresh
-clone. The private installation and proof commands are in
-[`../deployment/private-install.md`](../deployment/private-install.md).
+**Clone and push.** The commands use `viewer.external_origin`: `LAKE_EXTERNAL_ORIGIN` (or
+`--external-origin`), including its scheme and non-default port, else `https://` plus
+`LAKE_PUBLIC_HOST`. Request and proxy headers cannot replace either value. With neither configured
+the panel explains the missing setting and shows no commands
+([../serving/configuration.md](../serving/configuration.md)). The first block runs `liquid clone`
+into a new directory and enters it; the second runs `liquid push` from that checkout after changes
+have been captured and named. The panel tells the person to export an account token from
+**Tokens** as `LIQUID_TOKEN` before running either; the token is never in the URL
+([../api/sync.md](../api/sync.md)). URLs and directory names are shell-quoted.
+`tests/instance_origin.mjs` executes the two blocks copied from the page and is described in
+[../deployment/private-install.md](../deployment/private-install.md).
 
 ## Tree and file
 
-`GET /repository/tree?id=<id>&ref=<ref>` presents recursive entries as a file browser. Each row
-keeps the entry kind, mode, logical size, and newest change that touched the path. Directory rows
-also match changes below their path. The HTTP adapter derives this annotation from `list_changes`
-and `change_diff`; the renderer receives only typed values.
+`/repository/tree?id=<id>&ref=<ref>` (`TreePage.tsx`) lists every path of the ref recursively, with
+kind, mode, logical size and the newest change that touched it; directory rows also match changes
+below them. The page derives that from `list_changes` and each change's `change_diff`, a few at a
+time. A directory in a file's breadcrumb jumps to its row by anchor.
 
-`GET /file?repository_id=<id>&ref=<ref>&path=<path>` renders breadcrumbs, complete blob metadata,
-raw and download links, stable `L<number>` anchors, selectable `L<first>-L<last>` ranges, and
-per-line blame. Blame is resolved newest-first from text-hunk ranges in the change log; a change
-without text hunks owns the remaining lines for that version. `GET /file/raw` returns source as
-plain text and `GET /file/download` adds an attachment disposition. Both use the same
-`repository_file` capability and authorization as the HTML page.
+`/file?repository_id=<id>&ref=<ref>&path=<path>` (`FilePage.tsx`) shows breadcrumbs, the complete
+blob metadata, **Raw** and **Download**, stable `L<number>` anchors, selectable `L<first>-L<last>`
+ranges (shift-click a line number extends from the last one clicked) and per-line blame. Blame is
+resolved newest-first from text-hunk ranges in the change log; a change without text hunks owns the
+remaining lines for that version. Raw and Download are lake's `/file/raw` and `/file/download`
+routes, which use the same `repository_file` capability and authorization.
 
-C and C++ extensions are parsed server-side with the tree-sitter grammar target shared by
-liquid's bundled frontends. Parsed source units and a small token renderer add syntax roles. The
-recognized extension list matches those frontends. Every other extension uses the same numbered
-source layout with fully escaped plain text.
+C and C++ files are highlighted in the browser (comments, strings and keywords). The syntax-unit
+shading comes from lake: `repository_file {units: true}` parses the source with the tree-sitter
+grammar target shared by liquid's bundled frontends and returns each unit's line range. Every other
+extension uses the same numbered layout with plain text.
 
 ## Change review
 
-`GET /change?repository_id=<id>&id=<change>` makes the first message line the review title and
-renders the remaining Markdown on the server with the same raw-HTML prohibition as README files.
-It shows compact change, author, parent, and blob identities; review state and reviewers; per-file
-and aggregate addition/removal counts; structural conflict values; line-addressable text hunks and
-their anchored comments; and repository checks with output paths and verified attestation profiles.
-Reviews and comments are selected by change and review identity after their capability reads.
-Change lookup includes changes retained by named review references as well as the current head, so
-an open review remains available before it lands.
+`/change?repository_id=<id>&id=<change>` (`ChangePage.tsx`) makes the first message line the
+review title and renders the rest as Markdown. It shows compact change, author, parent and blob
+identities; review state and reviewers (`list_reviews`); per-file and total addition and removal
+counts; structural conflict values; line-addressable text hunks with their anchored comments
+(`list_review_comments`); and repository checks with output paths and verified attestation profiles
+(`list_artifacts`). Change lookup includes changes kept by named review references as well as the
+current head, so an open review is readable before it lands. When the repository's workspace
+cannot be read, the page says *Reviews are unavailable* with the reason and shows everything else.
 
-The unified diff is the no-script view. One page-local vanilla script switches to the side-by-side
-representation and copies the complete change identity. If the script is unavailable, every file,
-hunk, comment, conflict, check, attestation count, and full identity remains present. Full
-identities are also available on hover through `title`. Comment threads follow both diff
-representations and link back to their numbered new-line anchor, so switching layouts never hides
-discussion. Reviewer, assignee, and allowed-pusher identities use the same compact rule and wrap
-as groups rather than overflowing their panels.
+Unified is the default layout; **Side by side** switches it, and a button copies the full change
+identity. Comment threads follow both layouts and link to their numbered new-line anchor, so
+switching never hides discussion. Reviewer, assignee and allowed-pusher identities use the compact
+form and wrap as groups.
 
-`GET /conflicts?repository_id=<id>` presents the current first-class Liquid records beside the
-change review. It names each kind and exact region, explains the conflict in plain words, lists all
-suspicious-merge reasons, and keeps the base, left, right, and optional reviewed proposal identities
-as evidence. Signed-in writers resolve a record through `POST /conflicts/resolve`; the form calls
-the shared `resolve_conflict` capability and offers left, right, reviewed proposal, or prepared
-replacement text.
+`/conflicts?repository_id=<id>` (`ConflictsPage.tsx`) presents the current first-class Liquid
+conflict records. It names each kind and exact region, explains the conflict in plain words, lists
+every suspicious-merge reason, and keeps the base, left, right and optional reviewed proposal
+identities as evidence. A signed-in writer resolves a record on `main` with `resolve_conflict`:
+keep left, keep right, accept the reviewed proposal, or prepared replacement text.
 
 ## What the scenario proves
 
 The Postgres-backed forge scenario starts with a Liquid drip stream and publishes a candidate on a
 named review reference while `main` remains at its prior head. A reviewer opens the review through
-`liquid::forge_client`, reads the same change through the server-rendered page, and comments on a
-source line. The author rebases the candidate as a rewritten change with an inserted line, the
+`liquid::forge_client`, reads the same change, and comments on a source line. The author rebases the candidate as a rewritten change with an inserted line, the
 client advances every anchor through Liquid's diff, and the test asserts that the original comment
 moves from line 2 to line 3 with its moved disposition preserved. Only the rewritten, approved
 change is then published to `main`.
 
 Before landing, the scenario records the graph-selected action and its signed provenance in Lake's
 Liquid repository. It asserts that the repository contains no `.yml` or `.yaml` file. The landed
-change page must contain the graph action's result identity, `build/forge-proof.txt`, and the
-verified `slsa_provenance/1` profile. This proves that the visible check describes the recorded
+change must carry the graph action's result identity, `build/forge-proof.txt`, and the verified
+`slsa_provenance/1` profile. This proves that the visible check describes the recorded
 graph result rather than repository automation configuration.
 
 ## Issues
 
-`GET /issues?repository_id=<id>` lists forge issues and accepts state, label, and assignee filters
-as an ordinary GET form. Each result keeps its state, labels, assignees, creation date, and compact
-identity visible. An unmatched filter combination has a specific empty result rather than an
-empty table.
+`/issues?repository_id=<id>[&state=&label=&assignee=]` (`IssuesPage.tsx`) lists forge issues.
+`list_issues` takes no filters, so the page filters by state, label and assignee itself; the
+filters are in the URL. Each result shows its state, labels, assignees, creation date and compact
+identity. A filter combination with no match has its own empty result.
 
-`GET /issue?repository_id=<id>&id=<issue>` renders the issue body and discussion Markdown on the
-server, followed by labels, assignees, and linked change identities. Raw HTML in every body is
-escaped before Markdown markup is introduced. The page has no local script: links, filters,
-discussion, and supporting details follow document order and work unchanged without JavaScript.
+`/issue?repository_id=<id>&id=<issue>` (`IssuePage.tsx`) finds the issue in `list_issues` (lake has
+no `get_issue`) and shows its body and discussion (`list_issue_comments`) as Markdown, then labels,
+assignees and linked change identities.
 
-## Releases, webhooks, and branch protection
+## Releases, artifacts, webhooks and branch protection
 
-`GET /releases?repository_id=<id>` renders release notes through the safe Markdown path and keeps
-the tag, change identity, artifacts, output counts, and verified attestation counts together. It
-shows an explicit release-level artifact empty state when older records have none.
+`/releases?repository_id=<id>` shows release notes as Markdown and keeps the tag, change identity,
+artifacts, output counts and verified attestation counts together, with an explicit empty state
+for a release without artifacts.
 
-`GET /artifact?repository_id=<id>&id=<result>` includes a Search inside form and a member listing.
-Each output path is searchable as `in:artifact:<output>@<result>`; text and source members link to
-their scoped results, while binary members retain their digest without a search link. A nested
-container is opened one level below the output and deeper nesting is listed but not indexed.
+`/artifacts` pages build results through `list_artifacts`, filtered by action, output and content
+(1 to 1000 per page, 100 by default). `/artifact?repository_id=<id>&id=<result>` includes a
+**Search inside** form and a member listing. Each output path is searchable as
+`in:artifact:<output>@<result>`; text and source members link to their scoped search, binary
+members keep their digest without a link. A nested container is opened one level below the output;
+deeper nesting is listed but not indexed.
 
-`GET /webhooks?repository_id=<id>` groups each sanitized webhook configuration with its durable
-delivery attempts: event, attempt number, status, error, and delivery outcome. Secrets are removed
-by `list_webhooks` and are never renderer input. Failed attempts expose an ordinary POST retry form
-to `/webhooks/retry`; successful deliveries and signed-out views do not. The POST calls
-`retry_webhook_delivery`, whose redirect returns to the history page and leaves every attempt
-visible.
+`/webhooks?repository_id=<id>` groups each webhook's sanitized configuration with its durable
+delivery attempts: event, attempt number, status, error and outcome. `list_webhooks` removes
+secrets. A failed attempt offers **Retry** (`retry_webhook_delivery`), which creates a new attempt
+and leaves every earlier one visible.
 
-`GET /protection?repository_id=<id>` shows each ref pattern with its review, verification,
-fast-forward, allowed-pusher, and policy-object values. It also reads the signed audit capability
-and selects denied `forge.branch_protection.refused` events for that repository, retaining the
-reference, caller, matching rule, reason, and event date. Rules and the refusal audit each have a
-separate empty state. All three pages are server-rendered and add no local script.
+`/protection?repository_id=<id>` shows each ref pattern with its review, verification,
+fast-forward, allowed-pusher and policy-object values, and the denied
+`forge.branch_protection.refused` events for that repository from `audit` (its workspace's log,
+or the central log when the repository has no workspace): reference, caller, matching rule,
+reason and date. Rules and refusals each have an empty state.
 
-## Empty, loading, and error states
+## Empty, loading and error states
 
-Every forge collection and supporting section names its empty state in place: repositories,
-trees, recent changes, README content, refs, access, diffs, reviews, comments, checks, issues,
-releases, artifacts, deliveries, rules, and refused updates never collapse into an unexplained
-blank region.
+Every forge collection and supporting section names its empty state in place: repositories, trees,
+recent changes, README content, refs, access, diffs, reviews, comments, checks, issues, releases,
+artifacts, deliveries, rules and refused updates never collapse into an unexplained blank region.
+A failed read is an error, never an empty list.
 
-The shared loading renderer uses `role="status"`, polite announcements, and `aria-busy="true"`.
-Its animation uses governed motion tokens and is reduced by the global reduced-motion rule. The
-HTTP adapter waits for capability reads before sending forge pages, so this state is intended for
-hosts that choose to display a pending server navigation; no client data loader is introduced.
+While a page's required reads load it shows the kit's skeleton. A failed read shows lake's error
+page: the error code, *We Could Not Load This Page*, the message, and **Back to repositories**. A
+signed-out visitor refused a repository is sent to `/sign-in?next=…` instead, so a private
+repository's existence is not disclosed (`RepositoryError` in `forge.tsx`).
 
-Repository capability errors render through the shared forge error page with the real HTTP status,
-an alert role, escaped error detail, and a keyboard-accessible route back to repositories.
-Anonymous authorization failures continue to redirect to sign-in without disclosing repository
-existence.
+## Keyboard
 
-## Keyboard and no-script behavior
+Source order is skip link, rail, top bar, breadcrumb, repository tabs, primary content, then
+supporting details. All links, disclosure controls, line anchors and buttons are keyboard
+focusable. Issue filters come before results, discussion before supporting metadata, and a state
+page's recovery action after its message.
 
-Source order is skip link, primary navigation, top-bar controls, breadcrumbs, repository tabs,
-primary content, then supporting details. All links, native disclosure controls, line anchors, and
-theme controls are keyboard focusable. Without JavaScript the repository, tree, and file views
-remain readable and navigable. The file-range island only adds shift-click range selection and
-range highlighting; individual line anchors remain ordinary links without it. Change review uses
-one further island for its view toggle and copy control; unified review remains the default.
-Issue filters precede results, issue discussion precedes supporting metadata, and forge state pages
-place their primary recovery action after the state message.
+## What changed (lake#561)
+
+The pages render in the browser instead of from C++ renderers, so the no-script behaviour the
+server pages guaranteed (the tree as `details`, the file range and diff toggle as optional
+scripts) no longer applies: the app needs JavaScript. Markdown and C/C++ highlighting moved to the
+browser with the same rules; syntax units still come from lake.
 
 ## Verify
 
-Run `lake-tests --gtest_filter='WebUi.Markdown*:WebUi.Repositories*:WebUi.RepositoryContent*'` for
-the portable renderer checks. With a schema-loaded `LAKE_TEST_DB_URI`, run
-`lake-tests --gtest_filter='PostgresForgeScenario.*'` for the complete review lifecycle.
-The string tests prove raw HTML is escaped, heading anchors are stable, repository sections are
-present, tree rows carry last-change context, known source is highlighted, line anchors and blame
-are rendered, review Markdown is sanitized, review state and comments are anchored, checks and
-attestations are present, long identities are compact, and the shared shell remains intact. The
-seeded visual proof is generated through `tools/ui/screenshot.sh` and recorded in
-`docs/ui/screenshots/`.
+`npm run build` in `frontend/` type-checks the pages. With a schema-loaded `LAKE_TEST_DB_URI`,
+`lake-tests --gtest_filter='PostgresForgeScenario.*'` runs the complete review lifecycle. In a browser, open a public repository signed out and a private one signed in,
+and check the README's anchors and an embedded `<script>` shown as text, a C++ file's highlighting
+and `#L5-L9`, a change in both layouts with comments, issue filters, a webhook retry, and the
+protection page as the operator.
 
 ## Change
 
-Add page data to the typed values in `include/lake/api/web_ui.hpp`, fetch it through capabilities
-in `src/api/http_server.cpp`, and render it in `src/api/web_ui.cpp`. Shared presentation belongs in
-`src/api/web_ui_styles.inc`; page-specific inline styles are not allowed. A new interaction must
-remain useful without JavaScript and may add one small vanilla script only when the interaction is
-named in bridge decision 17.
+Add the data to a capability's output first ([../api/web-app.md](../api/web-app.md#change)), then
+read it in the page. Shared presentation belongs in `styles/lake.css` and the kit; pages use lake's
+classes, not their own colours.
