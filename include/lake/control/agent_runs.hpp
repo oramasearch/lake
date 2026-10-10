@@ -21,14 +21,16 @@
 namespace lake::control {
 
 // The lake capabilities a launched agent's credential may call: its workspace through the agent
-// path (lake#235), and the repository reads a definition stored in lake needs. Its skills narrow
-// further inside agent-runtime.
+// path (lake#235), the repository reads a definition stored in lake needs, and the workspace's
+// transcripts (lake#561). Its skills narrow further inside agent-runtime.
 inline const std::vector<std::string> agent_launch_scopes{"workspace_query",
                                                           "workspace_act",
                                                           "workspace_openapi",
                                                           "list_agent_library",
                                                           "repository_tree",
-                                                          "repository_file"};
+                                                          "repository_file",
+                                                          "list_transcripts",
+                                                          "get_transcript"};
 
 // A schedule's cron expression (docs/api/agent-launches.md): the five fields a Kubernetes CronJob
 // takes (minute, hour, day of month, month, day of week), or one of @hourly, @daily, @weekly,

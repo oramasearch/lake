@@ -100,6 +100,25 @@ using WebhookSender = std::function<WebhookDeliveryResult(
 using ReplicationRequester = std::function<std::expected<nlohmann::json, ApiError>(
     const std::string& source_url, std::uint64_t after_tree_size)>;
 
+// Speech-to-text (docs/api/transcripts.md, lake#561). The audio is held only while it is sent:
+// a transcriber never stores or logs it.
+struct TranscriptionRequest {
+    std::string file_name; // with an extension the provider recognises (audio_file_name)
+    std::string mime;      // the audio's media type, or application/octet-stream
+    std::string audio;     // the decoded bytes
+    std::string language;  // ISO-639-1, or empty to let the provider detect it
+};
+struct Transcription {
+    std::string text;
+    std::optional<double> seconds; // the audio's length, when the provider reports it
+    std::string model;
+};
+// Turns audio into text. The HTTP server injects one over its outbound client when
+// LAKE_OPENAI_API_KEY is set; tests inject a fake. Empty: speech-to-text is not configured.
+// It blocks for the length of the exchange, so a handler runs it with run_blocking.
+using Transcriber =
+    std::function<std::expected<Transcription, ApiError>(const TranscriptionRequest& request)>;
+
 enum class CapabilityKind { Read, Action };
 std::string_view to_string(CapabilityKind kind);
 
@@ -290,6 +309,9 @@ struct ApiContext {
     std::string identity_seed;
     std::string instance_kek;
     WebhookSender webhook_sender;
+    // Speech-to-text for transcribe and create_transcript (docs/api/transcripts.md); empty when
+    // this lake has no OpenAI key.
+    Transcriber transcriber;
     SyncStore* sync_store = nullptr;
     MeteringConfig metering;
     // Repository transfer and build records on their way to the workspace Zettas (lake#348,

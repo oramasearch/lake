@@ -39,6 +39,9 @@ void register_volume_capabilities(Registry& registry);
 // The reads lake's web app needs (lake#561, docs/api/web-app.md): viewer, my_permissions,
 // list_packages, list_docs, get_doc, mcp_setup.
 void register_console_capabilities(Registry& registry, std::string_view version);
+// Speech-to-text and workspace transcripts (lake#561, docs/api/transcripts.md): transcribe,
+// create_transcript, list_transcripts, get_transcript, update_transcript, delete_transcript.
+void register_transcript_capabilities(Registry& registry);
 // The live workspace a new repository is created in (lake#315): `input.workspace_id` must name a
 // workspace of `input.customer_id`'s space that is not deleted. Anything else, including a missing
 // id, is invalid_input at /workspace_id; there is no default workspace.

@@ -67,7 +67,9 @@ remove and update of sealed records in one workspace Zetta's record store) and `
 workspace uses; `ask_messages.hpp` is the reference codec. `Store` has no reads of the retired
 `ask_messages` table, which migration `0050` dropped (lake#483). `opportunities.hpp` is the
 first mutable collection (Design → Opportunities, lake#376): derived keys, conditional status
-writes; the retired `opportunities` table is dropped by migration `0070` with its legacy reads. See
+writes; the retired `opportunities` table is dropped by migration `0070` with its legacy reads.
+`transcripts.hpp` (lake#561) is the transcripts codec: one record per transcript in its
+workspace, found by the space, never in PostgreSQL (`docs/api/transcripts.md`). See
 `docs/architecture/workspace-records.md`. `drive_share_links.hpp` is the drive share link codec
 (lake#350): a mutable record per link keyed by its id and found by repository and folder, and the
 bearer token format `<workspace id>.<link id>.<secret>` that routes a recipient to the workspace.

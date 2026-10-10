@@ -19,29 +19,30 @@
 #include <pqxx/pqxx>
 
 #include "api/forge_records_api.hpp"
-#include "audit_test_support.hpp"
 #include "api/secret_records_api.hpp"
-#include "control/secrets_crypto.hpp"
 #include "api/workspace_records_api.hpp"
-#include "lake/api/capabilities.hpp"
-#include "lake/api/forge.hpp"
+#include "audit_test_support.hpp"
+#include "control/secrets_crypto.hpp"
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/audit_routing.hpp"
+#include "lake/api/capabilities.hpp"
+#include "lake/api/forge.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/api/transcription.hpp"
 #include "lake/audit/audit.hpp"
-#include "lake/control/application_authorization_codes.hpp"
-#include "lake/control/application_user_records.hpp"
-#include "lake/control/application_credential_records.hpp"
-#include "lake/control/application_settings_records.hpp"
-#include "lake/control/application_webhook_records.hpp"
-#include "lake/control/apps.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/agent_task_records.hpp"
+#include "lake/control/application_authorization_codes.hpp"
+#include "lake/control/application_credential_records.hpp"
+#include "lake/control/application_settings_records.hpp"
+#include "lake/control/application_user_records.hpp"
+#include "lake/control/application_webhook_records.hpp"
+#include "lake/control/apps.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/drive_share_links.hpp"
-#include "lake/control/identity_crypto.hpp"
 #include "lake/control/forge_records.hpp"
+#include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/metering.hpp"
 #include "lake/control/oci_records.hpp"
@@ -52,6 +53,7 @@
 #include "lake/control/repository_records.hpp"
 #include "lake/control/secret_records.hpp"
 #include "lake/control/stream_owners.hpp"
+#include "lake/control/transcripts.hpp"
 #include "lake/control/workspace_audit.hpp"
 #include "lake/control/workspace_records.hpp"
 #include "lake/control/zetta_control.hpp"
@@ -312,6 +314,8 @@ struct TwoSpaces {
     std::vector<Space> spaces;
 
     std::string database_uri; // empty: the in-memory store
+    // Speech-to-text for transcribe and audio transcripts; empty: not configured.
+    lake::api::Transcriber transcriber;
 
     // What the operator reports for a service.
     void status(const std::string& service_id, const std::string& phase,
@@ -374,6 +378,7 @@ struct TwoSpaces {
         context.credential_session_id = space.principal.session_id;
         context.scopes = space.principal.scopes;
         context.request_id = lake::control::new_uuid_v4();
+        context.transcriber = transcriber;
         return context;
     }
 
@@ -659,6 +664,245 @@ TEST_P(WorkspaceRecordStores, OpportunitiesStayInTheWorkspaceTheirScanRanIn) {
     EXPECT_EQ(deleted.error.code, "invalid_input");
     EXPECT_EQ(deleted.error.path, "/workspace_id");
     EXPECT_EQ(t.opportunities(first, 0).size(), 4U);
+}
+
+TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const auto in = [&](const auto& space, std::size_t workspace, json input) {
+        input["customer_id"] = space.customer_id;
+        input["workspace_id"] = space.workspaces[workspace];
+        return input;
+    };
+
+    // Without a key, speech-to-text is refused and nothing is written.
+    const std::string audio = "data:audio/webm;codecs=opus;base64,c3BlZWNo"; // "speech"
+    const auto unconfigured =
+        t.call(first, "transcribe", {{"name", "memo"}, {"audio_base64", audio}});
+    EXPECT_EQ(unconfigured.error.code, "not_supported");
+    EXPECT_EQ(unconfigured.error.message, "Speech-to-text is not configured on this lake.");
+    const auto unconfigured_create =
+        t.call(first,
+               "create_transcript",
+               in(first, 0, {{"title", "Memo"}, {"source", "recording"}, {"audio_base64", audio}}));
+    EXPECT_EQ(unconfigured_create.error.code, "not_supported");
+
+    // The fake transcriber: what it was sent, and the text it answers.
+    std::vector<lake::api::TranscriptionRequest> heard;
+    t.transcriber = [&heard](const lake::api::TranscriptionRequest& request)
+        -> std::expected<lake::api::Transcription, lake::api::ApiError> {
+        heard.push_back(request);
+        if (request.audio == "silence") {
+            return std::unexpected(
+                lake::api::ApiError{"engine_error", "OpenAI could not transcribe the audio"});
+        }
+        return lake::api::Transcription{
+            "We agreed to ship the budget on Friday.", 42.5, "gpt-4o-transcribe"};
+    };
+
+    const auto transcribed = t.call(
+        first, "transcribe", {{"name", "memo"}, {"audio_base64", audio}, {"language", "en"}});
+    ASSERT_TRUE(transcribed.ok) << transcribed.error.message;
+    EXPECT_EQ(transcribed.value,
+              (json{{"text", "We agreed to ship the budget on Friday."},
+                    {"seconds", 42.5},
+                    {"model", "gpt-4o-transcribe"}}));
+    ASSERT_EQ(heard.size(), 1U);
+    EXPECT_EQ(heard[0].audio, "speech");
+    EXPECT_EQ(heard[0].file_name, "memo.webm");
+    EXPECT_EQ(heard[0].mime, "audio/webm");
+    EXPECT_EQ(heard[0].language, "en");
+    const auto failing =
+        t.call(first, "transcribe", {{"name", "x.wav"}, {"audio_base64", "c2lsZW5jZQ=="}});
+    EXPECT_EQ(failing.error.code, "engine_error");
+    for (const auto& space : t.spaces) {
+        for (const auto& workspace : space.workspaces) {
+            EXPECT_TRUE(
+                t.zetta->records["http://" + workspace + ".test"].rows("transcripts").empty())
+                << "transcribe keeps nothing";
+        }
+    }
+
+    // From audio: transcribed first, the audio never kept.
+    const auto from_audio = t.call(first,
+                                   "create_transcript",
+                                   in(first,
+                                      0,
+                                      {{"title", " Friday call "},
+                                       {"source", "recording"},
+                                       {"audio_base64", audio},
+                                       {"audio_name", "call.m4a"},
+                                       {"recorded_at", "2026-10-09T15:00:00Z"}}));
+    ASSERT_TRUE(from_audio.ok) << from_audio.error.message;
+    EXPECT_EQ(from_audio.value["title"], "Friday call");
+    EXPECT_EQ(from_audio.value["text"], "We agreed to ship the budget on Friday.");
+    EXPECT_EQ(from_audio.value["source"], "recording");
+    EXPECT_EQ(from_audio.value["seconds"], 42.5);
+    EXPECT_EQ(from_audio.value["recorded_at"], "2026-10-09T15:00:00Z");
+    EXPECT_EQ(from_audio.value["created_by"], first.principal.user_id);
+    EXPECT_TRUE(from_audio.value["language"].is_null());
+    EXPECT_EQ(heard.back().file_name, "call.m4a");
+    EXPECT_EQ(heard.back().mime, "audio/mp4");
+
+    // From text, and from captions cleaned to what was said.
+    const auto from_text = t.call(first,
+                                  "create_transcript",
+                                  in(first,
+                                     0,
+                                     {{"title", "Notes"},
+                                      {"source", "text"},
+                                      {"text", "Pasted notes about hiring."},
+                                      {"language", "en"}}));
+    ASSERT_TRUE(from_text.ok) << from_text.error.message;
+    EXPECT_TRUE(from_text.value["seconds"].is_null());
+    EXPECT_EQ(from_text.value["language"], "en");
+    const auto from_vtt =
+        t.call(first,
+               "create_transcript",
+               in(first,
+                  0,
+                  {{"title", "Standup captions"},
+                   {"source", "upload"},
+                   {"text",
+                    "WEBVTT\n\n1\n00:00:00.000 --> 00:00:02.000\n<v Ana>Budget "
+                    "is late\n\n2\n00:00:02.000 --> 00:00:04.000\nso we wait\n"}}));
+    ASSERT_TRUE(from_vtt.ok) << from_vtt.error.message;
+    EXPECT_EQ(from_vtt.value["text"], "Ana: Budget is late\nso we wait");
+    EXPECT_EQ(heard.size(), 3U) << "text is never sent for transcription";
+
+    // Sealed at rest, and no audio in the record.
+    const auto& rows =
+        t.zetta->records["http://" + first.workspaces[0] + ".test"].rows("transcripts");
+    ASSERT_EQ(rows.size(), 3U);
+    for (const auto& [key, row] : rows) {
+        EXPECT_EQ(row.dump().find("Friday"), std::string::npos) << "sealed at rest";
+        EXPECT_EQ(row.dump().find("c3BlZWNo"), std::string::npos);
+    }
+    {
+        auto context = t.context(first);
+        auto records =
+            lake::api::workspace_records(context, first.customer_id, first.workspaces[0]);
+        ASSERT_TRUE(records);
+        const auto stored = run(records->get(lake::control::TranscriptCodec::collection,
+                                             from_audio.value["id"].get<std::string>()));
+        ASSERT_TRUE(stored && *stored);
+        for (const auto& [field, value] : (*stored)->body.items()) {
+            EXPECT_EQ(field.find("audio"), std::string::npos) << field;
+        }
+        EXPECT_EQ((*stored)->body.dump().find("speech"), std::string::npos);
+    }
+
+    // Refusals name the field.
+    const auto neither =
+        t.call(first, "create_transcript", in(first, 0, {{"title", "Empty"}, {"source", "text"}}));
+    EXPECT_EQ(neither.error.code, "invalid_input");
+    EXPECT_EQ(neither.error.path, "/text");
+    const auto untitled = t.call(first,
+                                 "create_transcript",
+                                 in(first, 0, {{"title", " "}, {"source", "text"}, {"text", "x"}}));
+    EXPECT_EQ(untitled.error.path, "/title");
+    const auto bad_source =
+        t.call(first,
+               "create_transcript",
+               in(first, 0, {{"title", "x"}, {"source", "fax"}, {"text", "x"}}));
+    EXPECT_EQ(bad_source.error.code, "invalid_input");
+    EXPECT_EQ(bad_source.error.path, "/source");
+    const auto long_text =
+        t.call(first,
+               "create_transcript",
+               in(first,
+                  0,
+                  {{"title", "x"},
+                   {"source", "text"},
+                   {"text", std::string(lake::api::max_transcript_text_bytes + 1, 'a')}}));
+    EXPECT_EQ(long_text.error.code, "size_invalid");
+
+    // Newest first; q filters title and text ignoring case; limit and cursor page.
+    const auto list = [&](const auto& space, std::size_t workspace, json extra) {
+        return t.call(space, "list_transcripts", in(space, workspace, std::move(extra)));
+    };
+    auto listed = list(first, 0, json::object());
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["transcripts"].size(), 3U);
+    EXPECT_EQ(listed.value["transcripts"][0]["id"], from_vtt.value["id"]);
+    EXPECT_EQ(listed.value["transcripts"][2]["id"], from_audio.value["id"]);
+    EXPECT_EQ(listed.value["transcripts"][2]["excerpt"], "We agreed to ship the budget on Friday.");
+    EXPECT_FALSE(listed.value["transcripts"][0].contains("text"));
+    EXPECT_FALSE(listed.value.contains("next_cursor"));
+    listed = list(first, 0, {{"q", "BUDGET"}});
+    ASSERT_EQ(listed.value["transcripts"].size(), 2U);
+    EXPECT_EQ(listed.value["transcripts"][0]["title"], "Standup captions");
+    EXPECT_EQ(listed.value["transcripts"][1]["title"], "Friday call");
+    EXPECT_EQ(list(first, 0, {{"q", "notes"}}).value["transcripts"].size(), 1U) << "the title";
+    listed = list(first, 0, {{"limit", 2}});
+    ASSERT_EQ(listed.value["transcripts"].size(), 2U);
+    ASSERT_TRUE(listed.value.contains("next_cursor"));
+    const auto rest = list(first, 0, {{"limit", 2}, {"cursor", listed.value["next_cursor"]}});
+    ASSERT_EQ(rest.value["transcripts"].size(), 1U);
+    EXPECT_EQ(rest.value["transcripts"][0]["id"], from_audio.value["id"]);
+    EXPECT_EQ(list(first, 0, {{"cursor", "nope"}}).error.path, "/cursor");
+    EXPECT_TRUE(list(first, 1, json::object()).value["transcripts"].empty())
+        << "another workspace of the space lists none";
+
+    // Get, update and delete, in the owning workspace only.
+    const std::string id = from_audio.value["id"];
+    const auto got = t.call(first, "get_transcript", in(first, 0, {{"id", id}}));
+    ASSERT_TRUE(got.ok) << got.error.message;
+    EXPECT_EQ(got.value, from_audio.value);
+    EXPECT_EQ(t.call(first, "get_transcript", in(first, 1, {{"id", id}})).error.code, "not_found");
+    EXPECT_EQ(t.call(first, "get_transcript", in(first, 0, {{"id", "not-an-id"}})).error.code,
+              "not_found");
+    const auto renamed = t.call(
+        first, "update_transcript", in(first, 0, {{"id", id}, {"title", "Friday budget call"}}));
+    ASSERT_TRUE(renamed.ok) << renamed.error.message;
+    EXPECT_EQ(renamed.value["title"], "Friday budget call");
+    EXPECT_EQ(renamed.value["text"], from_audio.value["text"]) << "only the title changes";
+    EXPECT_EQ(renamed.value["created_at"], from_audio.value["created_at"]);
+    const auto edited = t.call(
+        first, "update_transcript", in(first, 0, {{"id", id}, {"text", "We ship on Monday."}}));
+    ASSERT_TRUE(edited.ok);
+    EXPECT_EQ(edited.value["text"], "We ship on Monday.");
+    EXPECT_EQ(edited.value["title"], "Friday budget call");
+    EXPECT_EQ(t.call(first, "get_transcript", in(first, 0, {{"id", id}})).value["text"],
+              "We ship on Monday.");
+    EXPECT_EQ(t.call(first, "update_transcript", in(first, 0, {{"id", id}})).error.code,
+              "invalid_input");
+    EXPECT_EQ(
+        t.call(first, "update_transcript", in(first, 1, {{"id", id}, {"title", "x"}})).error.code,
+        "not_found");
+    EXPECT_EQ(t.call(first, "delete_transcript", in(first, 1, {{"id", id}})).error.code,
+              "not_found");
+    const auto deleted = t.call(first, "delete_transcript", in(first, 0, {{"id", id}}));
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(deleted.value, (json{{"deleted", true}}));
+    EXPECT_EQ(t.call(first, "get_transcript", in(first, 0, {{"id", id}})).error.code, "not_found");
+    EXPECT_EQ(t.call(first, "delete_transcript", in(first, 0, {{"id", id}})).error.code,
+              "not_found");
+    EXPECT_EQ(list(first, 0, json::object()).value["transcripts"].size(), 2U);
+
+    // Another space is refused before any workspace is read.
+    for (const std::string capability : {"list_transcripts",
+                                         "get_transcript",
+                                         "create_transcript",
+                                         "update_transcript",
+                                         "delete_transcript"}) {
+        json input = in(first, 0, {{"id", from_text.value["id"]}});
+        if (capability == "list_transcripts") {
+            input.erase("id");
+        }
+        if (capability == "create_transcript") {
+            input = in(first, 0, {{"title", "x"}, {"source", "text"}, {"text", "x"}});
+        }
+        if (capability == "update_transcript") {
+            input["title"] = "x";
+        }
+        EXPECT_EQ(t.call(second, capability, input).error.code, "unauthorized") << capability;
+    }
 }
 
 TEST(WorkspaceRecords, AnOpportunityStatusChangeRereadsAfterAConcurrentWrite) {

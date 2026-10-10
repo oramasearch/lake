@@ -38,7 +38,8 @@ per launch, `lal.<launch id>.<secret>`, puts it in a Secret owned by the Job or 
 writes only its SHA-256 (`credential_sha256`). lake's stores resolve such a bearer by comparing
 digests in constant time (`context_for`): it acts as the person who launched it, limited to the
 launch's `scopes` (`control::agent_launch_scopes`: `workspace_query`, `workspace_act`,
-`workspace_openapi`, `list_agent_library`, `repository_tree`, `repository_file`). A launch that is
+`workspace_openapi`, `list_agent_library`, `repository_tree`, `repository_file`, and the workspace's
+transcripts through `list_transcripts` and `get_transcript`, lake#561). A launch that is
 stopped (`desired = absent`) or not yet reported has no usable credential.
 
 ## Schedules

@@ -63,6 +63,34 @@ The image must contain lake#479 before the opt-in is turned on: an older image r
 beside the running pod and the surge stalls. See
 [`store-volume.md`](store-volume.md#the-hand-off).
 
+## Speech-to-text key
+
+Speech-to-text (`transcribe`, and `create_transcript` from audio, lake#561,
+[`../api/transcripts.md`](../api/transcripts.md)) needs `LAKE_OPENAI_API_KEY` in the lake pod.
+Without it both answer `not_supported` and the rest of lake is unaffected. `LAKE_TRANSCRIBE_MODEL`
+is optional (default `gpt-4o-transcribe`).
+
+On the dev cluster the key already exists as Secret `lake-prod-openai`, key `OPENAI_API_KEY`, in
+namespace `lake`, where the lake pods run (`spec.agents.openaiSecretName` names the same Secret for
+the agents). The Lake CRD's `spec.env` is a list of Kubernetes `EnvVar`s, so `valueFrom.secretKeyRef`
+is supported. The operator appends each entry after its own variables and skips only the names it
+manages (`lakeEnv` in the operator's `internal/controller/lake_controller.go`). The key never
+enters the CR.
+
+`spec.env` already holds `LAKE_LOG_MODE`, `LAKE_PUBLIC_HOST` and `LAKE_CLERK_PUBLISHABLE_KEY`, and a
+merge patch would replace the whole list, so append with a JSON patch:
+
+```sh
+kubectl --context orama-production-cluster-01 patch lake prod --type json -p '[
+  {"op": "add", "path": "/spec/env/-", "value": {"name": "LAKE_OPENAI_API_KEY",
+   "valueFrom": {"secretKeyRef": {"name": "lake-prod-openai", "key": "OPENAI_API_KEY"}}}}
+]'
+```
+
+The Deployment rolls. To check it, `transcribe` a short clip; the answer names its `model`.
+Removing the entry turns speech-to-text off again. An image built before lake#561 ignores the
+variable.
+
 ## Runbook
 
 **Roll a new lake image.** Release an immutable CI-built image (see

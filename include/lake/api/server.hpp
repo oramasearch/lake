@@ -142,6 +142,14 @@ struct ServerOptions {
     // and sign-up are Clerk's and lake's own identity pages leave the navigation; empty or `xxx`
     // keeps lake's own sign-in, as an on-prem install uses. See docs/api/clerk.md.
     std::string clerk_publishable_key;
+    // Speech-to-text (docs/api/transcripts.md, lake#561): OpenAI's key (LAKE_OPENAI_API_KEY) and
+    // the transcription model (LAKE_TRANSCRIBE_MODEL, empty: gpt-4o-transcribe). With no key and
+    // no injected `transcriber`, transcribe and audio transcripts answer not_supported.
+    std::string openai_api_key;
+    std::string transcribe_model;
+    // An injected transcriber (tests); empty: OpenAI over the server's outbound client when
+    // `openai_api_key` is set.
+    Transcriber transcriber;
     // Configured external attestation verifiers. Lake owns their invocation but
     // callers retain their lifetime for the server lifetime.
     control::callers::TokenReviewer* token_reviewer = nullptr;

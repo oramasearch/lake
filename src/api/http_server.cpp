@@ -95,6 +95,7 @@
 #include "lake/api/rest.hpp"
 #include "lake/api/store_owner.hpp"
 #include "lake/api/sync_store.hpp"
+#include "lake/api/transcription.hpp"
 #include "lake/api/web_app.hpp"
 #include "lake/api/web_ui.hpp"
 #include "lake/api/workspace_deletion.hpp"
@@ -6585,6 +6586,8 @@ struct OutboundRequest {
     std::string url;
     std::string body;
     std::vector<std::pair<std::string, std::string>> headers;
+    // The whole exchange after the TLS handshake; speech-to-text uploads take longer.
+    std::chrono::seconds timeout{30};
 };
 
 struct OutboundResponse {
@@ -6876,13 +6879,13 @@ private:
             }
             auto [timeout_error, reason] = co_await boost::capy::timeout(
                 exchange_outbound(secure, pending->request, target, pending->response),
-                std::chrono::seconds(30));
+                pending->request.timeout);
             exchange_error = timeout_error ? "outbound request timed out" : std::move(reason);
             [[maybe_unused]] auto shutdown = co_await secure.shutdown();
         } else {
             auto [timeout_error, reason] = co_await boost::capy::timeout(
                 exchange_outbound(socket, pending->request, target, pending->response),
-                std::chrono::seconds(30));
+                pending->request.timeout);
             exchange_error = timeout_error ? "outbound request timed out" : std::move(reason);
         }
         pending->response.error = std::move(exchange_error);
@@ -7045,6 +7048,9 @@ struct ApiServer::Impl {
     // The registry is fixed for the life of the process, so its MCP tool list is too (lake#441).
     std::string mcp_tool_digest;
     mutable OutboundHttpClient outbound_http;
+    // Speech-to-text (docs/api/transcripts.md): the injected one, else OpenAI over outbound_http
+    // when a key is configured, else empty.
+    Transcriber transcriber;
     struct CachedJwks {
         std::string document;
         std::chrono::steady_clock::time_point fetched_at;
@@ -7866,6 +7872,21 @@ struct ApiServer::Impl {
                                                                             options.node_name);
         }
         clerk = clerk_config(options.clerk_publishable_key);
+        transcriber = options.transcriber;
+        if (!transcriber && !options.openai_api_key.empty()) {
+            transcriber = openai_transcriber(
+                options.openai_api_key,
+                options.transcribe_model,
+                [this](const std::string& url,
+                       std::string body,
+                       std::vector<std::pair<std::string, std::string>> headers,
+                       std::chrono::seconds timeout) {
+                    OutboundResponse response = outbound_http.request(
+                        {"POST", url, std::move(body), std::move(headers), timeout});
+                    return TranscriptPostResponse{
+                        response.status, std::move(response.body), std::move(response.error)};
+                });
+        }
         register_core_capabilities(registry, version_string());
         openapi_body = openapi_document(registry, version_string()).dump();
         agent_openapi_body =
@@ -8360,6 +8381,7 @@ struct ApiServer::Impl {
         ctx.public_host = options.public_host;
         ctx.external_origin = options.external_origin;
         ctx.clerk_publishable_key = options.clerk_publishable_key;
+        ctx.transcriber = transcriber;
         ctx.artifact_catalog = [this] {
             nlohmann::json catalog = artifacts.catalog();
             catalog["available"] = artifacts.available();

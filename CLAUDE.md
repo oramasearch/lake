@@ -33,6 +33,15 @@ surface. `agent_turn` checks a confirmed ApplicationAgent or ExperimentsAgent pr
 stored one (`proposal_task_id`, `proposal_sha256`). Not deployed yet. See `docs/ui/web-app.md` and
 `docs/serving/http.md`.
 
+Speech-to-text and workspace transcripts follow (lake#561, no migration): `transcribe` sends audio
+to OpenAI (`gpt-4o-transcribe`) with lake's key (`LAKE_OPENAI_API_KEY`, `LAKE_TRANSCRIBE_MODEL`)
+through the server's outbound client, an injected `Transcriber` the tests replace with a fake, and
+`not_supported` without a key; `create_transcript`, `list_transcripts` (`q` on title and text),
+`get_transcript`, `update_transcript` and `delete_transcript` keep sealed `lake_transcripts`
+records in the workspace Zetta, from a recording, uploaded audio, a cleaned `.vtt`/`.srt` or pasted
+text. The audio is never kept. Not deployed; `Lake/prod` needs the key in `spec.env`
+(`docs/deployment/aks.md#speech-to-text-key`). See `docs/api/transcripts.md`.
+
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in
 [`docs/build/container-image.md`](docs/build/container-image.md).
