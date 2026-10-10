@@ -583,14 +583,14 @@ that licence boundary.
   provides Corosio TLS and Argon2id. The runtime carries those OpenSSL shared libraries plus
   `libstdc++6 libpq5 ca-certificates`, numeric non-root `USER 10001:10001` (a named user cannot
   satisfy a `runAsNonRoot` pod security context).
-- GitHub Actions uses the same toolchain for pull-request builds and publishes the Dockerfile image
-  on a Git tag, only for `linux/amd64`. Private repositories are read with one read-only deploy key each
-  (secrets `DEPLOY_KEY_*`); `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` must still be configured by
-  Steve before the image workflow can publish. See
-  `docs/build/ci.md`.
-- Deployment images are CI-built immutable `oramasearch/lake:<tag>` images; the workflow also
-  publishes `oramasearch/lake:sha-<short-sha>` and rejects `latest`. The Docker Hub repo is private;
-  the `Lake` CR needs `spec.pullSecretName` and the Secret in `spec.namespace`.
+- **No CI.** Steve has said no to CI (umbrella `CLAUDE.md`). Never add, enable or extend a
+  workflow, never edit `.github/workflows/` to make CI pass, and never wait on or cite CI checks.
+  Proof is the local suite plus the cluster BuildKit Linux lane
+  (`lake-linux-test/run-lake-linux-tests.sh`, liquid-dev skill). `docs/build/ci.md` describes the
+  workflow files that remain in the repository.
+- Deployment images are built on the cluster BuildKit (liquid-dev skill) as immutable
+  `oramasearch/lake:<tag>` images, never `latest`. The Docker Hub repo is private; the `Lake` CR
+  needs `spec.pullSecretName` and the Secret in `spec.namespace`.
 
 ## Open decisions
 

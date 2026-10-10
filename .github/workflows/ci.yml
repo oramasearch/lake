@@ -297,14 +297,6 @@ jobs:
           path: _liquid-bin
           key: ${{ steps.liquid_cache.outputs.cache-primary-key }}
 
-      # The web app (frontend/, lake#561) builds with Node 22: its tests run TypeScript directly.
-      - name: Set up Node 22 for the web app
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
       - name: Install Puppeteer for the browser proof
         # puppeteer-core drives the runner's own Chrome; no browser is downloaded.
         run: |
