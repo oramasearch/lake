@@ -1,7 +1,7 @@
 import type { Screen } from "@/routes/types";
-import { stub } from "@/components/ScreenStub";
+import { lazyPage } from "@/lib/lazyPage";
 
 export const screens: Screen[] = [
-  { path: "/train/streams", title: "Streams", section: "train", nav: true, icon: "streams", workspace: true, owns: ["/train/stream"], component: stub("Streams") },
-  { path: "/train/stream", title: "Topic", section: "train", workspace: true, component: stub("Topic") },
+  { path: "/train/streams", title: "Streams", section: "train", nav: true, icon: "streams", workspace: true, owns: ["/train/stream"], component: lazyPage(() => import("./StreamsPage")) },
+  { path: "/train/stream", title: "Topic", section: "train", workspace: true, component: lazyPage(() => import("./TopicPage")) },
 ];
