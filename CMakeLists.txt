@@ -294,7 +294,10 @@ add_library(lake-core STATIC
 target_include_directories(lake-core PUBLIC include
   PRIVATE "${LAKE_LIQUID_SOURCE_DIR}" "${LAKE_LIQUID_SOURCE_DIR}/src")
 target_compile_features(lake-core PUBLIC cxx_std_26)
-target_compile_definitions(lake-core PRIVATE LAKE_BUILD_REVISION=\"${LAKE_BUILD_REVISION}\")
+# Only version.cpp reads the revision; defining it for every lake-core source would change every
+# compile command per revision and defeat the image build's compiler cache.
+set_source_files_properties(src/version.cpp PROPERTIES
+  COMPILE_DEFINITIONS "LAKE_BUILD_REVISION=\"${LAKE_BUILD_REVISION}\"")
 target_link_libraries(lake-core
   PUBLIC nlohmann_json::nlohmann_json liquid::liquid orama::oramacore-cpp OpenSSL::Crypto
   PRIVATE liquid_frontend_syntax)
