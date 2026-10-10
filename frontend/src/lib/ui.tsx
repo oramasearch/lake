@@ -301,8 +301,9 @@ export function Meter({ value, max = 100, label, tone }: { value: number | null 
   );
 }
 
+/** Cards that auto-fit 18rem columns, or the columns a caller names with `grid-cols-*`. */
 export function Grid({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={cx("grid", className)}>{children}</div>;
+  return <div className={cx(className?.includes("grid-cols") ? "grid" : "lake-grid", className)}>{children}</div>;
 }
 
 /** Label / value pairs as a definition list. Values that are absent read "—". */

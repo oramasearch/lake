@@ -414,7 +414,9 @@ table + .panel,
 .card > :last-child {
   margin-bottom: 0;
 }
-.grid {
+/* The kit's auto-fitting card grid. Not `.grid`: that is Tailwind's utility, which this rule
+   (unlayered) would override everywhere, squeezing every `grid grid-cols-*` into 18rem columns. */
+.lake-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr));
   gap: var(--lake-space-4);
