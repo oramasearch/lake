@@ -363,10 +363,19 @@ protected:
     shared_request(std::string_view suffix, std::string_view path, std::string_view token = {}) {
         const std::string selected_token =
             token.empty() ? link_.at("token").get<std::string>() : std::string(token);
+        // A recipient's folder and preview are the web app's /share pages, read through the
+        // link's capabilities; a download is the server's own bytes route.
+        if (suffix == "/download") {
+            return http_request(server_->port(),
+                                "GET",
+                                "/share/" + selected_token +
+                                    "/download?ref=main&path=" + std::string(path));
+        }
         return http_request(server_->port(),
                             "GET",
-                            "/share/" + selected_token + std::string(suffix) +
-                                "?ref=main&path=" + std::string(path));
+                            std::string(suffix == "/preview" ? "/v1/preview_drive_share_link"
+                                                             : "/v1/resolve_drive_share_link") +
+                                "?token=" + selected_token + "&ref=main&path=" + std::string(path));
     }
 
     void expect_refused(std::string_view path, std::string_view token = {}) {
@@ -414,18 +423,17 @@ protected:
 
 TEST_F(SharedLinkScenario, SignedOutRecipientTraversesPreviewsAndDownloadsExactBytes) {
     const std::string token = link_.at("token");
-    const auto root = http_request(server_->port(), "GET", "/share/" + token);
+    const auto root = http_request(
+        server_->port(), "GET", "/v1/resolve_drive_share_link?token=" + token + "&ref=main");
     ASSERT_NE(root.find(" 200 "), std::string::npos) << root;
-    EXPECT_NE(root.find("path=shared%2Fchild"), std::string::npos);
+    EXPECT_NE(root.find("shared/child"), std::string::npos) << root;
     EXPECT_EQ(root.find("shared-sibling"), std::string::npos);
     const auto child = shared_request("", "shared/child");
     ASSERT_NE(child.find(" 200 "), std::string::npos) << child;
     EXPECT_NE(child.find("nested.txt"), std::string::npos);
-    EXPECT_NE(child.find("Up one folder"), std::string::npos);
     const auto preview = shared_request("/preview", "shared/child/nested.txt");
     ASSERT_NE(preview.find(" 200 "), std::string::npos) << preview;
     EXPECT_NE(preview.find("nested recipient"), std::string::npos);
-    EXPECT_NE(preview.find("download>Download"), std::string::npos);
     const auto fallback = shared_request("/preview", "shared/child/bytes.bin");
     ASSERT_NE(fallback.find(" 200 "), std::string::npos) << fallback;
     EXPECT_NE(fallback.find("No preview is available"), std::string::npos);
@@ -477,37 +485,33 @@ TEST_F(SharedLinkScenario, SignedOutRecipientTraversesPreviewsAndDownloadsExactB
     EXPECT_NE(write_role_read.find(" 200 "), std::string::npos) << write_role_read;
 }
 
-TEST_F(SharedLinkScenario, SharingPagesNameTheWorkspaceThatHoldsTheLinks) {
-    const std::string folder =
-        "/drive/share?repository_id=" + fixture_.repository.id + "&ref=main&path=shared";
-    // The space's only workspace becomes an explicit choice in the URL, never a default.
-    const auto chosen = http_request(server_->port(), "GET", folder, {}, bearer(fixture_.owner));
-    ASSERT_NE(chosen.find(" 302 "), std::string::npos) << chosen;
-    EXPECT_NE(chosen.find("workspace_id=" + workspace_), std::string::npos) << chosen;
-    const auto page = http_request(server_->port(), "GET", folder + "&workspace_id=" + workspace_,
-                                   {}, bearer(fixture_.owner));
-    ASSERT_NE(page.find(" 200 "), std::string::npos) << page;
-    EXPECT_NE(page.find("name=\"link_id\" value=\"" + link_.at("id").get<std::string>()),
-              std::string::npos);
-    EXPECT_NE(page.find("name=\"workspace_id\" value=\"" + workspace_ + "\""), std::string::npos);
-    // A second workspace holds none of these links, and the page says which one it shows.
+TEST_F(SharedLinkScenario, AFoldersLinksAreThoseOfTheWorkspaceNamed) {
+    // What the sharing page reads: a folder's access in one named workspace, never a default.
+    const auto access = [&](const std::string& workspace, const SignedUpUser& who) {
+        return http_request(server_->port(),
+                            "GET",
+                            "/v1/drive_effective_access?repository_id=" + fixture_.repository.id +
+                                "&ref=main&path=shared" +
+                                (workspace.empty() ? std::string() : "&workspace_id=" + workspace),
+                            {},
+                            bearer(who));
+    };
+    const std::string link_id = link_.at("id");
+    const auto held = access(workspace_, fixture_.owner);
+    ASSERT_NE(held.find(" 200 "), std::string::npos) << held;
+    EXPECT_NE(held.find(link_id), std::string::npos) << held;
+    // A second workspace holds none of these links.
     const std::string lab = workspaces_->create(fixture_.customer.id, "lab");
-    const auto other = http_request(server_->port(), "GET", folder + "&workspace_id=" + lab, {},
-                                    bearer(fixture_.owner));
+    const auto other = access(lab, fixture_.owner);
     ASSERT_NE(other.find(" 200 "), std::string::npos) << other;
-    // (Its grant still shows in the folder's access table: policy stays central.)
-    EXPECT_EQ(other.find("name=\"link_id\" value=\"" + link_.at("id").get<std::string>()),
-              std::string::npos);
-    EXPECT_NE(other.find("No links."), std::string::npos);
-    // With two workspaces and none remembered, the page asks.
-    const auto ask = http_request(server_->port(), "GET", folder, {}, bearer(fixture_.owner));
-    ASSERT_NE(ask.find(" 200 "), std::string::npos) << ask;
-    EXPECT_NE(ask.find("Choose the workspace"), std::string::npos);
-    // Someone who cannot share the folder learns nothing about the space's workspaces.
+    EXPECT_EQ(other.find("\"" + link_id + "\""), std::string::npos) << other;
+    EXPECT_EQ(access("", fixture_.owner).find(" 200 "), std::string::npos)
+        << "the workspace is named, never defaulted";
+    // Someone who cannot share the folder learns nothing about its links.
     const SignedUpUser stranger = sign_up("stranger");
-    const auto refused = http_request(server_->port(), "GET", folder, {}, bearer(stranger));
-    EXPECT_EQ(refused.find("Choose the workspace"), std::string::npos) << refused;
+    const auto refused = access(workspace_, stranger);
     EXPECT_EQ(refused.find(" 200 "), std::string::npos) << refused;
+    EXPECT_EQ(refused.find(link_id), std::string::npos) << refused;
 }
 
 TEST_F(SharedLinkScenario, ScopeAndRevocationRefuseEveryRead) {
@@ -647,14 +651,7 @@ TEST_F(DriveScenario, UserSyncsSharesAndSeesHistoryEndToEnd) {
         http_request(server_->port(), "GET", history_api_path, {}, bearer(recipient)));
     ASSERT_TRUE(history_api.value("ok", false)) << history_api.dump();
     ASSERT_FALSE(history_api.at("value").at("items").empty());
-    const std::string change = history_api.at("value").at("items").at(0).at("id");
-    const std::string history_path = "/drive/history?repository_id=" + fixture.repository.id +
-                                     "&ref=main&path=shared-project/notes.txt";
-    const std::string history =
-        http_request(server_->port(), "GET", history_path, {}, bearer(recipient));
-    EXPECT_NE(history.find(" 200 "), std::string::npos) << history;
-    EXPECT_NE(history.find("shared-project/notes.txt"), std::string::npos);
-    EXPECT_NE(history.find(change), std::string::npos);
+    EXPECT_EQ(history_api.at("value").at("items").at(0).at("path"), "shared-project/notes.txt");
 }
 
 // lake#123: an ordinary overwrite through the Postgres-backed upload route keeps the previous
@@ -769,23 +766,18 @@ TEST_F(DriveScenario, ConcurrentOfflineEditsExposeAndResolveFirstClassConflict) 
     EXPECT_EQ(drive_conflict.at("value").at("conflict").at("id"), conflict.at("id"));
     EXPECT_EQ(drive_conflict.at("value").at("versions").size(), 2U);
 
+    // What Drive's conflict page shows: both values in the file's history and the explanation.
     const std::string history_path =
-        "/drive/history?repository_id=" + fixture.repository.id + "&ref=main&path=" + original;
+        "/v1/drive_history?repository_id=" + fixture.repository.id + "&ref=main&path=" + original;
     const std::string history =
         http_request(server_->port(), "GET", history_path, {}, bearer(fixture.owner));
     EXPECT_NE(history.find(" 200 "), std::string::npos) << history;
     for (const std::string& value : values) {
         EXPECT_NE(history.find(value), std::string::npos) << history;
     }
-
-    const std::string conflict_page_path =
-        "/drive/conflict?repository_id=" + fixture.repository.id + "&ref=main&path=" + original;
-    const std::string conflict_page =
-        http_request(server_->port(), "GET", conflict_page_path, {}, bearer(fixture.owner));
-    EXPECT_NE(conflict_page.find(" 200 "), std::string::npos) << conflict_page;
-    EXPECT_NE(conflict_page.find("Structural overlap"), std::string::npos);
-    EXPECT_NE(conflict_page.find(conflict.at("explanation").get<std::string>()), std::string::npos);
-    EXPECT_NE(conflict_page.find("action=\"/drive/conflict/resolve\""), std::string::npos);
+    EXPECT_NE(drive_conflict.dump().find(conflict.at("explanation").get<std::string>()),
+              std::string::npos)
+        << drive_conflict.dump();
 
     const json resolution_input{{"repository_id", fixture.repository.id},
                                 {"ref", "main"},

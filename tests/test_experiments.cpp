@@ -1,17 +1,15 @@
 #include <cstdlib>
 #include <iostream>
-#include <regex>
 
 #include <gtest/gtest.h>
 
 #include "audit_test_support.hpp"
 #include "experiment_fixture.hpp"
 #include "http1/client.hpp"
-#include "one_thread_io.hpp"
 #include "lake/api/agent_docs.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/server.hpp"
-#include "lake/api/web_ui.hpp"
+#include "one_thread_io.hpp"
 
 namespace {
 using nlohmann::json;
@@ -30,34 +28,6 @@ void closed_objects(const json& schema) {
             if (key != "enum" && key != "const") {
                 closed_objects(child);
             }
-        }
-    }
-}
-
-void controls_registered(const std::string& html, const lake::api::Registry& registry) {
-    const auto begin = html.find("<section id=\"experiments\"");
-    const auto end = html.find("<script type=\"application/json\" id=\"experiment-data\"", begin);
-    ASSERT_NE(begin, std::string::npos);
-    ASSERT_NE(end, std::string::npos);
-    const auto content = html.substr(begin, end - begin);
-    const std::regex controls("</?(?:form|a|input|button|select|textarea|summary)\\b[^>]*>");
-    const std::regex mapping("data-capability=\"([^\"]+)\"");
-    std::string form;
-    for (auto match = std::sregex_iterator(content.begin(), content.end(), controls);
-         match != std::sregex_iterator(); ++match) {
-        const auto tag = match->str();
-        if (tag == "</form>") {
-            form.clear();
-        }
-        if (tag.starts_with("</")) {
-            continue;
-        }
-        std::smatch declaration;
-        const auto capability = std::regex_search(tag, declaration, mapping) ? declaration[1].str() : form;
-        ASSERT_FALSE(capability.empty()) << "Unmapped experiment control: " << tag;
-        EXPECT_NE(registry.find(capability), nullptr) << tag;
-        if (tag.starts_with("<form ")) {
-            form = capability;
         }
     }
 }
@@ -110,54 +80,6 @@ protected:
         return std::string(reinterpret_cast<const char*>(response->body.data()), response->body.size());
     }
 };
-
-TEST(ExperimentsRenderer, RunBoxShowsAnEditableConfirmedAgentProposal) {
-    lake::api::ExperimentsPage page;
-    page.customer_id = "customer-one";
-    page.customers = {{"customer-one", "Personal", true}};
-    page.data = {{"studies", json::array()}, {"runs", json::array()}};
-    page.experiments_agent = true;
-    page.agent_task = {
-        {"task_id", "task-one"},
-        {"status", "succeeded"},
-        {"answer",
-         {{"reply", "Review the bounded study."},
-          {"result",
-           {{"kind", "proposal"},
-            {"confirm", true},
-            {"study", lake::test::experiment_study().at("spec")},
-            {"explanations", {{"objective", "Use validation AUC."}}}}}}}};
-    page.proposal_sha256 = std::string(64, 'a');
-    const std::string html = lake::api::web_ui_experiments(page, true);
-    EXPECT_NE(html.find("<h2>Run an Experiment</h2>"), std::string::npos);
-    EXPECT_NE(html.find("Ask ExperimentsAgent"), std::string::npos);
-    EXPECT_NE(html.find("Study proposal (JSON)"), std::string::npos);
-    EXPECT_NE(html.find("held_out_auc"), std::string::npos);
-    EXPECT_NE(html.find("Confirm and start study"), std::string::npos);
-    EXPECT_NE(html.find(std::string(64, 'a')), std::string::npos);
-    EXPECT_EQ(html.find("ExperimentsAgent is not registered"), std::string::npos);
-}
-
-TEST(ExperimentsRenderer, AQuestionHasAReplyBoxForTheSameTurn) {
-    lake::api::ExperimentsPage page;
-    page.customer_id = "customer-one";
-    page.customers = {{"customer-one", "Personal", true}};
-    page.data = {{"studies", json::array()}, {"runs", json::array()}};
-    page.experiments_agent = true;
-    page.agent_reply = true;
-    page.agent_task = {
-        {"task_id", "task-question"},
-        {"status", "succeeded"},
-        {"answer",
-         {{"reply", "Which project should I use?"},
-          {"result", {{"kind", "question"}, {"confirm", false}}}}}};
-    const std::string html = lake::api::web_ui_experiments(page, true);
-    EXPECT_NE(html.find("Which project should I use?"), std::string::npos);
-    EXPECT_NE(html.find("<h3>Reply</h3>"), std::string::npos);
-    EXPECT_NE(html.find("name=\"task_id\" value=\"task-question\""), std::string::npos);
-    EXPECT_NE(html.find("name=\"reply\""), std::string::npos);
-    EXPECT_EQ(html.find("name=\"goal\" value="), std::string::npos);
-}
 
 TEST_F(Experiments, SpacePolicyConfirmationAndWorkspaceAliasesCannotBypassPromotion) {
     const auto object = store->find_policy_object("customer", customer);
@@ -291,60 +213,6 @@ TEST_F(Experiments, StartStudyLeavesDefaultsToZettaAndKeepsItsErrorPath) {
     EXPECT_NE(failed.error.message.find("from_defaults"), std::string::npos);
 }
 
-TEST(ExperimentsRenderer, ObjectivesUseTheRunReportsMetricNames) {
-    lake::api::ExperimentsPage page;
-    page.customer_id = "customer-one";
-    page.customers = {{"customer-one", "Personal", true}};
-    page.can_write = true;
-    auto study = lake::test::experiment_study();
-    study["spec"]["objective"]["metric"] = "validation.auc";
-    page.data = {{"studies", json::array({study})}, {"runs", json::array()}};
-    const std::string html = lake::api::web_ui_experiments(page, true);
-    EXPECT_NE(html.find("name=\"objective.metric\" value=\"held_out_auc\""), std::string::npos);
-    EXPECT_NE(html.find("<option value=\"held_out_log_loss\">"), std::string::npos);
-    EXPECT_NE(html.find("<td>held_out_auc</td>"), std::string::npos);
-    EXPECT_EQ(html.find(">validation.auc<"), std::string::npos);
-    EXPECT_NE(html.find("\"roc_auc\":\"held_out_auc\""), std::string::npos);
-}
-
-// lake#449: analysis panels are tables, promotion is marked, and the latest trials' curves are in
-// the page before any script runs.
-TEST(ExperimentsRenderer, StudyPanelsAreReadableAndCarryTrialCurves) {
-    lake::api::ExperimentsPage page;
-    page.customer_id = "customer-one";
-    page.customers = {{"customer-one", "Personal", true}};
-    page.mode = "study";
-    page.study = "study-one";
-    page.data = lake::test::experiment_study();
-    page.data["promoted_model"] = "model-one";
-    lake::test::ExperimentCaller caller;
-    page.analysis = caller.analysis();
-    page.trial_metrics = json::array({lake::test::experiment_metrics("trial-1")});
-    const std::string html = lake::api::web_ui_experiments(page, true);
-    const auto history = html.find("id=\"optimization-table\"");
-    ASSERT_NE(history, std::string::npos);
-    const auto panels = html.substr(history, html.find("Trial Leaderboard") - history);
-    EXPECT_EQ(panels.find("<pre>"), std::string::npos);
-    EXPECT_NE(panels.find("<td>trial-1</td>"), std::string::npos);
-    EXPECT_NE(panels.find("<th scope=\"col\">learning_rate</th>"), std::string::npos);
-    EXPECT_NE(panels.find("<td>learning_rate</td><td>1.0</td>"), std::string::npos);
-    EXPECT_NE(html.find("status-success\">promoted</span>"), std::string::npos);
-    EXPECT_NE(html.find("trial-1 · validation.auc — Data Table"), std::string::npos);
-    const auto data = html.find("id=\"experiment-data\"");
-    ASSERT_NE(data, std::string::npos);
-    EXPECT_NE(html.find("\"details\":[{", data), std::string::npos);
-}
-
-TEST_F(Experiments, StudyPageReadsTheLatestTrialCurves) {
-    lake::api::ApiServer server({.port = 0, .store = store,
-        .workspaces = workspace->service, .admin_token = "experiment-operator"});
-    ASSERT_TRUE(server.start()) << server.reason();
-    const auto html = request(server.port(), "GET", "/w/" + workspace->id +
-        "/train/experiment?study=study-one&customer_id=" + customer);
-    EXPECT_NE(html.find("trial-1 · validation.auc — Data Table"), std::string::npos);
-    EXPECT_NE(html.find("trial-2 · train.loss — Data Table"), std::string::npos);
-}
-
 TEST_F(Experiments, BoundedLiveReadsResolveOnlyTheSelectedSpacesStudyOrRun) {
     const json input = {{"kind", "run"}, {"id", "run-a"}, {"from_sequence", 42},
         {"wait_ms", 30000}, {"max_events", 2}};
@@ -401,33 +269,12 @@ TEST_F(Experiments, RestAndMcpExposeMatchingSchemasAndCallEveryOperation) {
     }
 }
 
-TEST_F(Experiments, EveryPageControlUsesACapabilityAndNavigationOwnsAllExperimentRoutes) {
+// The web app's Experiments pages call only these capabilities (docs/ui/experiments.md); the
+// agents' guide names the live read and the confirmation a person gives.
+TEST_F(Experiments, AgentDocsNameTheLiveReadAndTheConfirmation) {
     lake::api::ApiServer server({.port = 0, .store = store,
         .workspaces = workspace->service, .admin_token = "experiment-operator"});
     ASSERT_TRUE(server.start()) << server.reason();
-    const std::vector<std::string> paths = {"/train/experiments?", "/train/experiment?study=study-one&",
-        "/train/experiment/run?run=run-a&", "/train/experiments/compare?runs=run-a,run-b&"};
-    for (const auto& path : paths) {
-        const auto html = request(server.port(), "GET", "/w/" + workspace->id + path + "customer_id=" + customer);
-        controls_registered(html, registry);
-        const auto navigation = html.find("href=\"/w/" + workspace->id + "/train/experiments\" aria-current=\"page\"");
-        ASSERT_NE(navigation, std::string::npos);
-        const auto link = html.substr(navigation, html.find("</a>", navigation) - navigation);
-        EXPECT_NE(link.find("<svg class=\"icon\""), std::string::npos);
-        EXPECT_EQ(html.find("href=\"/train/runs\" aria-current=\"page\""), std::string::npos);
-        EXPECT_EQ(html.find("experiment-service-secret"), std::string::npos);
-        EXPECT_EQ(html.find("data-action=\"delete"), std::string::npos);
-        EXPECT_EQ(html.find(">Delete"), std::string::npos);
-        EXPECT_EQ(html.find("<script>alert(1)</script>"), std::string::npos);
-        for (const auto name : lake::api::web_ui_experiment_asset_names()) {
-            const std::string asset(lake::api::web_ui_experiment_asset_url(name));
-            EXPECT_NE(html.find(asset), std::string::npos);
-            EXPECT_EQ(lake::api::web_ui_asset_cache_control(asset), "public, max-age=31536000, immutable");
-            EXPECT_EQ(request(server.port(), "GET", asset), lake::api::web_ui_experiment_asset(name));
-        }
-    }
-    const auto dp = request(server.port(), "GET", "/w/" + workspace->id + "/train/experiment/run?run=dp-run&customer_id=" + customer);
-    EXPECT_NE(dp.find("curves suppressed for differential privacy"), std::string::npos);
     const auto agent_docs = lake::api::agent_docs::llms_full_txt(registry, "http://127.0.0.1");
     EXPECT_NE(agent_docs.find("tail_experiment_events"), std::string::npos);
     EXPECT_NE(agent_docs.find("person's confirmation"), std::string::npos);

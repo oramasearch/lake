@@ -4,6 +4,11 @@
 
 #include <gtest/gtest.h>
 
+#include <cctype>
+#include <fstream>
+#include <sstream>
+#include <string>
+
 using lake::api::web_app_asset;
 using lake::api::web_app_cache_control;
 using lake::api::web_app_index;
@@ -61,4 +66,58 @@ TEST(WebApp, TheBuiltAppIsEmbedded) {
     EXPECT_NE(web_app_index().find("<div id=\"root\">"), std::string_view::npos);
     EXPECT_EQ(web_app_asset("/index.html")->content_type, "text/html; charset=utf-8");
     EXPECT_EQ(web_app_asset("/no-such-file"), nullptr);
+}
+
+namespace {
+
+std::string read_source(const char* relative) {
+    std::ifstream in(std::string(LAKE_TEST_SOURCE_DIR) + "/" + relative);
+    std::stringstream text;
+    text << in.rdbuf();
+    return text.str();
+}
+
+std::string collapsed(std::string_view text) {
+    std::string out;
+    bool space = false;
+    for (const char c : text) {
+        if (std::isspace(static_cast<unsigned char>(c))) {
+            space = true;
+            continue;
+        }
+        if (space && !out.empty()) {
+            out += ' ';
+        }
+        space = false;
+        out += c;
+    }
+    return out;
+}
+
+} // namespace
+
+// docs/ui/front-door.md's Landing copy quotes the homepage word for word: every bold phrase is in
+// the page's source (frontend/src/pages/home/HomePage.tsx, and the invitation sentence in
+// frontend/src/pages/account/signIn.ts), as its Verify section checks by hand.
+TEST(WebApp, FrontDoorDocQuotesTheHomePage) {
+    const std::string doc = read_source("docs/ui/front-door.md");
+    const auto start = doc.find("## Landing copy");
+    ASSERT_NE(start, std::string::npos);
+    const auto end = doc.find("\n## ", start + 1);
+    const std::string section = doc.substr(start, end == std::string::npos ? end : end - start);
+    const std::string source = collapsed(read_source("frontend/src/pages/home/HomePage.tsx") +
+                                         read_source("frontend/src/pages/account/signIn.ts"));
+    ASSERT_FALSE(source.empty());
+    std::size_t quoted = 0;
+    for (std::size_t at = section.find("**"); at != std::string::npos;) {
+        const auto close = section.find("**", at + 2);
+        if (close == std::string::npos) {
+            break;
+        }
+        const std::string phrase = collapsed(section.substr(at + 2, close - at - 2));
+        EXPECT_NE(source.find(phrase), std::string::npos) << phrase;
+        ++quoted;
+        at = section.find("**", close + 2);
+    }
+    EXPECT_GE(quoted, 10U) << "the Landing copy section quotes the homepage";
 }

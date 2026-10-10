@@ -83,20 +83,9 @@ add_test(
   NAME lake-ui-token-gates
   COMMAND ${CMAKE_SOURCE_DIR}/tools/ui/test-token-gates.sh)
 
-# The UI fixture starts, renders every page it seeds, and answers every registered GET route
-# below 500 (lake#497).
-add_test(
-  NAME lake-ui-fixture-pages
-  COMMAND ${CMAKE_SOURCE_DIR}/tools/ui/test-fixture-pages.sh $<TARGET_FILE:lake-ui-fixture>)
-set_tests_properties(lake-ui-fixture-pages PROPERTIES TIMEOUT 600)
-
 add_test(
   NAME lake-ui-contrast
   COMMAND ${LAKE_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/ui/check-contrast.mjs)
-
-add_test(
-  NAME lake-experiment-charts
-  COMMAND ${LAKE_NODE_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/experiment_charts.cjs)
 
 # The fakes are coroutines too: one that flows off its end is an error, as in lake's own targets.
 foreach(lake_test_target lake-tests lake-postgres-tests)

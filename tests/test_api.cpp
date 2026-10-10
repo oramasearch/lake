@@ -3002,7 +3002,10 @@ TEST(TelemetryHttp, MetricsRequireExistingAuthAndUsePrometheusContentType) {
     server.stop();
 }
 
-TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
+// The browser session is the API's: password sign-up through /v1 sets the HttpOnly lake_session
+// cookie, which then reads sessions and enrolls MFA. The former server pages are the web app's, so
+// a request that is not a browser's gets the 404 (lake#561).
+TEST(IdentityHttp, ApiSignUpIssuesAndResolvesHttpOnlySessions) {
     ServerOptions options;
     options.port = 0;
     options.public_host = "lake.example";
@@ -3011,61 +3014,54 @@ TEST(IdentityHttp, PagesIssueAndResolveHttpOnlySessions) {
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
 
-    const std::string page = http_get(server.port(), "/sign-up");
-    EXPECT_NE(page.find(" 200 "), std::string::npos);
-    EXPECT_NE(page.find("action=\"/identity/sign-up\""), std::string::npos);
-    const std::string mfa_challenge = http_get(server.port(), "/mfa");
-    EXPECT_NE(mfa_challenge.find(" 200 "), std::string::npos);
-    EXPECT_NE(mfa_challenge.find("action=\"/identity/mfa/verify\""), std::string::npos);
-
-    const std::string operator_page =
-        http_get(server.port(), "/sign-in", "Bearer operator-page-token");
-    EXPECT_NE(operator_page.find(" 302 "), std::string::npos);
-    EXPECT_EQ(response_header(operator_page, "Location"), "/repositories");
-    const std::string operator_sessions =
-        http_get(server.port(), "/sessions", "Bearer operator-page-token");
-    EXPECT_NE(operator_sessions.find(" 302 "), std::string::npos);
-    EXPECT_EQ(response_header(operator_sessions, "Location"), "/repositories");
-
-    const std::string created =
+    for (const std::string_view path : {"/sign-up", "/sign-in", "/mfa", "/sessions"}) {
+        const std::string retired =
+            http_request(server.port(), "GET", path, "", "text/plain", {}, {}, "lake.example");
+        EXPECT_NE(retired.find(" 404 "), std::string::npos) << path << "\n" << retired;
+    }
+    const std::string form =
         http_request(server.port(),
                      "POST",
                      "/identity/sign-up",
                      "email=page%40example.test&display_name=Page+User&password=correct+horse+"
                      "battery+staple&device_name=browser&identity_document=%7B%7D",
-                     "application/x-www-form-urlencoded");
-    EXPECT_NE(created.find(" 302 "), std::string::npos) << created;
-    EXPECT_EQ(response_header(created, "Location"), "/repositories");
-    const std::string set_cookie = response_header(created, "Set-Cookie");
-    EXPECT_NE(set_cookie.find("HttpOnly"), std::string::npos);
-    const std::size_t cookie_end = set_cookie.find(';');
-    const std::string cookie = set_cookie.substr(0, cookie_end);
+                     "application/x-www-form-urlencoded",
+                     {},
+                     {},
+                     "lake.example");
+    EXPECT_NE(form.find(" 404 "), std::string::npos) << "the sign-up form is retired: " << form;
 
-    const std::string sessions =
-        http_request(server.port(), "GET", "/sessions", "", "text/plain", cookie);
-    EXPECT_NE(sessions.find(" 200 "), std::string::npos) << sessions;
-    EXPECT_NE(sessions.find("Sessions and Devices"), std::string::npos);
-    EXPECT_NE(sessions.find("browser"), std::string::npos);
-
-    const std::string mfa_enrollment = http_request(server.port(),
-                                                    "POST",
-                                                    "/identity/mfa/enroll",
-                                                    "",
-                                                    "application/x-www-form-urlencoded",
-                                                    cookie);
-    EXPECT_NE(mfa_enrollment.find(" 200 "), std::string::npos) << mfa_enrollment;
-    EXPECT_NE(mfa_enrollment.find("otpauth://totp/lake:"), std::string::npos);
-    EXPECT_NE(mfa_enrollment.find("Recovery Codes"), std::string::npos);
-    EXPECT_NE(mfa_enrollment.find("action=\"/identity/mfa/disable\""), std::string::npos);
-
-    const std::string rest_signup = http_request(
+    const std::string created = http_request(
         server.port(),
         "POST",
         "/v1/sign_up_password",
-        R"({"email":"rest-page@example.test","password":"correct horse battery staple","display_name":"REST Page","device_name":"browser","identity_document":"{}"})",
-        "application/json");
-    EXPECT_NE(rest_signup.find(" 200 "), std::string::npos) << rest_signup;
-    EXPECT_NE(response_header(rest_signup, "Set-Cookie").find("HttpOnly"), std::string::npos);
+        R"({"email":"page@example.test","password":"correct horse battery staple","display_name":"Page User","device_name":"browser","identity_document":"{}"})",
+        "application/json",
+        {},
+        {},
+        "lake.example");
+    EXPECT_NE(created.find(" 200 "), std::string::npos) << created;
+    const std::string set_cookie = response_header(created, "Set-Cookie");
+    EXPECT_NE(set_cookie.find("HttpOnly"), std::string::npos);
+    EXPECT_NE(set_cookie.find("SameSite=Lax"), std::string::npos);
+    const std::string cookie = set_cookie.substr(0, set_cookie.find(';'));
+
+    const std::string sessions = http_request(
+        server.port(), "GET", "/v1/list_sessions", "", "text/plain", cookie, {}, "lake.example");
+    EXPECT_NE(sessions.find(" 200 "), std::string::npos) << sessions;
+    EXPECT_NE(sessions.find("browser"), std::string::npos);
+
+    const std::string enrolled = http_request(server.port(),
+                                              "POST",
+                                              "/v1/enroll_mfa",
+                                              "{}",
+                                              "application/json",
+                                              cookie,
+                                              {},
+                                              "lake.example");
+    EXPECT_NE(enrolled.find(" 200 "), std::string::npos) << enrolled;
+    EXPECT_NE(enrolled.find("otpauth://totp/lake:"), std::string::npos);
+    EXPECT_NE(enrolled.find("recovery_codes"), std::string::npos);
     server.stop();
 }
 
@@ -5446,9 +5442,25 @@ TEST(HuggingFaceHttp, CommonModelAndDatasetCallsUseRepositoryCapabilities) {
                                                    {},
                                                    authorization);
     EXPECT_NE(lfs_committed.find(" 200 "), std::string::npos) << lfs_committed;
-    const std::string model_page =
-        http_request(server.port(), "GET", "/models/ada/fixture-model", "", "text/html");
-    EXPECT_NE(model_page.find("Training Provenance"), std::string::npos) << model_page;
+    // The model page's reads: the Hub name resolves to its repository, which get_model reads.
+    const std::string resolved = http_request(server.port(),
+                                              "GET",
+                                              "/v1/resolve_model?namespace=ada&name=fixture-model",
+                                              "",
+                                              "text/plain",
+                                              {},
+                                              authorization);
+    ASSERT_NE(resolved.find(" 200 "), std::string::npos) << resolved;
+    const std::string model_page = http_request(
+        server.port(),
+        "GET",
+        "/v1/get_model?id=" + response_json(resolved)["value"]["repository_id"].get<std::string>() +
+            "&revision=" + response_json(resolved)["value"]["revision"].get<std::string>(),
+        "",
+        "text/plain",
+        {},
+        authorization);
+    EXPECT_NE(model_page.find(" 200 "), std::string::npos) << model_page;
     EXPECT_NE(model_page.find("weights.bin"), std::string::npos) << model_page;
 
     // A repository belongs to one workspace (lake#315): named in the body, or for a hub client
@@ -5732,9 +5744,9 @@ TEST(ModelProvenance, SignedDatasetChainVerifiesAndTamperingIsRefused) {
               liquid::to_string(dataset_change->value));
     const std::string model_page = http_request(server.port(),
                                                 "GET",
-                                                "/models/" + model->id,
+                                                "/v1/get_model?id=" + model->id + "&revision=main",
                                                 "",
-                                                "text/html",
+                                                "text/plain",
                                                 {},
                                                 "Bearer provenance-admin");
     EXPECT_NE(model_page.find("run-7"), std::string::npos) << model_page;
@@ -5756,7 +5768,7 @@ TEST(ModelProvenance, SignedDatasetChainVerifiesAndTamperingIsRefused) {
     server.stop();
 }
 
-TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
+TEST(RepositoryHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     TemporaryRepositoryRoot root;
     const auto store = std::make_shared<lake::control::InMemoryStore>();
     const auto user = store->create_user({"", "", "Ada"});
@@ -5871,52 +5883,45 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     ApiServer server(options);
     ASSERT_TRUE(server.start()) << server.reason();
 
-    const std::string listed = http_get(server.port(), "/repositories");
-    EXPECT_NE(listed.find(" 200 "), std::string::npos);
-    EXPECT_NE(listed.find("public-repository"), std::string::npos);
-    EXPECT_EQ(listed.find("private-repository"), std::string::npos);
-
-    const std::string public_page =
-        http_get(server.port(), "/repository?id=" + public_repository->id);
-    EXPECT_NE(public_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(public_page.find("public-repository"), std::string::npos);
-    const std::string tree_page =
-        http_get(server.port(), "/repository/tree?id=" + public_repository->id + "&ref=main");
-    EXPECT_NE(tree_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(tree_page.find("readme.md"), std::string::npos);
-    const std::string file_page = http_get(
-        server.port(), "/file?repository_id=" + public_repository->id + "&ref=main&path=readme.md");
-    EXPECT_NE(file_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(file_page.find("public content"), std::string::npos);
-    const std::string change_page = http_get(server.port(),
-                                             "/change?repository_id=" + public_repository->id +
-                                                 "&id=" + liquid::to_string(second_change->value));
-    EXPECT_NE(change_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(change_page.find("readme.md"), std::string::npos);
-    EXPECT_NE(change_page.find("notes.md"), std::string::npos);
-    EXPECT_NE(change_page.find("@@ -2,0 +2,1 @@"), std::string::npos);
-    EXPECT_NE(change_page.find("+updated"), std::string::npos);
-    const std::string reformatting_page =
-        http_get(server.port(),
-                 "/change?repository_id=" + reformatting_repository->id +
-                     "&id=" + liquid::to_string(formatting_change->value));
-    EXPECT_NE(reformatting_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(reformatting_page.find("No changes to display."), std::string::npos);
-    EXPECT_EQ(reformatting_page.find("<code>format.cpp</code>"), std::string::npos);
-    const std::string artifacts_page =
-        http_get(server.port(), "/artifacts?repository_id=" + public_repository->id + "&limit=1");
-    EXPECT_NE(artifacts_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(artifacts_page.find("Build Results"), std::string::npos);
-    EXPECT_NE(artifacts_page.find("Next page"), std::string::npos);
-    const std::string artifact_page =
-        http_get(server.port(),
-                 "/artifact?repository_id=" + public_repository->id +
-                     "&id=" + liquid::to_string(second_result->value));
-    EXPECT_NE(artifact_page.find(" 200 "), std::string::npos);
-    EXPECT_NE(artifact_page.find("build/app"), std::string::npos);
-    EXPECT_NE(artifact_page.find("slsa_provenance/1"), std::string::npos);
-    EXPECT_NE(artifact_page.find("sbom/1"), std::string::npos);
-    EXPECT_NE(artifact_page.find("verified"), std::string::npos);
+    // What the web app's repository pages read, signed out: a public repository is readable
+    // through the API, a private one is not (lake#561).
+    const auto read = [&](const std::string& path, std::string_view authorization = {}) {
+        const std::string response = http_get(server.port(), "/v1/" + path, authorization);
+        EXPECT_NE(response.find(" 200 "), std::string::npos) << path << "\n" << response;
+        return response_json(response)["value"];
+    };
+    const std::string listed = read("list_repositories?customer_id=" + customer->id).dump();
+    EXPECT_NE(listed.find("public-repository"), std::string::npos) << listed;
+    EXPECT_EQ(listed.find("private-repository"), std::string::npos) << listed;
+    EXPECT_EQ(read("get_repository?id=" + public_repository->id)["name"], "public-repository");
+    EXPECT_NE(
+        read("repository_tree?id=" + public_repository->id + "&ref=main").dump().find("readme.md"),
+        std::string::npos);
+    EXPECT_NE(read("repository_file?id=" + public_repository->id + "&ref=main&path=readme.md")
+                  .dump()
+                  .find("public content"),
+              std::string::npos);
+    const std::string change = read("change_diff?id=" + public_repository->id +
+                                    "&change_id=" + liquid::to_string(second_change->value))
+                                   .dump();
+    EXPECT_NE(change.find("readme.md"), std::string::npos) << change;
+    EXPECT_NE(change.find("notes.md"), std::string::npos) << change;
+    EXPECT_NE(change.find("updated"), std::string::npos) << change;
+    // A reformatting-only change has no line to show: its one entry is modified with no hunks.
+    const json reformatting = read("change_diff?id=" + reformatting_repository->id +
+                                   "&change_id=" + liquid::to_string(formatting_change->value));
+    const std::string reformatted = reformatting.dump();
+    EXPECT_EQ(reformatted.find("int value;"), std::string::npos) << reformatted;
+    const json artifacts = read("list_artifacts?id=" + public_repository->id + "&limit=1");
+    EXPECT_EQ(artifacts["items"].size(), 1U) << artifacts.dump();
+    EXPECT_EQ(artifacts["done"], false) << "a next page";
+    EXPECT_FALSE(artifacts.value("next_cursor", std::string()).empty());
+    const std::string artifact = read("get_artifact?id=" + public_repository->id +
+                                      "&result_id=" + liquid::to_string(second_result->value))
+                                     .dump();
+    EXPECT_NE(artifact.find("build/app"), std::string::npos) << artifact;
+    EXPECT_NE(artifact.find("slsa_provenance/1"), std::string::npos) << artifact;
+    EXPECT_NE(artifact.find("sbom/1"), std::string::npos) << artifact;
 
     const std::string model_response =
         http_get(server.port(), "/api/models/" + public_repository->id);
@@ -5935,37 +5940,30 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     EXPECT_NE(nested_model_file.find("{\"fixture\":true}"), std::string::npos);
 
     const std::string drive =
-        http_get(server.port(),
-                 "/drive?repository_id=" + public_repository->id + "&ref=main&path=&view=grid",
-                 "Bearer test-token");
-    EXPECT_NE(drive.find(" 200 "), std::string::npos) << drive;
-    EXPECT_NE(drive.find("class=\"drive-grid\""), std::string::npos);
-    EXPECT_NE(drive.find("action=\"/drive/upload\""), std::string::npos);
-    EXPECT_EQ(drive.find(" · —"), std::string::npos);
-
-    const std::string boundary = "lake-drive-boundary";
-    const std::string multipart =
-        "--" + boundary + "\r\nContent-Disposition: form-data; name=\"repository_id\"\r\n\r\n" +
-        public_repository->id + "\r\n--" + boundary +
-        "\r\nContent-Disposition: form-data; name=\"ref\"\r\n\r\nmain\r\n--" + boundary +
-        "\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\n\r\n--" + boundary +
-        "\r\nContent-Disposition: form-data; name=\"files\"; filename=\"browser.txt\"\r\n"
-        "Content-Type: text/plain\r\n\r\nbrowser upload\r\n--" +
-        boundary + "--\r\n";
-    const std::string uploaded = http_request(server.port(),
-                                              "POST",
-                                              "/drive/upload",
-                                              multipart,
-                                              "multipart/form-data; boundary=" + boundary,
-                                              {},
-                                              "Bearer test-token");
-    EXPECT_NE(uploaded.find(" 302 "), std::string::npos) << uploaded;
-    const std::string uploaded_preview = http_get(
+        read("drive_browse?repository_id=" + public_repository->id + "&ref=main&path=",
+             "Bearer test-token")
+            .dump();
+    EXPECT_NE(drive.find("readme.md"), std::string::npos) << drive;
+    const std::string uploaded = http_request(
         server.port(),
-        "/drive/preview?repository_id=" + public_repository->id + "&ref=main&path=browser.txt",
+        "POST",
+        "/v1/upload_drive_files",
+        json{{"repository_id", public_repository->id},
+             {"ref", "main"},
+             {"path", ""},
+             {"files",
+              json::array({{{"name", "browser.txt"}, {"content", "YnJvd3NlciB1cGxvYWQ="}}})}}
+            .dump(),
+        "application/json",
+        {},
         "Bearer test-token");
-    EXPECT_NE(uploaded_preview.find(" 200 "), std::string::npos) << uploaded_preview;
-    EXPECT_NE(uploaded_preview.find("browser upload"), std::string::npos);
+    EXPECT_NE(uploaded.find(" 200 "), std::string::npos) << uploaded;
+    EXPECT_NE(
+        read("drive_preview?repository_id=" + public_repository->id + "&ref=main&path=browser.txt",
+             "Bearer test-token")
+            .dump()
+            .find("browser upload"),
+        std::string::npos);
     const std::string downloaded = http_get(
         server.port(),
         "/drive/download?repository_id=" + public_repository->id + "&ref=main&path=browser.txt",
@@ -5974,28 +5972,23 @@ TEST(WebUiHttp, PublicRepositoriesAreReadableAndPrivateRepositoriesAreHidden) {
     EXPECT_NE(downloaded.find("attachment; filename=\"browser.txt\""), std::string::npos)
         << downloaded;
     EXPECT_NE(downloaded.find("browser upload"), std::string::npos);
-    const std::string version_diff =
-        http_get(server.port(),
-                 "/drive/history/diff?repository_id=" + public_repository->id +
-                     "&ref=main&path=readme.md&left=" + liquid::to_string(first_change->value) +
-                     "&right=" + liquid::to_string(second_change->value),
-                 "Bearer test-token");
-    EXPECT_NE(version_diff.find(" 200 "), std::string::npos) << version_diff;
-    EXPECT_NE(version_diff.find("+updated"), std::string::npos);
+    EXPECT_NE(read("diff_drive_versions?repository_id=" + public_repository->id +
+                       "&ref=main&path=readme.md&left=" + liquid::to_string(first_change->value) +
+                       "&right=" + liquid::to_string(second_change->value),
+                   "Bearer test-token")
+                  .dump()
+                  .find("updated"),
+              std::string::npos);
 
-    const std::string private_page =
-        http_get(server.port(), "/repository?id=" + private_repository->id);
-    EXPECT_NE(private_page.find(" 302 "), std::string::npos);
-    const std::string private_change =
-        http_get(server.port(), "/change?repository_id=" + private_repository->id + "&id=hidden");
-    EXPECT_NE(private_change.find(" 302 "), std::string::npos);
-    const std::string private_artifacts =
-        http_get(server.port(), "/artifacts?repository_id=" + private_repository->id);
-    EXPECT_NE(private_artifacts.find(" 302 "), std::string::npos);
-    EXPECT_NE(private_page.find("Location: /sign-in"), std::string::npos);
+    // A private repository: not through the API, and a download sends the person to sign in.
     const std::string private_api =
         http_get(server.port(), "/v1/get_repository?id=" + private_repository->id);
     EXPECT_NE(private_api.find(" 401 "), std::string::npos);
+    const std::string private_file =
+        http_get(server.port(),
+                 "/file/raw?repository_id=" + private_repository->id + "&ref=main&path=readme.md");
+    EXPECT_NE(private_file.find(" 302 "), std::string::npos) << private_file;
+    EXPECT_NE(private_file.find("Location: /sign-in"), std::string::npos) << private_file;
     server.stop();
 }
 

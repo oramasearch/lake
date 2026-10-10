@@ -276,7 +276,6 @@ struct ApiContext {
     std::string credential_rejection;
     std::string workspace_id; // explicitly supplied by the capability or workspace URL
     std::string path_workspace_id; // immutable selection from /w/<workspace>/...
-    std::string remembered_workspace_id; // UI navigation only; never a capability default
     std::string authentication_method;
     std::string device;
     std::string credential_device_id;
@@ -315,8 +314,6 @@ struct ApiContext {
     std::shared_ptr<WorkspaceCallTiming> workspace_call_timing;
     // The HTTP request this call serves (lake#384); null outside a request (owner loop, tests).
     std::shared_ptr<RequestAttribution> request_attribution;
-    // GET-page navigation resolves the same authorized customer list once per request.
-    std::shared_ptr<std::optional<ApiResult>> page_customers;
     // Only renderer definition reads opt in; edits must read the current graph.
     bool cache_workspace_definitions = false;
     // Sends a turn to an agent's service (docs/api/agent-launches.md); null without agents.

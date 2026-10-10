@@ -68,44 +68,17 @@ const browser = await withinTimeout(
 );
 
 try {
-  if (args[0] === "--jobs") {
-    const [, jobsPath, failuresPath] = args;
+  const [source, output, networkLog] = args;
 
-    if (!jobsPath || !failuresPath) {
-      throw new Error("jobs and failures paths are required");
-    }
+  if (!source || !output || !networkLog) {
+    throw new Error("source, output, and network log paths are required");
+  }
 
-    const jobs = (await fs.readFile(`/work/${jobsPath}`, "utf8"))
-      .trim()
-      .split("\n")
-      .filter(Boolean);
-    const failures = [];
+  const failure = await capture(browser, source, output, networkLog);
 
-    for (const job of jobs) {
-      const [pageName, source, output, networkLog] = job.split("\t");
-      const failure = await capture(browser, source, output, networkLog);
-
-      if (failure) {
-        failures.push(`${pageName}\t${networkLog}`);
-        console.error(`${pageName}: ${failure}`);
-      }
-    }
-
-    await fs.writeFile(`/work/${failuresPath}`, `${failures.join("\n")}${failures.length ? "\n" : ""}`);
-    process.exitCode = failures.length ? 1 : 0;
-  } else {
-    const [source, output, networkLog] = args;
-
-    if (!source || !output || !networkLog) {
-      throw new Error("source, output, and network log paths are required");
-    }
-
-    const failure = await capture(browser, source, output, networkLog);
-
-    if (failure) {
-      console.error(failure);
-      process.exitCode = 1;
-    }
+  if (failure) {
+    console.error(failure);
+    process.exitCode = 1;
   }
 } finally {
   await browser.close();

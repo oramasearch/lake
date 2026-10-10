@@ -81,30 +81,28 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 
+#include "agent_task_records_api.hpp"
 #include "lake/api/agent_docs.hpp"
 #include "lake/api/apps.hpp"
 #include "lake/api/capabilities.hpp"
+#include "lake/api/clerk.hpp"
 #include "lake/api/datasets.hpp"
+#include "lake/api/drive.hpp"
 #include "lake/api/images.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/registry.hpp"
-#include "lake/api/workspace_deletion.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/store_owner.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/web_app.hpp"
 #include "lake/api/web_ui.hpp"
-#include "agent_task_records_api.hpp"
-#include "request_log.hpp"
-#include "route_guard.hpp"
-#include "secret_records_api.hpp"
-#include "workspace_records_api.hpp"
-#include "lake/control/ask_messages.hpp"
-#include "lake/control/oci_records.hpp"
+#include "lake/api/workspace_deletion.hpp"
 #include "lake/audit/audit.hpp"
+#include "lake/control/ask_messages.hpp"
 #include "lake/control/callers.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/oci_records.hpp"
 #include "lake/control/pki.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/policy.hpp"
@@ -117,6 +115,10 @@
 #include "lake/transparency/timestamps.hpp"
 #include "lake/transparency/tuf.hpp"
 #include "lake/version.hpp"
+#include "request_log.hpp"
+#include "route_guard.hpp"
+#include "secret_records_api.hpp"
+#include "workspace_records_api.hpp"
 
 #include <liquid/git.hpp>
 #include <liquid/hash.hpp>
@@ -128,6 +130,23 @@
 
 namespace lake::api {
 namespace {
+
+// The workspace a /w/<workspace>/... path names: a UUID, or empty for any other path.
+std::string workspace_path_id(std::string_view path) {
+    if (!path.starts_with("/w/")) {
+        return {};
+    }
+    const auto end = path.find('/', 3);
+    if (end == std::string_view::npos) {
+        return {};
+    }
+    const std::string id(path.substr(3, end - 3));
+    if (id.size() != 36 ||
+        std::ranges::any_of(id, [](unsigned char c) { return !std::isxdigit(c) && c != '-'; })) {
+        return {};
+    }
+    return id;
+}
 
 constexpr auto sync_content_type = "application/vnd.liquid.sync-v1";
 constexpr auto sync_error_content_type = "application/vnd.liquid.error-v1";
@@ -480,7 +499,6 @@ boost::http::route_task send_text(boost::http::route_params& route,
     route.res.set(http::field::content_type, content_type);
     route.res.set(http::field::cache_control, cache_control);
     if (content_type.starts_with("text/html")) {
-        body = web_ui_workspace_document(std::move(body), workspace_path_id(std::string(route.url.path())));
         // Only lake frames lake's pages (the Ask Orama panel, lake#258): no clickjacking.
         route.res.set("Content-Security-Policy", "frame-ancestors 'self'");
     }
@@ -694,7 +712,7 @@ bool constant_time_equal(std::string_view a, std::string_view b) {
 }
 
 // A capy WriteSink that collects a request body into a std::string — for the
-// form-urlencoded bodies the server-rendered sign-in posts (json_sink parses
+// form-urlencoded bodies the sign-in and hosted-page forms post (json_sink parses
 // JSON, which form bodies are not).
 struct StringBodySink {
     std::string data;
@@ -829,38 +847,6 @@ std::string form_field(std::string_view body, std::string_view name) {
         if (amp == std::string_view::npos)
             break;
         pos = amp + 1;
-    }
-    return {};
-}
-
-// Every value of a repeated field (checkboxes), in order.
-std::vector<std::string> form_fields(std::string_view body, std::string_view name) {
-    std::vector<std::string> values;
-    std::size_t pos = 0;
-    while (pos < body.size()) {
-        const std::size_t amp = body.find('&', pos);
-        std::string_view pair =
-            body.substr(pos, amp == std::string_view::npos ? std::string_view::npos : amp - pos);
-        const std::size_t eq = pair.find('=');
-        if (eq != std::string_view::npos && form_decode(pair.substr(0, eq)) == name) {
-            values.push_back(form_decode(pair.substr(eq + 1)));
-        }
-        if (amp == std::string_view::npos) {
-            break;
-        }
-        pos = amp + 1;
-    }
-    return values;
-}
-
-std::string workspace_form_error(const boost::http::route_params& route, std::string_view body) {
-    const auto workspace = workspace_path_id(std::string(route.url.path()));
-    if (workspace.empty()) {
-        return {};
-    }
-    const auto values = form_fields(body, "workspace_id");
-    if (values.size() != 1 || values.front() != workspace) {
-        return "workspace_id must be supplied once and match the URL path";
     }
     return {};
 }
@@ -1963,11 +1949,6 @@ MultipartForm parse_multipart(std::string_view body, std::string_view content_ty
     return output;
 }
 
-std::string path_parent(std::string_view path) {
-    const std::size_t slash = path.find_last_of('/');
-    return slash == std::string_view::npos ? std::string{} : std::string(path.substr(0, slash));
-}
-
 std::string path_filename(std::string_view path) {
     const std::size_t slash = path.find_last_of('/');
     return std::string(slash == std::string_view::npos ? path : path.substr(slash + 1));
@@ -2001,19 +1982,6 @@ std::string workspace_prefixed_local_path(std::string_view path) {
     }
     const std::size_t end = path.find('/', 3);
     return end == std::string_view::npos ? std::string() : std::string(path.substr(end));
-}
-
-// The workspace selector's choices: each live workspace by its name, which is unique among the
-// space's live workspaces, without "(environment)" (lake#452). Workspaces lists environments.
-std::vector<std::pair<std::string, std::string>>
-workspace_choices(const std::vector<lake::control::Workspace>& rows) {
-    std::vector<std::pair<std::string, std::string>> choices;
-    for (const auto& row : rows) {
-        if (row.desired != "deleted") {
-            choices.emplace_back(row.id, row.name);
-        }
-    }
-    return choices;
 }
 
 bool workspace_api_path(std::string_view path) {
@@ -2152,7 +2120,8 @@ std::string app_return_path(std::string_view path) {
     return app_authorize_path(app_id, redirect);
 }
 
-// The Ship app return the no-JavaScript pages carry in the lake_sign_in_return cookie.
+// The Ship app return /apps/authorize leaves in the lake_sign_in_return cookie for the sign-in
+// routes that redirect after setting the session (the Clerk exchange, the OAuth callback).
 std::string app_sign_in_return(const boost::http::route_params& route) {
     const std::string encoded = cookie_value(route, "lake_sign_in_return");
     if (encoded.empty()) {
@@ -2215,27 +2184,6 @@ std::string application_redirect_location(const control::Application& applicatio
     return location;
 }
 
-std::vector<std::string> form_lines(std::string_view value) {
-    std::vector<std::string> output;
-    std::size_t start = 0;
-    while (start <= value.size()) {
-        const std::size_t end = value.find('\n', start);
-        std::string line(value.substr(
-            start, end == std::string_view::npos ? value.size() - start : end - start));
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        if (!line.empty()) {
-            output.push_back(std::move(line));
-        }
-        if (end == std::string_view::npos) {
-            break;
-        }
-        start = end + 1;
-    }
-    return output;
-}
-
 std::optional<std::uint64_t> decimal_value(std::string_view value) {
     std::uint64_t output = 0;
     const auto parsed = std::from_chars(value.data(), value.data() + value.size(), output);
@@ -2279,18 +2227,6 @@ oci_content_range(const boost::http::route_params& route) {
     return std::optional<OciContentRange>{{*start, *end}};
 }
 
-std::uint64_t query_page_limit(const boost::http::route_params& route) {
-    const std::string text = query_value(route, "limit");
-    if (text.empty()) {
-        return 100;
-    }
-    std::uint64_t value = 0;
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
-    return error == std::errc{} && end == text.data() + text.size() && value > 0 && value <= 1'000
-               ? value
-               : 100;
-}
-
 std::string browser_session_cookie(const boost::http::route_params& route,
                                    std::string_view secret) {
     std::string cookie = "lake_session=" + std::string(secret) + "; HttpOnly; SameSite=Lax; Path=/";
@@ -2298,26 +2234,6 @@ std::string browser_session_cookie(const boost::http::route_params& route,
         cookie += "; Secure";
     }
     return cookie;
-}
-
-std::vector<std::string> comma_separated(std::string_view value) {
-    std::vector<std::string> result;
-    std::size_t position = 0;
-    while (position <= value.size()) {
-        const std::size_t comma = value.find(',', position);
-        std::string item(value.substr(
-            position, comma == std::string_view::npos ? std::string_view::npos : comma - position));
-        const std::size_t first = item.find_first_not_of(" \t\r\n");
-        const std::size_t last = item.find_last_not_of(" \t\r\n");
-        if (first != std::string::npos) {
-            result.push_back(item.substr(first, last - first + 1));
-        }
-        if (comma == std::string_view::npos) {
-            break;
-        }
-        position = comma + 1;
-    }
-    return result;
 }
 
 nlohmann::json to_nlohmann(const boost::json::value& value) {
@@ -2387,387 +2303,6 @@ std::string json_string(const nlohmann::json& value, std::string_view key) {
         return {};
     }
     return field->get<std::string>();
-}
-
-control::Organization organization_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "taap_id"),
-            json_string(value, "display_name"),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at")};
-}
-
-control::SsoProvider sso_provider_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "organization_id"),
-            json_string(value, "pool_id"),
-            json_string(value, "name"),
-            json_string(value, "protocol"),
-            json_string(value, "issuer"),
-            json_string(value, "metadata"),
-            json_string(value, "signing_certificate"),
-            json_string(value, "client_id"),
-            value.value("attribute_mapping", nlohmann::json::object()),
-            value.value("jit_provisioning", false),
-            value.value("enabled", false),
-            json_string(value, "tested_at"),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at")};
-}
-
-control::FederationIssuer federation_issuer_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "organization_id"),
-            json_string(value, "issuer"),
-            json_string(value, "claim"),
-            json_string(value, "created_at")};
-}
-
-control::ProvisioningLog provisioning_log_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "provider_id"),
-            json_string(value, "resource"),
-            json_string(value, "operation"),
-            json_string(value, "external_id"),
-            json_string(value, "outcome"),
-            value.value("details", nlohmann::json::object()),
-            json_string(value, "created_at")};
-}
-
-control::Customer customer_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "customer_type"),
-            json_string(value, "user_id"),
-            json_string(value, "organization_id"),
-            json_string(value, "name"),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at")};
-}
-
-control::Application application_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "customer_id"),
-            json_string(value, "pool_id"),
-            json_string(value, "name"),
-            value.value("allowed_origins", std::vector<std::string>{}),
-            value.value("redirect_uris", std::vector<std::string>{}),
-            json_string(value, "custom_sign_in_domain"),
-            value.value("theme", nlohmann::json::object()),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at"),
-            json_string(value, "workspace_id")};
-}
-
-control::ApplicationUser application_user_from_json(const nlohmann::json& value) {
-    return {json_string(value, "application_id"),
-            json_string(value, "user_id"),
-            json_string(value, "taap_id"),
-            json_string(value, "email"),
-            json_string(value, "display_name"),
-            json_string(value, "status"),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at")};
-}
-
-control::ApplicationOrganization application_organization_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "application_id"),
-            json_string(value, "taap_id"),
-            json_string(value, "name"),
-            value.value("metadata", nlohmann::json::object()),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at")};
-}
-
-control::ApplicationWebhookEvent application_event_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "application_id"),
-            json_string(value, "event"),
-            value.value("payload", nlohmann::json::object()),
-            json_string(value, "created_at")};
-}
-
-control::Repository repository_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "customer_id"),
-            json_string(value, "name"),
-            json_string(value, "description"),
-            json_string(value, "visibility"),
-            json_string(value, "deleted_at"),
-            json_string(value, "retention_until"),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at"),
-            json_string(value, "workspace_id")};
-}
-
-control::ForgeRecord forge_record_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "repository_id"),
-            json_string(value, "kind"),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at"),
-            value.value("value", nlohmann::json::object())};
-}
-
-RepositoryContentRef repository_content_ref_from_json(const nlohmann::json& value) {
-    return {json_string(value, "name"), json_string(value, "change")};
-}
-
-RepositoryTreeEntry repository_tree_entry_from_json(const nlohmann::json& value) {
-    RepositoryTreeEntry output{json_string(value, "path"),
-                               json_string(value, "kind"),
-                               json_string(value, "blob"),
-                               value.value("mode", 0U),
-                               json_string(value, "node_id"),
-                               value.value("size", std::uint64_t{0}),
-                               value.value("stored_size", std::uint64_t{0})};
-    output.last_changed_at = json_string(value, "modified_at");
-    return output;
-}
-
-RepositoryFile repository_file_from_json(const nlohmann::json& value) {
-    return {json_string(value, "path"),
-            json_string(value, "blob"),
-            json_string(value, "contents"),
-            value.value("size", std::uint64_t{0})};
-}
-
-DriveVersionDiff drive_version_diff_from_json(const nlohmann::json& value) {
-    DriveVersionDiff difference{repository_file_from_json(value.at("left")),
-                                repository_file_from_json(value.at("right")),
-                                {}};
-    for (const nlohmann::json& line : value.at("lines")) {
-        difference.lines.push_back({json_string(line, "kind"), json_string(line, "text")});
-    }
-    return difference;
-}
-
-RepositoryChange repository_change_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            value.value("parents", std::vector<std::string>{}),
-            json_string(value, "author"),
-            json_string(value, "message"),
-            json_string(value, "occurred_at")};
-}
-
-RepositoryConflict repository_conflict_from_json(const nlohmann::json& value) {
-    RepositoryConflict output{
-        .id = json_string(value, "id"),
-        .base = json_string(value, "base"),
-        .left = json_string(value, "left"),
-        .right = json_string(value, "right"),
-        .region = {.path = json_string(value.at("region"), "path")},
-        .kind = json_string(value, "kind"),
-        .explanation = json_string(value, "explanation"),
-        .reasons = value.value("reasons", std::vector<std::string>{}),
-    };
-    const nlohmann::json& region = value.at("region");
-    if (region.contains("bytes")) {
-        output.region.bytes =
-            RepositoryConflictByteRange{region.at("bytes").value("offset", std::uint64_t{0}),
-                                        region.at("bytes").value("length", std::uint64_t{0})};
-    }
-    if (region.contains("nodes")) {
-        output.region.nodes = RepositoryConflictNodeRange{json_string(region.at("nodes"), "first"),
-                                                          json_string(region.at("nodes"), "last")};
-    }
-    if (value.contains("proposal")) {
-        output.proposal = json_string(value, "proposal");
-    }
-    if (value.contains("node")) {
-        output.node = json_string(value, "node");
-    }
-    return output;
-}
-
-RepositoryDiffEntry repository_diff_entry_from_json(const nlohmann::json& value) {
-    RepositoryDiffEntry entry{
-        .path = json_string(value, "path"),
-        .old_path = json_string(value, "old_path"),
-        .kind = json_string(value, "kind"),
-        .changes = value.value("changes", std::vector<std::string>{}),
-        .old_blob = json_string(value, "old_blob"),
-        .new_blob = json_string(value, "new_blob"),
-        .old_conflicts = value.value("old_conflicts", std::vector<std::string>{}),
-        .new_conflicts = value.value("new_conflicts", std::vector<std::string>{}),
-    };
-    if (value.contains("old_mode") && value.at("old_mode").is_number_unsigned()) {
-        entry.old_mode = value.at("old_mode").get<std::uint32_t>();
-    }
-    if (value.contains("new_mode") && value.at("new_mode").is_number_unsigned()) {
-        entry.new_mode = value.at("new_mode").get<std::uint32_t>();
-    }
-    if (value.contains("line_hunks") && value.at("line_hunks").is_array()) {
-        entry.line_hunks.emplace();
-        for (const nlohmann::json& hunk : value.at("line_hunks")) {
-            entry.line_hunks->push_back({hunk.value("old_line", std::uint64_t{0}),
-                                         hunk.value("old_count", std::uint64_t{0}),
-                                         hunk.value("new_line", std::uint64_t{0}),
-                                         hunk.value("new_count", std::uint64_t{0}),
-                                         hunk.value("removed_lines", std::vector<std::string>{}),
-                                         hunk.value("added_lines", std::vector<std::string>{})});
-        }
-    }
-    return entry;
-}
-
-RepositoryArtifact repository_artifact_from_json(const nlohmann::json& value) {
-    RepositoryArtifact artifact{
-        .id = json_string(value, "id"),
-        .action = json_string(value, "action"),
-        .exit_code = value.value("exit_code", 0),
-        .cache_status = json_string(value, "cache_status"),
-        .divergent = value.value("divergent", false),
-        .verification = json_string(value, "verification"),
-        .worker = json_string(value, "worker"),
-        .observed_at = json_string(value, "observed_at"),
-        .started_at = json_string(value, "started_at"),
-        .finished_at = json_string(value, "finished_at"),
-    };
-    for (const nlohmann::json& output : value.value("outputs", nlohmann::json::array())) {
-        artifact.outputs.push_back({json_string(output, "path"),
-                                    output.value("mode", std::uint32_t{0}),
-                                    json_string(output, "blob")});
-    }
-    if (value.contains("timing") && value.at("timing").is_object()) {
-        const nlohmann::json& timing = value.at("timing");
-        artifact.timing = {timing.value("queued_ms", std::uint64_t{0}),
-                           timing.value("sandbox_ms", std::uint64_t{0}),
-                           timing.value("exec_ms", std::uint64_t{0}),
-                           timing.value("hash_ms", std::uint64_t{0}),
-                           timing.value("store_ms", std::uint64_t{0})};
-    }
-    for (const nlohmann::json& attestation : value.value("attestations", nlohmann::json::array())) {
-        artifact.attestations.push_back({json_string(attestation, "id"),
-                                         json_string(attestation, "profile"),
-                                         json_string(attestation, "subject"),
-                                         json_string(attestation, "issuer"),
-                                         attestation.value("verified", false),
-                                         json_string(attestation, "reason")});
-    }
-    if (value.contains("trace") && value.at("trace").is_object()) {
-        const nlohmann::json& trace = value.at("trace");
-        artifact.trace = RepositoryArtifactTrace{json_string(trace, "id"),
-                                                 trace.value("wall_ms", std::uint64_t{0}),
-                                                 trace.value("actions", std::uint64_t{0}),
-                                                 trace.value("dependencies", std::uint64_t{0}),
-                                                 trace.value("cache_hits", std::uint64_t{0}),
-                                                 trace.value("cache_misses", std::uint64_t{0})};
-    }
-    for (const nlohmann::json& member : value.value("members", nlohmann::json::array())) {
-        artifact.members.push_back({json_string(member, "artifact"),
-                                    json_string(member, "version"),
-                                    json_string(member, "path"),
-                                    json_string(member, "digest"),
-                                    member.value("indexed", false),
-                                    json_string(member, "reason")});
-    }
-    return artifact;
-}
-
-control::Team team_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "organization_id"),
-            json_string(value, "name"),
-            json_string(value, "display_name"),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at")};
-}
-
-control::Membership membership_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "organization_id"),
-            json_string(value, "team_id"),
-            json_string(value, "principal_type"),
-            json_string(value, "principal_id"),
-            json_string(value, "principal_taap_id"),
-            json_string(value, "role"),
-            json_string(value, "attestation_digest"),
-            json_string(value, "granted_by_taap_id"),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at")};
-}
-
-control::Invitation invitation_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "organization_id"),
-            json_string(value, "team_id"),
-            json_string(value, "invitee_type"),
-            json_string(value, "invitee"),
-            json_string(value, "role"),
-            json_string(value, "expires_at"),
-            json_string(value, "status"),
-            json_string(value, "accepted_membership_id"),
-            json_string(value, "created_by_taap_id"),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at")};
-}
-
-control::PolicyObject object_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "object_type"),
-            json_string(value, "external_id"),
-            json_string(value, "parent_id"),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at"),
-            value.value("inherit", true)};
-}
-
-control::Grant grant_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "principal_taap_id"),
-            json_string(value, "object_id"),
-            json_string(value, "role"),
-            json_string(value, "attestation_digest"),
-            json_string(value, "granted_by_taap_id"),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at")};
-}
-
-control::EffectiveAccessEntry access_from_json(const nlohmann::json& value) {
-    return {json_string(value, "principal_taap_id"),
-            json_string(value, "source_object_id"),
-            json_string(value, "role"),
-            value.at("actions").get<std::vector<std::string>>(),
-            value.value("inherited", false)};
-}
-
-control::SecretMount secret_mount_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "customer_id"),
-            json_string(value, "organization_id"),
-            json_string(value, "workspace_id"),
-            json_string(value, "name"),
-            json_string(value, "description"),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at")};
-}
-
-control::SecretMetadata secret_metadata_from_json(const nlohmann::json& value) {
-    std::vector<control::SecretVersionMetadata> versions;
-    for (const nlohmann::json& version : value.at("versions")) {
-        versions.push_back({version.at("version").get<std::uint64_t>(),
-                            json_string(version, "created_at"),
-                            json_string(version, "deleted_at"),
-                            json_string(version, "destroyed_at")});
-    }
-    return {json_string(value, "mount_id"),
-            json_string(value, "name"),
-            value.at("current_version").get<std::uint64_t>(),
-            value.value("custom_metadata", nlohmann::json::object()),
-            std::move(versions),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at")};
-}
-
-control::EncryptionKey encryption_key_from_json(const nlohmann::json& value) {
-    return {json_string(value, "id"),
-            json_string(value, "mount_id"),
-            json_string(value, "name"),
-            json_string(value, "derived_from"),
-            value.at("current_version").get<std::uint64_t>(),
-            json_string(value, "created_at"),
-            json_string(value, "updated_at")};
 }
 
 class LiquidCustomerStores final : public SyncStore {
@@ -7393,9 +6928,8 @@ std::string_view to_string(StoreRootState state) {
 // mirror into the transparency log, search, registry indexes) and a missed route would let two
 // processes write the root at once.
 bool store_root_exempt(std::string_view path) {
-    return path == "/healthz" || path == "/readyz" || path == "/metrics" ||
-           path == "/style.css" || path == web_ui_stylesheet_url() ||
-           path.starts_with("/fonts/") || path.starts_with("/assets/experiments/");
+    return path == "/healthz" || path == "/readyz" || path == "/metrics" || path == "/style.css" ||
+           path == web_ui_stylesheet_url() || path.starts_with("/fonts/");
 }
 
 // Counts a route handler as in flight from its first step until it completes, so stop() can
@@ -8305,11 +7839,6 @@ struct ApiServer::Impl {
         if (web_ui_stylesheet_url().empty()) {
             failure_reason = "could not calculate the stylesheet asset hash";
         }
-        for (const std::string_view asset : web_ui_experiment_asset_names()) {
-            if (web_ui_experiment_asset_url(asset).empty()) {
-                failure_reason = "could not calculate the experiment asset hash for " + std::string(asset);
-            }
-        }
         for (const std::string_view font : web_ui_font_names()) {
             if (web_ui_font_url(font).empty()) {
                 failure_reason = "could not calculate the font asset hash for " + std::string(font);
@@ -8773,9 +8302,6 @@ struct ApiServer::Impl {
             return *timing->context;
         }
         ApiContext ctx;
-        if (page_read) {
-            ctx.page_customers = std::make_shared<std::optional<ApiResult>>();
-        }
         // A capability that long-polls gives its HTTP worker back (lake#534).
         if (server) {
             ctx.leave_worker = [connections = server.get(), token = server->request_token(route)](
@@ -8786,7 +8312,6 @@ struct ApiServer::Impl {
         ctx.request_path = std::string(route.url.path());
         ctx.request_query = std::string(route.url.encoded_query());
         ctx.path_workspace_id = workspace_path_id(ctx.request_path);
-        ctx.remembered_workspace_id = cookie_value(route, "lake_workspace");
         ctx.workspace_id = ctx.path_workspace_id;
         ctx.store = options.store.get();
         ctx.search = options.search.get();
@@ -8861,9 +8386,8 @@ struct ApiServer::Impl {
             ctx.device = std::string(route.req.at(boost::http::field::user_agent));
         }
         // Authorization: the bearer wins; else the HttpOnly session cookie (its
-        // value IS the admin token, validated identically), so the server-rendered
-        // pages authenticate with the cookie set by POST /session and the token
-        // never touches the page.
+        // value IS the credential secret, validated identically), so the web app
+        // authenticates with the cookie a sign-in route set and never sees the secret.
         std::string bearer = bearer_of(route);
         if (!bearer.empty()) {
             ctx.authentication_method = "bearer";
@@ -8928,77 +8452,6 @@ struct ApiServer::Impl {
             timing->context = ctx;
         }
         return ctx;
-    }
-
-    ApiResult page_customers(ApiContext& context) const {
-        if (context.page_customers && *context.page_customers) {
-            return **context.page_customers;
-        }
-        auto result = registry.call("list_customers", {{"limit", 200}}, context);
-        if (context.page_customers) {
-            *context.page_customers = result;
-        }
-        return result;
-    }
-
-    WebUiViewer viewer_for(const ApiContext& context) const {
-        WebUiViewer viewer{context.authorized, context.operator_credential};
-        viewer.path = context.request_path;
-        viewer.query = context.request_query;
-        viewer.user_id = context.acting_user_id;
-        viewer.clerk = clerk.has_value();
-        viewer.workspace_id = context.path_workspace_id;
-        if (viewer.workspace_id.empty()) {
-            viewer.workspace_id = context.remembered_workspace_id;
-        }
-        if (context.authorized && options.store && options.workspaces) {
-            auto read_context = context;
-            const auto customers = page_customers(read_context);
-            if (customers.ok) {
-                for (const auto& row : customers.value.at("items")) {
-                    const auto customer = customer_from_json(row);
-                    viewer.spaces.emplace_back(customer.id,
-                                               web_ui_space_label(customer, viewer.user_id));
-                }
-            }
-            const auto query = boost::urls::parse_query(context.request_query);
-            if (query && context.path_workspace_id.empty()) {
-                for (const auto& parameter : *query) {
-                    if (parameter.key == "customer_id" &&
-                        std::ranges::any_of(viewer.spaces, [&](const auto& space) {
-                            return space.first == parameter.value;
-                        })) {
-                        viewer.customer_id = parameter.value;
-                    }
-                }
-            }
-            if (!viewer.workspace_id.empty()) {
-                const auto workspace = options.store->get_workspace(viewer.workspace_id);
-                if (workspace && workspace->desired != "deleted" &&
-                    (viewer.customer_id.empty() || viewer.customer_id == workspace->customer_id) &&
-                    std::ranges::any_of(viewer.spaces, [&](const auto& space) {
-                        return space.first == workspace->customer_id;
-                    })) {
-                    viewer.customer_id = workspace->customer_id;
-                } else {
-                    viewer.workspace_id.clear();
-                }
-            }
-            if (viewer.customer_id.empty() && !viewer.spaces.empty()) {
-                viewer.customer_id = viewer.spaces.front().first;
-            }
-            if (const auto rows = options.store->list_workspaces(viewer.customer_id)) {
-                viewer.workspaces = workspace_choices(*rows);
-            }
-            if (viewer.workspace_id.empty() && viewer.workspaces.size() == 1) {
-                viewer.workspace_id = viewer.workspaces.front().first;
-            }
-        }
-        return viewer;
-    }
-
-    WebUiViewer viewer_for(const boost::http::route_params& route) const {
-        return viewer_for(context_for(route));
     }
 
     // Authentication and session events happen outside the registry, so they are
@@ -9374,10 +8827,6 @@ struct ApiServer::Impl {
         if (read_error) {
             co_return boost::http::route_error(read_error);
         }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
-        }
         const std::string customer_id = route_value(route, "customer_id");
         const std::string expected_url = request_origin(route) + std::string(route.url.path());
         const bool new_account = capability_name == "acme_new_account";
@@ -9491,26 +8940,12 @@ struct ApiServer::Impl {
             route, boost::http::status::ok, order_document.dump(), "application/json");
     }
 
-    boost::http::route_task serve_web_root(boost::http::route_params& route) {
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_home(viewer_for(route)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
     boost::http::route_task redirect(boost::http::route_params& route,
                                      std::string_view location,
                                      std::string_view set_cookie = {}) {
         namespace http = boost::http;
-        const auto workspace = workspace_path_id(std::string(route.url.path()));
-        std::string destination(location);
-        const auto query = destination.find('?');
-        if (!workspace.empty() && workspace_page_path(destination.substr(0, query))) {
-            destination = "/w/" + workspace + destination;
-        }
         route.status(http::status::found);
-        route.res.set(http::field::location, destination);
+        route.res.set(http::field::location, location);
         if (!set_cookie.empty())
             route.res.set(http::field::set_cookie, set_cookie);
         route.res.set(http::field::cache_control, "no-store");
@@ -9519,16 +8954,6 @@ struct ApiServer::Impl {
         if (send_error)
             co_return http::route_error(send_error);
         co_return http::route_done;
-    }
-
-    boost::http::route_task serve_login(boost::http::route_params& route) {
-        if (context_for(route).authorized)
-            return redirect(route, "/repositories");
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_login(query_value(route, "error"), viewer_for(route)),
-                         "text/html; charset=utf-8",
-                         "no-store");
     }
 
     // POST /session — the sign-in form. A matching token becomes the HttpOnly
@@ -9637,573 +9062,15 @@ struct ApiServer::Impl {
                          "no-store");
     }
 
-    boost::http::route_task serve_repository_page_error(boost::http::route_params& route,
-                                                        const ApiContext& context,
-                                                        const ApiResult& result) {
+    // A download's failure: without a credential, the sign-in page; else the API's own answer.
+    boost::http::route_task serve_download_error(boost::http::route_params& route,
+                                                 const ApiContext& context,
+                                                 const ApiResult& result) {
         if (!context.authorized &&
             (result.error.code == "unauthorized" || result.error.code == "unauthenticated")) {
             return redirect(route, "/sign-in");
         }
-        return send_text(route,
-                         boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
-                         web_ui_error(result.error.code, result.error.message, viewer_for(route)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_customers_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        if (!ctx.authorized)
-            return redirect(route, "/sign-in");
-        std::vector<control::Customer> customers;
-        const ApiResult rows = registry.call("list_customers", {{"limit", 500}}, ctx);
-        if (!rows.ok) {
-            return serve_page_error(route, rows);
-        }
-        for (const auto& value : rows.value.at("items")) {
-            customers.push_back(customer_from_json(value));
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_customers(customers, viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_organizations_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        if (!ctx.authorized)
-            return redirect(route, "/sign-in");
-        const ApiResult rows = registry.call("list_organizations", {{"limit", 500}}, ctx);
-        if (!rows.ok) {
-            return serve_page_error(route, rows);
-        }
-        OrganizationsPageData data;
-        for (const auto& value : rows.value.at("items")) {
-            data.organizations.push_back(organization_from_json(value));
-        }
-        data.person = !ctx.operator_credential && !ctx.acting_user_id.empty();
-        if (data.person) {
-            const ApiResult memberships = registry.call("list_memberships", {{"limit", 500}}, ctx);
-            if (memberships.ok) {
-                for (const auto& value : memberships.value.at("items")) {
-                    data.memberships.push_back(membership_from_json(value));
-                }
-            }
-            const ApiResult invitations = registry.call("list_invitations", {{"limit", 100}}, ctx);
-            if (invitations.ok) {
-                for (const auto& value : invitations.value.at("items")) {
-                    data.invitations.push_back(
-                        {invitation_from_json(value), value.value("organization_name", "")});
-                }
-            }
-            const ApiResult customers = page_customers(ctx);
-            if (customers.ok) {
-                for (const auto& value : customers.value.value("items", nlohmann::json::array())) {
-                    control::Customer customer = customer_from_json(value);
-                    if (customer.customer_type == "individual" &&
-                        customer.user_id == ctx.acting_user_id) {
-                        data.personal_space = std::move(customer);
-                        break;
-                    }
-                }
-            }
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_organizations(data, viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task form_failure(boost::http::route_params& route,
-                                         const ApiResult& result,
-                                         const ApiContext& context) {
-        return send_text(route,
-                         boost::http::int_to_status(rest_status(result)),
-                         web_ui_error(result.error.code, result.error.message, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    // POST /organizations/create: a person starts an organization and is sent on to invite
-    // people (docs/ui/settings.md).
-    boost::http::route_task serve_organization_create(boost::http::route_params& route) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return boost::http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        nlohmann::json input{{"display_name", form_field(body, "display_name")}};
-        if (const std::string name = form_field(body, "name"); !name.empty()) {
-            input["name"] = name;
-        }
-        const ApiResult result = registry.call("create_organization_space", input, context);
-        if (!result.ok) {
-            co_return co_await form_failure(route, result, context);
-        }
-        co_return co_await redirect(
-            route,
-            "/organization?id=" + result.value.at("organization").at("id").get<std::string>() +
-                "&tab=invitations");
-    }
-
-    // POST /organizations/convert: the confirmed conversion of the viewer's personal space.
-    boost::http::route_task serve_organization_convert(boost::http::route_params& route) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return boost::http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string customer_id = form_field(body, "customer_id");
-        const ApiResult customer =
-            registry.call("get_customer", {{"customer_id", customer_id}}, context);
-        if (!customer.ok) {
-            co_return co_await form_failure(route, customer, context);
-        }
-        const std::string handle = customer.value.value("name", "");
-        if (form_field(body, "confirm") != handle) {
-            co_return co_await form_failure(
-                route,
-                ApiResult::failure("invalid_input",
-                                   "type the handle " + handle +
-                                       " exactly to confirm turning this space into an "
-                                       "organization; nothing was changed",
-                                   "/confirm"),
-                context);
-        }
-        const ApiResult result = registry.call(
-            "convert_personal_space",
-            {{"customer_id", customer_id}, {"display_name", form_field(body, "display_name")}},
-            context);
-        if (!result.ok) {
-            co_return co_await form_failure(route, result, context);
-        }
-        co_return co_await redirect(
-            route,
-            "/organization?id=" + result.value.at("organization").at("id").get<std::string>() +
-                "&tab=invitations");
-    }
-
-    // POST /invitations/accept: the invitee joins.
-    boost::http::route_task serve_invitation_accept(boost::http::route_params& route) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return boost::http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const ApiResult result = registry.call(
-            "join_organization", {{"invitation_id", form_field(body, "invitation_id")}}, context);
-        if (!result.ok) {
-            co_return co_await form_failure(route, result, context);
-        }
-        co_return co_await redirect(
-            route, "/organization?id=" + result.value.at("organization_id").get<std::string>());
-    }
-
-    // POST /organization/teams: create a team from the organization's Teams tab.
-    boost::http::route_task serve_organization_team_create(boost::http::route_params& route) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return boost::http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string organization_id = form_field(body, "organization_id");
-        nlohmann::json input{{"organization_id", organization_id},
-                             {"name", form_field(body, "name")}};
-        if (const std::string display_name = form_field(body, "display_name");
-            !display_name.empty()) {
-            input["display_name"] = display_name;
-        }
-        const ApiResult result = registry.call("create_team", input, context);
-        if (!result.ok) {
-            co_return co_await form_failure(route, result, context);
-        }
-        co_return co_await redirect(route, "/organization?id=" + organization_id + "&tab=teams");
-    }
-
-    boost::http::route_task serve_organization_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string organization_id = query_value(route, "id");
-        if (organization_id.empty()) {
-            co_return co_await redirect(route, "/organizations");
-        }
-        const ApiResult organization_result =
-            registry.call("get_organization", {{"id", organization_id}}, context);
-        if (!organization_result.ok) {
-            co_return co_await serve_page_error(route, organization_result);
-        }
-        OrganizationSettingsData data;
-        const auto load = [&](const std::string& name,
-                              nlohmann::json input,
-                              auto append) -> std::optional<ApiResult> {
-            const ApiResult result = registry.call(name, std::move(input), context);
-            if (!result.ok) {
-                return result;
-            }
-            for (const nlohmann::json& item :
-                 result.value.value("items", nlohmann::json::array())) {
-                append(item);
-            }
-            return std::nullopt;
-        };
-        if (const auto error = load(
-                "list_teams",
-                {{"organization_id", organization_id}, {"limit", 500}},
-                [&](const nlohmann::json& item) { data.teams.push_back(team_from_json(item)); })) {
-            co_return co_await serve_page_error(route, *error);
-        }
-        if (const auto error = load("list_memberships",
-                                    {{"organization_id", organization_id}, {"limit", 500}},
-                                    [&](const nlohmann::json& item) {
-                                        data.memberships.push_back(membership_from_json(item));
-                                    })) {
-            co_return co_await serve_page_error(route, *error);
-        }
-        if (const auto error = load("list_invitations",
-                                    {{"organization_id", organization_id}, {"limit", 500}},
-                                    [&](const nlohmann::json& item) {
-                                        data.invitations.push_back(invitation_from_json(item));
-                                    })) {
-            co_return co_await serve_page_error(route, *error);
-        }
-        const ApiResult access =
-            registry.call("entity_effective_access",
-                          {{"object_type", "organization"}, {"id", organization_id}},
-                          context);
-        if (access.ok) {
-            for (const nlohmann::json& item :
-                 access.value.value("items", nlohmann::json::array())) {
-                data.access.push_back(access_from_json(item));
-            }
-        }
-        const ApiResult providers = registry.call(
-            "list_sso_providers", {{"organization_id", organization_id}, {"limit", 100}}, context);
-        if (providers.ok) {
-            for (const nlohmann::json& item :
-                 providers.value.value("items", nlohmann::json::array())) {
-                data.providers.push_back(sso_provider_from_json(item));
-            }
-        }
-        const ApiResult customers = registry.call("list_customers", {{"limit", 500}}, context);
-        if (customers.ok) {
-            for (const nlohmann::json& item :
-                 customers.value.value("items", nlohmann::json::array())) {
-                const control::Customer customer = customer_from_json(item);
-                if (customer.organization_id != organization_id) {
-                    continue;
-                }
-                const ApiResult applications = unwrap(co_await registry.call_async(
-                    "list_applications", {{"customer_id", customer.id}, {"limit", 100}}, context));
-                if (applications.ok) {
-                    for (const nlohmann::json& application :
-                         applications.value.value("items", nlohmann::json::array())) {
-                        data.applications.push_back(application_from_json(application));
-                    }
-                }
-                // Only the Usage tab shows usage, which reads the space's workspaces.
-                if (query_value(route, "tab") == "metering") {
-                    auto metering = co_await registry.call_async(
-                        "metering_usage", {{"customer_id", customer.id}}, context);
-                    if (metering && metering->ok) {
-                        data.metering = metering->value;
-                    }
-                }
-                break;
-            }
-        }
-        // Organization events are control-plane events: the central log alone (decision 52).
-        const ApiResult audit_result = registry.call(
-            "audit",
-            {{"object", "organization/" + organization_id}, {"limit", 100}, {"log", "central"}},
-            context);
-        if (audit_result.ok) {
-            for (const nlohmann::json& item :
-                 audit_result.value.value("items", nlohmann::json::array())) {
-                data.audit_events.push_back(audit::event_from_json(item));
-            }
-        }
-        co_return co_await send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_organization(organization_from_json(organization_result.value),
-                                data,
-                                query_value(route, "tab"),
-                                "",
-                                viewer_for(context)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_team_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            return redirect(route, "/sign-in");
-        }
-        const std::string team_id = query_value(route, "id");
-        const ApiResult team = registry.call("get_team", {{"id", team_id}}, context);
-        if (!team.ok) {
-            return serve_page_error(route, team);
-        }
-        const control::Team value = team_from_json(team.value);
-        const ApiResult members = registry.call(
-            "list_memberships",
-            {{"organization_id", value.organization_id}, {"team_id", value.id}, {"limit", 500}},
-            context);
-        if (!members.ok) {
-            return serve_page_error(route, members);
-        }
-        std::vector<control::Membership> memberships;
-        for (const nlohmann::json& item : members.value.at("items")) {
-            memberships.push_back(membership_from_json(item));
-        }
-        std::vector<control::EffectiveAccessEntry> access;
-        const ApiResult effective = registry.call(
-            "entity_effective_access", {{"object_type", "team"}, {"id", team_id}}, context);
-        if (effective.ok) {
-            for (const nlohmann::json& item :
-                 effective.value.value("items", nlohmann::json::array())) {
-                access.push_back(access_from_json(item));
-            }
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_team(value, memberships, access, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_member_page(boost::http::route_params& route,
-                                              std::string_view error = {},
-                                              bool confirm_removal = false) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            return redirect(route, "/sign-in");
-        }
-        const std::string member_id = query_value(route, "id");
-        const ApiResult member = registry.call("get_membership", {{"id", member_id}}, context);
-        if (!member.ok) {
-            return serve_page_error(route, member);
-        }
-        const control::Membership value = membership_from_json(member.value);
-        const std::string type = value.team_id.empty() ? "organization" : "team";
-        const std::string scope_id = value.team_id.empty() ? value.organization_id : value.team_id;
-        const ApiResult effective = registry.call(
-            "entity_effective_access", {{"object_type", type}, {"id", scope_id}}, context);
-        std::vector<control::EffectiveAccessEntry> access;
-        if (effective.ok) {
-            for (const nlohmann::json& item :
-                 effective.value.value("items", nlohmann::json::array())) {
-                if (item.value("principal_taap_id", "") == value.principal_taap_id) {
-                    access.push_back(access_from_json(item));
-                }
-            }
-        }
-        return send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_member(value,
-                          access,
-                          error,
-                          confirm_removal || query_value(route, "confirm_removal") == "yes",
-                          viewer_for(context)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_sso_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        if (!ctx.authorized) {
-            return redirect(route, "/sign-in");
-        }
-        const std::string organization_id = query_value(route, "organization_id");
-        if (organization_id.empty()) {
-            return redirect(route, "/organizations");
-        }
-        const ApiResult provider_rows = registry.call(
-            "list_sso_providers", {{"organization_id", organization_id}, {"limit", 100}}, ctx);
-        if (!provider_rows.ok) {
-            return serve_page_error(route, provider_rows);
-        }
-        const ApiResult issuer_rows = registry.call(
-            "list_federation_issuers", {{"organization_id", organization_id}, {"limit", 500}}, ctx);
-        if (!issuer_rows.ok) {
-            return serve_page_error(route, issuer_rows);
-        }
-        std::vector<control::SsoProvider> providers;
-        for (const nlohmann::json& value : provider_rows.value.at("items")) {
-            providers.push_back(sso_provider_from_json(value));
-        }
-        std::vector<control::FederationIssuer> issuers;
-        for (const nlohmann::json& value : issuer_rows.value.at("items")) {
-            issuers.push_back(federation_issuer_from_json(value));
-        }
-        std::vector<control::ProvisioningLog> logs;
-        std::string provider_id = query_value(route, "provider_id");
-        if (provider_id.empty() && !providers.empty()) {
-            provider_id = providers.front().id;
-        }
-        if (!provider_id.empty()) {
-            const ApiResult log_rows = registry.call(
-                "list_sso_provisioning_logs", {{"provider_id", provider_id}, {"limit", 100}}, ctx);
-            if (!log_rows.ok) {
-                return serve_page_error(route, log_rows);
-            }
-            for (const nlohmann::json& value : log_rows.value.at("items")) {
-                logs.push_back(provisioning_log_from_json(value));
-            }
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_sso(organization_id, providers, issuers, logs, viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_teams_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        if (!ctx.authorized)
-            return redirect(route, "/sign-in");
-        const std::string organization_id = query_value(route, "organization_id");
-        if (organization_id.empty())
-            return redirect(route, "/organizations");
-        const ApiResult rows = registry.call(
-            "list_teams", {{"organization_id", organization_id}, {"limit", 500}}, ctx);
-        if (!rows.ok) {
-            return serve_page_error(route, rows);
-        }
-        std::vector<control::Team> teams;
-        for (const auto& value : rows.value.at("items")) {
-            teams.push_back(team_from_json(value));
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_teams(organization_id, teams, viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_members_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        if (!ctx.authorized)
-            return redirect(route, "/sign-in");
-        const std::string organization_id = query_value(route, "organization_id");
-        const std::string team_id = query_value(route, "team_id");
-        if (organization_id.empty())
-            return redirect(route, "/organizations");
-        nlohmann::json input{{"organization_id", organization_id}, {"limit", 500}};
-        if (!team_id.empty()) {
-            input["team_id"] = team_id;
-        }
-        const ApiResult rows = registry.call("list_memberships", input, ctx);
-        if (!rows.ok) {
-            return serve_page_error(route, rows);
-        }
-        std::vector<control::Membership> memberships;
-        for (const auto& value : rows.value.at("items")) {
-            memberships.push_back(membership_from_json(value));
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_memberships(organization_id, team_id, memberships, viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_invitations_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        if (!ctx.authorized)
-            return redirect(route, "/sign-in");
-        const std::string organization_id = query_value(route, "organization_id");
-        const std::string team_id = query_value(route, "team_id");
-        if (organization_id.empty())
-            return redirect(route, "/organizations");
-        nlohmann::json input{{"organization_id", organization_id}, {"limit", 500}};
-        if (!team_id.empty()) {
-            input["team_id"] = team_id;
-        }
-        const ApiResult rows = registry.call("list_invitations", input, ctx);
-        if (!rows.ok) {
-            return serve_page_error(route, rows);
-        }
-        std::vector<control::Invitation> invitations;
-        for (const auto& value : rows.value.at("items")) {
-            invitations.push_back(invitation_from_json(value));
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_invitations(organization_id, team_id, invitations, viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_grants_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        if (!ctx.authorized)
-            return redirect(route, "/sign-in");
-        const std::string object_id = query_value(route, "object_id");
-        if (object_id.empty())
-            return redirect(route, "/organizations");
-        const ApiResult object_result = registry.call("get_object", {{"id", object_id}}, ctx);
-        if (!object_result.ok) {
-            return serve_page_error(route, object_result);
-        }
-        const ApiResult grant_result =
-            registry.call("list_grants", {{"object_id", object_id}, {"limit", 500}}, ctx);
-        if (!grant_result.ok) {
-            return serve_page_error(route, grant_result);
-        }
-        std::vector<control::Grant> grants;
-        for (const auto& value : grant_result.value.at("items")) {
-            grants.push_back(grant_from_json(value));
-        }
-        return send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_grants(object_from_json(object_result.value), grants, viewer_for(ctx)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_access_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        if (!ctx.authorized)
-            return redirect(route, "/sign-in");
-        const std::string object_id = query_value(route, "object_id");
-        if (object_id.empty())
-            return redirect(route, "/organizations");
-        const ApiResult object_result = registry.call("get_object", {{"id", object_id}}, ctx);
-        if (!object_result.ok) {
-            return serve_page_error(route, object_result);
-        }
-        const ApiResult access_result =
-            registry.call("effective_access", {{"object_id", object_id}}, ctx);
-        if (!access_result.ok) {
-            return serve_page_error(route, access_result);
-        }
-        std::vector<control::EffectiveAccessEntry> entries;
-        for (const auto& value : access_result.value.at("items")) {
-            entries.push_back(access_from_json(value));
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_effective_access(
-                             object_from_json(object_result.value), entries, viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-        return redirect(route, "/", "lake_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+        return serve_page_error(route, result);
     }
 
     control::Result<control::Application>
@@ -10246,323 +9113,6 @@ struct ApiServer::Impl {
                          error_body(failure.error.code, failure.error.message),
                          "application/json; charset=utf-8",
                          "no-store");
-    }
-
-    boost::http::route_task serve_applications_page(boost::http::route_params& route,
-                                                    std::string error = {}) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const ApiResult customer_rows = registry.call("list_customers", {{"limit", 500}}, context);
-        if (!customer_rows.ok) {
-            co_return co_await serve_page_error(route, customer_rows);
-        }
-        std::vector<control::Customer> customers;
-        std::vector<control::Application> applications;
-        std::vector<control::Workspace> workspaces;
-        for (const auto& value : customer_rows.value.at("items")) {
-            const control::Customer customer = customer_from_json(value);
-            customers.push_back(customer);
-            if (auto owned = options.store->list_workspaces(customer.id)) {
-                for (control::Workspace& workspace : *owned) {
-                    if (workspace.desired != "deleted") {
-                        workspaces.push_back(std::move(workspace));
-                    }
-                }
-            }
-            // Each application's settings are read from its workspace (lake#351).
-            const ApiResult application_rows = unwrap(co_await registry.call_async(
-                "list_applications", {{"customer_id", customer.id}, {"limit", 500}}, context));
-            if (!application_rows.ok) {
-                co_return co_await serve_page_error(route, application_rows);
-            }
-            for (const auto& application : application_rows.value.at("items")) {
-                applications.push_back(application_from_json(application));
-            }
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_applications(applications,
-                                                         customers,
-                                                         workspaces,
-                                                         error,
-                                                         viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_application_register(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        // The form names the workspace; its space is the application's customer.
-        const std::string workspace_id = form_field(body, "workspace_id");
-        std::string customer_id = form_field(body, "customer_id");
-        if (options.store && !workspace_id.empty()) {
-            if (const auto workspace = options.store->get_workspace(workspace_id)) {
-                customer_id = workspace->customer_id;
-            }
-        }
-        // The first signing key is written into the workspace (lake#352): asynchronously.
-        auto completed = co_await registry.call_async(
-            "register_application",
-            {{"customer_id", customer_id},
-             {"workspace_id", workspace_id},
-             {"name", form_field(body, "name")},
-             {"allowed_origins", form_lines(form_field(body, "allowed_origins"))},
-             {"redirect_uris", form_lines(form_field(body, "redirect_uris"))},
-             {"custom_sign_in_domain", form_field(body, "custom_sign_in_domain")},
-             {"theme", {{"accent_color", form_field(body, "accent_color")}}}},
-            context);
-        const ApiResult result =
-            completed ? std::move(*completed)
-                      : ApiResult::failure("store_error", completed.error().message);
-        if (!result.ok) {
-            co_return co_await serve_applications_page(route, result.error.message);
-        }
-        co_return co_await redirect(route, "/application?id=" + json_string(result.value, "id"));
-    }
-
-    boost::http::route_task serve_application_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string id = query_value(route, "id");
-        // The settings are read from the application's workspace (lake#351).
-        const ApiResult result =
-            unwrap(co_await registry.call_async("get_application", {{"id", id}}, context));
-        if (!result.ok) {
-            co_return co_await serve_page_error(route, result);
-        }
-        co_return co_await send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_application(application_from_json(result.value), viewer_for(context)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    // An application page's two reads at once, in one round: the application with its settings
-    // (one get_record) and one listing of its workspace, which `workspace_id` names from the
-    // application's routing row (lake#351).
-    liquid::runtime::task<std::vector<ApiResult>>
-    application_page_reads(ApiContext& context, const std::string& id, std::string listing) {
-        co_return unwrap_reads(co_await page_reads(
-            context,
-            {{"get_application", {{"id", id}}},
-             {std::move(listing),
-              {{"application_id", id}, {"workspace_id", application_workspace(id)},
-               {"limit", 500}}}}));
-    }
-
-    static std::vector<ApiResult>
-    unwrap_reads(std::expected<std::vector<ApiResult>, liquid::error> completed) {
-        if (!completed) {
-            const ApiResult failed = ApiResult::failure("store_error", completed.error().message);
-            return {failed, failed};
-        }
-        return std::move(*completed);
-    }
-
-    // An application's users and organizations are read from the workspace Zetta of the
-    // application's workspace (lake#353, lake#354): the capabilities take that workspace.
-    boost::http::route_task serve_application_users_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string id = query_value(route, "id");
-        const auto reads = unwrap_reads(
-            co_await application_page_reads(context, id, "list_application_users"));
-        const ApiResult& application = reads.at(0);
-        if (!application.ok) {
-            co_return co_await serve_page_error(route, application);
-        }
-        const control::Application parsed = application_from_json(application.value);
-        const ApiResult& rows = reads.at(1);
-        if (!rows.ok) {
-            co_return co_await serve_page_error(route, rows);
-        }
-        std::vector<control::ApplicationUser> users;
-        for (const auto& value : rows.value.at("items")) {
-            users.push_back(application_user_from_json(value));
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_application_users(parsed, users, viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    // The workspace of the application a form names, for the capabilities that need it.
-    std::string application_workspace(const std::string& application_id) {
-        if (!options.store) {
-            return {};
-        }
-        const auto application = options.store->get_application(application_id);
-        return application ? application->workspace_id : std::string();
-    }
-
-    boost::http::route_task serve_application_user_suspend(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string application_id = form_field(body, "application_id");
-        const ApiResult result = unwrap(
-            co_await registry.call_async("suspend_application_user",
-                                         {{"application_id", application_id},
-                                          {"workspace_id", application_workspace(application_id)},
-                                          {"user_id", form_field(body, "user_id")}},
-                                         context));
-        if (!result.ok) {
-            co_return co_await serve_page_error(route, result);
-        }
-        co_return co_await redirect(route, "/application/users?id=" + application_id);
-    }
-
-    boost::http::route_task serve_application_organizations_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string id = query_value(route, "id");
-        const auto reads = unwrap_reads(
-            co_await application_page_reads(context, id, "list_application_organizations"));
-        const ApiResult& application = reads.at(0);
-        if (!application.ok) {
-            co_return co_await serve_page_error(route, application);
-        }
-        const control::Application parsed = application_from_json(application.value);
-        const ApiResult& rows = reads.at(1);
-        if (!rows.ok) {
-            co_return co_await serve_page_error(route, rows);
-        }
-        std::vector<control::ApplicationOrganization> organizations;
-        for (const auto& value : rows.value.at("items")) {
-            organizations.push_back(application_organization_from_json(value));
-        }
-        co_return co_await send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_application_organizations(parsed, organizations, viewer_for(context)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task
-    serve_application_organization_create(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string application_id = form_field(body, "application_id");
-        const ApiResult result = unwrap(
-            co_await registry.call_async("create_application_organization",
-                                         {{"application_id", application_id},
-                                          {"workspace_id", application_workspace(application_id)},
-                                          {"name", form_field(body, "name")},
-                                          {"taap_id", form_field(body, "taap_id")}},
-                                         context));
-        if (!result.ok) {
-            co_return co_await serve_page_error(route, result);
-        }
-        co_return co_await redirect(route, "/application/organizations?id=" + application_id);
-    }
-
-    boost::http::route_task
-    serve_application_organization_delete(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string application_id = form_field(body, "application_id");
-        const ApiResult result = unwrap(
-            co_await registry.call_async("delete_application_organization",
-                                         {{"application_id", application_id},
-                                          {"workspace_id", application_workspace(application_id)},
-                                          {"organization_id", form_field(body, "organization_id")}},
-                                         context));
-        if (!result.ok) {
-            co_return co_await serve_page_error(route, result);
-        }
-        co_return co_await redirect(route, "/application/organizations?id=" + application_id);
-    }
-
-    // The application's event log, read from the workspace Zetta of the application's workspace
-    // (lake#356); a new webhook's secret is shown once, on the page its creation renders.
-    boost::http::route_task serve_application_events(boost::http::route_params& route,
-                                                     ApiContext& context,
-                                                     std::string id,
-                                                     std::string secret = {}) {
-        const auto reads = unwrap_reads(
-            co_await application_page_reads(context, id, "list_application_webhook_events"));
-        const ApiResult& application = reads.at(0);
-        if (!application.ok) {
-            co_return co_await serve_page_error(route, application);
-        }
-        const control::Application parsed = application_from_json(application.value);
-        const ApiResult& rows = reads.at(1);
-        if (!rows.ok) {
-            co_return co_await serve_page_error(route, rows);
-        }
-        std::vector<control::ApplicationWebhookEvent> events;
-        for (const auto& value : rows.value.at("items")) {
-            events.push_back(application_event_from_json(value));
-        }
-        co_return co_await send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_application_events(parsed, events, secret, viewer_for(context)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_application_events_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        co_return co_await serve_application_events(route, context, query_value(route, "id"));
-    }
-
-    boost::http::route_task serve_application_webhook_create(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string application_id = form_field(body, "application_id");
-        // The webhook is kept in the application's workspace (lake#355), which the form does not
-        // choose: it is the one the application was registered in.
-        auto created = co_await registry.call_async(
-            "create_application_webhook",
-            {{"application_id", application_id},
-             {"workspace_id", application_workspace(application_id)},
-             {"url", form_field(body, "url")},
-             {"events", comma_separated(form_field(body, "events"))}},
-            context);
-        if (!created) {
-            co_return co_await serve_page_error(
-                route, ApiResult::failure("store_error", created.error().message));
-        }
-        if (!created->ok) {
-            co_return co_await serve_page_error(route, *created);
-        }
-        co_return co_await serve_application_events(
-            route, context, application_id, created->value.value("secret", ""));
     }
 
     boost::http::route_task send_application_identity_page(boost::http::route_params& route,
@@ -10724,181 +9274,33 @@ struct ApiServer::Impl {
         ApiContext context = context_for(route);
         auto completed = co_await registry.call_async(
             "application_jwks", {{"application_id", route_value(route, "id")}}, context);
-        const ApiResult result =
-            completed ? std::move(*completed)
-                      : ApiResult::failure("store_error", completed.error().message);
-        co_return co_await send_text(route,
-                         boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
-                         result.ok ? result.value.dump() : rest_envelope(result).dump(),
-                         "application/json; charset=utf-8",
-                         result.ok ? "public, max-age=300" : "no-store");
+        const ApiResult result = completed
+                                     ? std::move(*completed)
+                                     : ApiResult::failure("store_error", completed.error().message);
+        co_return co_await send_text(
+            route,
+            boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
+            result.ok ? result.value.dump() : rest_envelope(result).dump(),
+            "application/json; charset=utf-8",
+            result.ok ? "public, max-age=300" : "no-store");
     }
 
-    boost::http::route_task serve_sign_up(boost::http::route_params& route) {
-        const ApiContext context = context_for(route);
-        if (context.authorized) {
-            co_return co_await redirect(route,
-                            context.operator_credential || clerk ? "/repositories" : "/sessions");
+    // GET /sign-up, /sign-in, /mfa and /passkey-sign-in on an identity application's custom
+    // sign-in host: the application's hosted page, with its settings read from its workspace
+    // (lake#351). On lake's own host the web app answers these paths (docs/ui/web-app.md), so a
+    // request that is not a browser's falls through to the 404.
+    boost::http::route_task serve_custom_domain_page(boost::http::route_params& route,
+                                                     std::string_view page) {
+        auto routing = application_for_domain(route);
+        if (!routing) {
+            co_return boost::http::route_next;
         }
-        // A custom sign-in host names its application by routing; the page renders its settings,
-        // read from its workspace (lake#351).
-        if (auto routing = application_for_domain(route)) {
-            const auto application =
-                configured_result(co_await configured_for(std::move(routing), route));
-            if (!application) {
-                co_return co_await send_application_error(route, application.error());
-            }
-            co_return co_await send_application_identity_page(route, *application, "sign-up");
+        const auto application =
+            configured_result(co_await configured_for(std::move(routing), route));
+        if (!application) {
+            co_return co_await send_application_error(route, application.error());
         }
-        if (clerk) {
-            co_return co_await send_text(route,
-                             boost::http::status::ok,
-                             web_ui_clerk_sign_in(*clerk,
-                                                  "sign-up",
-                                                  query_value(route, "error"),
-                                                  !query_value(route, "signed_out").empty(),
-                                                  viewer_for(context)),
-                             "text/html; charset=utf-8",
-                             "no-store");
-        }
-        co_return co_await send_text(route,
-                         boost::http::status::ok,
-                         web_ui_sign_up("", viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_sign_in(boost::http::route_params& route) {
-        const ApiContext context = context_for(route);
-        if (context.authorized) {
-            // Already signed in: the return the URL names (`return_to` from /apps/authorize, or
-            // `next`, lake#561), else the cookie's.
-            std::string app_return = same_origin_next(query_value(route, "return_to"));
-            if (app_return.empty()) {
-                app_return = same_origin_next(query_value(route, "next"));
-            }
-            if (app_return.empty()) {
-                app_return = app_sign_in_return(route);
-            }
-            co_return co_await redirect(
-                route,
-                app_return.empty()
-                    ? (context.operator_credential || clerk ? "/repositories" : "/sessions")
-                    : app_return);
-        }
-        // A custom sign-in host names its application by routing; the page renders its settings,
-        // read from its workspace (lake#351).
-        if (auto routing = application_for_domain(route)) {
-            const auto application =
-                configured_result(co_await configured_for(std::move(routing), route));
-            if (!application) {
-                co_return co_await send_application_error(route, application.error());
-            }
-            co_return co_await send_application_identity_page(route, *application, "sign-in");
-        }
-        if (clerk) {
-            co_return co_await send_text(route,
-                             boost::http::status::ok,
-                             web_ui_clerk_sign_in(*clerk,
-                                                  "sign-in",
-                                                  query_value(route, "error"),
-                                                  !query_value(route, "signed_out").empty(),
-                                                  viewer_for(context)),
-                             "text/html; charset=utf-8",
-                             "no-store");
-        }
-        co_return co_await send_text(route,
-                         boost::http::status::ok,
-                         web_ui_sign_in("", viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_mfa(boost::http::route_params& route) {
-        const ApiContext context = context_for(route);
-        if (context.operator_credential) {
-            co_return co_await redirect(route, "/repositories");
-        }
-        // A custom sign-in host names its application by routing; the page renders its settings,
-        // read from its workspace (lake#351).
-        if (auto routing = application_for_domain(route)) {
-            const auto application =
-                configured_result(co_await configured_for(std::move(routing), route));
-            if (!application) {
-                co_return co_await send_application_error(route, application.error());
-            }
-            co_return co_await send_application_identity_page(route, *application, "mfa");
-        }
-        co_return co_await send_text(route,
-                         boost::http::status::ok,
-                         web_ui_mfa("", "", {}, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_passkeys(boost::http::route_params& route) {
-        const ApiContext context = context_for(route);
-        if (!context.authorized) {
-            return redirect(route, "/sign-in");
-        }
-        if (context.operator_credential) {
-            return redirect(route, "/repositories");
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_passkeys("", viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_passkey_sign_in(boost::http::route_params& route) {
-        const ApiContext context = context_for(route);
-        if (context.authorized) {
-            co_return co_await redirect(route, context.operator_credential ? "/repositories" : "/sessions");
-        }
-        // A custom sign-in host names its application by routing; the page renders its settings,
-        // read from its workspace (lake#351).
-        if (auto routing = application_for_domain(route)) {
-            const auto application =
-                configured_result(co_await configured_for(std::move(routing), route));
-            if (!application) {
-                co_return co_await send_application_error(route, application.error());
-            }
-            co_return co_await send_application_identity_page(route, *application, "passkey");
-        }
-        co_return co_await send_text(route,
-                         boost::http::status::ok,
-                         web_ui_passkey_sign_in("", viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_sessions(boost::http::route_params& route) {
-        const ApiContext context = context_for(route);
-        if (!context.authorized) {
-            return redirect(route, "/sign-in");
-        }
-        if (context.operator_credential) {
-            return redirect(route, "/repositories");
-        }
-        std::vector<control::Session> sessions;
-        std::vector<control::Device> devices;
-        std::string error;
-        if (auto rows = options.store->list_sessions(context.acting_user_id, context.pool_id)) {
-            sessions = std::move(*rows);
-        } else {
-            error = rows.error().message;
-        }
-        if (auto rows = options.store->list_devices(context.acting_user_id)) {
-            devices = std::move(*rows);
-        } else if (error.empty()) {
-            error = rows.error().message;
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_sessions(sessions, devices, error, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
+        co_return co_await send_application_identity_page(route, *application, page);
     }
 
     // lake's public origin for copy-ready instructions: the configured external origin, else the
@@ -10912,92 +9314,6 @@ struct ApiServer::Impl {
         }
         const auto host = route.req.find(boost::http::field::host);
         return host == route.req.end() ? std::string() : "http://" + std::string(host->value);
-    }
-
-    // Developer → MCP (docs/api/mcp.md).
-    boost::http::route_task serve_docs(boost::http::route_params& route, std::string page) {
-        const ApiContext context = context_for(route);
-        auto rendered = web_ui_docs(page, viewer_for(context));
-        if (!rendered) {
-            auto missing = web_ui_docs("", viewer_for(context));
-            return send_text(route,
-                             boost::http::status::not_found,
-                             missing ? *missing : std::string("no such page"),
-                             "text/html; charset=utf-8",
-                             "no-store");
-        }
-        return send_text(
-            route, boost::http::status::ok, *rendered, "text/html; charset=utf-8", "no-store");
-    }
-
-    boost::http::route_task serve_mcp_page(boost::http::route_params& route) {
-        const ApiContext context = context_for(route);
-        if (!context.authorized) {
-            return redirect(route, "/sign-in");
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_mcp({.origin = public_origin(route),
-                                     .groups = agent_docs::tool_groups(registry)},
-                                    viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    // Create an MCP key: a lake API token through create_token, the same capability /tokens uses,
-    // scoped to every tool or to the read tools, shown once on the page.
-    boost::http::route_task serve_mcp_key(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const bool read_only = form_field(body, "access") == "read";
-        nlohmann::json scopes = nlohmann::json::array();
-        if (read_only) {
-            for (const std::string& name : agent_docs::read_tool_names(registry)) {
-                scopes.push_back(name);
-            }
-        } else {
-            scopes.push_back("*");
-        }
-        nlohmann::json input{{"name", read_only ? "MCP key (read-only)" : "MCP key"},
-                             {"scopes", std::move(scopes)},
-                             {"static", false},
-                             {"reason", "created on Developer → MCP"}};
-        if (const std::string expiry = form_field(body, "expires_in_seconds"); expiry == "never") {
-            // A key that never expires (lake#234) names its tools and says why it exists.
-            input["never_expires"] = true;
-            const std::string reason = form_field(body, "reason");
-            input["reason"] = reason.empty() ? std::string("created on Developer → MCP") : reason;
-            if (!read_only) {
-                nlohmann::json named = nlohmann::json::array();
-                for (const auto& capability : registry.list()) {
-                    named.push_back(capability->name);
-                }
-                input["scopes"] = std::move(named);
-            }
-        } else if (!expiry.empty()) {
-            input["expires_in_seconds"] = std::atoi(expiry.c_str());
-        }
-        const ApiResult result =
-            unwrap(co_await registry.call_async("create_token", input, context));
-        McpPage page{.origin = public_origin(route), .groups = agent_docs::tool_groups(registry)};
-        if (result.ok) {
-            page.key = result.value.value("secret", "");
-        } else {
-            page.error = result.error.message;
-        }
-        co_return co_await send_text(route,
-                                     result.ok ? http::status::ok
-                                               : http::int_to_status(rest_status(result)),
-                                     web_ui_mcp(page, viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
     }
 
     // Public, like llms.txt, which links it: the skill holds no one's data, only how to use lake.
@@ -11018,467 +9334,6 @@ struct ApiServer::Impl {
                               : agent_docs::llms_txt(registry, public_origin(route)),
                          "text/plain; charset=utf-8",
                          "public, max-age=300");
-    }
-
-    boost::http::route_task serve_tokens(boost::http::route_params& route) {
-        const ApiContext context = context_for(route);
-        if (!context.authorized) {
-            return redirect(route, "/sign-in");
-        }
-        if (context.operator_credential) {
-            return redirect(route, "/repositories");
-        }
-        std::vector<control::Session> sessions;
-        std::string error;
-        if (auto rows = options.store->list_sessions(context.acting_user_id, context.pool_id)) {
-            sessions = std::move(*rows);
-        } else {
-            error = rows.error().message;
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_tokens(sessions, "", error, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_settings(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized || context.operator_credential) {
-            return redirect(route, "/sign-in");
-        }
-        std::vector<control::Session> sessions;
-        std::vector<control::Device> devices;
-        std::string error;
-        if (auto rows = options.store->list_sessions(context.acting_user_id, context.pool_id)) {
-            sessions = std::move(*rows);
-        } else {
-            error = rows.error().message;
-        }
-        if (auto rows = options.store->list_devices(context.acting_user_id)) {
-            devices = std::move(*rows);
-        } else if (error.empty()) {
-            error = rows.error().message;
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_settings(context.acting_identity,
-                                         sessions,
-                                         devices,
-                                         query_value(route, "tab"),
-                                         error,
-                                         viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_organization_invitation(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string organization_id = form_field(body, "organization_id");
-        // The form offers a lifetime in days; an explicit expires_at still wins.
-        std::string expires_at = form_field(body, "expires_at");
-        if (expires_at.empty()) {
-            const std::string days_field = form_field(body, "expires_in_days");
-            int days = 7;
-            if (!days_field.empty()) {
-                const auto [end, error] =
-                    std::from_chars(days_field.data(), days_field.data() + days_field.size(), days);
-                if (error != std::errc{} || end != days_field.data() + days_field.size() ||
-                    days < 1 || days > 90) {
-                    co_return co_await form_failure(
-                        route,
-                        ApiResult::failure("invalid_input",
-                                           "an invitation lasts from 1 to 90 days",
-                                           "/expires_in_days"),
-                        context);
-                }
-            }
-            expires_at = std::format(
-                "{:%FT%TZ}",
-                std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now() +
-                                                         std::chrono::days{days}));
-        }
-        const ApiResult result = registry.call("create_invitation",
-                                               {{"organization_id", organization_id},
-                                                {"invitee_type", form_field(body, "invitee_type")},
-                                                {"invitee", form_field(body, "invitee")},
-                                                {"role", form_field(body, "role")},
-                                                {"expires_at", expires_at}},
-                                               context);
-        if (!result.ok) {
-            co_return co_await send_text(
-                route,
-                http::int_to_status(rest_status(result)),
-                web_ui_error(result.error.code, result.error.message, viewer_for(context)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        co_return co_await redirect(route,
-                                    "/organization?id=" + organization_id + "&tab=invitations");
-    }
-
-    boost::http::route_task serve_organization_sso(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string organization_id = form_field(body, "organization_id");
-        const ApiResult result = registry.call("register_sso_provider",
-                                               {{"organization_id", organization_id},
-                                                {"name", form_field(body, "name")},
-                                                {"protocol", form_field(body, "protocol")},
-                                                {"issuer", form_field(body, "issuer")},
-                                                {"scim_token", form_field(body, "scim_token")}},
-                                               context);
-        if (!result.ok) {
-            co_return co_await send_text(
-                route,
-                http::int_to_status(rest_status(result)),
-                web_ui_error(result.error.code, result.error.message, viewer_for(context)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        co_return co_await redirect(route, "/organization?id=" + organization_id + "&tab=sso");
-    }
-
-    boost::http::route_task serve_member_role(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string membership_id = form_field(body, "id");
-        const ApiResult result =
-            registry.call("set_member_role",
-                          {{"id", membership_id}, {"role", form_field(body, "role")}},
-                          context);
-        if (!result.ok) {
-            co_return co_await send_text(
-                route,
-                http::int_to_status(rest_status(result)),
-                web_ui_error(result.error.code, result.error.message, viewer_for(context)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        co_return co_await redirect(route, "/member?id=" + membership_id);
-    }
-
-    boost::http::route_task serve_member_remove(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string membership_id = form_field(body, "id");
-        if (form_field(body, "confirmed") != "yes") {
-            co_return co_await redirect(route,
-                                        "/member?id=" + membership_id + "&confirm_removal=yes");
-        }
-        const ApiResult result = registry.call("remove_member", {{"id", membership_id}}, context);
-        if (!result.ok) {
-            co_return co_await send_text(
-                route,
-                http::int_to_status(rest_status(result)),
-                web_ui_error(result.error.code, result.error.message, viewer_for(context)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        co_return co_await redirect(route, "/organizations");
-    }
-
-    boost::http::route_task serve_metering_quota(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        const std::string customer_id = form_field(body, "customer_id");
-        const std::string quota = form_field(body, "quota_bytes");
-        std::uint64_t quota_bytes = 0;
-        const auto [position, error] =
-            std::from_chars(quota.data(), quota.data() + quota.size(), quota_bytes);
-        if (error != std::errc{} || position != quota.data() + quota.size()) {
-            co_return co_await send_text(route,
-                                         http::status::bad_request,
-                                         web_ui_error("invalid_input",
-                                                      "quota bytes must be a non-negative integer",
-                                                      viewer_for(route)),
-                                         "text/html; charset=utf-8",
-                                         "no-store");
-        }
-        ApiContext context = context_for(route);
-        const ApiResult result =
-            registry.call("set_storage_quota",
-                          {{"customer_id", customer_id}, {"quota_bytes", quota_bytes}},
-                          context);
-        if (!result.ok) {
-            co_return co_await send_text(
-                route,
-                http::int_to_status(rest_status(result)),
-                web_ui_error(result.error.code, result.error.message, viewer_for(context)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        co_return co_await redirect(route, "/metering?customer_id=" + customer_id);
-    }
-
-    boost::http::route_task serve_identity_sign_up(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const ApiResult result = unwrap(co_await registry.call_async(
-            "sign_up_password",
-            {{"email", form_field(body, "email")},
-             {"display_name", form_field(body, "display_name")},
-             {"password", form_field(body, "password")},
-             {"device_name", form_field(body, "device_name")},
-             {"identity_document", form_field(body, "identity_document")}},
-            context));
-        if (!result.ok) {
-            co_return co_await send_text(route,
-                                         http::int_to_status(rest_status(result)),
-                                         web_ui_sign_up(result.error.message, viewer_for(context)),
-                                         "text/html; charset=utf-8",
-                                         "no-store");
-        }
-        co_return co_await redirect(
-            route,
-            app_sign_in_return(route).empty() ? "/repositories" : app_sign_in_return(route),
-            browser_session_cookie(route, result.value.value("secret", "")));
-    }
-
-    boost::http::route_task serve_identity_sign_in(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const ApiResult result =
-            unwrap(co_await registry.call_async("sign_in_password",
-                                                {{"email", form_field(body, "email")},
-                                                 {"password", form_field(body, "password")},
-                                                 {"device_name", form_field(body, "device_name")}},
-                                                context));
-        if (!result.ok && result.error.code == "mfa_required") {
-            co_return co_await redirect(route, "/mfa");
-        }
-        if (!result.ok) {
-            co_return co_await send_text(route,
-                                         http::int_to_status(rest_status(result)),
-                                         web_ui_sign_in(result.error.message, viewer_for(context)),
-                                         "text/html; charset=utf-8",
-                                         "no-store");
-        }
-        const std::string app_return = app_sign_in_return(route);
-        co_return co_await redirect(
-            route,
-            app_return.empty() ? "/sessions" : app_return,
-            browser_session_cookie(route, result.value.value("secret", "")));
-    }
-
-    boost::http::route_task serve_identity_mfa_verify(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const ApiResult result =
-            unwrap(co_await registry.call_async("verify_mfa",
-                                                {{"email", form_field(body, "email")},
-                                                 {"password", form_field(body, "password")},
-                                                 {"code", form_field(body, "code")},
-                                                 {"device_name", form_field(body, "device_name")}},
-                                                context));
-        if (!result.ok) {
-            co_return co_await send_text(
-                route,
-                http::int_to_status(rest_status(result)),
-                web_ui_mfa(result.error.message, "", {}, viewer_for(context)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        const std::string app_return = app_sign_in_return(route);
-        co_return co_await redirect(
-            route,
-            app_return.empty() ? "/sessions" : app_return,
-            browser_session_cookie(route, result.value.value("secret", "")));
-    }
-
-    boost::http::route_task serve_identity_mfa_enroll(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        static_cast<void>(body);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const ApiResult result =
-            unwrap(co_await registry.call_async("enroll_mfa", nlohmann::json::object(), context));
-        if (!result.ok) {
-            co_return co_await send_text(
-                route,
-                http::int_to_status(rest_status(result)),
-                web_ui_mfa(result.error.message, "", {}, viewer_for(context)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        std::vector<std::string> recovery_codes;
-        for (const nlohmann::json& code :
-             result.value.value("recovery_codes", nlohmann::json::array())) {
-            if (code.is_string()) {
-                recovery_codes.push_back(code.get<std::string>());
-            }
-        }
-        co_return co_await send_text(
-            route,
-            http::status::ok,
-            web_ui_mfa(
-                "", result.value.value("otpauth_uri", ""), recovery_codes, viewer_for(context)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_identity_mfa_disable(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const ApiResult result = unwrap(co_await registry.call_async(
-            "disable_mfa", {{"code", form_field(body, "code")}}, context));
-        if (!result.ok) {
-            co_return co_await send_text(
-                route,
-                http::int_to_status(rest_status(result)),
-                web_ui_mfa(result.error.message, "", {}, viewer_for(context)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        co_return co_await redirect(route, "/mfa");
-    }
-
-    boost::http::route_task serve_identity_oauth(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const ApiResult result = unwrap(co_await registry.call_async(
-            "start_oauth",
-            {{"provider", form_field(body, "provider")},
-             {"device_name", form_field(body, "device_name")},
-             {"identity_document", form_field(body, "identity_document")}},
-            context));
-        if (!result.ok) {
-            co_return co_await send_text(route,
-                                         http::int_to_status(rest_status(result)),
-                                         web_ui_sign_in(result.error.message, viewer_for(context)),
-                                         "text/html; charset=utf-8",
-                                         "no-store");
-        }
-        co_return co_await redirect(route, result.value.value("authorization_url", "/sign-in"));
-    }
-
-    boost::http::route_task serve_identity_session_revoke(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const ApiResult result =
-            registry.call("revoke_session", {{"id", form_field(body, "session_id")}}, context);
-        if (!result.ok) {
-            co_return co_await send_text(
-                route,
-                http::int_to_status(rest_status(result)),
-                web_ui_sessions({}, {}, result.error.message, viewer_for(context)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        const std::string return_to =
-            form_field(body, "return_to") == "/tokens" ? "/tokens" : "/sessions";
-        co_return co_await redirect(route, return_to);
-    }
-
-    boost::http::route_task serve_identity_device_revoke(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const ApiResult result =
-            registry.call("revoke_device", {{"device_id", form_field(body, "device_id")}}, context);
-        if (!result.ok) {
-            co_return co_await send_text(
-                route,
-                http::int_to_status(rest_status(result)),
-                web_ui_sessions({}, {}, result.error.message, viewer_for(context)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        co_return co_await redirect(route, "/sessions");
-    }
-
-    boost::http::route_task serve_identity_token_create(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        // No lifetime asked for means as long as the issuing credential allows (at most 30 days):
-        // a token may not outlive the session that made it, so a fixed 30-day request from an
-        // older session was refused.
-        nlohmann::json input{{"name", form_field(body, "name")},
-                             {"scopes", comma_separated(form_field(body, "scopes"))},
-                             {"static", form_field(body, "static") == "true"},
-                             {"reason", form_field(body, "reason")}};
-        if (form_field(body, "never_expires") == "true") {
-            input["never_expires"] = true;
-        }
-        if (const std::string expiry = form_field(body, "expires_in_seconds"); !expiry.empty()) {
-            input["expires_in_seconds"] = std::atoi(expiry.c_str());
-        }
-        const ApiResult result =
-            unwrap(co_await registry.call_async("create_token", input, context));
-        std::vector<control::Session> sessions;
-        if (context.authorized && !context.operator_credential) {
-            if (auto rows = options.store->list_sessions(context.acting_user_id, context.pool_id)) {
-                sessions = std::move(*rows);
-            }
-        }
-        if (!result.ok) {
-            co_return co_await send_text(
-                route,
-                http::int_to_status(rest_status(result)),
-                web_ui_tokens(sessions, "", result.error.message, viewer_for(context)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        co_return co_await send_text(
-            route,
-            http::status::ok,
-            web_ui_tokens(sessions, result.value.value("secret", ""), "", viewer_for(context)),
-            "text/html; charset=utf-8",
-            "no-store");
     }
 
     std::optional<std::string> jwks_for(const std::string& url, bool refresh) {
@@ -11806,323 +9661,35 @@ struct ApiServer::Impl {
         co_return co_await redirect(route, destination, cookie);
     }
 
-    boost::http::route_task serve_entity_access_page(boost::http::route_params& route,
-                                                     std::string_view object_type) {
-        ApiContext ctx = context_for(route);
-        if (!ctx.authorized) {
-            return redirect(route, "/sign-in");
-        }
-        const std::string id = query_value(route, "id");
-        if (id.empty()) {
-            return redirect(route, "/organizations");
-        }
-        const ApiResult access_result = registry.call(
-            "entity_effective_access", {{"object_type", object_type}, {"id", id}}, ctx);
-        if (!access_result.ok) {
-            return serve_page_error(route, access_result);
-        }
-        std::vector<control::EffectiveAccessEntry> entries;
-        for (const nlohmann::json& value : access_result.value.at("items")) {
-            entries.push_back(access_from_json(value));
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_effective_access(object_from_json(access_result.value.at("object")),
-                                                 entries,
-                                                 viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_repository_create(boost::http::route_params& route) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
-        }
-        ApiContext context = context_for(route);
-        // The form chooses a workspace, which names its space (lake#315). A customer_id the form
-        // also sends must be that space; create_repository refuses one that is not.
-        const std::string workspace_id = form_field(body, "workspace_id");
-        std::string customer_id = form_field(body, "customer_id");
-        if (customer_id.empty() && !workspace_id.empty() && options.store) {
-            if (const auto workspace = options.store->get_workspace(workspace_id)) {
-                customer_id = workspace->customer_id;
-            }
-        }
-        // The description is written to the repository's workspace (lake#315).
-        const ApiResult result =
-            unwrap(co_await registry.call_async("create_repository",
-                                                {{"customer_id", customer_id},
-                                                 {"workspace_id", workspace_id},
-                                                 {"name", form_field(body, "name")},
-                                                 {"description", form_field(body, "description")},
-                                                 {"visibility", "private"}},
-                                                context));
-        if (!result.ok) {
-            co_return co_await serve_page_error(route, result);
-        }
-        co_return co_await redirect(route,
-                                    "/repository?id=" + result.value.at("id").get<std::string>());
-    }
-
-    boost::http::route_task serve_repository_build(boost::http::route_params& route) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
-        }
-        ApiContext context = context_for(route);
-        const ApiResult result = registry.call("build_image",
-                                               {{"customer_id", form_field(body, "customer_id")},
-                                                {"workspace_id", form_field(body, "workspace_id")},
-                                                {"repository", form_field(body, "repository")},
-                                                {"revision", form_field(body, "revision")},
-                                                {"target", form_field(body, "target")}},
-                                               context);
-        if (!result.ok) {
-            co_return co_await serve_page_error(route, result);
-        }
-        co_return co_await redirect(route,
-                                    "/ship/packages?customer_id=" +
-                                        oauth_url_encode(form_field(body, "customer_id")));
-    }
-
-    boost::http::route_task serve_repositories_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        std::vector<control::Repository> repositories;
-        std::map<std::string, control::Customer> owners;
-        nlohmann::json input{{"limit", 500}};
-        const std::string customer_id = query_value(route, "customer_id");
-        if (!customer_id.empty()) {
-            input["customer_id"] = customer_id;
-        }
-        // The descriptions come from each listed repository's workspace, one read per workspace
-        // (lake#315); a workspace that cannot be read marks its rows instead of failing the page.
-        const ApiResult rows =
-            unwrap(co_await registry.call_async("list_repositories", input, ctx));
-        if (!rows.ok) {
-            co_return co_await serve_page_error(route, rows);
-        }
-        std::map<std::string, std::string> descriptions_unavailable;
-        for (const auto& value : rows.value.at("items")) {
-            repositories.push_back(repository_from_json(value));
-            if (value.contains("description_unavailable")) {
-                descriptions_unavailable.emplace(json_string(value, "id"),
-                                                 json_string(value, "description_unavailable"));
-            }
-        }
-        if (ctx.authorized) {
-            const ApiResult customers = registry.call("list_customers", {{"limit", 1000}}, ctx);
-            if (!customers.ok) {
-                co_return co_await serve_page_error(route, customers);
-            }
-            for (const auto& value : customers.value.at("items")) {
-                control::Customer customer = customer_from_json(value);
-                owners.emplace(customer.id, std::move(customer));
-            }
-        }
-        // The owners' live workspaces: the workspace column and the create form's choice.
-        std::vector<control::Workspace> workspaces;
-        if (options.store) {
-            for (const auto& [id, owner] : owners) {
-                if (const auto rows = options.store->list_workspaces(id)) {
-                    for (const control::Workspace& workspace : *rows) {
-                        if (workspace.desired != "deleted") {
-                            workspaces.push_back(workspace);
-                        }
-                    }
-                }
-            }
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_repositories(repositories, owners, viewer_for(ctx),
-                                                         workspaces, descriptions_unavailable),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    // ---- Design, Train and Ship over the customer's Zetta workspace (docs/api/workspaces.md) ----
-
-    struct WorkspaceSelection {
-        std::vector<WorkspaceCustomer> customers;
-        std::string customer_id;
-    };
-
-    WorkspaceSelection workspace_selection(ApiContext& context, std::string_view requested) {
-        WorkspaceSelection selection;
-        const ApiResult rows = page_customers(context);
-        if (rows.ok) {
-            for (const auto& value : rows.value.value("items", nlohmann::json::array())) {
-                const control::Customer customer = customer_from_json(value);
-                selection.customers.push_back({customer.id,
-                                               customer.name,
-                                               !context.acting_user_id.empty() &&
-                                                   customer.user_id == context.acting_user_id});
-            }
-        }
-        std::stable_partition(selection.customers.begin(),
-                              selection.customers.end(),
-                              [](const WorkspaceCustomer& customer) { return customer.yours; });
-        for (const WorkspaceCustomer& customer : selection.customers) {
-            if (customer.id == requested) {
-                selection.customer_id = customer.id;
-            }
-        }
-        if (selection.customer_id.empty() && !selection.customers.empty()) {
-            selection.customer_id = selection.customers.front().id;
-        }
-        if (requested.empty() && !context.remembered_workspace_id.empty() && options.store) {
-            const auto workspace = options.store->get_workspace(context.remembered_workspace_id);
-            if (workspace && workspace->desired != "deleted" &&
-                std::ranges::any_of(selection.customers, [&](const auto& customer) {
-                    return customer.id == workspace->customer_id;
-                })) {
-                selection.customer_id = workspace->customer_id;
-            }
-        }
-        if (!context.path_workspace_id.empty() && options.store) {
-            const auto workspace = options.store->get_workspace(context.path_workspace_id);
-            if (workspace && std::ranges::any_of(selection.customers, [&](const auto& customer) {
-                    return customer.id == workspace->customer_id;
-                })) {
-                selection.customer_id = workspace->customer_id;
-            }
-        }
-        return selection;
-    }
-
+    // A workspace-scoped server route names a live workspace, or answers 404: /w/<id>/v1/...,
+    // /w/<id>/mcp, /w/<id>/v1/openapi.json and a workspace's Zetta under
+    // /w/<id>/workspaces/<space>/zetta/. Every other /w/<id>/ path belongs to the web app
+    // (docs/ui/web-app.md), which a browser already has; anything else falls through to the 404.
     boost::http::route_task workspace_route(boost::http::route_params& route) {
         namespace http = boost::http;
         const std::string path(route.url.path());
-        // `/w/<workspace>` and `/w/<workspace>/` are the workspace itself: its home is the page
-        // an unqualified workspace link lands on (lake#452). The next request checks the ID.
-        if (const std::string home = workspace_path_id(path.ends_with('/') ? path : path + "/");
-            !home.empty() && (path == "/w/" + home || path == "/w/" + home + "/") &&
-            (route.req.method() == http::method::get || route.req.method() == http::method::head)) {
-            const std::string query = route.url.encoded_query().empty()
-                                          ? std::string()
-                                          : "?" + std::string(route.url.encoded_query());
-            co_return co_await redirect(route, "/w/" + home + "/design/projects" + query);
+        const std::string local = workspace_prefixed_local_path(path);
+        if ((!workspace_api_path(local) && !local.starts_with("/workspaces/")) ||
+            local == "/v1/apps/auth") {
+            co_return http::route_next;
         }
         const std::string selected = workspace_path_id(path);
-        const std::string prefixed_local = workspace_prefixed_local_path(path);
-        if (workspace_api_path(prefixed_local)) {
-            if (prefixed_local == "/v1/apps/auth") {
-                co_return http::route_next;
-            }
-            if (selected.empty() || !options.store) {
-                co_return co_await send_text(route,
-                                             http::status::not_found,
-                                             error_body("not_found", "no such workspace"),
-                                             "application/json; charset=utf-8",
-                                             "no-store");
-            }
-            const auto workspace = options.store->get_workspace(selected);
-            if (!workspace || workspace->desired == "deleted") {
-                co_return co_await send_text(route,
-                                             http::status::not_found,
-                                             error_body("not_found", "no such workspace"),
-                                             "application/json; charset=utf-8",
-                                             "no-store");
-            }
-            co_return http::route_next;
+        if (selected.empty() || !options.store) {
+            co_return co_await send_text(route,
+                                         http::status::not_found,
+                                         error_body("not_found", "no such workspace"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
         }
-        const bool switching = path == "/workspace/select";
-        const std::string local = workspace_local_path(path);
-        if (!workspace_page_path(local) && !switching) {
-            co_return http::route_next;
+        const auto workspace = options.store->get_workspace(selected);
+        if (!workspace || workspace->desired == "deleted") {
+            co_return co_await send_text(route,
+                                         http::status::not_found,
+                                         error_body("not_found", "no such workspace"),
+                                         "application/json; charset=utf-8",
+                                         "no-store");
         }
-        auto context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        if (local.starts_with("/workspaces/") &&
-            context.credential_kind == "agent_task") {
-            co_return http::route_next;
-        }
-        if (local.starts_with("/workspaces/") && !selected.empty() && context.session_credential) {
-            co_return http::route_next;
-        }
-        auto selection = workspace_selection(context, query_value(route, "customer_id"));
-        const std::string requested_customer = query_value(route, "customer_id");
-        if (!selected.empty()) {
-            const auto workspace = options.store
-                ? options.store->get_workspace(selected)
-                : control::Result<control::Workspace>(std::unexpect,
-                      control::StoreError{"invalid_input", "workspace_id is unknown"});
-            const std::string requested_workspace = query_value(route, "workspace_id");
-            if (!workspace || workspace->desired == "deleted" || workspace->customer_id != selection.customer_id ||
-                (!requested_customer.empty() && requested_customer != workspace->customer_id) ||
-                (!requested_workspace.empty() && requested_workspace != selected)) {
-                co_return co_await send_text(route, http::status::bad_request,
-                    error_body("invalid_input", "workspace_id is not a workspace Zetta in this space"),
-                    "application/json", "no-store");
-            }
-            route.res.set(http::field::set_cookie,
-                "lake_workspace=" + selected + "; HttpOnly; SameSite=Lax; Path=/");
-            co_return http::route_next;
-        }
-        if (path.starts_with("/w/") || route.req.method() != http::method::get) {
-            co_return co_await send_text(route, http::status::bad_request,
-                error_body("invalid_input", "workspace_id is required in the URL path"),
-                "application/json", "no-store");
-        }
-        auto viewer = viewer_for(context);
-        viewer.customer_id = selection.customer_id;
-        viewer.workspace_id.clear();
-        viewer.workspaces.clear();
-        if (const auto rows = options.store->list_workspaces(selection.customer_id)) {
-            viewer.workspaces = workspace_choices(*rows);
-        }
-        std::string choice = switching ? query_value(route, "workspace_id")
-                                       : cookie_value(route, "lake_workspace");
-        if (std::ranges::none_of(viewer.workspaces, [&](const auto& workspace) {
-                return workspace.first == choice;
-            })) {
-            choice.clear();
-        }
-        if (choice.empty() && viewer.workspaces.size() == 1) {
-            choice = viewer.workspaces.front().first;
-        }
-        const std::string page = switching ? query_value(route, "page") : local;
-        const std::string destination = (workspace_page_path(page) || page == "/workspaces") && !page.contains('?') &&
-            !page.contains('#') ? page : "/design/projects";
-        if (!choice.empty()) {
-            std::string query;
-            if (!switching && !route.url.encoded_query().empty()) {
-                query = "?" + std::string(route.url.encoded_query());
-            }
-            if (switching) {
-                const std::string page_query = query_value(route, "page_query");
-                const auto parameters = boost::urls::parse_query(page_query);
-                if (parameters) {
-                    for (const auto& parameter : *parameters) {
-                        if (parameter.key != "workspace_id" && parameter.key != "customer_id") {
-                            query += query.empty() ? "?" : "&";
-                            query += oauth_url_encode(parameter.key) + "=" + oauth_url_encode(parameter.value);
-                        }
-                    }
-                }
-                query += query.empty() ? "?" : "&";
-                query += "customer_id=" + oauth_url_encode(selection.customer_id);
-            }
-            const std::string prefix = destination == "/workspaces" ? "" : "/w/" + choice;
-            co_return co_await redirect(route, prefix + destination + query,
-                "lake_workspace=" + choice + "; HttpOnly; SameSite=Lax; Path=/");
-        }
-        viewer.path = destination;
-        co_return co_await send_text(route, http::status::ok,
-            web_ui_shell("lake — Choose a Workspace", "",
-                "<h1>Choose a Workspace</h1><p>Select a workspace above or create a new one.</p>", viewer),
-            "text/html; charset=utf-8", "no-store");
+        co_return http::route_next;
     }
 
     static ApiResult unwrap(std::expected<ApiResult, liquid::error> completed) {
@@ -12130,3258 +9697,7 @@ struct ApiServer::Impl {
                          : ApiResult::failure("store_error", completed.error().message);
     }
 
-    // A coroutine, so `capability` and `input` live in this frame while call_async, which takes
-    // them by reference, runs.
-    liquid::runtime::task<ApiResult>
-    workspace_call(std::string capability, nlohmann::json input, ApiContext& context) {
-        const auto definition = registry.find(capability);
-        if (definition && definition->input_schema.value("properties", nlohmann::json::object())
-                              .contains("workspace_id") && !input.contains("workspace_id")) {
-            input["workspace_id"] = context.path_workspace_id;
-        }
-        co_return unwrap(co_await registry.call_async(capability, input, context));
-    }
-
-    using WorkspaceRead = std::pair<std::string, nlohmann::json>;
-
-    struct WorkspaceReadCompletion {
-        liquid::result<ApiResult> value;
-    };
-
-    boost::capy::io_task<WorkspaceReadCompletion>
-    complete_workspace_read(liquid::runtime::task<ApiResult> task) {
-        auto result = co_await std::move(task);
-        co_return boost::capy::io_result<WorkspaceReadCompletion>{{}, {std::move(result)}};
-    }
-
-    liquid::runtime::task<std::vector<ApiResult>>
-    page_reads(ApiContext context, std::vector<WorkspaceRead> reads) {
-        if (reads.empty()) {
-            co_return std::vector<ApiResult>{};
-        }
-        std::vector<ApiContext> contexts;
-        contexts.reserve(reads.size());
-        for (std::size_t index = 0; index < reads.size(); ++index) {
-            contexts.push_back(context);
-        }
-        std::vector<boost::capy::io_task<WorkspaceReadCompletion>> pending;
-        pending.reserve(reads.size());
-        for (std::size_t index = 0; index < reads.size(); ++index) {
-            auto& [capability, input] = reads[index];
-            pending.push_back(complete_workspace_read(workspace_call(
-                std::move(capability), std::move(input), contexts[index])));
-        }
-        auto [wait_error, completed] =
-            co_await liquid::runtime::when_all(std::move(pending));
-        if (wait_error) {
-            co_return std::unexpected(liquid::error{liquid::errc::internal,
-                                                    wait_error.message(),
-                                                    "workspace page reads"});
-        }
-        std::vector<ApiResult> results;
-        results.reserve(completed.size());
-        for (auto& result : completed) {
-            results.push_back(unwrap(std::move(result.value)));
-        }
-        co_return results;
-    }
-
-    liquid::runtime::task<std::vector<ApiResult>>
-    workspace_reads(ApiContext context,
-                    const std::string& customer_id,
-                    std::vector<WorkspaceRead> reads,
-                    bool lean_datasets = false) {
-        context.cache_workspace_definitions = true;
-        std::vector<std::size_t> projected;
-        for (std::size_t index = 0; index < reads.size(); ++index) {
-            auto& [capability, input] = reads[index];
-            if (capability == "list_services" || capability == "list_stores" ||
-                capability == "list_agent_launches" || capability == "list_agent_schedules" ||
-                capability == "workspace_status") {
-                input["customer_id"] = customer_id;
-                continue;
-            }
-            if (capability == "list_runs" &&
-                (input.contains("project") || input.contains("solution"))) {
-                input["customer_id"] = customer_id;
-                continue;
-            }
-            if (capability == "list_agent_library") {
-                continue;
-            }
-            if (lean_datasets && capability == "list_datasets") {
-                capability = "workspace_sql";
-                input = {{"customer_id", customer_id},
-                         {"statement", "SELECT database, dataset FROM system.datasets"}};
-                projected.push_back(index);
-                continue;
-            }
-            input = {{"customer_id", customer_id},
-                     {"capability", capability},
-                     {"input", std::move(input)}};
-            capability = "workspace_query";
-        }
-        auto results = co_await page_reads(std::move(context), std::move(reads));
-        if (!results) {
-            co_return std::unexpected(results.error());
-        }
-        for (const auto index : projected) {
-            auto& result = results->at(index);
-            if (result.ok) {
-                // system.datasets names the column `dataset`; annotate_list adds the `name`,
-                // `id` and `kind` the pages read (lake#447).
-                result.value = {{"datasets", result.value.value("rows", nlohmann::json::array())}};
-                datasets::annotate_list(result.value);
-            }
-        }
-        co_return std::move(*results);
-    }
-
-    struct ProjectGraphReads {
-        ApiResult project;
-        std::vector<ApiResult> graphs;
-    };
-
-    static std::vector<WorkspaceRead> initial_workspace_reads(const WorkspacePage& page,
-                                                              bool defer_agents) {
-        if (page.section == "runs") {
-            // Studies name their trial runs (lake#449).
-            return {{"list_runs", nlohmann::json::object()},
-                    {"list_studies", nlohmann::json::object()}};
-        }
-        if (page.section == "agents") {
-            // Zetta's list_agents is deferred to /train/agents/list (lake#446).
-            if (defer_agents) {
-                return {{"list_agent_library", nlohmann::json::object()}};
-            }
-            return {{"list_agents", nlohmann::json::object()},
-                    {"list_agent_library", nlohmann::json::object()}};
-        }
-        if (page.section != "data") {
-            return {};
-        }
-        std::vector<WorkspaceRead> reads{
-            {"list_connections", nlohmann::json::object()},
-            {"list_datasets", nlohmann::json::object()},
-            {"list_dataset_generators", nlohmann::json::object()},
-            {"list_services", nlohmann::json::object()},
-            {"list_stores", nlohmann::json::object()}};
-        if (!page.subject.empty()) {
-            reads.push_back({"list_source_tables", {{"connection", page.subject},
-                {"include_columns", true}, {"max_tables", 100}}});
-        }
-        return reads;
-    }
-
-    liquid::runtime::task<ProjectGraphReads>
-    project_graph_reads(ApiContext context, std::string customer_id, std::string name) {
-        context.cache_workspace_definitions = true;
-        ApiResult project = unwrap(co_await workspace_call(
-            "workspace_query",
-            {{"customer_id", customer_id},
-             {"capability", "get_project"},
-             {"input", {{"name", name}}}},
-            context));
-        std::vector<WorkspaceRead> reads;
-        if (project.ok && project.value.is_object()) {
-            // The Project Agent's compile check graphs are lake's, not pipelines (lake#438).
-            if (const auto listed = project.value.find("graphs"); listed != project.value.end()) {
-                *listed = without_project_agent_checks(*listed);
-            }
-            for (const auto& graph : project.value.value("graphs", nlohmann::json::array())) {
-                reads.push_back({"get_graph",
-                                 {{"project", name},
-                                  {"graph", graph.value("name", std::string())}}});
-            }
-        }
-        auto graphs = co_await workspace_reads(std::move(context), customer_id, std::move(reads));
-        co_return ProjectGraphReads{
-            std::move(project), graphs ? std::move(*graphs) : std::vector<ApiResult>{}};
-    }
-
-    // The pipeline page's data (docs/design/zetta-parity.md): the graph, this workspace's runs and
-    // datasets, and the latest run of this pipeline for step status. `extra` carries a gate or
-    // deploy answer to show on the page.
-    liquid::runtime::task<WorkspacePage> pipeline_page(ApiContext& context,
-                                                       std::string customer_id,
-                                                       std::string project,
-                                                       std::string graph,
-                                                       std::string step,
-                                                       nlohmann::json extra) {
-        WorkspacePage page;
-        page.section = "pipeline";
-        auto selection = workspace_selection(context, customer_id);
-        page.customers = std::move(selection.customers);
-        page.customer_id = std::move(selection.customer_id);
-        page.project = std::move(project);
-        page.subject = std::move(graph);
-        page.step = std::move(step);
-        if (page.customer_id.empty() || !options.workspaces) {
-            page.unavailable = "Design, Train and Ship are not available on this lake yet.";
-            co_return page;
-        }
-        const ApiResult status = unwrap(co_await workspace_call(
-            "workspace_status", {{"customer_id", page.customer_id}}, context));
-        if (!status.ok) {
-            page.unavailable = status.error.message;
-            co_return page;
-        }
-        page.state = status.value;
-        if (!page.state.value("ready", false)) {
-            co_return page;
-        }
-        const std::vector<WorkspaceRead> reads{
-            {"get_graph", {{"project", page.project}, {"graph", page.subject}}},
-            {"list_runs", nlohmann::json::object()},
-            {"list_datasets", nlohmann::json::object()},
-        };
-        auto completed_reads = co_await workspace_reads(context, page.customer_id, reads);
-        if (!completed_reads) {
-            page.error = completed_reads.error().message;
-            co_return page;
-        }
-        const ApiResult& got = completed_reads->at(0);
-        if (!got.ok) {
-            page.error = got.error.message;
-            co_return page;
-        }
-        page.data["get_graph"] = got.value;
-        const ApiResult& runs = completed_reads->at(1);
-        if (runs.ok) {
-            page.data["list_runs"] = runs.value;
-            nlohmann::json latest;
-            for (const nlohmann::json& run : runs.value.value("runs", nlohmann::json::array())) {
-                const std::string of = run.value("graph", std::string());
-                const std::string created = run.value("created", std::string());
-                if ((of == page.subject || of == got.value.value("graph_id", std::string())) &&
-                    (!latest.is_object() ||
-                     created >= latest.value("created", std::string()))) {
-                    latest = run;
-                }
-            }
-            if (latest.is_object()) {
-                page.data["latest_run"] = std::move(latest);
-            }
-        }
-        const ApiResult& datasets = completed_reads->at(2);
-        if (datasets.ok) {
-            page.data["list_datasets"] = datasets.value;
-        }
-        for (auto& [key, value] : extra.items()) {
-            page.data[key] = value;
-        }
-        co_return page;
-    }
-
-    // `customer_id` and `extra` serve a form post that answers with the page itself: the post's
-    // customer, and data to show once (the Data page's store connection), never in a URL.
-    boost::http::route_task serve_workspace_page(boost::http::route_params& route,
-                                                 std::string section,
-                                                 std::string customer_id = {},
-                                                 nlohmann::json extra = nlohmann::json::object()) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        if (section == "pipeline") {
-            // A Project Agent proposal to review (lake#249), and run settings to prefill.
-            nlohmann::json shown = nlohmann::json::object();
-            // The Project Agent's background turn (lake#269): working, or its proposal.
-            if (const std::string task = query_value(route, "task"); !task.empty()) {
-                const ApiResult followed = unwrap(co_await workspace_call(
-                    "get_agent_task",
-                    {{"customer_id", query_value(route, "customer_id")}, {"task_id", task}},
-                    context));
-                const std::string status =
-                    followed.ok ? followed.value.value("status", std::string()) : "";
-                if (status == "pending" || status == "running") {
-                    shown["project_agent_working"] = true;
-                    shown["project_agent_message"] = followed.value.value("message", std::string());
-                } else if (followed.ok) {
-                    const nlohmann::json answer =
-                        followed.value.value("answer", nlohmann::json::object());
-                    const nlohmann::json proposal =
-                        answer.is_object()
-                            ? answer.value("result", nlohmann::json::object())
-                                  .value("proposal", nlohmann::json())
-                            : nlohmann::json();
-                    if (proposal.is_object()) {
-                        shown["proposal"] = proposal;
-                    } else {
-                        shown["project_agent_error"] =
-                            answer.is_object() && answer.contains("result")
-                                ? answer["result"].value("reply", std::string("no proposal"))
-                                : followed.value.value("message", std::string("no proposal"));
-                        shown["project_agent_reply"] =
-                            agent_task_needs_reply(followed.value, "agent-project");
-                        shown["project_agent_task_id"] = task;
-                    }
-                }
-            }
-            for (const char* key : {"dataset", "holdout", "model"}) {
-                if (std::string value = query_value(route, key); !value.empty()) {
-                    shown[std::string("run_") + key] = value;
-                }
-            }
-            auto built = co_await pipeline_page(context,
-                                                query_value(route, "customer_id"),
-                                                query_value(route, "project"),
-                                                query_value(route, "graph"),
-                                                query_value(route, "step"),
-                                                std::move(shown));
-            WorkspacePage page = built ? std::move(*built) : WorkspacePage{};
-            if (!built) {
-                page.section = "pipeline";
-                page.unavailable = built.error().message;
-            }
-            if (const std::string error = query_value(route, "error"); !error.empty()) {
-                page.error = error;
-            }
-            co_return co_await send_text(route,
-                                         boost::http::status::ok,
-                                         web_ui_workspace(page, viewer_for(context)),
-                                         "text/html; charset=utf-8",
-                                         "no-store");
-        }
-        WorkspacePage page;
-        page.section = section;
-        page.error = query_value(route, "error");
-        // Train > Agents renders before Zetta's list_agents answers; ?inline=1 (the no-script
-        // link) waits for it instead (lake#446).
-        const bool defer_agents = section == "agents" && query_value(route, "inline") != "1";
-        auto selection = workspace_selection(
-            context, customer_id.empty() ? query_value(route, "customer_id") : customer_id);
-        page.customers = std::move(selection.customers);
-        page.customer_id = std::move(selection.customer_id);
-        if (section == "project") {
-            page.subject = query_value(route, "name");
-        } else if (section == "solution" || section == "methodology") {
-            page.subject = query_value(route, "id");
-        } else if (section == "run" || section == "index" || section == "agent") {
-            page.subject = query_value(route, "id");
-        } else if (section == "dataset") {
-            page.subject = query_value(route, "name");
-        } else if (section == "data") {
-            page.subject = query_value(route, "browse");
-        }
-        page.origin =
-            options.external_origin.empty()
-                ? (options.public_host.empty() ? std::string() : "https://" + options.public_host)
-                : options.external_origin;
-        page.workspace_id = context.path_workspace_id;
-        if (page.customer_id.empty()) {
-            page.unavailable = "You have no space to work in yet.";
-        } else if (section == "workspaces") {
-            const ApiResult listed = unwrap(co_await workspace_call(
-                "list_workspaces", {{"customer_id", page.customer_id}}, context));
-            if (listed.ok) {
-                page.data["list_workspaces"] = listed.value;
-            } else {
-                page.unavailable = listed.error.message;
-            }
-            // The typed-name confirmation names what the deletion destroys (lake#514).
-            if (const std::string doomed = query_value(route, "delete"); listed.ok && !doomed.empty()) {
-                const ApiResult plan = unwrap(co_await workspace_call(
-                    "delete_workspace",
-                    {{"customer_id", page.customer_id}, {"workspace_id", doomed}, {"dry_run", true}},
-                    context));
-                if (plan.ok) {
-                    page.data["delete_workspace"] = plan.value;
-                } else {
-                    page.error = plan.error.message;
-                }
-            }
-        } else if (!options.workspaces) {
-            page.unavailable = section == "services"
-                                   ? "Services are not available on this lake yet: the operator "
-                                     "has not enabled them."
-                                   : "Design, Train and Ship are not available on this lake yet: "
-                                     "it has no workspace control plane configured.";
-        } else if (section == "services") {
-            const ApiResult listed = unwrap(co_await workspace_call(
-                "list_services", {{"customer_id", page.customer_id}}, context));
-            if (listed.ok) {
-                page.data["list_services"] = listed.value;
-                // Connections that use a service, so deleting one warns (lake#188).
-                const ApiResult connections =
-                    unwrap(co_await workspace_call("workspace_query",
-                                                   {{"customer_id", page.customer_id},
-                                                    {"capability", "list_connections"},
-                                                    {"input", nlohmann::json::object()}},
-                                                   context));
-                if (connections.ok) {
-                    page.data["list_connections"] = connections.value;
-                }
-            } else {
-                page.unavailable = listed.error.message;
-            }
-        } else {
-            auto reads = initial_workspace_reads(page, defer_agents);
-            reads.push_back({"workspace_status", nlohmann::json::object()});
-            const auto results = co_await workspace_reads(
-                context, page.customer_id, reads, section == "data");
-            const ApiResult status = results ? results->back() :
-                ApiResult::failure("store_unavailable", results.error().message);
-            if (!status.ok) {
-                page.unavailable = status.error.message;
-            } else {
-                page.state = status.value;
-                if (defer_agents && page.state.value("ready", false)) {
-                    page.data["defer_agents"] = true;
-                }
-                if (page.state.value("ready", false)) {
-                    for (std::size_t index = 0; index + 1 < reads.size(); ++index) {
-                        const auto& result = results->at(index);
-                        const auto& capability = reads[index].first;
-                        if (result.ok) {
-                            page.data[capability] = result.value;
-                        } else if (page.error.empty() && capability != "list_agent_library" &&
-                                   capability != "list_studies") {
-                            page.error = result.error.message;
-                        }
-                    }
-                }
-            }
-        }
-        if (section == "agent" && page.unavailable.empty() && !page.state.value("ready", false)) {
-            const ApiResult launches = unwrap(co_await workspace_call(
-                "list_agent_launches",
-                {{"customer_id", page.customer_id}, {"agent_id", page.subject}, {"limit", 20}},
-                context));
-            if (launches.ok) {
-                page.data["list_agent_launches"] = launches.value;
-            }
-            const ApiResult schedules = unwrap(co_await workspace_call(
-                "list_agent_schedules",
-                {{"customer_id", page.customer_id}, {"agent_id", page.subject}},
-                context));
-            if (schedules.ok) {
-                page.data["list_agent_schedules"] = schedules.value;
-            }
-        }
-        if (section == "discover") {
-            // Design → Opportunities (lake#269): the saved Opportunities, and the scan that is
-            // running or just finished (settled into rows the first time it is read).
-            const std::string task = query_value(route, "task");
-            if (!task.empty()) {
-                const ApiResult followed = unwrap(co_await workspace_call(
-                    "get_agent_task", {{"customer_id", page.customer_id}, {"task_id", task}}, context));
-                if (followed.ok) {
-                    page.data["task"] = followed.value;
-                }
-            }
-            nlohmann::json list_input{{"customer_id", page.customer_id}};
-            if (!task.empty()) {
-                list_input["task_id"] = task;
-            }
-            // The saved Opportunities (a list_records in the workspace Zetta, lake#376) and what
-            // the engine runs, so each Opportunity says whether it does (lake#289): one round.
-            context.registry = &registry;
-            ApiContext list_context = context;
-            auto [wait_error, listed, methodologies] = co_await liquid::runtime::when_all(
-                liquid::runtime::as_io(
-                    workspace_call("list_opportunities", std::move(list_input), list_context)),
-                liquid::runtime::as_io(
-                    lake::api::workspace_methodologies(context, page.customer_id)));
-            if (wait_error && page.error.empty()) {
-                page.error = wait_error.message();
-            }
-            if (listed) {
-                if (const ApiResult result = unwrap(std::move(listed)); result.ok) {
-                    page.data["list_opportunities"] = result.value;
-                } else if (page.error.empty()) {
-                    page.error = result.error.message;
-                }
-            }
-            if (methodologies && methodologies->is_array()) {
-                page.data["list_methodologies"] = *methodologies;
-            }
-        }
-        if ((section == "agents" || section == "discover" || section == "library") &&
-            !page.data.contains("list_agent_library")) {
-            // The Agent Library does not need the workspace (docs/api/train-agents.md).
-            const ApiResult library = unwrap(
-                co_await workspace_call("list_agent_library", nlohmann::json::object(), context));
-            if (library.ok) {
-                page.data["list_agent_library"] = library.value;
-            }
-        }
-        if (page.unavailable.empty() && section == "data" && !page.state.value("ready", false)) {
-            // Storage does not need the workspace (docs/api/storage.md).
-            const ApiResult stores = unwrap(co_await workspace_call(
-                "list_stores", {{"customer_id", page.customer_id}}, context));
-            if (stores.ok) {
-                page.data["list_stores"] = stores.value;
-            } else if (page.error.empty()) {
-                page.error = stores.error.message;
-            }
-        }
-        // A project made from an Opportunity: the Project Agent designs its pipeline in the
-        // background; reading its task applies the design once it is done (settle_build).
-        if (page.unavailable.empty() && page.state.value("ready", false) &&
-            section == "project" && !page.subject.empty() && context.store) {
-            // The same reads the web app makes (latest_agent_task, lake#561).
-            const ApiResult build = unwrap(co_await workspace_call(
-                "latest_agent_task",
-                {{"customer_id", page.customer_id}, {"subject", "build:" + page.subject}},
-                context));
-            if (!build.ok) {
-                page.error = "The Project Agent's design could not be read: " + build.error.message;
-            } else if (const nlohmann::json task = build.value.value("task", nlohmann::json());
-                       task.is_object()) {
-                // The page names a task by its phase ("Running", "Failed"), as the row has it.
-                std::string status = task.value("status", std::string("pending"));
-                if (status != "pending" && !status.empty()) {
-                    status[0] =
-                        static_cast<char>(std::toupper(static_cast<unsigned char>(status[0])));
-                }
-                page.data["build"] = {{"status", status},
-                                      {"message", task.value("message", std::string())}};
-                if (task.contains("build_error")) {
-                    page.error = "The Project Agent designed a pipeline, but it could not be "
-                                 "applied: " +
-                                 task.value("build_error", std::string());
-                }
-            }
-            const ApiResult solution = unwrap(co_await workspace_call(
-                "latest_agent_task",
-                {{"customer_id", page.customer_id}, {"subject", "solution:" + page.subject}},
-                context));
-            if (!solution.ok) {
-                if (page.error.empty()) {
-                    page.error = "The Project Agent's foundation proposal could not be read: " +
-                                 solution.error.message;
-                }
-            } else if (const nlohmann::json task = solution.value.value("task", nlohmann::json());
-                       task.is_object()) {
-                page.data["solution_task"] = task;
-            }
-        }
-        if (page.unavailable.empty() && page.state.value("ready", false)) {
-            std::vector<std::pair<std::string, nlohmann::json>> reads;
-            std::vector<ApiResult> project_graphs;
-            if (section == "methodologies") {
-                reads = {{"list_methodologies", nlohmann::json::object()}};
-            } else if (section == "methodology") {
-                reads = {{"list_methodologies", nlohmann::json::object()},
-                         {"list_solutions", nlohmann::json::object()}};
-            } else if (section == "solutions") {
-                reads = {{"list_solutions", nlohmann::json::object()}};
-            } else if (section == "solution") {
-                reads = {{"get_solution", {{"solution", page.subject}}},
-                         {"list_datasets", nlohmann::json::object()},
-                         {"list_runs", {{"solution", page.subject}, {"limit", 5}}}};
-            } else if (section == "projects") {
-                reads = {{"list_projects", nlohmann::json::object()}};
-            } else if (section == "project") {
-                const std::vector<WorkspaceRead> catalogues{
-                    {"list_datasets", nlohmann::json::object()},
-                    {"list_methodologies", nlohmann::json::object()}};
-                ApiContext runs_context = context;
-                // Start remote catalogue reads before cached definitions: their synchronous
-                // authorization and audit work can then overlap the catalogue round trip.
-                auto [wait_error, listed, project, runs] = co_await liquid::runtime::when_all(
-                    liquid::runtime::as_io(workspace_reads(context, page.customer_id, catalogues)),
-                    liquid::runtime::as_io(
-                        project_graph_reads(context, page.customer_id, page.subject)),
-                    liquid::runtime::as_io(workspace_call("list_runs",
-                                                          {{"customer_id", page.customer_id},
-                                                           {"project", page.subject},
-                                                           {"limit", 5}},
-                                                          runs_context)));
-                if (wait_error) {
-                    page.error = wait_error.message();
-                }
-                if (project) {
-                    if (project->project.ok) {
-                        page.data["get_project"] = std::move(project->project.value);
-                    } else if (page.error.empty()) {
-                        page.error = project->project.error.message;
-                    }
-                    project_graphs = std::move(project->graphs);
-                } else if (page.error.empty()) {
-                    page.error = project.error().message;
-                }
-                if (listed) {
-                    for (std::size_t index = 0; index < listed->size(); ++index) {
-                        const ApiResult& result = listed->at(index);
-                        if (result.ok) {
-                            page.data[catalogues[index].first] = result.value;
-                        } else if (index == 0 && page.error.empty()) {
-                            page.error = result.error.message;
-                        }
-                    }
-                } else if (page.error.empty()) {
-                    page.error = listed.error().message;
-                }
-                if (runs && runs->ok) {
-                    page.data["list_runs"] = std::move(runs->value);
-                } else if (!runs && page.error.empty()) {
-                    page.error = runs.error().message;
-                } else if (runs && page.error.empty()) {
-                    page.error = runs->error.message;
-                }
-            } else if (section == "data") {
-                if (const std::string loaded = query_value(route, "loaded"); !loaded.empty()) {
-                    page.data["loaded"] = {{"table", loaded},
-                                           {"rows", query_value(route, "rows")},
-                                           {"database", query_value(route, "database")},
-                                           {"format", query_value(route, "format")},
-                                           {"renamed_from", query_value(route, "renamed_from")}};
-                }
-            } else if (section == "agent") {
-                reads = {{"get_agent", {{"id", page.subject}}},
-                         {"agent_training_status", {{"id", page.subject}}},
-                         {"list_projects", nlohmann::json::object()},
-                         {"list_agent_launches", {{"agent_id", page.subject}, {"limit", 20}}},
-                         {"list_agent_schedules", {{"agent_id", page.subject}}}};
-            } else if (section == "run") {
-                // The report is requested once the run has finished: asking a running run for
-                // its report makes the deployed Zetta drop the connection.
-                reads = {{"get_run", {{"run_id", page.subject}}},
-                         {"list_traces", {{"limit", 500}}},
-                         {"list_studies", nlohmann::json::object()}};
-            } else if (section == "models") {
-                // Studies name their models and say which one each promoted (lake#449).
-                reads = {{"list_models", nlohmann::json::object()},
-                         {"list_studies", nlohmann::json::object()}};
-            } else if (section == "dataset") {
-                const std::string database = query_value(route, "database");
-                const std::string selected_database = database.empty() ? "datasets" : database;
-                const auto results = co_await page_reads(
-                    context,
-                    {{"workspace_query",
-                      {{"customer_id", page.customer_id},
-                       {"capability", "get_dataset"},
-                       {"input", {{"dataset", page.subject}, {"database", selected_database}}}}},
-                     {"workspace_sql",
-                      {{"customer_id", page.customer_id},
-                       {"statement", "SELECT * FROM " + selected_database + "." + page.subject +
-                                         " LIMIT 20"}}},
-                     // Column types (lake#447): the workspace stores schemaless rows, and its
-                     // analysis reads each column's type from a sample.
-                     {"workspace_query",
-                      {{"customer_id", page.customer_id},
-                       {"capability", "analyze_dataset"},
-                       {"input",
-                        {{"dataset", selected_database + "." + page.subject},
-                         {"sample_rows", 256}}}}}});
-                if (!results) {
-                    page.error = results.error().message;
-                } else {
-                    const ApiResult& dataset = results->at(0);
-                    if (dataset.ok) {
-                        page.data["get_dataset"] = dataset.value;
-                    } else if (page.error.empty()) {
-                        page.error = dataset.error.message;
-                    }
-                    const ApiResult& sample = results->at(1);
-                    if (sample.ok) {
-                        nlohmann::json rows = sample.value.value("rows", nlohmann::json::array());
-                        if (rows.is_array() && rows.size() > 20) {
-                            rows.erase(rows.begin() + 20, rows.end());
-                        }
-                        page.data["sample"] = {{"rows", std::move(rows)}};
-                    }
-                    if (const ApiResult& analysis = results->at(2); analysis.ok) {
-                        page.data["analyze_dataset"] = analysis.value;
-                    }
-                }
-            } else if (section == "query") {
-                const std::string statement = query_value(route, "statement");
-                const std::string database = query_value(route, "database");
-                page.data["statement"] = statement;
-                page.data["database"] = database;
-                if (!statement.empty()) {
-                    nlohmann::json input{{"customer_id", page.customer_id},
-                                         {"statement", statement}};
-                    if (!database.empty()) {
-                        input["database"] = database;
-                    }
-                    const ApiResult ran =
-                        unwrap(co_await workspace_call("workspace_sql", std::move(input), context));
-                    if (ran.ok) {
-                        page.data["workspace_sql"] = ran.value;
-                    } else {
-                        page.error = ran.error.message;
-                    }
-                }
-            } else if (section == "indexes") {
-                // The New Index form's dataset choices load after the page (lake#446): Zetta's
-                // dataset listing scans every table. ?inline=1 (the no-script link) waits.
-                reads = {{"list_indexes", nlohmann::json::object()}};
-                if (query_value(route, "inline") == "1") {
-                    reads.push_back({"list_datasets", nlohmann::json::object()});
-                } else {
-                    page.data["defer_index_datasets"] = true;
-                }
-            } else if (section == "index") {
-                reads = {{"get_index", {{"index_id", page.subject}}}};
-                if (const std::string asked = query_value(route, "q"); !asked.empty()) {
-                    nlohmann::json search{{"target", page.subject}, {"query", asked}};
-                    page.data["search_query"] = asked;
-                    if (const std::string field = query_value(route, "field"); !field.empty()) {
-                        search["field"] = field;
-                        page.data["search_field"] = field;
-                    }
-                    const std::string top_k = query_value(route, "top_k");
-                    const int hits =
-                        top_k.empty() ? 10 : std::clamp(std::atoi(top_k.c_str()), 1, 100);
-                    search["top_k"] = hits;
-                    page.data["search_top_k"] = hits;
-                    reads.push_back({"search", std::move(search)});
-                }
-            }
-            bool needs_run_report = false;
-            // Indexes needs only dataset names for its picker: the projected system.datasets
-            // read, not Zetta's full list_datasets scan (lake#446).
-            auto completed_reads = co_await workspace_reads(
-                context, page.customer_id, reads, section == "data" || section == "indexes");
-            if (!completed_reads) {
-                page.error = completed_reads.error().message;
-            } else {
-                for (std::size_t index = 0; index < completed_reads->size(); ++index) {
-                    const std::string& capability = reads[index].first;
-                    const ApiResult& result = completed_reads->at(index);
-                    if (result.ok) {
-                        page.data[capability] = result.value;
-                        const std::string status = result.value.value("status", std::string());
-                        needs_run_report = needs_run_report ||
-                                           (capability == "get_run" && status != "running" &&
-                                            status != "queued" && status != "pending");
-                    } else if (page.error.empty() && capability != "list_methodologies" &&
-                               capability != "list_solutions" && capability != "list_studies" &&
-                               !(section == "agent" && (capability == "list_projects" ||
-                                   capability == "list_agent_launches" ||
-                                   capability == "list_agent_schedules")) &&
-                               !(capability == "get_solution" &&
-                                 result.error.code == "unknown_capability")) {
-                        page.error = result.error.message;
-                    }
-                }
-            }
-            if (section == "agent") {
-                nlohmann::json approved = nlohmann::json::array();
-                const auto projects = page.data.value("list_projects", nlohmann::json::object());
-                for (const auto& entry : projects.value("projects", nlohmann::json::array())) {
-                    if (!entry.is_object()) {
-                        continue;
-                    }
-                    const std::string project = entry.value("name", std::string());
-                    for (const auto& graph : without_project_agent_checks(
-                             entry.value("graphs", nlohmann::json::array()))) {
-                        if (graph.value("approval", std::string()) == "approved") {
-                            approved.push_back({{"project", project},
-                                                {"graph", graph.value("name", std::string())}});
-                        }
-                    }
-                }
-                page.data["approved_pipelines"] = std::move(approved);
-            }
-            if (needs_run_report) {
-                const ApiResult report = unwrap(co_await workspace_call(
-                    "workspace_query",
-                    {{"customer_id", page.customer_id},
-                     {"capability", "get_run_report"},
-                     {"input", {{"run_id", page.subject}}}},
-                    context));
-                if (report.ok) {
-                    page.data["get_run_report"] = report.value;
-                } else if (page.error.empty()) {
-                    page.error = report.error.message;
-                }
-            }
-            if (section == "project" && page.data.contains("get_project")) {
-                // A solution graph identifies itself through its manifest. That durable engine
-                // record carries the policy, experiment, monitor and readout ids, so the project
-                // page needs no duplicate lake-side solution state (lake#292).
-                const nlohmann::json graphs =
-                    page.data["get_project"].value("graphs", nlohmann::json::array());
-                for (std::size_t graph_index = 0;
-                     graph_index < project_graphs.size();
-                     ++graph_index) {
-                    const nlohmann::json& summary = graphs.at(graph_index);
-                    const std::string graph = summary.value("name", std::string());
-                    const ApiResult& detail = project_graphs.at(graph_index);
-                    if (!detail.ok) {
-                        continue;
-                    }
-                    nlohmann::json foundation;
-                    nlohmann::json source_roles;
-                    nlohmann::json stages = nlohmann::json::array();
-                    for (const nlohmann::json& node :
-                         detail.value.value("nodes", nlohmann::json::array())) {
-                        const nlohmann::json attributes =
-                            node.value("attributes", nlohmann::json::object());
-                        if (node.value("id", std::string()) == "solution_manifest" &&
-                            attributes.contains("foundation") &&
-                            attributes["foundation"].is_object()) {
-                            foundation = attributes["foundation"];
-                            source_roles = attributes.value("sources", nlohmann::json::object());
-                        }
-                        if (attributes.contains("solution_stage")) {
-                            stages.push_back({{"id", node.value("id", std::string())},
-                                              {"name", node.value("name", std::string())},
-                                              {"kind", node.value("kind", std::string())},
-                                              {"stage", attributes["solution_stage"]}});
-                        }
-                    }
-                    if (!foundation.is_object()) {
-                        continue;
-                    }
-                    nlohmann::json solution_project{
-                        {"graph", graph},
-                        {"graph_id",
-                         detail.value.value("graph_id", summary.value("id", std::string()))},
-                        {"foundation", foundation},
-                        {"sources", source_roles},
-                        {"stages", std::move(stages)}};
-                    const std::array<const char*, 5> state_keys{
-                        "policy", "experiment", "ledger", "monitor", "roi"};
-                    const std::vector<WorkspaceRead> state_reads{
-                        {"get_policy",
-                         {{"policy_id", foundation.value("policy_id", std::string())}}},
-                        {"get_experiment",
-                         {{"experiment", foundation.value("experiment_id", std::string())}}},
-                        {"list_ledger", nlohmann::json::object()},
-                        {"get_monitor",
-                         {{"solution", foundation.value("monitor_id", std::string())}}},
-                        {"get_roi_readout",
-                         {{"solution",
-                           foundation.value("readout_id",
-                                            foundation.value("scope", std::string()))}}},
-                    };
-                    auto states = co_await workspace_reads(context, page.customer_id, state_reads);
-                    if (!states) {
-                        if (page.error.empty()) {
-                            page.error = states.error().message;
-                        }
-                        continue;
-                    }
-                    for (std::size_t state_index = 0; state_index < 5; ++state_index) {
-                        if (states->at(state_index).ok) {
-                            solution_project[state_keys[state_index]] =
-                                states->at(state_index).value;
-                        }
-                    }
-                    const nlohmann::json listed_runs =
-                        page.data.value("list_runs", nlohmann::json::object());
-                    nlohmann::json solution_runs = nlohmann::json::array();
-                    nlohmann::json latest;
-                    for (const nlohmann::json& run :
-                         listed_runs.value("runs", nlohmann::json::array())) {
-                        const std::string of = run.value("graph", std::string());
-                        if (of != solution_project.value("graph", std::string()) &&
-                            of != solution_project.value("graph_id", std::string())) {
-                            continue;
-                        }
-                        solution_runs.push_back(run);
-                        if (latest.is_null() || run.value("created", std::string()) >
-                                                    latest.value("created", std::string())) {
-                            latest = run;
-                        }
-                    }
-                    solution_project["runs"] = std::move(solution_runs);
-                    if (latest.is_object()) {
-                        solution_project["run"] = latest;
-                        std::string decisions;
-                        for (const nlohmann::json& output :
-                             latest.value("outputs", nlohmann::json::array())) {
-                            if (output.value("name", std::string()) == "solution decisions") {
-                                decisions = output.value("ref", std::string());
-                            }
-                        }
-                        const bool safe = !decisions.empty() &&
-                                          std::ranges::all_of(decisions, [](unsigned char c) {
-                                              return std::isalnum(c) || c == '_' || c == '.';
-                                          });
-                        if (safe) {
-                            const ApiResult rows = unwrap(co_await workspace_call(
-                                "workspace_sql",
-                                {{"customer_id", page.customer_id},
-                                 {"statement", "SELECT * FROM " + decisions}},
-                                context));
-                            if (rows.ok) {
-                                nlohmann::json values =
-                                    rows.value.value("rows", nlohmann::json::array());
-                                if (values.is_array() && values.size() > 100) {
-                                    values.erase(values.begin() + 100, values.end());
-                                }
-                                solution_project["decisions"] = std::move(values);
-                            }
-                        }
-                    }
-                    page.data["solution_project"] = std::move(solution_project);
-                    break;
-                }
-            }
-        }
-        if (section == "models") {
-            page.data["origin"] = public_origin(route);
-        }
-        for (auto& [key, value] : extra.items()) {
-            page.data[key] = value;
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_workspace(page, viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    // Form posts. Each runs one or two registry capabilities as the signed-in user and returns to
-    // the page it came from; a failure comes back as ?error=.
-    // Train > Data > Upload a file: a CSV or JSONL file becomes a dataset in the workspace
-    // (Zetta's upload_dataset, which takes at most 16 MiB of content).
-    boost::http::route_task serve_workspace_upload(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string content_type = route.req.count(http::field::content_type) == 0
-                                             ? std::string{}
-                                             : std::string(route.req.at(http::field::content_type));
-        MultipartForm form = parse_multipart(body, content_type);
-        const std::string customer_id = form.fields["customer_id"];
-        std::string back = "/train/data?customer_id=" + oauth_url_encode(customer_id);
-        constexpr std::size_t upload_limit = std::size_t{16} * 1024 * 1024;
-        ApiResult result = ApiResult::success(nlohmann::json::object());
-        if (!form.error.empty()) {
-            result = ApiResult::failure("invalid_input", form.error);
-        } else if (form.files.size() != 1 || form.files.front().contents.empty()) {
-            result = ApiResult::failure("invalid_input", "Choose one CSV or JSONL file.");
-        } else if (form.files.front().contents.size() > upload_limit) {
-            result = ApiResult::failure("invalid_input", "The file is larger than 16 MiB.");
-        } else {
-            const MultipartFile& file = form.files.front();
-            std::string format = form.fields["format"];
-            if (format.empty()) {
-                format = file.name.ends_with(".jsonl") || file.name.ends_with(".ndjson") ? "jsonl"
-                                                                                         : "csv";
-            }
-            std::string content(file.contents.size(), '\0');
-            std::memcpy(content.data(), file.contents.data(), file.contents.size());
-            // A taken name is refused unless the person chose the next free name (lake#447).
-            const std::string if_exists =
-                form.fields["if_exists"] == "rename" ? "rename" : "fail";
-            result = unwrap(co_await workspace_call("workspace_act",
-                                                    {{"customer_id", customer_id},
-                                                     {"capability", "upload_dataset"},
-                                                     {"input",
-                                                      {{"table_name", form.fields["table_name"]},
-                                                       {"format", format},
-                                                       {"content", std::move(content)},
-                                                       {"if_exists", if_exists}}}},
-                                                    context));
-            if (result.ok && !result.value.contains("format")) {
-                result.value["format"] = format;
-            }
-        }
-        if (!result.ok) {
-            back += "&error=" + oauth_url_encode(result.error.message);
-        } else {
-            // Say what arrived, from what, and where (lake#256, lake#447).
-            back += "&loaded=" + oauth_url_encode(result.value.value("table", std::string())) +
-                    "&rows=" + std::to_string(result.value.value("rows", 0)) +
-                    "&database=" +
-                    oauth_url_encode(result.value.value("database", std::string("datasets"))) +
-                    "&format=" + oauth_url_encode(result.value.value("format", std::string()));
-            if (const std::string renamed = result.value.value("renamed_from", std::string());
-                !renamed.empty()) {
-                back += "&renamed_from=" + oauth_url_encode(renamed);
-            }
-        }
-        co_return co_await redirect(route, back);
-    }
-
-    // ---- Ask Orama (docs/api/ask-orama.md, lake#236) ----
-
-    // The conversation's messages as the page shows them.
-    nlohmann::json ask_messages_json(const std::vector<control::AskMessage>& messages) {
-        nlohmann::json out = nlohmann::json::array();
-        for (const control::AskMessage& message : messages) {
-            out.push_back({{"id", message.id},
-                           {"role", message.role},
-                           {"content", message.content},
-                           {"payload", message.payload}});
-        }
-        return out;
-    }
-
-    // The signed-in person's conversation in the workspace of this page (lake#370): its messages
-    // live in that workspace's Zetta, never in lake's control store.
-    liquid::runtime::task<control::ZettaControlResult<std::vector<control::AskMessage>>>
-    ask_conversation(ApiContext& context, std::string conversation, std::size_t newest = 200) {
-        auto records = page_records(context);
-        if (!records) {
-            co_return control::ZettaControlResult<std::vector<control::AskMessage>>(
-                std::unexpected(records.error()));
-        }
-        control::AskMessages messages(*records);
-        co_return control::settled(co_await messages.list(
-            control::ask_conversation_lookup(conversation, context.acting_user_id), newest));
-    }
-
-    // The space that owns the workspace in the page's path; the route guard has checked that the
-    // signed-in person can see it.
-    std::string page_workspace_customer(const ApiContext& context) const {
-        if (context.path_workspace_id.empty() || !options.store) {
-            return {};
-        }
-        const auto workspace = options.store->get_workspace(context.path_workspace_id);
-        return workspace ? workspace->customer_id : std::string();
-    }
-
-    control::ZettaControlResult<control::WorkspaceRecords> page_records(const ApiContext& context) {
-        const std::string customer_id = page_workspace_customer(context);
-        if (customer_id.empty()) {
-            return std::unexpected(control::ZettaControlError{
-                "invalid_input", "workspace_id is required in the URL path", "/workspace_id"});
-        }
-        return workspace_records(context, customer_id, context.path_workspace_id);
-    }
-
-    // Ask Orama first, then the library's running chat agents a person uses (never its internal
-    // tooling, lake#451). lake answers these itself; the space's own chat-capable agents come from
-    // Zetta's list_agents, which the page defers to /ask/agents because it takes hundreds of
-    // milliseconds (lake#446).
-    nlohmann::json ask_library_agents(ApiContext& context) {
-        const ApiResult library =
-            registry.call("list_agent_library", nlohmann::json::object(), context);
-        return control::talk_to_agents(library.ok ? library.value : nlohmann::json::object());
-    }
-
-    // The space's own agents that take a conversation (the deferred /ask/agents panel).
-    liquid::runtime::task<ApiResult> ask_workspace_agents(ApiContext& context,
-                                                          std::string customer_id) {
-        const ApiResult own = unwrap(co_await workspace_call("workspace_query",
-                                                             {{"customer_id", customer_id},
-                                                              {"capability", "list_agents"},
-                                                              {"input", nlohmann::json::object()}},
-                                                             context));
-        if (!own.ok) {
-            co_return own;
-        }
-        nlohmann::json agents = nlohmann::json::array();
-        for (const nlohmann::json& agent : own.value.value("agents", nlohmann::json::array())) {
-            // Never a library key (its internal tooling included, lake#451): only the space's own.
-            if (agent.value("kind", std::string("custom")) != "orama" &&
-                agent.value("chat_capable", true) &&
-                control::library_agent(agent.value("id", std::string())) == nullptr) {
-                agents.push_back({{"id", agent.value("id", std::string())},
-                                  {"name", agent.value("name", std::string())}});
-            }
-        }
-        co_return ApiResult::success({{"agents", std::move(agents)}});
-    }
-
-    // A background turn of a conversation (lake#269). While it runs, the task as get_agent_task
-    // reads it (its agent, latest progress message, attempts and start), so the page can say who
-    // is working and what it last reported (lake#451); once it finished, settle_ask_turn stores
-    // its answer as the conversation's assistant message, once, and this answers null.
-    liquid::runtime::task<nlohmann::json> settle_turn(ApiContext& context,
-                                                      std::string customer_id,
-                                                      std::string task_id,
-                                                      std::string conversation,
-                                                      bool factory) {
-        const ApiResult settled =
-            unwrap(co_await workspace_call("settle_ask_turn",
-                                           {{"customer_id", customer_id},
-                                            {"conversation_id", conversation},
-                                            {"task_id", task_id},
-                                            {"kind", factory ? "factory" : "ask"}},
-                                           context));
-        if (!settled.ok || settled.value.value("settled", true)) {
-            co_return nullptr;
-        }
-        co_return settled.value.value("task", nlohmann::json());
-    }
-
-    // A deferred panel's answer (docs/ui/performance.md, lake#446): JSON, never cached, with the
-    // same Server-Timing as a page so the slow workspace call it waited on is named.
-    boost::http::route_task send_panel(boost::http::route_params& route,
-                                       boost::http::status status,
-                                       const nlohmann::json& body) {
-        co_return co_await send_text(
-            route, status, body.dump(), "application/json; charset=utf-8", "no-store");
-    }
-
-    // GET /ask/agents: the space's own chat agents for Ask Orama's picker.
-    boost::http::route_task serve_ask_agents_panel(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized || context.acting_user_id.empty()) {
-            co_return co_await send_panel(
-                route, boost::http::status::unauthorized, {{"error", "Sign in again."}});
-        }
-        const std::string customer_id =
-            workspace_selection(context, query_value(route, "customer_id")).customer_id;
-        if (customer_id.empty() || !options.workspaces) {
-            co_return co_await send_panel(
-                route, boost::http::status::ok, {{"agents", nlohmann::json::array()}});
-        }
-        auto listed = co_await ask_workspace_agents(context, customer_id);
-        const ApiResult result =
-            listed ? std::move(*listed)
-                   : ApiResult::failure("store_unavailable", listed.error().message);
-        co_return co_await send_panel(route,
-                                      boost::http::status::ok,
-                                      result.ok ? result.value
-                                                : nlohmann::json{{"error", result.error.message}});
-    }
-
-    // GET /train/agents/list: Train > Agents' "Your Agents" panel, rendered by lake.
-    boost::http::route_task serve_agents_panel(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await send_panel(
-                route, boost::http::status::unauthorized, {{"error", "Sign in again."}});
-        }
-        WorkspacePage page;
-        page.section = "agents";
-        page.workspace_id = context.path_workspace_id;
-        page.customer_id =
-            workspace_selection(context, query_value(route, "customer_id")).customer_id;
-        if (page.customer_id.empty() || !options.workspaces) {
-            co_return co_await send_panel(route,
-                                          boost::http::status::ok,
-                                          {{"error", "You have no workspace to read agents from."}});
-        }
-        const auto results = co_await workspace_reads(
-            context, page.customer_id, {{"list_agents", nlohmann::json::object()}});
-        if (!results) {
-            page.error = results.error().message;
-        } else if (results->front().ok) {
-            page.data["list_agents"] = results->front().value;
-        } else {
-            page.error = results->front().error.message;
-        }
-        co_return co_await send_panel(
-            route,
-            boost::http::status::ok,
-            {{"html", web_ui_workspace_document(web_ui_your_agents(page), page.workspace_id)}});
-    }
-
-    // GET /ship/indexes/datasets: the New Index form with the space's dataset choices.
-    boost::http::route_task serve_index_datasets_panel(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await send_panel(
-                route, boost::http::status::unauthorized, {{"error", "Sign in again."}});
-        }
-        WorkspacePage page;
-        page.section = "indexes";
-        page.workspace_id = context.path_workspace_id;
-        page.customer_id =
-            workspace_selection(context, query_value(route, "customer_id")).customer_id;
-        if (page.customer_id.empty() || !options.workspaces) {
-            co_return co_await send_panel(route,
-                                          boost::http::status::ok,
-                                          {{"error", "You have no workspace to index."}});
-        }
-        const auto results = co_await workspace_reads(
-            context, page.customer_id, {{"list_datasets", nlohmann::json::object()}}, true);
-        if (!results) {
-            page.error = results.error().message;
-        } else if (results->front().ok) {
-            page.data["list_datasets"] = results->front().value;
-        } else {
-            page.error = results->front().error.message;
-        }
-        co_return co_await send_panel(
-            route,
-            boost::http::status::ok,
-            {{"html", web_ui_workspace_document(web_ui_new_index(page), page.workspace_id)}});
-    }
-
-    boost::http::route_task serve_ask_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized || context.acting_user_id.empty()) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        AskPage page;
-        auto selection = workspace_selection(context, query_value(route, "customer_id"));
-        page.customer_id = selection.customer_id;
-        page.from = query_value(route, "from");
-        page.embed = query_value(route, "embed") == "1";
-        page.agent = query_value(route, "agent");
-        page.error = query_value(route, "error");
-        page.conversation_id = query_value(route, "conversation");
-        page.task_id = query_value(route, "task");
-        if (!page.task_id.empty() && !page.conversation_id.empty()) {
-            auto working = co_await settle_turn(
-                context, page.customer_id, page.task_id, page.conversation_id, false);
-            page.working = working && working->is_object();
-            if (page.working) {
-                page.turn = std::move(*working);
-            }
-        }
-        if (page.conversation_id.empty()) {
-            page.conversation_id = control::new_uuid_v4();
-        } else if (auto messages =
-                       control::settled(co_await ask_conversation(context, page.conversation_id))) {
-            page.messages = ask_messages_json(*messages);
-        } else if (page.error.empty()) {
-            page.error = "This conversation could not be read: " + messages.error().message;
-        }
-        if (!page.customer_id.empty() && options.workspaces) {
-            page.agents = ask_library_agents(context);
-            page.defer_agents = true;
-        }
-        if (page.agents.empty()) {
-            page.agents =
-                nlohmann::json::array({{{"id", "agent-ask-orama"}, {"name", "Ask Orama"}}});
-        }
-        // The agent this conversation talks to stays selected while the workspace's agents load.
-        if (!page.agent.empty() &&
-            std::ranges::none_of(page.agents, [&](const nlohmann::json& agent) {
-                return agent.value("id", std::string()) == page.agent;
-            })) {
-            page.agents.push_back({{"id", page.agent}, {"name", page.agent}});
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_ask(page, viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_ask_form(boost::http::route_params& route, bool confirm) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
-        }
-        ApiContext context = context_for(route);
-        if (!context.authorized || context.acting_user_id.empty() || !options.store) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string customer_id = form_field(body, "customer_id");
-        std::string conversation = form_field(body, "conversation");
-        if (conversation.empty()) {
-            conversation = control::new_uuid_v4();
-        }
-        // A message the workspace did not store is an error the page shows, never a silent loss.
-        std::string error;
-        const std::string from = form_field(body, "from");
-        std::string agent = form_field(body, "agent");
-        if (agent.empty()) {
-            agent = "agent-ask-orama";
-        }
-        std::string back = "/ask?customer_id=" + oauth_url_encode(customer_id) +
-                           "&conversation=" + oauth_url_encode(conversation) +
-                           "&from=" + oauth_url_encode(from) + "&agent=" + oauth_url_encode(agent) +
-                           (form_field(body, "embed") == "1" ? "&embed=1" : "");
-        // The whole page it was opened from, by name (lake#258): its path and each query value,
-        // so "this pipeline" is the pipeline on that page.
-        nlohmann::json page{{"path", from.substr(0, from.find('?'))}};
-        if (const std::size_t mark = from.find('?'); mark != std::string::npos) {
-            std::string_view rest = std::string_view(from).substr(mark + 1);
-            while (!rest.empty()) {
-                const std::size_t amp = rest.find('&');
-                const std::string_view pair = rest.substr(0, amp);
-                const std::size_t equals = pair.find('=');
-                if (equals != std::string_view::npos) {
-                    page[form_decode(pair.substr(0, equals))] = form_decode(pair.substr(equals + 1));
-                }
-                rest = amp == std::string_view::npos ? std::string_view() : rest.substr(amp + 1);
-            }
-        }
-        // The same capabilities the web app calls (lake#561): the browser never writes a message.
-        if (!confirm) {
-            const ApiResult sent =
-                unwrap(co_await workspace_call("send_ask_message",
-                                               {{"customer_id", customer_id},
-                                                {"conversation_id", conversation},
-                                                {"kind", "ask"},
-                                                {"agent", agent},
-                                                {"message", form_field(body, "message")},
-                                                {"page", page}},
-                                               context));
-            if (!sent.ok) {
-                error = sent.error.message;
-            } else if (const std::string task = sent.value.value("task_id", std::string());
-                       !task.empty()) {
-                // Running in the background (lake#269): the page follows the task.
-                back += "&task=" + oauth_url_encode(task);
-            }
-        } else {
-            // Run one proposal the person was shown, as the person. Only a proposal lake stored
-            // for this person's conversation can be confirmed.
-            const ApiResult confirmed = unwrap(co_await workspace_call(
-                "confirm_ask_proposal",
-                {{"customer_id", customer_id},
-                 {"conversation_id", conversation},
-                 {"message_id", form_field(body, "message_id")},
-                 {"index", std::max(0, std::atoi(form_field(body, "index").c_str()))}},
-                context));
-            if (!confirmed.ok) {
-                error = confirmed.error.message;
-            }
-        }
-        if (!error.empty()) {
-            back += "&error=" + oauth_url_encode(error);
-        }
-        co_return co_await redirect(route, back);
-    }
-
-    // ---- Train > Agents > Agent Factory (docs/api/agent-factory.md, lake#233) ----
-
-    static std::string proposal_digest(const nlohmann::json& proposal) {
-        return agent_proposal_digest(proposal);
-    }
-
-    static nlohmann::json agent_result(const nlohmann::json& task) {
-        const nlohmann::json answer = task.value("answer", nlohmann::json::object());
-        if (!answer.is_object()) {
-            return nlohmann::json::object();
-        }
-        const nlohmann::json result = answer.value("result", nlohmann::json::object());
-        return result.is_object() ? result : nlohmann::json::object();
-    }
-
-    static bool agent_task_needs_reply(const nlohmann::json& task,
-                                       std::string_view agent) {
-        if (task.value("status", std::string()) != "succeeded") {
-            return false;
-        }
-        const nlohmann::json result = agent_result(task);
-        const std::string kind = result.value("kind", std::string());
-        if (kind == "question") {
-            return true;
-        }
-        if (agent == "agent-project") {
-            return !result.value("proposal", nlohmann::json()).is_object();
-        }
-        if (agent == "agent-application") {
-            return kind.empty() ||
-                   (kind == "proposal" &&
-                    (!result.value("confirm", false) ||
-                     !result.value("app", nlohmann::json()).is_object()));
-        }
-        if (agent == "agent-experiments") {
-            return kind.empty() ||
-                   (kind == "proposal" &&
-                    (!result.value("confirm", false) ||
-                     !result.value("study", nlohmann::json()).is_object()));
-        }
-        return false;
-    }
-
-    boost::http::route_task serve_factory_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized || context.acting_user_id.empty()) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        FactoryPage page;
-        page.customer_id =
-            workspace_selection(context, query_value(route, "customer_id")).customer_id;
-        page.error = query_value(route, "error");
-        page.conversation_id = query_value(route, "conversation");
-        page.task_id = query_value(route, "task");
-        if (!page.task_id.empty() && !page.conversation_id.empty()) {
-            auto working = co_await settle_turn(
-                context, page.customer_id, page.task_id, page.conversation_id, true);
-            page.working = working && working->is_object();
-        }
-        if (page.conversation_id.empty()) {
-            page.conversation_id = control::new_uuid_v4();
-        } else if (auto messages =
-                       control::settled(co_await ask_conversation(context, page.conversation_id))) {
-            page.messages = ask_messages_json(*messages);
-            for (const control::AskMessage& message : *messages) {
-                if (message.role == "assistant" && message.payload.is_object() &&
-                    message.payload.contains("answer")) {
-                    page.latest = message.payload["answer"];
-                    page.message_id = message.id;
-                }
-            }
-            if (page.latest.contains("proposal")) {
-                page.proposal_sha256 = proposal_digest(page.latest["proposal"]);
-            }
-        } else if (page.error.empty()) {
-            page.error = "This conversation could not be read: " + messages.error().message;
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_factory(page, viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    // The files of a Python proposal, with instructions.md composed from Studio's boxes when the
-    // proposal carries none.
-    boost::http::route_task serve_factory_form(boost::http::route_params& route, bool approve) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
-        }
-        ApiContext context = context_for(route);
-        if (!context.authorized || context.acting_user_id.empty() || !options.store) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string customer_id = form_field(body, "customer_id");
-        std::string conversation = form_field(body, "conversation");
-        if (conversation.empty()) {
-            conversation = control::new_uuid_v4();
-        }
-        const std::string query = "customer_id=" + oauth_url_encode(customer_id);
-        std::string back =
-            "/train/agents/new?" + query + "&conversation=" + oauth_url_encode(conversation);
-        // The same capabilities the web app calls (lake#561).
-        if (!approve) {
-            const ApiResult sent =
-                unwrap(co_await workspace_call("send_ask_message",
-                                               {{"customer_id", customer_id},
-                                                {"conversation_id", conversation},
-                                                {"kind", "factory"},
-                                                {"message", form_field(body, "message")}},
-                                               context));
-            if (!sent.ok) {
-                back += "&error=" + oauth_url_encode(sent.error.message);
-            } else {
-                // AgentCreator works in the background (lake#269); the page follows the task.
-                back += "&task=" + oauth_url_encode(sent.value.value("task_id", std::string()));
-            }
-            co_return co_await redirect(route, back);
-        }
-        // Approve and create: only the exact proposal the person was shown, without defects.
-        const ApiResult created = unwrap(
-            co_await workspace_call("approve_agent_proposal",
-                                    {{"customer_id", customer_id},
-                                     {"conversation_id", conversation},
-                                     {"message_id", form_field(body, "message_id")},
-                                     {"proposal_sha256", form_field(body, "proposal_sha256")}},
-                                    context));
-        if (!created.ok) {
-            co_return co_await redirect(route,
-                                        back + "&error=" + oauth_url_encode(created.error.message));
-        }
-        co_return co_await redirect(
-            route,
-            "/train/agent?" + query +
-                "&id=" + oauth_url_encode(created.value.value("agent_id", std::string())));
-    }
-
-    // Design > Discover Opportunities: one Auto-Suggest turn over the profile lake builds, shown
-    // on the page (docs/api/discover.md). Nothing is created here.
-    // Scan my workspace (lake#269): a background Auto-Suggest turn. The request returns at once to
-    // the Opportunities page, which follows the task until its Opportunities are saved.
-    boost::http::route_task serve_discover_scan(boost::http::route_params& route) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
-        }
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string customer_id = form_field(body, "customer_id");
-        std::string back = "/design/opportunities?customer_id=" + oauth_url_encode(customer_id);
-        const ApiResult started = unwrap(co_await workspace_call(
-            "agent_turn",
-            {{"customer_id", customer_id},
-             {"agent", "agent-autosuggest"},
-             {"kind", "discover"},
-             {"message", "What could this workspace build from its data?"}},
-            context));
-        back += started.ok ? "&task=" + oauth_url_encode(started.value.value("task_id", std::string()))
-                           : "&error=" + oauth_url_encode(started.error.message);
-        co_return co_await redirect(route, back);
-    }
-
-    boost::http::route_task serve_workspace_form(boost::http::route_params& route,
-                                                 std::string action) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
-        }
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string customer_id = form_field(body, "customer_id");
-        const std::string query = "customer_id=" + oauth_url_encode(customer_id);
-        const auto act = [&](std::string capability, nlohmann::json input) {
-            return workspace_call("workspace_act",
-                                  {{"customer_id", customer_id},
-                                   {"capability", std::move(capability)},
-                                   {"input", std::move(input)}},
-                                  context);
-        };
-        std::string back;
-        ApiResult result = ApiResult::success(nlohmann::json::object());
-        if (action == "workspace_create" || action == "workspace_delete") {
-            back = "/workspaces?" + query;
-            nlohmann::json input{{"customer_id", customer_id}};
-            if (action == "workspace_create") {
-                input["name"] = form_field(body, "name");
-                input["environment"] = form_field(body, "environment");
-            } else {
-                input["workspace_id"] = form_field(body, "workspace_id");
-                input["confirm"] = form_field(body, "confirm");
-            }
-            result = unwrap(co_await workspace_call(
-                action == "workspace_create" ? "create_workspace" : "delete_workspace", input, context));
-            if (!result.ok && action == "workspace_delete") {
-                // Back to the confirmation, which lists what the deletion destroys.
-                back += "&delete=" + oauth_url_encode(form_field(body, "workspace_id"));
-            }
-        } else if (action == "start") {
-            const std::string requested = form_field(body, "return");
-            back = requested == "/design/projects" || requested == "/train/data" ||
-                           requested == "/train/agents" || requested == "/train/runs" ||
-                           requested == "/ship/models" || requested == "/ship/indexes"
-                       ? requested
-                       : std::string("/design/projects");
-            back += "?" + query;
-            result = unwrap(co_await workspace_call(
-                "start_workspace", {{"customer_id", customer_id}}, context));
-        } else if (action == "delete") {
-            back = "/design/projects?" + query;
-            result = unwrap(co_await workspace_call(
-                "delete_workspace",
-                {{"customer_id", customer_id}, {"confirm", form_field(body, "confirm")}},
-                context));
-        } else if (action == "agent_create") {
-            // Train > Agents > Create an Agent: Studio's boxes (docs/api/train-agents.md). The
-            // Orama base model makes a native agent that runs in the workspace; a frontier model
-            // makes a Python agent that runs on agent-runtime from the instructions composed here.
-            const std::string name = form_field(body, "name");
-            const std::string purpose = form_field(body, "purpose");
-            const std::string manifesto = form_field(body, "manifesto");
-            const std::string goal = form_field(body, "goal");
-            nlohmann::json agent{{"name", name},
-                                 {"purpose", purpose},
-                                 {"description", purpose},
-                                 {"work_area",
-                                  {{"kind", form_field(body, "work_area")},
-                                   {"detail", form_field(body, "work_area_detail")}}},
-                                 {"manifesto", manifesto},
-                                 {"goal", goal},
-                                 {"skills", form_fields(body, "skills")},
-                                 {"trigger", form_field(body, "trigger")}};
-            const control::WorkspaceConfig* config =
-                options.workspaces ? &options.workspaces->config() : nullptr;
-            if (form_field(body, "model") == "frontier") {
-                std::string instructions = "# " + name + "\n\n" + purpose + "\n";
-                if (!manifesto.empty()) {
-                    instructions += "\n## How you work\n\n" + manifesto + "\n";
-                }
-                if (!goal.empty()) {
-                    instructions += "\n## Your goal\n\n" + goal + "\n";
-                }
-                agent["runtime"] = "python";
-                agent["model_name"] = config ? config->frontier_model : std::string("gpt-4o");
-                agent["definition"] = {{"source", "zetta"},
-                                       {"instructions", instructions},
-                                       {"files", nlohmann::json::array()},
-                                       {"entrypoint", ""}};
-            } else {
-                agent["runtime"] = "native";
-                agent["model"] = config ? config->base_agent_model : std::string();
-                agent["model_name"] = "Orama base model";
-                agent["system_prompt"] = manifesto;
-            }
-            const bool python = agent.value("runtime", std::string()) == "python";
-            const std::string trigger = agent.value("trigger", std::string());
-            result = unwrap(co_await act("create_agent", std::move(agent)));
-            const std::string created = result.ok ? result.value.value("id", std::string()) : "";
-            if (result.ok && python && !trigger.empty()) {
-                // A trigger is lake's to fire (docs/api/agent-launches.md).
-                const ApiResult scheduled = unwrap(co_await workspace_call(
-                    "schedule_agent",
-                    {{"customer_id", customer_id}, {"agent_id", created}, {"trigger", trigger}},
-                    context));
-                if (!scheduled.ok) {
-                    result = scheduled;
-                }
-            }
-            back = !created.empty() ? "/train/agent?" + query + "&id=" + oauth_url_encode(created)
-                                    : "/train/agents?" + query;
-        } else if (action == "discover_create") {
-            // Project drafts from the chosen saved Opportunities, only on the person's
-            // confirmation (lake#269).
-            back = "/design/opportunities?" + query;
-            nlohmann::json ids = nlohmann::json::array();
-            for (const std::string& id : form_fields(body, "pick")) {
-                ids.push_back(id);
-            }
-            if (form_field(body, "confirm") != "yes") {
-                result = ApiResult::failure("invalid_input", "Confirm to create the drafts.");
-            } else if (ids.empty()) {
-                result = ApiResult::failure("invalid_input", "Choose at least one Opportunity.");
-            } else {
-                result = unwrap(co_await workspace_call(
-                    "create_projects_from_opportunities",
-                    {{"customer_id", customer_id}, {"opportunity_ids", std::move(ids)}},
-                    context));
-                if (result.ok) {
-                    back = "/design/projects?" + query;
-                }
-            }
-        } else if (action == "solution_start") {
-            // The person supplies the business inputs; the Project Agent proposes the engine's
-            // remaining foundation. create_solution runs only after confirmation (lake#292).
-            const std::string solution = form_field(body, "solution");
-            const std::string name = form_field(body, "name");
-            back = "/design/solution?" + query + "&id=" + oauth_url_encode(solution);
-            int level = 0;
-            const std::string level_text = form_field(body, "level");
-            const auto [level_end, level_error] =
-                std::from_chars(level_text.data(), level_text.data() + level_text.size(), level);
-            const std::string value_text = form_field(body, "value_per_outcome");
-            const std::string investment_text = form_field(body, "investment");
-            char* value_end = nullptr;
-            char* investment_end = nullptr;
-            const double value = std::strtod(value_text.c_str(), &value_end);
-            const double investment = std::strtod(investment_text.c_str(), &investment_end);
-            if (level_error != std::errc() || level_end != level_text.data() + level_text.size() ||
-                value_text.empty() || value_end == value_text.c_str() || *value_end != '\0' ||
-                investment_text.empty() || investment_end == investment_text.c_str() ||
-                *investment_end != '\0') {
-                result = ApiResult::failure("invalid_input",
-                                            "Level and economics must be valid numbers.");
-            } else {
-                result = unwrap(
-                    co_await workspace_call("start_solution",
-                                            {{"customer_id", customer_id},
-                                             {"project", name},
-                                             {"solution", solution},
-                                             {"level", level},
-                                             {"dataset", form_field(body, "dataset")},
-                                             {"delivery",
-                                              {{"kind", form_field(body, "delivery_kind")},
-                                               {"endpoint", form_field(body, "delivery_endpoint")},
-                                               {"owner", form_field(body, "owner")}}},
-                                             {"roi_model",
-                                              {{"value_per_outcome", value},
-                                               {"investment", investment},
-                                               {"currency", form_field(body, "currency")}}}},
-                                            context));
-                if (result.ok) {
-                    back =
-                        "/design/project?" + query + "&name=" + oauth_url_encode(name) +
-                        "&task=" + oauth_url_encode(result.value.value("task_id", std::string()));
-                }
-            }
-        } else if (action == "solution_confirm") {
-            const std::string project = form_field(body, "project");
-            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            nlohmann::json edits =
-                nlohmann::json::parse(form_field(body, "foundation"), nullptr, false);
-            if (!edits.is_object()) {
-                result =
-                    ApiResult::failure("invalid_input", "The foundation must be a JSON object.");
-            } else if (form_field(body, "confirm") != "yes") {
-                result = ApiResult::failure("invalid_input",
-                                            "Confirm that you reviewed the foundation.");
-            } else {
-                result = unwrap(co_await workspace_call(
-                    "confirm_solution",
-                    {{"task_id", form_field(body, "task_id")}, {"edits", std::move(edits)}},
-                    context));
-            }
-        } else if (action == "solution_run") {
-            const std::string project = form_field(body, "project");
-            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            nlohmann::json input{{"project", project}, {"graph", form_field(body, "graph")}};
-            if (const std::string token = form_field(body, "delivery_token"); !token.empty()) {
-                input["delivery_token"] = token;
-            }
-            result = unwrap(co_await act("run_solution", std::move(input)));
-            if (result.ok) {
-                back += "&run=" + oauth_url_encode(result.value.value("run_id", std::string()));
-            }
-        } else if (action == "solution_policy") {
-            const std::string project = form_field(body, "project");
-            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            nlohmann::json config =
-                nlohmann::json::parse(form_field(body, "config"), nullptr, false);
-            if (!config.is_object()) {
-                result = ApiResult::failure("invalid_input",
-                                            "The policy configuration must be a JSON object.");
-            } else if (form_field(body, "confirm") != "yes") {
-                result = ApiResult::failure(
-                    "invalid_input", "Approve the proposed policy version before applying it.");
-            } else {
-                result = unwrap(co_await act("update_policy",
-                                             {{"policy_id", form_field(body, "policy_id")},
-                                              {"config", std::move(config)},
-                                              {"reason", form_field(body, "reason")}}));
-            }
-        } else if (action == "solution_approve") {
-            const std::string project = form_field(body, "project");
-            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            if (form_field(body, "confirm") != "yes") {
-                result = ApiResult::failure("invalid_input",
-                                            "Confirm this A1 decision before approving it.");
-            } else {
-                result = unwrap(co_await act("approve_decision",
-                                             {{"decision_id", form_field(body, "decision_id")}}));
-            }
-        } else if (action == "solution_outcome") {
-            const std::string project = form_field(body, "project");
-            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            const std::string value_text = form_field(body, "value");
-            char* value_end = nullptr;
-            const double value = std::strtod(value_text.c_str(), &value_end);
-            if (value_text.empty() || value_end == value_text.c_str() || *value_end != '\0') {
-                result = ApiResult::failure("invalid_input", "The outcome value must be a number.");
-            } else {
-                result = unwrap(co_await act("record_outcome",
-                                             {{"action_id", form_field(body, "action_id")},
-                                              {"outcome", form_field(body, "outcome")},
-                                              {"value", value},
-                                              {"currency", form_field(body, "currency")},
-                                              {"source", "manual"},
-                                              {"occurred_at", form_field(body, "occurred_at")}}));
-            }
-        } else if (action == "discover_dismiss") {
-            back = "/design/opportunities?" + query;
-            result = unwrap(co_await workspace_call(
-                "dismiss_opportunity",
-                {{"customer_id", customer_id}, {"opportunity_id", form_field(body, "opportunity_id")}},
-                context));
-        } else if (action == "agent_grant" || action == "agent_revoke") {
-            // Pipelines as tools (lake#238): the whole list is written back, so Zetta checks
-            // every grant is still approved and pins each to its approval.
-            const std::string id = form_field(body, "id");
-            back = "/train/agent?" + query + "&id=" + oauth_url_encode(id);
-            const ApiResult current = unwrap(co_await workspace_call("workspace_query",
-                                                                     {{"customer_id", customer_id},
-                                                                      {"capability", "get_agent"},
-                                                                      {"input", {{"id", id}}}},
-                                                                     context));
-            if (!current.ok) {
-                result = current;
-            } else {
-                const std::string project = form_field(body, "project");
-                const std::string graph = form_field(body, "graph");
-                nlohmann::json grants = nlohmann::json::array();
-                for (const nlohmann::json& grant :
-                     current.value.value("pipelines", nlohmann::json::array())) {
-                    const bool same = grant.value("project", std::string()) == project &&
-                                      grant.value("graph", std::string()) == graph;
-                    if (!same) {
-                        grants.push_back({{"project", grant.value("project", std::string())},
-                                          {"graph", grant.value("graph", std::string())}});
-                    }
-                }
-                if (action == "agent_grant") {
-                    grants.push_back({{"project", project}, {"graph", graph}});
-                }
-                result = unwrap(co_await act("update_agent", {{"id", id}, {"pipelines", grants}}));
-            }
-        } else if (action == "agent_schedule" || action == "agent_unschedule") {
-            const std::string id = form_field(body, "id");
-            back = "/train/agent?" + query + "&id=" + oauth_url_encode(id) + "#agent-schedules";
-            if (action == "agent_schedule") {
-                const std::string when = form_field(body, "when");
-                // Five fields or an @macro is cron; anything else is Studio's plain words.
-                const bool cron = when.starts_with('@') ||
-                                  std::ranges::count(when, ' ') >= 4 &&
-                                      when.find_first_not_of("0123456789*/,- ") ==
-                                          std::string::npos;
-                nlohmann::json input{{"customer_id", customer_id},
-                                     {"agent_id", id},
-                                     {cron ? "cron" : "trigger", when}};
-                const std::string task = form_field(body, "input");
-                if (!task.empty()) {
-                    input["input"] = task;
-                }
-                result = unwrap(co_await workspace_call("schedule_agent", input, context));
-            } else {
-                result = unwrap(co_await workspace_call(
-                    "unschedule_agent",
-                    {{"customer_id", customer_id}, {"schedule_id", form_field(body, "schedule_id")}},
-                    context));
-            }
-        } else if (action == "agent_run" || action == "agent_stop") {
-            const std::string id = form_field(body, "id");
-            back = "/train/agent?" + query + "&id=" + oauth_url_encode(id);
-            if (action == "agent_run") {
-                const std::string task = form_field(body, "input");
-                result = unwrap(co_await workspace_call(
-                    "launch_agent",
-                    {{"customer_id", customer_id},
-                     {"agent_id", id},
-                     {"mode", "job"},
-                     {"input", task.empty() ? nlohmann::json(nullptr) : nlohmann::json(task)}},
-                    context));
-            } else {
-                result = unwrap(co_await workspace_call(
-                    "stop_agent_launch",
-                    {{"customer_id", customer_id}, {"launch_id", form_field(body, "launch_id")}},
-                    context));
-            }
-        } else if (action == "agent_delete") {
-            const std::string id = form_field(body, "id");
-            const std::string name = form_field(body, "name");
-            if (form_field(body, "confirm") != name) {
-                result = ApiResult::failure("invalid_input", "Type the agent's name to delete it.");
-                back = "/train/agent?" + query + "&id=" + oauth_url_encode(id);
-            } else {
-                result = unwrap(co_await act("delete_agent", {{"id", id}}));
-                if (result.ok) {
-                    // No CronJob outlives its agent.
-                    const ApiResult schedules = unwrap(co_await workspace_call(
-                        "list_agent_schedules",
-                        {{"customer_id", customer_id}, {"agent_id", id}},
-                        context));
-                    for (const nlohmann::json& schedule :
-                         schedules.ok ? schedules.value.value("schedules", nlohmann::json::array())
-                                      : nlohmann::json::array()) {
-                        co_await workspace_call(
-                            "unschedule_agent",
-                            {{"customer_id", customer_id},
-                             {"schedule_id", schedule.value("id", std::string())}},
-                            context);
-                    }
-                }
-                back = result.ok ? "/train/agents?" + query
-                                 : "/train/agent?" + query + "&id=" + oauth_url_encode(id);
-            }
-        } else if (action == "delete_project") {
-            const std::string project = form_field(body, "project");
-            if (form_field(body, "confirm") != project) {
-                result =
-                    ApiResult::failure("invalid_input", "Type the project's name to delete it.");
-                back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            } else {
-                result = unwrap(co_await act("delete_project", {{"name", project}}));
-                back = result.ok
-                           ? "/design/projects?" + query
-                           : "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            }
-        } else if (action.starts_with("pipeline_")) {
-            // The pipeline page's forms (docs/design/zetta-parity.md).
-            const std::string project = form_field(body, "project");
-            std::string graph = form_field(body, "graph");
-            const auto page_of = [&](const std::string& name, const std::string& step) {
-                return "/design/pipeline?" + query + "&project=" + oauth_url_encode(project) +
-                       "&graph=" + oauth_url_encode(name) +
-                       (step.empty() ? std::string() : "&step=" + oauth_url_encode(step));
-            };
-            back = page_of(graph, form_field(body, "step"));
-            nlohmann::json shown; // an answer the page shows (gate, deploy) instead of redirecting
-            if (action == "pipeline_edit") {
-                result = unwrap(co_await workspace_call("edit_pipeline",
-                                                        {{"customer_id", customer_id},
-                                                         {"project", project},
-                                                         {"graph", graph},
-                                                         {"op", form_field(body, "op")},
-                                                         {"step", form_field(body, "step")},
-                                                         {"kind", form_field(body, "kind")},
-                                                         {"name", form_field(body, "name")},
-                                                         {"from", form_field(body, "from")},
-                                                         {"to", form_field(body, "to")}},
-                                                        context));
-                if (result.ok) {
-                    const std::string op = form_field(body, "op");
-                    graph = result.value.value("name", graph);
-                    back = page_of(graph,
-                                   op == "remove_step" ? std::string()
-                                   : op == "add_step"  ? result.value.value("step", std::string())
-                                   : op == "add_edge"  ? form_field(body, "from")
-                                                       : form_field(body, "step"));
-                }
-            } else if (action == "pipeline_ask") {
-                // Ask the Project Agent for a change (lake#249): it answers with a proposal, kept
-                // for review; nothing changes until the person applies it.
-                nlohmann::json turn{{"customer_id", customer_id},
-                                    {"agent", "agent-project"},
-                                    {"message", form_field(body, "request")},
-                                    {"kind", "pipeline"},
-                                    {"context", {{"project", project}, {"graph", graph}}}};
-                const std::string task_id = form_field(body, "task_id");
-                if (!task_id.empty()) {
-                    const ApiResult task = unwrap(co_await workspace_call(
-                        "get_agent_task",
-                        {{"customer_id", customer_id}, {"task_id", task_id}},
-                        context));
-                    if (!task.ok) {
-                        result = task;
-                    } else if (task.value.value("agent", std::string()) != "agent-project" ||
-                               task.value.value("kind", std::string()) != "pipeline" ||
-                               !agent_task_needs_reply(task.value, "agent-project") ||
-                               task.value.value("conversation_id", std::string()).empty()) {
-                        result = ApiResult::failure(
-                            "invalid_input", "That task has no Project Agent question to answer.");
-                    } else {
-                        turn["message"] = form_field(body, "reply");
-                        turn["conversation_id"] = task.value.at("conversation_id");
-                    }
-                }
-                if (result.ok) {
-                    result = unwrap(co_await workspace_call("agent_turn", std::move(turn), context));
-                }
-                if (result.ok) {
-                    // The Project Agent works in the background (lake#269).
-                    back = page_of(graph, "") + "&task=" +
-                           oauth_url_encode(result.value.value("task_id", std::string())) +
-                           "#proposal";
-                }
-            } else if (action == "pipeline_apply") {
-                const auto edits = nlohmann::json::parse(form_field(body, "edits"), nullptr, false);
-                result = unwrap(co_await workspace_call("edit_pipeline",
-                                                        {{"customer_id", customer_id},
-                                                         {"project", project},
-                                                         {"graph", graph},
-                                                         {"edits", edits}},
-                                                        context));
-                if (result.ok) {
-                    graph = result.value.value("name", graph);
-                    back = page_of(graph, "");
-                    for (const char* key : {"dataset", "holdout"}) {
-                        if (const std::string value = form_field(body, key); !value.empty()) {
-                            back += std::string("&") + key + "=" + oauth_url_encode(value);
-                        }
-                    }
-                    back += "#run";
-                }
-            } else if (action == "pipeline_approve") {
-                result =
-                    unwrap(co_await act("approve_plan", {{"project", project}, {"graph", graph}}));
-            } else if (action == "pipeline_gate") {
-                result = unwrap(co_await act("gate", {{"project", project}, {"graph", graph}}));
-                if (result.ok) {
-                    shown["gate"] = result.value;
-                }
-            } else if (action == "pipeline_deploy") {
-                result = unwrap(co_await act(
-                    "deploy", {{"project", project}, {"graph", graph}, {"target", "local"}}));
-                if (result.ok) {
-                    shown["deploy"] = result.value;
-                }
-            } else if (action == "pipeline_run") {
-                nlohmann::json input{
-                    {"customer_id", customer_id}, {"project", project}, {"graph", graph}};
-                if (const std::string path = form_field(body, "dataset_path"); !path.empty()) {
-                    input["dataset_path"] = path;
-                }
-                if (const std::string model = form_field(body, "model_name"); !model.empty()) {
-                    input["model_name"] = model;
-                }
-                if (const std::string holdout = form_field(body, "holdout_fraction");
-                    !holdout.empty()) {
-                    char* end = nullptr;
-                    const double fraction = std::strtod(holdout.c_str(), &end);
-                    if (end != holdout.c_str() && *end == '\0') {
-                        input["holdout_fraction"] = fraction;
-                    }
-                }
-                result = unwrap(co_await workspace_call("run_pipeline", std::move(input), context));
-                if (result.ok && result.value.contains("run")) {
-                    back = "/train/run?" + query + "&id=" +
-                           oauth_url_encode(result.value["run"].value("run_id", std::string()));
-                } else if (result.ok) {
-                    shown["gate"] = result.value["gate"];
-                }
-            } else if (action == "pipeline_new" || action == "pipeline_n8n" ||
-                       action == "pipeline_python") {
-                const std::string name = form_field(body, "name");
-                nlohmann::json input{{"customer_id", customer_id},
-                                     {"project", project},
-                                     {"from",
-                                      action == "pipeline_new"   ? "empty"
-                                      : action == "pipeline_n8n" ? "n8n"
-                                                                 : "python"}};
-                if (!name.empty()) {
-                    input["name"] = name;
-                }
-                if (action != "pipeline_new") {
-                    input["content"] =
-                        form_field(body, action == "pipeline_n8n" ? "content" : "source");
-                }
-                result =
-                    unwrap(co_await workspace_call("create_pipeline", std::move(input), context));
-                back = result.ok
-                           ? page_of(result.value.value("name", name), "")
-                           : "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            }
-            if (!shown.empty()) {
-                auto built = co_await pipeline_page(
-                    context, customer_id, project, graph, form_field(body, "step"), shown);
-                if (built) {
-                    co_return co_await send_text(route,
-                                                 boost::http::status::ok,
-                                                 web_ui_workspace(*built, viewer_for(context)),
-                                                 "text/html; charset=utf-8",
-                                                 "no-store");
-                }
-            }
-        } else if (action == "dataset_promote") {
-            back = "/train/dataset?" + query +
-                   "&database=" + oauth_url_encode(form_field(body, "database")) +
-                   "&name=" + oauth_url_encode(form_field(body, "dataset"));
-            result = unwrap(co_await act("promote_dataset",
-                                         {{"dataset", form_field(body, "dataset")},
-                                          {"database", form_field(body, "database")}}));
-        } else if (action == "dataset_generate") {
-            back = "/train/data?" + query;
-            // Never `path`: it would write a file on the workspace's node.
-            nlohmann::json input{{"kind", form_field(body, "kind")}};
-            if (const std::string variants = form_field(body, "variants_per_subject");
-                !variants.empty()) {
-                input["variants_per_subject"] = std::clamp(std::atoi(variants.c_str()), 1, 50);
-            }
-            result = unwrap(co_await act("generate_dataset", std::move(input)));
-        } else if (action == "index_create") {
-            nlohmann::json input{{"table", form_field(body, "table")}};
-            nlohmann::json fields = nlohmann::json::array();
-            for (const std::string& field : comma_separated(form_field(body, "fields"))) {
-                fields.push_back(field);
-            }
-            if (!fields.empty()) {
-                input["fields"] = std::move(fields);
-            }
-            result = unwrap(co_await act("create_index", std::move(input)));
-            back = result.ok ? "/ship/index?" + query + "&id=" +
-                                   oauth_url_encode(result.value.value("index_id", std::string()))
-                             : "/ship/indexes?" + query;
-        } else if (action == "index_publish") {
-            const std::string index = form_field(body, "index");
-            back = "/ship/index?" + query + "&id=" + oauth_url_encode(index);
-            result = unwrap(
-                co_await act(form_field(body, "publish") == "1" ? "expose_index" : "unexpose_index",
-                             {{"index", index}}));
-        } else if (action == "service_create") {
-            back = "/services?" + query;
-            nlohmann::json input{{"customer_id", customer_id},
-                                 {"workspace_id", form_field(body, "workspace_id")},
-                                 {"kind", form_field(body, "kind")},
-                                 {"name", form_field(body, "name")}};
-            for (const char* field : {"instances", "storage_gi"}) {
-                const std::string value = form_field(body, field);
-                int number = 0;
-                const auto [end, error] =
-                    std::from_chars(value.data(), value.data() + value.size(), number);
-                if (!value.empty() && error == std::errc() && end == value.data() + value.size()) {
-                    input[field] = number;
-                }
-            }
-            result = unwrap(co_await workspace_call("create_service", std::move(input), context));
-        } else if (action == "service_delete") {
-            back = "/services?" + query;
-            result = unwrap(co_await workspace_call("delete_service",
-                                                    {{"customer_id", customer_id},
-                                                     {"service_id", form_field(body, "service_id")},
-                                                     {"confirm", form_field(body, "confirm")}},
-                                                    context));
-        } else if (action == "service_connection") {
-            // Answered with the page itself, so the password never rides in a redirect URL.
-            const std::string service_id = form_field(body, "service_id");
-            result = unwrap(
-                co_await workspace_call("service_connection",
-                                        {{"customer_id", customer_id}, {"service_id", service_id}},
-                                        context));
-            if (result.ok) {
-                WorkspacePage page;
-                page.section = "services";
-                auto selection = workspace_selection(context, customer_id);
-                page.customers = std::move(selection.customers);
-                page.customer_id = std::move(selection.customer_id);
-                const ApiResult listed = unwrap(co_await workspace_call(
-                    "list_services", {{"customer_id", customer_id}}, context));
-                if (listed.ok) {
-                    page.data["list_services"] = listed.value;
-                    for (const nlohmann::json& service :
-                         listed.value.value("services", nlohmann::json::array())) {
-                        if (service.value("id", std::string()) == service_id) {
-                            result.value["name"] = service.value("name", std::string());
-                        }
-                    }
-                }
-                page.data["service_connection"] = std::move(result.value);
-                co_return co_await send_text(route,
-                                             boost::http::status::ok,
-                                             web_ui_workspace(page, viewer_for(context)),
-                                             "text/html; charset=utf-8",
-                                             "no-store");
-            }
-            back = "/services?" + query;
-        } else if (action == "store_create") {
-            back = "/train/data?" + query;
-            // One choice of type and provider, "volume:cluster".
-            const std::string chosen = form_field(body, "store");
-            const std::size_t colon = chosen.find(':');
-            nlohmann::json input{
-                {"customer_id", customer_id},
-                {"type", colon == std::string::npos ? chosen : chosen.substr(0, colon)},
-                {"provider", colon == std::string::npos ? std::string() : chosen.substr(colon + 1)},
-                {"name", form_field(body, "name")}};
-            const std::string size = form_field(body, "size_gi");
-            int number = 0;
-            const auto [end, error] =
-                std::from_chars(size.data(), size.data() + size.size(), number);
-            if (!size.empty() && error == std::errc() && end == size.data() + size.size()) {
-                input["size_gi"] = number;
-            }
-            result = unwrap(co_await workspace_call("create_store", std::move(input), context));
-        } else if (action == "store_delete") {
-            back = "/train/data?" + query;
-            result = unwrap(co_await workspace_call("delete_store",
-                                                    {{"customer_id", customer_id},
-                                                     {"store_id", form_field(body, "store_id")},
-                                                     {"confirm", form_field(body, "confirm")}},
-                                                    context));
-        } else if (action == "store_connection") {
-            // Answered with the Data page itself, so the connection never rides in a URL and is
-            // never stored.
-            const std::string store_id = form_field(body, "store_id");
-            result = unwrap(
-                co_await workspace_call("store_connection",
-                                        {{"customer_id", customer_id}, {"store_id", store_id}},
-                                        context));
-            if (result.ok) {
-                const ApiResult listed = unwrap(co_await workspace_call(
-                    "list_stores", {{"customer_id", customer_id}}, context));
-                if (listed.ok) {
-                    for (const nlohmann::json& store :
-                         listed.value.value("stores", nlohmann::json::array())) {
-                        if (store.value("id", std::string()) == store_id) {
-                            result.value["name"] = store.value("name", std::string());
-                        }
-                    }
-                }
-                co_return co_await serve_workspace_page(
-                    route, "data", customer_id, {{"store_connection", std::move(result.value)}});
-            }
-            back = "/train/data?" + query;
-        } else if (action == "connect_service") {
-            back = "/train/data?" + query;
-            result = unwrap(co_await workspace_call(
-                "connect_service",
-                {{"customer_id", customer_id}, {"service_id", form_field(body, "service_id")}},
-                context));
-        } else if (action == "connect") {
-            back = "/train/data?" + query;
-            const std::string type = form_field(body, "type");
-            nlohmann::json connector{{"type", type}};
-            const std::vector<const char*> fields =
-                type == "postgres"
-                    ? std::vector<const char*>{"host",
-                                               "port",
-                                               "user",
-                                               "sslmode",
-                                               "database",
-                                               "schema",
-                                               "token"}
-                    : std::vector<const char*>{
-                          "account", "warehouse", "role", "database", "schema", "token"};
-            for (const char* field : fields) {
-                if (const std::string value = form_field(body, field); !value.empty()) {
-                    connector[field] = value;
-                }
-            }
-            result = unwrap(co_await act(
-                "create_connection",
-                {{"name", form_field(body, "name")}, {"connector", std::move(connector)}}));
-        } else if (action == "disconnect") {
-            back = "/train/data?" + query;
-            result =
-                unwrap(co_await act("delete_connection", {{"name", form_field(body, "name")}}));
-        } else if (action == "pull") {
-            back = "/train/data?" + query;
-            nlohmann::json input{{"connection", form_field(body, "connection")},
-                                 {"query", form_field(body, "query")},
-                                 {"table_name", form_field(body, "table_name")}};
-            if (const std::string max_rows = form_field(body, "max_rows"); !max_rows.empty()) {
-                long long rows = 0;
-                const auto [end, error] =
-                    std::from_chars(max_rows.data(), max_rows.data() + max_rows.size(), rows);
-                if (error != std::errc() || end != max_rows.data() + max_rows.size() || rows < 1) {
-                    result = ApiResult::failure("invalid_input",
-                                                "The row limit must be a whole number.");
-                } else {
-                    input["max_rows"] = rows;
-                }
-            }
-            if (result.ok) {
-                result = unwrap(co_await act("create_dataset_from_query", std::move(input)));
-                // A workspace started with --governance asks for a consent approval lake cannot
-                // give; say so rather than pass Zetta's challenge through.
-                if (!result.ok && result.error.code == "consent_required") {
-                    result = ApiResult::failure(
-                        "consent_required",
-                        "This workspace requires an approval before it reaches an outside "
-                        "database, and lake cannot approve it.");
-                }
-            }
-        } else if (action == "create_project") {
-            const std::string name = form_field(body, "name");
-            nlohmann::json input{{"name", name}};
-            for (const char* field : {"description", "intent"}) {
-                if (const std::string value = form_field(body, field); !value.empty()) {
-                    input[field] = value;
-                }
-            }
-            result = unwrap(co_await act("create_project", std::move(input)));
-            back = result.ok ? "/design/project?" + query + "&name=" + oauth_url_encode(name)
-                             : "/design/projects?" + query;
-        } else if (action == "compile") {
-            const std::string project = form_field(body, "project");
-            const std::string chosen = form_field(body, "dataset");
-            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            // The same capability the web app calls (compile_pipeline, lake#561).
-            nlohmann::json compile{{"customer_id", customer_id},
-                                   {"project", project},
-                                   {"intent", form_field(body, "intent")}};
-            if (!chosen.empty()) {
-                compile["dataset"] = chosen;
-            }
-            if (const std::string methodology = form_field(body, "methodology");
-                !methodology.empty()) {
-                compile["methodology"] = methodology;
-            }
-            result =
-                unwrap(co_await workspace_call("compile_pipeline", std::move(compile), context));
-            const std::string built_graph = result.ok ? result.value.value("graph", std::string())
-                                                      : std::string();
-            if (result.ok && !chosen.empty() && !built_graph.empty()) {
-                back = "/design/pipeline?" + query + "&project=" + oauth_url_encode(project) +
-                       "&graph=" + oauth_url_encode(built_graph) +
-                       "&dataset=" + oauth_url_encode(chosen) + "#run";
-            }
-        } else if (action == "approve") {
-            const std::string project = form_field(body, "project");
-            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            result = unwrap(co_await act(
-                "approve_plan", {{"project", project}, {"graph", form_field(body, "graph")}}));
-        } else if (action == "run") {
-            const std::string project = form_field(body, "project");
-            const std::string graph = form_field(body, "graph");
-            back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            result = unwrap(co_await act("gate", {{"project", project}, {"graph", graph}}));
-            if (result.ok && result.value.value("block_deploy", false)) {
-                result =
-                    ApiResult::failure("invalid_input",
-                                       "The pipeline did not pass its checks: " +
-                                           result.value.value("verdict", std::string("blocked")));
-            } else if (result.ok) {
-                result = unwrap(co_await act("run", {{"project", project}, {"graph", graph}}));
-                if (result.ok) {
-                    back = "/train/runs?" + query;
-                }
-            }
-        } else if (action == "publish") {
-            back = "/ship/models?" + query;
-            result = unwrap(
-                co_await act(form_field(body, "publish") == "1" ? "expose_model" : "unexpose_model",
-                             {{"model_id", form_field(body, "model")}}));
-        }
-        if (!result.ok) {
-            back += "&error=" + oauth_url_encode(result.error.message);
-        }
-        co_return co_await redirect(route, back);
-    }
-
-    // Ship > Packages: what this lake's registries hold. The instance registries (npm, Python,
-    // legacy one-component OCI) are public reads; the selected space's tenant images come from
-    // their routes and the tags in each routed workspace (lake#383), for a viewer who may read
-    // the space.
-    boost::http::route_task serve_packages_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        nlohmann::json builds = nlohmann::json::array();
-        std::string customer_id = query_value(route, "customer_id");
-        const ApiResult customers = registry.call("list_customers", {{"limit", 1000}}, context);
-        if (customers.ok && customer_id.empty()) {
-            for (const nlohmann::json& customer : customers.value.at("items")) {
-                customer_id = customer.value("id", std::string());
-                break;
-            }
-        }
-        if (!customer_id.empty()) {
-            const ApiResult listed =
-                registry.call("list_builds", {{"customer_id", customer_id}}, context);
-            if (listed.ok) {
-                builds = listed.value.value("builds", nlohmann::json::array());
-            }
-        }
-        // The same catalog the web app reads (list_packages, lake#561).
-        nlohmann::json packages_input = nlohmann::json::object();
-        if (!customer_id.empty()) {
-            packages_input["customer_id"] = customer_id;
-        }
-        ApiResult packages =
-            unwrap(co_await registry.call_async("list_packages", packages_input, context));
-        if (!packages.ok && !customer_id.empty()) {
-            // A space whose images cannot be read still shows the instance registries.
-            packages = unwrap(
-                co_await registry.call_async("list_packages", nlohmann::json::object(), context));
-        }
-        nlohmann::json catalog = packages.ok ? packages.value : nlohmann::json::object();
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_packages(catalog,
-                                                     catalog.value("available", false),
-                                                     catalog.value("origin", std::string()),
-                                                     viewer_for(context),
-                                                     builds,
-                                                     customer_id),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_experiments_page(boost::http::route_params& route,
-                                                  const std::string& mode) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        ExperimentsPage page;
-        page.mode = mode;
-        if (!options.store) {
-            page.error = "The control store is unavailable.";
-            co_return co_await send_text(route, boost::http::status::service_unavailable,
-                web_ui_experiments(page, viewer_for(context)), "text/html; charset=utf-8", "no-store");
-        }
-        auto selection = workspace_selection(context, query_value(route, "customer_id"));
-        page.customers = std::move(selection.customers);
-        page.customer_id = std::move(selection.customer_id);
-        page.study = query_value(route, "study");
-        page.run = query_value(route, "run");
-        page.project = query_value(route, "project");
-        page.state = query_value(route, "state");
-        page.error = query_value(route, "error");
-        const auto object = options.store->find_policy_object("customer", page.customer_id);
-        if (object) {
-            const auto write = control::authorize(*options.store, context.acting_identity,
-                object->id, "write", context.authorization_cache);
-            const auto admin = control::authorize(*options.store, context.acting_identity,
-                object->id, "admin", context.authorization_cache);
-            page.can_write = context.operator_credential || (write && write->allowed);
-            page.can_promote = context.operator_credential || (admin && admin->allowed);
-        }
-        if (options.workspaces) {
-            const ApiResult library = unwrap(co_await workspace_call(
-                "list_agent_library", nlohmann::json::object(), context));
-            if (library.ok) {
-                for (const nlohmann::json& agent :
-                     library.value.value("agents", nlohmann::json::array())) {
-                    if (agent.value("key", std::string()) == "agent-experiments" &&
-                        agent.value("deployed", false)) {
-                        page.experiments_agent = true;
-                    }
-                }
-            }
-        }
-        const std::string task_id = query_value(route, "task");
-        if (!task_id.empty()) {
-            std::optional<control::AgentTask> pending;
-            const auto found = options.store->get_agent_task(task_id);
-            if (found) {
-                pending = *found;
-            }
-            if (pending && pending->customer_id == page.customer_id &&
-                pending->requested_by_user_id == context.acting_user_id &&
-                pending->agent == "agent-experiments" && pending->kind == "experiment" &&
-                (pending->phase.empty() || pending->phase == "Pending" ||
-                 pending->phase == "Running")) {
-                // The agent's latest message is in the task's workspace (lake#375).
-                static_cast<void>(
-                    control::settled(co_await load_agent_task_content(context, *pending)));
-                page.agent_task = {{"task_id", pending->id},
-                                   {"message", pending->message},
-                                   {"attempts", pending->attempts},
-                                   {"agent", pending->agent},
-                                   {"kind", pending->kind},
-                                   {"status", pending->phase == "Running" ? "running" : "pending"}};
-                page.agent_working = true;
-            } else {
-                const ApiResult task = unwrap(co_await workspace_call(
-                    "get_agent_task",
-                    {{"customer_id", page.customer_id}, {"task_id", task_id}},
-                    context));
-                if (!task.ok) {
-                    if (page.error.empty()) {
-                        page.error = task.error.message;
-                    }
-                } else if (task.value.value("agent", std::string()) != "agent-experiments" ||
-                           task.value.value("kind", std::string()) != "experiment") {
-                    if (page.error.empty()) {
-                        page.error = "That is not an ExperimentsAgent experiment task.";
-                    }
-                } else {
-                    page.agent_task = task.value;
-                    nlohmann::json answer =
-                        task.value.value("answer", nlohmann::json::object());
-                    if (!answer.is_object()) {
-                        answer = nlohmann::json::object();
-                    }
-                    nlohmann::json proposal =
-                        answer.value("result", nlohmann::json::object());
-                    if (!proposal.is_object()) {
-                        proposal = nlohmann::json::object();
-                    }
-                    if (proposal.value("kind", std::string()) == "proposal" &&
-                        proposal.value("confirm", false) &&
-                        proposal.value("study", nlohmann::json()).is_object()) {
-                        page.proposal_sha256 = proposal_digest(proposal);
-                    }
-                    page.agent_reply =
-                        agent_task_needs_reply(task.value, "agent-experiments");
-                }
-            }
-        }
-        nlohmann::json input{{"customer_id", page.customer_id}};
-        std::string capability = "list_experiments";
-        if (mode == "study") {
-            capability = "get_experiment_study";
-            input["study"] = page.study;
-        } else if (mode == "run") {
-            capability = "get_run_metrics";
-            input["run"] = page.run;
-        } else if (mode == "compare") {
-            capability = "compare_runs";
-            const auto runs = query_value(route, "runs");
-            std::size_t begin = 0;
-            while (begin < runs.size()) {
-                const auto end = runs.find(',', begin);
-                page.runs.push_back(runs.substr(begin, end == std::string::npos ? end : end - begin));
-                if (end == std::string::npos) {
-                    break;
-                }
-                begin = end + 1;
-            }
-            input["runs"] = page.runs;
-        } else {
-            input["project"] = page.project;
-            input["state"] = page.state;
-        }
-        std::vector<WorkspaceRead> reads{{capability, input}};
-        if (mode == "study") {
-            reads.push_back({"get_experiment_analysis", input});
-        }
-        const auto results = co_await page_reads(context, std::move(reads));
-        const ApiResult result = results ? results->at(0)
-                                         : ApiResult::failure("store_error", results.error().message);
-        if (!result.ok) {
-            if (page.error.empty()) {
-                page.error = result.error.message;
-            }
-        } else {
-            page.data = result.value;
-            if (mode == "study") {
-                const ApiResult& analysis = results->at(1);
-                if (analysis.ok) {
-                    page.analysis = analysis.value;
-                } else {
-                    page.error = analysis.error.message;
-                }
-                // The latest eight trials' curves are in the page itself (lake#449), so they show
-                // before, and without, the live refresh. A trial whose curves cannot be read is
-                // left out rather than failing the page.
-                std::vector<WorkspaceRead> curves;
-                const nlohmann::json trials = page.data.value("trials", nlohmann::json::array());
-                const std::size_t first = trials.size() > 8 ? trials.size() - 8 : 0;
-                for (std::size_t index = first; index < trials.size(); ++index) {
-                    const std::string run = trials[index].value("run", std::string());
-                    if (!run.empty()) {
-                        curves.push_back({"get_run_metrics",
-                                          {{"customer_id", page.customer_id}, {"run", run}}});
-                    }
-                }
-                if (const auto read = co_await page_reads(context, std::move(curves)); read) {
-                    for (const ApiResult& metrics : *read) {
-                        if (metrics.ok) {
-                            page.trial_metrics.push_back(metrics.value);
-                        }
-                    }
-                }
-            }
-        }
-        co_return co_await send_text(route, boost::http::status::ok,
-            web_ui_experiments(page, viewer_for(context)), "text/html; charset=utf-8", "no-store");
-    }
-
-    boost::http::route_task serve_experiments_agent_form(boost::http::route_params& route,
-                                                         bool confirm) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
-        }
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string customer_id = form_field(body, "customer_id");
-        nlohmann::json input{{"customer_id", customer_id},
-                             {"agent", "agent-experiments"},
-                             {"kind", "experiment"}};
-        std::optional<ApiResult> prepared;
-        if (!confirm) {
-            const std::string task_id = form_field(body, "task_id");
-            if (task_id.empty()) {
-                input["message"] = form_field(body, "goal");
-            } else {
-                const ApiResult task = unwrap(co_await workspace_call(
-                    "get_agent_task", {{"customer_id", customer_id}, {"task_id", task_id}}, context));
-                if (!task.ok) {
-                    prepared = task;
-                } else if (task.value.value("agent", std::string()) != "agent-experiments" ||
-                           task.value.value("kind", std::string()) != "experiment" ||
-                           !agent_task_needs_reply(task.value, "agent-experiments") ||
-                           task.value.value("conversation_id", std::string()).empty()) {
-                    prepared = ApiResult::failure(
-                        "invalid_input", "That task has no ExperimentsAgent question to answer.");
-                } else {
-                    input["message"] = form_field(body, "reply");
-                    input["conversation_id"] = task.value.at("conversation_id");
-                }
-            }
-        } else {
-            const std::string task_id = form_field(body, "task_id");
-            const ApiResult task = unwrap(co_await workspace_call(
-                "get_agent_task", {{"customer_id", customer_id}, {"task_id", task_id}}, context));
-            if (!task.ok) {
-                prepared = task;
-            } else {
-                nlohmann::json answer = task.value.value("answer", nlohmann::json::object());
-                if (!answer.is_object()) {
-                    answer = nlohmann::json::object();
-                }
-                nlohmann::json proposal = answer.value("result", nlohmann::json::object());
-                if (!proposal.is_object()) {
-                    proposal = nlohmann::json::object();
-                }
-                const nlohmann::json study = nlohmann::json::parse(
-                    form_field(body, "study"), nullptr, false);
-                if (task.value.value("agent", std::string()) != "agent-experiments" ||
-                    task.value.value("kind", std::string()) != "experiment" ||
-                    task.value.value("status", std::string()) != "succeeded" ||
-                    proposal.value("kind", std::string()) != "proposal" ||
-                    !proposal.value("confirm", false) ||
-                    !proposal.value("study", nlohmann::json()).is_object()) {
-                    prepared = ApiResult::failure(
-                        "invalid_input",
-                        "That task has no ExperimentsAgent proposal to confirm.");
-                } else if (form_field(body, "proposal_sha256") != proposal_digest(proposal)) {
-                    prepared = ApiResult::failure(
-                        "conflict", "The ExperimentsAgent proposal changed before confirmation.");
-                } else if (study.is_discarded() || !study.is_object()) {
-                    prepared = ApiResult::failure(
-                        "invalid_input", "The edited study proposal must be a JSON object.");
-                } else {
-                    proposal["study"] = study;
-                    input["message"] = "Confirm and start the reviewed study proposal.";
-                    input["proposal_task_id"] = task_id;
-                    input["proposal_sha256"] = form_field(body, "proposal_sha256");
-                    input["context"] = {{"confirmed_proposal", std::move(proposal)}};
-                }
-            }
-        }
-        const ApiResult result =
-            prepared ? std::move(*prepared)
-                     : unwrap(co_await workspace_call("agent_turn", input, context));
-        std::string back =
-            "/train/experiments?customer_id=" + oauth_url_encode(customer_id);
-        if (result.ok) {
-            back += "&task=" +
-                    oauth_url_encode(result.value.value("task_id", std::string()));
-        } else {
-            back += "&error=" + oauth_url_encode(result.error.message);
-        }
-        co_return co_await redirect(route, back);
-    }
-
-    boost::http::route_task serve_streams_page(boost::http::route_params& route, bool detail) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        StreamsPage page;
-        if (!options.store) {
-            page.error = "The control store is unavailable.";
-            co_return co_await send_text(route, boost::http::status::service_unavailable,
-                web_ui_streams(page, viewer_for(context)), "text/html; charset=utf-8", "no-store");
-        }
-        auto selection = workspace_selection(context, query_value(route, "customer_id"));
-        page.customers = std::move(selection.customers);
-        page.customer_id = std::move(selection.customer_id);
-        page.prefix = query_value(route, "prefix");
-        page.cursor = query_value(route, "cursor");
-        page.task = query_value(route, "task");
-        page.agent = query_value(route, "agent");
-        const std::string limit = query_value(route, "limit");
-        if (!limit.empty()) {
-            const nlohmann::json parsed = nlohmann::json::parse(limit, nullptr, false);
-            if (parsed.is_number_integer() && parsed >= 1 && parsed <= 200) {
-                page.limit = parsed.get<int>();
-            }
-        }
-        const auto object = options.store->find_policy_object("customer", page.customer_id);
-        if (object) {
-            const auto write = control::authorize(*options.store, context.acting_identity,
-                                                 object->id, "write", context.authorization_cache);
-            const auto admin = control::authorize(*options.store, context.acting_identity,
-                                                 object->id, "admin", context.authorization_cache);
-            page.can_write = context.operator_credential || (write && write->allowed);
-            page.can_admin = context.operator_credential || (admin && admin->allowed);
-        }
-        nlohmann::json input{{"customer_id", page.customer_id}};
-        if (detail) {
-            page.topic = query_value(route, "topic");
-            page.zetta = query_value(route, "zetta");
-            input["zetta"] = page.zetta;
-            input["topic"] = page.topic;
-            const nlohmann::json info_input = input;
-            const auto from = query_value(route, "from_sequence");
-            if (!from.empty()) {
-                input["from_sequence"] = nlohmann::json::parse(from, nullptr, false);
-                if (input["from_sequence"].is_discarded()) {
-                    input["from_sequence"] = from;
-                }
-            }
-            input["direction"] = "backward";
-            if (!page.task.empty()) {
-                input["task"] = page.task;
-            }
-            if (!page.agent.empty()) {
-                input["agent"] = page.agent;
-            }
-            const auto results = co_await page_reads(
-                context, {{"get_stream", info_input}, {"browse_stream", std::move(input)}});
-            if (!results) {
-                page.error = results.error().message;
-            } else if (results->at(0).ok) {
-                page.detail = results->at(0).value;
-                const ApiResult& messages = results->at(1);
-                if (messages.ok) {
-                    page.messages = messages.value;
-                } else {
-                    page.error = messages.error.message;
-                }
-            } else {
-                page.error = results->at(0).error.message;
-            }
-        } else {
-            input["prefix"] = page.prefix;
-            input["limit"] = page.limit;
-            if (!page.cursor.empty()) {
-                input["cursor"] = page.cursor;
-            }
-            const auto listed = unwrap(co_await workspace_call("list_streams", input, context));
-            if (listed.ok) {
-                page.listing = listed.value;
-            } else {
-                page.error = listed.error.message;
-            }
-        }
-        co_return co_await send_text(route, boost::http::status::ok,
-            web_ui_streams(page, viewer_for(context)), "text/html; charset=utf-8", "no-store");
-    }
-
-    boost::http::route_task serve_apps_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        AppsPage page;
-        auto selection = workspace_selection(context, query_value(route, "customer_id"));
-        page.customers = std::move(selection.customers);
-        page.customer_id = std::move(selection.customer_id);
-        page.error = query_value(route, "error");
-        if (!page.customer_id.empty()) {
-            const ApiResult apps = unwrap(
-                co_await workspace_call("list_apps", {{"customer_id", page.customer_id}}, context));
-            if (apps.ok) {
-                page.apps = apps.value.value("apps", nlohmann::json::array());
-            } else if (page.error.empty()) {
-                page.error = apps.error.message;
-            }
-            const ApiResult repositories = registry.call(
-                "list_repositories", {{"customer_id", page.customer_id}, {"limit", 500}}, context);
-            if (repositories.ok) {
-                page.repositories = repositories.value.value("items", nlohmann::json::array());
-            }
-            if (options.workspaces) {
-                const ApiResult library = unwrap(co_await workspace_call(
-                    "list_agent_library", nlohmann::json::object(), context));
-                if (library.ok) {
-                    for (const nlohmann::json& agent :
-                         library.value.value("agents", nlohmann::json::array())) {
-                        if (agent.value("key", std::string()) == "agent-application" &&
-                            agent.value("deployed", false)) {
-                            page.application_agent = true;
-                        }
-                    }
-                }
-            }
-            const std::string task_id = query_value(route, "task");
-            if (!task_id.empty()) {
-                std::optional<control::AgentTask> pending;
-                if (options.store) {
-                    const auto found = options.store->get_agent_task(task_id);
-                    if (found) {
-                        pending = *found;
-                    }
-                }
-                if (pending && pending->customer_id == page.customer_id &&
-                    pending->requested_by_user_id == context.acting_user_id &&
-                    pending->agent == "agent-application" && pending->kind == "app" &&
-                    (pending->phase.empty() || pending->phase == "Pending" ||
-                     pending->phase == "Running")) {
-                    // The agent's latest message is in the task's workspace (lake#375).
-                    static_cast<void>(
-                        control::settled(co_await load_agent_task_content(context, *pending)));
-                    page.agent_task = {
-                        {"task_id", pending->id},
-                        {"message", pending->message},
-                        {"attempts", pending->attempts},
-                        {"agent", pending->agent},
-                        {"kind", pending->kind},
-                        {"status", pending->phase == "Running" ? "running" : "pending"}};
-                    page.agent_working = true;
-                } else {
-                    const ApiResult task = unwrap(co_await workspace_call(
-                        "get_agent_task",
-                        {{"customer_id", page.customer_id}, {"task_id", task_id}},
-                        context));
-                    if (!task.ok) {
-                        if (page.error.empty()) {
-                            page.error = task.error.message;
-                        }
-                    } else if (task.value.value("agent", std::string()) != "agent-application" ||
-                               task.value.value("kind", std::string()) != "app") {
-                        if (page.error.empty()) {
-                            page.error = "That is not an ApplicationAgent app task.";
-                        }
-                    } else {
-                        page.agent_task = task.value;
-                        // A failed task carries "answer": null; treat any non-object as empty.
-                        nlohmann::json answer =
-                            task.value.value("answer", nlohmann::json::object());
-                        if (!answer.is_object()) {
-                            answer = nlohmann::json::object();
-                        }
-                        nlohmann::json proposal = answer.value("result", nlohmann::json::object());
-                        if (!proposal.is_object()) {
-                            proposal = nlohmann::json::object();
-                        }
-                        if (proposal.value("kind", std::string()) == "proposal" &&
-                            proposal.value("confirm", false)) {
-                            page.proposal_sha256 = proposal_digest(proposal);
-                        }
-                        page.agent_reply =
-                            agent_task_needs_reply(task.value, "agent-application");
-                    }
-                }
-            }
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_apps(page, viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_app_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        AppPage page;
-        auto selection = workspace_selection(context, query_value(route, "customer_id"));
-        page.customers = std::move(selection.customers);
-        page.customer_id = std::move(selection.customer_id);
-        page.error = query_value(route, "error");
-        const std::string app_id = query_value(route, "app_id");
-        if (page.customer_id.empty() || app_id.empty()) {
-            co_return co_await redirect(
-                route, "/ship/apps?customer_id=" + oauth_url_encode(page.customer_id));
-        }
-        const nlohmann::json input{{"customer_id", page.customer_id}, {"app_id", app_id}};
-        const ApiResult app = unwrap(co_await workspace_call("get_app", input, context));
-        if (!app.ok) {
-            co_return co_await send_text(
-                route,
-                boost::http::status::not_found,
-                web_ui_error(app.error.code, app.error.message, viewer_for(context)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        page.app = app.value;
-        nlohmann::json events_input = input;
-        events_input["wait_ms"] = 0;
-        const ApiResult events =
-            unwrap(co_await workspace_call("receive_app_events", events_input, context));
-        if (events.ok) {
-            page.events = events.value.value("events", nlohmann::json::array());
-        }
-        nlohmann::json logs_input = input;
-        logs_input["limit"] = 200;
-        const ApiResult logs = unwrap(co_await workspace_call("app_logs", logs_input, context));
-        if (logs.ok) {
-            page.logs = logs.value;
-        }
-        const ApiResult builds = unwrap(co_await workspace_call(
-            "list_builds", {{"customer_id", page.customer_id}}, context));
-        if (builds.ok) {
-            page.builds_available = true;
-            const nlohmann::json source =
-                page.app.value("source", nlohmann::json::object());
-            const std::string repository =
-                source.is_object() ? source.value("repository", std::string()) : std::string();
-            const std::string target_marker =
-                "/" + page.app.value("name", std::string()) + ":";
-            for (nlohmann::json build :
-                 builds.value.value("builds", nlohmann::json::array())) {
-                if (build.value("repository", std::string()) != repository ||
-                    !build.value("target", std::string()).contains(target_marker)) {
-                    continue;
-                }
-                const std::string build_id =
-                    build.value("id", build.value("build_id", std::string()));
-                if (build_id.empty()) {
-                    continue;
-                }
-                const nlohmann::json build_input{{"customer_id", page.customer_id},
-                                                 {"build_id", build_id}};
-                const ApiResult detail =
-                    unwrap(co_await workspace_call("get_build", build_input, context));
-                if (detail.ok) {
-                    build = detail.value;
-                }
-                const ApiResult build_logs =
-                    unwrap(co_await workspace_call("build_logs", build_input, context));
-                if (build_logs.ok) {
-                    build["logs"] = build_logs.value;
-                }
-                page.builds.push_back(std::move(build));
-            }
-        }
-        if (options.workspaces) {
-            const ApiResult services = unwrap(co_await workspace_call(
-                "list_services", {{"customer_id", page.customer_id}}, context));
-            if (services.ok) {
-                page.services = services.value.value("services", nlohmann::json::array());
-            }
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_app(page, viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_app_form(boost::http::route_params& route, std::string action) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
-        }
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string customer_id = form_field(body, "customer_id");
-        const std::string app_id = form_field(body, "app_id");
-        nlohmann::json input{{"customer_id", customer_id}};
-        std::optional<ApiResult> prepared;
-        if (!app_id.empty()) {
-            input["app_id"] = app_id;
-        }
-        std::string capability;
-        if (action == "create") {
-            capability = "create_app";
-            input["name"] = form_field(body, "name");
-            input["mode"] = form_field(body, "mode");
-            input["framework"] = form_field(body, "framework");
-            const auto port = decimal_value(form_field(body, "port"));
-            input["port"] = port.value_or(0);
-            if (input.at("mode") == "runtime") {
-                input["source"] = {{"repository", form_field(body, "repository")},
-                                   {"revision", form_field(body, "revision")},
-                                   {"path", form_field(body, "path")},
-                                   {"entrypoint", form_field(body, "entrypoint")}};
-            } else {
-                input["image"] = form_field(body, "image");
-            }
-        } else if (action == "restart" || action == "stop" || action == "start") {
-            capability = action + "_app";
-        } else if (action == "scale") {
-            capability = "scale_app";
-            input["replicas"] = decimal_value(form_field(body, "replicas")).value_or(0);
-        } else if (action == "deploy" || action == "rollback") {
-            capability = action + "_app";
-            const std::string image = form_field(body, "image");
-            if (!image.empty()) {
-                input["image"] = image;
-            } else {
-                input["source"] = {{"repository", form_field(body, "repository")},
-                                   {"revision", form_field(body, "revision")},
-                                   {"path", form_field(body, "path")},
-                                   {"entrypoint", form_field(body, "entrypoint")}};
-            }
-        } else if (action == "env_set") {
-            capability = "set_app_env";
-            input["key"] = form_field(body, "key");
-            const std::string secret_ref = form_field(body, "secret_ref");
-            if (secret_ref.empty()) {
-                input["value"] = form_field(body, "value");
-            } else {
-                input["secret_ref"] = secret_ref;
-            }
-        } else if (action == "env_unset") {
-            capability = "unset_app_env";
-            input["key"] = form_field(body, "key");
-        } else if (action == "zetta") {
-            capability = "set_app_zetta_binding";
-            input["attached"] = form_field(body, "attached") == "1";
-        } else if (action == "service_bind" || action == "service_unbind") {
-            capability =
-                action == "service_bind" ? "bind_service_to_app" : "unbind_service_from_app";
-            input["service_id"] = form_field(body, "service_id");
-        } else if (action == "service_create") {
-            capability = "create_service_and_bind_to_app";
-            input["kind"] = form_field(body, "kind");
-            input["name"] = form_field(body, "name");
-            if (const auto size = decimal_value(form_field(body, "size")); size) {
-                input["storage_gi"] = *size;
-            }
-        } else if (action == "auth") {
-            capability = "set_app_auth";
-            input["auth"] = form_field(body, "auth");
-            input["confirm_public"] = form_field(body, "confirm_public") == "1";
-        } else if (action == "delete") {
-            capability = "delete_app";
-            input["confirm"] = form_field(body, "confirm");
-        } else if (action == "build") {
-            capability = "build_app";
-            input.erase("app_id");
-            input["app"] = app_id;
-        } else if (action == "build_cancel") {
-            capability = "cancel_build";
-            input.erase("app_id");
-            input["build_id"] = form_field(body, "build_id");
-        } else if (action == "agent") {
-            const std::string task_id = form_field(body, "task_id");
-            if (task_id.empty()) {
-                capability = "agent_turn";
-                input["agent"] = "agent-application";
-                input["kind"] = "app";
-                input["message"] = form_field(body, "description");
-            } else {
-                const ApiResult task = unwrap(co_await workspace_call(
-                    "get_agent_task", {{"customer_id", customer_id}, {"task_id", task_id}}, context));
-                if (!task.ok) {
-                    prepared = task;
-                } else if (task.value.value("agent", std::string()) != "agent-application" ||
-                           task.value.value("kind", std::string()) != "app" ||
-                           !agent_task_needs_reply(task.value, "agent-application") ||
-                           task.value.value("conversation_id", std::string()).empty()) {
-                    prepared = ApiResult::failure(
-                        "invalid_input", "That task has no ApplicationAgent question to answer.");
-                } else {
-                    capability = "agent_turn";
-                    input["agent"] = "agent-application";
-                    input["kind"] = "app";
-                    input["message"] = form_field(body, "reply");
-                    input["conversation_id"] = task.value.at("conversation_id");
-                }
-            }
-        } else if (action == "agent_confirm") {
-            const std::string task_id = form_field(body, "task_id");
-            const ApiResult task = unwrap(co_await workspace_call(
-                "get_agent_task", {{"customer_id", customer_id}, {"task_id", task_id}}, context));
-            if (!task.ok) {
-                prepared = task;
-            } else {
-                const nlohmann::json answer =
-                    task.value.value("answer", nlohmann::json::object());
-                const nlohmann::json proposal =
-                    answer.value("result", nlohmann::json::object());
-                if (task.value.value("agent", std::string()) != "agent-application" ||
-                    task.value.value("kind", std::string()) != "app" ||
-                    task.value.value("status", std::string()) != "succeeded" ||
-                    proposal.value("kind", std::string()) != "proposal" ||
-                    !proposal.value("confirm", false)) {
-                    prepared = ApiResult::failure(
-                        "invalid_input", "That task has no ApplicationAgent proposal to confirm.");
-                } else if (form_field(body, "proposal_sha256") != proposal_digest(proposal)) {
-                    prepared = ApiResult::failure(
-                        "conflict", "The ApplicationAgent proposal changed before confirmation.");
-                } else {
-                    // A public app needs the person's acknowledgement that it is public; the turn
-                    // carries it so create_app accepts the agent's public app (lake#452).
-                    const nlohmann::json app = proposal.value("app", nlohmann::json::object());
-                    const auto access = app.is_object() ? app.find("auth") : app.end();
-                    const bool public_app = access != app.end() && access->is_string() &&
-                                            (*access == "none" || *access == "public");
-                    if (public_app && form_field(body, "confirm_public") != "1") {
-                        prepared = ApiResult::failure(
-                            "invalid_input",
-                            "This app will be public. Tick the box to confirm that anyone with "
-                            "its address can open it.");
-                    } else {
-                        capability = "agent_turn";
-                        input["agent"] = "agent-application";
-                        input["kind"] = "app";
-                        input["message"] = "Confirm and deploy the reviewed proposal.";
-                        input["proposal_task_id"] = task_id;
-                        input["proposal_sha256"] = form_field(body, "proposal_sha256");
-                        input["context"] = {{"confirmed_proposal", proposal}};
-                        if (public_app) {
-                            input["context"]["confirm_public"] = true;
-                        }
-                    }
-                }
-            }
-        }
-        ApiResult result = prepared ? std::move(*prepared)
-                           : capability.empty()
-                               ? ApiResult::failure("invalid_input", "unknown app action")
-                               : unwrap(co_await workspace_call(capability, input, context));
-        std::string back = action == "create" || action == "agent" || action == "agent_confirm"
-                               ? "/ship/apps?customer_id=" + oauth_url_encode(customer_id)
-                               : "/ship/app?customer_id=" + oauth_url_encode(customer_id) +
-                                     "&app_id=" + oauth_url_encode(app_id);
-        if (result.ok && action == "create") {
-            back = "/ship/app?customer_id=" + oauth_url_encode(customer_id) +
-                   "&app_id=" + oauth_url_encode(result.value.value("id", std::string()));
-        } else if (result.ok && (action == "agent" || action == "agent_confirm")) {
-            back += "&task=" +
-                    oauth_url_encode(result.value.value("task_id", std::string()));
-        }
-        if (!result.ok) {
-            back += "&error=" + oauth_url_encode(result.error.message);
-        }
-        co_return co_await redirect(route, back);
-    }
-
-    // Every environment across the repositories the caller may list, from the same two
-    // capabilities the per-repository pages call. A repository whose environments the caller
-    // may not read is skipped rather than failing the page.
-    boost::http::route_task serve_deployments_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const ApiResult rows = registry.call("list_repositories", {{"limit", 500}}, context);
-        if (!rows.ok) {
-            co_return co_await serve_page_error(route, rows);
-        }
-        std::vector<DeploymentSummary> environments;
-        std::string stale_since;
-        for (const auto& value : rows.value.at("items")) {
-            control::Repository repository = repository_from_json(value);
-            // Each repository's environments are in its own workspace; one that cannot be read
-            // (no workspace, not ready) is skipped like one the caller may not read.
-            const ApiResult listed = unwrap(co_await registry.call_async(
-                "list_environments", {{"repository_id", repository.id}}, context));
-            if (!listed.ok) {
-                continue;
-            }
-            if (stale_since.empty() && listed.value.contains("stale_since") &&
-                listed.value.at("stale_since").is_string()) {
-                stale_since = listed.value.at("stale_since").get<std::string>();
-            }
-            for (const auto& item : listed.value.value("items", nlohmann::json::array())) {
-                environments.push_back({repository, item});
-            }
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_deployments(environments, stale_since,
-                                                        viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_environments_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        const std::string repository_id = query_value(route, "repository_id");
-        if (repository_id.empty()) {
-            co_return co_await redirect(route, "/repositories");
-        }
-        const ApiResult repository =
-            registry.call("get_repository", {{"id", repository_id}}, context);
-        if (!repository.ok) {
-            co_return co_await serve_repository_page_error(route, context, repository);
-        }
-        const ApiResult environments = unwrap(co_await registry.call_async(
-            "list_environments", {{"repository_id", repository_id}}, context));
-        if (!environments.ok) {
-            co_return co_await serve_repository_page_error(route, context, environments);
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_environments(repository_from_json(repository.value),
-                                                         environments.value,
-                                                         viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_environment_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        const std::string repository_id = query_value(route, "repository_id");
-        const std::string name = query_value(route, "name");
-        if (repository_id.empty() || name.empty()) {
-            co_return co_await redirect(route, "/repositories");
-        }
-        const ApiResult repository =
-            registry.call("get_repository", {{"id", repository_id}}, context);
-        if (!repository.ok) {
-            co_return co_await serve_repository_page_error(route, context, repository);
-        }
-        const ApiResult environment = unwrap(co_await registry.call_async(
-            "get_environment", {{"repository_id", repository_id}, {"environment", name}},
-            context));
-        if (!environment.ok) {
-            co_return co_await serve_repository_page_error(route, context, environment);
-        }
-        const ApiResult deployments = unwrap(co_await registry.call_async(
-            "list_deployments",
-            {{"repository_id", repository_id}, {"environment", name}, {"limit", 100}}, context));
-        if (!deployments.ok) {
-            co_return co_await serve_repository_page_error(route, context, deployments);
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_environment(repository_from_json(repository.value),
-                                                        environment.value,
-                                                        deployments.value,
-                                                        viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_logs_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        const std::string repository_id = query_value(route, "repository_id");
-        const std::string environment_name = query_value(route, "environment");
-        if (repository_id.empty() || environment_name.empty()) {
-            co_return co_await redirect(route, "/repositories");
-        }
-        const ApiResult repository =
-            registry.call("get_repository", {{"id", repository_id}}, context);
-        if (!repository.ok) {
-            co_return co_await serve_repository_page_error(route, context, repository);
-        }
-        auto completed = co_await registry.call_async("environment_logs",
-                                                      {{"repository_id", repository_id},
-                                                       {"environment", environment_name},
-                                                       {"since", query_value(route, "since")},
-                                                       {"limit", 200},
-                                                       {"direction", "forward"}},
-                                                      context);
-        const ApiResult logs = completed
-                                   ? std::move(*completed)
-                                   : ApiResult::failure("store_error", completed.error().message);
-        if (!logs.ok) {
-            co_return co_await serve_repository_page_error(route, context, logs);
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_logs(repository_from_json(repository.value),
-                                                 environment_name,
-                                                 logs.value,
-                                                 logs.value.value("stale_since", ""),
-                                                 viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_platform_form(boost::http::route_params& route,
-                                                std::string capability) {
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return co_await send_text(
-                route,
-                boost::http::status::bad_request,
-                web_ui_error("invalid_input", "could not read form", viewer_for(route)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        nlohmann::json input{{"repository_id", form_field(body, "repository_id")},
-                             {"environment", form_field(body, "environment")}};
-        if (capability == "set_environment_env" || capability == "unset_environment_env") {
-            input["key"] = form_field(body, "key");
-        }
-        if (capability == "set_environment_env") {
-            input["value"] = form_field(body, "value");
-        }
-        if (capability == "create_domain" || capability == "delete_domain") {
-            input["host"] = form_field(body, "host");
-        }
-        if (capability == "create_domain") {
-            input["tls"] = form_field(body, "tls");
-        }
-        ApiContext context = context_for(route);
-        auto completed = co_await registry.call_async(capability, input, context);
-        const ApiResult result = completed
-                                     ? std::move(*completed)
-                                     : ApiResult::failure("store_error", completed.error().message);
-        if (!result.ok) {
-            co_return co_await serve_page_error(route, result);
-        }
-        const std::string destination =
-            "/environment?repository_id=" +
-            oauth_url_encode(input.at("repository_id").get<std::string>()) +
-            "&name=" + oauth_url_encode(input.at("environment").get<std::string>());
-        co_return co_await redirect(route, destination);
-    }
-
-    boost::http::route_task serve_exports_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string repository_id = query_value(route, "repository_id");
-        if (repository_id.empty()) {
-            co_return co_await redirect(route, "/repositories");
-        }
-        const ApiResult repository_result =
-            registry.call("get_repository", {{"id", repository_id}}, ctx);
-        if (!repository_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, repository_result);
-        }
-        const ApiResult exports_result =
-            unwrap(co_await registry.call_async(
-                "list_exports", {{"repository_id", repository_id}}, ctx));
-        if (!exports_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, exports_result);
-        }
-        std::vector<control::ForgeRecord> exports;
-        for (const nlohmann::json& value : exports_result.value.at("items")) {
-            exports.push_back(forge_record_from_json(value));
-        }
-        co_return co_await send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_exports(repository_from_json(repository_result.value), exports, viewer_for(ctx)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
+    // ---- Downloads: the routes that answer bytes rather than a capability's JSON ----
 
     boost::http::route_task serve_export_download(boost::http::route_params& route) {
         ApiContext ctx = context_for(route);
@@ -15389,254 +9705,20 @@ struct ApiServer::Impl {
         if (repository_id.empty()) {
             co_return co_await redirect(route, "/repositories");
         }
-        const ApiResult exported =
-            unwrap(co_await registry.call_async("export_repository",
-                          {{"repository_id", repository_id},
-                           {"include_git", query_value(route, "include_git") == "true"}},
-                          ctx));
+        const ApiResult exported = unwrap(co_await registry.call_async(
+            "export_repository",
+            {{"repository_id", repository_id},
+             {"include_git", query_value(route, "include_git") == "true"}},
+            ctx));
         if (!exported.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, exported);
+            co_return co_await serve_download_error(route, ctx, exported);
         }
         route.res.set("content-disposition", "attachment; filename=lake-export.json");
         co_return co_await send_text(route,
-                         boost::http::status::ok,
-                         exported.value.at("archive").dump(2),
-                         "application/vnd.lake.export+json",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_repository_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "id");
-        if (id.empty()) {
-            co_return co_await redirect(route, "/repositories");
-        }
-        // The home page shows the description, from the repository's workspace (lake#315).
-        const ApiResult repository_result =
-            unwrap(co_await registry.call_async("get_repository", {{"id", id}}, ctx));
-        if (!repository_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, repository_result);
-        }
-        const control::Repository repository = repository_from_json(repository_result.value);
-        std::optional<control::Customer> owner;
-        if (ctx.authorized) {
-            const ApiResult owner_result =
-                registry.call("get_customer", {{"customer_id", repository.customer_id}}, ctx);
-            if (owner_result.ok) {
-                owner = customer_from_json(owner_result.value);
-            }
-        }
-        const ApiResult refs_result = registry.call("repository_refs", {{"id", id}}, ctx);
-        if (!refs_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, refs_result);
-        }
-        RepositoryHomeData data;
-        data.external_origin = options.external_origin;
-        data.description_unavailable = json_string(repository_result.value,
-                                                   "description_unavailable");
-        for (const nlohmann::json& value : refs_result.value.at("items")) {
-            data.refs.push_back(repository_content_ref_from_json(value));
-        }
-        const std::string default_ref = data.refs.empty() ? "main" : data.refs.front().name;
-        const ApiResult changes_result = registry.call("list_changes", {{"id", id}}, ctx);
-        if (!changes_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, changes_result);
-        }
-        for (const nlohmann::json& value : changes_result.value.at("items")) {
-            data.changes.push_back(repository_change_from_json(value));
-        }
-        if (!data.refs.empty()) {
-            const ApiResult tree_result =
-                registry.call("repository_tree", {{"id", id}, {"ref", default_ref}}, ctx);
-            if (!tree_result.ok) {
-                co_return co_await serve_repository_page_error(route, ctx, tree_result);
-            }
-            for (const nlohmann::json& value : tree_result.value.at("items")) {
-                data.tree.push_back(repository_tree_entry_from_json(value));
-            }
-            const ApiResult readme_result = registry.call(
-                "repository_file", {{"id", id}, {"ref", default_ref}, {"path", "README.md"}}, ctx);
-            if (readme_result.ok) {
-                data.readme = repository_file_from_json(readme_result.value);
-            } else if (readme_result.error.code != "not_found") {
-                co_return co_await serve_repository_page_error(route, ctx, readme_result);
-            }
-        }
-        if (ctx.authorized) {
-            const ApiResult access_result = registry.call(
-                "entity_effective_access", {{"object_type", "repository"}, {"id", id}}, ctx);
-            if (!access_result.ok) {
-                co_return co_await serve_repository_page_error(route, ctx, access_result);
-            }
-            for (const nlohmann::json& value : access_result.value.at("items")) {
-                data.access.push_back(access_from_json(value));
-            }
-        }
-        const ApiResult releases_result =
-            unwrap(co_await registry.call_async(
-                "list_releases", {{"repository_id", id}}, ctx));
-        // Releases are forge records in the repository's workspace Zetta (lake#341). The home page
-        // does not wait for that workspace: it says why the releases are missing instead.
-        if (!releases_result.ok) {
-            data.releases_unavailable = releases_result.error.message;
-        } else {
-            for (const nlohmann::json& value : releases_result.value.at("items")) {
-                data.releases.push_back(forge_record_from_json(value));
-            }
-        }
-        // The owning workspace (lake#315), for a viewer who may read the repository's space; a
-        // public reader from elsewhere is not told the space's workspace names.
-        if (ctx.authorized && !repository.workspace_id.empty()) {
-            const ApiResult workspace = registry.call(
-                "get_workspace",
-                {{"customer_id", repository.customer_id}, {"workspace_id", repository.workspace_id}},
-                ctx);
-            if (workspace.ok) {
-                data.workspace = control::Workspace{
-                    .id = json_string(workspace.value, "id"),
-                    .customer_id = json_string(workspace.value, "customer_id"),
-                    .name = json_string(workspace.value, "name"),
-                    .environment = json_string(workspace.value, "environment")};
-            }
-        }
-        co_return co_await send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_repository(repository, owner ? &*owner : nullptr, data, viewer_for(ctx)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_repository_tree_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "id");
-        const std::string ref = query_value(route, "ref");
-        if (id.empty() || ref.empty()) {
-            return redirect(route, "/repositories");
-        }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
-        if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
-        }
-        const ApiResult tree_result =
-            registry.call("repository_tree", {{"id", id}, {"ref", ref}}, ctx);
-        if (!tree_result.ok) {
-            return serve_repository_page_error(route, ctx, tree_result);
-        }
-        std::vector<RepositoryTreeEntry> entries;
-        for (const nlohmann::json& value : tree_result.value.at("items")) {
-            entries.push_back(repository_tree_entry_from_json(value));
-        }
-        const ApiResult changes_result = registry.call("list_changes", {{"id", id}}, ctx);
-        if (!changes_result.ok) {
-            return serve_repository_page_error(route, ctx, changes_result);
-        }
-        for (const nlohmann::json& value : changes_result.value.at("items")) {
-            const RepositoryChange change = repository_change_from_json(value);
-            const ApiResult diff_result =
-                registry.call("change_diff", {{"id", id}, {"change_id", change.id}}, ctx);
-            if (!diff_result.ok) {
-                return serve_repository_page_error(route, ctx, diff_result);
-            }
-            for (const nlohmann::json& difference : diff_result.value.at("items")) {
-                const std::string changed_path = json_string(difference, "path");
-                for (RepositoryTreeEntry& entry : entries) {
-                    const bool contains_change =
-                        entry.kind != "blob" && changed_path.starts_with(entry.path + "/");
-                    if (!entry.last_change.empty() ||
-                        (changed_path != entry.path && !contains_change)) {
-                        continue;
-                    }
-                    entry.last_change = change.id;
-                    entry.last_message = change.message;
-                    entry.last_author = change.author;
-                    entry.last_changed_at = change.occurred_at;
-                }
-            }
-        }
-        return send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_repository_tree(
-                repository_from_json(repository_result.value), ref, entries, viewer_for(ctx)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_repository_file_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "repository_id");
-        const std::string ref = query_value(route, "ref");
-        const std::string path = query_value(route, "path");
-        if (id.empty() || ref.empty() || path.empty()) {
-            return redirect(route, "/repositories");
-        }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
-        if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
-        }
-        const ApiResult file_result =
-            registry.call("repository_file", {{"id", id}, {"ref", ref}, {"path", path}}, ctx);
-        if (!file_result.ok) {
-            return serve_repository_page_error(route, ctx, file_result);
-        }
-        const RepositoryFile file = repository_file_from_json(file_result.value);
-        std::size_t line_count = 0;
-        if (!file.contents.empty()) {
-            line_count = static_cast<std::size_t>(std::ranges::count(file.contents, '\n') +
-                                                  (file.contents.ends_with('\n') ? 0 : 1));
-        }
-        std::vector<RepositoryBlameLine> blame(line_count);
-        for (std::size_t index = 0; index < blame.size(); ++index) {
-            blame[index].line = index + 1;
-        }
-        const ApiResult changes_result = registry.call("list_changes", {{"id", id}}, ctx);
-        if (!changes_result.ok) {
-            return serve_repository_page_error(route, ctx, changes_result);
-        }
-        for (const nlohmann::json& value : changes_result.value.at("items")) {
-            const RepositoryChange change = repository_change_from_json(value);
-            const ApiResult diff_result =
-                registry.call("change_diff", {{"id", id}, {"change_id", change.id}}, ctx);
-            if (!diff_result.ok) {
-                return serve_repository_page_error(route, ctx, diff_result);
-            }
-            for (const nlohmann::json& value_difference : diff_result.value.at("items")) {
-                const RepositoryDiffEntry difference =
-                    repository_diff_entry_from_json(value_difference);
-                if (difference.path != path) {
-                    continue;
-                }
-                auto assign_line = [&](std::uint64_t line) {
-                    if (line == 0 || line > blame.size() || !blame[line - 1].change.empty()) {
-                        return;
-                    }
-                    blame[line - 1].change = change.id;
-                    blame[line - 1].author = change.author;
-                    blame[line - 1].occurred_at = change.occurred_at;
-                };
-                if (difference.line_hunks && !difference.line_hunks->empty()) {
-                    for (const RepositoryLineHunk& hunk : *difference.line_hunks) {
-                        const std::uint64_t count = std::max<std::uint64_t>(hunk.new_count, 1);
-                        for (std::uint64_t line = hunk.new_line; line < hunk.new_line + count;
-                             ++line) {
-                            assign_line(line);
-                        }
-                    }
-                } else {
-                    for (std::uint64_t line = 1; line <= blame.size(); ++line) {
-                        assign_line(line);
-                    }
-                }
-            }
-        }
-        return send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_repository_file(
-                repository_from_json(repository_result.value), ref, file, blame, viewer_for(ctx)),
-            "text/html; charset=utf-8",
-            "no-store");
+                                     boost::http::status::ok,
+                                     exported.value.at("archive").dump(2),
+                                     "application/vnd.lake.export+json",
+                                     "no-store");
     }
 
     boost::http::route_task serve_repository_file_content(boost::http::route_params& route,
@@ -15651,7 +9733,7 @@ struct ApiServer::Impl {
         const ApiResult result = registry.call(
             "repository_file", {{"id", repository_id}, {"ref", ref}, {"path", path}}, context);
         if (!result.ok) {
-            return serve_repository_page_error(route, context, result);
+            return serve_download_error(route, context, result);
         }
         if (download) {
             route.res.set("content-disposition", "attachment; filename=download");
@@ -15660,507 +9742,6 @@ struct ApiServer::Impl {
                          boost::http::status::ok,
                          json_string(result.value, "contents"),
                          "text/plain; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_changes_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "repository_id");
-        if (id.empty()) {
-            return redirect(route, "/repositories");
-        }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
-        if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
-        }
-        const ApiResult changes_result = registry.call("list_changes", {{"id", id}}, ctx);
-        if (!changes_result.ok) {
-            return serve_repository_page_error(route, ctx, changes_result);
-        }
-        std::vector<RepositoryChange> changes;
-        for (const nlohmann::json& value : changes_result.value.at("items")) {
-            changes.push_back(repository_change_from_json(value));
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_repository_log(repository_from_json(repository_result.value),
-                                               changes,
-                                               viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_change_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "repository_id");
-        const std::string change_id = query_value(route, "id");
-        if (id.empty() || change_id.empty()) {
-            co_return co_await redirect(route, "/repositories");
-        }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
-        if (!repository_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, repository_result);
-        }
-        const ApiResult change_result =
-            registry.call("get_change", {{"id", id}, {"change_id", change_id}}, ctx);
-        if (!change_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, change_result);
-        }
-        const ApiResult diff_result =
-            registry.call("change_diff", {{"id", id}, {"change_id", change_id}}, ctx);
-        if (!diff_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, diff_result);
-        }
-        std::vector<RepositoryDiffEntry> differences;
-        for (const nlohmann::json& value : diff_result.value.at("items")) {
-            differences.push_back(repository_diff_entry_from_json(value));
-        }
-        ChangeReviewData review;
-        const ApiResult reviews_result =
-            unwrap(co_await registry.call_async(
-                "list_reviews", {{"repository_id", id}, {"limit", 100}}, ctx));
-        // Reviews and their comments are forge records in the repository's workspace Zetta
-        // (lake#341); the diff does not wait for it, and the page says why they are missing.
-        if (!reviews_result.ok) {
-            review.unavailable = reviews_result.error.message;
-        }
-        std::set<std::string> review_ids;
-        const nlohmann::json no_items = nlohmann::json::array();
-        for (const nlohmann::json& value :
-             reviews_result.ok ? reviews_result.value.at("items") : no_items) {
-            control::ForgeRecord item = forge_record_from_json(value);
-            if (item.value.value("change_id", "") != change_id) {
-                continue;
-            }
-            review_ids.insert(item.id);
-            review.reviews.push_back(std::move(item));
-        }
-        const ApiResult comments_result =
-            review.unavailable.empty()
-                ? unwrap(co_await registry.call_async(
-                      "list_review_comments", {{"repository_id", id}, {"limit", 1000}}, ctx))
-                : reviews_result;
-        if (!comments_result.ok && review.unavailable.empty()) {
-            review.unavailable = comments_result.error.message;
-        }
-        for (const nlohmann::json& value :
-             comments_result.ok ? comments_result.value.at("items") : no_items) {
-            control::ForgeRecord item = forge_record_from_json(value);
-            const nlohmann::json anchor = item.value.value("anchor", nlohmann::json::object());
-            if (!review_ids.contains(item.value.value("review_id", "")) ||
-                anchor.value("change", "") != change_id) {
-                continue;
-            }
-            review.comments.push_back(std::move(item));
-        }
-        const ApiResult checks_result =
-            registry.call("list_artifacts", {{"id", id}, {"limit", 100}}, ctx);
-        if (!checks_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, checks_result);
-        }
-        review.checks.next_cursor = json_string(checks_result.value, "next_cursor");
-        review.checks.done = checks_result.value.value("done", false);
-        for (const nlohmann::json& value : checks_result.value.at("items")) {
-            review.checks.items.push_back(repository_artifact_from_json(value));
-        }
-        co_return co_await send_text(route,
-                         boost::http::status::ok,
-                         web_ui_change(repository_from_json(repository_result.value),
-                                       repository_change_from_json(change_result.value),
-                                       differences,
-                                       review,
-                                       viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_issues_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "repository_id");
-        if (id.empty()) {
-            co_return co_await redirect(route, "/repositories");
-        }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
-        if (!repository_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, repository_result);
-        }
-        const ApiResult issues_result =
-            unwrap(co_await registry.call_async(
-                "list_issues", {{"repository_id", id}, {"limit", 1000}}, ctx));
-        if (!issues_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, issues_result);
-        }
-        std::vector<control::ForgeRecord> issues;
-        for (const nlohmann::json& value : issues_result.value.at("items")) {
-            issues.push_back(forge_record_from_json(value));
-        }
-        co_return co_await send_text(route,
-                         boost::http::status::ok,
-                         web_ui_issues(repository_from_json(repository_result.value),
-                                       issues,
-                                       query_value(route, "state"),
-                                       query_value(route, "label"),
-                                       query_value(route, "assignee"),
-                                       viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_issue_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "repository_id");
-        const std::string issue_id = query_value(route, "id");
-        if (id.empty() || issue_id.empty()) {
-            co_return co_await redirect(route, "/repositories");
-        }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
-        if (!repository_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, repository_result);
-        }
-        const ApiResult issues_result =
-            unwrap(co_await registry.call_async(
-                "list_issues", {{"repository_id", id}, {"limit", 1000}}, ctx));
-        if (!issues_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, issues_result);
-        }
-        std::optional<control::ForgeRecord> issue;
-        for (const nlohmann::json& value : issues_result.value.at("items")) {
-            control::ForgeRecord candidate = forge_record_from_json(value);
-            if (candidate.id == issue_id) {
-                issue = std::move(candidate);
-                break;
-            }
-        }
-        if (!issue) {
-            co_return co_await send_text(route,
-                             boost::http::status::not_found,
-                             web_ui_error("not_found", "issue not found", viewer_for(ctx)),
-                             "text/html; charset=utf-8",
-                             "no-store");
-        }
-        const ApiResult comments_result =
-            unwrap(co_await registry.call_async(
-                "list_issue_comments", {{"repository_id", id}, {"limit", 1000}}, ctx));
-        if (!comments_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, comments_result);
-        }
-        std::vector<control::ForgeRecord> comments;
-        for (const nlohmann::json& value : comments_result.value.at("items")) {
-            control::ForgeRecord comment = forge_record_from_json(value);
-            if (comment.value.value("issue_id", "") == issue_id) {
-                comments.push_back(std::move(comment));
-            }
-        }
-        co_return co_await send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_issue(
-                repository_from_json(repository_result.value), *issue, comments, viewer_for(ctx)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_releases_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "repository_id");
-        if (id.empty()) {
-            co_return co_await redirect(route, "/repositories");
-        }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
-        if (!repository_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, repository_result);
-        }
-        const ApiResult releases_result =
-            unwrap(co_await registry.call_async(
-                "list_releases", {{"repository_id", id}, {"limit", 1000}}, ctx));
-        if (!releases_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, releases_result);
-        }
-        std::vector<control::ForgeRecord> releases;
-        for (const nlohmann::json& value : releases_result.value.at("items")) {
-            releases.push_back(forge_record_from_json(value));
-        }
-        co_return co_await send_text(route,
-                         boost::http::status::ok,
-                         web_ui_releases(repository_from_json(repository_result.value),
-                                         releases,
-                                         viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_webhooks_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "repository_id");
-        if (id.empty()) {
-            co_return co_await redirect(route, "/repositories");
-        }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
-        if (!repository_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, repository_result);
-        }
-        const ApiResult webhooks_result =
-            unwrap(co_await registry.call_async(
-                "list_webhooks", {{"repository_id", id}, {"limit", 1000}}, ctx));
-        if (!webhooks_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, webhooks_result);
-        }
-        const ApiResult deliveries_result =
-            unwrap(co_await registry.call_async(
-                "list_webhook_deliveries", {{"repository_id", id}, {"limit", 1000}}, ctx));
-        if (!deliveries_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, deliveries_result);
-        }
-        std::vector<control::ForgeRecord> webhooks;
-        std::vector<control::ForgeRecord> deliveries;
-        for (const nlohmann::json& value : webhooks_result.value.at("items")) {
-            webhooks.push_back(forge_record_from_json(value));
-        }
-        for (const nlohmann::json& value : deliveries_result.value.at("items")) {
-            deliveries.push_back(forge_record_from_json(value));
-        }
-        co_return co_await send_text(route,
-                         boost::http::status::ok,
-                         web_ui_webhooks(repository_from_json(repository_result.value),
-                                         webhooks,
-                                         deliveries,
-                                         viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_webhook_retry(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext ctx = context_for(route);
-        const std::string repository_id = form_field(body, "repository_id");
-        const ApiResult result = unwrap(co_await registry.call_async(
-            "retry_webhook_delivery",
-            {{"repository_id", repository_id}, {"delivery_id", form_field(body, "delivery_id")}},
-            ctx));
-        if (!result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, result);
-        }
-        co_return co_await redirect(route,
-                                    "/webhooks?repository_id=" + oauth_url_encode(repository_id));
-    }
-
-    boost::http::route_task serve_branch_protection_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "repository_id");
-        if (id.empty()) {
-            co_return co_await redirect(route, "/repositories");
-        }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
-        if (!repository_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, repository_result);
-        }
-        const ApiResult rules_result =
-            unwrap(co_await registry.call_async(
-                "list_branch_protections", {{"repository_id", id}, {"limit", 1000}}, ctx));
-        if (!rules_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, rules_result);
-        }
-        // Branch protection decisions are the repository's data: its workspace's audit
-        // (decision 52), or the central log for a repository without a workspace.
-        const std::string repository_workspace =
-            repository_result.value.value("workspace_id", std::string());
-        nlohmann::json audit_input = {{"limit", 500}};
-        if (repository_workspace.empty()) {
-            audit_input["log"] = "central";
-        } else {
-            audit_input["workspace_id"] = repository_workspace;
-        }
-        const ApiResult audit_result =
-            unwrap(co_await registry.call_async("audit", audit_input, ctx));
-        if (!audit_result.ok) {
-            co_return co_await serve_repository_page_error(route, ctx, audit_result);
-        }
-        std::vector<control::ForgeRecord> rules;
-        std::vector<audit::Event> events;
-        for (const nlohmann::json& value : rules_result.value.at("items")) {
-            rules.push_back(forge_record_from_json(value));
-        }
-        for (const nlohmann::json& value :
-             audit_result.value.value("items", nlohmann::json::array())) {
-            events.push_back(audit::event_from_json(value));
-        }
-        co_return co_await send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_branch_protection(
-                repository_from_json(repository_result.value), rules, events, viewer_for(ctx)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_conflicts_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "repository_id");
-        if (id.empty()) {
-            return redirect(route, "/repositories");
-        }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
-        if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
-        }
-        const ApiResult conflicts_result = registry.call("list_conflicts", {{"id", id}}, ctx);
-        if (!conflicts_result.ok) {
-            return serve_repository_page_error(route, ctx, conflicts_result);
-        }
-        std::vector<RepositoryConflict> conflicts;
-        for (const nlohmann::json& value : conflicts_result.value.at("items")) {
-            conflicts.push_back(repository_conflict_from_json(value));
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_repository_conflicts(repository_from_json(repository_result.value),
-                                                     conflicts,
-                                                     viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_artifact_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "repository_id");
-        const std::string result_id = query_value(route, "id");
-        if (id.empty() || result_id.empty()) {
-            return redirect(route, "/repositories");
-        }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
-        if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
-        }
-        const ApiResult artifact_result =
-            registry.call("get_artifact", {{"id", id}, {"result_id", result_id}}, ctx);
-        if (!artifact_result.ok) {
-            return serve_repository_page_error(route, ctx, artifact_result);
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_artifact(repository_from_json(repository_result.value),
-                                         repository_artifact_from_json(artifact_result.value),
-                                         viewer_for(ctx)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_artifacts_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        const std::string id = query_value(route, "repository_id");
-        if (id.empty()) {
-            return redirect(route, "/repositories");
-        }
-        const ApiResult repository_result = registry.call("get_repository", {{"id", id}}, ctx);
-        if (!repository_result.ok) {
-            return serve_repository_page_error(route, ctx, repository_result);
-        }
-        const RepositoryArtifactFilter filter{
-            .action = query_value(route, "action"),
-            .output = query_value(route, "output"),
-            .content = query_value(route, "content"),
-            .cursor = query_value(route, "cursor"),
-            .limit = query_page_limit(route),
-        };
-        const ApiResult result = registry.call("list_artifacts",
-                                               {{"id", id},
-                                                {"action", filter.action},
-                                                {"output", filter.output},
-                                                {"content", filter.content},
-                                                {"cursor", filter.cursor},
-                                                {"limit", filter.limit}},
-                                               ctx);
-        if (!result.ok) {
-            return serve_repository_page_error(route, ctx, result);
-        }
-        RepositoryArtifactPage page{.next_cursor = json_string(result.value, "next_cursor"),
-                                    .done = result.value.value("done", false)};
-        for (const nlohmann::json& value : result.value.at("items")) {
-            page.items.push_back(repository_artifact_from_json(value));
-        }
-        return send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_artifacts(
-                repository_from_json(repository_result.value), page, filter, viewer_for(ctx)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_drive_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        const std::string repository_id = query_value(route, "repository_id");
-        const std::string ref =
-            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
-        const std::string path = query_value(route, "path");
-        DriveFolderOptions folder_options;
-        folder_options.view = query_value(route, "view") == "grid" ? "grid" : "list";
-        const std::string requested_sort = query_value(route, "sort");
-        folder_options.sort =
-            requested_sort == "size" || requested_sort == "modified" ? requested_sort : "name";
-        folder_options.descending = query_value(route, "direction") == "desc";
-        if (repository_id.empty()) {
-            return redirect(route, "/repositories");
-        }
-        const ApiResult result =
-            registry.call("drive_browse",
-                          {{"repository_id", repository_id},
-                           {"ref", ref},
-                           {"path", path},
-                           {"sort", folder_options.sort},
-                           {"direction", folder_options.descending ? "desc" : "asc"}},
-                          context);
-        if (!result.ok) {
-            return serve_repository_page_error(route, context, result);
-        }
-        std::vector<RepositoryTreeEntry> entries;
-        for (const nlohmann::json& value : result.value.at("items")) {
-            entries.push_back(repository_tree_entry_from_json(value));
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_drive_folder(repository_from_json(result.value.at("repository")),
-                                             ref,
-                                             path,
-                                             entries,
-                                             folder_options,
-                                             viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_drive_preview_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        const std::string repository_id = query_value(route, "repository_id");
-        const std::string ref =
-            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
-        const std::string path = query_value(route, "path");
-        const ApiResult result =
-            registry.call("drive_preview",
-                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
-                          context);
-        if (!result.ok) {
-            return serve_repository_page_error(route, context, result);
-        }
-        const RepositoryFile file{json_string(result.value, "path"),
-                                  json_string(result.value, "blob"),
-                                  "",
-                                  result.value.value("size", std::uint64_t{0})};
-        const DrivePreview preview{json_string(result.value, "format"),
-                                   json_string(result.value, "media_type"),
-                                   json_string(result.value, "html")};
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_drive_preview(repository_from_json(result.value.at("repository")),
-                                              ref,
-                                              file,
-                                              preview,
-                                              viewer_for(context)),
-                         "text/html; charset=utf-8",
                          "no-store");
     }
 
@@ -16175,7 +9756,7 @@ struct ApiServer::Impl {
                           {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
                           context);
         if (!result.ok) {
-            co_return co_await serve_repository_page_error(route, context, result);
+            co_return co_await serve_download_error(route, context, result);
         }
         std::string filename = path_filename(path);
         std::ranges::replace(filename, '"', '_');
@@ -16189,609 +9770,9 @@ struct ApiServer::Impl {
                                       "\"" + json_string(result.value, "blob") + "\"");
     }
 
-    boost::http::route_task serve_drive_history_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        const std::string repository_id = query_value(route, "repository_id");
-        const std::string ref =
-            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
-        const std::string path = query_value(route, "path");
-        const ApiResult result =
-            registry.call("drive_history",
-                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
-                          context);
-        if (!result.ok) {
-            return serve_repository_page_error(route, context, result);
-        }
-        std::vector<nlohmann::json> changes;
-        for (const nlohmann::json& value : result.value.at("items")) {
-            changes.push_back(value);
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_drive_history(repository_from_json(result.value.at("repository")),
-                                              ref,
-                                              path,
-                                              changes,
-                                              viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_drive_history_diff(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        const std::string repository_id = query_value(route, "repository_id");
-        const std::string ref =
-            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
-        const std::string path = query_value(route, "path");
-        const std::string left = query_value(route, "left");
-        const std::string right = query_value(route, "right");
-        const ApiResult result = registry.call("diff_drive_versions",
-                                               {{"repository_id", repository_id},
-                                                {"ref", ref},
-                                                {"path", path},
-                                                {"left", left},
-                                                {"right", right}},
-                                               context);
-        if (!result.ok) {
-            return serve_repository_page_error(route, context, result);
-        }
-        return send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_drive_version_diff(repository_from_json(result.value.at("repository")),
-                                      ref,
-                                      path,
-                                      left,
-                                      right,
-                                      drive_version_diff_from_json(result.value),
-                                      viewer_for(context)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_drive_conflict_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        const std::string repository_id = query_value(route, "repository_id");
-        const std::string ref =
-            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
-        const std::string path = query_value(route, "path");
-        const ApiResult result =
-            registry.call("drive_conflict",
-                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
-                          context);
-        if (!result.ok) {
-            return serve_repository_page_error(route, context, result);
-        }
-        std::vector<RepositoryFile> versions;
-        for (const nlohmann::json& value : result.value.at("versions")) {
-            versions.push_back(repository_file_from_json(value));
-        }
-        std::optional<DriveVersionDiff> difference;
-        if (result.value.contains("difference")) {
-            difference = drive_version_diff_from_json(result.value.at("difference"));
-        }
-        const RepositoryConflict conflict =
-            repository_conflict_from_json(result.value.at("conflict"));
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_drive_conflict(repository_from_json(result.value.at("repository")),
-                                               ref,
-                                               conflict,
-                                               versions,
-                                               difference,
-                                               viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_conflict_resolution(boost::http::route_params& route,
-                                                      bool return_to_drive) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string repository_id = form_field(body, "repository_id");
-        const std::string ref = form_field(body, "ref");
-        const std::string path = form_field(body, "path");
-        const std::string resolution = form_field(body, "resolution");
-        nlohmann::json input{{"repository_id", repository_id},
-                             {"ref", ref},
-                             {"path", path},
-                             {"conflict_id", form_field(body, "conflict_id")},
-                             {"resolution", resolution}};
-        if (resolution == "blob") {
-            const std::string prepared = form_field(body, "blob");
-            std::vector<std::byte> bytes;
-            bytes.reserve(prepared.size());
-            std::ranges::transform(prepared, std::back_inserter(bytes), [](char value) {
-                return static_cast<std::byte>(value);
-            });
-            input["blob"] = base64_encode(bytes);
-        }
-        const ApiResult result = registry.call("resolve_conflict", std::move(input), context);
-        if (!result.ok) {
-            co_return co_await serve_repository_page_error(route, context, result);
-        }
-        if (return_to_drive) {
-            co_return co_await redirect(route,
-                                        "/drive?repository_id=" + oauth_url_encode(repository_id) +
-                                            "&ref=" + oauth_url_encode(ref) +
-                                            "&path=" + oauth_url_encode(path_parent(path)));
-        }
-        co_return co_await redirect(route,
-                                    "/conflicts?repository_id=" + oauth_url_encode(repository_id));
-    }
-
     liquid::runtime::task<ApiResult>
     page_call(std::string capability, nlohmann::json input, ApiContext& context) {
         co_return unwrap(co_await registry.call_async(capability, input, context));
-    }
-
-    // The live workspaces of a repository's space: where its folders' links can be held
-    // (lake#350).
-    std::vector<std::pair<std::string, std::string>>
-    share_workspace_choices(const std::string& repository_id) {
-        if (!options.store) {
-            return {};
-        }
-        const auto repository = options.store->get_repository(repository_id);
-        if (!repository) {
-            return {};
-        }
-        const auto rows = options.store->list_workspaces(repository->customer_id);
-        return rows ? workspace_choices(*rows) : std::vector<std::pair<std::string, std::string>>{};
-    }
-
-    boost::http::route_task render_drive_share_page(boost::http::route_params& route,
-                                                    ApiContext context,
-                                                    const std::string& repository_id,
-                                                    const std::string& ref,
-                                                    const std::string& path,
-                                                    const std::string& workspace_id,
-                                                    std::string created_link = {},
-                                                    std::string error = {}) {
-        const ApiResult result = unwrap(co_await page_call("drive_effective_access",
-                                                    {{"repository_id", repository_id},
-                                                     {"workspace_id", workspace_id},
-                                                     {"ref", ref},
-                                                     {"path", path}},
-                                                    context));
-        if (!result.ok) {
-            co_return co_await serve_repository_page_error(route, context, result);
-        }
-        std::vector<control::EffectiveAccessEntry> access;
-        for (const nlohmann::json& value : result.value.at("items")) {
-            access.push_back(access_from_json(value));
-        }
-        std::vector<nlohmann::json> links;
-        for (const nlohmann::json& value : result.value.at("links")) {
-            links.push_back(value);
-        }
-        co_return co_await send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_drive_share(repository_from_json(result.value.at("repository")),
-                               ref,
-                               path,
-                               {workspace_id, share_workspace_choices(repository_id)},
-                               access,
-                               links,
-                               created_link,
-                               error,
-                               viewer_for(route)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_drive_share_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string repository_id = query_value(route, "repository_id");
-        const std::string ref =
-            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
-        const std::string path = query_value(route, "path");
-        std::string workspace_id = query_value(route, "workspace_id");
-        if (workspace_id.empty()) {
-            // Links live in one workspace of the repository's space. The URL names it; without
-            // one, the person's remembered workspace (or the space's only one) is a navigation
-            // choice made explicit by a redirect, never a capability default.
-            const nlohmann::json folder{
-                {"repository_id", repository_id}, {"ref", ref}, {"path", path}};
-            const auto capability = registry.find("drive_effective_access");
-            auto object = capability && options.store
-                              ? capability->resolve_object(folder, context)
-                              : std::expected<std::string, ApiError>(std::unexpected(
-                                    ApiError{"store_unavailable", "no store", {}}));
-            if (!object) {
-                co_return co_await serve_repository_page_error(
-                    route, context,
-                    ApiResult::failure(object.error().code, object.error().message,
-                                       object.error().path));
-            }
-            if (context.acting_identity != "admin") {
-                const auto decision = control::authorize(*options.store,
-                                                         context.acting_identity,
-                                                         *object,
-                                                         "share",
-                                                         context.authorization_cache);
-                if (!decision || !decision->allowed) {
-                    co_return co_await serve_repository_page_error(
-                        route, context,
-                        ApiResult::failure("unauthorized",
-                                           "principal is not allowed to share drive folder"));
-                }
-            }
-            const auto choices = share_workspace_choices(repository_id);
-            std::string choice = cookie_value(route, "lake_workspace");
-            if (std::ranges::none_of(choices, [&](const auto& c) { return c.first == choice; })) {
-                choice.clear();
-            }
-            if (choice.empty() && choices.size() == 1) {
-                choice = choices.front().first;
-            }
-            if (choice.empty()) {
-                const auto repository = options.store->get_repository(repository_id);
-                if (!repository) {
-                    co_return co_await serve_repository_page_error(
-                        route, context,
-                        ApiResult::failure(repository.error().code, repository.error().message));
-                }
-                co_return co_await send_text(
-                    route,
-                    boost::http::status::ok,
-                    web_ui_drive_share_workspaces(*repository, ref, path, {"", choices},
-                                                  viewer_for(route)),
-                    "text/html; charset=utf-8",
-                    "no-store");
-            }
-            co_return co_await redirect(route, drive_share_location(repository_id, ref, path, choice));
-        }
-        co_return co_await render_drive_share_page(
-            route, std::move(context), repository_id, ref, path, workspace_id);
-    }
-
-    static std::string drive_share_location(const std::string& repository_id,
-                                            const std::string& ref,
-                                            const std::string& path,
-                                            const std::string& workspace_id) {
-        return "/drive/share?repository_id=" + oauth_url_encode(repository_id) +
-               "&ref=" + oauth_url_encode(ref) + "&path=" + oauth_url_encode(path) +
-               (workspace_id.empty() ? std::string() : "&workspace_id=" + oauth_url_encode(workspace_id));
-    }
-
-    boost::http::route_task render_drive_share_link_page(boost::http::route_params& route,
-                                                         ApiContext context,
-                                                         const std::string& repository_id,
-                                                         const std::string& ref,
-                                                         const std::string& path,
-                                                         const std::string& workspace_id,
-                                                         const std::string& link_id,
-                                                         std::string error = {}) {
-        const ApiResult result = unwrap(co_await page_call("drive_effective_access",
-                                                    {{"repository_id", repository_id},
-                                                     {"workspace_id", workspace_id},
-                                                     {"ref", ref},
-                                                     {"path", path}},
-                                                    context));
-        if (!result.ok) {
-            co_return co_await serve_repository_page_error(route, context, result);
-        }
-        const auto link =
-            std::ranges::find_if(result.value.at("links"), [&](const nlohmann::json& value) {
-                return json_string(value, "id") == link_id;
-            });
-        if (link == result.value.at("links").end()) {
-            co_return co_await serve_repository_page_error(
-                route, context, ApiResult::failure("not_found", "drive share link was not found"));
-        }
-        co_return co_await send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_drive_share_link(repository_from_json(result.value.at("repository")),
-                                    ref,
-                                    path,
-                                    workspace_id,
-                                    *link,
-                                    error,
-                                    viewer_for(route)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_drive_share_link_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        // The renderer is a coroutine that takes these by reference, so they live in this frame
-        // until it finishes; passing temporaries left it reading destroyed strings (lake#497).
-        const std::string repository_id = query_value(route, "repository_id");
-        const std::string ref =
-            query_value(route, "ref").empty() ? "main" : query_value(route, "ref");
-        const std::string path = query_value(route, "path");
-        const std::string workspace_id = query_value(route, "workspace_id");
-        const std::string link_id = query_value(route, "link_id");
-        co_return co_await render_drive_share_link_page(
-            route, std::move(context), repository_id, ref, path, workspace_id, link_id);
-    }
-
-    boost::http::route_task serve_shared_with_me_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            return redirect(route, "/sign-in");
-        }
-        const ApiResult result =
-            registry.call("drive_shared_with_me", nlohmann::json::object(), context);
-        if (!result.ok) {
-            return serve_page_error(route, result);
-        }
-        std::vector<nlohmann::json> folders;
-        for (const nlohmann::json& folder : result.value.at("items")) {
-            folders.push_back(folder);
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_shared_with_me(folders, "", viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_drive_share_direct(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string repository_id = form_field(body, "repository_id");
-        const std::string ref = form_field(body, "ref");
-        const std::string path = form_field(body, "path");
-        const ApiResult result =
-            registry.call("share_drive_folder",
-                          {{"repository_id", repository_id},
-                           {"ref", ref},
-                           {"path", path},
-                           {"principal_taap_id", form_field(body, "principal_taap_id")},
-                           {"role", form_field(body, "role")},
-                           {"attestation_digest", form_field(body, "attestation_digest")}},
-                          context);
-        const std::string workspace_id = form_field(body, "workspace_id");
-        if (!result.ok && !workspace_id.empty()) {
-            co_return co_await render_drive_share_page(
-                route, context, repository_id, ref, path, workspace_id, {}, result.error.message);
-        }
-        if (!result.ok) {
-            co_return co_await serve_repository_page_error(route, context, result);
-        }
-        co_return co_await redirect(route,
-                                    drive_share_location(repository_id, ref, path, workspace_id));
-    }
-
-    boost::http::route_task serve_drive_share_link_create(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string repository_id = form_field(body, "repository_id");
-        const std::string workspace_id = form_field(body, "workspace_id");
-        const std::string ref = form_field(body, "ref");
-        const std::string path = form_field(body, "path");
-        const ApiResult result = unwrap(co_await page_call("create_drive_share_link",
-                                                    {{"repository_id", repository_id},
-                                                     {"workspace_id", workspace_id},
-                                                     {"ref", ref},
-                                                     {"path", path},
-                                                     {"role", form_field(body, "role")},
-                                                     {"expires_at", form_field(body, "expires_at")}},
-                                                    context));
-        if (!result.ok) {
-            co_return co_await render_drive_share_page(
-                route, context, repository_id, ref, path, workspace_id, {}, result.error.message);
-        }
-        co_return co_await render_drive_share_page(
-            route, context, repository_id, ref, path, workspace_id, json_string(result.value, "url"));
-    }
-
-    boost::http::route_task serve_drive_share_link_revoke(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string workspace_id = form_field(body, "workspace_id");
-        const ApiResult result = unwrap(co_await page_call(
-            "revoke_drive_share_link",
-            {{"workspace_id", workspace_id}, {"link_id", form_field(body, "link_id")}},
-            context));
-        const std::string repository_id = form_field(body, "repository_id");
-        const std::string ref = form_field(body, "ref");
-        const std::string path = form_field(body, "path");
-        if (!result.ok) {
-            co_return co_await render_drive_share_page(
-                route, context, repository_id, ref, path, workspace_id, {}, result.error.message);
-        }
-        const std::string return_to = form_field(body, "return_to");
-        co_return co_await redirect(
-            route,
-            return_to == "detail"
-                ? "/drive/share/link?repository_id=" + oauth_url_encode(repository_id) +
-                      "&ref=" + oauth_url_encode(ref) + "&path=" + oauth_url_encode(path) +
-                      "&workspace_id=" + oauth_url_encode(workspace_id) +
-                      "&link_id=" + oauth_url_encode(form_field(body, "link_id"))
-                : drive_share_location(repository_id, ref, path, workspace_id));
-    }
-
-    boost::http::route_task serve_drive_restore(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string repository_id = form_field(body, "repository_id");
-        const std::string ref = form_field(body, "ref");
-        const std::string path = form_field(body, "path");
-        const ApiResult result = registry.call("restore_drive_version",
-                                               {{"repository_id", repository_id},
-                                                {"ref", ref},
-                                                {"path", path},
-                                                {"change_id", form_field(body, "change_id")}},
-                                               context);
-        if (!result.ok) {
-            co_return co_await serve_repository_page_error(route, context, result);
-        }
-        co_return co_await redirect(
-            route,
-            "/drive/history?repository_id=" + oauth_url_encode(repository_id) +
-                "&ref=" + oauth_url_encode(ref) + "&path=" + oauth_url_encode(path));
-    }
-
-    boost::http::route_task serve_drive_folder_create(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string repository_id = form_field(body, "repository_id");
-        const std::string ref = form_field(body, "ref");
-        const std::string path = form_field(body, "path");
-        const ApiResult result = registry.call("create_drive_folder",
-                                               {{"repository_id", repository_id},
-                                                {"ref", ref},
-                                                {"path", path},
-                                                {"name", form_field(body, "name")}},
-                                               context);
-        if (!result.ok) {
-            co_return co_await serve_repository_page_error(route, context, result);
-        }
-        co_return co_await redirect(route,
-                                    "/drive?repository_id=" + oauth_url_encode(repository_id) +
-                                        "&ref=" + oauth_url_encode(ref) +
-                                        "&path=" + oauth_url_encode(path));
-    }
-
-    boost::http::route_task serve_drive_upload(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        const std::string content_type = route.req.count(http::field::content_type) == 0
-                                             ? std::string{}
-                                             : std::string(route.req.at(http::field::content_type));
-        MultipartForm form = parse_multipart(body, content_type);
-        ApiContext context = context_for(route);
-        if (!form.error.empty()) {
-            co_return co_await serve_repository_page_error(
-                route, context, ApiResult::failure("invalid_input", form.error));
-        }
-        nlohmann::json files = nlohmann::json::array();
-        for (const MultipartFile& file : form.files) {
-            files.push_back({{"name", file.name}, {"content", base64_encode(file.contents)}});
-        }
-        const std::string repository_id = form.fields["repository_id"];
-        const std::string ref = form.fields["ref"];
-        const std::string path = form.fields["path"];
-        const ApiResult result = registry.call("upload_drive_files",
-                                               {{"repository_id", repository_id},
-                                                {"ref", ref},
-                                                {"path", path},
-                                                {"files", std::move(files)}},
-                                               context);
-        if (!result.ok) {
-            co_return co_await serve_repository_page_error(route, context, result);
-        }
-        co_return co_await redirect(route,
-                                    "/drive?repository_id=" + oauth_url_encode(repository_id) +
-                                        "&ref=" + oauth_url_encode(ref) +
-                                        "&path=" + oauth_url_encode(path));
-    }
-
-    boost::http::route_task serve_drive_rename(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string repository_id = form_field(body, "repository_id");
-        const std::string ref = form_field(body, "ref");
-        const std::string path = form_field(body, "path");
-        const std::string destination = path_parent(path).empty()
-                                            ? form_field(body, "name")
-                                            : path_parent(path) + "/" + form_field(body, "name");
-        const ApiResult result = registry.call("move_drive_path",
-                                               {{"repository_id", repository_id},
-                                                {"ref", ref},
-                                                {"path", path},
-                                                {"destination", destination}},
-                                               context);
-        if (!result.ok) {
-            co_return co_await serve_repository_page_error(route, context, result);
-        }
-        co_return co_await redirect(route,
-                                    "/drive?repository_id=" + oauth_url_encode(repository_id) +
-                                        "&ref=" + oauth_url_encode(ref) +
-                                        "&path=" + oauth_url_encode(path_parent(destination)));
-    }
-
-    boost::http::route_task serve_drive_move(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string repository_id = form_field(body, "repository_id");
-        const std::string ref = form_field(body, "ref");
-        const std::string path = form_field(body, "path");
-        const std::string folder = form_field(body, "destination_folder");
-        const std::string destination =
-            folder.empty() ? path_filename(path) : folder + "/" + path_filename(path);
-        const ApiResult result = registry.call("move_drive_path",
-                                               {{"repository_id", repository_id},
-                                                {"ref", ref},
-                                                {"path", path},
-                                                {"destination", destination}},
-                                               context);
-        if (!result.ok) {
-            co_return co_await serve_repository_page_error(route, context, result);
-        }
-        co_return co_await redirect(route,
-                                    "/drive?repository_id=" + oauth_url_encode(repository_id) +
-                                        "&ref=" + oauth_url_encode(ref) +
-                                        "&path=" + oauth_url_encode(folder));
-    }
-
-    boost::http::route_task serve_drive_delete(boost::http::route_params& route) {
-        namespace http = boost::http;
-        auto [read_error, body] = co_await read_string_body(route);
-        if (read_error) {
-            co_return http::route_error(read_error);
-        }
-        ApiContext context = context_for(route);
-        const std::string repository_id = form_field(body, "repository_id");
-        const std::string ref = form_field(body, "ref");
-        const std::string path = form_field(body, "path");
-        const ApiResult result =
-            registry.call("delete_drive_path",
-                          {{"repository_id", repository_id}, {"ref", ref}, {"path", path}},
-                          context);
-        if (!result.ok) {
-            co_return co_await serve_repository_page_error(route, context, result);
-        }
-        co_return co_await redirect(route,
-                                    "/drive?repository_id=" + oauth_url_encode(repository_id) +
-                                        "&ref=" + oauth_url_encode(ref) +
-                                        "&path=" + oauth_url_encode(path_parent(path)));
     }
 
     nlohmann::json drive_share_input(const boost::http::route_params& route) {
@@ -16806,72 +9787,12 @@ struct ApiServer::Impl {
         return input;
     }
 
-    boost::http::route_task serve_drive_share_error(boost::http::route_params& route,
-                                                    const ApiResult& result) {
-        return send_text(
-            route,
-            boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
-            web_ui_drive_link(
-                "Shared folder", {}, result.error.message, "", "main", "", viewer_for(route)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_drive_share_link(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        const auto input = drive_share_input(route);
-        const ApiResult result = unwrap(co_await page_call("resolve_drive_share_link", input, context));
-        if (!result.ok) {
-            co_return co_await serve_drive_share_error(route, result);
-        }
-        std::vector<RepositoryTreeEntry> entries;
-        for (const nlohmann::json& value : result.value.at("items")) {
-            entries.push_back(repository_tree_entry_from_json(value));
-        }
-        co_return co_await send_text(route,
-                         boost::http::status::ok,
-                         web_ui_drive_link(json_string(result.value, "path"),
-                                           entries,
-                                           "",
-                                           input.at("token").get<std::string>(),
-                                           input.at("ref").get<std::string>(),
-                                           json_string(result.value, "root_path"),
-                                           viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    boost::http::route_task serve_drive_share_preview(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        const auto input = drive_share_input(route);
-        const ApiResult result = unwrap(co_await page_call("preview_drive_share_link", input, context));
-        if (!result.ok) {
-            co_return co_await serve_drive_share_error(route, result);
-        }
-        const RepositoryFile file{json_string(result.value, "path"),
-                                  json_string(result.value, "blob"),
-                                  "",
-                                  result.value.at("size").get<std::uint64_t>()};
-        const DrivePreview preview{json_string(result.value, "format"),
-                                   json_string(result.value, "media_type"),
-                                   json_string(result.value, "html")};
-        co_return co_await send_text(route,
-                         boost::http::status::ok,
-                         web_ui_drive_link_preview(input.at("token").get<std::string>(),
-                                                   input.at("ref").get<std::string>(),
-                                                   file,
-                                                   preview,
-                                                   viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
     boost::http::route_task serve_drive_share_download(boost::http::route_params& route) {
         ApiContext context = context_for(route);
-        const ApiResult result =
-            unwrap(co_await page_call("download_drive_share_link", drive_share_input(route), context));
+        const ApiResult result = unwrap(
+            co_await page_call("download_drive_share_link", drive_share_input(route), context));
         if (!result.ok) {
-            co_return co_await serve_drive_share_error(route, result);
+            co_return co_await serve_page_error(route, result);
         }
         std::string filename = path_filename(json_string(result.value, "path"));
         std::ranges::replace(filename, '"', '_');
@@ -16997,7 +9918,10 @@ struct ApiServer::Impl {
             if (!repository.starts_with(prefix)) {
                 return {RegistryAccess::Denied};
             }
-            return {RegistryAccess::Allowed, customer->id, build->workspace_id, true,
+            return {RegistryAccess::Allowed,
+                    customer->id,
+                    build->workspace_id,
+                    true,
                     build_target_image(build->target, customer->name)};
         }
         if (principal->kind == "app_pull") {
@@ -17058,12 +9982,14 @@ struct ApiServer::Impl {
         const auto tenant = tenant_repository(repository);
         if (!tenant) {
             return std::unexpected(RegistryRefusal{boost::http::status::bad_request,
-                                                   "OCI repository name is invalid", "NAME_INVALID"});
+                                                   "OCI repository name is invalid",
+                                                   "NAME_INVALID"});
         }
         if (!options.store || !options.workspaces) {
-            return std::unexpected(RegistryRefusal{
-                boost::http::status::not_found,
-                "tenant image repositories need a control store and workspaces", "NAME_UNKNOWN"});
+            return std::unexpected(
+                RegistryRefusal{boost::http::status::not_found,
+                                "tenant image repositories need a control store and workspaces",
+                                "NAME_UNKNOWN"});
         }
         std::optional<control::Customer> customer;
         if (!grant.customer_id.empty()) {
@@ -17074,12 +10000,13 @@ struct ApiServer::Impl {
             customer = space_customer(*options.store, tenant->space);
         }
         if (!customer || customer->name != tenant->space) {
-            return std::unexpected(RegistryRefusal{boost::http::status::not_found,
-                                                   "image repository is unknown", "NAME_UNKNOWN"});
+            return std::unexpected(RegistryRefusal{
+                boost::http::status::not_found, "image repository is unknown", "NAME_UNKNOWN"});
         }
         const auto unavailable = [](const control::StoreError& error) {
             return RegistryRefusal{boost::http::status::service_unavailable,
-                                   "image routes cannot be read: " + error.message, "UNAVAILABLE"};
+                                   "image routes cannot be read: " + error.message,
+                                   "UNAVAILABLE"};
         };
         auto routed = options.store->get_oci_repository_route(customer->id, tenant->name);
         if (!routed && routed.error().code != "not_found") {
@@ -17087,41 +10014,42 @@ struct ApiServer::Impl {
         }
         // A build's first push routes only its own target, `<image>` and `cache/<image>`: a
         // route never moves, so a build cannot claim another name for its workspace.
-        const bool own_target = !grant.build_image.empty() &&
-                                (tenant->name == grant.build_image ||
-                                 tenant->name == "cache/" + grant.build_image);
+        const bool own_target =
+            !grant.build_image.empty() &&
+            (tenant->name == grant.build_image || tenant->name == "cache/" + grant.build_image);
         if (!routed && write && grant.may_route && own_target) {
-            routed = options.store->create_oci_repository_route(customer->id, tenant->name,
-                                                                grant.workspace_id);
+            routed = options.store->create_oci_repository_route(
+                customer->id, tenant->name, grant.workspace_id);
             if (!routed && routed.error().code == "invalid_input") {
-                return std::unexpected(RegistryRefusal{boost::http::status::bad_request,
-                                                       routed.error().message, "NAME_INVALID"});
+                return std::unexpected(RegistryRefusal{
+                    boost::http::status::bad_request, routed.error().message, "NAME_INVALID"});
             }
             if (!routed && routed.error().code == "conflict") {
-                return std::unexpected(RegistryRefusal{boost::http::status::forbidden,
-                                                       routed.error().message, "DENIED"});
+                return std::unexpected(RegistryRefusal{
+                    boost::http::status::forbidden, routed.error().message, "DENIED"});
             }
             if (!routed) {
                 return std::unexpected(unavailable(routed.error()));
             }
         }
         if (!routed && write && grant.may_route) {
-            return std::unexpected(RegistryRefusal{
-                boost::http::status::forbidden,
-                "a build routes only its own target image and its cache", "DENIED"});
+            return std::unexpected(
+                RegistryRefusal{boost::http::status::forbidden,
+                                "a build routes only its own target image and its cache",
+                                "DENIED"});
         }
         if (!routed) {
-            return std::unexpected(RegistryRefusal{
-                boost::http::status::not_found,
-                "image repository " + std::string(repository) +
-                    " has no workspace; route it with create_image_repository",
-                "NAME_UNKNOWN"});
+            return std::unexpected(
+                RegistryRefusal{boost::http::status::not_found,
+                                "image repository " + std::string(repository) +
+                                    " has no workspace; route it with create_image_repository",
+                                "NAME_UNKNOWN"});
         }
         if (!grant.workspace_id.empty() && routed->workspace_id != grant.workspace_id) {
-            return std::unexpected(RegistryRefusal{
-                boost::http::status::forbidden,
-                "image repository " + std::string(repository) + " belongs to another workspace",
-                "DENIED"});
+            return std::unexpected(RegistryRefusal{boost::http::status::forbidden,
+                                                   "image repository " + std::string(repository) +
+                                                       " belongs to another workspace",
+                                                   "DENIED"});
         }
         ApiContext context = context_for(route);
         context.workspace_id = routed->workspace_id;
@@ -17136,10 +10064,12 @@ struct ApiServer::Impl {
     // A workspace that cannot be read: the pull or push may be retried.
     boost::http::route_task registry_workspace_error(boost::http::route_params& route,
                                                      const control::ZettaControlError& error) {
-        return registry_error(route, boost::http::status::service_unavailable,
-                              "the image repository's workspace cannot be reached: " +
-                                  error.code + ": " + error.message,
-                              true, "UNAVAILABLE");
+        return registry_error(route,
+                              boost::http::status::service_unavailable,
+                              "the image repository's workspace cannot be reached: " + error.code +
+                                  ": " + error.message,
+                              true,
+                              "UNAVAILABLE");
     }
 
     boost::http::route_task registry_auth_error(boost::http::route_params& route,
@@ -17214,8 +10144,8 @@ struct ApiServer::Impl {
         }
         const auto started = artifacts.begin_upload(repository);
         if (!started) {
-            co_return co_await registry_error(route, boost::http::status::bad_request,
-                                              started.error(), true);
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, started.error(), true);
         }
         const std::string location =
             "/v2/" + repository + "/blobs/uploads/" + std::string(*started);
@@ -17319,8 +10249,8 @@ struct ApiServer::Impl {
                 route, boost::http::status::accepted, {}, "application/octet-stream", "no-store");
         }
         if (*authorized) {
-            co_return co_await finish_tenant_upload(route, std::move(**authorized), repository,
-                                                    upload, query_value(route, "digest"));
+            co_return co_await finish_tenant_upload(
+                route, std::move(**authorized), repository, upload, query_value(route, "digest"));
         }
         const auto completed = artifacts.finish_upload(upload, query_value(route, "digest"));
         if (!completed) {
@@ -17355,10 +10285,12 @@ struct ApiServer::Impl {
                                                  std::string digest) {
         const auto workspace = options.store->get_workspace(tenant.workspace_id);
         if (!workspace) {
-            co_return co_await registry_error(route, boost::http::status::service_unavailable,
+            co_return co_await registry_error(route,
+                                              boost::http::status::service_unavailable,
                                               "the image repository's workspace cannot be read: " +
                                                   workspace.error().message,
-                                              true, "UNAVAILABLE");
+                                              true,
+                                              "UNAVAILABLE");
         }
         auto records = workspace_records(tenant.context, tenant.customer_id, tenant.workspace_id);
         if (!records) {
@@ -17368,8 +10300,11 @@ struct ApiServer::Impl {
         if (workspace->store_moved_at.empty()) {
             const auto completed = artifacts.finish_upload(upload, digest);
             if (!completed) {
-                co_return co_await registry_error(route, boost::http::status::bad_request,
-                                                  completed.error(), true, "BLOB_UPLOAD_INVALID");
+                co_return co_await registry_error(route,
+                                                  boost::http::status::bad_request,
+                                                  completed.error(),
+                                                  true,
+                                                  "BLOB_UPLOAD_INVALID");
             }
             blob.size = artifacts.blob_size(*completed).value_or(0);
             auto recorded = control::settled(co_await control::record_oci_blob(*records, blob));
@@ -17379,14 +10314,16 @@ struct ApiServer::Impl {
             co_return co_await blob_created(route, repository, digest);
         }
         if (!ArtifactRegistry::digest_name(digest)) {
-            co_return co_await registry_error(route, boost::http::status::bad_request,
-                                              "OCI upload or digest is invalid", true,
+            co_return co_await registry_error(route,
+                                              boost::http::status::bad_request,
+                                              "OCI upload or digest is invalid",
+                                              true,
                                               "BLOB_UPLOAD_INVALID");
         }
         // The object the workspace already names for this digest: a re-push of a blob it holds
         // adds nothing, so the quota is not checked for it.
-        auto existing = control::settled(
-            co_await control::get_oci_blob(*records, tenant.customer_id, digest));
+        auto existing =
+            control::settled(co_await control::get_oci_blob(*records, tenant.customer_id, digest));
         if (!existing) {
             co_return co_await registry_workspace_error(route, existing.error());
         }
@@ -17394,8 +10331,11 @@ struct ApiServer::Impl {
         const bool known_rooted = *existing && (*existing)->rooted;
         const auto claimed = artifacts.claim_upload(upload);
         if (!claimed) {
-            co_return co_await registry_error(route, boost::http::status::bad_request,
-                                              claimed.error(), true, "BLOB_UPLOAD_INVALID");
+            co_return co_await registry_error(route,
+                                              boost::http::status::bad_request,
+                                              claimed.error(),
+                                              true,
+                                              "BLOB_UPLOAD_INVALID");
         }
         const std::filesystem::path source = *claimed;
         auto stored = co_await blocking_call(
@@ -17413,8 +10353,8 @@ struct ApiServer::Impl {
                 if (error) {
                     return std::unexpected(SyncStoreError{"io", error.message()});
                 }
-                auto put = sync_store.put_workspace_blob(tenant.customer_id, tenant.workspace_id,
-                                                         source, true, known, known_rooted);
+                auto put = sync_store.put_workspace_blob(
+                    tenant.customer_id, tenant.workspace_id, source, true, known, known_rooted);
                 if (put && put->size != hashed) {
                     return std::unexpected(SyncStoreError{
                         "corrupt", "the stored blob's size differs from the bytes hashed"});
@@ -17428,16 +10368,18 @@ struct ApiServer::Impl {
             // Bytes that are not their digest, or that the space's quota refuses, are dropped;
             // after any other failure (an unavailable or busy store, a local read error) they go
             // back under the upload id, so the client's retry of the same completion works.
-            const bool drop = stored.error().code == "invalid_digest" ||
-                              stored.error().rule == "storage_quota";
+            const bool drop =
+                stored.error().code == "invalid_digest" || stored.error().rule == "storage_quota";
             if (drop) {
                 ArtifactRegistry::remove_claimed(source);
             } else {
                 static_cast<void>(artifacts.release_upload(upload, source));
             }
             if (stored.error().code == "invalid_digest" || stored.error().code == "io") {
-                co_return co_await registry_error(route, boost::http::status::bad_request,
-                                                  stored.error().message, true,
+                co_return co_await registry_error(route,
+                                                  boost::http::status::bad_request,
+                                                  stored.error().message,
+                                                  true,
                                                   "BLOB_UPLOAD_INVALID");
             }
             co_return co_await registry_store_error(route, stored.error());
@@ -17455,11 +10397,12 @@ struct ApiServer::Impl {
     }
 
     boost::http::route_task blob_created(boost::http::route_params& route,
-                                         const std::string& repository, const std::string& digest) {
+                                         const std::string& repository,
+                                         const std::string& digest) {
         route.res.set(boost::http::field::location, "/v2/" + repository + "/blobs/" + digest);
         route.res.set("Docker-Content-Digest", digest);
-        return send_text(route, boost::http::status::created, {}, "application/octet-stream",
-                         "no-store");
+        return send_text(
+            route, boost::http::status::created, {}, "application/octet-stream", "no-store");
     }
 
     // A workspace store that refused a blob read or write (lake#383 phase B): unavailable stores
@@ -17469,29 +10412,35 @@ struct ApiServer::Impl {
     boost::http::route_task registry_store_error(boost::http::route_params& route,
                                                  const SyncStoreError& error) {
         if (error.rule == "storage_quota") {
-            return registry_error(route, boost::http::status::insufficient_storage, error.message,
-                                  true, "DENIED");
+            return registry_error(
+                route, boost::http::status::insufficient_storage, error.message, true, "DENIED");
         }
         if (error.code == "store_unavailable" || error.code == "busy" || error.code == "locked") {
             route.res.set(boost::http::field::retry_after, "1");
             // A refused client does not keep its connection (and a server worker) while it waits
             // to retry (lake#534).
             route.res.set_keep_alive(false);
-            return registry_error(route, boost::http::status::service_unavailable,
+            return registry_error(route,
+                                  boost::http::status::service_unavailable,
                                   "the image repository's workspace store is unavailable: " +
                                       error.message,
-                                  true, "UNAVAILABLE");
+                                  true,
+                                  "UNAVAILABLE");
         }
         if (error.code == "not_found") {
-            return registry_error(route, boost::http::status::internal_server_error,
+            return registry_error(route,
+                                  boost::http::status::internal_server_error,
                                   "the workspace store does not hold a blob its record names; push "
                                   "the blob again",
-                                  true, "UNKNOWN");
+                                  true,
+                                  "UNKNOWN");
         }
-        return registry_error(route, boost::http::status::internal_server_error,
-                              "the image repository's workspace store failed: " + error.code + ": " +
-                                  error.message,
-                              true, "UNKNOWN");
+        return registry_error(route,
+                              boost::http::status::internal_server_error,
+                              "the image repository's workspace store failed: " + error.code +
+                                  ": " + error.message,
+                              true,
+                              "UNKNOWN");
     }
 
     // At most this many blob streams run at once in this process, each with one window of
@@ -17508,8 +10457,11 @@ struct ApiServer::Impl {
     // short body and retries.
     using BlobReader =
         std::function<SyncStoreResult<std::uint64_t>(std::uint64_t, std::span<std::byte>)>;
-    boost::http::route_task stream_blob(boost::http::route_params& route, std::string digest,
-                                        std::uint64_t size, BlobReader read, bool head) {
+    boost::http::route_task stream_blob(boost::http::route_params& route,
+                                        std::string digest,
+                                        std::uint64_t size,
+                                        BlobReader read,
+                                        bool head) {
         namespace http = boost::http;
         struct Slot {
             std::atomic<int>& count;
@@ -17562,8 +10514,10 @@ struct ApiServer::Impl {
         // (lake#534); its own stream slots and the long-request caps bound it.
         if (server && !server->leave_worker(route)) {
             route.res.set(http::field::retry_after, "1");
-            co_return co_await registry_error(route, http::status::too_many_requests,
-                                              "too many long requests are waiting; retry", true,
+            co_return co_await registry_error(route,
+                                              http::status::too_many_requests,
+                                              "too many long requests are waiting; retry",
+                                              true,
                                               "TOOMANYREQUESTS");
         }
         std::uint64_t sent = 0;
@@ -17579,14 +10533,15 @@ struct ApiServer::Impl {
                 // its stream slot and the connection.
                 const auto idle = options.registry_stream_idle_timeout;
                 if (sent + offset == size) {
-                    auto [send_error] = co_await boost::capy::timeout(
-                        route.res_body.commit_eof(copied), idle);
+                    auto [send_error] =
+                        co_await boost::capy::timeout(route.res_body.commit_eof(copied), idle);
                     if (send_error) {
                         co_return http::route_error(send_error);
                     }
                     co_return http::route_done;
                 }
-                auto [send_error] = co_await boost::capy::timeout(route.res_body.commit(copied), idle);
+                auto [send_error] =
+                    co_await boost::capy::timeout(route.res_body.commit(copied), idle);
                 if (send_error) {
                     if (send_error == boost::capy::error::timeout) {
                         std::cerr << nlohmann::json{{"event", "oci_blob_stream_idle"},
@@ -17605,9 +10560,10 @@ struct ApiServer::Impl {
                 std::cerr << nlohmann::json{{"event", "oci_blob_stream_failed"},
                                             {"sent", sent},
                                             {"size", size},
-                                            {"error", next ? std::string("short read")
-                                                           : next.error().code + ": " +
-                                                                 next.error().message}}
+                                            {"error",
+                                             next
+                                                 ? std::string("short read")
+                                                 : next.error().code + ": " + next.error().message}}
                                  .dump()
                           << '\n';
                 co_return http::route_error(std::make_error_code(std::errc::io_error));
@@ -17622,15 +10578,20 @@ struct ApiServer::Impl {
     // moving), and each window takes the lane only for its one read. HEAD checks that the store
     // holds the object.
     boost::http::route_task serve_workspace_blob(boost::http::route_params& route,
-                                                 std::string customer_id, std::string workspace_id,
-                                                 control::OciBlob blob, bool head) {
+                                                 std::string customer_id,
+                                                 std::string workspace_id,
+                                                 control::OciBlob blob,
+                                                 bool head) {
         auto admission = sync_store.admit_workspace_stream(workspace_id);
         if (!admission) {
             co_return co_await registry_store_error(route, admission.error());
         }
         if (head) {
             auto present = co_await blocking_call(
-                [&] { return sync_store.workspace_blob_present(customer_id, workspace_id, blob.object); },
+                [&] {
+                    return sync_store.workspace_blob_present(
+                        customer_id, workspace_id, blob.object);
+                },
                 [](std::string message) -> SyncStoreResult<bool> {
                     return std::unexpected(SyncStoreError{"store_unavailable", std::move(message)});
                 });
@@ -17643,32 +10604,39 @@ struct ApiServer::Impl {
         }
         const std::string object = blob.object;
         co_return co_await stream_blob(
-            route, blob.digest, blob.size,
-            [this, customer_id, workspace_id, object](std::uint64_t offset, std::span<std::byte> into) {
-                return sync_store.read_workspace_blob(customer_id, workspace_id, object, offset, into,
-                                                      false);
+            route,
+            blob.digest,
+            blob.size,
+            [this, customer_id, workspace_id, object](std::uint64_t offset,
+                                                      std::span<std::byte> into) {
+                return sync_store.read_workspace_blob(
+                    customer_id, workspace_id, object, offset, into, false);
             },
             head);
     }
 
     // A tenant blob whose record names no store object yet: streamed from the instance registry's
     // file, never read whole.
-    boost::http::route_task serve_instance_blob(boost::http::route_params& route,
-                                                std::string digest, bool head) {
+    boost::http::route_task
+    serve_instance_blob(boost::http::route_params& route, std::string digest, bool head) {
         const auto file = artifacts.blob_file(digest);
         std::error_code error;
         const std::uintmax_t size = file ? std::filesystem::file_size(*file, error) : 0;
         if (!file || error) {
-            co_return co_await registry_error(route, boost::http::status::not_found,
-                                              "blob is unknown in this repository", true);
+            co_return co_await registry_error(
+                route, boost::http::status::not_found, "blob is unknown in this repository", true);
         }
         const std::filesystem::path path = *file;
         co_return co_await stream_blob(
-            route, digest, size,
-            [path](std::uint64_t offset, std::span<std::byte> into) -> SyncStoreResult<std::uint64_t> {
+            route,
+            digest,
+            size,
+            [path](std::uint64_t offset,
+                   std::span<std::byte> into) -> SyncStoreResult<std::uint64_t> {
                 std::ifstream input(path, std::ios::binary);
                 input.seekg(static_cast<std::streamoff>(offset));
-                input.read(reinterpret_cast<char*>(into.data()), static_cast<std::streamsize>(into.size()));
+                input.read(reinterpret_cast<char*>(into.data()),
+                           static_cast<std::streamsize>(into.size()));
                 if (input.bad() || (!input && input.gcount() == 0 && !into.empty())) {
                     return std::unexpected(SyncStoreError{"io", "could not read " + path.string()});
                 }
@@ -17691,8 +10659,8 @@ struct ApiServer::Impl {
             if (!tenant) {
                 co_return co_await registry_refusal(route, tenant.error());
             }
-            auto records = workspace_records(tenant->context, tenant->customer_id,
-                                             tenant->workspace_id);
+            auto records =
+                workspace_records(tenant->context, tenant->customer_id, tenant->workspace_id);
             if (!records) {
                 co_return co_await registry_workspace_error(route, records.error());
             }
@@ -17705,13 +10673,14 @@ struct ApiServer::Impl {
             bool manifest = false;
             for (const control::OciTag& tag : *tags) {
                 manifest = manifest || tag.digest == digest;
-                referenced = referenced || std::ranges::any_of(tag.references, [&](const auto& item) {
-                                 return item.digest == digest;
-                             });
+                referenced =
+                    referenced || std::ranges::any_of(tag.references, [&](const auto& item) {
+                        return item.digest == digest;
+                    });
             }
             if (manifest && !referenced) {
-                auto stored = control::settled(co_await control::get_oci_manifest(
-                    *records, tenant->customer_id, digest));
+                auto stored = control::settled(
+                    co_await control::get_oci_manifest(*records, tenant->customer_id, digest));
                 if (!stored) {
                     co_return co_await registry_workspace_error(route, stored.error());
                 }
@@ -17720,14 +10689,20 @@ struct ApiServer::Impl {
                     const std::span<const char> characters((*stored)->document.data(),
                                                            (*stored)->document.size());
                     const auto bytes = std::as_bytes(characters);
-                    co_return co_await send_bytes(
-                        route, boost::http::status::ok, "application/octet-stream",
-                        bytes, digest, {}, head);
+                    co_return co_await send_bytes(route,
+                                                  boost::http::status::ok,
+                                                  "application/octet-stream",
+                                                  bytes,
+                                                  digest,
+                                                  {},
+                                                  head);
                 }
             }
             if (!referenced) {
-                co_return co_await registry_error(route, boost::http::status::not_found,
-                                                  "blob is unknown in this repository", true);
+                co_return co_await registry_error(route,
+                                                  boost::http::status::not_found,
+                                                  "blob is unknown in this repository",
+                                                  true);
             }
             // ...and only when the workspace records that its space pushed it. A record that names
             // a store object is read only from the workspace's store (lake#383 phase B); one that
@@ -17739,13 +10714,14 @@ struct ApiServer::Impl {
                 co_return co_await registry_workspace_error(route, recorded.error());
             }
             if (!*recorded) {
-                co_return co_await registry_error(route, boost::http::status::not_found,
-                                                  "blob is unknown in this repository", true);
+                co_return co_await registry_error(route,
+                                                  boost::http::status::not_found,
+                                                  "blob is unknown in this repository",
+                                                  true);
             }
             if (!(*recorded)->object.empty()) {
-                co_return co_await serve_workspace_blob(route, tenant->customer_id,
-                                                        tenant->workspace_id,
-                                                        std::move(**recorded), head);
+                co_return co_await serve_workspace_blob(
+                    route, tenant->customer_id, tenant->workspace_id, std::move(**recorded), head);
             }
             co_return co_await serve_instance_blob(route, digest, head);
         } else if (!artifacts.repository_has_blob(repository, digest)) {
@@ -17802,18 +10778,22 @@ struct ApiServer::Impl {
             }
         }
         if (digest.empty()) {
-            co_return co_await registry_error(route, boost::http::status::not_found,
-                                              "OCI manifest is unknown in this repository", true,
+            co_return co_await registry_error(route,
+                                              boost::http::status::not_found,
+                                              "OCI manifest is unknown in this repository",
+                                              true,
                                               "MANIFEST_UNKNOWN");
         }
-        auto manifest =
-            control::settled(co_await control::get_oci_manifest(*records, tenant.customer_id, digest));
+        auto manifest = control::settled(
+            co_await control::get_oci_manifest(*records, tenant.customer_id, digest));
         if (!manifest) {
             co_return co_await registry_workspace_error(route, manifest.error());
         }
         if (!*manifest) {
-            co_return co_await registry_error(route, boost::http::status::not_found,
-                                              "OCI manifest is unknown in this repository", true,
+            co_return co_await registry_error(route,
+                                              boost::http::status::not_found,
+                                              "OCI manifest is unknown in this repository",
+                                              true,
                                               "MANIFEST_UNKNOWN");
         }
         route.res.set("Docker-Content-Digest", digest);
@@ -17821,9 +10801,13 @@ struct ApiServer::Impl {
                                                (*manifest)->document.size());
         const auto bytes = std::as_bytes(characters);
         co_return co_await send_bytes(
-            route, boost::http::status::ok,
+            route,
+            boost::http::status::ok,
             content_type.empty() ? "application/vnd.oci.image.manifest.v1+json" : content_type,
-            bytes, digest, {}, head);
+            bytes,
+            digest,
+            {},
+            head);
     }
 
     // A tenant manifest push (lake#383): the manifest is stored once in the workspace (`if_absent`,
@@ -17836,25 +10820,32 @@ struct ApiServer::Impl {
                                                         std::string content_type,
                                                         std::string document) {
         if (!ArtifactRegistry::tag_name(reference)) {
-            co_return co_await registry_error(route, boost::http::status::bad_request,
-                                              "OCI manifest name is invalid", true, "TAG_INVALID");
+            co_return co_await registry_error(route,
+                                              boost::http::status::bad_request,
+                                              "OCI manifest name is invalid",
+                                              true,
+                                              "TAG_INVALID");
         }
         const std::string digest = ArtifactRegistry::digest_of(document);
         if (ArtifactRegistry::digest_name(reference) && reference != digest) {
-            co_return co_await registry_error(route, boost::http::status::bad_request,
-                                              "OCI manifest bytes do not match their digest", true,
+            co_return co_await registry_error(route,
+                                              boost::http::status::bad_request,
+                                              "OCI manifest bytes do not match their digest",
+                                              true,
                                               "DIGEST_INVALID");
         }
         const nlohmann::json parsed = nlohmann::json::parse(document, nullptr, false);
         if (parsed.is_discarded() || !parsed.is_object() || parsed.value("schemaVersion", 0) != 2) {
-            co_return co_await registry_error(route, boost::http::status::bad_request,
+            co_return co_await registry_error(route,
+                                              boost::http::status::bad_request,
                                               "OCI manifest is not valid schema version 2 JSON",
-                                              true, "MANIFEST_INVALID");
+                                              true,
+                                              "MANIFEST_INVALID");
         }
         const auto digests = manifest_digests(parsed);
         if (!digests) {
-            co_return co_await registry_error(route, boost::http::status::bad_request,
-                                              digests.error(), true, "MANIFEST_INVALID");
+            co_return co_await registry_error(
+                route, boost::http::status::bad_request, digests.error(), true, "MANIFEST_INVALID");
         }
         auto records = workspace_records(tenant.context, tenant.customer_id, tenant.workspace_id);
         if (!records) {
@@ -17872,29 +10863,33 @@ struct ApiServer::Impl {
             }
             if (!*pushed) {
                 co_return co_await registry_error(
-                    route, boost::http::status::bad_request,
+                    route,
+                    boost::http::status::bad_request,
                     "OCI manifest references a blob not pushed to this workspace: " + referenced,
-                    true, "MANIFEST_BLOB_UNKNOWN");
+                    true,
+                    "MANIFEST_BLOB_UNKNOWN");
             }
             references.push_back({referenced, (*pushed)->size});
         }
-        auto stored = control::settled(co_await control::put_oci_manifest(
-            *records, {.customer_id = tenant.customer_id,
-                       .digest = digest,
-                       .content_type = content_type,
-                       .document = document,
-                       .references = references}));
+        auto stored =
+            control::settled(co_await control::put_oci_manifest(*records,
+                                                                {.customer_id = tenant.customer_id,
+                                                                 .digest = digest,
+                                                                 .content_type = content_type,
+                                                                 .document = document,
+                                                                 .references = references}));
         if (!stored) {
             co_return co_await registry_workspace_error(route, stored.error());
         }
-        auto tagged = control::settled(co_await control::set_oci_tag(
-            *records, {.customer_id = tenant.customer_id,
-                       .repository = tenant.name,
-                       .tag = reference,
-                       .digest = digest,
-                       .content_type = content_type,
-                       .manifest_size = document.size(),
-                       .references = std::move(references)}));
+        auto tagged =
+            control::settled(co_await control::set_oci_tag(*records,
+                                                           {.customer_id = tenant.customer_id,
+                                                            .repository = tenant.name,
+                                                            .tag = reference,
+                                                            .digest = digest,
+                                                            .content_type = content_type,
+                                                            .manifest_size = document.size(),
+                                                            .references = std::move(references)}));
         if (!tagged) {
             co_return co_await registry_workspace_error(route, tagged.error());
         }
@@ -17919,8 +10914,8 @@ struct ApiServer::Impl {
                 if (!tenant) {
                     co_return co_await registry_refusal(route, tenant.error());
                 }
-                co_return co_await serve_tenant_manifest_read(route, std::move(*tenant), reference,
-                                                              head);
+                co_return co_await serve_tenant_manifest_read(
+                    route, std::move(*tenant), reference, head);
             }
             const auto object = artifacts.manifest(repository, reference);
             if (!object) {
@@ -17958,9 +10953,8 @@ struct ApiServer::Impl {
                 ? "application/vnd.oci.image.manifest.v1+json"
                 : std::string(route.req.at(boost::http::field::content_type));
         if (tenant) {
-            co_return co_await serve_tenant_manifest_write(route, std::move(*tenant), repository,
-                                                           reference, content_type,
-                                                           std::move(body));
+            co_return co_await serve_tenant_manifest_write(
+                route, std::move(*tenant), repository, reference, content_type, std::move(body));
         }
         const std::span<const char> characters(body.data(), body.size());
         const auto published =
@@ -18215,38 +11209,6 @@ struct ApiServer::Impl {
                                       route.req.method() == boost::http::method::head);
     }
 
-    boost::http::route_task serve_model_page(boost::http::route_params& route) {
-        const auto repository = hub_repository(hub_id(route));
-        if (!repository) {
-            return send_text(
-                route,
-                boost::http::status::not_found,
-                web_ui_shell(
-                    "lake — model", "not found", "<h1>Model Not Found</h1>", viewer_for(route)),
-                "text/html; charset=utf-8",
-                "no-store");
-        }
-        ApiContext context = context_for(route);
-        const ApiResult result =
-            registry.call("get_model", {{"id", repository->id}, {"revision", "main"}}, context);
-        if (!result.ok) {
-            return send_text(route,
-                             boost::http::int_to_status(static_cast<unsigned>(rest_status(result))),
-                             web_ui_shell("lake — model",
-                                          "error",
-                                          "<h1>Model Unavailable</h1><p class=\"error\">" +
-                                              web_ui_escape(result.error.message) + "</p>",
-                                          viewer_for(context)),
-                             "text/html; charset=utf-8",
-                             "no-store");
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_model(result.value, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
     boost::http::route_task serve_hub_preupload(boost::http::route_params& route) {
         const auto repository = hub_repository(hub_id(route));
         if (!repository) {
@@ -18260,10 +11222,6 @@ struct ApiServer::Impl {
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
             co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
         }
         nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
         if (request.is_discarded() || !request.is_object()) {
@@ -18298,10 +11256,6 @@ struct ApiServer::Impl {
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
             co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
         }
         nlohmann::json operations = nlohmann::json::array();
         std::string message = "Hugging Face upload";
@@ -18346,13 +11300,13 @@ struct ApiServer::Impl {
         ApiContext context = context_for(route);
         // The commit and its search index update (lake#381) wait on the repository's store, so
         // they run on the asynchronous registry path, off the server thread.
-        const ApiResult result = unwrap(co_await registry.call_async(
-            "commit_repository_files",
-            {{"id", repository->id},
-             {"revision", route_value(route, "revision")},
-             {"message", message},
-             {"operations", std::move(operations)}},
-            context));
+        const ApiResult result =
+            unwrap(co_await registry.call_async("commit_repository_files",
+                                                {{"id", repository->id},
+                                                 {"revision", route_value(route, "revision")},
+                                                 {"message", message},
+                                                 {"operations", std::move(operations)}},
+                                                context));
         if (!result.ok) {
             co_return co_await send_hub_result(route, result);
         }
@@ -18371,10 +11325,6 @@ struct ApiServer::Impl {
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
             co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
         }
         const nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
         if (request.is_discarded() || !request.is_object()) {
@@ -18437,10 +11387,10 @@ struct ApiServer::Impl {
         // A repository belongs to one workspace (lake#315). Hub clients cannot add a field to
         // create_repo's body, so the workspace may also come in the X-Lake-Workspace-Id header
         // (huggingface_hub: HfApi(headers=...)). There is no default.
-        std::string workspace_id = request.contains("workspace_id") &&
-                                           request.at("workspace_id").is_string()
-                                       ? request.at("workspace_id").get<std::string>()
-                                       : std::string();
+        std::string workspace_id =
+            request.contains("workspace_id") && request.at("workspace_id").is_string()
+                ? request.at("workspace_id").get<std::string>()
+                : std::string();
         if (workspace_id.empty() && route.req.count("x-lake-workspace-id") != 0) {
             workspace_id = std::string(route.req.at("x-lake-workspace-id"));
         }
@@ -18468,10 +11418,6 @@ struct ApiServer::Impl {
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
             co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
         }
         const nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
         if (request.is_discarded() || !request.is_object() || !request.contains("content") ||
@@ -18535,10 +11481,6 @@ struct ApiServer::Impl {
         auto [read_error, body] = co_await read_string_body(route);
         if (read_error) {
             co_return boost::http::route_error(read_error);
-        }
-        if (const auto error = workspace_form_error(route, body); !error.empty()) {
-            co_return co_await send_text(route, boost::http::status::bad_request,
-                error_body("invalid_input", error), "application/json", "no-store");
         }
         const nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
         if (request.is_discarded() || !request.is_object() ||
@@ -18616,352 +11558,8 @@ struct ApiServer::Impl {
         co_return co_await send_hub_result(route, result);
     }
 
-    boost::http::route_task serve_search_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const search::Query query{.text = query_value(route, "query"),
-                                  .customer = query_value(route, "customer"),
-                                  .repository = query_value(route, "repository"),
-                                  .ref = query_value(route, "ref"),
-                                  .limit = 100,
-                                  .change = query_value(route, "change"),
-                                  .history = query_value(route, "history") == "1",
-                                  .workspace = query_value(route, "workspace_id")};
-        search::QueryResult search_result;
-        if (!query.text.empty()) {
-            nlohmann::json input{{"query", query.text}, {"limit", query.limit}};
-            if (!query.customer.empty()) {
-                input["customer"] = query.customer;
-            }
-            if (!query.repository.empty()) {
-                input["repository"] = query.repository;
-            }
-            if (!query.ref.empty()) {
-                input["ref"] = query.ref;
-            }
-            if (!query.change.empty()) {
-                input["change"] = query.change;
-            }
-            if (query.history) {
-                input["history"] = true;
-            }
-            if (!query.workspace.empty()) {
-                input["workspace_id"] = query.workspace;
-            }
-            // Search reads workspace indexes under their stores' lanes and may rebuild one
-            // (lake#381), so it runs on the asynchronous registry path, off the server thread.
-            const ApiResult result =
-                unwrap(co_await registry.call_async("search", input, context));
-            if (!result.ok) {
-                co_return co_await serve_page_error(route, result);
-            }
-            const std::string mode = result.value.value("mode", "hot");
-            search_result.mode = mode == "scan"       ? search::QueryMode::Scan
-                                 : mode == "snapshot" ? search::QueryMode::Snapshot
-                                 : mode == "artifact" ? search::QueryMode::Artifact
-                                                      : search::QueryMode::Hot;
-            search_result.scanned_changes = result.value.value("scanned_changes", std::size_t{0});
-            for (const nlohmann::json& item : result.value.at("items")) {
-                search_result.items.push_back(search::Hit{
-                    .customer = item.at("customer").get<std::string>(),
-                    .repository = item.at("repository").get<std::string>(),
-                    .path = item.at("path").get<std::string>(),
-                    .change = item.at("change").get<std::string>(),
-                    .snippet = item.at("snippet").get<std::string>(),
-                    .score = item.at("score").get<double>(),
-                    .artifact = item.value("artifact", ""),
-                    .artifact_version = item.value("artifact_version", ""),
-                    .digest = item.value("digest", ""),
-                    .line = item.value("line", std::size_t{0}),
-                    .workspace = item.value("workspace_id", ""),
-                });
-            }
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_search(query, search_result, viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_metering_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        std::string customer_id = query_value(route, "customer_id");
-        if (customer_id.empty() && !context.operator_credential) {
-            // An account's Usage opens on its own personal space.
-            customer_id = workspace_selection(context, "").customer_id;
-        }
-        nlohmann::json usage{{"customer_id", customer_id}, {"items", nlohmann::json::array()}};
-        if (!customer_id.empty()) {
-            // Usage reads the space's workspaces, so it runs on the asynchronous registry path.
-            auto completed = co_await registry.call_async(
-                "metering_usage", {{"customer_id", customer_id}}, context);
-            const ApiResult result =
-                completed ? std::move(*completed)
-                          : ApiResult::failure("store_error", completed.error().message);
-            if (!result.ok) {
-                co_return co_await serve_page_error(route, result);
-            }
-            usage = result.value;
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_metering(usage, viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    // Organization > Activity: the signed-in person's own audit events (my_audit).
-    boost::http::route_task serve_activity_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        if (!ctx.authorized)
-            co_return co_await redirect(route, "/sign-in");
-        // Newest first, and without the successful reads a browser polls, unless asked
-        // (lake#445).
-        const bool include_reads = query_value(route, "reads") == "all";
-        const audit::Filter filter{
-            .object = query_value(route, "object"),
-            .outcome = query_value(route, "outcome"),
-            .from = query_value(route, "from"),
-            .to = query_value(route, "to"),
-            .limit = 500,
-            .newest_first = query_value(route, "order") != "oldest",
-        };
-        nlohmann::json input = {{"limit", filter.limit},
-                                {"order", filter.newest_first ? "newest" : "oldest"},
-                                {"include_reads", include_reads}};
-        for (const auto& [key, value] :
-             {std::pair<const char*, const std::string&>{"object", filter.object},
-              {"outcome", filter.outcome},
-              {"from", filter.from},
-              {"to", filter.to}}) {
-            if (!value.empty())
-                input[key] = value;
-        }
-        // The central log and the person's workspaces' audits, in one round (decision 52).
-        const ApiResult result = unwrap(co_await registry.call_async("my_audit", input, ctx));
-        if (!result.ok) {
-            co_return co_await serve_page_error(route, result);
-        }
-        const nlohmann::json items = result.value.value("items", nlohmann::json::array());
-        std::vector<audit::Event> events;
-        for (const nlohmann::json& item : items) {
-            events.push_back(audit::event_from_json(item));
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_audit(events,
-                                                  filter,
-                                                  nlohmann::json::object(),
-                                                  viewer_for(ctx),
-                                                  audit_page_view(
-                                                      result.value, items, include_reads)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_audit_page(boost::http::route_params& route) {
-        ApiContext ctx = context_for(route);
-        if (!ctx.authorized)
-            co_return co_await redirect(route, "/sign-in");
-        const audit::Filter filter{
-            .principal = query_value(route, "principal"),
-            .object = query_value(route, "object"),
-            .outcome = query_value(route, "outcome"),
-            .from = query_value(route, "from"),
-            .to = query_value(route, "to"),
-            .limit = 500,
-            .newest_first = query_value(route, "order") != "oldest",
-        };
-        nlohmann::json input = {{"limit", filter.limit},
-                                {"order", filter.newest_first ? "newest" : "oldest"}};
-        if (!filter.principal.empty())
-            input["principal"] = filter.principal;
-        if (!filter.object.empty())
-            input["object"] = filter.object;
-        if (!filter.outcome.empty())
-            input["outcome"] = filter.outcome;
-        if (!filter.from.empty())
-            input["from"] = filter.from;
-        if (!filter.to.empty())
-            input["to"] = filter.to;
-        // The central log and every workspace's audit, in one round (decision 52).
-        const ApiResult result = unwrap(co_await registry.call_async("audit", input, ctx));
-        if (!result.ok) {
-            co_return co_await serve_page_error(route, result);
-        }
-        const nlohmann::json items = result.value.value("items", nlohmann::json::array());
-        std::vector<audit::Event> events;
-        for (const nlohmann::json& item : items) {
-            events.push_back(audit::event_from_json(item));
-        }
-        nlohmann::json log_configuration;
-        if (ctx.checkpoints) {
-            const ApiResult configuration =
-                registry.call("transparency_log_configuration", nlohmann::json::object(), ctx);
-            if (!configuration.ok) {
-                co_return co_await serve_page_error(route, configuration);
-            }
-            log_configuration = configuration.value;
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_audit(events,
-                                                  filter,
-                                                  log_configuration,
-                                                  viewer_for(ctx),
-                                                  audit_page_view(result.value, items, true)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_transparency_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        const std::string identity = query_value(route, "identity");
-        nlohmann::json scan;
-        if (!identity.empty()) {
-            const ApiResult result =
-                registry.call("transparency_identity_scan", {{"identity", identity}}, context);
-            if (!result.ok) {
-                return serve_page_error(route, result);
-            }
-            scan = result.value;
-        }
-        return send_text(route,
-                         boost::http::status::ok,
-                         web_ui_transparency(identity, scan, viewer_for(context)),
-                         "text/html; charset=utf-8",
-                         "no-store");
-    }
-
-    // Secret pages (docs/api/secrets.md): mounts live in workspaces (lake#328), so the list is of
-    // one workspace, named by `workspace_id` or else the one the viewer last chose. A mount's own
-    // pages need no workspace: the mount names it.
-    boost::http::route_task serve_secret_mounts_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        std::string workspace_id = query_value(route, "workspace_id");
-        if (workspace_id.empty()) {
-            workspace_id = context.remembered_workspace_id;
-        }
-        const auto workspace = workspace_id.empty() || !options.store
-                                   ? control::Result<control::Workspace>(std::unexpect,
-                                         control::StoreError{"not_found", "no workspace"})
-                                   : options.store->get_workspace(workspace_id);
-        if (!workspace || workspace->desired == "deleted") {
-            if (!query_value(route, "workspace_id").empty()) {
-                co_return co_await serve_page_error(
-                    route, ApiResult::failure("invalid_input",
-                                              "workspace_id must name a workspace Zetta in this "
-                                              "space",
-                                              "/workspace_id"));
-            }
-            co_return co_await send_text(route,
-                                         boost::http::status::ok,
-                                         web_ui_secret_mounts({}, "", viewer_for(context)),
-                                         "text/html; charset=utf-8",
-                                         "no-store");
-        }
-        nlohmann::json input{{"customer_id", workspace->customer_id},
-                             {"workspace_id", workspace->id},
-                             {"limit", 500}};
-        const std::string organization_id = query_value(route, "organization_id");
-        if (!organization_id.empty()) {
-            input["organization_id"] = organization_id;
-        }
-        const ApiResult result =
-            unwrap(co_await registry.call_async("list_secret_mounts", input, context));
-        if (!result.ok) {
-            co_return co_await serve_page_error(route, result);
-        }
-        std::vector<control::SecretMount> mounts;
-        for (const nlohmann::json& item : result.value.at("items")) {
-            mounts.push_back(secret_mount_from_json(item));
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_secret_mounts(mounts, workspace->id,
-                                                          viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
-    boost::http::route_task serve_secrets_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string mount_id = query_value(route, "mount_id");
-        if (mount_id.empty()) {
-            co_return co_await redirect(route, "/secret-mounts");
-        }
-        const ApiResult mount_result = unwrap(
-            co_await registry.call_async("get_secret_mount", {{"mount_id", mount_id}}, context));
-        if (!mount_result.ok) {
-            co_return co_await serve_page_error(route, mount_result);
-        }
-        const control::SecretMount mount = secret_mount_from_json(mount_result.value);
-        const std::string name = query_value(route, "name");
-        std::optional<control::SecretMetadata> metadata;
-        if (!name.empty()) {
-            const ApiResult metadata_result = unwrap(co_await registry.call_async(
-                "secret_metadata", {{"mount_id", mount_id}, {"name", name}}, context));
-            if (!metadata_result.ok) {
-                co_return co_await serve_page_error(route, metadata_result);
-            }
-            metadata = secret_metadata_from_json(metadata_result.value);
-        }
-        co_return co_await send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_secrets(mount, name, metadata ? &*metadata : nullptr, viewer_for(context)),
-            "text/html; charset=utf-8",
-            "no-store");
-    }
-
-    boost::http::route_task serve_encryption_keys_page(boost::http::route_params& route) {
-        ApiContext context = context_for(route);
-        if (!context.authorized) {
-            co_return co_await redirect(route, "/sign-in");
-        }
-        const std::string mount_id = query_value(route, "mount_id");
-        if (mount_id.empty()) {
-            co_return co_await redirect(route, "/secret-mounts");
-        }
-        const ApiResult mount_result = unwrap(
-            co_await registry.call_async("get_secret_mount", {{"mount_id", mount_id}}, context));
-        if (!mount_result.ok) {
-            co_return co_await serve_page_error(route, mount_result);
-        }
-        const ApiResult keys_result = unwrap(co_await registry.call_async(
-            "list_encryption_keys", {{"mount_id", mount_id}, {"limit", 500}}, context));
-        if (!keys_result.ok) {
-            co_return co_await serve_page_error(route, keys_result);
-        }
-        std::vector<control::EncryptionKey> keys;
-        for (const nlohmann::json& item : keys_result.value.at("items")) {
-            keys.push_back(encryption_key_from_json(item));
-        }
-        co_return co_await send_text(route,
-                                     boost::http::status::ok,
-                                     web_ui_encryption_keys(secret_mount_from_json(
-                                                                mount_result.value),
-                                                            keys,
-                                                            viewer_for(context)),
-                                     "text/html; charset=utf-8",
-                                     "no-store");
-    }
-
     // A file of the embedded web app (docs/ui/web-app.md); 404 when the build has no such file.
-    boost::http::route_task serve_web_app_file(boost::http::route_params& route,
-                                               std::string path) {
+    boost::http::route_task serve_web_app_file(boost::http::route_params& route, std::string path) {
         const WebAppAsset* asset = web_app_asset(path);
         if (asset == nullptr) {
             return send_text(route,
@@ -18993,14 +11591,6 @@ struct ApiServer::Impl {
                          std::string(web_ui_font(name)),
                          "font/woff2",
                          web_ui_asset_cache_control(path));
-    }
-
-    boost::http::route_task serve_experiment_asset(boost::http::route_params& route,
-                                                  std::string_view name) {
-        co_return co_await send_text(route, boost::http::status::ok,
-            std::string(web_ui_experiment_asset(name)),
-            name.ends_with(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8",
-            web_ui_asset_cache_control(std::string(route.url.path())));
     }
 
     boost::http::route_task serve_openapi(boost::http::route_params& route) {
@@ -19124,8 +11714,8 @@ struct ApiServer::Impl {
             metrics.increment_counter("lake_workspace_deletion_errors_total");
             std::println(stderr, "lake: workspace deletion pending: {}", resumed.error());
         } else if (*resumed > 0) {
-            metrics.increment_counter("lake_workspace_deletions_completed_total", {},
-                                      static_cast<double>(*resumed));
+            metrics.increment_counter(
+                "lake_workspace_deletions_completed_total", {}, static_cast<double>(*resumed));
         }
     }
 
@@ -19191,16 +11781,21 @@ struct ApiServer::Impl {
                 reported = current;
             }
         };
-        report("lake_audit_workspace_events_written_total", {}, now.written,
-               reported_audit.written);
-        report("lake_audit_workspace_flush_errors_total", {}, now.flush_errors,
+        report(
+            "lake_audit_workspace_events_written_total", {}, now.written, reported_audit.written);
+        report("lake_audit_workspace_flush_errors_total",
+               {},
+               now.flush_errors,
                reported_audit.flush_errors);
-        report("lake_audit_workspace_conflicts_total", {}, now.conflicts,
-               reported_audit.conflicts);
-        report("lake_audit_workspace_dropped_total", {{"reason", "bound"}}, now.dropped,
+        report("lake_audit_workspace_conflicts_total", {}, now.conflicts, reported_audit.conflicts);
+        report("lake_audit_workspace_dropped_total",
+               {{"reason", "bound"}},
+               now.dropped,
                reported_audit.dropped);
-        report("lake_audit_workspace_dropped_total", {{"reason", "workspace_deleted"}},
-               now.dropped_gone, reported_audit.dropped_gone);
+        report("lake_audit_workspace_dropped_total",
+               {{"reason", "workspace_deleted"}},
+               now.dropped_gone,
+               reported_audit.dropped_gone);
         metrics.set_gauge(
             "lake_audit_workspace_pending", {}, static_cast<double>(audit_recorder->pending()));
     }
@@ -19222,18 +11817,28 @@ struct ApiServer::Impl {
                 reported = current;
             }
         };
-        report("lake_request_series_requests_written_total", {}, now.recorded,
+        report("lake_request_series_requests_written_total",
+               {},
+               now.recorded,
                reported_request_series.recorded);
-        report("lake_request_series_flush_errors_total", {}, now.flush_errors,
+        report("lake_request_series_flush_errors_total",
+               {},
+               now.flush_errors,
                reported_request_series.flush_errors);
-        report("lake_request_series_dropped_total", {{"reason", "bound"}}, now.dropped_bound,
+        report("lake_request_series_dropped_total",
+               {{"reason", "bound"}},
+               now.dropped_bound,
                reported_request_series.dropped_bound);
-        report("lake_request_series_dropped_total", {{"reason", "workspace_deleted"}},
-               now.dropped_workspace_deleted, reported_request_series.dropped_workspace_deleted);
-        report("lake_request_series_dropped_total", {{"reason", "refused"}}, now.dropped_refused,
+        report("lake_request_series_dropped_total",
+               {{"reason", "workspace_deleted"}},
+               now.dropped_workspace_deleted,
+               reported_request_series.dropped_workspace_deleted);
+        report("lake_request_series_dropped_total",
+               {{"reason", "refused"}},
+               now.dropped_refused,
                reported_request_series.dropped_refused);
-        metrics.set_gauge("lake_request_series_pending", {},
-                          static_cast<double>(request_recorder->pending()));
+        metrics.set_gauge(
+            "lake_request_series_pending", {}, static_cast<double>(request_recorder->pending()));
     }
 
     void log_store_owner(nlohmann::json event) const {
@@ -19383,7 +11988,9 @@ struct ApiServer::Impl {
         if (!from_own_origin(route)) {
             return "Cross-site requests cannot use the browser session.";
         }
-        const std::string local = workspace_local_path(std::string(route.url.path()));
+        const std::string path(route.url.path());
+        const std::string local =
+            workspace_path_id(path).empty() ? path : workspace_prefixed_local_path(path);
         const bool json_api = local == "/mcp" || (local.starts_with("/v1/") &&
                                                   !local.starts_with("/v1/repositories/"));
         if (json_api && route.req.method() == boost::http::method::post &&
@@ -19841,8 +12448,7 @@ struct ApiServer::Impl {
                     // tools/list is itself the fresh list, so it never carries the notice:
                     // a client that refetches on the notice is not told again.
                     content_type = "text/event-stream";
-                    body = "event: message\ndata: " +
-                           mcp_tool_list_changed_notification().dump() +
+                    body = "event: message\ndata: " + mcp_tool_list_changed_notification().dump() +
                            "\n\nevent: message\ndata: " + body + "\n\n";
                 }
             }
@@ -19960,8 +12566,8 @@ static std::expected<void, std::string> prepare_local_identity() {
     std::filesystem::create_directories(home / "identity", created);
     int lock = -1;
     if (!created) {
-        lock = ::open((home / "identity" / ".lake-create.lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC,
-                      0600);
+        lock = ::open(
+            (home / "identity" / ".lake-create.lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
         if (lock >= 0) {
             static_cast<void>(::flock(lock, LOCK_EX));
         }
@@ -20052,31 +12658,33 @@ bool ApiServer::start() {
     // and answered 500, never a dropped connection (lake#440). It also counts itself in flight
     // for the drain in stop() (lake#479).
     const auto guarded = [&impl](std::string pattern, auto handler) {
-        return guard_route(std::move(pattern),
-                           [&impl, handler = std::move(handler)](
-                               http::route_params& route) -> http::route_task {
-                               return count_in_flight(impl.in_flight, handler(route));
-                           },
-                           [&impl](http::route_params& route, const RouteFailure& failure) {
-                               const auto timing = request_timing(route);
-                               impl.record_request(route,
-                                                   failure.route,
-                                                   timing ? timing->started
-                                                          : std::chrono::steady_clock::now());
-                           });
+        return guard_route(
+            std::move(pattern),
+            [&impl, handler = std::move(handler)](http::route_params& route) -> http::route_task {
+                return count_in_flight(impl.in_flight, handler(route));
+            },
+            [&impl](http::route_params& route, const RouteFailure& failure) {
+                const auto timing = request_timing(route);
+                impl.record_request(route,
+                                    failure.route,
+                                    timing ? timing->started : std::chrono::steady_clock::now());
+            });
     };
     const auto add_route = [&router, &guarded](auto method, auto path, auto handler) {
         const std::string original(path);
         auto guarded_handler = guarded(original, std::move(handler));
-        if (workspace_page_path(original)) {
-            router.add(method, "/w/:workspace_id" + original, decltype(guarded_handler)(guarded_handler));
+        // A workspace's Zetta is also reached at /w/<workspace>/workspaces/<space>/zetta/....
+        if (original.starts_with("/workspaces/")) {
+            router.add(
+                method, "/w/:workspace_id" + original, decltype(guarded_handler)(guarded_handler));
         }
         router.add(method, original, std::move(guarded_handler));
     };
     const auto add_workspace_api_route = [&router, &guarded](auto method, auto path, auto handler) {
         const std::string original(path);
         auto guarded_handler = guarded(original, std::move(handler));
-        router.add(method, "/w/:workspace_id" + original, decltype(guarded_handler)(guarded_handler));
+        router.add(
+            method, "/w/:workspace_id" + original, decltype(guarded_handler)(guarded_handler));
         router.add(method, original, std::move(guarded_handler));
     };
     router.use([&impl, cors = http::cors()](http::route_params& route) -> http::route_task {
@@ -20118,8 +12726,8 @@ bool ApiServer::start() {
         co_return result;
     }));
     // The web app (docs/ui/web-app.md): a browser opening any page is answered with the app's
-    // index.html, before the workspace redirects and the npm catch-all, which would otherwise
-    // claim single-segment paths. The app routes, guards and renders the page itself.
+    // index.html, before the workspace check and the npm catch-all, which would otherwise claim
+    // single-segment paths. The app routes, guards and renders the page itself.
     router.use(guarded("web_app", [&impl](http::route_params& route) -> http::route_task {
         const std::string path(route.url.path());
         const std::string accept(route.req.value_or(http::field::accept, ""));
@@ -20145,63 +12753,47 @@ bool ApiServer::start() {
         }
         co_return result;
     }));
-    add_route(http::method::get, "/", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/", impl.serve_web_root(route));
-    });
-    add_route(http::method::get, "/ui/:file", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route,
-                                    "/ui/:file",
-                                    impl.serve_web_app_file(route, std::string(route.url.path())));
-    });
+    add_route(
+        http::method::get, "/ui/:file", [&impl](http::route_params& route) -> http::route_task {
+            return impl.observe_request(
+                route, "/ui/:file", impl.serve_web_app_file(route, std::string(route.url.path())));
+        });
     add_route(
         http::method::get, "/style.css", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/style.css", impl.serve_style(route));
         });
     const std::string stylesheet_path(web_ui_stylesheet_url());
     add_route(http::method::get,
-               stylesheet_path,
-               [&impl, stylesheet_path](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route, stylesheet_path, impl.serve_style(route));
-               });
-    for (const std::string_view asset : web_ui_experiment_asset_names()) {
-        for (const auto& path : {"/assets/experiments/" + std::string(asset),
-                                 std::string(web_ui_experiment_asset_url(asset))}) {
-            add_route(http::method::get, path,
-                [&impl, asset, path](http::route_params& route) -> http::route_task {
-                    return impl.observe_request(route, path, impl.serve_experiment_asset(route, asset));
-                });
-        }
-    }
+              stylesheet_path,
+              [&impl, stylesheet_path](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(route, stylesheet_path, impl.serve_style(route));
+              });
     for (const std::string_view font : web_ui_font_names()) {
         const std::string route_path = "/fonts/" + std::string(font);
         add_route(http::method::get,
-                   route_path,
-                   [&impl, font, route_path](http::route_params& route) -> http::route_task {
-                       return impl.observe_request(route, route_path, impl.serve_font(route, font));
-                   });
+                  route_path,
+                  [&impl, font, route_path](http::route_params& route) -> http::route_task {
+                      return impl.observe_request(route, route_path, impl.serve_font(route, font));
+                  });
         const std::string hashed_route_path(web_ui_font_url(font));
         add_route(http::method::get,
-                   hashed_route_path,
-                   [&impl, font, hashed_route_path](http::route_params& route) -> http::route_task {
-                       return impl.observe_request(
-                           route, hashed_route_path, impl.serve_font(route, font));
-                   });
+                  hashed_route_path,
+                  [&impl, font, hashed_route_path](http::route_params& route) -> http::route_task {
+                      return impl.observe_request(
+                          route, hashed_route_path, impl.serve_font(route, font));
+                  });
     }
     add_route(
         http::method::get, "/healthz", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/healthz", impl.serve_healthz(route));
         });
-    add_route(
-        http::method::get, "/readyz", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/readyz", impl.serve_readyz(route));
-        });
+    add_route(http::method::get, "/readyz", [&impl](http::route_params& route) -> http::route_task {
+        return impl.observe_request(route, "/readyz", impl.serve_readyz(route));
+    });
     add_route(
         http::method::get, "/metrics", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/metrics", impl.serve_metrics(route));
         });
-    add_route(http::method::get, "/login", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/login", impl.serve_login(route));
-    });
     add_route(
         http::method::post, "/session", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/session", impl.serve_session(route));
@@ -20211,177 +12803,9 @@ bool ApiServer::start() {
             return impl.observe_request(route, "/logout", impl.serve_logout(route));
         });
     add_route(
-        http::method::get, "/customers", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/customers", impl.serve_customers_page(route));
-        });
-    add_route(
-        http::method::get, "/applications", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(
-                route, "/applications", impl.serve_applications_page(route));
-        });
-    add_route(http::method::post,
-               "/applications",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/applications", impl.serve_application_register(route));
-               });
-    add_route(
-        http::method::get, "/application", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/application", impl.serve_application_page(route));
-        });
-    add_route(http::method::get,
-               "/application/users",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/application/users", impl.serve_application_users_page(route));
-               });
-    add_route(http::method::post,
-               "/application/users/suspend",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/application/users/suspend",
-                                               impl.serve_application_user_suspend(route));
-               });
-    add_route(http::method::get,
-               "/application/organizations",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/application/organizations",
-                                               impl.serve_application_organizations_page(route));
-               });
-    add_route(http::method::post,
-               "/application/organizations",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/application/organizations",
-                                               impl.serve_application_organization_create(route));
-               });
-    add_route(http::method::post,
-               "/application/organizations/delete",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/application/organizations/delete",
-                                               impl.serve_application_organization_delete(route));
-               });
-    add_route(http::method::get,
-               "/application/events",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/application/events", impl.serve_application_events_page(route));
-               });
-    add_route(http::method::post,
-               "/application/webhooks",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/application/webhooks",
-                                               impl.serve_application_webhook_create(route));
-               });
-    add_route(http::method::get,
-               "/organizations",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/organizations", impl.serve_organizations_page(route));
-               });
-    add_route(
-        http::method::get, "/organization", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(
-                route, "/organization", impl.serve_organization_page(route));
-        });
-    add_route(http::method::get, "/team", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/team", impl.serve_team_page(route));
-    });
-    add_route(
-        http::method::get, "/member", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/member", impl.serve_member_page(route));
-        });
-    add_route(http::method::post,
-               "/organization/invitations",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/organization/invitations",
-                                               impl.serve_organization_invitation(route));
-               });
-    add_route(http::method::post,
-               "/organizations/create",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route, "/organizations/create", impl.serve_organization_create(route));
-               });
-    add_route(http::method::post,
-               "/organizations/convert",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route, "/organizations/convert", impl.serve_organization_convert(route));
-               });
-    add_route(http::method::post,
-               "/invitations/accept",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route, "/invitations/accept", impl.serve_invitation_accept(route));
-               });
-    add_route(http::method::post,
-               "/organization/teams",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route, "/organization/teams", impl.serve_organization_team_create(route));
-               });
-    add_route(http::method::post,
-               "/organization/sso",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/organization/sso", impl.serve_organization_sso(route));
-               });
-    add_route(
-        http::method::post, "/member/role", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/member/role", impl.serve_member_role(route));
-        });
-    add_route(http::method::post,
-               "/member/remove",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/member/remove", impl.serve_member_remove(route));
-               });
-    add_route(http::method::get, "/sso", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/sso", impl.serve_sso_page(route));
-    });
-    add_route(http::method::get, "/teams", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/teams", impl.serve_teams_page(route));
-    });
-    add_route(
-        http::method::get, "/members", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/members", impl.serve_members_page(route));
-        });
-    add_route(
-        http::method::get, "/invitations", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/invitations", impl.serve_invitations_page(route));
-        });
-    add_route(
-        http::method::get, "/grants", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/grants", impl.serve_grants_page(route));
-        });
-    add_route(
-        http::method::get, "/access", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/access", impl.serve_access_page(route));
-        });
-    add_route(http::method::get,
-               "/repository/access",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/repository/access",
-                                               impl.serve_entity_access_page(route, "repository"));
-               });
-    add_route(http::method::get,
-               "/organization/access",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route,
-                       "/organization/access",
-                       impl.serve_entity_access_page(route, "organization"));
-               });
-    add_route(
-        http::method::get, "/team/access", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(
-                route, "/team/access", impl.serve_entity_access_page(route, "team"));
-        });
-    add_route(
         http::method::get, "/sign-up", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/sign-up", impl.serve_sign_up(route));
+            return impl.observe_request(
+                route, "/sign-up", impl.serve_custom_domain_page(route, "sign-up"));
         });
     add_route(
         http::method::get,
@@ -20403,69 +12827,69 @@ bool ApiServer::start() {
                 route, "/apps/:id/mfa", impl.serve_application_identity_page(route, "mfa"));
         });
     add_route(http::method::get,
-               "/apps/:id/passkey-sign-in",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route,
-                       "/apps/:id/passkey-sign-in",
-                       impl.serve_application_identity_page(route, "passkey"));
-               });
+              "/apps/:id/passkey-sign-in",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route,
+                      "/apps/:id/passkey-sign-in",
+                      impl.serve_application_identity_page(route, "passkey"));
+              });
     add_route(http::method::post,
-               "/apps/:id/identity/sign-up",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route,
-                       "/apps/:id/identity/sign-up",
-                       impl.serve_application_password(route, "sign_up_password"));
-               });
+              "/apps/:id/identity/sign-up",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route,
+                      "/apps/:id/identity/sign-up",
+                      impl.serve_application_password(route, "sign_up_password"));
+              });
     add_route(http::method::post,
-               "/apps/:id/identity/sign-in",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route,
-                       "/apps/:id/identity/sign-in",
-                       impl.serve_application_password(route, "sign_in_password"));
-               });
+              "/apps/:id/identity/sign-in",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route,
+                      "/apps/:id/identity/sign-in",
+                      impl.serve_application_password(route, "sign_in_password"));
+              });
     add_route(http::method::post,
-               "/apps/:id/identity/mfa/verify",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route,
-                       "/apps/:id/identity/mfa/verify",
-                       impl.serve_application_password(route, "verify_mfa"));
-               });
+              "/apps/:id/identity/mfa/verify",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(route,
+                                              "/apps/:id/identity/mfa/verify",
+                                              impl.serve_application_password(route, "verify_mfa"));
+              });
     add_route(http::method::post,
-               "/apps/:id/identity/passkey/begin",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route,
-                       "/apps/:id/identity/passkey/begin",
-                       impl.serve_application_passkey(route, "begin_passkey_sign_in"));
-               });
+              "/apps/:id/identity/passkey/begin",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route,
+                      "/apps/:id/identity/passkey/begin",
+                      impl.serve_application_passkey(route, "begin_passkey_sign_in"));
+              });
     add_route(http::method::post,
-               "/apps/:id/identity/passkey/sign-in",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route,
-                       "/apps/:id/identity/passkey/sign-in",
-                       impl.serve_application_passkey(route, "sign_in_passkey"));
-               });
+              "/apps/:id/identity/passkey/sign-in",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route,
+                      "/apps/:id/identity/passkey/sign-in",
+                      impl.serve_application_passkey(route, "sign_in_passkey"));
+              });
     add_route(http::method::post,
-               "/apps/:id/identity/oauth",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/apps/:id/identity/oauth", impl.serve_application_oauth(route));
-               });
+              "/apps/:id/identity/oauth",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/apps/:id/identity/oauth", impl.serve_application_oauth(route));
+              });
     add_route(http::method::get,
-               "/v1/apps/:id/.well-known/jwks.json",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/v1/apps/:id/.well-known/jwks.json",
-                                               impl.serve_application_jwks(route));
-               });
+              "/v1/apps/:id/.well-known/jwks.json",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(route,
+                                              "/v1/apps/:id/.well-known/jwks.json",
+                                              impl.serve_application_jwks(route));
+              });
     add_route(
         http::method::get, "/sign-in", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/sign-in", impl.serve_sign_in(route));
+            return impl.observe_request(
+                route, "/sign-in", impl.serve_custom_domain_page(route, "sign-in"));
         });
     add_route(http::method::get,
               "/apps/authorize",
@@ -20478,596 +12902,65 @@ bool ApiServer::start() {
             return impl.observe_request(route, "/v1/apps/auth", impl.serve_app_forward_auth(route));
         });
     add_route(http::method::get, "/mfa", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/mfa", impl.serve_mfa(route));
-    });
-    add_route(
-        http::method::get, "/passkeys", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/passkeys", impl.serve_passkeys(route));
-        });
-    add_route(http::method::get,
-               "/passkey-sign-in",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/passkey-sign-in", impl.serve_passkey_sign_in(route));
-               });
-    add_route(
-        http::method::get, "/sessions", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/sessions", impl.serve_sessions(route));
-        });
-    add_route(
-        http::method::get, "/tokens", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/tokens", impl.serve_tokens(route));
-        });
-    // The Docs section (lake#252): public, rendered from the guides embedded at build time.
-    add_route(http::method::get, "/docs", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/docs", impl.serve_docs(route, ""));
+        return impl.observe_request(route, "/mfa", impl.serve_custom_domain_page(route, "mfa"));
     });
     add_route(http::method::get,
-               "/docs/:page",
-               [&impl](http::route_params& route) -> http::route_task {
-                   std::string page;
-                   for (const auto& [name, value] : route.params) {
-                       if (name == "page") {
-                           page = value;
-                       }
-                   }
-                   return impl.observe_request(route, "/docs/:page", impl.serve_docs(route, page));
-               });
+              "/passkey-sign-in",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/passkey-sign-in", impl.serve_custom_domain_page(route, "passkey"));
+              });
     add_route(http::method::get,
-               "/developer/mcp",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route, "/developer/mcp", impl.serve_mcp_page(route));
-               });
-    add_route(http::method::post,
-               "/developer/mcp/key",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/developer/mcp/key", impl.serve_mcp_key(route));
-               });
+              "/developer/mcp/skill",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/developer/mcp/skill", impl.serve_mcp_skill(route));
+              });
     add_route(http::method::get,
-               "/developer/mcp/skill",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/developer/mcp/skill", impl.serve_mcp_skill(route));
-               });
-    add_route(http::method::get,
-               "/skills/lake/SKILL.md",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/skills/lake/SKILL.md", impl.serve_mcp_skill(route));
-               });
+              "/skills/lake/SKILL.md",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/skills/lake/SKILL.md", impl.serve_mcp_skill(route));
+              });
     add_route(
         http::method::get, "/llms.txt", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(route, "/llms.txt", impl.serve_llms(route, false));
         });
     add_route(http::method::get,
-               "/llms-full.txt",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/llms-full.txt", impl.serve_llms(route, true));
-               });
-    add_route(
-        http::method::get, "/settings", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/settings", impl.serve_settings(route));
-        });
+              "/llms-full.txt",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/llms-full.txt", impl.serve_llms(route, true));
+              });
     add_route(http::method::post,
-               "/identity/sign-up",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/identity/sign-up", impl.serve_identity_sign_up(route));
-               });
-    add_route(http::method::post,
-               "/identity/sign-in",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/identity/sign-in", impl.serve_identity_sign_in(route));
-               });
-    add_route(http::method::post,
-               "/identity/clerk-session",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/identity/clerk-session", impl.serve_clerk_session(route));
-               });
-    add_route(http::method::post,
-               "/identity/mfa/verify",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/identity/mfa/verify", impl.serve_identity_mfa_verify(route));
-               });
-    add_route(http::method::post,
-               "/identity/mfa/enroll",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/identity/mfa/enroll", impl.serve_identity_mfa_enroll(route));
-               });
-    add_route(http::method::post,
-               "/identity/mfa/disable",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/identity/mfa/disable", impl.serve_identity_mfa_disable(route));
-               });
-    add_route(http::method::post,
-               "/identity/oauth",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/identity/oauth", impl.serve_identity_oauth(route));
-               });
-    add_route(http::method::post,
-               "/identity/session/revoke",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/identity/session/revoke",
-                                               impl.serve_identity_session_revoke(route));
-               });
-    add_route(http::method::post,
-               "/identity/device/revoke",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/identity/device/revoke", impl.serve_identity_device_revoke(route));
-               });
-    add_route(http::method::post,
-               "/identity/token/create",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/identity/token/create", impl.serve_identity_token_create(route));
-               });
-    add_route(http::method::post,
-               "/repository/create",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/repository/create", impl.serve_repository_create(route));
-               });
-    add_route(http::method::post,
-               "/repository/build",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/repository/build", impl.serve_repository_build(route));
-               });
-    add_route(
-        http::method::get, "/repositories", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(
-                route, "/repositories", impl.serve_repositories_page(route));
-        });
-    for (const auto& [path, section] :
-         std::array<std::pair<const char*, const char*>, 22>{{{"/design/projects", "projects"},
-                                                              {"/workspaces", "workspaces"},
-                                                              {"/design/solutions", "solutions"},
-                                                              {"/design/solution", "solution"},
-                                                              {"/design/methodologies", "methodologies"},
-                                                              {"/design/methodology", "methodology"},
-                                                              {"/design/discover", "discover"},
-                                                              {"/design/opportunities", "discover"},
-                                                              {"/design/agent-library", "library"},
-                                                              {"/design/project", "project"},
-                                                              {"/design/pipeline", "pipeline"},
-                                                              {"/train/agents", "agents"},
-                                                              {"/train/agent", "agent"},
-                                                              {"/train/data", "data"},
-                                                              {"/train/dataset", "dataset"},
-                                                              {"/train/query", "query"},
-                                                              {"/train/runs", "runs"},
-                                                              {"/train/run", "run"},
-                                                              {"/ship/models", "models"},
-                                                              {"/ship/indexes", "indexes"},
-                                                              {"/ship/index", "index"},
-                                                              {"/services", "services"}}}) {
-        add_route(http::method::get,
-                   path,
-                   [&impl, path, section](http::route_params& route) -> http::route_task {
-                       return impl.observe_request(
-                           route, path, impl.serve_workspace_page(route, section));
-                   });
-    }
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 51>{
-             {{"/workspace/start", "start"},
-              {"/workspaces/create", "workspace_create"},
-              {"/workspaces/delete", "workspace_delete"},
-              {"/design/solutions/start", "solution_start"},
-              {"/design/solution/confirm", "solution_confirm"},
-              {"/design/solution/run", "solution_run"},
-              {"/design/solution/policy", "solution_policy"},
-              {"/design/solution/approve", "solution_approve"},
-              {"/design/solution/outcome", "solution_outcome"},
-              {"/train/agents/create", "agent_create"},
-              {"/train/agent/run", "agent_run"},
-              {"/train/agent/grant", "agent_grant"},
-              {"/design/discover/create", "discover_create"},
-              {"/design/opportunities/create", "discover_create"},
-              {"/design/opportunities/dismiss", "discover_dismiss"},
-              {"/train/agent/revoke", "agent_revoke"},
-              {"/train/agent/stop", "agent_stop"},
-              {"/train/agent/schedule", "agent_schedule"},
-              {"/train/agent/unschedule", "agent_unschedule"},
-              {"/train/agent/delete", "agent_delete"},
-              {"/train/dataset/promote", "dataset_promote"},
-              {"/train/data/generate", "dataset_generate"},
-              {"/train/data/connect-service", "connect_service"},
-              {"/ship/indexes/create", "index_create"},
-              {"/ship/index/publish", "index_publish"},
-              {"/design/pipeline/edit", "pipeline_edit"},
-              {"/design/pipeline/approve", "pipeline_approve"},
-              {"/design/pipeline/gate", "pipeline_gate"},
-              {"/design/pipeline/run", "pipeline_run"},
-              {"/design/pipeline/deploy", "pipeline_deploy"},
-              {"/design/pipeline/ask", "pipeline_ask"},
-              {"/design/pipeline/apply", "pipeline_apply"},
-              {"/design/project/new-pipeline", "pipeline_new"},
-              {"/design/project/n8n", "pipeline_n8n"},
-              {"/design/project/python", "pipeline_python"},
-              {"/design/project/delete", "delete_project"},
-              {"/services/create", "service_create"},
-              {"/services/delete", "service_delete"},
-              {"/services/connection", "service_connection"},
-              {"/train/data/store-create", "store_create"},
-              {"/train/data/store-delete", "store_delete"},
-              {"/train/data/store-connection", "store_connection"},
-              {"/workspace/delete", "delete"},
-              {"/train/data/connect", "connect"},
-              {"/train/data/disconnect", "disconnect"},
-              {"/train/data/pull", "pull"},
-              {"/design/projects/create", "create_project"},
-              {"/design/project/compile", "compile"},
-              {"/design/project/approve", "approve"},
-              {"/design/project/run", "run"},
-              {"/ship/models/publish", "publish"}}}) {
-        add_route(http::method::post,
-                   path,
-                   [&impl, path, action](http::route_params& route) -> http::route_task {
-                       return impl.observe_request(
-                           route, path, impl.serve_workspace_form(route, action));
-                   });
-    }
-    add_route(http::method::post,
-               "/design/discover/scan",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/design/discover/scan", impl.serve_discover_scan(route));
-               });
-    add_route(http::method::post,
-               "/design/opportunities/scan",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/design/opportunities/scan", impl.serve_discover_scan(route));
-               });
+              "/identity/clerk-session",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/identity/clerk-session", impl.serve_clerk_session(route));
+              });
     add_route(http::method::get,
-               "/train/agents/new",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/train/agents/new", impl.serve_factory_page(route));
-               });
-    add_route(http::method::post,
-               "/train/agents/new/send",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/train/agents/new/send", impl.serve_factory_form(route, false));
-               });
-    add_route(http::method::post,
-               "/train/agents/new/approve",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/train/agents/new/approve", impl.serve_factory_form(route, true));
-               });
-    add_route(http::method::get, "/ask", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/ask", impl.serve_ask_page(route));
-    });
-    // The deferred panels (web_ui_deferred_panels, lake#446).
-    add_route(
-        http::method::get, "/ask/agents", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/ask/agents", impl.serve_ask_agents_panel(route));
-        });
-    add_route(http::method::get,
-               "/ship/indexes/datasets",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/ship/indexes/datasets", impl.serve_index_datasets_panel(route));
-               });
-    add_route(http::method::get,
-               "/train/agents/list",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/train/agents/list", impl.serve_agents_panel(route));
-               });
-    add_route(
-        http::method::post, "/ask/send", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/ask/send", impl.serve_ask_form(route, false));
-        });
-    add_route(
-        http::method::post, "/ask/confirm", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/ask/confirm", impl.serve_ask_form(route, true));
-        });
-    add_route(http::method::post,
-               "/train/data/upload",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/train/data/upload", impl.serve_workspace_upload(route));
-               });
-    add_route(http::method::get,
-               "/ship/packages",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/ship/packages", impl.serve_packages_page(route));
-               });
-    add_route(
-        http::method::get, "/ship/apps", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/ship/apps", impl.serve_apps_page(route));
-        });
-    add_route(
-        http::method::get, "/ship/app", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/ship/app", impl.serve_app_page(route));
-        });
-    for (const auto& [path, action] : std::array<std::pair<const char*, const char*>, 19>{
-             {{"/ship/apps/create", "create"},
-              {"/ship/apps/agent", "agent"},
-              {"/ship/apps/agent/confirm", "agent_confirm"},
-              {"/ship/app/restart", "restart"},
-              {"/ship/app/stop", "stop"},
-              {"/ship/app/start", "start"},
-              {"/ship/app/scale", "scale"},
-              {"/ship/app/deploy", "deploy"},
-              {"/ship/app/rollback", "rollback"},
-              {"/ship/app/env/set", "env_set"},
-              {"/ship/app/env/unset", "env_unset"},
-              {"/ship/app/zetta", "zetta"},
-              {"/ship/app/service/bind", "service_bind"},
-              {"/ship/app/service/unbind", "service_unbind"},
-              {"/ship/app/service/create", "service_create"},
-              {"/ship/app/auth", "auth"},
-              {"/ship/app/delete", "delete"},
-              {"/ship/app/build", "build"},
-              {"/ship/app/build/cancel", "build_cancel"}}}) {
-        add_route(http::method::post,
-                   path,
-                   [&impl, path, action](http::route_params& route) -> http::route_task {
-                       return impl.observe_request(route, path, impl.serve_app_form(route, action));
-                   });
-    }
-    add_route(
-        http::method::get, "/deployments", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/deployments", impl.serve_deployments_page(route));
-        });
-    add_route(
-        http::method::get, "/environments", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(
-                route, "/environments", impl.serve_environments_page(route));
-        });
-    add_route(
-        http::method::get, "/environment", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/environment", impl.serve_environment_page(route));
-        });
-    add_route(http::method::get, "/logs", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/logs", impl.serve_logs_page(route));
-    });
-    add_route(
-        http::method::post,
-        "/platform/env/set",
-        [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(
-                route, "/platform/env/set", impl.serve_platform_form(route, "set_environment_env"));
-        });
-    add_route(http::method::post,
-               "/platform/env/unset",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route,
-                       "/platform/env/unset",
-                       impl.serve_platform_form(route, "unset_environment_env"));
-               });
-    add_route(http::method::post,
-               "/platform/domain/create",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/platform/domain/create",
-                                               impl.serve_platform_form(route, "create_domain"));
-               });
-    add_route(http::method::post,
-               "/platform/domain/delete",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/platform/domain/delete",
-                                               impl.serve_platform_form(route, "delete_domain"));
-               });
-    add_route(
-        http::method::get, "/exports", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/exports", impl.serve_exports_page(route));
-        });
-    add_route(http::method::get,
-               "/exports/download",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/exports/download", impl.serve_export_download(route));
-               });
-    add_route(
-        http::method::get, "/repository", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/repository", impl.serve_repository_page(route));
-        });
-    add_route(http::method::get,
-               "/repository/tree",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/repository/tree", impl.serve_repository_tree_page(route));
-               });
-    add_route(http::method::get, "/file", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/file", impl.serve_repository_file_page(route));
-    });
+              "/exports/download",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/exports/download", impl.serve_export_download(route));
+              });
     add_route(
         http::method::get, "/file/raw", [&impl](http::route_params& route) -> http::route_task {
             return impl.observe_request(
                 route, "/file/raw", impl.serve_repository_file_content(route, false));
         });
     add_route(http::method::get,
-               "/file/download",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/file/download", impl.serve_repository_file_content(route, true));
-               });
-    add_route(
-        http::method::get, "/changes", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/changes", impl.serve_changes_page(route));
-        });
-    add_route(
-        http::method::get, "/change", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/change", impl.serve_change_page(route));
-        });
-    add_route(
-        http::method::get, "/issues", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/issues", impl.serve_issues_page(route));
-        });
-    add_route(http::method::get, "/issue", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/issue", impl.serve_issue_page(route));
-    });
-    add_route(
-        http::method::get, "/releases", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/releases", impl.serve_releases_page(route));
-        });
-    add_route(
-        http::method::get, "/webhooks", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/webhooks", impl.serve_webhooks_page(route));
-        });
-    add_route(http::method::post,
-               "/webhooks/retry",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/webhooks/retry", impl.serve_webhook_retry(route));
-               });
-    add_route(
-        http::method::get, "/protection", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(
-                route, "/protection", impl.serve_branch_protection_page(route));
-        });
-    add_route(
-        http::method::get, "/conflicts", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/conflicts", impl.serve_conflicts_page(route));
-        });
-    add_route(http::method::post,
-               "/conflicts/resolve",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/conflicts/resolve", impl.serve_conflict_resolution(route, false));
-               });
-    add_route(
-        http::method::get, "/artifacts", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/artifacts", impl.serve_artifacts_page(route));
-        });
-    add_route(
-        http::method::get, "/artifact", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/artifact", impl.serve_artifact_page(route));
-        });
-    add_route(http::method::get, "/drive", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/drive", impl.serve_drive_page(route));
-    });
+              "/file/download",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/file/download", impl.serve_repository_file_content(route, true));
+              });
     add_route(http::method::get,
-               "/drive/preview",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/preview", impl.serve_drive_preview_page(route));
-               });
-    add_route(http::method::get,
-               "/drive/download",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/download", impl.serve_drive_download(route));
-               });
-    add_route(http::method::get,
-               "/drive/history",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/history", impl.serve_drive_history_page(route));
-               });
-    add_route(http::method::post,
-               "/drive/history/restore",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/history/restore", impl.serve_drive_restore(route));
-               });
-    add_route(http::method::get,
-               "/drive/history/diff",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/history/diff", impl.serve_drive_history_diff(route));
-               });
-    add_route(http::method::get,
-               "/drive/conflict",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/conflict", impl.serve_drive_conflict_page(route));
-               });
-    add_route(http::method::post,
-               "/drive/conflict/resolve",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(route,
-                                               "/drive/conflict/resolve",
-                                               impl.serve_conflict_resolution(route, true));
-               });
-    add_route(http::method::post,
-               "/drive/folder",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/folder", impl.serve_drive_folder_create(route));
-               });
-    add_route(http::method::post,
-               "/drive/upload",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/upload", impl.serve_drive_upload(route));
-               });
-    add_route(http::method::post,
-               "/drive/rename",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/rename", impl.serve_drive_rename(route));
-               });
-    add_route(
-        http::method::post, "/drive/move", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/drive/move", impl.serve_drive_move(route));
-        });
-    add_route(http::method::post,
-               "/drive/delete",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/delete", impl.serve_drive_delete(route));
-               });
-    add_route(
-        http::method::get, "/drive/share", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/drive/share", impl.serve_drive_share_page(route));
-        });
-    add_route(http::method::get,
-               "/drive/share/link",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/share/link", impl.serve_drive_share_link_page(route));
-               });
-    add_route(http::method::get,
-               "/shared-with-me",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/shared-with-me", impl.serve_shared_with_me_page(route));
-               });
-    add_route(http::method::post,
-               "/drive/share/direct",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/share/direct", impl.serve_drive_share_direct(route));
-               });
-    add_route(http::method::post,
-               "/drive/share/link",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/share/link", impl.serve_drive_share_link_create(route));
-               });
-    add_route(http::method::post,
-               "/drive/share/revoke",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/drive/share/revoke", impl.serve_drive_share_link_revoke(route));
-               });
-    add_route(
-        http::method::get, "/share/:token", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/share/:token", impl.serve_drive_share_link(route));
-        });
-    add_route(http::method::get, "/share/:token/preview", [&impl](http::route_params& route) {
-        return impl.observe_request(
-            route, "/share/:token/preview", impl.serve_drive_share_preview(route));
-    });
+              "/drive/download",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/drive/download", impl.serve_drive_download(route));
+              });
     add_route(http::method::get, "/share/:token/download", [&impl](http::route_params& route) {
         return impl.observe_request(
             route, "/share/:token/download", impl.serve_drive_share_download(route));
@@ -21176,63 +13069,11 @@ bool ApiServer::start() {
     add_lfs_batch("/:namespace/:repo_git/info/lfs/objects/batch");
     add_lfs_batch("/:repo_git/info/lfs/objects/batch");
     add_route(http::method::put,
-               "/api/lfs/:repository/:oid",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/api/lfs/:repository/:oid", impl.serve_hub_lfs_upload(route));
-               });
-    add_route(http::method::get,
-               "/models/:namespace/:id",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/models/:namespace/:id", impl.serve_model_page(route));
-               });
-    add_route(
-        http::method::get, "/models/:id", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/models/:id", impl.serve_model_page(route));
-        });
-    add_route(
-        http::method::get, "/search", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/search", impl.serve_search_page(route));
-        });
-    add_route(
-        http::method::get, "/metering", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/metering", impl.serve_metering_page(route));
-        });
-    add_route(http::method::post,
-               "/metering/quota",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/metering/quota", impl.serve_metering_quota(route));
-               });
-    add_route(
-        http::method::get, "/activity", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/activity", impl.serve_activity_page(route));
-        });
-    add_route(http::method::get, "/audit", [&impl](http::route_params& route) -> http::route_task {
-        return impl.observe_request(route, "/audit", impl.serve_audit_page(route));
-    });
-    add_route(
-        http::method::get, "/transparency", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(
-                route, "/transparency", impl.serve_transparency_page(route));
-        });
-    add_route(http::method::get,
-               "/secret-mounts",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/secret-mounts", impl.serve_secret_mounts_page(route));
-               });
-    add_route(
-        http::method::get, "/secrets", [&impl](http::route_params& route) -> http::route_task {
-            return impl.observe_request(route, "/secrets", impl.serve_secrets_page(route));
-        });
-    add_route(http::method::get,
-               "/encryption-keys",
-               [&impl](http::route_params& route) -> http::route_task {
-                   return impl.observe_request(
-                       route, "/encryption-keys", impl.serve_encryption_keys_page(route));
-               });
+              "/api/lfs/:repository/:oid",
+              [&impl](http::route_params& route) -> http::route_task {
+                  return impl.observe_request(
+                      route, "/api/lfs/:repository/:oid", impl.serve_hub_lfs_upload(route));
+              });
     add_route(http::method::get,
                "/v1/oauth/:provider/callback",
                [&impl](http::route_params& route) -> http::route_task {
@@ -21370,31 +13211,6 @@ bool ApiServer::start() {
                        return impl.observe_request(route,
                                                    "/workspaces/:customer_id/zetta/v1/:capability",
                                                    impl.serve_workspace_zetta(route, false));
-                   });
-    }
-    for (const auto& [path, mode] : std::map<std::string, std::string>{
-             {"/train/experiments", "list"}, {"/train/experiment", "study"},
-             {"/train/experiment/run", "run"}, {"/train/experiments/compare", "compare"}}) {
-        add_route(http::method::get, path,
-            [&impl, path, mode](http::route_params& route) -> http::route_task {
-                return impl.observe_request(route, path, impl.serve_experiments_page(route, mode));
-            });
-    }
-    for (const auto& [path, confirm] :
-         std::map<std::string, bool>{{"/train/experiments/agent", false},
-                                     {"/train/experiments/agent/confirm", true}}) {
-        add_route(http::method::post,
-                   path,
-                   [&impl, path, confirm](http::route_params& route) -> http::route_task {
-                       return impl.observe_request(
-                           route, path, impl.serve_experiments_agent_form(route, confirm));
-                   });
-    }
-    for (const std::string path : {"/train/streams", "/train/stream"}) {
-        add_route(http::method::get, path,
-                   [&impl, path](http::route_params& route) -> http::route_task {
-                       return impl.observe_request(route, path,
-                           impl.serve_streams_page(route, path == "/train/stream"));
                    });
     }
     for (const auto& capability : impl.registry.list()) {

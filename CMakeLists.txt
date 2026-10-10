@@ -38,21 +38,6 @@ set(LAKE_BUILD_REVISION "unknown" CACHE STRING "Source revision embedded in the 
 
 include(FetchContent)
 
-set(LAKE_EXPERIMENT_ASSETS
-  assets/experiments/uPlot.iife.js
-  assets/experiments/uPlot.min.css
-  assets/experiments/experiments.js
-  assets/experiments/experiments.css)
-set(LAKE_EMBEDDED_EXPERIMENTS_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/experiment_assets.cpp")
-add_custom_command(
-  OUTPUT "${LAKE_EMBEDDED_EXPERIMENTS_CPP}"
-  COMMAND "${CMAKE_COMMAND}"
-    "-DINPUT_DIR=${CMAKE_CURRENT_SOURCE_DIR}/assets/experiments"
-    "-DOUTPUT_FILE=${LAKE_EMBEDDED_EXPERIMENTS_CPP}"
-    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_experiments.cmake"
-  DEPENDS ${LAKE_EXPERIMENT_ASSETS} cmake/embed_experiments.cmake
-  VERBATIM)
-
 set(LAKE_FONT_FILES
   assets/fonts/ibm-plex-sans-400.woff2
   assets/fonts/ibm-plex-sans-500.woff2
@@ -207,13 +192,12 @@ endif()
 set(SKIP_BUILD_TEST ON CACHE BOOL "" FORCE)
 add_subdirectory(modules/libpqxx EXCLUDE_FROM_ALL)
 
-# lake-core: HTTP-free. Version, the pure web_ui renderers, the capability registry and its
+# lake-core: HTTP-free. Version, the hosted sign-in page renderers, the capability registry and its
 # REST / OpenAPI / MCP renderings, the control-plane store interface and the in-memory store.
 add_library(lake-core STATIC
   src/control/apps.cpp
   src/control/builds.cpp
   ${LAKE_EMBEDDED_FONTS_CPP}
-  ${LAKE_EMBEDDED_EXPERIMENTS_CPP}
   ${LAKE_EMBEDDED_GUIDE_CPP}
   ${LAKE_EMBEDDED_WEB_APP_CPP}
   src/api/web_app.cpp
@@ -262,8 +246,6 @@ add_library(lake-core STATIC
   src/api/datasets.cpp
   src/api/stream_capabilities.cpp
   src/api/experiment_capabilities.cpp
-  src/api/web_ui_streams.cpp
-  src/api/web_ui_experiments.cpp
   src/api/pipeline.cpp
   src/api/registry.cpp
   src/api/store_owner.cpp
@@ -347,14 +329,10 @@ target_link_libraries(lake-api PRIVATE Boost::beast2 Boost::http Boost::json Boo
 add_executable(lake src/main.cpp)
 target_link_libraries(lake PRIVATE lake-api lake-core lake-control-postgres)
 
-add_executable(lake-ui-fixture tools/ui/fixture_server.cpp)
-target_compile_features(lake-ui-fixture PRIVATE cxx_std_26)
-target_link_libraries(lake-ui-fixture PRIVATE lake-api lake-core lake-control-postgres OpenSSL::Crypto)
-
 # A coroutine returning liquid::runtime::task<T> (a result<T>) that flows off its end leaves the
 # result unset, and the awaiting coroutine then reads uninitialized memory (lake#476). The compiler
 # sees every such path, so it is an error rather than a warning.
-foreach(lake_target lake-core lake-control-postgres lake-api lake lake-ui-fixture)
+foreach(lake_target lake-core lake-control-postgres lake-api lake)
   target_compile_options(${lake_target} PRIVATE -Werror=return-type)
 endforeach()
 

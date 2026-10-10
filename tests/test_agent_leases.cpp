@@ -6,7 +6,6 @@
 #include <pqxx/pqxx>
 
 #include "lake/api/capabilities.hpp"
-#include "lake/api/web_ui.hpp"
 #include "lake/control/agent_library.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/postgres_store.hpp"
@@ -392,7 +391,7 @@ TEST_P(AgentLeases, MigrationAdoptsLegacyClaimsAndPreservesExistingLeases) {
     EXPECT_EQ(after->attempts, 2);
 }
 
-TEST_P(AgentLeases, RetryNoticeRendersOnAppsExperimentsAndProject) {
+TEST_P(AgentLeases, RetryNoticeIsTheTasksMessage) {
     ASSERT_TRUE(call("claim_agent_task", json::object()).ok);
     age(61);
     pump();
@@ -402,31 +401,6 @@ TEST_P(AgentLeases, RetryNoticeRendersOnAppsExperimentsAndProject) {
     const auto task = store->get_agent_task(task_id);
     ASSERT_TRUE(task);
     EXPECT_EQ(task->message, message);
-    const json view{{"task_id", task_id}, {"status", "pending"}, {"message", task->message}};
-    lake::api::AppsPage apps;
-    apps.customer_id = customer_id;
-    apps.agent_task = view;
-    apps.agent_working = true;
-    EXPECT_NE(lake::api::web_ui_apps(apps).find(message), std::string::npos);
-    lake::api::ExperimentsPage experiments;
-    experiments.customer_id = customer_id;
-    experiments.agent_task = view;
-    experiments.agent_working = true;
-    const std::string experiments_html = lake::api::web_ui_experiments(experiments);
-    EXPECT_NE(experiments_html.find(message), std::string::npos);
-    // lake#438: the review URL ends in #experiment-proposal, where a declarative refresh is only
-    // a fragment jump; the panel reloads the page itself.
-    EXPECT_NE(experiments_html.find("setTimeout(()=>location.reload(),2000)"), std::string::npos);
-    EXPECT_NE(experiments_html.find(
-                  "<noscript><meta http-equiv=\"refresh\" content=\"2\"></noscript>"),
-              std::string::npos);
-    lake::api::WorkspacePage project;
-    project.section = "project";
-    project.customer_id = customer_id;
-    project.subject = "lease-project";
-    project.state = {{"ready", true}};
-    project.data = {{"solution_task", view}};
-    EXPECT_NE(lake::api::web_ui_workspace(project).find(message), std::string::npos);
 }
 
 TEST(AgentLeaseConfig, ParsesPerAgentBoundsAndRejectsInvalidConfiguration) {

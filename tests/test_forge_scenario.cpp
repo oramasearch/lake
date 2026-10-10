@@ -335,13 +335,19 @@ TEST(PostgresForgeScenario, DripsReviewRebaseAndGraphEvidenceLandEndToEnd) {
     ASSERT_TRUE(opened) << opened.error().message;
     EXPECT_EQ(opened->state, liquid::forge_review_state::open);
     EXPECT_EQ(liquid::to_string(opened->change.value), liquid::to_string(candidate->value));
-    const std::string candidate_page = http_get(server->port(),
-                                                "/change?repository_id=" + repository->id +
-                                                    "&id=" + liquid::to_string(candidate->value),
-                                                options.admin_token);
-    EXPECT_NE(candidate_page.find(" 200 "), std::string::npos) << candidate_page;
-    EXPECT_NE(candidate_page.find("Review forge change"), std::string::npos);
-    EXPECT_NE(candidate_page.find("taap:1:ed25519:reviewer"), std::string::npos);
+    // What the change page reads (lake#561): the change and its open review with its reviewer.
+    const std::string candidate_change = http_get(
+        server->port(),
+        "/v1/get_change?id=" + repository->id + "&change_id=" + liquid::to_string(candidate->value),
+        options.admin_token);
+    EXPECT_NE(candidate_change.find(" 200 "), std::string::npos) << candidate_change;
+    EXPECT_NE(candidate_change.find("Review forge change"), std::string::npos);
+    const std::string reviews =
+        http_get(server->port(),
+                 "/v1/list_reviews?repository_id=" + repository->id + "&limit=100",
+                 options.admin_token);
+    EXPECT_NE(reviews.find(" 200 "), std::string::npos) << reviews;
+    EXPECT_NE(reviews.find("taap:1:ed25519:reviewer"), std::string::npos) << reviews;
 
     const auto comment = liquid::runtime::block_on(reviewer.create_comment(
         review->id,
@@ -400,14 +406,19 @@ TEST(PostgresForgeScenario, DripsReviewRebaseAndGraphEvidenceLandEndToEnd) {
     ASSERT_TRUE(landed_head) << landed_head.error().message;
     EXPECT_EQ(*landed_head, liquid::to_string(rebased->value));
 
-    const std::string landed_page = http_get(server->port(),
-                                             "/change?repository_id=" + repository->id +
-                                                 "&id=" + liquid::to_string(rebased->value),
-                                             options.admin_token);
-    EXPECT_NE(landed_page.find(" 200 "), std::string::npos) << landed_page;
-    EXPECT_NE(landed_page.find("Rebase forge change"), std::string::npos);
-    EXPECT_NE(landed_page.find("build/forge-proof.txt"), std::string::npos);
-    EXPECT_NE(landed_page.find("slsa_provenance/1"), std::string::npos);
-    EXPECT_NE(landed_page.find(liquid::to_string(graph->result.value)), std::string::npos);
+    const std::string landed_change = http_get(
+        server->port(),
+        "/v1/get_change?id=" + repository->id + "&change_id=" + liquid::to_string(rebased->value),
+        options.admin_token);
+    EXPECT_NE(landed_change.find(" 200 "), std::string::npos) << landed_change;
+    EXPECT_NE(landed_change.find("Rebase forge change"), std::string::npos);
+    // The change's checks: its build result, provenance and graph evidence.
+    const std::string checks = http_get(server->port(),
+                                        "/v1/list_artifacts?id=" + repository->id + "&limit=100",
+                                        options.admin_token);
+    EXPECT_NE(checks.find(" 200 "), std::string::npos) << checks;
+    EXPECT_NE(checks.find("build/forge-proof.txt"), std::string::npos) << checks;
+    EXPECT_NE(checks.find("slsa_provenance/1"), std::string::npos);
+    EXPECT_NE(checks.find(liquid::to_string(graph->result.value)), std::string::npos);
     server->stop();
 }

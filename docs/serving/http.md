@@ -6,8 +6,10 @@ with. Port 4900 by default (`--listen HOST:PORT`); every flag and environment va
 
 **Where.** `include/lake/api/server.hpp` is the public shape (`ApiServer`, `ServerOptions`) and
 names no HTTP type. `src/api/http_server.cpp` is the one translation unit that includes Beast2,
-`boost::http` or Boost.JSON. Pages are pure renderers in `src/api/web_ui.cpp` (string in, string
-out) and are the unit-tested surface.
+`boost::http` or Boost.JSON. The console is the web app in `frontend/`, embedded in the binary and
+answered for every browser page request ([`../ui/web-app.md`](../ui/web-app.md)); it calls only
+`/v1`. The one surface lake still renders is an identity application's hosted sign-in pages, pure
+renderers in `src/api/web_ui.cpp` (string in, string out).
 
 **Lifecycle.** `ApiServer::start()`: build the router → construct `HttpConnections(io_context,
 router, parser_cfg, serializer_cfg, limits)` (`src/api/http_connections.hpp`) → `bind` (open,
@@ -21,44 +23,43 @@ tick.
 
 | Route | Serves |
 |---|---|
-| `GET /` | the account → repository → push landing page with viewer-specific navigation |
-| `GET /style-<hash>.css`, `GET /fonts/<IBM Plex face>-<hash>.woff2` | content-hashed design-system assets (`public, max-age=31536000, immutable`) linked by every page |
+| a browser's `GET` or `HEAD` of any other path (`Accept: text/html`) | the web app's `index.html` (`no-cache`, `Content-Security-Policy: frame-ancestors 'self'`): `/`, `/repositories`, `/w/<workspace_id>/design/projects` and every other page are the app's ([`../ui/web-app.md`](../ui/web-app.md)); the same path asked for by anything else is the 404 |
+| `GET /ui/<file>` | the app's content-hashed files (`public, max-age=31536000, immutable`) |
+| `GET /style-<hash>.css`, `GET /fonts/<IBM Plex face>-<hash>.woff2` | content-hashed design-system assets (`public, max-age=31536000, immutable`) linked by the hosted application pages |
 | `GET /style.css`, `GET /fonts/<IBM Plex face>.woff2` | compatibility aliases for direct and older links (`no-cache`) |
 | `GET /healthz`, `GET /readyz` | unauthenticated liveness and control-store readiness probes; see [`telemetry.md`](telemetry.md) |
 | `GET /metrics` | Prometheus metrics, guarded by the same bearer or session cookie as capabilities |
 | `GET /v1/server_info` | `{ok, value: {name, node, version, revision, api, store}}`, no auth; `revision` is the full source commit embedded at image build time, or `unknown` for a build that did not supply it |
-| `GET /sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | public password, TOTP, OAuth and passkey entry pages |
-| `GET /settings`, `/sessions`, `/passkeys`, `/tokens` | authenticated profile, session/device, passkey and scoped-token management pages |
-| `POST /repository/create` | authenticated form adapter for `create_repository`; takes `workspace_id` (the workspace names its space when `customer_id` is absent), creates a private repository there and redirects to its home |
-| `POST /identity/*` | form adapters that call the corresponding registry capability; see [`../ui/identity.md`](../ui/identity.md) |
-| `GET /applications`, `/application`, `/application/users`, `/application/organizations`, `/application/events` | application registration and operator management pages |
-| `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in` | themed application identity pages; a configured custom host serves its equivalent entry pages |
-| `GET /apps/authorize?app=<id>&rd=<URL>` | Lake-session handoff for a protected Ship app; validates exact HTTPS app host and redirects with a 60-second one-use code |
-| `GET /v1/apps/auth`, `/w/<workspace_id>/v1/apps/auth` | nginx forward-auth for protected Ship apps; returns app-scoped identity headers and exchanges one-use codes for a host-only cookie |
-| `GET /ship/apps`, `/ship/app?customer_id=<id>&app_id=<id>` | Ship app list and operating page, including retained and live app/build events |
-| `POST /ship/apps/create`, `/ship/apps/agent`, `/ship/app/*` | capability-backed app creation, agent start, deploy, lifecycle, environment, binding, auth, build, and delete form adapters |
-| `GET /train/experiments`, `/train/experiment`, `/train/experiment/run`, `/train/experiments/compare` | space-scoped study, trial, metric, artifact and comparison pages |
-| `POST /train/experiments/agent`, `/train/experiments/agent/confirm` | `agent_turn` form adapters for an ExperimentsAgent goal and the exact edited study proposal |
+| `POST /session` | the operator token form: a matching token becomes the Strict `lake_session` cookie and redirects to `/repositories`; a wrong one redirects to `/login?error=…` |
+| `POST /logout` | revokes the session, clears the cookie and redirects to `/` (to `/sign-in?signed_out=1` under Clerk) |
+| `POST /identity/clerk-session` | exchanges a Clerk session token for the `lake_session` cookie ([`../api/clerk.md`](../api/clerk.md)) |
+| `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity; sets the cookie and redirects |
+| `GET /file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | the bytes of a repository file, a Drive file, a signed export or a shared file; without a credential a protected download redirects to `/sign-in` |
+| `GET /llms.txt`, `/llms-full.txt`, `/developer/mcp/skill`, `/skills/lake/SKILL.md` | the agents' guide and the Claude skill, public text |
+| `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in`; the same four paths on an application's custom sign-in host | themed application identity pages, server-rendered ([`../api/apps.md`](../api/apps.md)); on lake's own host those paths are the web app's |
 | `POST /apps/<id>/identity/*` | application-pool identity form adapters |
 | `GET /v1/apps/<id>/.well-known/jwks.json` | the application's public Ed25519 JSON Web Key Set |
-| `GET /customers`, `/repositories`, `/repository?id=`, `/organizations`, `/organization?id=`, `/team?id=`, `/member?id=`, `/teams`, `/members`, `/invitations`, `/grants`, `/access`, `/search`, `/metering`, `/secret-mounts`, `/secrets`, `/encryption-keys`, `/audit` | server-rendered pages with ordinary `/sign-in` for protected reads and public repository browsing; operator entry remains `/login` and `POST /session`; see [`../ui/README.md`](../ui/README.md) |
-| `GET /transparency?identity=<taap-id>` | public hosted identity monitor over checkpoint-verified bulk tiles |
-| `GET /repository/tree`, `/file`, `/changes`, `/change`, `/issues`, `/issue`, `/releases`, `/webhooks`, `/protection`, `/conflicts`, `/artifacts`, `/artifact`; `POST /conflicts/resolve` | forge pages over authorized repository, review, issue, release, webhook, policy, signed-audit, and libliquid records; conflict pages explain kind, region, and reasons before posting an audited resolution |
-| `GET /environments?repository_id=`, `/environment?repository_id=&name=`, `/logs?repository_id=&environment=` | platform summaries, deployment history, capability-backed environment/domain forms, and cursor-polling Loki-compatible logs; stale mirror reads show a warning |
-| `GET /drive`, `/drive/preview`, `/drive/download`, `/drive/history`, `/drive/history/diff`, `/drive/conflict`, `/drive/share`, `/share/:token` | server-rendered drive list/grid browsing, registered previews with exact-byte fallback, explained conflict comparison, effective access, and scoped links; create, upload, rename, move, delete, restore, conflict resolution, and sharing mutations use POST under `/drive/` |
+| `GET /apps/authorize?app=<id>&rd=<URL>` | Lake-session handoff for a protected Ship app; validates exact HTTPS app host and redirects with a 60-second one-use code |
+| `GET /v1/apps/auth`, `/w/<workspace_id>/v1/apps/auth` | nginx forward-auth for protected Ship apps; returns app-scoped identity headers and exchanges one-use codes for a host-only cookie |
 | `/api/models/*`, `/api/datasets/*`, model/dataset resolve and basic-LFS routes | the documented `huggingface_hub` create, upload, list, info, snapshot, and file-download subset; see [`../api/models.md`](../api/models.md) |
-| `GET /models/:namespace/:name`, `/models/:id` | model revisions, files, deduplication savings, and verified training provenance |
 | `/v2/*`, native npm and Python package paths, `/buildid/*` | OCI Distribution and package/debug registries; OCI blob upload patches and final puts use the streamed registry limit below; see [`../api/registry.md`](../api/registry.md) |
 | `GET /v1/<read>`, `POST /v1/<action>`; the same below `/w/<workspace_id>` | the capability registry as REST: identity and application authentication, short-lived agent-session keys, account recovery, offline grants, tenants, repositories, organization administration, policy, repository search, static secrets, encryption, TUF metadata, transparency monitoring, asynchronous replication, the lake identity and the signed audit stream; bearer required except documented public identity/recovery entry points, transparency reads, and application JWKS |
 | `POST /v1/repositories/<repository-id>/sync/{find-missing,push,pull,chunks}` | streaming liquid push, pull, missing-object negotiation, and chunk upload with bounded streaming request and response bodies, through the same registry policy and audit path; offline push accepts a grant UUID and returns per-change reauthorization results; see [`../api/sync.md`](../api/sync.md) |
 | `GET /v1/repositories/<repository-id>/sync/chunks/<digest>` | ranged liquid chunk reads with `offset` and `length` query parameters |
 | `GET /v1/openapi.json`, `/w/<workspace_id>/v1/openapi.json` | the same OpenAPI 3.1 document, generated from the registry |
-| `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity |
-| `GET /sso?organization_id=<uuid>` | organization SSO provider, federation issuer policy, and SCIM provisioning evidence page |
+| `GET`/`POST /workspaces/<customer_id>/zetta/v1/<capability>`, and below `/w/<workspace_id>` | a workspace's Zetta in Zetta's own REST shape for agents ([`../api/workspaces.md`](../api/workspaces.md)) |
 | `/scim/v2/Users`, `/scim/v2/Groups` and `/:id` | provider-bearer SCIM 2.0 filtered list, get, create, PATCH and delete resources |
 | `GET /acme/<customer-id>/directory`, ACME resource `POST`s, `HEAD /acme/<customer-id>/new-nonce`, `GET /.well-known/acme-challenge/<token>` | RFC 8555 account, HTTP-01 order, CSR finalize, polling, and certificate download |
 | `POST /mcp`, `/w/<workspace_id>/mcp` | MCP (JSON-RPC 2.0): `initialize`, `tools/list`, `tools/call`; the same registry as tools. `initialize` declares `tools.listChanged` and answers an `Mcp-Session-Id`; a session from an older tool list gets `notifications/tools/list_changed` ([mcp.md](../api/mcp.md)). `GET`/`DELETE` answer 405. |
 | anything else | `404 {"ok":false,"error":{"code":"not_found"}}` |
+
+The server-rendered console pages, their deferred panels and their HTML form handlers
+(`/identity/sign-in`, `/repository/create`, `/drive/upload`, `/ship/app/*`, `/design/*` and the
+rest) were retired in lake#561: each did what a `/v1` capability does, and the web app calls the
+capability. `WebAppHttp.BrowsersGetTheAppAndCustomDomainsTheirHostedSignIn` checks that a browser
+gets the app for former page paths and that anything else gets the 404, that a retired form is
+gone, that `/w/<workspace_id>/` is checked only where the API is reached, and that a custom sign-in
+host still answers its hosted pages.
 
 ## Connections and workers
 
@@ -224,8 +225,10 @@ The router resolves the workspace before dispatch. A malformed, absent, or delet
 returns HTTP 404 with `not_found`. App-source, app-event, build, and task credentials retain their
 existing capability restrictions and must belong to the selected workspace. Other credentials
 continue through the same registry policy authorization used by `/v1` and `/mcp`. The prefixed
-OpenAPI response is byte-for-byte the same registry document as `/v1/openapi.json`; page routes
-under `/w/<workspace_id>/...` retain their existing handling.
+OpenAPI response is byte-for-byte the same registry document as `/v1/openapi.json`. A workspace's
+Zetta below `/w/<workspace_id>/workspaces/...` is checked the same way. Every other path below
+`/w/<workspace_id>/` is a page of the web app, which a browser gets as `index.html`; the server
+neither redirects it nor remembers a workspace in a cookie (lake#561).
 
 The prefixed `GET /w/<workspace_id>/v1/apps/auth` route is the one exception to the generic
 workspace resolver. It authenticates the host and checks that the stored app workspace equals the
@@ -276,8 +279,8 @@ Like the request log line, it names the route pattern and never the raw path (de
 lake#384, [telemetry.md](telemetry.md#request-logs)).
 
 The request id is the caller's `X-Request-Id`, or a new UUID. The request is then answered `500`
-with `Cache-Control: no-store` and `X-Request-Id`: the HTML error page when `Accept` names
-`text/html`, otherwise the JSON envelope with code `internal_error`. The response starts from a
+with `Cache-Control: no-store` and `X-Request-Id`: a standalone HTML error page
+(`web_ui_error`) when `Accept` names `text/html`, otherwise the JSON envelope with code `internal_error`. The response starts from a
 cleared header set, so fields the handler set before it threw do not leak, and the exception text
 stays in the log, never in the response. The usual request log line and metrics follow with status
 `500`, and the connection stays open for the next request.
@@ -303,25 +306,26 @@ responses, therefore begins without another request's headers or payload metadat
 then add headers belonging to the current response. Keep this reset before CORS and dispatch;
 resetting in a send helper would discard headers deliberately added by the current handler.
 
-The four `HttpServer/HttpResponseIsolation` cases use one worker to force reuse, real password
-sign-in, independent client cookies, all three public entry pages, public JSON and OpenAPI
-responses, and protected session reads.
+The four `HttpServer/HttpResponseIsolation.SignInCannotAuthenticateAnotherClient` cases use one
+worker to force reuse, real password sign-in through `/v1/sign_in_password`, independent client
+cookies, the public `viewer`, `server_info` and OpenAPI reads, and protected session reads.
 Both in-memory and Postgres variants cover the same socket and a newly accepted socket. The
-tests fail against the previous response path because B receives A's cookie and can open
-`/sessions`; after the reset B remains anonymous and A remains authenticated.
+tests fail against the previous response path because B receives A's cookie and can read
+`list_sessions`; after the reset B remains anonymous and A remains authenticated.
 `HttpServer.ResponseResetPreservesCurrentProtocolAndCors` also alternates HTTP/1.0 and HTTP/1.1
 over one connection, checks preflight and error responses, and requires preflight-only fields to
 disappear while current CORS headers, status, protocol version and keep-alive policy remain correct.
 
 Verify the complete native suites with Postgres, and reproduce against a local binary using
-`curl -q -sS -D headers.private http://127.0.0.1:<port>/sign-up -o signup.html`. After another client
-signs in, this GET must return 200 without `Set-Cookie` or `Location`. Repeat using isolated cookie
+`curl -q -sS -D headers.private http://127.0.0.1:<port>/v1/viewer -o viewer.json`. After another
+client signs in, this GET must return 200 without `Set-Cookie` or `Location`. Repeat using isolated cookie
 jars and both reused and fresh connections. Redact every cookie and account value before sharing
 headers. A containing deployment and the same production reproduction are required to establish
 that the live instance is repaired; this source change does not redeploy it.
 
 **Verify.** `./build/lake --listen 127.0.0.1:4900 --node x --memory-store --admin-token t`, then
-`curl -i` the landing page, `/v1/server_info`, `/healthz` and an unmatched path;
+`curl -i -H 'Accept: text/html' /` (the web app), `/v1/server_info`, `/healthz` and an unmatched
+path;
 `ctest --test-dir build`. The focused idle-close proof is
 `ctest --test-dir build -R HttpServer.IdleKeepAliveCloseWritesNothingToStderr --output-on-failure`.
 
@@ -346,8 +350,8 @@ browser session."}}` when:
 A missing `Origin` and a missing `Sec-Fetch-Site` pass: a non-browser client sends neither, and a
 browser sends `Origin` on every cross-origin unsafe request. Bearer-authenticated calls are not
 affected, from any origin. The check is a router middleware that runs right after the response
-reset and CORS, before any route, so it covers `/v1`, `/mcp` and every remaining form route
-(`/logout`, `/drive/delete`, `/ask/send`, …) alike.
+reset and CORS, before any route, so it covers `/v1`, `/mcp` and the remaining form routes
+(`/logout`, `/session`, `/identity/clerk-session`) alike.
 
 **Why.** Ship apps are hosted one label below the platform's zone (`<name>.oramadev.net` beside
 `lake.oramadev.net`), so customer app code is *same-site* with lake and a browser sends
@@ -356,12 +360,12 @@ make a signed-in person's browser run any action as a "simple" `text/plain` requ
 (inventory §4.4). Requiring JSON forces a CORS preflight, which lake's wildcard CORS cannot satisfy
 with credentials; the `Origin` and `Sec-Fetch-Site` check refuses the request itself.
 
-**Lake's own pages** keep working: a same-origin form post carries a same-origin `Origin`, and the
-pages' scripts already post JSON (`application/json`) to `/v1`.
+**Lake's own web app** keeps working: it posts JSON (`application/json`) to `/v1` from lake's
+origin, and a same-origin form post carries a same-origin `Origin`.
 
 **Verify.** `HttpServer/HttpResponseIsolation.TheWebAppTalksToAskOramaThroughCapabilities` refuses a
 foreign `Origin`, `Origin: null`, `Sec-Fetch-Site: same-site` and `cross-site`, `text/plain` and
-form bodies to `/v1` and `/mcp`, and a foreign form post to `/ask/send`, and accepts the same calls
+form bodies to `/v1` and `/mcp`, and a foreign form post to `/logout`, and accepts the same calls
 from lake's origin and a bearer call from a foreign origin. By hand:
 `curl -i -X POST localhost:4900/v1/enroll_mfa -H 'Cookie: lake_session=<secret>' -H 'Origin: https://other.example' -H 'Content-Type: application/json' -d '{}'`
 answers 403.
@@ -371,13 +375,13 @@ browser must post to from another origin is a bearer route, never an exemption h
 
 ## Bearer-link recipient delivery
 
-`GET /share/:token` renders the shared root or its requested descendant folder. The sibling routes
-`GET /share/:token/preview` and `GET /share/:token/download` require a file `path`; all accept `ref`
-(default `main`). Each route calls its public share-link registry capability and uses `no-store`.
-The attachment carries the exact authorized bytes. Scope, role, expiry, and revocation checks live
-in the registry handlers and also apply to REST and MCP. See [sharing](../api/sharing.md).
+A recipient opens `/share/:token` and `/share/:token/preview` in the web app, which reads them
+through `resolve_drive_share_link` and `preview_drive_share_link`. `GET /share/:token/download`
+stays a server route: it requires a file `path`, accepts `ref` (default `main`), calls
+`download_drive_share_link` and answers the exact authorized bytes as an attachment with
+`no-store`. Scope, role, expiry, and revocation checks live in the registry handlers and also apply
+to REST and MCP. See [sharing](../api/sharing.md).
 
-Customer-page authentication redirects go to `/sign-in`. The explicit operator entry stays at
-`/login`, with `POST /session` retaining its existing operator credential contract. Shared page
-renderers receive `WebUiViewer` from `context_for`; navigation never grants authority. See
-[the front-door contract](../ui/front-door.md).
+A protected download without a credential redirects to `/sign-in`. The explicit operator entry
+stays at `/login` (a web app page) with `POST /session` retaining its existing operator credential
+contract. See [the front-door contract](../ui/front-door.md).

@@ -19,15 +19,14 @@
 #include <boost/corosio/ipv4_address.hpp>
 #include <boost/http.hpp>
 
+#include "api/workspace_records_api.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/rest.hpp"
-#include "lake/api/web_ui.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/workspace_audit.hpp"
 #include "lake/control/zetta_control.hpp"
-#include "api/workspace_records_api.hpp"
 #include "repository_test_support.hpp"
 #include "workspace_fixture.hpp"
 
@@ -489,9 +488,6 @@ TEST_F(PlatformFixture, EnvironmentValuesDomainsAndSecretScanningUseAppendOnlyRo
     ASSERT_TRUE(environment);
     ASSERT_EQ(environment->at("domains").size(), 1U);
     EXPECT_EQ(environment->at("domains").at(0).at("status"), "pending");
-    const std::string pending_page =
-        lake::api::web_ui_environment(repository, *environment, json{{"items", json::array()}});
-    EXPECT_NE(pending_page.find("pending"), std::string::npos);
 
     json ready_domain = control->domains.back();
     ready_domain["status"] = "ready";
@@ -651,30 +647,8 @@ TEST_F(PlatformFixture, ReadRoleCannotWriteAndDeployRoleIsRequiredForDomains) {
     EXPECT_TRUE(domain.ok) << domain.error.message;
 }
 
-TEST_F(PlatformFixture, RenderersAndDiscoveryExposePlatformSurface) {
+TEST_F(PlatformFixture, DiscoveryExposesPlatformSurface) {
     ASSERT_TRUE(sync());
-    json environments = *list_environments();
-    environments["stale_since"] = "2026-09-06T00:04:00Z";
-    const std::string list_page = lake::api::web_ui_environments(repository, environments);
-    EXPECT_NE(list_page.find("Platform data is stale"), std::string::npos);
-    EXPECT_NE(list_page.find("production"), std::string::npos);
-    EXPECT_NE(list_page.find("sha256:0123456789ab"), std::string::npos);
-
-    json environment = *get_environment("production");
-    const std::string detail_page = lake::api::web_ui_environment(
-        repository, environment, *list_deployments("production", 100));
-    EXPECT_NE(detail_page.find("Environment Variables"), std::string::npos);
-    EXPECT_NE(detail_page.find("Deployment History"), std::string::npos);
-    EXPECT_NE(detail_page.find("platform/domain/create"), std::string::npos);
-
-    const json logs{
-        {"items",
-         json::array({{{"ts", "200"}, {"pod", "web-1"}, {"container", "app"}, {"line", "ready"}}})},
-        {"next_since", "200"}};
-    const std::string logs_page = lake::api::web_ui_logs(repository, "production", logs, "stale");
-    EXPECT_NE(logs_page.find("environment_logs"), std::string::npos);
-    EXPECT_NE(logs_page.find("Refresh"), std::string::npos);
-
     const json openapi = lake::api::openapi_document(registry, "test");
     EXPECT_TRUE(openapi.at("paths").contains("/v1/get_environment"));
     EXPECT_TRUE(openapi.at("paths").contains("/v1/create_domain"));
