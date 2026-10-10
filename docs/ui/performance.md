@@ -69,13 +69,13 @@ can exceed `total`. The count exposes accidental fan-out even when the calls ove
   that outlives a deploy reloads once when it asks for a chunk the new build no longer has.
 - **No third-party requests.** Fonts, scripts and styles all come from lake.
 
-Measured from the `npm run build` output at `a5e5921` (2026-10-10; sizes as Vite reports them,
+Measured from the `npm run build` output at `ec0a7b2` (2026-10-10; sizes as Vite reports them,
 gzip in brackets):
 
 | What | Size |
 |---|---|
 | Files in `dist/ui/` | 126: 118 scripts, 3 stylesheets, 5 fonts |
-| Entry script `index-*.js` (React, the router, TanStack Query, the shell, the kit, Markdown) | 560.05 kB (174.57 kB) |
+| Entry script `index-*.js` (React, the router, TanStack Query, the shell, the kit) | 369.57 kB (115.28 kB) |
 | Main stylesheet `index-*.css` | 63.87 kB (11.72 kB) |
 | The chart chunk (uPlot and the Experiments shared code) | 66.12 kB (28.63 kB) |
 | Largest page chunk, `ProjectPage-*.js` | 24.79 kB (7.19 kB) |
@@ -83,9 +83,9 @@ gzip in brackets):
 | Fonts, five IBM Plex WOFF2 files | 100.62 kB in total |
 | `dist/` on disk | 1.5 MB |
 
-The entry script carries the Markdown renderer because the shell's Ask Orama panel imports it
-(through `pages/train/workspace.tsx`).
-`vite.config.ts` raises Vite's chunk-size warning to 900 kB, so the build does not warn about it.
+The Ask Orama panel, and with it the Markdown renderer, loads the first time it is opened
+(`React.lazy` in `components/Shell.tsx`), so the entry script carries neither. Before that it was
+560.05 kB (174.57 kB).
 
 To measure again: `cd frontend && npm ci && npm run build`, and read the size table Vite prints.
 In a browser, open a page with the Network panel's cache disabled for the first load and enabled
