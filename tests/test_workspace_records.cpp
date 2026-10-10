@@ -2495,6 +2495,236 @@ TEST_P(WorkspaceRecordStores, SecretsLiveInTheirMountsWorkspace) {
     EXPECT_TRUE(admin("read_secret", {{"mount_id", placed[0].mount}, {"name", "database"}}).ok);
 }
 
+// lake#561: a secret mount's owner is the account that owns the workspace (an individual's
+// personal space here, with no organization at all) or, as before, an organization inside the
+// space. An account's mount hangs under the customer's policy object, and its name is claimed for
+// the account, so an account mount and an organization mount of the same name do not collide.
+TEST_P(WorkspaceRecordStores, SecretMountsBelongToAnAccountOrAnOrganization) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& own = t.spaces[0];
+    const auto& other = t.spaces[1];
+    const auto as = [&](const TwoSpaces::Space& space, const std::string& capability, json input) {
+        return secret_call(t, t.context(space), capability, std::move(input));
+    };
+    const std::string workspace = own.workspaces[0];
+
+    // The account creates a mount without naming an organization: it needs admin on its customer.
+    const auto mount = as(own,
+                          "create_secret_mount",
+                          {{"customer_id", own.customer_id},
+                           {"workspace_id", workspace},
+                           {"name", "vault"},
+                           {"description", "Personal credentials"}});
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::string mount_id = mount.value["id"];
+    EXPECT_EQ(mount.value["owner_type"], "customer");
+    EXPECT_TRUE(mount.value["organization_id"].is_null());
+    EXPECT_EQ(mount.value["workspace_id"], workspace);
+
+    // Its route carries no organization, and its policy object hangs under the customer's.
+    const auto route = t.store->get_secret_mount_route(mount_id);
+    ASSERT_TRUE(route) << route.error().message;
+    EXPECT_TRUE(route->organization_id.empty());
+    EXPECT_EQ(route->workspace_id, workspace);
+    const auto mount_object = t.store->find_policy_object("secret_mount", mount_id);
+    ASSERT_TRUE(mount_object);
+    const auto environment = t.store->get_policy_object(mount_object->parent_id);
+    ASSERT_TRUE(environment);
+    EXPECT_EQ(environment->object_type, "environment");
+    EXPECT_EQ(environment->external_id, "secrets/" + own.customer_id);
+    const auto customer_object = t.store->find_policy_object("customer", own.customer_id);
+    ASSERT_TRUE(customer_object);
+    EXPECT_EQ(environment->parent_id, customer_object->id);
+
+    // Secrets: put, read, list, and the mount among the account's readable mounts.
+    const auto put = as(own,
+                        "put_secret",
+                        {{"mount_id", mount_id},
+                         {"name", "database"},
+                         {"value", {{"password", "account-owned-password"}}}});
+    ASSERT_TRUE(put.ok) << put.error.message;
+    EXPECT_EQ(put.value["version"], 1);
+    const auto read = as(own, "read_secret", {{"mount_id", mount_id}, {"name", "database"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["value"]["password"], "account-owned-password");
+    const auto secrets = as(own, "list_secrets", {{"mount_id", mount_id}});
+    ASSERT_TRUE(secrets.ok) << secrets.error.message;
+    ASSERT_EQ(secrets.value["items"].size(), 1U);
+    EXPECT_EQ(secrets.value["items"][0]["name"], "database");
+    const auto mounts = as(
+        own, "list_secret_mounts", {{"customer_id", own.customer_id}, {"workspace_id", workspace}});
+    ASSERT_TRUE(mounts.ok) << mounts.error.message;
+    ASSERT_EQ(mounts.value["items"].size(), 1U);
+    EXPECT_EQ(mounts.value["items"][0]["id"], mount_id);
+    EXPECT_EQ(mounts.value["items"][0]["owner_type"], "customer");
+
+    // Keys: create one and use it.
+    const auto key = as(own, "create_encryption_key", {{"mount_id", mount_id}, {"name", "orders"}});
+    ASSERT_TRUE(key.ok) << key.error.message;
+    const auto sealed =
+        as(own, "encrypt", {{"mount_id", mount_id}, {"name", "orders"}, {"plaintext", "aGVsbG8"}});
+    ASSERT_TRUE(sealed.ok) << sealed.error.message;
+    const auto opened =
+        as(own,
+           "decrypt",
+           {{"mount_id", mount_id}, {"name", "orders"}, {"ciphertext", sealed.value["value"]}});
+    ASSERT_TRUE(opened.ok) << opened.error.message;
+    EXPECT_EQ(opened.value["value"], "aGVsbG8");
+    const auto keys = as(own, "list_encryption_keys", {{"mount_id", mount_id}});
+    ASSERT_TRUE(keys.ok) << keys.error.message;
+    EXPECT_EQ(keys.value["items"].size(), 1U);
+
+    // The records are in the workspace, sealed: no name or value in the clear.
+    auto& tables = t.zetta->records["http://" + workspace + ".test"];
+    for (const std::string collection : {"secrets_mounts", "secrets_entries", "secrets_versions"}) {
+        for (const auto& [record_key, row] : tables.rows(collection)) {
+            EXPECT_EQ(row.dump().find("account-owned-password"), std::string::npos) << collection;
+            EXPECT_EQ(row.dump().find("Personal credentials"), std::string::npos) << collection;
+        }
+    }
+
+    // Another person, with no grant on this account, is refused everywhere and lists nothing.
+    const auto foreign_create =
+        as(other,
+           "create_secret_mount",
+           {{"customer_id", own.customer_id}, {"workspace_id", workspace}, {"name", "trespass"}});
+    EXPECT_EQ(foreign_create.error.code, "unauthorized");
+    EXPECT_EQ(as(other, "read_secret", {{"mount_id", mount_id}, {"name", "database"}}).error.code,
+              "unauthorized");
+    EXPECT_EQ(as(other,
+                 "put_secret",
+                 {{"mount_id", mount_id}, {"name", "database"}, {"value", {{"password", "x"}}}})
+                  .error.code,
+              "unauthorized");
+    EXPECT_EQ(as(other, "list_secrets", {{"mount_id", mount_id}}).error.code, "unauthorized");
+    EXPECT_EQ(as(other, "get_secret_mount", {{"mount_id", mount_id}}).error.code, "unauthorized");
+    EXPECT_EQ(
+        as(other, "encrypt", {{"mount_id", mount_id}, {"name", "orders"}, {"plaintext", "aGk"}})
+            .error.code,
+        "unauthorized");
+    EXPECT_EQ(
+        as(other, "create_encryption_key", {{"mount_id", mount_id}, {"name", "mine"}}).error.code,
+        "unauthorized");
+    const auto foreign_list = as(other,
+                                 "list_secret_mounts",
+                                 {{"customer_id", own.customer_id}, {"workspace_id", workspace}});
+    EXPECT_TRUE(foreign_list.ok ? foreign_list.value["items"].empty()
+                                : foreign_list.error.code == "unauthorized")
+        << foreign_list.value.dump();
+    // Nor can the other person make their own account the owner of a mount in this workspace.
+    const auto crossed =
+        as(other,
+           "create_secret_mount",
+           {{"customer_id", other.customer_id}, {"workspace_id", workspace}, {"name", "crossed"}});
+    EXPECT_FALSE(crossed.ok);
+    EXPECT_EQ(tables.rows("secrets_mounts").size(), 2U) << "the mount and its name claim";
+
+    // An organization inside the account's space owns a mount of the same name in the same
+    // workspace: the claims are per owner, so neither collides with the other.
+    const auto organization =
+        as(own,
+           "create_organization",
+           {{"display_name", "Side project"}, {"customer_id", own.customer_id}});
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const std::string organization_id = organization.value["id"];
+    const auto organization_mount = as(own,
+                                       "create_secret_mount",
+                                       {{"customer_id", own.customer_id},
+                                        {"workspace_id", workspace},
+                                        {"organization_id", organization_id},
+                                        {"name", "vault"}});
+    ASSERT_TRUE(organization_mount.ok) << organization_mount.error.message;
+    EXPECT_EQ(organization_mount.value["owner_type"], "organization");
+    EXPECT_EQ(organization_mount.value["organization_id"], organization_id);
+    const std::string organization_mount_id = organization_mount.value["id"];
+    EXPECT_NE(organization_mount_id, mount_id);
+    // The organization's mount is as it always was: its route names the organization, and its
+    // policy object hangs under the organization's environment.
+    const auto organization_route = t.store->get_secret_mount_route(organization_mount_id);
+    ASSERT_TRUE(organization_route);
+    EXPECT_EQ(organization_route->organization_id, organization_id);
+    const auto organization_environment = t.store->get_policy_object(
+        t.store->find_policy_object("secret_mount", organization_mount_id)->parent_id);
+    ASSERT_TRUE(organization_environment);
+    EXPECT_EQ(organization_environment->external_id,
+              "secrets/" + own.customer_id + "/" + organization_id);
+    EXPECT_EQ(organization_environment->parent_id,
+              t.store->find_policy_object("organization", organization_id)->id);
+    // Each owner still claims its name once.
+    for (const json& owner : {json::object(), json{{"organization_id", organization_id}}}) {
+        json input = {
+            {"customer_id", own.customer_id}, {"workspace_id", workspace}, {"name", "vault"}};
+        input.update(owner);
+        const auto again = as(own, "create_secret_mount", input);
+        EXPECT_EQ(again.error.code, "conflict") << owner.dump();
+        EXPECT_EQ(again.error.path, "/name") << owner.dump();
+    }
+    // Both mounts list, each with its own owner, and keep their own secrets.
+    const auto both = as(
+        own, "list_secret_mounts", {{"customer_id", own.customer_id}, {"workspace_id", workspace}});
+    ASSERT_TRUE(both.ok) << both.error.message;
+    ASSERT_EQ(both.value["items"].size(), 2U);
+    std::set<std::string> owners;
+    for (const auto& item : both.value["items"]) {
+        owners.insert(item["owner_type"].get<std::string>());
+    }
+    EXPECT_EQ(owners, (std::set<std::string>{"customer", "organization"}));
+    const auto only_organization = as(own,
+                                      "list_secret_mounts",
+                                      {{"customer_id", own.customer_id},
+                                       {"workspace_id", workspace},
+                                       {"organization_id", organization_id}});
+    ASSERT_TRUE(only_organization.ok) << only_organization.error.message;
+    ASSERT_EQ(only_organization.value["items"].size(), 1U);
+    EXPECT_EQ(only_organization.value["items"][0]["id"], organization_mount_id);
+    EXPECT_EQ(as(own, "read_secret", {{"mount_id", organization_mount_id}, {"name", "database"}})
+                  .error.code,
+              "not_found");
+    EXPECT_TRUE(as(own, "read_secret", {{"mount_id", mount_id}, {"name", "database"}}).ok);
+
+    // The other person's organization is not inside this space, and cannot own a mount here.
+    const auto foreign_organization =
+        as(other,
+           "create_organization",
+           {{"display_name", "Elsewhere"}, {"customer_id", other.customer_id}});
+    ASSERT_TRUE(foreign_organization.ok) << foreign_organization.error.message;
+    const auto outside = secret_call(t,
+                                     secret_operator(t),
+                                     "create_secret_mount",
+                                     {{"customer_id", own.customer_id},
+                                      {"workspace_id", workspace},
+                                      {"organization_id", foreign_organization.value["id"]},
+                                      {"name", "outside"}});
+    EXPECT_EQ(outside.error.code, "invalid_input");
+    EXPECT_EQ(outside.error.path, "/organization_id");
+
+    // A customer KEK rotation rewraps the account's data keys too; its secrets stay readable.
+    const auto rotated = as(own, "rotate_customer_kek", {{"customer_id", own.customer_id}});
+    ASSERT_TRUE(rotated.ok) << rotated.error.message;
+    const auto after = as(own, "read_secret", {{"mount_id", mount_id}, {"name", "database"}});
+    ASSERT_TRUE(after.ok) << after.error.message;
+    EXPECT_EQ(after.value["value"]["password"], "account-owned-password");
+
+    if (GetParam()) {
+        // Migration 0071: the route's organization is nullable, and the account's route holds NULL.
+        pqxx::connection connection(database_uri_);
+        pqxx::work tx(connection);
+        EXPECT_EQ(tx.exec("SELECT is_nullable FROM information_schema.columns WHERE table_name = "
+                          "'secret_mount_routes' AND column_name = 'organization_id'")[0][0]
+                      .as<std::string>(),
+                  "YES");
+        EXPECT_TRUE(tx.exec_params("SELECT organization_id FROM secret_mount_routes WHERE "
+                                   "mount_id = $1::uuid",
+                                   mount_id)[0][0]
+                        .is_null());
+        EXPECT_FALSE(tx.exec("SELECT to_regclass('secret_mount_owners_guard')")[0][0].is_null());
+    }
+}
+
 std::int64_t lease_now_us() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
                std::chrono::system_clock::now().time_since_epoch())

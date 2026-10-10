@@ -45,18 +45,34 @@ json input_schema(json properties, json required = json::array()) {
     return schema;
 }
 
-std::expected<std::string, ApiError> organization_object(const json& input, ApiContext& context) {
-    context.audit_customer_id = input.at("customer_id");
+// The organization a new mount names, or empty when its account (the customer) owns it.
+std::string mount_organization(const json& input) {
+    const auto found = input.find("organization_id");
+    return found != input.end() && found->is_string() ? found->get<std::string>() : std::string();
+}
+
+// The policy object that decides who may create a mount: its owner's. That is the organization
+// named by `organization_id` (`admin` on the organization, as before), or, without one, the
+// customer that owns the workspace (`admin` on the customer, the same object an account's
+// environments hang under).
+std::expected<std::string, ApiError> mount_owner_object(const json& input, ApiContext& context) {
+    const std::string customer_id = input.at("customer_id");
+    const std::string organization_id = mount_organization(input);
+    context.audit_customer_id = customer_id;
     context.audit_kind = "secret_mount";
-    context.audit_object = "secret_mount/" + input.at("customer_id").get<std::string>() + "/" +
-                           input.at("organization_id").get<std::string>() + "/" +
+    context.audit_object = "secret_mount/" + customer_id + "/" +
+                           (organization_id.empty() ? "" : organization_id + "/") +
                            input.at("name").get<std::string>();
     context.audit_details = {{"mount", input.at("name")},
-                             {"workspace_id", input.value("workspace_id", "")}};
-    auto object = context.store->find_policy_object("organization", input.at("organization_id"));
+                             {"workspace_id", input.value("workspace_id", "")},
+                             {"owner_type", organization_id.empty() ? "customer" : "organization"}};
+    const bool account = organization_id.empty();
+    auto object = context.store->find_policy_object(account ? "customer" : "organization",
+                                                    account ? customer_id : organization_id);
     if (!object) {
-        return std::unexpected(
-            ApiError{object.error().code, object.error().message, "/organization_id"});
+        return std::unexpected(ApiError{object.error().code,
+                                        object.error().message,
+                                        account ? "/customer_id" : "/organization_id"});
     }
     return object->id;
 }
@@ -268,20 +284,21 @@ void register_mount_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "create_secret_mount",
         .title = "Create secret mount",
-        .description = "Create an organization secret mount in one workspace of a customer. The "
-                       "mount, its secrets and its keys live in that workspace's Zetta.",
+        .description = "Create a secret mount in one workspace of a customer. Without "
+                       "organization_id the customer (the account that owns the workspace) owns "
+                       "it; with one, that organization does. The mount, its secrets and its keys "
+                       "live in that workspace's Zetta.",
         .input_schema = input_schema({{"customer_id", {{"type", "string"}}},
                                       {"workspace_id", {{"type", "string"}}},
                                       {"organization_id", {{"type", "string"}}},
                                       {"name", {{"type", "string"}}},
                                       {"description", {{"type", "string"}}}},
-                                     json::array({"customer_id", "workspace_id",
-                                                  "organization_id", "name"})),
+                                     json::array({"customer_id", "workspace_id", "name"})),
         .output_schema = object_schema(),
         .kind = CapabilityKind::Action,
-        .object = "organization",
+        .object = "secret mount owner",
         .action = "admin",
-        .resolve_object = organization_object,
+        .resolve_object = mount_owner_object,
         .resolves_operator_audit_target = true,
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
@@ -291,7 +308,7 @@ void register_mount_capabilities(Registry& registry) {
             control::SecretMount draft;
             draft.customer_id = input.at("customer_id");
             draft.workspace_id = input.at("workspace_id");
-            draft.organization_id = input.at("organization_id");
+            draft.organization_id = mount_organization(input);
             draft.name = input.at("name");
             draft.description = input.value("description", "");
             auto created = control::settled(co_await create_secret_mount(context, draft));
