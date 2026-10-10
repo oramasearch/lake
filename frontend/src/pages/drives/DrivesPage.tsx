@@ -110,7 +110,7 @@ export default function DrivesPage() {
                         <Link to={driveHref(row.drive.id, row.entry.parent_id)} className="block truncate font-medium">
                           {row.entry.name}
                         </Link>
-                        <span className="block truncate text-[12px] text-ink-3">{row.entry.path}</span>
+                        {row.entry.path !== row.entry.name && <span className="block truncate text-[12px] text-ink-3">{row.entry.path}</span>}
                       </span>
                     </span>
                   ),

@@ -50,7 +50,7 @@ import { Menu, displaySize, driveHref as repositoryDriveHref } from "@/pages/rep
 import { qs, useWorkspace, useWsPath } from "@/pages/train/workspace";
 import { rangeSelect, sortEntries, validName, type Direction, type SortKey, type UploadItem } from "./paths";
 import { storageFor, type Drive, type DriveStorage, type Item, type Listing, type Progress } from "./storage";
-import { storageLabel, targetHref, targetLabel } from "./targets";
+import { STORAGE, storageLabel, targetHref, targetLabel } from "./targets";
 import { ShortcutDialog } from "./ShortcutDialog";
 import { FolderPicker } from "./FolderPicker";
 
@@ -165,6 +165,7 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
   const files = items.filter((item) => item.kind === "file");
   const shortcuts = items.filter((item) => item.kind === "shortcut");
   const broken = shortcuts.filter((item) => item.status === "broken").length;
+  const stats = (1 + (drive.storage !== "virtual" ? 2 : 0) + (storage.can.shortcuts ? 1 : 0)) as 2 | 3 | 4;
 
   const select = (item: Item, event: MouseEvent) => {
     const next = new Set(event.metaKey || event.ctrlKey || event.shiftKey ? selected : []);
@@ -265,7 +266,12 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
   );
 
   return (
-    <Page eyebrow={`Drive · ${storageLabel(drive.storage)}`} title={here} sub={<PathBar drive={drive} crumbs={crumbs} open={open} dropOn={dropOn} dropTarget={dropTarget} />} actions={actions}>
+    <Page
+      eyebrow={`Drive · ${storageLabel(drive.storage)}`}
+      title={here}
+      sub={crumbs.length ? <PathBar drive={drive} crumbs={crumbs} open={open} dropOn={dropOn} dropTarget={dropTarget} /> : STORAGE.find((s) => s.id === drive.storage)?.detail}
+      actions={actions}
+    >
       <input ref={upload.filesInput} type="file" multiple className="sr-only" aria-label="Files to upload" onChange={(e) => void upload.fromInput(e.target)} />
       <input
         ref={upload.folderInput}
@@ -277,10 +283,10 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
         {...({ webkitdirectory: "" } as Record<string, string>)}
         onChange={(e) => void upload.fromInput(e.target)}
       />
-      <StatRow cols={drive.storage === "virtual" ? 3 : 4}>
+      <StatRow cols={stats}>
         <Stat label="Folders" value={listing.isLoading ? "…" : folders} icon={Folder} sub="in this folder" />
         {drive.storage !== "virtual" && <Stat label="Files" value={listing.isLoading ? "…" : files.length} icon={FileText} sub={displaySize(files.reduce((sum, f) => sum + f.size, 0))} />}
-        <Stat label="Shortcuts" value={listing.isLoading ? "…" : shortcuts.length} icon={Link2} sub={broken ? `${broken} broken` : "all reachable"} />
+        {storage.can.shortcuts && <Stat label="Shortcuts" value={listing.isLoading ? "…" : shortcuts.length} icon={Link2} sub={broken ? `${broken} broken` : "all reachable"} />}
         {drive.storage !== "virtual" && <Stat label="History" value={drive.storage === "repository" ? "Kept" : "None"} icon={History} sub={drive.storage === "repository" ? "every change can be restored" : "a deleted file is gone"} />}
       </StatRow>
       {upload.progress && (
