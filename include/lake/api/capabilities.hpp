@@ -42,6 +42,38 @@ void register_console_capabilities(Registry& registry, std::string_view version)
 // Speech-to-text and workspace transcripts (lake#561, docs/api/transcripts.md): transcribe,
 // create_transcript, list_transcripts, get_transcript, update_transcript, delete_transcript.
 void register_transcript_capabilities(Registry& registry);
+// Drives (lake#561, docs/api/drives.md): create_drive, list_drives, get_drive, rename_drive,
+// delete_drive; and a workspace-files or virtual drive's folders, files and shortcuts:
+// list_drive_entries, get_drive_entry, create_drive_folder_entry, create_drive_shortcut,
+// move_drive_entry, delete_drive_entry, begin_drive_upload, append_drive_upload,
+// finish_drive_upload, upload_drive_entries, read_drive_file, recent_drive_entries.
+void register_drives_capabilities(Registry& registry);
+// A finished workspace file, as GET /drive/files/download streams it. The route authorizes and
+// audits the read through get_drive_entry first; this reads the record again for the object key,
+// which no capability answers.
+struct WorkspaceFile {
+    std::string id;
+    std::string name;
+    std::string content_type;
+    std::string sha256;
+    std::string object_key;
+    std::uint64_t size = 0;
+};
+liquid::runtime::task<control::ZettaControlResult<WorkspaceFile>>
+find_workspace_file(ApiContext& context,
+                    std::string customer_id,
+                    std::string workspace_id,
+                    std::string drive_id,
+                    std::string id);
+// Plaintext [offset, offset + length) of a workspace file of `size` bytes.
+liquid::runtime::task<control::ZettaControlResult<std::string>>
+read_workspace_file(ApiContext& context,
+                    std::string customer_id,
+                    std::string workspace_id,
+                    std::string object_key,
+                    std::uint64_t size,
+                    std::uint64_t offset,
+                    std::uint64_t length);
 // The live workspace a new repository is created in (lake#315): `input.workspace_id` must name a
 // workspace of `input.customer_id`'s space that is not deleted. Anything else, including a missing
 // id, is invalid_input at /workspace_id; there is no default workspace.

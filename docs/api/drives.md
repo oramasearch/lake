@@ -1,0 +1,200 @@
+# Drives
+
+**Status: implemented 2026-10-10 in the source tree (lake#561); not deployed.** A workspace's
+drives are the places it keeps files. Each drive keeps its files one of three ways (`storage`):
+
+| `storage` | Files are | History | Written with |
+|---|---|---|---|
+| `repository` | a liquid repository of the workspace | every write is a change | the drive_* capabilities ([drive.md](../ui/drive.md)) on the drive's `repository_id` |
+| `files` | workspace files: records and sealed objects in the workspace Zetta | none | the entry capabilities below |
+| `virtual` | folders and shortcuts only | none | the entry capabilities below, without uploads |
+
+A drive is one sealed record in `lake_drives` of its workspace Zetta, found by its space; its
+folders, files and shortcuts (a `files` or `virtual` drive's) are sealed records in
+`lake_drive_entries`, found by drive ([workspace-records.md](../architecture/workspace-records.md)).
+Nothing about a drive is in PostgreSQL. Deleting the workspace deletes them with its Zetta.
+
+## Capabilities
+
+Every capability takes `customer_id` and `workspace_id` (`Registry::call` checks the workspace is
+the space's) and authorizes on the space: reads need `read`, actions `write`. Every call is
+audited in the workspace's own log ([audit.md](audit.md#which-log)).
+
+| Capability | Kind | Input (besides `customer_id`, `workspace_id`) | Output |
+|---|---|---|---|
+| `create_drive` | action | `name`, `storage`, `repository_id?`, `repository_name?` | the drive |
+| `list_drives` | read | — | `{drives: [drive]}`, by name |
+| `get_drive` | read | `id` | the drive |
+| `rename_drive` | action | `id`, `name` | the drive |
+| `delete_drive` | action | `id`, `confirm_name` | `{deleted: true, entries_removed, repository_id?}` |
+| `list_drive_entries` | read | `drive_id`, `folder_id?` or `path?` | `{drive, folder_id, path, ancestors: [{id, name}], items: [entry]}` |
+| `get_drive_entry` | read | `drive_id`, `id` | the entry |
+| `create_drive_folder_entry` | action | `drive_id`, `parent_id?`, `path` | the last folder |
+| `create_drive_shortcut` | action | `drive_id`, `parent_id?`, `name`, `target` | the entry, with `status` |
+| `move_drive_entry` | action | `drive_id`, `id`, `parent_id?`, `name?` | the entry |
+| `delete_drive_entry` | action | `drive_id`, `id` | `{deleted: true, entries_removed}` |
+| `begin_drive_upload` | action | `drive_id`, `parent_id?`, `path`, `size`, `content_type?`, `on_conflict?` | `{entry, block_size, max_chunk_bytes}` |
+| `append_drive_upload` | action | `drive_id`, `id`, `offset`, `content` (base64) | `{received, complete, size}` |
+| `finish_drive_upload` | action | `drive_id`, `id`, `sha256?` | the entry |
+| `upload_drive_entries` | action | `drive_id`, `parent_id?`, `on_conflict?`, `files: [{path, content, content_type?}]` | `{items: [entry]}` |
+| `read_drive_file` | read | `drive_id`, `id`, `offset?`, `length?` | `{id, name, size, content_type, sha256, offset, content_base64}` |
+| `recent_drive_entries` | read | `limit?` (1 to 100, default 20) | `{items: [{drive: {id, name}, entry}]}` |
+
+A drive is `{id, name, storage, repository_id, created_by, created_at}`; `repository_id` is `null`
+except for a repository drive. An entry is `{id, drive_id, parent_id, kind, name, path, created_by,
+created_at, modified_by, modified_at}`, `parent_id` `null` at the drive's top, plus for a file
+`{size, content_type, sha256, state}` and for a shortcut `{target, status, reason?}`.
+
+### Drives
+
+- A drive's name is 1 to 255 bytes with no `/`, `\` or control character, not `.`, `..` or
+  `.lake-folder`, and unique in the workspace (`conflict` at `/name`).
+- `create_drive` with `storage: repository` names an existing repository of the workspace
+  (`repository_id`; the caller must be able to read it, through `get_repository`) or a new one to
+  create (`repository_name`, through `create_repository`, as the caller). A new repository has no
+  `main` until its first change, and every drive_* capability resolves `main` first, so a bare
+  repository's `drive_browse` answers `not_found`. `create_drive` therefore writes the
+  repository's first change at once: the top folder's empty-folder marker `.lake-folder`
+  (`commit_repository_files` takes an empty folder path for it), which `drive_browse` never lists.
+- `delete_drive` needs `confirm_name` equal to the drive's name (`invalid_input` at
+  `/confirm_name`). A `files` drive's entries and their objects are deleted first, children before
+  parents; a `virtual` drive's entries are deleted; a `repository` drive's repository is never
+  touched, and the answer names it.
+
+### Folders, Files and Shortcuts
+
+The entry capabilities refuse a repository drive (`invalid_input` at `/drive_id`); a virtual
+drive refuses uploads.
+
+- Names follow the drive name rule and are unique in their folder, an unfinished upload's too. A
+  name taken answers `conflict`, except for uploads: `on_conflict` is `rename` (default: the first
+  free `name (2).ext`), `replace` (the upload replaces that ready file when it finishes: the old
+  record and object are deleted then, if the old file is still the one of that name there) or
+  `refuse`.
+- `create_drive_folder_entry` makes each level of `path` that is missing (as `mkdir -p`) and
+  answers the last; a level that is a file or shortcut is `conflict`.
+- `list_drive_entries` lists a folder's ready entries by `folder_id` (or a slash `path` from the
+  top; neither is the top), with the folders from the top down to it in `ancestors`.
+- `move_drive_entry` changes `parent_id` (empty: the top) and/or `name` with a write conditional
+  on the revision read, retried on a conflict. A folder never moves into itself. Only the record
+  changes: a file's object is never copied.
+- `delete_drive_entry` deletes the entry and, for a folder, everything in it, deepest first, each
+  file's object before its record.
+- Two writers creating the same name in one folder at once can both succeed: names are checked
+  against one read of the drive, not claimed atomically.
+
+### Shortcuts
+
+`target` is `{kind, ...}`:
+
+| `kind` | Fields | Checked |
+|---|---|---|
+| `repository` | `repository_id` | exists, not deleted, and the caller may read it |
+| `repository_path` | `repository_id`, `path`, `ref?` (default `main`) | as above, and `path` is in the tree at `ref` |
+| `drive_entry` | `drive_id`, `entry_id` | the drive and a ready entry exist in this workspace |
+| `transcript` | `id` | the transcript exists in this workspace |
+| `dataset`, `agent`, `model` | `id` | not checked |
+| `project` | `name` | not checked |
+| `url` | `url` (`http://` or `https://`, no space, `"`, `<` or `>`) | not checked |
+
+`create_drive_shortcut` refuses a checked target that is not there (`not_found` at `/target`).
+Every listing and `get_drive_entry` checks again and answers `status`: `ok`, `broken` (with
+`reason`) or `unknown` (a kind lake does not check, or a check that could not complete). A broken
+shortcut never fails its folder's listing. Repository trees are read once per repository and ref
+per call.
+
+### Uploads
+
+A file is uploaded in three steps, or in one call when small:
+
+1. `begin_drive_upload` writes an `uploading` entry at `path` relative to `parent_id` (its folders
+   made where missing), with a new opaque object key, and answers `block_size` (1 MiB) and
+   `max_chunk_bytes` (8 MiB). `size` is the file's length, at most 64 GiB; `content_type` defaults
+   from the name's extension. An uploading entry is never listed, and its name is taken.
+2. `append_drive_upload` sends bytes from `offset`, which is a multiple of `block_size`; every
+   chunk but the last is a whole number of blocks, and no chunk runs past `size`. Chunks go in
+   order. A chunk sent again (an answer lost) is accepted unchanged; one that does not continue
+   the object is `conflict` at `/offset`.
+3. `finish_drive_upload` reads the object back, block by block: it must hold exactly `size` bytes
+   (else `conflict`, "the upload is not complete"), and their SHA-256 becomes the entry's `sha256`
+   (`invalid_digest` at `/sha256` when one was sent and differs). The entry becomes `ready` and
+   is listed. Finishing a finished upload answers it again.
+
+`upload_drive_entries` does all three for each file (at most 16 MiB decoded per call), in order.
+
+`read_drive_file` answers up to 16 MiB of a ready file as base64. A browser downloads with
+`GET /drive/files/download?customer_id=&workspace_id=&drive_id=&id=[&inline=1]`
+([http.md](../serving/http.md)): the route calls `get_drive_entry` as the caller (so the read is
+authorized and audited), then streams the plaintext 1 MiB at a time from the object, opening each
+block as it goes; the file is never held whole. `inline=1` serves it `inline` only for images,
+PDF, plain text, CSV, Markdown, audio and video; anything else is an attachment. Every download
+carries `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox; default-src
+'none'`, and its ETag is the SHA-256.
+
+## How File Bytes Are Kept
+
+Each file's bytes are one object in the workspace Zetta's `lake_files` bucket (created on first
+use, without a quota), under the key `f/<uuid>`, which says nothing about the file. The record
+holds the key; a move or rename never touches the object.
+
+- **Sealed in blocks.** The plaintext is cut into 1 MiB blocks (the last shorter). Block `n` is
+  stored at object offset `n × (1 MiB + 28)` as its 12-byte nonce, the AES-256-GCM ciphertext and
+  the 16-byte tag, so any range is read by reading and opening only its blocks.
+- **Keys.** Two keys per workspace are derived with HKDF from `LAKE_INSTANCE_KEK`
+  (`lake/drive-files/v1/seal/<workspace>` and `lake/drive-files/v1/nonce/<workspace>`), as
+  workspace records derive theirs. Not the workspace store's data key: that key is kept inside
+  `lake_store` and opens only under that store's lease, which file requests do not hold.
+- **Nonces.** A block's nonce is the first 12 bytes of HMAC-SHA-256 under the nonce key of the
+  object key, the block index and the plaintext (a synthetic nonce). The same block always seals
+  to the same bytes, so a retried chunk is an exact repeat, which Zetta's exact-offset append
+  accepts as unchanged; two different blocks never share a nonce.
+- **Bound to their place.** The associated data is `lake-drive-files/v1|<workspace>|<key>|<index>`:
+  a block copied to another index, object or workspace does not open (`corrupt`).
+- **Durable.** Every append is `?durable=true`: Zetta fsyncs it before it answers, so an
+  acknowledged chunk survives a crash, and the upload resumes at the next chunk.
+- **No lease.** The bucket has no owner lease, unlike `lake_store`. Each object has one writer
+  (the upload that made its key; the entry is not `ready` until finished), every append names its
+  exact offset, and an object is never rewritten in place, so two replicas serving the same upload
+  can only append identical bytes. The store owner's lease protects liquid's in-memory directory
+  of `lake_store`, which `lake_files` does not have.
+- **Removal.** Deleting a file deletes its object (durably) before its record, so a failure leaves
+  a record whose object is gone, never an object no record names. An abandoned upload's object
+  stays until its entry is deleted.
+
+**Known gap:** `lake_files` is created without a quota, and lake's storage quota and usage
+figures read the `lake_store` bucket, so workspace files are not counted against the space's
+storage quota yet. The workspace Zetta's own volume is the bound.
+
+## Errors
+
+| Code | When |
+|---|---|
+| `invalid_input` | a name, path, media type, offset or target is invalid; a repository drive given to an entry capability; an upload to a virtual drive; `confirm_name` does not match |
+| `not_found` | no such drive, folder, entry or upload in this workspace; a checked shortcut target is gone |
+| `conflict` | a name taken; a folder level that is not a folder; a chunk out of order; an upload not complete; a finished upload sent more bytes |
+| `invalid_digest` | `finish_drive_upload`'s `sha256` differs from the bytes |
+| `size_invalid` | a chunk over 8 MiB, an inline upload or read over 16 MiB, a file over 64 GiB |
+| `not_supported` | this lake has no workspace Zetta object transport (no workspace files) |
+| `corrupt` | a stored block does not open with this workspace's key |
+| `quota_exceeded`, `store_unavailable` | the workspace Zetta refused or did not answer |
+
+## Verify
+
+- `tests/test_drives.cpp`: the folder tree and names; sealing (deterministic, bound to key, index
+  and workspace); chunked writes, retries, a lost answer, out-of-order and short objects, any-range
+  reads; a workspace-files drive end to end (folders from an upload path, chunked upload, finish,
+  moves without copying, rename/replace/refuse, recursive delete, recent files, drive delete);
+  another space refused; a virtual drive's shortcuts going broken; the audit routing; and over
+  HTTP, a repository drive's `main` from creation (a bare repository's `drive_browse` is
+  `not_found`) and a streamed download of a 3 MiB file.
+- `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls every capability above and
+  validates its answer against its output schema.
+
+## Change It
+
+- A new shortcut kind: `drive_shortcut_problem` (`src/control/drives.cpp`), `target_schema` and
+  `ShortcutChecker` (`src/api/drives_capabilities.cpp`), and `frontend/src/pages/drives/targets.ts`.
+- A new storage: `known_drive_storage`, `create_drive`, and a `DriveStorage` implementation in
+  `frontend/src/pages/drives/storage.ts`.
+- The block format is versioned by its labels (`v1`); a new format gets new labels and a record
+  field naming it, and keeps reading `v1`.

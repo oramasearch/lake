@@ -35,6 +35,7 @@ tick.
 | `POST /identity/clerk-session` | exchanges a Clerk session token for the `lake_session` cookie ([`../api/clerk.md`](../api/clerk.md)) |
 | `GET /v1/oauth/<provider>/callback` | OAuth authorization-code callback with one-use state, PKCE, and verified provider identity; sets the cookie and redirects |
 | `GET /file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | the bytes of a repository file, a Drive file, a signed export or a shared file; without a credential a protected download redirects to `/sign-in` |
+| `GET /drive/files/download?customer_id=&workspace_id=&drive_id=&id=[&inline=1]` | a workspace file ([drives.md](../api/drives.md#uploads)): authorized and audited through `get_drive_entry`, then streamed from the workspace Zetta's `lake_files` bucket 1 MiB at a time (the image-pull streamer, its slots and idle timeout), `nosniff`, a sandboxing CSP, and `inline` only for media types a browser shows as data |
 | `GET /llms.txt`, `/llms-full.txt`, `/developer/mcp/skill`, `/skills/lake/SKILL.md` | the agents' guide and the Claude skill, public text |
 | `GET /apps/<id>/sign-up`, `/sign-in`, `/mfa`, `/passkey-sign-in`; the same four paths on an application's custom sign-in host | themed application identity pages, server-rendered ([`../api/apps.md`](../api/apps.md)); on lake's own host those paths are the web app's |
 | `POST /apps/<id>/identity/*` | application-pool identity form adapters |

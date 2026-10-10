@@ -312,6 +312,10 @@ struct ApiContext {
     // Speech-to-text for transcribe and create_transcript (docs/api/transcripts.md); empty when
     // this lake has no OpenAI key.
     Transcriber transcriber;
+    // The transport to workspace Zettas' object routes, for workspace files (drives with
+    // `files` storage, docs/api/drives.md): the HTTP server's pooled client, or a test's fake.
+    // Null: this lake keeps no workspace files.
+    std::shared_ptr<control::ObjectTransport> object_transport;
     SyncStore* sync_store = nullptr;
     MeteringConfig metering;
     // Repository transfer and build records on their way to the workspace Zettas (lake#348,

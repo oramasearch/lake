@@ -8,6 +8,7 @@ import { screens as apps } from "@/pages/apps/routes";
 import { screens as ask } from "@/pages/ask/routes";
 import { screens as design } from "@/pages/design/routes";
 import { screens as developer } from "@/pages/developer/routes";
+import { screens as drives } from "@/pages/drives/routes";
 import { screens as experiments } from "@/pages/experiments/routes";
 import { screens as home } from "@/pages/home/routes";
 import { screens as organizations } from "@/pages/organizations/routes";
@@ -26,6 +27,7 @@ export const SCREENS: Screen[] = [
   ...account,
   ...developer,
   ...repositories,
+  ...drives,
   ...search,
   ...workspaces,
   ...design,
@@ -71,6 +73,8 @@ export const NAV: NavItem[] = [
   // Data: where a person's data lives and is found (Steve, 2026-10-10). Datasets is the Train →
   // Data page, kept at its address.
   { section: "data", path: "/repositories", label: "Repositories", icon: "repository", audience: ALL },
+  // A workspace's drives: files in a repository, as workspace files, or as shortcuts (lake#561).
+  { section: "data", path: "/drives", label: "Drives", icon: "repository", audience: AO },
   { section: "data", path: "/shared-with-me", label: "Shared with Me", icon: "repository", audience: ["account"] },
   { section: "data", path: "/search", label: "Search", icon: "search", audience: AO },
   { section: "data", path: "/train/data", label: "Datasets", icon: "metering", audience: AO },
