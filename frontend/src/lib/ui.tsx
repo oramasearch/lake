@@ -2,6 +2,7 @@
  * lake's existing component classes (styles/lake.css), so the look is lake's; Tailwind utilities,
  * bound to the same tokens, only arrange them. */
 import {
+  type ComponentType,
   Children,
   cloneElement,
   isValidElement,
@@ -13,10 +14,10 @@ import {
 } from "react";
 import { Link, NavLink } from "react-router-dom";
 import type { UseQueryResult } from "@tanstack/react-query";
-import { Check, Copy, Loader2 } from "lucide-react";
+import { Check, Copy, Inbox, Loader2 } from "lucide-react";
 import { ApiError, isSignedIn } from "./api";
 
-export function cx(...parts: (string | false | null | undefined)[]): string {
+export function cx(...parts: unknown[]): string {
   return parts.filter(Boolean).join(" ");
 }
 
@@ -84,16 +85,218 @@ export function Section({
   );
 }
 
-export function Card({ children, className, title, actions }: { children?: ReactNode; className?: string; title?: ReactNode; actions?: ReactNode }) {
-  return (
-    <div className={cx("card", className)}>
-      {(title || actions) && (
-        <div className="section-heading mb-3">
-          {title && <h3 className="m-0">{title}</h3>}
-          {actions}
+/** A card (rev-os's): a hairline 6px panel with an optional mono `label`, a `title`, actions on the
+ * right and a footer. `tone` marks an exception (danger edge), the active item (action edge) or a
+ * quiet one; `to` makes the whole card a link. */
+export function Card({
+  children,
+  className,
+  title,
+  label,
+  actions,
+  footer,
+  tone = "default",
+  padded = true,
+  to,
+}: {
+  children?: ReactNode;
+  className?: string;
+  title?: ReactNode;
+  label?: ReactNode;
+  actions?: ReactNode;
+  footer?: ReactNode;
+  tone?: "default" | "exception" | "active" | "quiet";
+  padded?: boolean;
+  to?: string;
+}) {
+  const body = (
+    <div
+      className={cx(
+        "rounded-[6px] border bg-surface",
+        tone === "exception" && "border-hairline border-l-[3px] border-l-bad",
+        tone === "active" && "border-hairline border-l-[3px] border-l-action",
+        tone === "quiet" && "border-hairline bg-transparent",
+        tone === "default" && "border-hairline",
+        to && "transition-colors hover:border-rule hover:bg-raised/40",
+        className,
+      )}
+    >
+      {(title || label || actions) && (
+        <div className={cx("flex flex-wrap items-start gap-x-3 gap-y-2", padded ? "px-4 pt-3" : "border-b border-hairline px-4 py-3")}>
+          <div className="min-w-0 flex-1">
+            {label && <div className="label m-0">{label}</div>}
+            {title && <div className="mt-0.5 text-[14.5px] font-semibold text-ink">{title}</div>}
+          </div>
+          {actions && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}
         </div>
       )}
+      {children !== undefined && <div className={cx(padded && "px-4 pt-2 pb-3.5")}>{children}</div>}
+      {footer && <div className="border-t border-hairline px-4 py-2 text-[12.5px] text-ink-2">{footer}</div>}
+    </div>
+  );
+  return to ? (
+    <Link to={to} className="block text-inherit no-underline">
+      {body}
+    </Link>
+  ) : (
+    body
+  );
+}
+
+/** A figure tile: a mono label, a large number and a line beneath (rev-os's Stat). */
+export function Stat({
+  label,
+  value,
+  sub,
+  tone,
+  icon: IconC,
+  to,
+}: {
+  label: ReactNode;
+  value: ReactNode;
+  sub?: ReactNode;
+  tone?: "bad" | "ok";
+  icon?: ComponentType<{ size?: number; className?: string }>;
+  to?: string;
+}) {
+  const inner = (
+    <div className={cx("h-full rounded-[6px] border border-hairline bg-surface px-4 py-3", tone === "bad" && "border-l-[3px] border-l-bad", to && "transition-colors hover:border-rule")}>
+      <div className="flex items-center gap-2">
+        {IconC && <IconC size={13} className="text-ink-3" />}
+        <div className="label m-0 truncate">{label}</div>
+      </div>
+      <div className={cx("mt-1.5 font-mono text-[22px] leading-none font-semibold tabular-nums text-ink", tone === "bad" && "text-bad", tone === "ok" && "text-ok")}>{value}</div>
+      {sub && <div className="mt-1.5 text-[12px] text-ink-3">{sub}</div>}
+    </div>
+  );
+  return to ? (
+    <Link to={to} className="block h-full text-inherit no-underline">
+      {inner}
+    </Link>
+  ) : (
+    inner
+  );
+}
+
+/** A row of figure tiles: 2 to 4 across on wide screens. */
+export function StatRow({ children, cols = 4 }: { children: ReactNode; cols?: 2 | 3 | 4 }) {
+  return <div className={cx("mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2", cols === 3 && "lg:grid-cols-3", cols === 4 && "lg:grid-cols-4")}>{children}</div>;
+}
+
+/** Main and side columns (rev-os's Split). */
+export function Split({ children, side, ratio = "wide" }: { children: ReactNode; side: ReactNode; ratio?: "wide" | "even" }) {
+  return (
+    <div className={cx("grid grid-cols-1 gap-4", ratio === "wide" ? "xl:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]" : "xl:grid-cols-2")}>
+      <div className="min-w-0 space-y-4">{children}</div>
+      <div className="min-w-0 space-y-4">{side}</div>
+    </div>
+  );
+}
+
+/** A pill (rev-os's Chip): a tag, a count or, with `onClick`, a filter. */
+export function Chip({
+  children,
+  tone = "neutral",
+  onClick,
+  active,
+  title,
+}: {
+  children: ReactNode;
+  tone?: "neutral" | "action" | "ok" | "bad" | "warn" | "ai";
+  onClick?: () => void;
+  active?: boolean;
+  title?: string;
+}) {
+  const className = cx(
+    "inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2.5 py-[1px] text-[12px] leading-5",
+    tone === "neutral" && "border-rule bg-surface text-ink-2",
+    tone === "action" && "border-action/40 bg-action-soft text-action",
+    tone === "ok" && "border-transparent bg-ok-soft text-ok",
+    tone === "bad" && "border-transparent bg-bad-soft text-bad",
+    tone === "warn" && "border-transparent bg-warn-soft text-warn",
+    tone === "ai" && "border-transparent bg-ai-soft text-ai",
+    onClick && "cursor-pointer hover:border-action",
+    active && "border-action font-semibold text-action",
+  );
+  return onClick ? (
+    <button type="button" className={cx(className, "chip-button")} onClick={onClick} aria-pressed={active} title={title}>
       {children}
+    </button>
+  ) : (
+    <span className={className} title={title}>
+      {children}
+    </span>
+  );
+}
+
+/** Filter pills: All, then each option with its count. */
+export function FilterChips<T extends string>({
+  options,
+  value,
+  onChange,
+  allLabel = "All",
+}: {
+  options: { id: T; label: ReactNode; count?: number }[];
+  value: T | null;
+  onChange: (v: T | null) => void;
+  allLabel?: string;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <Chip onClick={() => onChange(null)} active={value === null}>
+        {allLabel}
+      </Chip>
+      {options.map((o) => (
+        <Chip key={o.id} onClick={() => onChange(value === o.id ? null : o.id)} active={value === o.id}>
+          {o.label}
+          {o.count != null && <span className="font-mono text-[10.5px] text-ink-3">{o.count}</span>}
+        </Chip>
+      ))}
+    </div>
+  );
+}
+
+/** The row above a list: search, filters and actions. */
+export function Toolbar({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={cx("mb-3 flex flex-wrap items-center gap-2", className)}>{children}</div>;
+}
+
+export function SearchInput({ value, onChange, placeholder = "Search…", label = "Search" }: { value: string; onChange: (v: string) => void; placeholder?: string; label?: string }) {
+  return <input className="search-input" type="search" aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />;
+}
+
+/** A coloured edge and a sentence: information, a warning or a success (rev-os's Banner). */
+export function Banner({ tone = "info", title, children, action }: { tone?: "info" | "warn" | "ok" | "quiet"; title?: ReactNode; children?: ReactNode; action?: ReactNode }) {
+  return (
+    <div
+      className={cx(
+        "mb-3 flex items-start gap-3 rounded-[5px] border-l-[3px] px-3.5 py-2.5 text-[13px]",
+        tone === "info" && "border-l-action bg-action-soft text-ink",
+        tone === "warn" && "border-l-bad bg-bad-soft text-bad",
+        tone === "ok" && "border-l-ok bg-ok-soft text-ok",
+        tone === "quiet" && "border-l-rule bg-raised text-ink-2",
+      )}
+      role={tone === "warn" ? "alert" : "status"}
+    >
+      <div className="min-w-0 flex-1">
+        {title && <div className="font-semibold">{title}</div>}
+        {children && <div className={cx(title && "mt-0.5", tone === "warn" ? "text-bad" : "text-ink-2")}>{children}</div>}
+      </div>
+      {action && <div className="shrink-0">{action}</div>}
+    </div>
+  );
+}
+
+/** A track and its fill, with the value beside it. */
+export function Meter({ value, max = 100, label, tone }: { value: number | null | undefined; max?: number; label?: ReactNode; tone?: "bad" | "ok" }) {
+  const v = value ?? 0;
+  const w = Math.max(0, Math.min(100, max > 0 ? (v / max) * 100 : 0));
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-2 flex-1 overflow-hidden rounded-full bg-raised">
+        <div className={cx("h-full rounded-full", tone === "bad" ? "bg-bad" : tone === "ok" ? "bg-ok" : "bg-action")} style={{ width: `${w}%` }} />
+      </div>
+      {label !== undefined && <span className="font-mono text-[11.5px] text-ink-2 tabular-nums">{label}</span>}
     </div>
   );
 }
@@ -225,10 +428,28 @@ export function toneOf(status: string | null | undefined): Tone {
 }
 
 /** A status as a badge in words ("not_ready" → "Not ready"). */
+/** A status in words, as rev-os's state chip: a glyph, the word and its colour (never colour alone). */
 export function Status({ value, tone }: { value: string | null | undefined; tone?: Tone }) {
   if (!value) return <span className="muted">—</span>;
   const words = value.replace(/[_-]+/g, " ");
-  return <Badge tone={tone ?? toneOf(value)}>{words.charAt(0).toUpperCase() + words.slice(1)}</Badge>;
+  const t = tone ?? toneOf(value);
+  const glyph = t === "success" ? "✓" : t === "danger" ? "✗" : t === "warning" ? "○" : t === "ai" ? "◆" : "·";
+  return (
+    <span
+      className={cx(
+        "inline-flex items-center gap-1 rounded-[3px] px-1.5 py-[1px] font-mono text-[10.5px] leading-4 whitespace-nowrap",
+        t === "success" && "bg-ok-soft text-ok",
+        t === "danger" && "bg-bad-soft text-bad",
+        t === "warning" && "bg-warn-soft text-warn",
+        t === "ai" && "bg-ai-soft text-ai",
+        t === "info" && "bg-action-soft text-action",
+        t === "neutral" && "bg-raised text-ink-2",
+      )}
+    >
+      <span aria-hidden>{glyph}</span>
+      {words.charAt(0).toUpperCase() + words.slice(1)}
+    </span>
+  );
 }
 
 export function Notice({ children, tone = "info", title }: { children: ReactNode; tone?: "info" | "danger" | "warning" | "success"; title?: ReactNode }) {
@@ -241,10 +462,27 @@ export function Notice({ children, tone = "info", title }: { children: ReactNode
 }
 
 /** Nothing here yet: one sentence and the next action. */
-export function Empty({ children, action, compact }: { children: ReactNode; action?: ReactNode; compact?: boolean }) {
+/** Nothing here yet (rev-os's empty state): an icon, a title, one sentence and the next action. */
+export function Empty({
+  children,
+  action,
+  compact,
+  title,
+  icon: IconC = Inbox,
+}: {
+  children?: ReactNode;
+  action?: ReactNode;
+  compact?: boolean;
+  title?: ReactNode;
+  icon?: ComponentType<{ size?: number }>;
+}) {
   return (
-    <div className={cx(compact ? "compact-empty muted" : "empty")}>
-      <p className="m-0">{children}</p>
+    <div className={cx("flex flex-col items-center justify-center rounded-[6px] border border-dashed border-rule text-center", compact ? "px-4 py-6" : "px-6 py-12")}>
+      <div className="mb-2 flex h-9 w-9 items-center justify-center rounded-full bg-raised text-ink-3">
+        <IconC size={17} />
+      </div>
+      {title && <div className="text-[14px] font-semibold text-ink">{title}</div>}
+      {children && <div className={cx("max-w-md text-[13px] text-ink-2", title && "mt-1")}>{children}</div>}
       {action && <div className="mt-3 flex justify-center gap-2">{action}</div>}
     </div>
   );

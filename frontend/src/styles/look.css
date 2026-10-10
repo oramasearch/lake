@@ -655,3 +655,21 @@ main form.stack .field > label,
 main .field > label {
   display: block;
 }
+
+/* The kit's search box and filter pills (rev-os's Toolbar). */
+main .search-input {
+  width: 14rem;
+  min-height: 32px;
+}
+main .chip-button {
+  min-height: 0;
+  padding: 1px 10px;
+  font-size: 12px;
+  font-weight: var(--lake-weight-regular);
+  line-height: 20px;
+}
+main .chip-button[aria-pressed='true'] {
+  border-color: var(--lake-action);
+  color: var(--lake-action);
+  font-weight: var(--lake-weight-semibold);
+}
