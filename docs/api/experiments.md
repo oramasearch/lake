@@ -80,17 +80,25 @@ Initial proposal request (`POST /v1/agent_turn`; MCP tool `agent_turn`):
 ```
 
 `get_agent_task` returns a successful proposal with `kind:"proposal"`, `confirm:true`, an editable
-`study` object and explanations. No study write is present on that task credential. The reviewed
-object is sent in a second `agent_turn`:
+`study` object and explanations, and its digest as `proposal_sha256`. No study write is present on
+that task credential. The reviewed object is sent in a second `agent_turn`, naming the turn that
+proposed it (`proposal_task_id`) and the digest the person reviewed (`proposal_sha256`):
 
 ```json
-{"customer_id":"space-id","workspace_id":"workspace-id","agent":"agent-experiments","kind":"experiment","message":"Confirm and start the reviewed study proposal.","context":{"confirmed_proposal":{"kind":"proposal","confirm":true,"study":{"name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"held_out_auc","direction":"maximize","validation_split":"validation"},"budgets":{"max_trials":4,"max_parallel_trials":1,"max_wall_time_ms":60000,"cost_cap":5}},"explanations":{"objective":"Use held-out AUC."}}}}
+{"customer_id":"space-id","workspace_id":"workspace-id","agent":"agent-experiments","kind":"experiment","message":"Confirm and start the reviewed study proposal.","proposal_task_id":"task-id","proposal_sha256":"<proposal_sha256 from get_agent_task>","context":{"confirmed_proposal":{"kind":"proposal","confirm":true,"study":{"name":"Retention Tuning","project":"retention","pipeline":"training","dataset":"accounts","methodology":"M-1","objective":{"metric":"held_out_auc","direction":"maximize","validation_split":"validation"},"budgets":{"max_trials":4,"max_parallel_trials":1,"max_wall_time_ms":60000,"cost_cap":5}},"explanations":{"objective":"Use held-out AUC."}}}}
 ```
 ```json
 {"task_id":"confirmed-task-id","status":"pending"}
 ```
 
-The confirmed task alone receives workspace `create_study` and backing `start_study`. Status and
+Lake checks the confirmation itself (lake#561): `proposal_task_id` must be a finished
+`agent-experiments` `experiment` turn of this workspace that the caller may follow, whose answer is a
+proposal with a study; `proposal_sha256` must be that stored proposal's digest; and
+`confirmed_proposal` must be that proposal, with only `study` edited. Otherwise the turn is refused
+and nothing starts: `That task has no ExperimentsAgent proposal to confirm.` (400), `The
+ExperimentsAgent proposal changed before confirmation.` (409), or `The edited study proposal must be
+a JSON object.` (400). The confirmed task alone receives workspace `create_study` and backing
+`start_study`. Status and
 explanation use the same REST/MCP operation with `kind:"experiment_status"` or
 `kind:"experiment_explain"` and `context:{"study":"study-id"}`. A promotion is a separate
 reviewed confirmation; an explanation turn without it remains read-only.

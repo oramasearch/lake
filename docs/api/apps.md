@@ -362,6 +362,21 @@ person reviews the files and App settings. Lake starts a later turn with that ex
 `context.confirmed_proposal`; only the later turn receives `create_repository`,
 `commit_repository_files`, `create_app`, and `deploy_app`.
 
+The confirming call names what it confirms, and `agent_turn` checks it against the stored answer
+rather than trusting the caller's copy (lake#561):
+
+```json
+{"customer_id":"space-id","workspace_id":"workspace-id","agent":"agent-application","kind":"app","message":"Confirm and deploy the reviewed proposal.","proposal_task_id":"task-id","proposal_sha256":"<proposal_sha256 from get_agent_task>","context":{"confirmed_proposal":{"kind":"proposal","confirm":true,"files":[],"app":{"name":"customer-health","auth":"none"}},"confirm_public":true}}
+```
+
+`proposal_task_id` must be a finished `agent-application` `app` turn of this workspace that the
+caller may follow, and its answer a proposal with `confirm: true`, `files` and `app`
+(`That task has no ApplicationAgent proposal to confirm.`, 400). `proposal_sha256` must be the
+digest of that stored proposal, which `get_agent_task` returns beside it, and `confirmed_proposal`
+must equal it (`The ApplicationAgent proposal changed before confirmation.`, 409). A public app
+(`auth` `none` or `public`) also needs `context.confirm_public: true` (`This app will be public.
+Tick the box to confirm that anyone with its address can open it.`, 400).
+
 ApplicationAgent's App shape maps `auth: public` to Ship App `auth: none`, accepts a missing or null
 host as the generated wildcard host, and represents an operator-managed environment credential as
 `{"NAME":{"secret":"reference"}}`. `deploy_app` accepts the service's `app` key as an alias for

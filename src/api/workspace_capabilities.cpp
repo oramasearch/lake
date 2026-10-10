@@ -2231,12 +2231,15 @@ json task_json(const control::AgentTask& task) {
         app_proposal.value("confirm", false)) {
         out["review_url"] =
             "/ship/apps?customer_id=" + task.customer_id + "&task=" + task.id + "#proposal";
+        // What agent_turn's confirmation names: the proposal as lake stored it (lake#561).
+        out["proposal_sha256"] = agent_proposal_digest(app_proposal);
     }
     if (task.agent == "agent-experiments" && task.kind == "experiment" &&
         app_proposal.value("kind", std::string()) == "proposal" &&
         app_proposal.value("confirm", false)) {
         out["review_url"] = "/train/experiments?customer_id=" + task.customer_id +
                             "&task=" + task.id + "#experiment-proposal";
+        out["proposal_sha256"] = agent_proposal_digest(app_proposal);
     }
     return out;
 }
@@ -2435,6 +2438,90 @@ liquid::runtime::task<ApiResult> call_capability(ApiContext& context, std::strin
 ApiResult called(std::expected<ApiResult, liquid::error> completed) {
     return completed ? std::move(*completed)
                      : ApiResult::failure("store_error", completed.error().message);
+}
+
+// A confirmed proposal hands an ApplicationAgent or ExperimentsAgent turn its write tools, so lake
+// checks it here rather than trusting the caller's copy (lake#561): it must be the proposal in the
+// answer of `proposal_task_id`, a finished turn of the same agent and kind that the caller may
+// follow, and `proposal_sha256` must be that proposal's digest (get_agent_task returns it), so a
+// proposal that changed since the person saw it is refused. ExperimentsAgent's study is the one
+// part the person may edit; everything else is the stored proposal. A public app also needs
+// `context.confirm_public`. Answers the proposal the turn carries.
+liquid::runtime::task<ApiResult>
+verified_confirmed_proposal(const json& input, ApiContext& context, std::string_view agent) {
+    const bool experiments = agent == "agent-experiments";
+    const std::string who = experiments ? "ExperimentsAgent" : "ApplicationAgent";
+    const json context_input = input.value("context", json::object());
+    const json offered = context_input.value("confirmed_proposal", json());
+    const std::string task_id = input.value("proposal_task_id", std::string());
+    if (task_id.empty()) {
+        co_return ApiResult::failure("invalid_input",
+                                     "proposal_task_id: name the turn whose proposal you confirm",
+                                     "/proposal_task_id");
+    }
+    const ApiResult got =
+        called(co_await call_capability(context,
+                                        "get_agent_task",
+                                        {{"customer_id", input.at("customer_id")},
+                                         {"workspace_id", input.at("workspace_id")},
+                                         {"task_id", task_id}}));
+    if (!got.ok) {
+        co_return got;
+    }
+    const json& task = got.value;
+    const json answer = task.value("answer", json::object());
+    json proposal = answer.is_object() ? answer.value("result", json::object()) : json::object();
+    if (!proposal.is_object()) {
+        proposal = json::object();
+    }
+    const bool shaped = experiments ? proposal.value("study", json()).is_object()
+                                    : proposal.value("app", json()).is_object() &&
+                                          proposal.value("files", json()).is_array();
+    if (task.value("agent", std::string()) != agent ||
+        task.value("kind", std::string()) != (experiments ? "experiment" : "app") ||
+        task.value("status", std::string()) != "succeeded" ||
+        proposal.value("kind", std::string()) != "proposal" || !proposal.value("confirm", false) ||
+        !shaped) {
+        co_return ApiResult::failure("invalid_input",
+                                     "That task has no " + who + " proposal to confirm.",
+                                     "/proposal_task_id");
+    }
+    const std::string changed = "The " + who + " proposal changed before confirmation.";
+    if (input.value("proposal_sha256", std::string()) != agent_proposal_digest(proposal)) {
+        co_return ApiResult::failure("conflict", changed, "/proposal_sha256");
+    }
+    if (experiments) {
+        const json study = offered.is_object() ? offered.value("study", json()) : json();
+        if (!study.is_object()) {
+            co_return ApiResult::failure("invalid_input",
+                                         "The edited study proposal must be a JSON object.",
+                                         "/context/confirmed_proposal/study");
+        }
+        json unedited = offered;
+        unedited["study"] = proposal.at("study");
+        if (unedited != proposal) {
+            co_return ApiResult::failure("conflict", changed, "/context");
+        }
+        proposal["study"] = study;
+        co_return ApiResult::success(std::move(proposal));
+    }
+    if (offered != proposal) {
+        co_return ApiResult::failure("conflict", changed, "/context");
+    }
+    // A public app needs the person's acknowledgement that anyone with its address can open it
+    // (lake#452); create_app accepts the agent's public app only with it.
+    const json app = proposal.at("app");
+    const auto access = app.find("auth");
+    const bool public_app =
+        access != app.end() && access->is_string() && (*access == "none" || *access == "public");
+    if (public_app && context_input.value("confirm_public", json(false)) != json(true)) {
+        co_return ApiResult::failure(
+            "invalid_input",
+            "This app will be public. Tick the box to confirm that anyone with its address can "
+            "open it.",
+            "/context/confirm_public");
+    }
+    co_return ApiResult::success(std::move(proposal));
 }
 
 std::string base64(std::string_view bytes) {
@@ -4676,7 +4763,9 @@ void register_agent_run_capabilities(Registry& registry) {
                                                {"conversation_id", {{"type", "string"}}},
                                                {"context", {{"type", "object"}}},
                                                {"page", {{"type", "object"}}},
-                                               {"kind", {{"type", "string"}}}},
+                                               {"kind", {{"type", "string"}}},
+                                               {"proposal_task_id", {{"type", "string"}}},
+                                               {"proposal_sha256", {{"type", "string"}}}},
                                               json::array({"agent", "message"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Action,
@@ -4769,12 +4858,13 @@ void register_agent_run_capabilities(Registry& registry) {
                               "app_logs",
                               "receive_app_events"};
                     body["context"] = input.value("context", json::object());
-                    const json confirmed = body["context"].value("confirmed_proposal", json());
-                    if (confirmed.is_object() &&
-                        confirmed.value("kind", std::string()) == "proposal" &&
-                        confirmed.value("confirm", false) && confirmed.contains("files") &&
-                        confirmed.at("files").is_array() && confirmed.contains("app") &&
-                        confirmed.at("app").is_object()) {
+                    if (body["context"].contains("confirmed_proposal")) {
+                        const ApiResult confirmed =
+                            called(co_await verified_confirmed_proposal(input, context, agent));
+                        if (!confirmed.ok) {
+                            co_return confirmed;
+                        }
+                        body["context"]["confirmed_proposal"] = confirmed.value;
                         scopes.push_back("create_repository");
                         scopes.push_back("commit_repository_files");
                         scopes.push_back("create_app");
@@ -4807,12 +4897,13 @@ void register_agent_run_capabilities(Registry& registry) {
                                        "list_methodologies",
                                        "validate_study",
                                        "get_solution"});
-                        const json confirmed =
-                            body["context"].value("confirmed_proposal", json());
-                        if (confirmed.is_object() &&
-                            confirmed.value("kind", std::string()) == "proposal" &&
-                            confirmed.value("confirm", false) &&
-                            confirmed.value("study", json()).is_object()) {
+                        if (body["context"].contains("confirmed_proposal")) {
+                            const ApiResult confirmed =
+                                called(co_await verified_confirmed_proposal(input, context, agent));
+                            if (!confirmed.ok) {
+                                co_return confirmed;
+                            }
+                            body["context"]["confirmed_proposal"] = confirmed.value;
                             scopes.push_back("workspace_act");
                             scopes.push_back("create_study");
                             scopes.push_back("start_study");

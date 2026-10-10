@@ -74,6 +74,8 @@ export type AgentTask = {
   message?: string;
   conversation_id?: string;
   answer?: Row | null;
+  /** The digest of a proposal in the answer, as lake stored it; agent_turn's confirmation names it. */
+  proposal_sha256?: string;
 };
 
 /** A task is working while it is pending or running; the page checks again every 2 seconds. */

@@ -176,8 +176,11 @@ Secrets.
 
 `agent-application` is read-only on its first `app` task. A later task receives repository writes,
 `create_app`, and `deploy_app` only when its body contains the exact reviewed proposal at
-`context.confirmed_proposal`. Ship → Apps verifies that proposal against the completed task before
-starting the later turn. Ask Orama can delegate app requests through `agent_turn`; it never receives
+`context.confirmed_proposal`. `agent_turn` verifies that proposal itself (lake#561): the call names
+the turn that proposed it as `proposal_task_id` and the digest the person reviewed as
+`proposal_sha256` (`get_agent_task` returns it), and lake compares both with the proposal stored in
+that turn's answer. A public app (`auth` `none` or `public`) also needs `context.confirm_public:
+true`. The full input and refusals are in [apps.md](apps.md#applicationagent-and-ship-apps). Ask Orama can delegate app requests through `agent_turn`; it never receives
 the App write capabilities itself. See [agent-launches.md](agent-launches.md) and
 [the page contract](../ui/apps.md).
 

@@ -4152,11 +4152,27 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
                         {"confirm", true},
                         {"files", json::array()},
                         {"app", {{"name", "agent-reports"}, {"mode", "image"}}}};
-    const auto confirmed = r.call(
-        "agent_turn",
-        {{"agent", "agent-application"},
-         {"message", "Confirm and deploy the reviewed proposal."},
-         {"context", {{"confirmed_proposal", proposal}}}});
+    ASSERT_TRUE(r.set_task_status(first->id,
+                                  "Succeeded",
+                                  "",
+                                  "",
+                                  {{"ok", true}, {"reply", "Review it."}, {"result", proposal}}));
+    // A confirmation names the turn that proposed it and the digest the person reviewed (lake#561).
+    const std::string proposal_sha = lake::api::agent_proposal_digest(proposal);
+    EXPECT_EQ(r.call("get_agent_task", {{"task_id", first->id}}).value["proposal_sha256"],
+              proposal_sha);
+    const auto unnamed = r.call("agent_turn",
+                                {{"agent", "agent-application"},
+                                 {"message", "Confirm and deploy the reviewed proposal."},
+                                 {"context", {{"confirmed_proposal", proposal}}}});
+    EXPECT_EQ(unnamed.error.path, "/proposal_task_id");
+    EXPECT_EQ(r.bus->events("agent-tasks.agent-application").size(), 1U) << "nothing started";
+    const auto confirmed = r.call("agent_turn",
+                                  {{"agent", "agent-application"},
+                                   {"message", "Confirm and deploy the reviewed proposal."},
+                                   {"proposal_task_id", first->id},
+                                   {"proposal_sha256", proposal_sha},
+                                   {"context", {{"confirmed_proposal", proposal}}}});
     ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
     const auto second = r.task(confirmed.value["task_id"]);
     ASSERT_TRUE(second);
@@ -4183,11 +4199,13 @@ TEST(AgentRuns, ApplicationAgentWritesAppsOnlyAfterTheProposalIsConfirmed) {
     EXPECT_EQ(r.call("create_app", create_input).error.path, "/confirm_public")
         << "a person's own create_app acknowledges a public app as set_app_auth does";
 
-    const auto acknowledged = r.call(
-        "agent_turn",
-        {{"agent", "agent-application"},
-         {"message", "Confirm and deploy the reviewed proposal."},
-         {"context", {{"confirmed_proposal", proposal}, {"confirm_public", true}}}});
+    const auto acknowledged =
+        r.call("agent_turn",
+               {{"agent", "agent-application"},
+                {"message", "Confirm and deploy the reviewed proposal."},
+                {"proposal_task_id", first->id},
+                {"proposal_sha256", proposal_sha},
+                {"context", {{"confirmed_proposal", proposal}, {"confirm_public", true}}}});
     ASSERT_TRUE(acknowledged.ok) << acknowledged.error.message;
     const auto third = r.task(acknowledged.value["task_id"]);
     ASSERT_TRUE(third);
@@ -4325,12 +4343,13 @@ TEST(AgentRuns, ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations) {
               "/train/experiments?customer_id=" + r.w.customer_id + "&task=" + first->id +
                   "#experiment-proposal");
 
-    const auto confirmed = r.call(
-        "agent_turn",
-        {{"agent", "agent-experiments"},
-         {"kind", "experiment"},
-         {"message", "Confirm and start the reviewed study proposal."},
-         {"context", {{"confirmed_proposal", proposal}}}});
+    const auto confirmed = r.call("agent_turn",
+                                  {{"agent", "agent-experiments"},
+                                   {"kind", "experiment"},
+                                   {"message", "Confirm and start the reviewed study proposal."},
+                                   {"proposal_task_id", first->id},
+                                   {"proposal_sha256", review.value["proposal_sha256"]},
+                                   {"context", {{"confirmed_proposal", proposal}}}});
     ASSERT_TRUE(confirmed.ok) << confirmed.error.message;
     const auto second = r.task(confirmed.value["task_id"]);
     ASSERT_TRUE(second);

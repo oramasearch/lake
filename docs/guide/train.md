@@ -67,7 +67,8 @@ confirmation.
 REST uses `POST /v1/agent_turn`; MCP uses the `agent_turn` tool. Send
 `{"customer_id":"<customer id>","workspace_id":"<workspace id>","agent":"agent-experiments","kind":"experiment","message":"…"}`,
 follow its `task_id`, then
-send the reviewed result as `context.confirmed_proposal`. Direct clients may instead use the
+send the reviewed result as `context.confirmed_proposal`, with `proposal_task_id` (the proposing
+turn) and `proposal_sha256` (from `get_agent_task`). Direct clients may instead use the
 documented `start_study`, study/trial reads and confirmed promotion tools.
 
 ## Read the report

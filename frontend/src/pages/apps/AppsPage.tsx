@@ -299,6 +299,9 @@ function TaskPanels({
         agent: "agent-application",
         kind: "app",
         message: "Confirm and deploy the reviewed proposal.",
+        // lake checks these against the stored proposal before the turn gets its write tools.
+        proposal_task_id: taskId,
+        proposal_sha256: task.proposal_sha256 ?? "",
         context,
       });
       navigate(ws("/ship/apps") + qs({ customer_id: customerId, task: String(turn.task_id ?? "") }));

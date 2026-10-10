@@ -14692,6 +14692,8 @@ struct ApiServer::Impl {
                 } else {
                     proposal["study"] = study;
                     input["message"] = "Confirm and start the reviewed study proposal.";
+                    input["proposal_task_id"] = task_id;
+                    input["proposal_sha256"] = form_field(body, "proposal_sha256");
                     input["context"] = {{"confirmed_proposal", std::move(proposal)}};
                 }
             }
@@ -15147,6 +15149,8 @@ struct ApiServer::Impl {
                         input["agent"] = "agent-application";
                         input["kind"] = "app";
                         input["message"] = "Confirm and deploy the reviewed proposal.";
+                        input["proposal_task_id"] = task_id;
+                        input["proposal_sha256"] = form_field(body, "proposal_sha256");
                         input["context"] = {{"confirmed_proposal", proposal}};
                         if (public_app) {
                             input["context"]["confirm_public"] = true;

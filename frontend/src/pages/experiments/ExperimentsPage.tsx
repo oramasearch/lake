@@ -466,7 +466,12 @@ function TaskPanels({
           study = null;
         }
         if (!study || typeof study !== "object" || Array.isArray(study)) throw new ApiError(400, "invalid_input", "The edited study proposal must be a JSON object.");
-        await turn("Confirm and start the reviewed study proposal.", { context: { confirmed_proposal: { ...proposal, study } } });
+        // lake checks the task and digest against the stored proposal before the study can start.
+        await turn("Confirm and start the reviewed study proposal.", {
+          proposal_task_id: taskId,
+          proposal_sha256: task.proposal_sha256 ?? "",
+          context: { confirmed_proposal: { ...proposal, study } },
+        });
       });
     };
     return (
