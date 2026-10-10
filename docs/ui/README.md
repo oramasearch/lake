@@ -98,7 +98,7 @@ Files are under `frontend/src/pages/`.
 | `/shared-with-me` | `repositories/SharedWithMePage.tsx` | folders shared with the viewer | `drive_shared_with_me` |
 | `/share/:token`, `/share/:token/preview` | `repositories/SharePage.tsx`, `SharePreviewPage.tsx` | a folder or file opened through a link, signed out | `resolve_drive_share_link`, `preview_drive_share_link` |
 | `/models/:namespace/:id`, `/models/:id` | `admin/ModelPage.tsx` | a model repository's storage, provenance, files and revisions | `resolve_model`, `get_model` |
-| `/search` | `search/SearchPage.tsx` | ranked, substring or regex search | `search` |
+| `/search` | `search/SearchPage.tsx` | one query across the places the person ticks (`?q=&in=`): Repositories, Code (ranked, substring or regex, with its options), Datasets, Transcripts, Projects, Agents, Models and Docs, searched side by side and grouped by place; the choice is remembered in this browser, and `?query=` still opens code search | `list_repositories`, `search`, `workspace_sql`, `list_transcripts`, `workspace_query` (`list_projects`, `list_agents`, `list_models`), `list_docs`, `get_doc` |
 
 **Design, Train and Ship** (all under `/w/<workspace_id>/` except Deployments, Services and
 Workspaces)
