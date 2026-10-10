@@ -174,7 +174,7 @@ small.muted {
 .card + .card {
   margin-top: 12px;
 }
-.grid {
+.lake-grid {
   gap: 12px;
 }
 a.card {
