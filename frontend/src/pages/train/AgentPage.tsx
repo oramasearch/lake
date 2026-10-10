@@ -1,14 +1,17 @@
-/** Train → Agent (web_ui.cpp agent_content): one agent, its pipelines as tools, its schedules, its
- * unattended runs, its training and Delete. Each control calls the capability its form handler
- * called (http_server.cpp agent_grant … agent_delete). */
+/** Train → Agent (web_ui.cpp agent_content): one agent, with Overview (what it is for and its
+ * pipelines as tools), its unattended runs, its schedules and its training as tabs, and its facts
+ * and actions beside them. Each control calls the capability its form handler called
+ * (http_server.cpp agent_grant … agent_delete). */
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Bot, CalendarClock, MessageSquare, Play, Plus, Trash2, Workflow } from "lucide-react";
 import { ApiError, act, read, type Row } from "@/lib/api";
+import { Modal } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
 import { entityCrumb, useTrail } from "@/lib/trail";
-import { Button, DataTable, ErrorBlock, Field, Skeleton } from "@/lib/ui";
-import { engagement, modelLabel, skillLabels } from "./agents";
-import { WorkspaceFrame, qs, text, useAsync, useSpaceRead, useWorkspace, useWq, useWsPath, wa, wq } from "./workspace";
+import { Banner, Button, Card, Chip, DataTable, Empty, ErrorBlock, Field, KeyValue, Mono, Skeleton, Split, StateTabs, Status } from "@/lib/ui";
+import { AGENT_SKILLS, engagement, modelLabel, runsWhere } from "./agents";
+import { WorkspaceFrame, qs, text, timeAgo, useAsync, useSpaceRead, useWorkspace, useWq, useWsPath, wa, wq } from "./workspace";
 
 export default function AgentPage() {
   const [params] = useSearchParams();
@@ -18,68 +21,147 @@ export default function AgentPage() {
   const query = qs({ customer_id: customerId });
   const agent = useWq<Row>(id ? "get_agent" : null, { id });
   const name = agent.data ? text(agent.data, "name") : "";
+  const found = !!agent.data && Object.keys(agent.data).length > 0;
   useTrail(
     [{ label: "Train", to: ws(`/train/agents?${query}`) }, { label: "Agents", to: ws(`/train/agents?${query}`) }, entityCrumb(id || "Agent")],
     `Agent: ${name || id}`,
   );
+  const missing = (
+    <Empty icon={Bot} title="No such agent in this workspace" action={<Button to={ws(`/train/agents?${query}`)}>All agents</Button>}>
+      It may have been deleted, or the link names another workspace.
+    </Empty>
+  );
   return (
-    <WorkspaceFrame eyebrow="Train" title={`Agent: ${name || id}`}>
+    <WorkspaceFrame
+      eyebrow="Train"
+      title={
+        name ? (
+          <span className="inline-flex flex-wrap items-center gap-2">
+            {name}
+            <Status value={text(agent.data, "status") || "idle"} />
+          </span>
+        ) : (
+          `Agent: ${id}`
+        )
+      }
+      sub={found ? text(agent.data, "purpose") || undefined : undefined}
+      actions={
+        found ? (
+          <Button variant="primary" to={ws(`/ask?${qs({ customer_id: customerId, agent: id })}`)}>
+            <MessageSquare size={14} aria-hidden /> Talk to this agent in Ask Orama
+          </Button>
+        ) : null
+      }
+    >
       {() => {
-        if (!id) return <div className="panel empty">No such agent in this workspace.</div>;
+        if (!id) return missing;
         if (agent.isLoading) return <Skeleton />;
         if (agent.isError) {
-          if (agent.error instanceof ApiError && agent.error.status === 404) return <div className="panel empty">No such agent in this workspace.</div>;
+          if (agent.error instanceof ApiError && agent.error.status === 404) return missing;
           return <ErrorBlock error={agent.error} retry={() => void agent.refetch()} what="the agent" />;
         }
-        if (!agent.data || !Object.keys(agent.data).length) return <div className="panel empty">No such agent in this workspace.</div>;
-        return <AgentContent agent={agent.data} />;
+        if (!found) return missing;
+        return <AgentContent agent={agent.data!} />;
       }}
     </WorkspaceFrame>
   );
 }
 
+type Tab = "overview" | "runs" | "schedules" | "training";
+
 function AgentContent({ agent }: { agent: Row }) {
-  const ws = useWsPath();
-  const { customerId } = useWorkspace();
   const id = text(agent, "id");
   const runtime = text(agent, "runtime");
+  const native = !runtime || runtime === "native";
+  const [tab, setTab] = useState<Tab>("overview");
+  const [deleting, setDeleting] = useState(false);
+  // The page showed Training only when the read answered.
+  const training = useWq<Row>(native ? "agent_training_status" : null, { id });
+  const trained = !!training.data && Object.keys(training.data).length > 0;
   const area = (agent.work_area && typeof agent.work_area === "object" ? agent.work_area : {}) as Row;
   let areaText = text(area, "kind") === "project" ? "A single project" : text(area, "kind") === "dataset" ? "Specific data" : "This workspace";
   if (text(area, "detail")) areaText += `: ${text(area, "detail")}`;
-  const rows: [string, string][] = [
-    ["Purpose", text(agent, "purpose")],
-    ["Engagement", engagement(agent)],
-    ["Work area", areaText],
-    ["What it may do", skillLabels(agent.skills)],
-    ["Model", modelLabel(agent)],
-    ["Runs", runtime === "python" ? "On agent-runtime" : runtime === "service" ? "As its own service" : "In your workspace"],
-    ["Instructions", text(agent, "manifesto")],
-    ["What success looks like", text(agent, "goal")],
-    ["Runs on its own", text(agent, "trigger")],
-    ["Status", text(agent, "status")],
+  const skills = (Array.isArray(agent.skills) ? agent.skills : []).filter((s): s is string => typeof s === "string");
+  const tabs: { value: Tab; label: string }[] = [
+    { value: "overview", label: "Overview" },
+    { value: "runs", label: "Unattended Runs" },
+    ...(runtime === "python" ? [{ value: "schedules" as const, label: "Schedules" }] : []),
+    ...(trained ? [{ value: "training" as const, label: "Training" }] : []),
   ];
   return (
     <>
-      <section className="panel">
-        <h2>About</h2>
-        <dl>
-          {rows.map(([label, value]) => (
-            <div key={label} className="contents">
-              <dt>{label}</dt>
-              <dd>{value || "—"}</dd>
-            </div>
-          ))}
-        </dl>
-        <p>
-          <Button to={ws(`/ask?${qs({ customer_id: customerId, agent: id })}`)}>Talk to this agent in Ask Orama</Button>
-        </p>
-      </section>
-      <Pipelines agent={agent} />
-      {runtime === "python" && <Schedules agentId={id} />}
-      <Runs agent={agent} />
-      {(!runtime || runtime === "native") && <Training agentId={id} />}
-      <DeleteAgent agent={agent} />
+      <Split
+        side={
+          <>
+            <Card label="Facts">
+              <KeyValue
+                rows={[
+                  ["Engagement", engagement(agent)],
+                  ["Work area", areaText],
+                  [
+                    "What it may do",
+                    skills.length ? (
+                      <span className="flex flex-wrap gap-1">
+                        {skills.map((s) => (
+                          <Chip key={s}>{AGENT_SKILLS.find(([key]) => key === s)?.[1] ?? s}</Chip>
+                        ))}
+                      </span>
+                    ) : null,
+                  ],
+                  ["Model", modelLabel(agent) ? <Mono>{modelLabel(agent)}</Mono> : null],
+                  ["Runs", runsWhere(agent)],
+                  ["Runs on its own", text(agent, "trigger")],
+                  ["Status", <Status key="status" value={text(agent, "status") || "idle"} />],
+                  ["Id", <Mono key="id" short={12}>{id}</Mono>],
+                ]}
+              />
+            </Card>
+            <Card label="Actions">
+              <div className="flex flex-col gap-2">
+                <AskButton id={id} />
+                <Button variant="danger" onClick={() => setDeleting(true)}>
+                  <Trash2 size={14} aria-hidden /> Delete agent
+                </Button>
+                <p className="muted m-0 text-[12px]">Deleting the agent also removes its schedules.</p>
+              </div>
+            </Card>
+          </>
+        }
+      >
+        <StateTabs label="Agent" value={tab} onChange={setTab} tabs={tabs} />
+        {tab === "overview" && (
+          <>
+            <Card label="About">
+              <KeyValue
+                rows={[
+                  ["Instructions", text(agent, "manifesto") ? <span className="whitespace-pre-wrap">{text(agent, "manifesto")}</span> : null],
+                  ["What success looks like", text(agent, "goal")],
+                ]}
+              />
+            </Card>
+            <Pipelines agent={agent} />
+          </>
+        )}
+        {tab === "runs" && <Runs agent={agent} />}
+        {tab === "schedules" && runtime === "python" && <Schedules agentId={id} />}
+        {tab === "training" && trained && (
+          <Card label="Training">
+            <p className="m-0">{text(training.data, "reason")}</p>
+          </Card>
+        )}
+      </Split>
+      {deleting && <DeleteAgent agent={agent} onClose={() => setDeleting(false)} />}
     </>
+  );
+}
+
+function AskButton({ id }: { id: string }) {
+  const ws = useWsPath();
+  const { customerId } = useWorkspace();
+  return (
+    <Button to={ws(`/ask?${qs({ customer_id: customerId, agent: id })}`)}>
+      <MessageSquare size={14} aria-hidden /> Talk in Ask Orama
+    </Button>
   );
 }
 
@@ -115,24 +197,28 @@ function Pipelines({ agent }: { agent: Row }) {
       toast(grant ? `Granted ${graph}` : `Revoked ${graph}`);
     });
   return (
-    <section className="panel" id="agent-pipelines">
-      <h2>Pipelines</h2>
-      <p className="sub">
+    <Card label="Pipelines" title="Tools This Agent May Use" className="scroll-mt-4">
+      <p className="muted mt-0 text-[12.5px]">
         An approved Pipeline granted here becomes one of this agent's tools: it checks the correctness gate, runs it and reads the report. The grant keeps the
         approved version.
       </p>
       {change.error ? <ErrorBlock error={change.error} /> : null}
       {granted.length === 0 ? (
-        <p>No Pipelines granted.</p>
+        <Empty compact icon={Workflow} title="No Pipelines granted">
+          {offers.length ? "Grant an approved Pipeline below." : "Approve a Pipeline in a project to grant it here."}
+        </Empty>
       ) : (
-        <ul>
+        <ul className="m-0 list-none divide-y divide-hairline p-0">
           {granted.map((grant) => (
-            <li key={`${text(grant, "project")}/${text(grant, "graph")}`}>
-              <Link to={ws(`/design/pipeline?${qs({ customer_id: scope.customerId, project: text(grant, "project"), graph: text(grant, "graph") })}`)}>
-                {text(grant, "graph")}
-              </Link>{" "}
-              in {text(grant, "project")} <small>approved {text(grant, "version")}</small>{" "}
-              <Button disabled={change.busy} onClick={() => void write(text(grant, "project"), text(grant, "graph"), false)}>
+            <li key={`${text(grant, "project")}/${text(grant, "graph")}`} className="flex flex-wrap items-center gap-2 py-2">
+              <span className="min-w-0 flex-1">
+                <Link to={ws(`/design/pipeline?${qs({ customer_id: scope.customerId, project: text(grant, "project"), graph: text(grant, "graph") })}`)} className="font-semibold">
+                  {text(grant, "graph")}
+                </Link>{" "}
+                <span className="muted">in {text(grant, "project")}</span>
+              </span>
+              <Chip tone="ok">approved {text(grant, "version")}</Chip>
+              <Button variant="ghost" disabled={change.busy} onClick={() => void write(text(grant, "project"), text(grant, "graph"), false)}>
                 Revoke
               </Button>
             </li>
@@ -140,21 +226,23 @@ function Pipelines({ agent }: { agent: Row }) {
         </ul>
       )}
       {offers.length > 0 && (
-        <>
-          <h3>Approved Pipelines You Can Grant</h3>
-          <ul>
+        <div className="mt-4 border-t border-hairline pt-3">
+          <div className="label m-0">Approved Pipelines You Can Grant</div>
+          <ul className="m-0 list-none divide-y divide-hairline p-0">
             {offers.map((offer) => (
-              <li key={`${offer.project}/${offer.graph}`}>
-                {offer.graph} in {offer.project}{" "}
+              <li key={`${offer.project}/${offer.graph}`} className="flex flex-wrap items-center gap-2 py-2">
+                <span className="min-w-0 flex-1">
+                  <span className="font-semibold text-ink">{offer.graph}</span> <span className="muted">in {offer.project}</span>
+                </span>
                 <Button disabled={change.busy} onClick={() => void write(offer.project, offer.graph, true)}>
-                  Grant
+                  <Plus size={14} aria-hidden /> Grant
                 </Button>
               </li>
             ))}
           </ul>
-        </>
+        </div>
       )}
-    </section>
+    </Card>
   );
 }
 
@@ -169,28 +257,42 @@ function Schedules({ agentId }: { agentId: string }) {
   const schedules = useSpaceRead<{ schedules?: Row[] }>("list_agent_schedules", { agent_id: agentId });
   const add = useAsync();
   const remove = useAsync();
+  const [adding, setAdding] = useState(false);
   const [when, setWhen] = useState("");
   const [input, setInput] = useState("");
   return (
-    <section className="panel" id="agent-schedules">
-      <h2>Schedules</h2>
-      <p className="sub">Each schedule is its own Kubernetes CronJob: every tick runs this agent once, as you, with what you ask it here.</p>
+    <Card
+      label="Schedules"
+      title="When It Runs on Its Own"
+      actions={
+        <Button onClick={() => setAdding(true)}>
+          <Plus size={14} aria-hidden /> Add schedule
+        </Button>
+      }
+    >
+      <p className="muted mt-0 text-[12.5px]">Each schedule is its own Kubernetes CronJob: every tick runs this agent once, as you, with what you ask it here.</p>
       {remove.error ? <ErrorBlock error={remove.error} /> : null}
       <DataTable
         q={schedules}
         what="the schedules"
         rows={schedules.data?.schedules}
-        empty={<p>No schedules. It runs when you run it.</p>}
+        empty={
+          <Empty compact icon={CalendarClock} title="No schedules" action={<Button onClick={() => setAdding(true)}>Add schedule</Button>}>
+            It runs when you run it.
+          </Empty>
+        }
         rowKey={(s) => text(s, "id")}
         columns={[
-          { key: "when", label: "When", render: (s) => text(s, "description") },
           {
-            key: "cron",
-            label: "Cron",
+            key: "when",
+            label: "When",
             render: (s) => (
-              <>
-                <code>{text(s, "cron")}</code> <small>{text(s, "time_zone")}</small>
-              </>
+              <div className="min-w-0">
+                <div className="font-semibold text-ink">{text(s, "description")}</div>
+                <div className="font-mono text-[11.5px] text-ink-3">
+                  {text(s, "cron")} {text(s, "time_zone")}
+                </div>
+              </div>
             ),
           },
           { key: "asked", label: "Asked", render: (s) => (typeof s.input === "string" ? s.input : "") },
@@ -198,17 +300,28 @@ function Schedules({ agentId }: { agentId: string }) {
             key: "status",
             label: "Status",
             render: (s) => (
-              <>
-                <span className="badge">{text(s, "phase") || "Pending"}</span> <small>{text(s, "message")}</small>
-              </>
+              <div className="min-w-0">
+                <Status value={text(s, "phase") || "Pending"} />
+                {text(s, "message") && <div className="mt-0.5 text-[12px] text-ink-3">{text(s, "message")}</div>}
+              </div>
             ),
           },
-          { key: "last", label: "Last fired", render: (s) => text(s, "last_schedule_at") },
+          {
+            key: "last",
+            label: "Last fired",
+            render: (s) => (
+              <span className="font-mono text-[12px] text-ink-2" title={text(s, "last_schedule_at")}>
+                {text(s, "last_schedule_at") ? timeAgo(text(s, "last_schedule_at")) : "—"}
+              </span>
+            ),
+          },
           {
             key: "remove",
             label: "",
+            className: "text-right",
             render: (s) => (
               <Button
+                variant="ghost"
                 disabled={remove.busy}
                 onClick={() =>
                   void remove.run(async () => {
@@ -223,34 +336,47 @@ function Schedules({ agentId }: { agentId: string }) {
           },
         ]}
       />
-      <form
-        className="stack"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void add.run(async () => {
-            const body: Row = { customer_id: scope.customerId, workspace_id: scope.workspaceId, agent_id: agentId, [isCron(when) ? "cron" : "trigger"]: when };
-            if (input) body.input = input;
-            await act("schedule_agent", body);
-            setWhen("");
-            setInput("");
-            toast("Schedule added");
-          });
-        }}
-      >
-        {add.error ? <ErrorBlock error={add.error} /> : null}
-        <Field label="When">
-          <input name="when" required placeholder="every monday at 09:00, or 0 9 * * 1" value={when} onChange={(e) => setWhen(e.target.value)} />
-        </Field>
-        <Field label="Ask it">
-          <input name="input" placeholder="What should each run do?" value={input} onChange={(e) => setInput(e.target.value)} />
-        </Field>
-        <div>
-          <Button type="submit" loading={add.busy}>
-            Add schedule
-          </Button>
-        </div>
-      </form>
-    </section>
+      {adding && (
+        <Modal
+          title="Add a Schedule"
+          subtitle="Every tick runs this agent once, as you."
+          onClose={() => setAdding(false)}
+          footer={
+            <>
+              <Button onClick={() => setAdding(false)}>Cancel</Button>
+              <Button variant="primary" type="submit" form="add-schedule" loading={add.busy}>
+                Add schedule
+              </Button>
+            </>
+          }
+        >
+          <form
+            id="add-schedule"
+            className="stack"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void add.run(async () => {
+                const body: Row = { customer_id: scope.customerId, workspace_id: scope.workspaceId, agent_id: agentId, [isCron(when) ? "cron" : "trigger"]: when };
+                if (input) body.input = input;
+                await act("schedule_agent", body);
+                setWhen("");
+                setInput("");
+                toast("Schedule added");
+                setAdding(false);
+              });
+            }}
+          >
+            {add.error ? <ErrorBlock error={add.error} /> : null}
+            <Field label="When" help="In words, or five cron fields.">
+              <input name="when" required placeholder="every monday at 09:00, or 0 9 * * 1" value={when} onChange={(e) => setWhen(e.target.value)} />
+            </Field>
+            <Field label="Ask it">
+              <input name="input" placeholder="What should each run do?" value={input} onChange={(e) => setInput(e.target.value)} />
+            </Field>
+          </form>
+        </Modal>
+      )}
+    </Card>
   );
 }
 
@@ -280,26 +406,69 @@ function Runs({ agent }: { agent: Row }) {
   const rows = launches.data?.launches;
   const changing = (rows ?? []).some((l) => launchStatus(l).starting);
   return (
-    <section className="panel" id="agent-runs">
-      <h2>Unattended Runs</h2>
+    <Card label="Unattended Runs" title="What It Did on Its Own">
+      {python && (
+        <form
+          className="mb-3 flex flex-wrap items-end gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void run.run(async () => {
+              await act("launch_agent", { customer_id: scope.customerId, workspace_id: scope.workspaceId, agent_id: id, mode: "job", input: input || null });
+              setInput("");
+              toast("Run started");
+            });
+          }}
+        >
+          <label className="flex min-w-0 flex-1 flex-col gap-1 text-[12.5px] text-ink-2">
+            Run it once with
+            <input name="input" placeholder="What should it do this time?" value={input} onChange={(e) => setInput(e.target.value)} />
+          </label>
+          <Button variant="primary" type="submit" loading={run.busy}>
+            <Play size={14} aria-hidden /> Run now
+          </Button>
+        </form>
+      )}
+      {run.error ? <ErrorBlock error={run.error} /> : null}
       {stop.error ? <ErrorBlock error={stop.error} /> : null}
+      {changing && <Banner tone="quiet">A run is starting. This page checks again every 5 seconds.</Banner>}
       <DataTable
         q={launches}
         what="the runs"
         rows={rows}
-        empty={text(agent, "trigger") ? <p>No unattended runs yet. Its trigger runs it.</p> : <p>This agent only talks: it has no trigger.</p>}
+        empty={
+          <Empty compact icon={Play} title={text(agent, "trigger") ? "No unattended runs yet" : "This agent only talks"}>
+            {text(agent, "trigger") ? "Its trigger runs it." : "It has no trigger."}
+          </Empty>
+        }
         rowKey={(l) => text(l, "id")}
         columns={[
-          { key: "started", label: "Started", render: (l) => text(l, "created_at") },
-          { key: "how", label: "How", render: (l) => text(l, "trigger") },
-          { key: "mode", label: "Mode", render: (l) => text(l, "mode") },
+          {
+            key: "started",
+            label: "Started",
+            render: (l) => (
+              <span className="font-mono text-[12px] text-ink-2" title={text(l, "created_at")}>
+                {timeAgo(text(l, "created_at"))}
+              </span>
+            ),
+          },
+          {
+            key: "how",
+            label: "How",
+            render: (l) => (
+              <span className="flex flex-wrap gap-1">
+                {text(l, "trigger") && <Chip>{text(l, "trigger")}</Chip>}
+                {text(l, "mode") && <Chip>{text(l, "mode")}</Chip>}
+              </span>
+            ),
+          },
           {
             key: "status",
             label: "Status",
             render: (l) => (
-              <>
-                <span className="badge">{launchStatus(l).status}</span> <small>{text(l, "message")}</small>
-              </>
+              <div className="min-w-0">
+                <Status value={launchStatus(l).status} />
+                {text(l, "message") && <div className="mt-0.5 text-[12px] text-ink-3">{text(l, "message")}</div>}
+              </div>
             ),
           },
           {
@@ -307,16 +476,18 @@ function Runs({ agent }: { agent: Row }) {
             label: "Result",
             render: (l) => {
               const result = l.result && typeof l.result === "object" ? (l.result as Row) : null;
-              return (result ? text(result, "reply") || text(result, "error") : "").slice(0, 400);
+              return <span className="text-[12.5px] text-ink-2">{(result ? text(result, "reply") || text(result, "error") : "").slice(0, 400)}</span>;
             },
           },
           {
             key: "stop",
             label: "",
+            className: "text-right",
             render: (l) =>
               // A scheduled run belongs to its CronJob; removing the schedule stops the next ones.
               launchStatus(l).live && text(l, "trigger") !== "schedule" ? (
                 <Button
+                  variant="ghost"
                   disabled={stop.busy}
                   onClick={() =>
                     void stop.run(async () => {
@@ -331,51 +502,11 @@ function Runs({ agent }: { agent: Row }) {
           },
         ]}
       />
-      {python && (
-        <form
-          className="stack"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void run.run(async () => {
-              await act("launch_agent", { customer_id: scope.customerId, workspace_id: scope.workspaceId, agent_id: id, mode: "job", input: input || null });
-              setInput("");
-              toast("Run started");
-            });
-          }}
-        >
-          {run.error ? <ErrorBlock error={run.error} /> : null}
-          <Field label="Run it once with">
-            <input name="input" placeholder="What should it do this time?" value={input} onChange={(e) => setInput(e.target.value)} />
-          </Field>
-          <div>
-            <Button variant="primary" type="submit" loading={run.busy}>
-              Run now
-            </Button>
-          </div>
-        </form>
-      )}
-      {changing && (
-        <p className="sub" role="status">
-          A run is starting. This page checks again every 5 seconds.
-        </p>
-      )}
-    </section>
+    </Card>
   );
 }
 
-function Training({ agentId }: { agentId: string }) {
-  const training = useWq<Row>("agent_training_status", { id: agentId });
-  // The page showed this panel only when the read answered.
-  if (!training.data || !Object.keys(training.data).length) return null;
-  return (
-    <section className="panel">
-      <h2>Training</h2>
-      <p>{text(training.data, "reason")}</p>
-    </section>
-  );
-}
-
-function DeleteAgent({ agent }: { agent: Row }) {
+function DeleteAgent({ agent, onClose }: { agent: Row; onClose: () => void }) {
   const scope = useWorkspace();
   const ws = useWsPath();
   const navigate = useNavigate();
@@ -385,9 +516,22 @@ function DeleteAgent({ agent }: { agent: Row }) {
   const [confirm, setConfirm] = useState("");
   const remove = useAsync();
   return (
-    <section className="panel">
-      <h2>Delete Agent</h2>
+    <Modal
+      title={`Delete ${name}?`}
+      onClose={onClose}
+      width={460}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="danger" type="submit" form="delete-agent" loading={remove.busy} disabled={confirm !== name}>
+            Delete agent
+          </Button>
+        </>
+      }
+    >
+      <Banner tone="warn">The agent is deleted, and its schedules with it.</Banner>
       <form
+        id="delete-agent"
         className="stack"
         onSubmit={(e) => {
           e.preventDefault();
@@ -417,12 +561,7 @@ function DeleteAgent({ agent }: { agent: Row }) {
         >
           <input name="confirm" required autoComplete="off" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
         </Field>
-        <div>
-          <Button variant="danger" type="submit" loading={remove.busy}>
-            Delete agent
-          </Button>
-        </div>
       </form>
-    </section>
+    </Modal>
   );
 }

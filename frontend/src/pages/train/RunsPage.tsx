@@ -1,12 +1,14 @@
-/** Train → Runs (web_ui.cpp workspace_content "runs"): every pipeline run, its status and its
- * report. Also the run and study helpers the Run and Models pages share (study_refs, run_subject,
+/** Train → Runs (web_ui.cpp workspace_content "runs"): every pipeline run with figures, a search
+ * and status filters, its status and its report. Also the run and study helpers the Run and Models pages share (study_refs, run_subject,
  * trial_subject, when). */
-import { Fragment } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { CheckCircle2, Loader, Play, XCircle } from "lucide-react";
 import type { Row } from "@/lib/api";
+import { titleCase } from "@/lib/format";
 import { useTrail } from "@/lib/trail";
-import { Badge, DataTable, Query } from "@/lib/ui";
-import { WorkspaceFrame, qs, text, useWorkspace, useWq, useWsPath } from "./workspace";
+import { Button, DataTable, Empty, FilterChips, Mono, SearchInput, Stat, StatRow, Status, Toolbar } from "@/lib/ui";
+import { WorkspaceFrame, qs, text, timeAgo, useWorkspace, useWq, useWsPath } from "./workspace";
 
 /* ------------------------------------------------------------------ shared with Run and Models */
 
@@ -88,10 +90,13 @@ export function RunSubject({ run }: { run: Row }) {
 export { ObjectTable } from "./datasets";
 
 export function runStatusTone(status: string) {
-  return status === "succeeded" ? "success" : status === "failed" ? "danger" : "neutral";
+  return status === "succeeded" ? "success" : status === "failed" ? "danger" : UNFINISHED.has(status) ? "warning" : "neutral";
 }
 
 /* ------------------------------------------------------------------ the page */
+
+/** A run that has not finished (the Run page asks for the report only after). */
+export const UNFINISHED = new Set(["running", "queued", "pending"]);
 
 export default function RunsPage() {
   const path = useWsPath();
@@ -113,51 +118,114 @@ function Runs() {
   const { customerId } = useWorkspace();
   const q = useWq<Row>("list_runs");
   const studies = useStudies();
+  const [search, setSearch] = useState("");
+  const [status, setStatus] = useState<string | null>(null);
+  const runs = useMemo(() => ((q.data?.runs ?? []) as Row[]).filter((run) => run && typeof run === "object"), [q.data]);
+  const statuses = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const run of runs) {
+      const s = text(run, "status") || "unknown";
+      counts.set(s, (counts.get(s) ?? 0) + 1);
+    }
+    return [...counts.entries()].map(([id, count]) => ({ id, label: titleCase(id), count }));
+  }, [runs]);
+  const count = (s: string) => runs.filter((run) => text(run, "status") === s).length;
+  const unfinished = runs.filter((run) => UNFINISHED.has(text(run, "status"))).length;
+  const needle = search.trim().toLowerCase();
+  const shown = runs.filter((run) => {
+    if (status && (text(run, "status") || "unknown") !== status) return false;
+    if (!needle) return true;
+    const trial = studies.byRun.get(text(run, "id"));
+    const words = [text(run, "pipeline_name"), text(run, "project_name"), text(run, "graph"), text(run, "project"), text(run, "id"), trial?.name ?? ""].join(" ");
+    return words.toLowerCase().includes(needle);
+  });
+  const projects = path(`/design/projects?${qs({ customer_id: customerId })}`);
   return (
-    <Query
-      q={q}
-      what="runs"
-      isEmpty={(v) => !((v.runs ?? []) as Row[]).length}
-      empty={<div className="panel empty">No runs yet. Run a pipeline from a project.</div>}
-    >
-      {(value) => (
-        <DataTable<Row>
-          rows={(value.runs ?? []) as Row[]}
-          what="runs"
-          rowKey={(run, i) => text(run, "id") || String(i)}
-          columns={[
-            {
-              key: "pipeline",
-              label: "Pipeline",
-              render: (run) => {
-                const trial = studies.byRun.get(text(run, "id"));
-                return trial ? <TrialSubject refOf={trial} /> : <RunSubject run={run} />;
-              },
-            },
-            {
-              key: "status",
-              label: "Status",
-              render: (run) => <Badge tone={runStatusTone(text(run, "status"))}>{text(run, "status")}</Badge>,
-            },
-            { key: "created", label: "Started", render: (run) => when(text(run, "created")) },
-            {
-              key: "links",
-              label: "",
-              render: (run) => {
-                const id = text(run, "id");
-                return (
-                  <Fragment>
-                    <Link to={path(`/train/run?${qs({ customer_id: customerId, id })}`)}>{text(run, "status") === "failed" ? "Why it failed" : "Report"}</Link>
-                    {" · "}
-                    <Link to={path(`/train/experiment/run?${qs({ customer_id: customerId, run: id })}`)}>Charts</Link>
-                  </Fragment>
-                );
-              },
-            },
-          ]}
-        />
+    <>
+      {q.data && runs.length > 0 && (
+        <StatRow>
+          <Stat label="Runs" icon={Play} value={runs.length} sub="in this workspace" />
+          <Stat label="Succeeded" icon={CheckCircle2} value={count("succeeded")} tone={count("succeeded") ? "ok" : undefined} />
+          <Stat label="Failed" icon={XCircle} value={count("failed")} tone={count("failed") ? "bad" : undefined} sub={count("failed") ? "open one to see why" : "none"} />
+          <Stat label="In progress" icon={Loader} value={unfinished} sub="running, queued or pending" />
+        </StatRow>
       )}
-    </Query>
+      {q.data && runs.length > 0 && (
+        <Toolbar>
+          <SearchInput value={search} onChange={setSearch} placeholder="Search runs…" />
+          <FilterChips value={status} onChange={setStatus} options={statuses} allLabel="All statuses" />
+        </Toolbar>
+      )}
+      <DataTable<Row>
+        q={q}
+        what="runs"
+        rows={shown}
+        rowKey={(run, i) => text(run, "id") || String(i)}
+        initialSort={{ key: "created", dir: "descending" }}
+        empty={
+          runs.length === 0 ? (
+            <Empty icon={Play} title="No runs yet" action={<Button to={projects}>Open projects</Button>}>
+              Run a pipeline from a project.
+            </Empty>
+          ) : (
+            <Empty compact title="No run matches">
+              Clear the search or pick another status.
+            </Empty>
+          )
+        }
+        columns={[
+          {
+            key: "pipeline",
+            label: "Pipeline",
+            sort: (run) => (text(run, "pipeline_name") || text(run, "graph")).toLowerCase(),
+            render: (run) => {
+              const trial = studies.byRun.get(text(run, "id"));
+              return (
+                <div className="min-w-0">
+                  <div className="font-semibold">{trial ? <TrialSubject refOf={trial} /> : <RunSubject run={run} />}</div>
+                  <div className="text-[11.5px] text-ink-3">
+                    <Mono short={8}>{text(run, "id")}</Mono>
+                  </div>
+                </div>
+              );
+            },
+          },
+          {
+            key: "status",
+            label: "Status",
+            sort: (run) => text(run, "status"),
+            render: (run) => <Status value={text(run, "status") || "unknown"} tone={runStatusTone(text(run, "status"))} />,
+          },
+          {
+            key: "created",
+            label: "Started",
+            sort: (run) => text(run, "created"),
+            render: (run) => (
+              <span className="font-mono text-[12px] text-ink-2" title={when(text(run, "created"))}>
+                {timeAgo(text(run, "created"))}
+              </span>
+            ),
+          },
+          {
+            key: "links",
+            label: "",
+            className: "text-right",
+            render: (run) => {
+              const id = text(run, "id");
+              return (
+                <div className="flex flex-wrap justify-end gap-1.5">
+                  <Button variant="ghost" to={path(`/train/run?${qs({ customer_id: customerId, id })}`)}>
+                    {text(run, "status") === "failed" ? "Why it failed" : "Report"}
+                  </Button>
+                  <Button variant="ghost" to={path(`/train/experiment/run?${qs({ customer_id: customerId, run: id })}`)}>
+                    Charts
+                  </Button>
+                </div>
+              );
+            },
+          },
+        ]}
+      />
+    </>
   );
 }
-

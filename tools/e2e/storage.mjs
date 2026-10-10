@@ -43,7 +43,9 @@ try {
   await page.waitForURL(`${base}/repositories**`, { timeout: 60000 });
   await page.goto(`${base}/train/data`);
   await shot("storage");
-  const options = await storage().locator("select[name=store] option").evaluateAll((all) =>
+  const dialog = () => page.locator("[role=dialog]");
+  await storage().getByRole("button", { name: "New storage" }).first().click();
+  const options = await dialog().locator("select[name=store] option").evaluateAll((all) =>
     all.map((o) => ({ value: o.value, text: o.textContent, disabled: o.disabled })));
   const available = options.filter((o) => !o.disabled);
   check("providers", available.length > 0 && options.filter((o) => o.disabled).every((o) => o.text.includes("not yet")),
@@ -53,16 +55,18 @@ try {
     const name = `e2e-${option.value.replace(/[^a-z]/g, "")}-${Date.now().toString(36).slice(-5)}`;
     const row = () => storage().locator("tr", { hasText: name });
     await page.goto(`${base}/train/data`);
-    await storage().locator("select[name=store]").selectOption(option.value);
-    await storage().locator("input[name=name]").fill(name);
-    await storage().locator("input[name=size_gi]").fill("1");
+    await storage().getByRole("button", { name: "New storage" }).first().click();
+    await dialog().locator("select[name=store]").selectOption(option.value);
+    await dialog().locator("input[name=name]").fill(name);
+    await dialog().locator("input[name=size_gi]").fill("1");
     const created = Date.now();
-    await storage().getByRole("button", { name: "Create storage" }).click();
+    await dialog().getByRole("button", { name: "Create storage" }).click();
     await page.waitForLoadState("load");
     let status = "";
     while (Date.now() - created < 5 * 60 * 1000) {
       await page.goto(`${base}/train/data`);
-      status = (await row().locator("td").nth(4).innerText().catch(() => "")).replace(/\s+/g, " ");
+      // The status is a state chip: a glyph, then the word.
+      status = (await row().locator("td").nth(2).innerText().catch(() => "")).replace(/\s+/g, " ").replace(/^[^A-Za-z]+/, "");
       if (/^(Ready|Failed)/.test(status)) break;
       await page.waitForTimeout(2000);
     }
@@ -71,8 +75,8 @@ try {
 
     await row().getByRole("button", { name: "Show connection" }).click();
     await page.waitForLoadState("load");
-    const fields = await page.locator("main dl dt").allInnerTexts();
-    const values = await page.locator("main dl dd").allInnerTexts();
+    const fields = await dialog().locator("dl dt").allInnerTexts();
+    const values = await dialog().locator("dl dd").allInnerTexts();
     check(`${option.value} connection`, fields.length > 0, { fields });
     if (option.value === "volume:cluster") {
       const claimName = values[fields.indexOf("claim")] ?? "";
@@ -82,9 +86,9 @@ try {
     }
 
     await page.goto(`${base}/train/data`);
-    await row().locator("details summary").click();
-    await row().locator("input[name=confirm]").fill(name);
-    await row().getByRole("button", { name: `Delete ${name}` }).click();
+    await row().getByRole("button", { name: "Delete", exact: true }).click();
+    await dialog().locator("input[name=confirm]").fill(name);
+    await dialog().getByRole("button", { name: `Delete ${name}` }).click();
     await page.waitForLoadState("load");
     const deleting = Date.now();
     let gone = false;

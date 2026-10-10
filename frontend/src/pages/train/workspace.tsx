@@ -81,6 +81,12 @@ export function useWorkspaceState() {
   return useWorkspaceStatus().q;
 }
 
+/** Whether the page's workspace Zetta is ready: a header action that needs the workspace (New
+ * agent, Load data) shows only then. */
+export function useWorkspaceReady(): boolean {
+  return !!useWorkspaceStatus().q.data?.ready;
+}
+
 /** A Design, Train or Ship page (web_ui_workspace): eyebrow, heading, sub, then the shared
  * workspace gate (components/WorkspaceGate.tsx) around the content. `always` is shown ready or not
  * (the Data page's Storage, the Agents page's Agent Library). */
@@ -163,6 +169,19 @@ export function secondsSince(timestamp: string, now = Date.now()): number {
   if (!m) return -1;
   const at = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]));
   return Math.max(0, Math.floor((now - at) / 1000));
+}
+
+/** "5m ago", "3h ago", "2d ago" for a UTC timestamp (ISO-8601 or Postgres text, as
+ * `secondsSince` reads it); an older one as its date, one it cannot read as it is. */
+export function timeAgo(timestamp: string, now = Date.now()): string {
+  if (!timestamp) return "—";
+  const s = secondsSince(timestamp, now);
+  if (s < 0) return timestamp;
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 86400 * 14) return `${Math.floor(s / 86400)}d ago`;
+  return timestamp.slice(0, 10);
 }
 
 /** "40 seconds", "2 minutes": a duration as a person says it. */
