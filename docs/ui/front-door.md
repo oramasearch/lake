@@ -89,7 +89,9 @@ an ordinary account. Application-specific hosted identity pages retain their sep
 
 Customer authentication redirects lead to `/sign-in`. `/login` remains a direct, explicitly named
 operator entry with the existing `POST /session` contract. Its copy points account holders to their
-own sign-in. OpenAPI now describes account tokens and public operations accurately.
+own sign-in. A wrong operator token is recorded as a failed sign-in and redirects to
+`/login?error=That%20token%20did%20not%20match.`, which `/login` shows (lake#561: the web app reads
+`error` the same way); before, the form answered `401` with the page. OpenAPI now describes account tokens and public operations accurately.
 
 ## Verify and change
 

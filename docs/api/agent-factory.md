@@ -14,6 +14,8 @@ AgentCreator put in `reply`.
 
 ## The conversation
 
+The conversation is held through `send_ask_message` and `settle_ask_turn` with `kind: factory`
+([ask-orama.md](ask-orama.md#capabilities-lake561)); the page's forms call the same capabilities.
 `POST /train/agents/new/send` sends one `agent_turn` to `agent-creator` (a turn key limited to the
 workspace's reads). AgentCreator answers with one JSON object: a **question**, or a **proposal**
 with the **defects** its own rules found (skills, work area, approved Pipelines, code that compiles
@@ -24,10 +26,16 @@ tells AgentCreator what to change.
 
 ## Approve and create
 
-`POST /train/agents/new/approve` carries the proposal's message id and the **SHA-256 of the proposal
-the page showed**. lake recomputes it from the stored proposal; a proposal that changed since, one
-with defects, or one that is not in this person's conversation is refused. Approval is recorded as
-`agent.factory.approve` with the digest. Then lake, as the person:
+`approve_agent_proposal` (`POST /train/agents/new/approve` calls it) carries the proposal's message
+id and the **SHA-256 of the proposal the page showed**: SHA-256 of the proposal's compact JSON as
+lake serializes it. `settle_ask_turn` stores that digest with the proposal message as
+`payload.proposal_sha256`, and `get_ask_conversation` returns it, so the web app sends it back as
+it is: a browser's own serialization differs for numbers such as `2.0` (lake#561). lake recomputes
+it from the stored proposal; a proposal that is not in this person's conversation is `not_found`
+*That proposal is not in this conversation.*, one that changed since is `conflict` *The proposal
+changed since you saw it; review it again.*, and one with defects is `invalid_input` *This
+proposal still has defects.* Approval is recorded as `agent.factory.approve` with the digest. Then
+lake, as the person, through `create_agent_from_proposal`:
 
 | Proposal | lake creates |
 |---|---|
@@ -37,7 +45,12 @@ with defects, or one that is not in this person's conversation is refused. Appro
 
 `instructions.md` is composed from the name, purpose, manifesto and goal when the proposal carries
 none; `entrypoint` comes from `agent.toml`. A Python agent with a trigger is scheduled, and a **first
-check run** is launched so the new agent's first run is one the person can read. The page then opens
-the agent.
+check run** is launched so the new agent's first run is one the person can read. The outcome is
+stored in the conversation (*Created {name}.*, with whether its trigger was scheduled and whether a
+first check run started; a refusal stores *I could not create it: …*). The value is `{agent_id,
+name, schedule_error?, check_launch_id?}`; the page then opens the agent.
 
-Verify: `HttpServer/HttpResponseIsolation.TheAgentFactoryCreatesOnlyTheExactProposalThePersonApproved`.
+Verify: `HttpServer/HttpResponseIsolation.TheAgentFactoryCreatesOnlyTheExactProposalThePersonApproved`
+(the page) and `HttpServer/HttpResponseIsolation.TheWebAppApprovesOnlyTheAgentFactoryProposalItWasShown`
+(the capabilities, with a proposal holding `2.0`: the stored digest approves it, a stale digest is
+`409`, another message is `404`).

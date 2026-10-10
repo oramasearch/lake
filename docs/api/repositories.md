@@ -39,7 +39,7 @@ with lake#341, and its content moves with lake#380.
 | `delete_repository` | action | `id` | `404 not_found`, `409 conflict` (already tombstoned) |
 | `repository_refs` | read | `id` | `{items: [{name, change}]}`, from the liquid repository |
 | `repository_tree` | read | `id`, `ref` | `{items: [{path, kind, blob, mode, node_id, size, stored_size}]}` |
-| `repository_file` | read | `id`, `ref`, `path` | `{path, blob, contents, size}` |
+| `repository_file` | read | `id`, `ref`, `path`, `units?` | `{path, blob, contents, size, units?}` |
 | `list_changes` | read | `id` | `{items: [{id, parents, author, message, occurred_at}]}` |
 | `get_change` | read | `id`, `change_id` | change identity and metadata |
 | `change_diff` | read | `id`, `change_id` | `{items: [{path, old_path, kind, changes, old_mode, new_mode, old_blob, new_blob, line_hunks, old_conflicts, new_conflicts}]}` |
@@ -67,6 +67,15 @@ every successful or denied call.
 read libliquid directly through the lake repository-store adapter. Tree output is recursive;
 every entry retains its stable node identity plus logical and stored sizes, and every file links
 to its backing blob identity and rendered contents.
+
+`repository_file` with `units: true` also answers the file's **syntax units** (lake#561), the
+shading the File page draws: `units: [{start_line, end_line, kind}]` from libliquid's
+`liquid_frontend::parse_units`, lines as liquid reports them (the page shades `start_line` through
+`end_line`), `kind` liquid's numeric unit kind. Only the formats lake parses (C and C++, by
+extension: `.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hh`, `.hpp`, `.hxx`) carry `units`; any other file,
+and any call without `units: true`, has no `units` field. The server-rendered File page and the
+capability share `web_ui_source_units`. `Repositories.PublicRepositoryContentCapabilitiesUseTheRepositoryStore`
+checks both cases.
 
 `list_conflicts` exposes Liquid's first-class conflict record without reducing it to digests. The
 record names its content identity; base, left, and right values; kind (`text`, `structural`,

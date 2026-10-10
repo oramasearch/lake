@@ -2231,6 +2231,14 @@ Result<Customer> InMemoryStore::get_customer(const std::string& id) {
     return std::unexpected(StoreError{"not_found", "no customer " + id});
 }
 
+Result<Customer> InMemoryStore::organization_customer(const std::string& organization_id) {
+    std::lock_guard lock(mutex_);
+    for (const auto& c : customers_)
+        if (!organization_id.empty() && c.organization_id == organization_id)
+            return c;
+    return std::unexpected(StoreError{"not_found", "no space for organization " + organization_id});
+}
+
 } // namespace lake::control
 
 namespace lake::control {
@@ -2615,6 +2623,18 @@ Result<MfaEnrollment> InMemoryStore::enroll_mfa(const std::string& user_id,
         }
     }
     return std::unexpected(StoreError{"not_found", "password credential not found"});
+}
+
+Result<bool> InMemoryStore::mfa_enrolled(const std::string& user_id, const std::string& pool_id) {
+    std::lock_guard lock(mutex_);
+    const std::string pool = pool_id.empty() ? "lake" : pool_id;
+    for (const auto& credential : passwords_) {
+        if (credential.user_id == user_id && credential.pool_id == pool &&
+            !credential.totp_secret.empty()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 Result<void> InMemoryStore::disable_mfa(const std::string& user_id,

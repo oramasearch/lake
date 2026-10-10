@@ -2766,3 +2766,28 @@ TEST(PostgresVolumes, StorageNeverShrinksAndEveryTargetHasAPolicy) {
         EXPECT_THROW(tx.exec(statement), pqxx::check_violation) << statement;
     }
 }
+
+// lake#561: an organization's own space, as get_organization reads it.
+TEST(PostgresWebApp, AnOrganizationNamesItsOwnSpace) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto organization =
+        store->create_organization({"taap:1:ed25519:web-app-" + suffix, "web app", ""});
+    ASSERT_TRUE(organization) << organization.error().message;
+    const auto none = store->organization_customer(organization->id);
+    ASSERT_FALSE(none);
+    EXPECT_EQ(none.error().code, "not_found");
+    const auto customer =
+        store->create_customer({"organization", "", organization->id, "web-app-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+    const auto space = store->organization_customer(organization->id);
+    ASSERT_TRUE(space) << space.error().message;
+    EXPECT_EQ(space->id, customer->id);
+    // MFA enrollment on PostgreSQL is read through `viewer` in
+    // HttpServer/HttpResponseIsolation.TheViewerSaysWhoIsSignedInAndWhereTheyAre.
+}

@@ -15,16 +15,17 @@
 #include <liquid/liquid.hpp>
 #include <nlohmann/json.hpp>
 
+#include "api/agent_task_records_api.hpp"
+#include "experiment_fixture.hpp"
 #include "http1/client.hpp"
-#include "one_thread_io.hpp"
 #include "lake/api/server.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
 #include "objects/records.hpp"
-#include "temporary_directory.hpp"
-#include "stream_fixture.hpp"
-#include "experiment_fixture.hpp"
+#include "one_thread_io.hpp"
 #include "repository_test_support.hpp"
+#include "stream_fixture.hpp"
+#include "temporary_directory.hpp"
 
 extern char** environ;
 
@@ -217,6 +218,122 @@ void check_person_organizations(HttpEvidence& http, lake::control::Store& store)
     http.bearer = operator_bearer;
 }
 
+// The web app's capabilities (lake#561): the reads it needs and the Ask Orama and Agent Factory
+// conversation, as a person with write on the space.
+void check_web_app(HttpEvidence& http,
+                   lake::control::InMemoryStore& store,
+                   lake::test::ExperimentWorkspace& experiments,
+                   const std::string& kek,
+                   const lake::control::Customer& customer,
+                   const lake::control::Repository& repository) {
+    const json space{{"customer_id", customer.id}, {"workspace_id", experiments.id}};
+    const auto with = [&](const json& extra) {
+        json input = space;
+        input.update(extra);
+        return input;
+    };
+    http.call("my_permissions",
+              {{"object_type", "customer"},
+               {"object_id", customer.id},
+               {"actions", {"read", "write", "promote"}}});
+    http.call("resolve_model", {{"namespace", customer.name}, {"name", repository.name}});
+    auto& answers = experiments.caller->answers;
+    answers["capture_intent"] = {{"input_id", "intent-1"}};
+    answers["compile_intent"] = {{"name", "schema-graph"}};
+    answers["get_graph"] = {
+        {"graph_id", "graph-1"},
+        {"name", "schema-graph"},
+        {"project", "schema"},
+        {"nodes",
+         {{{"id", "load"}, {"kind", "connect"}, {"name", "Load"}},
+          {{"id", "train"}, {"kind", "model"}, {"name", "Train"}}}},
+        {"edges", {{{"from", "load"}, {"to", "train"}, {"kind", "data_flow"}}}}};
+    http.call("compile_pipeline", with({{"project", "schema"}, {"intent", "Predict churn"}}));
+    http.call("render_pipeline",
+              with({{"project", "schema"}, {"graph", "schema-graph"}, {"step", "train"}}));
+
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto session = checked(store.sign_up_password({"lake",
+                                                         "schema-asker-" + suffix + "@example.test",
+                                                         "correct horse battery staple",
+                                                         "Schema asker",
+                                                         "schema",
+                                                         "{}"}));
+    const auto person = checked(store.get_user(session.session.user_id));
+    const auto object = checked(store.find_policy_object("customer", customer.id));
+    checked(store.create_grant(
+        {person.taap_id, object.id, "write", "schema-asker-attestation", "admin", "schema"}));
+    const std::string operator_bearer = http.bearer;
+    http.bearer = session.secret;
+    http.call("viewer", {{"workspace_id", experiments.id}});
+
+    // An agent of the space answers at once; its proposal runs only through the conversation.
+    answers["get_agent"] = {{"id", "schema-agent"}, {"runtime", "native"}};
+    answers["chat"] = {{"reply", "You have one repository."},
+                       {"proposals", {{{"capability", "server_info"}, {"input", json::object()}}}},
+                       {"reads", json::array()},
+                       {"delegations", json::array()},
+                       {"trace_id", ""}};
+    const json sent = http.call("send_ask_message",
+                                with({{"agent", "schema-agent"}, {"message", "What do I have?"}}));
+    http.call("confirm_ask_proposal",
+              with({{"conversation_id", sent.at("conversation_id")},
+                    {"message_id", sent.at("reply_id")},
+                    {"index", 0}}));
+
+    // Background turns: the Project Agent's build of a project, and an AgentCreator proposal.
+    const auto task = [&](std::string agent, std::string kind, std::string conversation) {
+        return checked(store.create_agent_task({.id = lake::control::new_uuid_v4(),
+                                                .customer_id = customer.id,
+                                                .agent = std::move(agent),
+                                                .kind = std::move(kind),
+                                                .conversation_id = std::move(conversation),
+                                                .workspace_id = experiments.id,
+                                                .scopes = {"workspace_query"},
+                                                .requested_by_user_id = person.id,
+                                                .requested_by_taap_id = person.taap_id}));
+    };
+    task("agent-project", "build:schema", "");
+    http.call("latest_agent_task", with({{"subject", "build:schema"}}));
+    const std::string conversation = lake::control::new_uuid_v4();
+    auto factory = task("agent-creator", "factory", conversation);
+    lake::api::ApiContext context;
+    context.store = &store;
+    context.workspaces = experiments.service.get();
+    context.instance_kek = kek;
+    context.workspace_id = experiments.id;
+    const auto must = [](auto completed) {
+        const auto settled = lake::control::settled(std::move(completed));
+        if (!settled) {
+            throw std::runtime_error(settled.error().message);
+        }
+    };
+    must(liquid::runtime::block_on(lake::api::write_agent_task_request(context, factory)));
+    checked(store.claim_agent_task(factory.id, "agent-creator", std::string(64, 'a')));
+    factory = checked(store.record_agent_task_event(factory.id, "agent-creator", "Succeeded"));
+    const json answer{{"ok", true},
+                      {"result",
+                       {{"kind", "proposal"},
+                        {"proposal",
+                         {{"type", "native"},
+                          {"agent", {{"name", "Schema watcher"}, {"purpose", "Watch renewals"}}}}},
+                        {"defects", json::array()}}}};
+    must(liquid::runtime::block_on(
+        lake::api::write_agent_task_event(context, factory, "Succeeded", "Done", answer)));
+    http.call(
+        "settle_ask_turn",
+        with({{"conversation_id", conversation}, {"task_id", factory.id}, {"kind", "factory"}}));
+    const json messages =
+        http.call("get_ask_conversation", with({{"conversation_id", conversation}})).at("messages");
+    const json proposed = messages.back();
+    answers["create_agent"] = {{"id", "agent-schema"}, {"name", "Schema watcher"}};
+    http.call("approve_agent_proposal",
+              with({{"conversation_id", conversation},
+                    {"message_id", proposed.at("id")},
+                    {"proposal_sha256", proposed.at("payload").at("proposal_sha256")}}));
+    http.bearer = operator_bearer;
+}
+
 void check_proofs(HttpEvidence& http) {
     std::ifstream input(LAKE_TEST_SOURCE_DIR "/tests/fixtures/schema-tuf.json");
     const auto metadata = json::parse(input);
@@ -343,6 +460,7 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("download_drive_share_link", linked_file);
     check_membership(http, lake::control::to_json(user));
     check_person_organizations(http, *store);
+    check_web_app(http, *store, experiments, kek, customer, repository);
     check_proofs(http);
     validate_evidence(http.document);
 }

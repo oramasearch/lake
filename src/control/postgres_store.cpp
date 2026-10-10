@@ -1927,6 +1927,19 @@ public:
         });
     }
 
+    Result<Customer> organization_customer(const std::string& organization_id) override {
+        return with_tx<Customer>([&](pqxx::work& tx) -> Result<Customer> {
+            const pqxx::result rows =
+                tx.exec_params(std::string("SELECT ") + customer_columns +
+                                   " FROM customers WHERE organization_id = $1::uuid",
+                               organization_id);
+            if (rows.empty())
+                return std::unexpected(
+                    StoreError{"not_found", "no space for organization " + organization_id});
+            return customer_of(rows[0]);
+        });
+    }
+
     Result<Repository> create_repository(const NewRepository& in) override {
         if (!in.description.empty()) {
             return std::unexpected(StoreError{
@@ -5559,6 +5572,16 @@ public:
             }
             return issue_session(
                 tx, user_id, input.pool_id, input.device_name, "taap", "", {"*"}, "", 60 * 60 * 24);
+        });
+    }
+    Result<bool> mfa_enrolled(const std::string& user_id, const std::string& pool_id) override {
+        return with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT 1 FROM credentials WHERE user_id = $1::uuid AND pool_id = $2 "
+                "AND kind = 'totp' AND revoked_at IS NULL LIMIT 1",
+                user_id,
+                pool_id.empty() ? std::string("lake") : pool_id);
+            return !rows.empty();
         });
     }
     Result<MfaEnrollment> enroll_mfa(const std::string& user_id,

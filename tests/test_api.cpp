@@ -47,8 +47,8 @@
 #include "lake/api/rest.hpp"
 #include "lake/api/server.hpp"
 #include "lake/api/sync_store.hpp"
+#include "lake/api/web_ui.hpp"
 #include "lake/audit/audit.hpp"
-#include "lake/control/workspace_audit.hpp"
 #include "lake/control/apps.hpp"
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/handles.hpp"
@@ -57,6 +57,7 @@
 #include "lake/control/metering.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/postgres_store.hpp"
+#include "lake/control/workspace_audit.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/telemetry/metrics.hpp"
 #include "lake/version.hpp"
@@ -174,6 +175,10 @@ struct RepositoryFixtureStore final : SyncStore {
         }
         if (path == "weights.bin") {
             return RepositoryFile{path, "blob-weights", "fixture weights", 15};
+        }
+        if (path.ends_with(".cpp")) {
+            const std::string source = "int main() {\n    return 0;\n}\n";
+            return RepositoryFile{path, "blob-source", source, source.size(), bytes(source)};
         }
         if (revision == "change-1") {
             return RepositoryFile{path, "blob-1", "old\nshared\n", 11, bytes("old\nshared\n")};
@@ -4640,6 +4645,30 @@ TEST(Repositories, PublicRepositoryContentCapabilitiesUseTheRepositoryStore) {
         s.call("repository_file", {{"id", repository_id}, {"ref", "main"}, {"path", "readme.md"}})
             .value["contents"],
         "new\nshared\n");
+    // The File page's syntax-unit shading (lake#561): only on request, only for parsed formats.
+    const ApiResult source =
+        s.call("repository_file",
+               {{"id", repository_id}, {"ref", "main"}, {"path", "src/main.cpp"}, {"units", true}});
+    ASSERT_TRUE(source.ok) << source.error.message;
+    ASSERT_TRUE(source.value.contains("units"));
+    ASSERT_FALSE(source.value["units"].empty());
+    EXPECT_LE(source.value["units"][0]["start_line"], source.value["units"][0]["end_line"]);
+    EXPECT_TRUE(source.value["units"][0]["kind"].is_number_integer());
+    EXPECT_FALSE(s.call("repository_file",
+                        {{"id", repository_id}, {"ref", "main"}, {"path", "src/main.cpp"}})
+                     .value.contains("units"));
+    EXPECT_FALSE(
+        s.call("repository_file",
+               {{"id", repository_id}, {"ref", "main"}, {"path", "readme.md"}, {"units", true}})
+            .value.contains("units"));
+    // The model page's space/name (resolve_model): a public repository needs no credential.
+    const ApiResult resolved =
+        s.call("resolve_model", {{"namespace", "ada"}, {"name", "public-repository"}});
+    ASSERT_TRUE(resolved.ok) << resolved.error.message;
+    EXPECT_EQ(resolved.value["repository_id"], repository_id);
+    EXPECT_EQ(resolved.value["revision"], "main");
+    EXPECT_EQ(s.call("resolve_model", {{"namespace", "ada"}, {"name", "missing"}}).error.code,
+              "not_found");
     EXPECT_EQ(s.call("list_changes", {{"id", repository_id}}).value["items"].size(), 1u);
     EXPECT_EQ(
         s.call("get_change", {{"id", repository_id}, {"change_id", "change-1"}}).value["message"],
@@ -7315,3 +7344,149 @@ TEST(ApiDescriptions, EveryCapabilitySaysWhatItDoesForAPerson) {
                               << previous->second << ": \"" << text << "\"";
     }
 }
+
+namespace {
+
+// lake#561: the reads the web app needs that the server-rendered pages computed themselves.
+TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
+    Surface s;
+    const ApiResult owner =
+        s.call("create_user", {{"taap_id", "taap:1:ed25519:web-owner"}, {"display_name", "Owner"}});
+    ASSERT_TRUE(owner.ok);
+    const ApiResult customer = s.call(
+        "create_customer",
+        {{"customer_type", "individual"}, {"user_id", owner.value["id"]}, {"name", "web-owner"}});
+    ASSERT_TRUE(customer.ok);
+    const std::string customer_id = customer.value["id"];
+    const json every{"read", "write", "admin", "promote"};
+    const ApiResult operator_may =
+        s.call("my_permissions",
+               {{"object_type", "customer"}, {"object_id", customer_id}, {"actions", every}});
+    ASSERT_TRUE(operator_may.ok) << operator_may.error.message;
+    for (const std::string action : {"read", "write", "admin", "promote"}) {
+        EXPECT_EQ(operator_may.value["allowed"][action], true) << action;
+    }
+    EXPECT_EQ(s.call("my_permissions",
+                     {{"object_type", "customer"}, {"object_id", "nope"}, {"actions", every}})
+                  .error.code,
+              "not_found");
+    EXPECT_EQ(
+        s.call("my_permissions",
+               {{"object_type", "customer"}, {"object_id", customer_id}, {"actions", {"fly"}}})
+            .error.code,
+        "invalid_input");
+
+    const auto writer = s.store.create_user({"taap:1:ed25519:web-writer", "", "Writer"});
+    ASSERT_TRUE(writer);
+    const auto object = s.store.find_policy_object("customer", customer_id);
+    ASSERT_TRUE(object);
+    ASSERT_TRUE(s.store.create_grant(
+        {writer->taap_id, object->id, "write", "web-writer-attestation", "admin", "web-writer"}));
+    s.ctx.acting_identity = writer->taap_id;
+    s.ctx.acting_user_id = writer->id;
+    s.ctx.operator_credential = false;
+    s.ctx.session_credential = true;
+    s.ctx.scopes = {"*"};
+    const ApiResult writer_may =
+        s.call("my_permissions",
+               {{"object_type", "customer"}, {"object_id", customer_id}, {"actions", every}});
+    ASSERT_TRUE(writer_may.ok) << writer_may.error.message;
+    EXPECT_EQ(writer_may.value["allowed"],
+              (json{{"read", true}, {"write", true}, {"admin", false}, {"promote", false}}));
+
+    // Docs are public, in reading order.
+    s.ctx.authorized = false;
+    s.ctx.acting_identity.clear();
+    const ApiResult pages = s.call("list_docs");
+    ASSERT_TRUE(pages.ok) << pages.error.message;
+    const auto& guide = web_ui_guide();
+    ASSERT_EQ(pages.value["pages"].size(), guide.size());
+    ASSERT_GE(guide.size(), 2U);
+    EXPECT_EQ(pages.value["pages"][0]["slug"], guide.front().slug);
+    const ApiResult first = s.call("get_doc");
+    ASSERT_TRUE(first.ok) << first.error.message;
+    EXPECT_EQ(first.value["slug"], guide.front().slug);
+    EXPECT_EQ(first.value["markdown"], guide.front().markdown);
+    EXPECT_EQ(first.value["next"]["slug"], guide.at(1).slug);
+    const ApiResult last = s.call("get_doc", {{"page", guide.back().slug}});
+    ASSERT_TRUE(last.ok);
+    EXPECT_FALSE(last.value.contains("next"));
+    EXPECT_EQ(s.call("get_doc", {{"page", "no-such-guide"}}).error.code, "not_found");
+    EXPECT_EQ(s.call("mcp_setup").error.code, "unauthenticated");
+
+    s.ctx.authorized = true;
+    s.ctx.acting_identity = writer->taap_id;
+    s.ctx.external_origin = "https://lake.example.test";
+    const ApiResult setup = s.call("mcp_setup");
+    ASSERT_TRUE(setup.ok) << setup.error.message;
+    EXPECT_EQ(setup.value["mcp_url"], "https://lake.example.test/mcp");
+    EXPECT_FALSE(setup.value["tool_groups"].empty());
+    EXPECT_FALSE(setup.value["flows"].empty());
+    EXPECT_EQ(setup.value["scopes"]["all"].size(), s.registry.list().size());
+    const json& read_only = setup.value["scopes"]["read_only"];
+    EXPECT_NE(std::ranges::find(read_only, "list_customers"), read_only.end());
+    EXPECT_EQ(std::ranges::find(read_only, "create_customer"), read_only.end());
+    std::size_t grouped = 0;
+    for (const json& group : setup.value["tool_groups"]) {
+        grouped += group["tools"].size();
+    }
+    EXPECT_GT(grouped, 0U);
+
+    const ApiResult none = s.call("list_packages");
+    ASSERT_TRUE(none.ok) << none.error.message;
+    EXPECT_EQ(none.value["available"], false);
+    EXPECT_EQ(none.value["origin"], "https://lake.example.test");
+    s.ctx.artifact_catalog = [] {
+        return json{{"available", true},
+                    {"npm", {{{"name", "left-pad"}, {"versions", {"1.0.0"}}}}},
+                    {"python", json::array()},
+                    {"oci", {{{"name", "base"}, {"versions", {"latest"}}}}}};
+    };
+    const ApiResult packages = s.call("list_packages");
+    ASSERT_TRUE(packages.ok) << packages.error.message;
+    EXPECT_EQ(packages.value["available"], true);
+    EXPECT_EQ(packages.value["npm"][0]["name"], "left-pad");
+    EXPECT_EQ(packages.value["oci"][0]["versions"][0], "latest");
+}
+
+TEST(WebApp, ViewerNamesClerkAndAnOrganizationNamesItsSpace) {
+    Surface s;
+    s.ctx.clerk_publishable_key = "pk_test_YWJvdmUtc2VhaG9yc2UtNzUzNS5jbGVyay5hY2NvdW50cy5kZXYk";
+    s.ctx.authorized = false;
+    s.ctx.acting_identity.clear();
+    s.ctx.operator_credential = false;
+    const ApiResult visitor = s.call("viewer");
+    ASSERT_TRUE(visitor.ok) << visitor.error.message;
+    EXPECT_EQ(visitor.value["signed_in"], false);
+    EXPECT_EQ(visitor.value["clerk"]["enabled"], true);
+    EXPECT_EQ(visitor.value["clerk"]["frontend_api"], "above-seahorse-7535.clerk.accounts.dev");
+    EXPECT_EQ(visitor.value["password_sign_up"], false);
+    EXPECT_EQ(visitor.value["version"], "0.0.1");
+
+    s.ctx.authorized = true;
+    s.ctx.acting_identity = "admin";
+    s.ctx.operator_credential = true;
+    const ApiResult organization = s.call("create_organization", {{"display_name", "Acme"}});
+    ASSERT_TRUE(organization.ok) << organization.error.message;
+    const ApiResult before = s.call("get_organization", {{"id", organization.value["id"]}});
+    ASSERT_TRUE(before.ok) << before.error.message;
+    EXPECT_TRUE(before.value["customer_id"].is_null());
+    const ApiResult space = s.call("create_customer",
+                                   {{"customer_type", "organization"},
+                                    {"organization_id", organization.value["id"]},
+                                    {"name", "acme"}});
+    ASSERT_TRUE(space.ok) << space.error.message;
+    const ApiResult after = s.call("get_organization", {{"id", organization.value["id"]}});
+    ASSERT_TRUE(after.ok);
+    EXPECT_EQ(after.value["customer_id"], space.value["id"]);
+    const ApiResult administrator = s.call("viewer");
+    ASSERT_TRUE(administrator.ok);
+    EXPECT_EQ(administrator.value["administrator"], true);
+    EXPECT_FALSE(administrator.value.contains("user_id"));
+    ASSERT_EQ(administrator.value["spaces"].size(), 1U);
+    EXPECT_EQ(administrator.value["spaces"][0]["kind"], "organization");
+    EXPECT_EQ(administrator.value["spaces"][0]["label"], "acme");
+    EXPECT_EQ(administrator.value["customer_id"], space.value["id"]);
+}
+
+} // namespace

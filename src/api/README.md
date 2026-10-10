@@ -299,8 +299,14 @@ migration `0050` dropped its table (lake#483), and every other collection this p
 records, secrets, leases, the platform tables, application settings, authorization codes, agent
 task content and repository descriptions) left it, with its copier and the store's legacy reads,
 when migration `0070_drop_moved_tables` dropped its source (lake#311). Ask Orama and the Agent Factory
-(`http_server.cpp`) and `get_ask_conversation` read and write conversations in the page's or
-input's workspace. `settle_discover`, `list_opportunities`, `dismiss_opportunity` and
+conversations are written only by `send_ask_message`, `settle_ask_turn`, `confirm_ask_proposal` and
+`approve_agent_proposal` in `workspace_capabilities.cpp` (lake#561); the pages' forms in
+`http_server.cpp` call them, and `get_ask_conversation` reads, in the input's workspace.
+`console_capabilities.cpp` registers the reads the web app needs that the pages computed for
+themselves (`viewer`, `my_permissions`, `list_packages`, `list_docs`, `get_doc`, `mcp_setup`,
+docs/api/web-app.md); `latest_agent_task`, `compile_pipeline` and `render_pipeline` sit beside the
+conversation capabilities, and `resolve_model` with `find_hub_repository` in
+`model_capabilities.cpp`. `settle_discover`, `list_opportunities`, `dismiss_opportunity` and
 `create_projects_from_opportunities` keep Design → Opportunities in the workspace the scan ran in
 (lake#376); the Opportunities page reads them concurrently with the methodology registry. The record store capabilities stay out of
 the `workspace_query`/`workspace_act` allow-lists, so only lake reaches its `lake_*` collections

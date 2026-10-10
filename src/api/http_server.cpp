@@ -2015,16 +2015,6 @@ workspace_choices(const std::vector<lake::control::Workspace>& rows) {
     return choices;
 }
 
-// The space selector's label: the viewer's own personal space is "Personal space", not its
-// generated handle (lake#452); every other space keeps its name.
-std::string space_label(const lake::control::Customer& customer, std::string_view user_id) {
-    if (customer.customer_type == "individual" && !user_id.empty() &&
-        customer.user_id == user_id) {
-        return "Personal space";
-    }
-    return customer.name;
-}
-
 bool workspace_api_path(std::string_view path) {
     return path == "/mcp" || path == "/v1/openapi.json" || path.starts_with("/v1/");
 }
@@ -2139,16 +2129,10 @@ std::string app_authorize_path(std::string_view app_id, std::string_view redirec
     return "/apps/authorize?app=" + oauth_url_encode(app_id) + "&rd=" + oauth_url_encode(redirect);
 }
 
-std::string app_sign_in_return(const boost::http::route_params& route) {
-    const std::string encoded = cookie_value(route, "lake_sign_in_return");
-    if (encoded.empty()) {
-        return {};
-    }
-    const auto decoded = decode_base64url(encoded);
-    if (!decoded) {
-        return {};
-    }
-    const auto parsed = boost::urls::parse_relative_ref(*decoded);
+// A Ship app return (`/apps/authorize?app=…&rd=…`) rebuilt from its parts, or empty when `path`
+// is anything else; /apps/authorize itself then checks `rd` against the app.
+std::string app_return_path(std::string_view path) {
+    const auto parsed = boost::urls::parse_relative_ref(path);
     if (!parsed || parsed->encoded_path() != "/apps/authorize" || parsed->has_fragment()) {
         return {};
     }
@@ -2165,6 +2149,34 @@ std::string app_sign_in_return(const boost::http::route_params& route) {
         return {};
     }
     return app_authorize_path(app_id, redirect);
+}
+
+// The Ship app return the no-JavaScript pages carry in the lake_sign_in_return cookie.
+std::string app_sign_in_return(const boost::http::route_params& route) {
+    const std::string encoded = cookie_value(route, "lake_sign_in_return");
+    if (encoded.empty()) {
+        return {};
+    }
+    const auto decoded = decode_base64url(encoded);
+    return decoded ? app_return_path(*decoded) : std::string();
+}
+
+// Where a sign-in goes next when the browser names it (the web app posts `next`, lake#561): a
+// same-origin path (one leading '/', never "//" or "/\", which a browser reads as another host),
+// or a Ship app return. Empty: anything else.
+std::string same_origin_next(std::string_view next) {
+    if (const std::string app = app_return_path(next); !app.empty()) {
+        return app;
+    }
+    if (!next.starts_with('/') || next.starts_with("//") || next.starts_with("/\\") ||
+        std::ranges::any_of(next, [](unsigned char c) { return c < 0x20 || c == 0x7f; })) {
+        return {};
+    }
+    const auto parsed = boost::urls::parse_relative_ref(next);
+    if (!parsed || parsed->has_authority() || parsed->has_scheme()) {
+        return {};
+    }
+    return std::string(next);
 }
 
 std::string app_sign_in_return_cookie(const boost::http::route_params& route,
@@ -8820,6 +8832,13 @@ struct ApiServer::Impl {
             ctx.workspace_content = &workspace_content;
         }
         ctx.public_host = options.public_host;
+        ctx.external_origin = options.external_origin;
+        ctx.clerk_publishable_key = options.clerk_publishable_key;
+        ctx.artifact_catalog = [this] {
+            nlohmann::json catalog = artifacts.catalog();
+            catalog["available"] = artifacts.available();
+            return catalog;
+        };
         ctx.request_origin = request_origin(route);
         if (route.req.count(boost::http::field::origin) != 0) {
             ctx.caller_origin = std::string(route.req.at(boost::http::field::origin));
@@ -8937,7 +8956,8 @@ struct ApiServer::Impl {
             if (customers.ok) {
                 for (const auto& row : customers.value.at("items")) {
                     const auto customer = customer_from_json(row);
-                    viewer.spaces.emplace_back(customer.id, space_label(customer, viewer.user_id));
+                    viewer.spaces.emplace_back(customer.id,
+                                               web_ui_space_label(customer, viewer.user_id));
                 }
             }
             const auto query = boost::urls::parse_query(context.request_query);
@@ -9505,7 +9525,7 @@ struct ApiServer::Impl {
             return redirect(route, "/repositories");
         return send_text(route,
                          boost::http::status::ok,
-                         web_ui_login("", viewer_for(route)),
+                         web_ui_login(query_value(route, "error"), viewer_for(route)),
                          "text/html; charset=utf-8",
                          "no-store");
     }
@@ -9540,15 +9560,8 @@ struct ApiServer::Impl {
                     "application/json; charset=utf-8",
                     "no-store");
             }
-            const std::string body = web_ui_login("That token did not match.", viewer_for(context));
-            route.status(http::status::unauthorized);
-            route.res.set(http::field::content_type, "text/html; charset=utf-8");
-            route.res.set(http::field::cache_control, "no-store");
-            stamp_response_headers(route, body);
-            auto [send_error] = co_await route.send(body);
-            if (send_error)
-                co_return http::route_error(send_error);
-            co_return http::route_done;
+            // Back to the sign-in page, which says why (the web app reads `error` too, lake#561).
+            co_return co_await redirect(route, "/login?error=That%20token%20did%20not%20match.");
         }
         context.authorized = true;
         context.acting_identity = "admin";
@@ -10757,7 +10770,15 @@ struct ApiServer::Impl {
     boost::http::route_task serve_sign_in(boost::http::route_params& route) {
         const ApiContext context = context_for(route);
         if (context.authorized) {
-            const std::string app_return = app_sign_in_return(route);
+            // Already signed in: the return the URL names (`return_to` from /apps/authorize, or
+            // `next`, lake#561), else the cookie's.
+            std::string app_return = same_origin_next(query_value(route, "return_to"));
+            if (app_return.empty()) {
+                app_return = same_origin_next(query_value(route, "next"));
+            }
+            if (app_return.empty()) {
+                app_return = app_sign_in_return(route);
+            }
             co_return co_await redirect(
                 route,
                 app_return.empty()
@@ -11603,9 +11624,13 @@ struct ApiServer::Impl {
         if (request_is_https(route)) {
             cookie += "; Secure";
         }
-        const std::string app_return = app_sign_in_return(route);
+        // The page that sent the person here (`next`, lake#561), else the Ship app return.
+        std::string destination = same_origin_next(form_field(body, "next"));
+        if (destination.empty()) {
+            destination = app_sign_in_return(route);
+        }
         co_return co_await redirect(
-            route, app_return.empty() ? "/repositories" : app_return, cookie);
+            route, destination.empty() ? "/repositories" : destination, cookie);
     }
 
     boost::http::route_task serve_oauth_callback(boost::http::route_params& route) {
@@ -12594,38 +12619,41 @@ struct ApiServer::Impl {
         // background; reading its task applies the design once it is done (settle_build).
         if (page.unavailable.empty() && page.state.value("ready", false) &&
             section == "project" && !page.subject.empty() && context.store) {
-            if (auto build = context.store->latest_agent_task(page.customer_id,
-                                                              "build:" + page.subject,
-                                                              context.path_workspace_id)) {
-                const ApiResult followed = unwrap(co_await workspace_call(
-                    "get_agent_task",
-                    {{"customer_id", page.customer_id}, {"task_id", build->id}},
-                    context));
-                page.data["build"] = {
-                    {"status", build->phase.empty() ? "pending" : build->phase},
-                    {"message", followed.ok ? followed.value.value("message", build->message)
-                                            : build->message}};
-                if (!followed.ok) {
-                    page.error = "The Project Agent's design could not be read: " +
-                                 followed.error.message;
-                } else if (followed.value.contains("build_error")) {
+            // The same reads the web app makes (latest_agent_task, lake#561).
+            const ApiResult build = unwrap(co_await workspace_call(
+                "latest_agent_task",
+                {{"customer_id", page.customer_id}, {"subject", "build:" + page.subject}},
+                context));
+            if (!build.ok) {
+                page.error = "The Project Agent's design could not be read: " + build.error.message;
+            } else if (const nlohmann::json task = build.value.value("task", nlohmann::json());
+                       task.is_object()) {
+                // The page names a task by its phase ("Running", "Failed"), as the row has it.
+                std::string status = task.value("status", std::string("pending"));
+                if (status != "pending" && !status.empty()) {
+                    status[0] =
+                        static_cast<char>(std::toupper(static_cast<unsigned char>(status[0])));
+                }
+                page.data["build"] = {{"status", status},
+                                      {"message", task.value("message", std::string())}};
+                if (task.contains("build_error")) {
                     page.error = "The Project Agent designed a pipeline, but it could not be "
-                                 "applied: " + followed.value.value("build_error", std::string());
+                                 "applied: " +
+                                 task.value("build_error", std::string());
                 }
             }
-            if (auto solution = context.store->latest_agent_task(page.customer_id,
-                                                                 "solution:" + page.subject,
-                                                                 context.path_workspace_id)) {
-                const ApiResult followed = unwrap(co_await workspace_call(
-                    "get_agent_task",
-                    {{"customer_id", page.customer_id}, {"task_id", solution->id}},
-                    context));
-                if (followed.ok) {
-                    page.data["solution_task"] = followed.value;
-                } else if (page.error.empty()) {
+            const ApiResult solution = unwrap(co_await workspace_call(
+                "latest_agent_task",
+                {{"customer_id", page.customer_id}, {"subject", "solution:" + page.subject}},
+                context));
+            if (!solution.ok) {
+                if (page.error.empty()) {
                     page.error = "The Project Agent's foundation proposal could not be read: " +
-                                 followed.error.message;
+                                 solution.error.message;
                 }
+            } else if (const nlohmann::json task = solution.value.value("task", nlohmann::json());
+                       task.is_object()) {
+                page.data["solution_task"] = task;
             }
         }
         if (page.unavailable.empty() && page.state.value("ready", false)) {
@@ -13098,25 +13126,6 @@ struct ApiServer::Impl {
             control::ask_conversation_lookup(conversation, context.acting_user_id), newest));
     }
 
-    // Appends one message to the conversation in the workspace of this page, as the signed-in
-    // person and for the space that owns the workspace.
-    liquid::runtime::task<control::ZettaControlResult<control::AskMessage>>
-    append_ask(ApiContext& context, control::AskMessage message) {
-        auto records = page_records(context);
-        if (!records) {
-            co_return control::ZettaControlResult<control::AskMessage>(
-                std::unexpected(records.error()));
-        }
-        message.customer_id = page_workspace_customer(context);
-        message.user_id = context.acting_user_id;
-        if (const auto problem = control::ask_message_problem(message)) {
-            co_return control::ZettaControlResult<control::AskMessage>(
-                std::unexpected(control::ZettaControlError{"invalid_input", *problem}));
-        }
-        control::AskMessages messages(*records);
-        co_return control::settled(co_await messages.append(std::move(message)));
-    }
-
     // The space that owns the workspace in the page's path; the route guard has checked that the
     // signed-in person can see it.
     std::string page_workspace_customer(const ApiContext& context) const {
@@ -13172,65 +13181,24 @@ struct ApiServer::Impl {
 
     // A background turn of a conversation (lake#269). While it runs, the task as get_agent_task
     // reads it (its agent, latest progress message, attempts and start), so the page can say who
-    // is working and what it last reported (lake#451); once it finished, its answer becomes the
-    // conversation's assistant message, once, and this answers null.
+    // is working and what it last reported (lake#451); once it finished, settle_ask_turn stores
+    // its answer as the conversation's assistant message, once, and this answers null.
     liquid::runtime::task<nlohmann::json> settle_turn(ApiContext& context,
-                                            std::string customer_id,
-                                            std::string task_id,
-                                            std::string conversation,
-                                            bool factory) {
-        const ApiResult got = unwrap(co_await workspace_call(
-            "get_agent_task", {{"customer_id", customer_id}, {"task_id", task_id}}, context));
-        if (!got.ok) {
+                                                      std::string customer_id,
+                                                      std::string task_id,
+                                                      std::string conversation,
+                                                      bool factory) {
+        const ApiResult settled =
+            unwrap(co_await workspace_call("settle_ask_turn",
+                                           {{"customer_id", customer_id},
+                                            {"conversation_id", conversation},
+                                            {"task_id", task_id},
+                                            {"kind", factory ? "factory" : "ask"}},
+                                           context));
+        if (!settled.ok || settled.value.value("settled", true)) {
             co_return nullptr;
         }
-        const std::string status = got.value.value("status", std::string());
-        if (status == "pending" || status == "running") {
-            co_return got.value;
-        }
-        auto messages = control::settled(co_await ask_conversation(context, conversation));
-        if (!messages) {
-            co_return nullptr; // the answer is settled once the workspace answers again
-        }
-        for (const control::AskMessage& message : *messages) {
-            if (message.payload.is_object() &&
-                message.payload.value("task_id", std::string()) == task_id) {
-                co_return nullptr;
-            }
-        }
-        const nlohmann::json answer = got.value.value("answer", nlohmann::json::object());
-        const bool ok = status == "succeeded" && answer.is_object() && answer.value("ok", true);
-        std::string text;
-        nlohmann::json payload{{"task_id", task_id}, {"agent", got.value.value("agent", std::string())}};
-        if (!ok) {
-            text = "That did not finish: " +
-                   (answer.is_object() && answer.contains("error")
-                        ? answer["error"].is_string() ? answer["error"].get<std::string>()
-                                                      : answer["error"].dump()
-                        : got.value.value("message", std::string("the agent did not answer")));
-        } else if (factory) {
-            const nlohmann::json creator = creator_answer(answer);
-            const std::string kind = creator.value("kind", std::string());
-            text = kind == "question"   ? creator.value("question", std::string())
-                   : kind == "proposal" ? std::string("Here is the agent I propose. Review it below.")
-                                        : answer.value("reply", std::string("AgentCreator did not answer."));
-            payload["answer"] = creator;
-        } else {
-            text = answer.value("reply", std::string());
-            payload["proposals"] = answer.value("proposals", nlohmann::json::array());
-            payload["reads"] = answer.value("reads", nlohmann::json::array());
-            payload["delegations"] = answer.value("delegations", nlohmann::json::array());
-            payload["trace_id"] = answer.value("trace_id", std::string());
-        }
-        co_await append_ask(context, {"",
-                                      conversation,
-                                      customer_id,
-                                      context.acting_user_id,
-                                      "assistant",
-                                      std::move(text),
-                                      std::move(payload),
-                                      ""});
-        co_return nullptr;
+        co_return settled.value.value("task", nlohmann::json());
     }
 
     // A deferred panel's answer (docs/ui/performance.md, lake#446): JSON, never cached, with the
@@ -13401,11 +13369,6 @@ struct ApiServer::Impl {
         }
         // A message the workspace did not store is an error the page shows, never a silent loss.
         std::string error;
-        const auto record = [&](auto completed) {
-            if (!completed && error.empty()) {
-                error = "The conversation could not be saved: " + completed.error().message;
-            }
-        };
         const std::string from = form_field(body, "from");
         std::string agent = form_field(body, "agent");
         if (agent.empty()) {
@@ -13430,86 +13393,36 @@ struct ApiServer::Impl {
                 rest = amp == std::string_view::npos ? std::string_view() : rest.substr(amp + 1);
             }
         }
+        // The same capabilities the web app calls (lake#561): the browser never writes a message.
         if (!confirm) {
-            const std::string message = form_field(body, "message");
-            record(control::settled(co_await append_ask(context, {"",
-                                                 conversation,
-                                                 customer_id,
-                                                 context.acting_user_id,
-                                                 "user",
-                                                 message,
-                                                 nullptr,
-                                                 ""})));
-            const ApiResult answered =
-                unwrap(co_await workspace_call("agent_turn",
+            const ApiResult sent =
+                unwrap(co_await workspace_call("send_ask_message",
                                                {{"customer_id", customer_id},
-                                                {"agent", agent},
-                                                {"message", message},
                                                 {"conversation_id", conversation},
-                                                {"page", page},
-                                                {"kind", "ask"}},
+                                                {"kind", "ask"},
+                                                {"agent", agent},
+                                                {"message", form_field(body, "message")},
+                                                {"page", page}},
                                                context));
-            if (answered.ok && answered.value.contains("task_id")) {
+            if (!sent.ok) {
+                error = sent.error.message;
+            } else if (const std::string task = sent.value.value("task_id", std::string());
+                       !task.empty()) {
                 // Running in the background (lake#269): the page follows the task.
-                back += "&task=" + oauth_url_encode(answered.value.value("task_id", std::string()));
-            } else if (answered.ok) {
-                const nlohmann::json& value = answered.value;
-                record(control::settled(co_await append_ask(
-                    context,
-                    {"",
-                     conversation,
-                     customer_id,
-                     context.acting_user_id,
-                     "assistant",
-                     value.value("reply", std::string()),
-                     {{"agent", agent},
-                      {"proposals", value.value("proposals", nlohmann::json::array())},
-                      {"reads", value.value("reads", nlohmann::json::array())},
-                      {"delegations", value.value("delegations", nlohmann::json::array())},
-                      {"trace_id", value.value("trace_id", std::string())}},
-                     ""})));
-            } else {
-                error = answered.error.message;
+                back += "&task=" + oauth_url_encode(task);
             }
         } else {
             // Run one proposal the person was shown, as the person. Only a proposal lake stored
             // for this person's conversation can be confirmed.
-            const std::string message_id = form_field(body, "message_id");
-            const std::size_t index =
-                static_cast<std::size_t>(std::atoi(form_field(body, "index").c_str()));
-            auto messages = control::settled(co_await ask_conversation(context, conversation));
-            nlohmann::json proposal;
-            if (messages) {
-                for (const control::AskMessage& message : *messages) {
-                    const nlohmann::json proposals =
-                        message.payload.is_object()
-                            ? message.payload.value("proposals", nlohmann::json::array())
-                            : nlohmann::json::array();
-                    if (message.id == message_id && index < proposals.size()) {
-                        proposal = proposals[index];
-                    }
-                }
-            }
-            if (!proposal.is_object()) {
-                error = "That proposal is not in this conversation.";
-            } else {
-                const std::string capability = proposal.value("capability", std::string());
-                context.audit_details = {{"ask_confirm", true}, {"conversation_id", conversation}};
-                const ApiResult done = unwrap(co_await workspace_call(
-                    capability, proposal.value("input", nlohmann::json::object()), context));
-                record(control::settled(co_await append_ask(
-                    context,
-                    {"",
-                     conversation,
-                     customer_id,
-                     context.acting_user_id,
-                     "assistant",
-                     done.ok ? "Done: " + capability + "."
-                             : "That did not work: " + done.error.message,
-                     {{"agent", "agent-ask-orama"},
-                      {"confirmed", {{"message_id", message_id}, {"index", std::to_string(index)}}},
-                      {"ok", done.ok}},
-                     ""})));
+            const ApiResult confirmed = unwrap(co_await workspace_call(
+                "confirm_ask_proposal",
+                {{"customer_id", customer_id},
+                 {"conversation_id", conversation},
+                 {"message_id", form_field(body, "message_id")},
+                 {"index", std::max(0, std::atoi(form_field(body, "index").c_str()))}},
+                context));
+            if (!confirmed.ok) {
+                error = confirmed.error.message;
             }
         }
         if (!error.empty()) {
@@ -13520,20 +13433,8 @@ struct ApiServer::Impl {
 
     // ---- Train > Agents > Agent Factory (docs/api/agent-factory.md, lake#233) ----
 
-    // AgentCreator's structured answer, a question or a proposal: its `result` (agent-creator#1),
-    // or, from an AgentCreator that answered before it had one, the JSON in its reply.
-    static nlohmann::json creator_answer(const nlohmann::json& turn) {
-        if (const nlohmann::json result = turn.value("result", nlohmann::json());
-            result.is_object() && result.contains("kind")) {
-            return result;
-        }
-        nlohmann::json answer =
-            nlohmann::json::parse(turn.value("reply", std::string()), nullptr, false);
-        return answer.is_object() ? answer : nlohmann::json::object();
-    }
-
     static std::string proposal_digest(const nlohmann::json& proposal) {
-        return control::identity_crypto::sha256_hex(proposal.dump());
+        return agent_proposal_digest(proposal);
     }
 
     static nlohmann::json agent_result(const nlohmann::json& task) {
@@ -13637,96 +13538,39 @@ struct ApiServer::Impl {
         const std::string query = "customer_id=" + oauth_url_encode(customer_id);
         std::string back =
             "/train/agents/new?" + query + "&conversation=" + oauth_url_encode(conversation);
-        std::string error;
-        // Coroutine-safe: appends through the workspace and keeps the first failure for the page.
-        const auto keep = [&](auto completed) {
-            if (!completed && error.empty()) {
-                error = "The conversation could not be saved: " + completed.error().message;
-            }
-        };
+        // The same capabilities the web app calls (lake#561).
         if (!approve) {
-            const std::string message = form_field(body, "message");
-            keep(control::settled(co_await append_ask(context, {"",
-                                               conversation,
-                                               customer_id,
-                                               context.acting_user_id,
-                                               "user",
-                                               message,
-                                               nullptr,
-                                               ""})));
-            const ApiResult turned =
-                unwrap(co_await workspace_call("agent_turn",
+            const ApiResult sent =
+                unwrap(co_await workspace_call("send_ask_message",
                                                {{"customer_id", customer_id},
-                                                {"agent", "agent-creator"},
+                                                {"conversation_id", conversation},
                                                 {"kind", "factory"},
-                                                {"message", message},
-                                                {"conversation_id", conversation}},
+                                                {"message", form_field(body, "message")}},
                                                context));
-            if (!turned.ok) {
-                error = turned.error.message;
+            if (!sent.ok) {
+                back += "&error=" + oauth_url_encode(sent.error.message);
             } else {
                 // AgentCreator works in the background (lake#269); the page follows the task.
-                back += "&task=" + oauth_url_encode(turned.value.value("task_id", std::string()));
-            }
-            if (!error.empty()) {
-                back += "&error=" + oauth_url_encode(error);
+                back += "&task=" + oauth_url_encode(sent.value.value("task_id", std::string()));
             }
             co_return co_await redirect(route, back);
         }
-
         // Approve and create: only the exact proposal the person was shown, without defects.
-        const std::string message_id = form_field(body, "message_id");
-        nlohmann::json answer;
-        if (auto messages = control::settled(co_await ask_conversation(context, conversation))) {
-            for (const control::AskMessage& message : *messages) {
-                if (message.id == message_id && message.payload.is_object()) {
-                    answer = message.payload.value("answer", nlohmann::json::object());
-                }
-            }
-        }
-        const nlohmann::json proposal =
-            answer.is_object() ? answer.value("proposal", nlohmann::json()) : nlohmann::json();
-        if (!proposal.is_object()) {
-            error = "That proposal is not in this conversation.";
-        } else if (proposal_digest(proposal) != form_field(body, "proposal_sha256")) {
-            error = "The proposal changed since you saw it; review it again.";
-        } else if (!answer.value("defects", nlohmann::json::array()).empty()) {
-            error = "This proposal still has defects.";
-        }
-        if (!error.empty()) {
-            co_return co_await redirect(route, back + "&error=" + oauth_url_encode(error));
-        }
-        // The same capability REST and MCP call (create_agent_from_proposal).
-        const nlohmann::json agent = proposal.value("agent", nlohmann::json::object());
-        const ApiResult created = unwrap(co_await workspace_call(
-            "create_agent_from_proposal",
-            {{"customer_id", customer_id},
-             {"proposal", proposal},
-             {"defects", answer.value("defects", nlohmann::json::array())}},
-            context));
+        const ApiResult created = unwrap(
+            co_await workspace_call("approve_agent_proposal",
+                                    {{"customer_id", customer_id},
+                                     {"conversation_id", conversation},
+                                     {"message_id", form_field(body, "message_id")},
+                                     {"proposal_sha256", form_field(body, "proposal_sha256")}},
+                                    context));
         if (!created.ok) {
-            co_await append_ask(context, {"", conversation, customer_id, context.acting_user_id,
-                                          "assistant", "I could not create it: " + created.error.message,
-                                          {{"created", false}}, ""});
             co_return co_await redirect(route,
                                         back + "&error=" + oauth_url_encode(created.error.message));
         }
-        const std::string agent_id = created.value.value("agent_id", std::string());
-        std::string note = "Created " + agent.value("name", std::string()) + ".";
-        if (created.value.contains("scheduled")) {
-            note += created.value.value("scheduled", false)
-                        ? " Its trigger is scheduled."
-                        : " Its trigger was not scheduled: " +
-                              created.value.value("schedule_error", std::string());
-        }
-        if (created.value.contains("check_launch_id")) {
-            note += " A first check run has started.";
-        }
-        co_await append_ask(context, {"", conversation, customer_id, context.acting_user_id,
-                                      "assistant", note, {{"created", true}, {"agent_id", agent_id}},
-                                      ""});
-        co_return co_await redirect(route,
-                                    "/train/agent?" + query + "&id=" + oauth_url_encode(agent_id));
+        co_return co_await redirect(
+            route,
+            "/train/agent?" + query +
+                "&id=" + oauth_url_encode(created.value.value("agent_id", std::string())));
     }
 
     // Design > Discover Opportunities: one Auto-Suggest turn over the profile lake builds, shown
@@ -14498,10 +14342,19 @@ struct ApiServer::Impl {
             const std::string project = form_field(body, "project");
             const std::string chosen = form_field(body, "dataset");
             back = "/design/project?" + query + "&name=" + oauth_url_encode(project);
-            context.registry = &registry;
-            result = unwrap(co_await lake::api::compile_pipeline(
-                context, customer_id, project, form_field(body, "intent"), chosen, nullptr,
-                form_field(body, "methodology")));
+            // The same capability the web app calls (compile_pipeline, lake#561).
+            nlohmann::json compile{{"customer_id", customer_id},
+                                   {"project", project},
+                                   {"intent", form_field(body, "intent")}};
+            if (!chosen.empty()) {
+                compile["dataset"] = chosen;
+            }
+            if (const std::string methodology = form_field(body, "methodology");
+                !methodology.empty()) {
+                compile["methodology"] = methodology;
+            }
+            result =
+                unwrap(co_await workspace_call("compile_pipeline", std::move(compile), context));
             const std::string built_graph = result.ok ? result.value.value("graph", std::string())
                                                       : std::string();
             if (result.ok && !chosen.empty() && !built_graph.empty()) {
@@ -14551,7 +14404,6 @@ struct ApiServer::Impl {
         if (!context.authorized) {
             co_return co_await redirect(route, "/sign-in");
         }
-        nlohmann::json catalog = artifacts.catalog();
         nlohmann::json builds = nlohmann::json::array();
         std::string customer_id = query_value(route, "customer_id");
         const ApiResult customers = registry.call("list_customers", {{"limit", 1000}}, context);
@@ -14567,36 +14419,30 @@ struct ApiServer::Impl {
             if (listed.ok) {
                 builds = listed.value.value("builds", nlohmann::json::array());
             }
-            const ApiResult images = unwrap(co_await registry.call_async(
-                "list_image_repositories", {{"customer_id", customer_id}}, context));
-            if (images.ok) {
-                for (const nlohmann::json& image : images.value.at("items")) {
-                    if (image.value("name", std::string()).starts_with("cache/")) {
-                        continue;
-                    }
-                    nlohmann::json versions = nlohmann::json::array();
-                    for (const nlohmann::json& tag : image.value("tags", nlohmann::json::array())) {
-                        versions.push_back(tag.value("tag", std::string()));
-                    }
-                    catalog["oci"].push_back(
-                        {{"name", image.value("repository", std::string())}, {"versions", versions}});
-                }
-            }
         }
-        co_return co_await send_text(
-            route,
-            boost::http::status::ok,
-            web_ui_packages(catalog,
-                            artifacts.available(),
-                            options.external_origin.empty()
-                                ? (options.public_host.empty() ? std::string()
-                                                               : "https://" + options.public_host)
-                                : options.external_origin,
-                            viewer_for(context),
-                            builds,
-                            customer_id),
-            "text/html; charset=utf-8",
-            "no-store");
+        // The same catalog the web app reads (list_packages, lake#561).
+        nlohmann::json packages_input = nlohmann::json::object();
+        if (!customer_id.empty()) {
+            packages_input["customer_id"] = customer_id;
+        }
+        ApiResult packages =
+            unwrap(co_await registry.call_async("list_packages", packages_input, context));
+        if (!packages.ok && !customer_id.empty()) {
+            // A space whose images cannot be read still shows the instance registries.
+            packages = unwrap(
+                co_await registry.call_async("list_packages", nlohmann::json::object(), context));
+        }
+        nlohmann::json catalog = packages.ok ? packages.value : nlohmann::json::object();
+        co_return co_await send_text(route,
+                                     boost::http::status::ok,
+                                     web_ui_packages(catalog,
+                                                     catalog.value("available", false),
+                                                     catalog.value("origin", std::string()),
+                                                     viewer_for(context),
+                                                     builds,
+                                                     customer_id),
+                                     "text/html; charset=utf-8",
+                                     "no-store");
     }
 
     boost::http::route_task serve_experiments_page(boost::http::route_params& route,
@@ -17039,51 +16885,7 @@ struct ApiServer::Impl {
             return std::unexpected(
                 control::StoreError{"store_unavailable", "no control-plane store is configured"});
         }
-        if (const auto direct = options.store->get_repository(std::string(hub_id))) {
-            return *direct;
-        }
-        if (hub_id.starts_with("models/") || hub_id.starts_with("datasets/")) {
-            const std::size_t prefix = hub_id.find('/') + 1;
-            if (const auto direct =
-                    options.store->get_repository(std::string(hub_id.substr(prefix)))) {
-                return *direct;
-            }
-        }
-        std::string_view customer_name;
-        std::string_view repository_name = hub_id;
-        const std::size_t slash = hub_id.find('/');
-        if (slash != std::string_view::npos) {
-            customer_name = hub_id.substr(0, slash);
-            repository_name = hub_id.substr(slash + 1);
-        }
-        const auto customers = options.store->list_customers(1'000);
-        if (!customers) {
-            return std::unexpected(customers.error());
-        }
-        std::optional<control::Repository> match;
-        for (const control::Customer& customer : *customers) {
-            if (!customer_name.empty() && customer.name != customer_name) {
-                continue;
-            }
-            const auto repositories = options.store->list_repositories(customer.id, 1'000);
-            if (!repositories) {
-                return std::unexpected(repositories.error());
-            }
-            for (const control::Repository& repository : *repositories) {
-                if (repository.name != repository_name || !repository.deleted_at.empty()) {
-                    continue;
-                }
-                if (match) {
-                    return std::unexpected(control::StoreError{
-                        "conflict", "repository name is ambiguous without its customer"});
-                }
-                match = repository;
-            }
-        }
-        if (!match) {
-            return std::unexpected(control::StoreError{"not_found", "repository does not exist"});
-        }
-        return *match;
+        return find_hub_repository(*options.store, hub_id);
     }
 
     std::string hub_id(const boost::http::route_params& route, bool git = false) const {
@@ -19475,6 +19277,111 @@ struct ApiServer::Impl {
     // until this process owns the root and has opened it. It never fails while a hand-off is in
     // progress; it answers 503 only if the wait expired, the open failed, or the process is
     // stopping before it ever owned the root.
+    // ---- Cross-site request protection (lake#561, docs/serving/http.md#cross-site-requests) ----
+
+    // The browser session authenticates this request: no bearer, and a lake_session cookie.
+    // context_for resolves exactly this case to authentication_method "session".
+    static bool session_cookie_request(const boost::http::route_params& route) {
+        return bearer_of(route).empty() && !cookie_value(route, "lake_session").empty();
+    }
+
+    static bool unsafe_method(const boost::http::route_params& route) {
+        const auto method = route.req.method();
+        return method == boost::http::method::post || method == boost::http::method::put ||
+               method == boost::http::method::patch || method == boost::http::method::delete_;
+    }
+
+    // Whether a browser says this request came from lake's own origin. A missing Origin and a
+    // missing Sec-Fetch-Site are a non-browser client's, and pass: the cookie is the browser's.
+    bool from_own_origin(const boost::http::route_params& route) const {
+        const auto lower = [](std::string_view text) {
+            std::string out(text);
+            std::ranges::transform(out, out.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            return out;
+        };
+        if (route.req.count("sec-fetch-site") != 0 &&
+            lower(route.req.at("sec-fetch-site")) != "same-origin") {
+            return false;
+        }
+        if (route.req.count(boost::http::field::origin) == 0) {
+            return true;
+        }
+        std::string origin = lower(route.req.at(boost::http::field::origin));
+        while (origin.ends_with('/')) {
+            origin.pop_back();
+        }
+        if (origin == "null" || origin.empty()) {
+            return false;
+        }
+        std::string configured = lower(options.external_origin);
+        while (configured.ends_with('/')) {
+            configured.pop_back();
+        }
+        if ((!configured.empty() && origin == configured) ||
+            (!options.public_host.empty() && origin == "https://" + lower(options.public_host))) {
+            return true;
+        }
+        // The origin this request was sent to: the Host it carries, under either scheme (a proxy
+        // in front of lake terminates TLS).
+        const std::size_t scheme = origin.find("://");
+        if (scheme == std::string::npos || route.req.count(boost::http::field::host) == 0) {
+            return false;
+        }
+        const std::string scheme_name = origin.substr(0, scheme);
+        return (scheme_name == "https" || scheme_name == "http") &&
+               origin.substr(scheme + 3) == lower(route.req.at(boost::http::field::host));
+    }
+
+    static bool json_content_type(const boost::http::route_params& route) {
+        if (route.req.count(boost::http::field::content_type) == 0) {
+            return false;
+        }
+        std::string_view type = route.req.at(boost::http::field::content_type);
+        type = type.substr(0, type.find(';'));
+        while (!type.empty() && type.back() == ' ') {
+            type.remove_suffix(1);
+        }
+        std::string lowered(type);
+        std::ranges::transform(lowered, lowered.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return lowered == "application/json";
+    }
+
+    // An unsafe request the browser session authenticates must come from lake's own origin, and a
+    // /v1 or /mcp POST must be JSON, which no cross-site form or simple request can send.
+    // Bearer-authenticated calls are not affected. Empty: the request may proceed.
+    std::string cross_site_refusal(const boost::http::route_params& route) const {
+        if (!unsafe_method(route) || !session_cookie_request(route)) {
+            return {};
+        }
+        if (!from_own_origin(route)) {
+            return "Cross-site requests cannot use the browser session.";
+        }
+        const std::string local = workspace_local_path(std::string(route.url.path()));
+        const bool json_api = local == "/mcp" || (local.starts_with("/v1/") &&
+                                                  !local.starts_with("/v1/repositories/"));
+        if (json_api && route.req.method() == boost::http::method::post &&
+            !json_content_type(route)) {
+            return "Cross-site requests cannot use the browser session.";
+        }
+        return {};
+    }
+
+    boost::http::route_task refuse_cross_site(boost::http::route_params& route) {
+        const std::string refusal = cross_site_refusal(route);
+        if (refusal.empty()) {
+            co_return boost::http::route_next;
+        }
+        co_return co_await send_text(route,
+                                     boost::http::status::forbidden,
+                                     error_body("unauthorized", refusal),
+                                     "application/json; charset=utf-8",
+                                     "no-store");
+    }
+
     boost::http::route_task await_store_root(boost::http::route_params& route) {
         namespace http = boost::http;
         if (store_root_state.load() == StoreRootState::open) {
@@ -20165,6 +20072,17 @@ bool ApiServer::start() {
         }
         co_return result;
     });
+    // A cookie-authenticated unsafe request from another origin is refused before any route.
+    router.use(guarded("cross_site", [&impl](http::route_params& route) -> http::route_task {
+        auto result = co_await impl.refuse_cross_site(route);
+        if (result.what() != http::route_what::next) {
+            const auto timing = request_timing(route);
+            const auto start = timing ? timing->started : std::chrono::steady_clock::now();
+            const RequestTimingScope timing_scope(route, start);
+            impl.record_request(route, impl.route_pattern_for(route), start);
+        }
+        co_return result;
+    }));
     // Before any route that may touch the store root: wait for this process to own it.
     router.use(guarded("store_root", [&impl](http::route_params& route) -> http::route_task {
         auto result = co_await impl.await_store_root(route);

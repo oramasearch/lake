@@ -15,6 +15,7 @@
 #include "lake/api/datasets.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 
@@ -617,10 +618,77 @@ Capability write_capability(std::string name,
                       .handler = std::move(handler)};
 }
 
+// resolve_model (lake#561): the model page's `space/name`, for a caller who may read it. A
+// private model the caller may not read is not_found, as if it did not exist.
+ApiResult resolve_model(const json& input, ApiContext& context) {
+    if (!context.store) {
+        return ApiResult::failure("store_unavailable", "no control-plane store is configured");
+    }
+    const std::string space = input.value("namespace", std::string());
+    const std::string name = input.at("name");
+    const auto repository =
+        find_hub_repository(*context.store, space.empty() ? name : space + "/" + name);
+    const auto missing = [] { return ApiResult::failure("not_found", "no such model", "/name"); };
+    if (!repository) {
+        return repository.error().code == "not_found"
+                   ? missing()
+                   : ApiResult::failure(
+                         repository.error().code, repository.error().message, "/name");
+    }
+    if (repository->visibility != "public" && context.acting_identity != "admin") {
+        if (!context.authorized) {
+            return missing();
+        }
+        const auto object = context.store->find_policy_object("repository", repository->id);
+        if (!object) {
+            return missing();
+        }
+        const auto decision = control::authorize(*context.store,
+                                                 context.acting_identity,
+                                                 object->id,
+                                                 "read",
+                                                 context.authorization_cache);
+        if (!decision) {
+            return ApiResult::failure(decision.error().code, decision.error().message);
+        }
+        if (!decision->allowed) {
+            return missing();
+        }
+    }
+    return ApiResult::success({{"repository_id", repository->id}, {"revision", "main"}});
+}
+
 } // namespace
 
 void register_model_capabilities(Registry& registry) {
     registry.add(model_capability());
+    registry.add(Capability{
+        .name = "resolve_model",
+        .title = "Find a model by name",
+        .description =
+            "The model repository a model page names, by `name` and optionally its space "
+            "(`namespace`, the space's handle), with the revision the page shows. A model you "
+            "may not read is not_found, as if it did not exist; a public model needs no "
+            "credential. Read it with get_model {id: repository_id, revision}.",
+        .input_schema = {{"type", "object"},
+                         {"properties",
+                          {{"namespace", {{"type", "string"}}}, {"name", {{"type", "string"}}}}},
+                         {"required", json::array({"name"})},
+                         {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"repository_id", {{"type", "string"}}},
+                            {"revision", {{"type", "string"}}}}},
+                          {"required", json::array({"repository_id", "revision"})},
+                          {"additionalProperties", false}},
+        .kind = CapabilityKind::Read,
+        .requires_auth = false,
+        .object = "model",
+        .action = "read",
+        .resolve_object = [](const json&, ApiContext&) -> std::expected<std::string, ApiError> {
+            return std::string{};
+        },
+        .handler = resolve_model});
     registry.add(dataset_capability());
     registry.add(read_capability("resolve_model_file",
                                  "Resolve model file",
@@ -880,6 +948,54 @@ void register_model_capabilities(Registry& registry) {
             context.audit_details = {{"verified", verified.verified}};
             return ApiResult::success(provenance_json(verified));
         }));
+}
+
+control::Result<control::Repository> find_hub_repository(control::Store& store,
+                                                         std::string_view hub_id) {
+    if (const auto direct = store.get_repository(std::string(hub_id))) {
+        return *direct;
+    }
+    if (hub_id.starts_with("models/") || hub_id.starts_with("datasets/")) {
+        const std::size_t prefix = hub_id.find('/') + 1;
+        if (const auto direct = store.get_repository(std::string(hub_id.substr(prefix)))) {
+            return *direct;
+        }
+    }
+    std::string_view customer_name;
+    std::string_view repository_name = hub_id;
+    const std::size_t slash = hub_id.find('/');
+    if (slash != std::string_view::npos) {
+        customer_name = hub_id.substr(0, slash);
+        repository_name = hub_id.substr(slash + 1);
+    }
+    const auto customers = store.list_customers(1'000);
+    if (!customers) {
+        return std::unexpected(customers.error());
+    }
+    std::optional<control::Repository> match;
+    for (const control::Customer& customer : *customers) {
+        if (!customer_name.empty() && customer.name != customer_name) {
+            continue;
+        }
+        const auto repositories = store.list_repositories(customer.id, 1'000);
+        if (!repositories) {
+            return std::unexpected(repositories.error());
+        }
+        for (const control::Repository& repository : *repositories) {
+            if (repository.name != repository_name || !repository.deleted_at.empty()) {
+                continue;
+            }
+            if (match) {
+                return std::unexpected(control::StoreError{
+                    "conflict", "repository name is ambiguous without its customer"});
+            }
+            match = repository;
+        }
+    }
+    if (!match) {
+        return std::unexpected(control::StoreError{"not_found", "repository does not exist"});
+    }
+    return *match;
 }
 
 } // namespace lake::api
