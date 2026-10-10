@@ -1,15 +1,14 @@
 /** Train → Run (web_ui.cpp workspace_content "run", run_report_panel, run_details_panel): one run,
- * its report once it finished, its lineage, outputs, log and trace. While it runs the page checks
- * again every 15 seconds; the report is asked for only once the run is no longer running, queued
- * or pending (asking a running run makes Zetta drop the connection). */
-import { Link, useSearchParams } from "react-router-dom";
+ * its report once it finished, its lineage, outputs, log and trace, beside its facts. While it runs
+ * the page checks again every 15 seconds; the report is asked for only once the run is no longer
+ * running, queued or pending (asking a running run makes Zetta drop the connection). */
+import { useSearchParams } from "react-router-dom";
+import { Activity, LineChart } from "lucide-react";
 import type { Row } from "@/lib/api";
 import { entityCrumb, useTrail } from "@/lib/trail";
-import { Badge, ErrorBlock, Query } from "@/lib/ui";
-import { WorkspaceFrame, cellText, qs, text, useWorkspace, useWorkspaceState, useWq, useWsPath } from "./workspace";
-import { ObjectTable, RunSubject, TrialSubject, useStudies, when } from "./RunsPage";
-
-const UNFINISHED = new Set(["running", "queued", "pending"]);
+import { Banner, Button, Card, Chip, ErrorBlock, KeyValue, Mono, Query, Split, Stat, Status } from "@/lib/ui";
+import { WorkspaceFrame, cellText, qs, text, timeAgo, useWorkspace, useWorkspaceState, useWq, useWsPath } from "./workspace";
+import { ObjectTable, RunSubject, TrialSubject, UNFINISHED, runStatusTone, useStudies, when } from "./RunsPage";
 
 export default function RunPage() {
   const [params] = useSearchParams();
@@ -30,8 +29,33 @@ export default function RunPage() {
   // "Run: <uuid>" told a person nothing (lake#255): the pipeline's name when the run carries it.
   const pipeline = text(run.data, "pipeline_name");
   const title = pipeline ? `Run of ${pipeline}` : id ? `Run: ${id}` : "Run";
+  const status = text(run.data, "status");
   return (
-    <WorkspaceFrame eyebrow="Train" title={title}>
+    <WorkspaceFrame
+      eyebrow="Train"
+      title={
+        run.data ? (
+          <span className="inline-flex flex-wrap items-center gap-2">
+            {title}
+            <Status value={status || "unknown"} tone={runStatusTone(status)} />
+          </span>
+        ) : (
+          title
+        )
+      }
+      actions={
+        id ? (
+          <>
+            <Button to={path(`/train/streams?${qs({ customer_id: customerId })}`)}>
+              <Activity size={14} aria-hidden /> Workspace streams
+            </Button>
+            <Button to={path(`/train/experiment/run?${qs({ customer_id: customerId, run: text(run.data, "id") || id })}`)}>
+              <LineChart size={14} aria-hidden /> Training charts
+            </Button>
+          </>
+        ) : null
+      }
+    >
       {() => (
         <Query q={run} what="the run">
           {(value) => <RunBody run={value} id={id} />}
@@ -42,15 +66,13 @@ export default function RunPage() {
 }
 
 function RunBody({ run, id }: { run: Row; id: string }) {
-  const path = useWsPath();
-  const { customerId } = useWorkspace();
   const studies = useStudies();
   const status = text(run, "status");
   const finished = !UNFINISHED.has(status);
   const report = useWq<Row>("get_run_report", { run_id: id }, { enabled: finished });
   const traces = useWq<Row>("list_traces", { limit: 500 });
   const trial = studies.byRun.get(text(run, "id"));
-  const started = text(run, "created") ? ` · started ${when(text(run, "created"))}` : "";
+  const created = text(run, "created");
 
   const said: string[] = [];
   for (const log of (run.logs ?? []) as Row[]) {
@@ -60,50 +82,37 @@ function RunBody({ run, id }: { run: Row; id: string }) {
   }
 
   return (
-    <>
-      <p>
-        <Link to={path(`/train/experiment/run?${qs({ customer_id: customerId, run: text(run, "id") })}`)}>Training charts</Link>
-      </p>
-      <p>
-        <Link to={path(`/train/streams?${qs({ customer_id: customerId })}`)}>Workspace streams</Link>
-      </p>
-      <p>
-        Status: <Badge>{status || "unknown"}</Badge>
-      </p>
-      {trial ? (
-        <p className="sub">
-          <TrialSubject refOf={trial} />
-          {started}
-        </p>
-      ) : text(run, "graph") ? (
-        <p className="sub">
-          <RunSubject run={run} />
-          {started}
-        </p>
-      ) : null}
-      {said.length > 0 && (
-        <section className="panel notice" role="status">
-          {said.map((line, i) =>
-            line.startsWith("structural:") ? (
-              <p key={i}>
-                <strong>Nothing was trained.</strong> {line.slice("structural:".length)}.
-              </p>
-            ) : (
-              <p key={i}>{line}.</p>
-            ),
-          )}
-        </section>
+    <Split
+      side={
+        <Card label="Facts">
+          <KeyValue
+            rows={[
+              ["Status", <Status key="status" value={status || "unknown"} tone={runStatusTone(status)} />],
+              ["Pipeline", trial ? <TrialSubject key="trial" refOf={trial} /> : text(run, "graph") || text(run, "pipeline_name") ? <RunSubject key="subject" run={run} /> : null],
+              ["Started", created ? <span title={when(created)}>{`${when(created)} · ${timeAgo(created)}`}</span> : null],
+              ["Run", <Mono key="id" short={12}>{text(run, "id") || id}</Mono>],
+            ]}
+          />
+        </Card>
+      }
+    >
+      {said.map((line, i) =>
+        line.startsWith("structural:") ? (
+          <Banner key={i} tone="warn" title="Nothing was trained.">
+            {line.slice("structural:".length)}.
+          </Banner>
+        ) : (
+          <Banner key={i} tone="quiet">
+            {line}.
+          </Banner>
+        ),
       )}
+      {!finished && !report.data && <Banner tone="info">The report appears when the run finishes. This page checks again every 15 seconds.</Banner>}
       {report.isError ? <ErrorBlock error={report.error} what="the report" retry={() => void report.refetch()} /> : null}
       {report.data ? <ReportPanel report={report.data} /> : null}
       <Details run={run} spans={(traces.data?.spans ?? []) as Row[]} id={id} />
       {traces.isError ? <ErrorBlock error={traces.error} what="the trace" retry={() => void traces.refetch()} /> : null}
-      {!finished && !report.data && (
-        <div className="panel" role="status">
-          The report appears when the run finishes. This page checks again every 15 seconds.
-        </div>
-      )}
-    </>
+    </Split>
   );
 }
 
@@ -132,62 +141,70 @@ function Score({ report }: { report: Row }) {
   const size = rows !== null ? ` on ${rows.toFixed(0)} rows the model did not see` : " on rows the model did not see";
   const figures = HELD_OUT.filter(([key]) => number(key) !== null);
   const numeric = Object.entries(model as Row).filter(([key, value]) => typeof value === "number" && key !== "held_out_rows");
+  const [first, ...others] = figures;
   return (
-    <>
-      <h3>Score</h3>
-      {figures.length === 0 ? (
+    <div className="space-y-3">
+      <h3 className="m-0">Score</h3>
+      {!first ? (
         number("in_sample_auc") !== null ? (
-          <p>
+          <Banner tone="quiet">
             No held-out score. In-sample AUC {number("in_sample_auc")!.toFixed(3)} was measured on the rows the model learned from and flatters it; it is
             not a result.
-          </p>
+          </Banner>
         ) : (
-          <p>No held-out score was measured for this run.</p>
+          <Banner tone="quiet">No held-out score was measured for this run.</Banner>
         )
       ) : (
-        figures.map(([key, label], index) => {
-          const why = caveat(key);
-          const value = number(key)!.toFixed(3);
-          return index === 0 ? (
-            <div key={key}>
-              <p>
-                Held-out {label} <strong>{value}</strong>
-                {size}
+        <>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,16rem)_minmax(0,1fr)]">
+            <Stat label={`Held-out ${first[1]}`} value={number(first[0])!.toFixed(3)} tone={caveat(first[0]) ? "bad" : undefined} sub={size.trim()} />
+            {others.length > 0 && (
+              <div className="flex flex-wrap content-start gap-1.5">
+                {others.map(([key, label]) => {
+                  const why = caveat(key);
+                  return (
+                    <Chip key={key} tone={why ? "warn" : "neutral"} title={why || undefined}>
+                      Held-out {label} <span className="font-mono">{number(key)!.toFixed(3)}</span>
+                    </Chip>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          {caveat(first[0]) && (
+            <Banner tone="warn" title="Do not quote">
+              {caveat(first[0])}
+            </Banner>
+          )}
+          {others
+            .filter(([key]) => caveat(key))
+            .map(([key, label]) => (
+              <p key={key} className="muted m-0 text-[12.5px]">
+                Held-out {label} {number(key)!.toFixed(3)} — {caveat(key)}
               </p>
-              {why && (
-                <p className="notice status-warning" role="status">
-                  <Badge tone="warning">do not quote</Badge> {why}
-                </p>
-              )}
-            </div>
-          ) : (
-            <p key={key} className="sub">
-              Held-out {label} {value}
-              {why ? ` — ${why}` : ""}
-            </p>
-          );
-        })
+            ))}
+        </>
       )}
       {(numeric.length > 0 || rows !== null) && (
         <details>
           <summary>Every figure the model records</summary>
-          <dl>
+          <dl className="mt-2">
             {numeric.map(([key, value]) => (
               <div key={key} className="contents">
                 <dt>{key}</dt>
-                <dd>{cellText(value)}</dd>
+                <dd className="font-mono">{cellText(value)}</dd>
               </div>
             ))}
             {rows !== null && (
               <div className="contents">
                 <dt>held_out_rows</dt>
-                <dd>{rows.toFixed(0)}</dd>
+                <dd className="font-mono">{rows.toFixed(0)}</dd>
               </div>
             )}
           </dl>
         </details>
       )}
-    </>
+    </div>
   );
 }
 
@@ -197,20 +214,19 @@ function ReportPanel({ report }: { report: Row }) {
     const rows = report[key];
     if (!Array.isArray(rows) || rows.length === 0) return null;
     return (
-      <>
-        <h3>{heading}</h3>
-        {note && <p className="muted">{note}</p>}
+      <div className="mt-5 space-y-2">
+        <h3 className="m-0">{heading}</h3>
+        {note && <p className="muted m-0 text-[12.5px]">{note}</p>}
         <ObjectTable rows={rows} />
-      </>
+      </div>
     );
   };
   return (
-    <section className="panel">
-      <h2>Report</h2>
+    <Card label="Report" title="What the Run Found">
       <Score report={report} />
       {dataset && typeof dataset === "object" && !Array.isArray(dataset) && (
-        <>
-          <h3>What It Learned From</h3>
+        <div className="mt-5 space-y-2">
+          <h3 className="m-0">What It Learned From</h3>
           <dl>
             {Object.entries(dataset as Row).map(([key, value]) => (
               <div key={key} className="contents">
@@ -219,17 +235,17 @@ function ReportPanel({ report }: { report: Row }) {
               </div>
             ))}
           </dl>
-        </>
+        </div>
       )}
       {section("drivers", "What the Model Leans On", "A weight is what the model relied on, not a cause.")}
       {section("at_risk", "Most at Risk", "")}
       {section("caveats", "Do Not Read These as Results", "")}
       {section("missing", "What This Run Cannot Tell You", "")}
-      <details>
+      <details className="mt-5">
         <summary>The raw report</summary>
         <pre>{JSON.stringify(report, null, 2)}</pre>
       </details>
-    </section>
+    </Card>
   );
 }
 
@@ -246,8 +262,7 @@ function Details({ run, spans, id }: { run: Row; spans: Row[]; id: string }) {
   return (
     <>
       {lineage && typeof lineage === "object" && !Array.isArray(lineage) && (
-        <section className="panel">
-          <h2>Lineage</h2>
+        <Card label="Lineage">
           <dl>
             {Object.entries(lineage as Row).map(([key, value]) => (
               <div key={key} className="contents">
@@ -256,29 +271,26 @@ function Details({ run, spans, id }: { run: Row; spans: Row[]; id: string }) {
               </div>
             ))}
           </dl>
-        </section>
+        </Card>
       )}
       {filled(outputs) && (
-        <section className="panel">
-          <h2>Outputs</h2>
+        <Card label="Outputs">
           <ObjectTable rows={outputs} />
-        </section>
+        </Card>
       )}
       {filled(logs) && (
-        <section className="panel">
-          <h2>Log</h2>
+        <Card label="Log">
           <ObjectTable rows={logs} />
-        </section>
+        </Card>
       )}
       {mine.length > 0 && (
-        <section className="panel">
-          <h2>Trace</h2>
+        <Card label="Trace">
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>Span</th>
-                  <th>Time</th>
+                  <th className="text-right">Time</th>
                   <th></th>
                 </tr>
               </thead>
@@ -288,7 +300,7 @@ function Details({ run, spans, id }: { run: Row; spans: Row[]; id: string }) {
                   return (
                     <tr key={i}>
                       <td>{text(span, "name")}</td>
-                      <td>{duration.toFixed(1)} ms</td>
+                      <td className="text-right font-mono tabular-nums">{duration.toFixed(1)} ms</td>
                       <td>
                         <span
                           className={span.ok === false ? "waterfall-bar failed" : "waterfall-bar"}
@@ -301,7 +313,7 @@ function Details({ run, spans, id }: { run: Row; spans: Row[]; id: string }) {
               </tbody>
             </table>
           </div>
-        </section>
+        </Card>
       )}
     </>
   );

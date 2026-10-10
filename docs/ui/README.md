@@ -7,6 +7,8 @@ capabilities, the same ones REST and MCP callers use, with the same authorizatio
 can do nothing the API cannot.
 
 - How the app is built, its kit and the rules for a page: [web-app.md](web-app.md).
+- The Train and Data pages (Agents, Agent, Agent Factory, Runs, Run, Datasets, Dataset, Query):
+  [train.md](train.md).
 - The Ship pages (Models, Search Indexes, Search Index, Services): [ship.md](ship.md).
 - How it works on a phone, and how to check it at 390×844: [mobile-web.md](mobile-web.md).
 - Data → Transcripts, with dictation, recording and upload: [transcripts.md](transcripts.md).

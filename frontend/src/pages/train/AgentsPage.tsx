@@ -1,81 +1,159 @@
 /** Train → Agents (web_ui.cpp agents_content, web_ui_your_agents, agent_create_form): the space's
- * own agents, Create an Agent, and the Agent Library. Your Agents was a deferred panel because
- * Zetta's list_agents is slow (lake#446); here it is an ordinary read that fills in after the page
- * renders. */
+ * own agents as cards with figures and a toolbar, New agent in a drawer, the Agent Factory beside it,
+ * and the Agent Library. Your Agents was a deferred panel because Zetta's list_agents is slow
+ * (lake#446); here it is an ordinary read that fills in after the page renders. */
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
+import { Bot, Clock, Cpu, MessageSquare, Plus, Sparkles } from "lucide-react";
 import type { Row } from "@/lib/api";
 import { act } from "@/lib/api";
+import { Drawer } from "@/lib/overlay";
 import { useSession } from "@/lib/session";
 import { useToast } from "@/lib/toast";
 import { useTrail } from "@/lib/trail";
-import { Button, DataTable, ErrorBlock, Field, fieldError } from "@/lib/ui";
-import { AGENT_SKILLS, AgentLibrary, engagement, modelLabel, skillLabels } from "./agents";
-import { WorkspaceFrame, qs, text, useAsync, useWorkspace, useWq, useWsPath, wa } from "./workspace";
+import { Button, Card, Chip, Empty, ErrorBlock, Field, FilterChips, SearchInput, Skeleton, Stat, StatRow, Status, Toolbar, fieldError } from "@/lib/ui";
+import { AGENT_SKILLS, AgentLibrary, engagement, modelLabel, runsWhere, skillLabels } from "./agents";
+import { WorkspaceFrame, qs, text, useAsync, useWorkspace, useWorkspaceReady, useWq, useWsPath, wa } from "./workspace";
 
 export default function AgentsPage() {
   const ws = useWsPath();
   const { customerId } = useWorkspace();
+  const ready = useWorkspaceReady();
   const query = qs({ customer_id: customerId });
+  const [creating, setCreating] = useState(false);
   useTrail([
     { label: "Train", to: ws(`/train/agents?${query}`) },
     { label: "Agents", to: ws(`/train/agents?${query}`) },
   ]);
   return (
-    <WorkspaceFrame
-      eyebrow="Train"
-      title="Agents"
-      sub="Build agents that work for you, run them, and see what they did. Talk to any of them in Ask Orama."
-      always={<AgentLibrary />}
-    >
-      {() => (
-        <>
-          <YourAgents />
-          <CreateAgent />
-        </>
-      )}
-    </WorkspaceFrame>
+    <>
+      <WorkspaceFrame
+        eyebrow="Train"
+        title="Agents"
+        sub="Build agents that work for you, run them, and see what they did. Talk to any of them in Ask Orama."
+        actions={
+          ready ? (
+            <>
+              <Button to={ws(`/train/agents/new?${query}`)}>
+                <Sparkles size={14} aria-hidden /> Build with the Agent Factory
+              </Button>
+              <Button variant="primary" onClick={() => setCreating(true)}>
+                <Plus size={14} aria-hidden /> New agent
+              </Button>
+            </>
+          ) : null
+        }
+        always={<AgentLibrary />}
+      >
+        {() => <YourAgents onNew={() => setCreating(true)} />}
+      </WorkspaceFrame>
+      {creating && <CreateAgent onClose={() => setCreating(false)} />}
+    </>
   );
 }
 
-function YourAgents() {
+const CONVERSATION = "Conversation";
+const UNATTENDED = "Conversation and unattended";
+
+function YourAgents({ onNew }: { onNew: () => void }) {
   const ws = useWsPath();
   const { customerId } = useWorkspace();
   const listed = useWq<{ agents?: Row[] }>("list_agents");
-  const agents = (listed.data?.agents ?? []).filter((a) => text(a, "kind") !== "orama");
-  return (
-    <section className="panel" id="your-agents" aria-busy={listed.isLoading || undefined}>
-      <h2>Your Agents</h2>
-      {listed.isLoading ? (
+  const [search, setSearch] = useState("");
+  const [mode, setMode] = useState<string | null>(null);
+  if (listed.isLoading)
+    return (
+      <div aria-busy="true">
         <p className="muted" role="status">
           Loading your agents from the workspace…
         </p>
+        <Skeleton />
+      </div>
+    );
+  if (listed.isError) return <ErrorBlock error={listed.error} what="your agents" retry={() => void listed.refetch()} />;
+  const agents = (listed.data?.agents ?? []).filter((a) => text(a, "kind") !== "orama");
+  const unattended = agents.filter((a) => engagement(a) === UNATTENDED).length;
+  const frontier = agents.filter((a) => text(a, "runtime") === "python").length;
+  const needle = search.trim().toLowerCase();
+  const shown = agents.filter(
+    (a) => (!mode || engagement(a) === mode) && (!needle || `${text(a, "name")} ${text(a, "purpose")} ${modelLabel(a)}`.toLowerCase().includes(needle)),
+  );
+  return (
+    <section id="your-agents" aria-label="Your agents">
+      <StatRow>
+        <Stat label="Agents" icon={Bot} value={agents.length} sub="in this workspace" />
+        <Stat label="Run on their own" icon={Clock} value={unattended} sub="have a trigger" />
+        <Stat label="Conversation only" icon={MessageSquare} value={agents.length - unattended} sub="answer when you talk to them" />
+        <Stat label="Frontier model" icon={Cpu} value={frontier} sub="run by lake on agent-runtime" />
+      </StatRow>
+      {agents.length === 0 ? (
+        <Empty
+          icon={Bot}
+          title="No agents yet"
+          action={
+            <>
+              <Button variant="primary" onClick={onNew}>
+                <Plus size={14} aria-hidden /> New agent
+              </Button>
+              <Button to={ws(`/train/agents/new?${qs({ customer_id: customerId })}`)}>Build with the Agent Factory</Button>
+            </>
+          }
+        >
+          An agent does one job for you. Describe it yourself, or let AgentCreator ask what it needs and propose one.
+        </Empty>
       ) : (
-        <DataTable
-          q={listed}
-          what="your agents"
-          rows={agents}
-          empty={<p>No agents yet. Create one below.</p>}
-          rowKey={(a) => text(a, "id")}
-          columns={[
-            {
-              key: "agent",
-              label: "Agent",
-              render: (a) => (
-                <span className="agent-cell">
-                  <Link to={ws(`/train/agent?${qs({ customer_id: customerId, id: text(a, "id") })}`)}>{text(a, "name")}</Link>
-                  <small>{text(a, "purpose")}</small>
-                </span>
-              ),
-            },
-            { key: "engagement", label: "Engagement", render: (a) => <span className="badge">{engagement(a)}</span> },
-            { key: "skills", label: "Skills", render: (a) => skillLabels(a.skills) },
-            { key: "model", label: "Model", render: (a) => <code>{modelLabel(a)}</code> },
-            { key: "status", label: "Status", render: (a) => <span className="badge">{text(a, "status") || "idle"}</span> },
-          ]}
-        />
+        <>
+          <Toolbar>
+            <SearchInput value={search} onChange={setSearch} placeholder="Search agents…" />
+            <FilterChips
+              value={mode}
+              onChange={setMode}
+              options={[
+                { id: CONVERSATION, label: "Conversation only", count: agents.length - unattended },
+                { id: UNATTENDED, label: "Runs on its own", count: unattended },
+              ]}
+            />
+          </Toolbar>
+          {shown.length === 0 ? (
+            <Empty compact title="No agent matches">
+              Clear the search or pick another filter.
+            </Empty>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {shown.map((agent) => (
+                <AgentCard key={text(agent, "id")} agent={agent} to={ws(`/train/agent?${qs({ customer_id: customerId, id: text(agent, "id") })}`)} />
+              ))}
+            </div>
+          )}
+        </>
       )}
     </section>
+  );
+}
+
+function AgentCard({ agent, to }: { agent: Row; to: string }) {
+  const trigger = text(agent, "trigger");
+  return (
+    <Card to={to} label={runsWhere(agent)} title={text(agent, "name")} actions={<Status value={text(agent, "status") || "idle"} />} className="h-full">
+      <p className="m-0 line-clamp-2 text-[13px] text-ink-2">{text(agent, "purpose") || "—"}</p>
+      <div className="mt-3 flex flex-wrap items-center gap-1.5">
+        {trigger ? (
+          <Chip tone="action" title="Runs on its own">
+            <Clock size={12} aria-hidden /> {trigger}
+          </Chip>
+        ) : (
+          <Chip title="Answers when you talk to it">
+            <MessageSquare size={12} aria-hidden /> Conversation
+          </Chip>
+        )}
+        {modelLabel(agent) && (
+          <Chip tone="ai" title="Model">
+            <Cpu size={12} aria-hidden /> {modelLabel(agent)}
+          </Chip>
+        )}
+      </div>
+      {skillLabels(agent.skills) !== "—" && <p className="mt-2 mb-0 text-[12px] text-ink-3">May: {skillLabels(agent.skills)}</p>}
+    </Card>
   );
 }
 
@@ -93,10 +171,10 @@ type Draft = {
 
 const BLANK: Draft = { name: "", purpose: "", work_area: "workspace", work_area_detail: "", manifesto: "", goal: "", skills: [], model: "base", trigger: "" };
 
-/** Create an Agent (the `agent_create` form handler): the Orama base model makes a native agent that
- * runs in the workspace; a frontier model makes a Python agent that runs on agent-runtime from the
+/** New agent (the `agent_create` form handler): the Orama base model makes a native agent that runs
+ * in the workspace; a frontier model makes a Python agent that runs on agent-runtime from the
  * instructions composed here, and its trigger is scheduled. */
-function CreateAgent() {
+function CreateAgent({ onClose }: { onClose: () => void }) {
   const ws = useWsPath();
   const navigate = useNavigate();
   const toast = useToast();
@@ -144,20 +222,27 @@ function CreateAgent() {
         }
       }
       setDraft(BLANK);
+      onClose();
       navigate(id ? ws(`/train/agent?${qs({ customer_id: scope.customerId, id })}`) : ws(`/train/agents?${query}`));
     });
 
   return (
-    <section className="panel" id="create-agent">
-      <h2>Create an Agent</h2>
-      <p>
-        <Button to={ws(`/train/agents/new?${query}`)}>Build it with the Agent Factory</Button> or fill in the form below.
-      </p>
-      <p className="sub">
-        An agent does one job for you. Say what the job is, how it should work, what success looks like and what it may use. Without a schedule it
-        answers only when you talk to it; with one it also runs on its own.
-      </p>
+    <Drawer
+      title="New Agent"
+      subtitle="Say what the job is, how it should work, what success looks like and what it may use."
+      onClose={onClose}
+      width={580}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" type="submit" form="create-agent" loading={create.busy}>
+            Create agent
+          </Button>
+        </>
+      }
+    >
       <form
+        id="create-agent"
         className="stack"
         onSubmit={(e) => {
           e.preventDefault();
@@ -171,16 +256,18 @@ function CreateAgent() {
         <Field label="What it's for" error={fieldError(create.error, "purpose")}>
           <input name="purpose" required placeholder="Flag renewals at risk a month ahead" value={draft.purpose} onChange={(e) => set("purpose", e.target.value)} />
         </Field>
-        <Field label="Where it works">
-          <select name="work_area" value={draft.work_area} onChange={(e) => set("work_area", e.target.value)}>
-            <option value="workspace">Anywhere in this workspace</option>
-            <option value="project">One project</option>
-            <option value="dataset">Specific datasets</option>
-          </select>
-        </Field>
-        <Field label="Which project or datasets (if not the whole workspace)">
-          <input name="work_area_detail" placeholder="churn" value={draft.work_area_detail} onChange={(e) => set("work_area_detail", e.target.value)} />
-        </Field>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="Where it works">
+            <select name="work_area" value={draft.work_area} onChange={(e) => set("work_area", e.target.value)}>
+              <option value="workspace">Anywhere in this workspace</option>
+              <option value="project">One project</option>
+              <option value="dataset">Specific datasets</option>
+            </select>
+          </Field>
+          <Field label="Which project or datasets" help="If not the whole workspace.">
+            <input name="work_area_detail" placeholder="churn" value={draft.work_area_detail} onChange={(e) => set("work_area_detail", e.target.value)} />
+          </Field>
+        </div>
         <Field label="Instructions" help="How it should work, and what it must never do.">
           <textarea
             name="manifesto"
@@ -193,21 +280,18 @@ function CreateAgent() {
         <Field label="What success looks like">
           <textarea name="goal" rows={2} placeholder="Every at-risk renewal is flagged a month ahead." value={draft.goal} onChange={(e) => set("goal", e.target.value)} />
         </Field>
-        <fieldset>
-          <legend>What it may do</legend>
-          {AGENT_SKILLS.map(([key, label]) => (
-            <label key={key}>
-              <input
-                type="checkbox"
-                name="skills"
-                value={key}
-                checked={draft.skills.includes(key)}
-                onChange={(e) => set("skills", e.target.checked ? [...draft.skills, key] : draft.skills.filter((s) => s !== key))}
-              />{" "}
-              {label}
-            </label>
-          ))}
-        </fieldset>
+        <Field label="What it may do">
+          <div className="flex flex-wrap gap-1.5" role="group" aria-label="What it may do">
+            {AGENT_SKILLS.map(([key, label]) => {
+              const on = draft.skills.includes(key);
+              return (
+                <Chip key={key} active={on} onClick={() => set("skills", on ? draft.skills.filter((s) => s !== key) : [...draft.skills, key])}>
+                  {label}
+                </Chip>
+              );
+            })}
+          </div>
+        </Field>
         <Field label="Model">
           <select name="model" value={draft.model} onChange={(e) => set("model", e.target.value as Draft["model"])}>
             <option value="base">Orama base model, inside your workspace</option>
@@ -217,12 +301,7 @@ function CreateAgent() {
         <Field label="Runs on its own" help="Leave empty to use it only in conversation.">
           <input name="trigger" placeholder="every Monday at 09:00" value={draft.trigger} onChange={(e) => set("trigger", e.target.value)} />
         </Field>
-        <div>
-          <Button variant="primary" type="submit" loading={create.busy}>
-            Create agent
-          </Button>
-        </div>
       </form>
-    </section>
+    </Drawer>
   );
 }
