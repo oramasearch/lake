@@ -14,7 +14,7 @@ import {
 import { Link, NavLink } from "react-router-dom";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { Check, Copy, Loader2 } from "lucide-react";
-import { ApiError } from "./api";
+import { ApiError, isSignedIn } from "./api";
 
 export function cx(...parts: (string | false | null | undefined)[]): string {
   return parts.filter(Boolean).join(" ");
@@ -268,7 +268,7 @@ export function ErrorBlock({ error, retry, what }: { error: unknown; retry?: () 
       ? "You don't have access to this"
       : e?.status === 404
         ? "Not found"
-        : e?.status === 401
+        : e?.status === 401 && isSignedIn()
           ? "Your session has ended"
           : what
             ? `Couldn't load ${what}`

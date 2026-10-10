@@ -35,6 +35,10 @@ let announceSessionEnd = false;
 export function setSignedIn(value: boolean) {
   announceSessionEnd = value;
 }
+/** Whether someone is signed in: a 401 then means their session ended, not a failed sign-in. */
+export function isSignedIn(): boolean {
+  return announceSessionEnd;
+}
 
 function failure(status: number, code: string, message: string, path = ""): ApiError {
   if (status === 401) {
@@ -139,6 +143,26 @@ export async function act<T = Row>(name: string, input: Row = {}, options?: Call
   return value;
 }
 
+/** Call a capability that reads but is POSTed (`workspace_query`, `workspace_sql` with a body):
+ * like `act`, but it changes nothing, so it refreshes no other read. Inside a query, use this or
+ * `usePostRead`, never `act`: `act` refreshes every read, including the one that called it. */
+export async function postRead<T = Row>(name: string, input: Row = {}, options?: CallOptions): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${prefix(options)}/v1/${name}`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(input),
+      signal: options?.signal,
+    });
+  } catch (error) {
+    if ((error as Error).name === "AbortError") throw error;
+    throw new ApiError(0, "network", "Lake could not be reached. Check your connection and retry.");
+  }
+  return unwrap<T>(response);
+}
+
 /** A non-capability endpoint that answers JSON (sign-in, `/session`): same error handling. */
 export async function post<T = Row>(path: string, body: Row): Promise<T> {
   let response: Response;
@@ -213,6 +237,18 @@ export function listOf<T>(value: unknown, pick?: string): T[] {
     for (const field of Object.values(record)) if (Array.isArray(field)) return field as T[];
   }
   return [];
+}
+
+/** A POSTed read as a query: `usePostRead("workspace_query", {capability: "list_projects"})`. */
+export function usePostRead<T = Row>(name: string | null, input: Row = {}, options?: Partial<UseQueryOptions<T>> & CallOptions) {
+  const { workspace, ...queryOptions } = options ?? {};
+  const scope = workspace !== undefined ? workspace ?? "" : workspacePrefix;
+  return useQuery<T>({
+    queryKey: [name, scope, "post", input],
+    queryFn: ({ signal }) => postRead<T>(name!, input, { workspace, signal }),
+    enabled: !!name && (queryOptions.enabled ?? true),
+    ...queryOptions,
+  });
 }
 
 /** An action capability as a mutation. */

@@ -21,6 +21,16 @@ FROM zetta_source AS zetta-source
 # named context too rather than being vendored under modules/.
 FROM liquid_source AS liquid-source
 
+# ---------- web app ----------
+# The web app (frontend/, docs/ui/web-app.md) is built with Node 22 and embedded into the binary
+# by the build stage below.
+FROM node:22-bookworm-slim AS frontend
+WORKDIR /frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build
+
 # ---------- build stage ----------
 FROM ubuntu:24.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive
@@ -31,7 +41,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Argon2id EVP_KDF used by password credentials.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates wget gnupg lsb-release software-properties-common \
-      build-essential ninja-build git pkg-config libfuse3-dev fuse3 \
+      build-essential ninja-build git pkg-config libfuse3-dev fuse3 nodejs \
       libstdc++-14-dev zlib1g-dev libssl-dev libpq-dev \
  && wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh && chmod +x /tmp/llvm.sh && /tmp/llvm.sh 19 \
  && rm -rf /var/lib/apt/lists/*
@@ -62,6 +72,7 @@ WORKDIR /src
 COPY . /src
 COPY --from=zetta-source . /opt/zetta
 COPY --from=liquid-source . /opt/liquid
+COPY --from=frontend /frontend/dist /opt/frontend-dist
 
 # Tests off (skips the GoogleTest fetch and the test targets). FetchContent pulls Boost 1.91 into
 # build/_deps at configure time (needs network). Build uses all cores.
@@ -74,6 +85,7 @@ RUN cmake -S . -B build -G Ninja \
       -DLAKE_ZETTA_SOURCE_DIR="${LAKE_ZETTA_SOURCE_DIR}" \
       -DLAKE_LIQUID_SOURCE_DIR="${LAKE_LIQUID_SOURCE_DIR}" \
       -DLAKE_BUILD_REVISION="${LAKE_BUILD_REVISION}" \
+      -DLAKE_FRONTEND_DIST=/opt/frontend-dist \
       -DCMAKE_C_COMPILER=clang-19 \
       -DCMAKE_CXX_COMPILER=clang++-19 \
       -DOPENSSL_ROOT_DIR=/opt/openssl \
