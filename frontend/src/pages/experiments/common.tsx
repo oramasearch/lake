@@ -2,12 +2,12 @@
  * (heading, trail, notice, Live), the capability client, tables, the confirmed actions, the live
  * follow loop and the metric charts with their toolbar. */
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { ArrowLeft, Maximize2, Minimize2, MoveLeft, MoveRight, RotateCcw } from "lucide-react";
 import { act, ApiError, postRead, type Row } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
-import { Page } from "@/lib/ui";
-import { pause, qs, useWorkspaceLink } from "@/pages/apps/shared";
+import { Banner, Button, Card, Empty, Page } from "@/lib/ui";
+import { LiveSwitch, pause, qs, useWorkspaceLink } from "@/pages/apps/shared";
 import { useConfirm } from "@/pages/streams/common";
 import "@/styles/experiments.css";
 import { Chart, ChartContext, newRegistry, viewAction } from "./Chart";
@@ -46,13 +46,17 @@ export function useExperimentUrl() {
   return useCallback((path: string, input: Record<string, string> = {}) => ws(path) + qs({ customer_id: space?.id, ...input }), [ws, space]);
 }
 
-/** The heading every Experiments page shares; non-list pages add All experiments and Live. */
+/** The heading every Experiments page shares. Non-list pages add All experiments and the Live
+ * switch with its status; a page may name its own title, sentence and actions. */
 export function ExperimentsShell({
   mode,
   notice,
   live,
   onLive,
   status,
+  title,
+  sub,
+  actions,
   children,
 }: {
   mode: Mode;
@@ -60,6 +64,9 @@ export function ExperimentsShell({
   live?: boolean;
   onLive?: (value: boolean) => void;
   status?: string;
+  title?: ReactNode;
+  sub?: ReactNode;
+  actions?: ReactNode;
   children: ReactNode;
 }) {
   const ws = useWorkspaceLink();
@@ -69,20 +76,31 @@ export function ExperimentsShell({
     { label: "Experiments", to: ws("/train/experiments") },
   ]);
   return (
-    <Page eyebrow="Train" title={TITLES[mode]} sub="Follow training, compare results, and promote a completed trial.">
-      <div className="experiments">
-        <p role="status">{notice}</p>
-        {mode !== "list" && (
+    <Page
+      eyebrow={mode === "list" ? "Train" : "Train · Experiments"}
+      title={title ?? TITLES[mode]}
+      sub={sub ?? "Follow training, compare results, and promote a completed trial."}
+      actions={
+        mode !== "list" ? (
           <>
-            <p>
-              <Link to={url("/train/experiments", { project: "" })}>All experiments</Link>
-            </p>
-            <label>
-              <input type="checkbox" checked={!!live} onChange={(e) => onLive?.(e.target.checked)} /> Live updates
-            </label>
-            <span role="status">{status}</span>
+            <Button to={url("/train/experiments", { project: "" })}>
+              <ArrowLeft size={14} aria-hidden /> All experiments
+            </Button>
+            {actions}
+            <span className="inline-flex flex-wrap items-center gap-2">
+              <LiveSwitch live={!!live} onChange={(value) => onLive?.(value)} label="Live updates" />
+              <span role="status" className="text-[12px] text-ink-3">
+                {status}
+              </span>
+            </span>
           </>
-        )}
+        ) : (
+          actions
+        )
+      }
+    >
+      <div className="experiments">
+        <div role="status">{notice && <Banner tone="info">{notice}</Banner>}</div>
         {children}
       </div>
     </Page>
@@ -92,9 +110,9 @@ export function ExperimentsShell({
 /** A table of recorded values, as the script's `table()` drew it. */
 export function Table({ headers, rows, caption }: { headers: ReactNode[]; rows: unknown[][]; caption?: string }) {
   return (
-    <div className="table-scroll">
+    <div className="table-wrap">
       <table>
-        {caption && <caption>{caption}</caption>}
+        {caption && <caption className="sr-only">{caption}</caption>}
         <thead>
           <tr>
             {headers.map((header, index) => (
@@ -108,7 +126,9 @@ export function Table({ headers, rows, caption }: { headers: ReactNode[]; rows: 
           {rows.map((row, index) => (
             <tr key={index}>
               {row.map((value, column) => (
-                <td key={column}>{cell(value)}</td>
+                <td key={column} className={typeof value === "number" ? "text-right font-mono tabular-nums" : undefined}>
+                  {cell(value)}
+                </td>
               ))}
             </tr>
           ))}
@@ -260,69 +280,77 @@ export function MetricsView({ details }: { details: RunDetail[] }) {
     return out;
   }, [names]);
   const differences = useMemo(() => parameterDiff(details), [details]);
+  const zoom: [Parameters<typeof viewAction>[1], string, typeof RotateCcw][] = [
+    ["in", "Zoom in", Maximize2],
+    ["out", "Zoom out", Minimize2],
+    ["left", "Pan left", MoveLeft],
+    ["right", "Pan right", MoveRight],
+    ["reset", "Reset view", RotateCcw],
+  ];
   return (
     <ChartContext.Provider value={registry}>
-      <div className="experiment-toolbar">
-        <label>
-          X axis
-          <select
-            value={axis}
-            onChange={(e) => {
-              registry.views.clear();
-              setAxis(e.target.value);
-            }}
-          >
-            <option value="step">Step</option>
-            <option value="relative">Relative time</option>
-            <option value="wall">Wall time</option>
-          </select>
-        </label>
-        <label>
-          Smoothing (EMA) <output>{Math.round(weight * 100)}%</output>
-          <input type="range" min={0} max={99} value={smoothing} onChange={(e) => setSmoothing(Number(e.target.value))} />
-        </label>
-        <label>
-          <input type="checkbox" checked={log} onChange={(e) => setLog(e.target.checked)} /> Log scale
-        </label>
-        {(
-          [
-            ["in", "Zoom in"],
-            ["out", "Zoom out"],
-            ["left", "Pan left"],
-            ["right", "Pan right"],
-            ["reset", "Reset view"],
-          ] as const
-        ).map(([action, label]) => (
-          <button key={action} type="button" onClick={() => viewAction(registry, action)}>
-            {label}
-          </button>
-        ))}
-      </div>
-      <p className="sub">Drag a region to zoom; Shift-drag to pan. Hover for the crosshair and values. Non-positive values are omitted on a log axis and remain in the data table.</p>
-      <div>
+      <Card label="Plot" className="mb-4">
+        <div className="experiment-toolbar" style={{ marginBlock: 0 }}>
+          <label>
+            X axis
+            <select
+              value={axis}
+              onChange={(e) => {
+                registry.views.clear();
+                setAxis(e.target.value);
+              }}
+            >
+              <option value="step">Step</option>
+              <option value="relative">Relative time</option>
+              <option value="wall">Wall time</option>
+            </select>
+          </label>
+          <label>
+            Smoothing (EMA) <output>{Math.round(weight * 100)}%</output>
+            <input type="range" min={0} max={99} value={smoothing} onChange={(e) => setSmoothing(Number(e.target.value))} />
+          </label>
+          <label>
+            <input type="checkbox" checked={log} onChange={(e) => setLog(e.target.checked)} /> Log scale
+          </label>
+          <div className="flex flex-wrap gap-1.5">
+            {zoom.map(([action, label, Icon]) => (
+              <Button key={action} variant="ghost" onClick={() => viewAction(registry, action)} title={label} aria-label={label}>
+                <Icon size={14} aria-hidden /> <span className="hidden sm:inline">{label}</span>
+              </Button>
+            ))}
+          </div>
+        </div>
+        <p className="muted mb-0 mt-2 text-[12.5px]">Drag a region to zoom; Shift-drag to pan. Hover for the crosshair and values. Non-positive values are omitted on a log axis and remain in the data table.</p>
+      </Card>
+      <div className="space-y-4">
         {details
           .filter((run) => run.metrics_suppressed)
           .map((run) => (
-            <p key={run.run}>{run.run}: curves suppressed for differential privacy</p>
+            <Banner key={run.run} tone="quiet">
+              {run.run}: curves suppressed for differential privacy
+            </Banner>
           ))}
-        {!names.length && <p>No training curves have been recorded. Live updates will appear here.</p>}
+        {!names.length && <Empty compact title="No Training Curves Yet">No training curves have been recorded. Live updates will appear here.</Empty>}
         {[...groups].map(([prefix, metrics]) => (
-          <section key={prefix} className="panel">
-            <h2>{prefix === "Metrics" ? prefix : `${prefix[0].toUpperCase()}${prefix.slice(1)} Metrics`}</h2>
-            {metrics.map((name) => (
-              <MetricPlot key={name} name={name} details={details} labels={labels} axis={axis} weight={weight} log={log} />
-            ))}
-          </section>
+          <Card key={prefix} label="Curves" title={prefix === "Metrics" ? prefix : `${prefix[0].toUpperCase()}${prefix.slice(1)} Metrics`}>
+            <div className="grid grid-cols-1 gap-x-6 2xl:grid-cols-2">
+              {metrics.map((name) => (
+                <MetricPlot key={name} name={name} details={details} labels={labels} axis={axis} weight={weight} log={log} />
+              ))}
+            </div>
+          </Card>
         ))}
+        <Card title="Parameter Differences" label="Parameters">
+          {differences.length ? (
+            <Table headers={["Parameter", "Differs", ...labels]} rows={differences.map((row) => [row.name, row.differs ? "Yes" : "No", ...row.values])} />
+          ) : (
+            <p className="muted m-0 text-[13px]">No parameters recorded.</p>
+          )}
+        </Card>
+        <Card title="Artifacts" label="Evaluation">
+          <Artifacts details={details} />
+        </Card>
       </div>
-      <section className="panel">
-        <h2>Parameter Differences</h2>
-        <Table headers={["Parameter", "Differs", ...labels]} rows={differences.map((row) => [row.name, row.differs ? "Yes" : "No", ...row.values])} />
-      </section>
-      <section className="panel">
-        <h2>Artifacts</h2>
-        <Artifacts details={details} />
-      </section>
     </ChartContext.Provider>
   );
 }
@@ -342,7 +370,7 @@ function MetricPlot({ name, details, labels, axis, weight, log }: { name: string
   );
   return (
     <article className="experiment-plot">
-      <h3>{name}</h3>
+      <h3 className="m-0 font-mono text-[12.5px] font-semibold text-ink">{name}</h3>
       <Chart
         chartKey={`metric:${name}`}
         data={data}
@@ -350,7 +378,7 @@ function MetricPlot({ name, details, labels, axis, weight, log }: { name: string
         settings={{ title: name, time: axis === "wall", log, metric: true, xLabel: axis === "step" ? "Step" : axis === "wall" ? "Wall time" : "Seconds since run start" }}
       />
       <details>
-        <summary>Chart Data</summary>
+        <summary className="cursor-pointer text-[12.5px] text-ink-2">Chart data</summary>
         <Table headers={["Run", "Step", "Wall time", "Raw value", "Smoothed value"]} rows={rows} caption={name} />
       </details>
     </article>
@@ -361,7 +389,7 @@ type Data = Record<string, unknown[]> & { labels?: unknown[]; matrix?: unknown[]
 
 function Artifacts({ details }: { details: RunDetail[] }) {
   const items = details.flatMap((run) => (run.artifacts ?? []).map((artifact) => ({ run: run.run, artifact })));
-  if (!items.length) return <p>No artifacts have been recorded.</p>;
+  if (!items.length) return <p className="muted m-0 text-[13px]">No artifacts have been recorded.</p>;
   return (
     <>
       {items.map(({ run, artifact }, index) => (
@@ -406,8 +434,8 @@ function ArtifactView({ chartKey, run, name, type, data }: { chartKey: string; r
   }
   return (
     <section className="experiment-artifact">
-      <h3>
-        {name} · {run}
+      <h3 className="m-0 text-[13.5px] font-semibold text-ink">
+        {name} <span className="font-mono text-[12px] font-normal text-ink-3">· {run}</span>
       </h3>
       {body}
     </section>

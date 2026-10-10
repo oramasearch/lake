@@ -1,11 +1,13 @@
 /** Train → Experiments → one study (web_ui_experiments.cpp study mode; experiments.js drawStudy,
- * drawLeaderboard and refresh): status, Stop, optimization history, parallel coordinates,
- * parameter importance, the sortable trial leaderboard with Promote and Stop trial, and the latest
- * eight trials' curves, all refreshed live. */
-import { useEffect, useMemo, useRef, useState } from "react";
+ * drawLeaderboard and refresh), as a Split: optimization history, parallel coordinates, parameter
+ * importance and the sortable trial leaderboard with Promote and Stop trial on the left; the
+ * study's status, budgets and Stop on the right; then the latest eight trials' curves, all
+ * refreshed live. */
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Award, GitCompare, Square } from "lucide-react";
 import { type Row } from "@/lib/api";
-import { Badge } from "@/lib/ui";
+import { Banner, Button, Card, Chip, Empty, FilterChips, KeyValue, Meter, Section, Skeleton, Split, Stat, StatRow, Status } from "@/lib/ui";
 import { useSpacePermissions } from "@/pages/apps/shared";
 import { Chart, ChartContext, newRegistry } from "./Chart";
 import { describe, ExperimentsShell, MetricsView, Table, useCoalesced, useExperimentActions, useExperimentClient, useExperimentUrl, useFollow } from "./common";
@@ -94,71 +96,131 @@ export default function StudyPage() {
   if (!study) {
     return (
       <ExperimentsShell mode="study" notice={notice} live={live} onLive={setLive} status={status}>
-        {loaded ? null : <p className="muted">Loading the study…</p>}
+        {loaded ? <Empty title="Study Not Loaded">The study could not be read. The notice above says why.</Empty> : <Skeleton />}
       </ExperimentsShell>
     );
   }
   const spec = study.spec ?? {};
   const objective = (spec.objective ?? {}) as Row;
   const budgets = (spec.budgets ?? {}) as Row;
-  const statusLine =
-    `State: ${study.status} · Trials: ${study.trials.length} / ${cell(budgets.max_trials)} · Cost: ${cell(study.spent_cost)} / ${cell(budgets.cost_cap)}` +
-    ` · Objective: ${metricLabel(objective.metric)} (${cell(objective.direction)})` +
-    (study.stop_reason ? ` · ${study.stop_reason}` : "") +
-    (study.promoted_model ? ` · Promoted model: ${study.promoted_model}` : "");
+  const counts: Record<string, number> = {};
+  let best: number | null = null;
+  for (const trial of study.trials) {
+    counts[trial.state] = (counts[trial.state] ?? 0) + 1;
+    if (trial.state === "complete" && typeof trial.objective === "number") {
+      if (best === null || (objective.direction === "maximize" ? trial.objective > best : trial.objective < best)) best = trial.objective;
+    }
+  }
+  const maxTrials = typeof budgets.max_trials === "number" ? budgets.max_trials : Number(budgets.max_trials) || 0;
+  const costCap = typeof budgets.cost_cap === "number" ? budgets.cost_cap : Number(budgets.cost_cap) || 0;
+  const stop =
+    canWrite && study.status === "running" ? (
+      <Button variant="danger" disabled={actions.busy !== null} onClick={() => void actions.perform("stop_study", studyId)}>
+        <Square size={14} aria-hidden /> Stop study
+      </Button>
+    ) : null;
 
   return (
-    <ExperimentsShell mode="study" notice={notice} live={live} onLive={setLive} status={status}>
+    <ExperimentsShell
+      mode="study"
+      notice={notice}
+      live={live}
+      onLive={setLive}
+      status={status}
+      title={
+        <span className="inline-flex flex-wrap items-center gap-2.5">
+          {cell(spec.name)} <Status value={study.status} />
+        </span>
+      }
+      sub={`${cell(spec.project)} · ${metricLabel(objective.metric)} (${cell(objective.direction)})`}
+      actions={stop}
+    >
       {actions.dialog}
-      <section className="panel">
-        <h2>{cell(spec.name)}</h2>
-        <p>{statusLine}</p>
-        {canWrite && study.status === "running" && (
-          <button type="button" disabled={actions.busy !== null} onClick={() => void actions.perform("stop_study", studyId)}>
-            Stop study
-          </button>
-        )}
-        {study.promoted_model && (
-          <p>
-            <Badge tone="success">promoted</Badge> Model <code>{study.promoted_model}</code> is this study's promoted model.
-          </p>
-        )}
-      </section>
-      <StudyCharts analysis={analysis} />
-      <section className="panel">
-        <h2>Trial Leaderboard</h2>
-        <label>
-          Trial state
-          <select value={filter} onChange={(e) => setFilter(e.target.value)}>
-            <option value="">All states</option>
-            <option>running</option>
-            <option>complete</option>
-            <option>pruned</option>
-            <option>failed</option>
-          </select>
-        </label>
-        <Leaderboard
-          study={study}
-          trials={trials}
-          analysis={analysis}
-          trialMetrics={trialMetrics}
-          canWrite={canWrite}
-          canPromote={canPromote}
-          busy={actions.busy}
-          perform={(capability, run) => void actions.perform(capability, studyId, run)}
-          onCompare={(runs) => {
-            if (runs.length < 2 || runs.length > 8) {
-              setNotice("Select two to eight runs to compare.");
-              return;
-            }
-            navigate(url("/train/experiments/compare", { runs: runs.join(",") }));
-          }}
-          runHref={(run) => url("/train/experiment/run", { run })}
-        />
-      </section>
-      <h2>Latest Trial Curves</h2>
-      <p>The latest eight trial runs appear below. Open any trial for its full charts and artifacts.</p>
-      <MetricsView details={details} />
+      {study.promoted_model && (
+        <Banner tone="ok" title="Promoted">
+          Model <code>{study.promoted_model}</code> is this study's promoted model.
+        </Banner>
+      )}
+      <StatRow>
+        <Stat label="Best objective" value={best === null ? "—" : cell(best)} sub={metricLabel(objective.metric)} tone={best === null ? undefined : "ok"} icon={Award} />
+        <Stat label="Trials" value={`${study.trials.length} / ${cell(budgets.max_trials)}`} sub={`${counts.complete ?? 0} complete · ${counts.pruned ?? 0} pruned · ${counts.failed ?? 0} failed`} />
+        <Stat label="Running" value={counts.running ?? 0} />
+        <Stat label="Cost" value={cell(study.spent_cost)} sub={`cap ${cell(budgets.cost_cap)}`} />
+      </StatRow>
+      <Split
+        side={
+          <>
+            <Card label="Study" title="Status and Budgets">
+              <KeyValue
+                rows={[
+                  ["State", <Status key="s" value={study.status} />],
+                  ["Objective", `${metricLabel(objective.metric)} (${cell(objective.direction)})`],
+                  ["Trials", <span key="t" className="font-mono">{`${study.trials.length} / ${cell(budgets.max_trials)}`}</span>],
+                  ["Cost", <span key="c" className="font-mono">{`${cell(study.spent_cost)} / ${cell(budgets.cost_cap)}`}</span>],
+                  ["Sampler", cell(spec.sampler)],
+                  ["Pruner", cell(spec.pruner)],
+                  ["Stop reason", study.stop_reason ?? ""],
+                  ["Promoted model", study.promoted_model ? <code key="m">{study.promoted_model}</code> : ""],
+                ]}
+              />
+              {maxTrials > 0 && (
+                <div className="mt-3">
+                  <div className="label">Trial budget</div>
+                  <Meter value={study.trials.length} max={maxTrials} label={`${study.trials.length}/${maxTrials}`} />
+                </div>
+              )}
+              {costCap > 0 && typeof study.spent_cost === "number" && (
+                <div className="mt-3">
+                  <div className="label">Cost cap</div>
+                  <Meter value={study.spent_cost} max={costCap} label={`${cell(study.spent_cost)}/${cell(costCap)}`} tone={study.spent_cost >= costCap ? "bad" : undefined} />
+                </div>
+              )}
+            </Card>
+            <Card label="Trials" title="By State">
+              <div className="flex flex-wrap gap-1.5">
+                {Object.entries(counts).length ? (
+                  Object.entries(counts).map(([state, n]) => (
+                    <Chip key={state}>
+                      {state} <span className="font-mono text-[10.5px] text-ink-3">{n}</span>
+                    </Chip>
+                  ))
+                ) : (
+                  <span className="muted text-[13px]">No trials yet.</span>
+                )}
+              </div>
+            </Card>
+          </>
+        }
+      >
+        <StudyCharts analysis={analysis} />
+        <Card title="Trial Leaderboard" label="Trials">
+          <Leaderboard
+            study={study}
+            trials={trials}
+            analysis={analysis}
+            trialMetrics={trialMetrics}
+            canWrite={canWrite}
+            canPromote={canPromote}
+            busy={actions.busy}
+            filter={filter}
+            onFilter={setFilter}
+            perform={(capability, run) => void actions.perform(capability, studyId, run)}
+            onCompare={(runs) => {
+              if (runs.length < 2 || runs.length > 8) {
+                setNotice("Select two to eight runs to compare.");
+                return;
+              }
+              navigate(url("/train/experiments/compare", { runs: runs.join(",") }));
+            }}
+            runHref={(run) => url("/train/experiment/run", { run })}
+          />
+        </Card>
+      </Split>
+      <div className="mt-6">
+        <Section title="Latest Trial Curves" sub="The latest eight trial runs appear below. Open any trial for its full charts and artifacts.">
+          <MetricsView details={details} />
+        </Section>
+      </div>
     </ExperimentsShell>
   );
 }
@@ -191,25 +253,38 @@ function StudyCharts({ analysis }: { analysis: Analysis }) {
   const importanceNames = useMemo(() => importance.map((row) => String(row.parameter ?? "")), [importance]);
   return (
     <ChartContext.Provider value={registry}>
-      <section className="panel">
-        <h2>Optimization History</h2>
+      <Card label="Analysis" title="Optimization History">
         <Chart chartKey="history" data={historyData} labels={HISTORY_LABELS} settings={{ title: "Optimization History" }} />
-        {!history.length && <p>No trial has completed yet.</p>}
-        <Table headers={["Trial", "Run", "Objective", "Best so far"]} rows={history.map((row) => [row.number, row.run, row.value, row.best])} />
-      </section>
-      <section className="panel">
-        <h2>Parallel Coordinates</h2>
+        {!history.length && <p className="muted text-[13px]">No trial has completed yet.</p>}
+        <ChartData>
+          <Table headers={["Trial", "Run", "Objective", "Best so far"]} rows={history.map((row) => [row.number, row.run, row.value, row.best])} />
+        </ChartData>
+      </Card>
+      <Card label="Analysis" title="Parallel Coordinates">
         <Chart chartKey="parallel" data={parallelData} labels={runLabels} settings={{ xValues: labels, title: "Parallel Coordinates" }} />
-        <p>Axes are normalized from 0 to 1; categorical values follow first occurrence. Exact values:</p>
-        <Table headers={["Run", ...labels]} rows={rows.map((row, index) => [row.run, ...raw[index]])} />
-      </section>
-      <section className="panel">
-        <h2>Parameter Importance</h2>
+        <p className="muted text-[12.5px]">Axes are normalized from 0 to 1; categorical values follow first occurrence.</p>
+        <ChartData label="Exact values">
+          <Table headers={["Run", ...labels]} rows={rows.map((row, index) => [row.run, ...raw[index]])} />
+        </ChartData>
+      </Card>
+      <Card label="Analysis" title="Parameter Importance">
         <Chart chartKey="importance" data={importanceData} labels={IMPORTANCE_LABELS} settings={{ xValues: importanceNames, title: "Parameter Importance" }} />
-        {!importance.length && <p>Parameter importance needs completed trials.</p>}
-        <Table headers={["Parameter", "Importance"]} rows={importance.map((row) => [row.parameter, row.importance])} />
-      </section>
+        {!importance.length && <p className="muted text-[13px]">Parameter importance needs completed trials.</p>}
+        <ChartData>
+          <Table headers={["Parameter", "Importance"]} rows={importance.map((row) => [row.parameter, row.importance])} />
+        </ChartData>
+      </Card>
     </ChartContext.Provider>
+  );
+}
+
+/** A chart's exact values, folded under it. */
+function ChartData({ children, label = "Chart data" }: { children: ReactNode; label?: string }) {
+  return (
+    <details className="mt-2">
+      <summary className="cursor-pointer text-[12.5px] text-ink-2">{label}</summary>
+      {children}
+    </details>
   );
 }
 
@@ -224,6 +299,8 @@ function Leaderboard({
   canWrite,
   canPromote,
   busy,
+  filter,
+  onFilter,
   perform,
   onCompare,
   runHref,
@@ -235,6 +312,8 @@ function Leaderboard({
   canWrite: boolean;
   canPromote: boolean;
   busy: string | null;
+  filter: string;
+  onFilter: (state: string) => void;
   perform: (capability: "stop_experiment_trial" | "promote_trial", run: string) => void;
   onCompare: (runs: string[]) => void;
   runHref: (run: string) => string;
@@ -274,9 +353,20 @@ function Leaderboard({
   const label = (key: string) => key.replace(/^(param|metric):/, "");
   return (
     <>
-      <details>
-        <summary>Columns</summary>
-        <div className="trial-columns">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <FilterChips
+          options={TRIAL_STATES.map((state) => ({ id: state, label: state }))}
+          value={filter || null}
+          onChange={(value) => onFilter(value ?? "")}
+          allLabel="All states"
+        />
+        <Button className="ml-auto" disabled={selected.size === 0} onClick={() => onCompare([...selected])}>
+          <GitCompare size={14} aria-hidden /> Compare selected runs{selected.size ? ` (${selected.size})` : ""}
+        </Button>
+      </div>
+      <details className="mb-2">
+        <summary className="cursor-pointer text-[12.5px] text-ink-2">Columns</summary>
+        <div className="trial-columns mt-2">
           {available.map((key) => (
             <label key={key}>
               <input
@@ -296,13 +386,8 @@ function Leaderboard({
           ))}
         </div>
       </details>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          onCompare([...selected]);
-        }}
-      >
-        <div className="table-scroll">
+      <div>
+        <div className="table-wrap">
           <table>
             <thead>
               <tr>
@@ -346,22 +431,29 @@ function Leaderboard({
                       />
                     </td>
                     <td>
-                      <Link to={runHref(trial.run)}>{trial.run}</Link>
+                      <Link to={runHref(trial.run)} className="whitespace-nowrap font-mono">
+                        {trial.run}
+                      </Link>
                       {study.promoted_model && trial.model === study.promoted_model ? (
                         <>
                           {" "}
-                          <Badge tone="success">promoted</Badge>
+                          <Status value="promoted" tone="success" />
                         </>
                       ) : null}
                     </td>
-                    {visible.map((key) => (
-                      <td key={key}>{cell(value(trial, key))}</td>
-                    ))}
+                    {visible.map((key) => {
+                      const v = value(trial, key);
+                      return (
+                        <td key={key} className={typeof v === "number" ? "text-right font-mono tabular-nums" : undefined}>
+                          {key === "state" ? <Status value={String(v ?? "")} /> : cell(v)}
+                        </td>
+                      );
+                    })}
                     <td>
                       {capability && (
-                        <button type="button" disabled={busy !== null} onClick={() => perform(capability, trial.run)}>
+                        <Button variant={capability === "promote_trial" ? "primary" : "danger"} disabled={busy !== null} onClick={() => perform(capability, trial.run)}>
                           {capability === "promote_trial" ? "Promote" : "Stop trial"}
-                        </button>
+                        </Button>
                       )}
                     </td>
                   </tr>
@@ -370,8 +462,9 @@ function Leaderboard({
             </tbody>
           </table>
         </div>
-        <button type="submit">Compare selected runs</button>
-      </form>
+      </div>
     </>
   );
 }
+
+const TRIAL_STATES = ["running", "complete", "pruned", "failed"];
