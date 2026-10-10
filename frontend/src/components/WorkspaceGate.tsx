@@ -16,10 +16,11 @@
  * - `returnTo` is where Start lands; by default the current page's list page when lake allowed it
  *   (Projects, Data, Agents, Runs, Models, Search Indexes), else Projects. */
 import { type ReactNode, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { act, useRead, type ApiError } from "@/lib/api";
 import { useSession } from "@/lib/session";
-import { Button, Skeleton } from "@/lib/ui";
+import { Boxes, Loader2, Rocket, ServerOff } from "lucide-react";
+import { Banner, Button, Card, Empty, Skeleton, Status } from "@/lib/ui";
 import { startReturn, START_RETURNS } from "@/pages/design/logic";
 
 export type WorkspaceState = { requested?: boolean; phase?: string; message?: string; ready?: boolean; workspace_id?: string };
@@ -64,15 +65,21 @@ export function WorkspaceGate({
   returnTo?: string;
 }) {
   const { q, customerId, workspaceId } = useWorkspaceStatus();
-  if (!customerId) return <div className="panel empty">You have no workspace yet.</div>;
+  if (!customerId) {
+    return (
+      <Empty icon={Boxes} title="No Workspace Yet" action={<Button to="/workspaces">Workspaces</Button>}>
+        You have no workspace yet.
+      </Empty>
+    );
+  }
   if (!workspaceId || q.isLoading) return <Skeleton />;
   if (q.isError) {
     const message = (q.error as ApiError)?.message ?? "";
     // Lake showed the reason in an empty panel, and nothing else.
     return (
-      <div className="panel empty">
+      <Empty icon={ServerOff} title={message === NOT_CONFIGURED ? "Not Available on This Lake" : "Workspace Unavailable"}>
         {message === NOT_CONFIGURED ? "Design, Train and Ship are not available on this lake yet: it has no workspace control plane configured." : message}
-      </div>
+      </Empty>
     );
   }
   const state = q.data ?? {};
@@ -99,31 +106,28 @@ function GatePanel({ state, customerId, returnTo }: { state: WorkspaceState; cus
       // "workspace quota reached (<n>)".
       const quota = message.startsWith("workspace quota reached");
       return (
-        <>
-          <div className="panel notice status-danger">
-            <h2>Your Workspace Could Not Be Prepared</h2>
-            <p>
-              {quota
-                ? `This lake already runs as many workspaces as it allows (${message}). An operator can raise the limit; yours starts as soon as there is room, or cancel the request below.`
-                : message}
-            </p>
-          </div>
-          <section className="panel">
-            <h2>Cancel This Workspace</h2>
-            <p>Withdraw the request so you can start again later.</p>
-            <Link to={`/workspaces?customer_id=${encodeURIComponent(customerId)}`}>Cancel workspace</Link>
-          </section>
-        </>
+        <div className="space-y-3">
+          <Banner tone="warn" title="Your Workspace Could Not Be Prepared">
+            {quota
+              ? `This lake already runs as many workspaces as it allows (${message}). An operator can raise the limit; yours starts as soon as there is room, or cancel the request below.`
+              : message}
+          </Banner>
+          <Card
+            title="Cancel This Workspace"
+            actions={<Button to={`/workspaces?customer_id=${encodeURIComponent(customerId)}`}>Cancel workspace</Button>}
+          >
+            <p className="m-0 text-[13px] text-ink-2">Withdraw the request so you can start again later.</p>
+          </Card>
+        </div>
       );
     }
     return (
-      <div className="panel" role="status">
-        <h2>Preparing Your Workspace</h2>
-        <p>
+      <div role="status">
+        <Empty icon={Spinner} title="Preparing Your Workspace" action={<Status value={state.phase || "Not picked up yet"} tone="warning" />}>
           lake asked for a Zetta cluster of your own, where your projects, data and models live apart from every other customer's.{" "}
           {state.phase ? `Status: ${state.phase}.` : "It has not been picked up yet."}
-        </p>
-        <p className="muted">This page checks again every 15 seconds.</p>
+          <div className="mt-1 text-[12px] text-ink-3">This page checks again every 15 seconds.</div>
+        </Empty>
       </div>
     );
   }
@@ -146,20 +150,25 @@ function GatePanel({ state, customerId, returnTo }: { state: WorkspaceState; cus
   };
 
   return (
-    <div className="panel">
-      <h2>Start Your Workspace</h2>
-      <p>
+    <div className="space-y-3">
+      {error && <Banner tone="warn">{error}</Banner>}
+      <Empty
+        icon={Rocket}
+        title="Start Your Workspace"
+        action={
+          <Button variant="primary" loading={busy} onClick={() => void start()}>
+            <Rocket size={14} aria-hidden /> Start your workspace
+          </Button>
+        }
+      >
         Design, Train and Ship run on a Zetta cluster of your own, so your projects, data and models are never shared with another customer. It takes a minute or two to
         prepare.
-      </p>
-      {error && (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      )}
-      <Button variant="primary" loading={busy} onClick={() => void start()}>
-        Start your workspace
-      </Button>
+      </Empty>
     </div>
   );
+}
+
+/** A spinning loader as an Empty state's icon. */
+function Spinner({ size }: { size?: number }) {
+  return <Loader2 size={size} className="animate-spin" aria-hidden />;
 }

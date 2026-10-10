@@ -1,12 +1,13 @@
 /** Design → Methodology (lake's methodologies_content, methodology branch): one methodology, the
- * solutions that use it, and a way to build a pipeline with it when it runs. */
-import { Fragment } from "react";
-import { Link, useSearchParams } from "react-router-dom";
-import { Button, Page, Skeleton } from "@/lib/ui";
+ * solutions that use it, and a way to build a pipeline with it when it runs. Main column: what it
+ * needs, makes and is measured by, and its solutions; side: its status and the next step. */
+import { FlaskConical, Workflow } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import { Button, Card, Empty, Grid, KeyValue, Page, Skeleton, Split } from "@/lib/ui";
 import { WorkspaceGate } from "@/components/WorkspaceGate";
 import { qs, useWq, useWsPath } from "./api";
 import { joined, solutionUses, text, type J } from "./logic";
-import { RunsBadge, entityCrumb, useDesignTrail } from "./parts";
+import { Panel, RunsBadge, entityCrumb, useDesignTrail } from "./parts";
 import { NO_METHODOLOGIES } from "./MethodologiesPage";
 
 export default function MethodologyPage() {
@@ -14,7 +15,7 @@ export default function MethodologyPage() {
   const id = params.get("id") ?? "";
   useDesignTrail({ label: "Methodologies", path: "/design/methodologies" }, [id ? entityCrumb(id) : { label: "Methodology" }], id ? `Methodology: ${id}` : "Methodology");
   return (
-    <Page eyebrow="Design" title={id ? `Methodology: ${id}` : "Methodology"}>
+    <Page eyebrow="Design · Methodology" title={id || "Methodology"}>
       <WorkspaceGate>
         <Methodology id={id} />
       </WorkspaceGate>
@@ -29,67 +30,68 @@ function Methodology({ id }: { id: string }) {
   const solutions = useWq<J>("list_solutions", {}, { retry: false });
   if (methodologies.isLoading || solutions.isLoading) return <Skeleton />;
   const entries: J[] = !methodologies.isError && Array.isArray(methodologies.data?.methodologies) ? methodologies.data!.methodologies : [];
-  if (!entries.length) return <div className="panel empty">{NO_METHODOLOGIES}</div>;
+  if (!entries.length) {
+    return (
+      <Empty icon={FlaskConical} title="No Methodology Registry Yet">
+        {NO_METHODOLOGIES}
+      </Empty>
+    );
+  }
   const entry = entries.find((e) => text(e, "id") === id);
-  if (!entry) return <div className="panel empty">No methodology {id}.</div>;
+  if (!entry) {
+    return (
+      <Empty icon={FlaskConical} title={`No methodology ${id}`} action={<Button to={ws("/design/methodologies")}>All methodologies</Button>}>
+        The engine lists no methodology by that id.
+      </Empty>
+    );
+  }
   const users: J[] = (!solutions.isError && Array.isArray(solutions.data?.solutions) ? solutions.data!.solutions : []).filter((s: J) => solutionUses(s, id));
   const runnable = entry.runnable === true;
   return (
-    <>
-      <p className="sub">
-        {text(entry, "family")} · <RunsBadge entry={entry} />
-      </p>
-      <section className="panel">
-        <div className="table-wrap">
-          <table>
-            <tbody>
-              <tr>
-                <th>What it needs</th>
-                <td>{joined(entry.inputs)}</td>
-              </tr>
-              <tr>
-                <th>What it makes</th>
-                <td>{joined(entry.outputs)}</td>
-              </tr>
-              <tr>
-                <th>How it is measured</th>
-                <td>{joined(entry.metrics)}</td>
-              </tr>
-              <tr>
-                <th>Model kinds</th>
-                <td>{joined(entry.model_kinds)}</td>
-              </tr>
-              <tr>
-                <th>Solutions that use it</th>
-                <td>
-                  {users.length
-                    ? users.map((s, index) => (
-                        <Fragment key={text(s, "id") || index}>
-                          {index > 0 && ", "}
-                          <Link to={ws(`/design/solution?${qs({ id: text(s, "id") })}`)}>{`${text(s, "id")} ${text(s, "name")}`}</Link>
-                        </Fragment>
-                      ))
-                    : "—"}
-                </td>
-              </tr>
-              {!runnable && text(entry, "issue") && (
-                <tr>
-                  <th>Tracked in</th>
-                  <td>{text(entry, "issue")}</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
-      {runnable && (
-        <p>
-          <Button variant="primary" to={ws("/design/projects")}>
-            Build a pipeline with it
-          </Button>{" "}
-          <span className="sub">Open a project and choose {id} under Build a Pipeline.</span>
-        </p>
-      )}
-    </>
+    <Split
+      side={
+        <>
+          <Panel label="Status" title={<RunsBadge entry={entry} />}>
+            <KeyValue
+              rows={[
+                ["Family", text(entry, "family")],
+                ["Solutions", String(users.length)],
+                ...(!runnable && text(entry, "issue") ? ([["Tracked in", text(entry, "issue")]] as [string, string][]) : []),
+              ]}
+            />
+          </Panel>
+          {runnable && (
+            <Panel title="Build With It">
+              <p className="mt-0 text-[13px] text-ink-2">Open a project and choose {id} under Build a Pipeline.</p>
+              <Button variant="primary" to={ws("/design/projects")}>
+                <Workflow size={14} aria-hidden /> Build a pipeline with it
+              </Button>
+            </Panel>
+          )}
+        </>
+      }
+    >
+      <Panel label={id} title={text(entry, "name")}>
+        <KeyValue
+          rows={[
+            ["What it needs", joined(entry.inputs)],
+            ["What it makes", joined(entry.outputs)],
+            ["How it is measured", joined(entry.metrics)],
+            ["Model kinds", joined(entry.model_kinds)],
+          ]}
+        />
+      </Panel>
+      <Panel title="Solutions That Use It">
+        {users.length ? (
+          <Grid className="grid-cols-1 gap-2 sm:grid-cols-2">
+            {users.map((s, index) => (
+              <Card key={text(s, "id") || index} to={ws(`/design/solution?${qs({ id: text(s, "id") })}`)} label={text(s, "id")} title={text(s, "name")} actions={<RunsBadge entry={s} />} />
+            ))}
+          </Grid>
+        ) : (
+          <p className="m-0 text-[13px] text-ink-3">—</p>
+        )}
+      </Panel>
+    </Split>
   );
 }

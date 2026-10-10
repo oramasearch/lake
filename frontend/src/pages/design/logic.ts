@@ -97,6 +97,15 @@ export function withoutProjectAgentChecks<T extends J>(graphs: unknown): T[] {
   return graphs.filter((g) => !(g && typeof g === "object" && typeof g.name === "string" && g.name.startsWith(PROJECT_AGENT_CHECK)));
 }
 
+/** A project's state from its pipelines (the Project Agent's check graphs left out): one approved
+ * pipeline makes it "approved"; pipelines none of which is approved, "proposed"; none, "no pipelines". */
+export type ProjectState = "approved" | "proposed" | "no pipelines";
+export function projectState(graphs: J[]): { state: ProjectState; pipelines: number; approved: number } {
+  const approved = graphs.filter((g) => text(g, "approval") === "approved").length;
+  return { state: graphs.length === 0 ? "no pipelines" : approved > 0 ? "approved" : "proposed", pipelines: graphs.length, approved };
+}
+export const PROJECT_STATE_TONE: Record<ProjectState, "success" | "warning" | "neutral"> = { approved: "success", proposed: "warning", "no pipelines": "neutral" };
+
 /** The status badge's tone of a methodology or solution (runs_badge_of). */
 export function runsBadge(entry: J): { label: string; tone: "neutral" | "success" | "warning" } {
   if (text(entry, "status") === "sketch") return { label: "In design", tone: "neutral" };
