@@ -10,14 +10,30 @@ is authorized and audited as the same call over REST or MCP would be.
 
 | Route | File | What it does | Capabilities |
 |---|---|---|---|
-| `/secret-mounts?workspace_id=&organization_id=` | `frontend/src/pages/admin/SecretMountsPage.tsx` | The readable mounts of one workspace, with search. **New mount** opens a modal: the workspace (chosen once, never changed), the organization that owns the mount, a lowercase name and an optional description; it then opens the new mount | `list_secret_mounts`, `create_secret_mount`, `list_organizations`, `get_customer` |
+| `/secret-mounts?workspace_id=&organization_id=` | `frontend/src/pages/admin/SecretMountsPage.tsx` | The readable mounts of one workspace, with search. An **Owner** column names each mount's owner (the account, or the organization by name). **New mount** opens a modal: the workspace (chosen once, never changed), the **Owner**, a lowercase name and an optional description; it then opens the new mount | `list_secret_mounts`, `create_secret_mount`, `list_organizations`, `list_memberships`, `get_organization`, `get_customer` |
 | `/secrets?mount_id=` | `SecretsPage.tsx` (`MountView`) | The mount's secrets: path, state (live or deleted), current version, updated and created; search and a Live/Deleted filter; pages of 200 with Previous and Next. **New secret** opens a drawer | `get_secret_mount`, `list_secrets`, `put_secret` |
 | `/secrets?mount_id=&name=` | `SecretsPage.tsx` (`SecretView`) | One secret: its state, figures (current version, live, deleted, destroyed), custom metadata and version history. **New version**, **Reveal value**, and per version Reveal, Delete, Undelete and Destroy | `secret_metadata`, `put_secret`, `read_secret`, `delete_secret_versions`, `undelete_secret_versions`, `destroy_secret_versions` |
 | `/encryption-keys?mount_id=` | `EncryptionKeysPage.tsx` | The mount's keys. **New key** (a new key, or one derived from another key and a context), **Rotate** per key, and **Try it**, a drawer for encrypt, decrypt, rewrap, sign, verify and HMAC | `list_encryption_keys`, `create_encryption_key`, `derive_encryption_key`, `rotate_encryption_key`, `encrypt`, `decrypt`, `rewrap`, `sign`, `verify`, `hmac` |
 
 The value editor and the masked value are in `secretParts.tsx`; the pure rules (rows to a JSON
-object, raw JSON, version state, base64url) are in `secretValue.ts`, tested by
-`frontend/tests/secrets.test.ts`.
+object, raw JSON, version state, base64url) are in `secretValue.ts`, and who may own a mount is in
+`secretOwners.ts`, both tested by `frontend/tests/secrets.test.ts`.
+
+## Choosing the Owner
+
+A mount's owner is the account that owns its workspace or an organization inside that account
+([../api/secrets.md](../api/secrets.md#who-owns-a-mount-lake561)). The New Mount modal's **Owner**
+field offers, first and by default, the workspace's owner: **Your account** for the person's own
+workspaces (another account's workspace shows that account's name), or the organization, marked
+*(workspace owner)*, when the workspace is an organization's (`get_customer` names it). Then it
+offers each organization the person administers (an `owner` or `admin` membership of the
+organization itself, from `list_memberships`; the operator administers every one), except one whose
+own space is another account's (`get_organization`'s `customer_id`). Choosing the account sends no
+`organization_id`; choosing an organization sends its id. Nothing blocks a person who belongs to no
+organization: their account is always offered. Changing the workspace returns the field to that
+workspace's owner. A refusal at `/organization_id` or `/customer_id` shows under the field.
+
+The mount's page names the owner in its facts the same way (**Owner**).
 
 ## Writing a Secret
 
@@ -71,8 +87,6 @@ kept once the drawer closes.
 ## Empty States
 
 Each list's empty state leads to its create action: **New mount**, **New secret** and **New key**.
-With no organization, the New Mount modal says that a mount belongs to an organization and to create
-one first.
 
 ## How to Verify
 
@@ -84,7 +98,9 @@ npm run build
 ```
 
 `SecretsCapabilities.ListSecretsAnswersNamesAndStateNeverValues` and
-`PostgresCapabilities.SecretsAndEncryptionRoundTrip` cover `list_secrets`. In a browser, the pages'
+`PostgresCapabilities.SecretsAndEncryptionRoundTrip` cover `list_secrets`;
+`Stores/WorkspaceRecordStores.SecretMountsBelongToAnAccountOrAnOrganization` covers a mount an
+individual account owns, and `secrets.test.ts` the Owner choices. In a browser, the pages'
 empty and error states render without a workspace Zetta; a mount's secrets need one.
 
 ## How to Change

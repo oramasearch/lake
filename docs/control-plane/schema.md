@@ -142,7 +142,7 @@ does not update `secrets_versions`. (Since `0057` the data keys are workspace re
 
 | Table or change | Purpose |
 |---|---|
-| `secret_mount_routes` | One row per mount: its space, organization and workspace (`enforce_workspace_routing`: a live workspace of the same space, never changed). Content-free dispatch; no mount name, secret name, value or key. |
+| `secret_mount_routes` | One row per mount: its space, owning organization (NULL when the account owns the mount, [`0071`](#secret-mount-owners-migration)) and workspace (`enforce_workspace_routing`: a live workspace of the same space, never changed). Content-free dispatch; no mount name, secret name, value or key. |
 | `keystore.previous_wrapped_key`, `previous_version` | The customer KEK a rotation replaced, wrapped under its own version, kept until every workspace data key is rewrapped. |
 | `secrets_dynamic_leases` | Loses its foreign key to `secrets_mounts`; a new mount has no row there (lake#362 moves leases). |
 | `workspace_assignments` (`secrets_mounts`) | Each legacy mount's owner: `sole_workspace` or `needs_selection`. Its entries, versions, keys and data keys follow it. |
@@ -791,6 +791,19 @@ The operator vendors this schema and selects `drop_moved_tables_guard`. Its
 `secrets_versions`, `secrets_encryption_keys` and `secrets_data_keys` among the statements the
 schema must contain; those four entries go, and its Postgres rehearsal query needs the new guard.
 
+## Secret mount owners migration
+
+`0071_secret_mount_owners` (lake#561) lets an account own a secret mount. A mount created without
+`organization_id` belongs to the customer that owns its workspace (an individual's personal space,
+or an organization's space), so its route has no organization: the migration drops `NOT NULL` from
+`secret_mount_routes.organization_id`, and such a route stores NULL there. Its policy object hangs
+under the customer's (`customer → environment secrets/<customer> → secret_mount`); an organization's
+mount keeps `organization → environment secrets/<customer>/<organization> → secret_mount`. The route
+stays content-free. Existing rows are untouched, nothing is dropped, and the statement is
+idempotent; guard `secret_mount_owners_guard`. The operator vendors the schema and selects that
+guard in its own pull request before a lake with this change is rolled. See
+[`../api/secrets.md`](../api/secrets.md#who-owns-a-mount-lake561).
+
 ## Repository workspaces migration
 
 `0051_repository_workspaces` adds `repositories.workspace_id` (references `workspaces`, index
@@ -829,7 +842,7 @@ NULL until `move_workspace_store` switches the workspace: from then on its repos
 from its own encrypted liquid store in bucket `lake_store` of its workspace Zetta
 ([`../architecture/workspace-store.md`](../architecture/workspace-store.md)). The column is the only
 thing PostgreSQL keeps about that store; the operator does not read it. Idempotent; guard
-`workspace_store_guard`; the latest guard is `drop_moved_tables_guard` (migration `0070`), which the operator selects.
+`workspace_store_guard`; the latest guard is `secret_mount_owners_guard` (migration `0071`), which the operator selects.
 
 ## Metering workspaces migration
 

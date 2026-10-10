@@ -111,7 +111,8 @@ forge record collection (lake#341); the stores no longer write or read forge rec
 drops both retired tables.
 `secret_records.cpp` is the secrets collections' codecs (lake#328-#332); the stores no longer hold
 mounts, secrets, keys or data keys. They keep `secret_mount_routes` and the mount's policy objects
-(`create_secret_mount_route`), the customer KEK, which wraps and unwraps data keys without leaving
+(`create_secret_mount_route`: under the organization, or under the customer for a mount the account
+owns, whose route's organization is NULL, migration `0071_secret_mount_owners`), the customer KEK, which wraps and unwraps data keys without leaving
 the store and keeps the replaced version during a rotation (migration `0057_secret_workspaces`).
 Dynamic
 leases are records of their mount's workspace (lake#362, `SecretLeaseCodec` here); the stores keep

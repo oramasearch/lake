@@ -7403,18 +7403,29 @@ public:
 
     Result<SecretMountRoute> create_secret_mount_route(const SecretMountRoute& input) override {
         return with_tx<SecretMountRoute>([&](pqxx::work& tx) -> Result<SecretMountRoute> {
-            const pqxx::result scope = tx.exec_params(
-                "SELECT organization_object.id::text FROM objects AS organization_object "
-                "JOIN objects AS customer_object ON customer_object.id = "
-                "organization_object.parent_id AND customer_object.object_type = 'customer' "
-                "WHERE organization_object.object_type = 'organization' "
-                "AND organization_object.external_id = $1 "
-                "AND customer_object.external_id = $2",
-                input.organization_id,
-                input.customer_id);
+            // The owner's policy object: the customer's own (an account's mount, no
+            // organization), or an organization's inside the customer's namespace.
+            const bool account = input.organization_id.empty();
+            const pqxx::result scope =
+                account ? tx.exec_params("SELECT id::text FROM objects WHERE object_type = "
+                                         "'customer' AND external_id = $1",
+                                         input.customer_id)
+                        : tx.exec_params(
+                              "SELECT organization_object.id::text FROM objects AS "
+                              "organization_object "
+                              "JOIN objects AS customer_object ON customer_object.id = "
+                              "organization_object.parent_id AND customer_object.object_type = "
+                              "'customer' "
+                              "WHERE organization_object.object_type = 'organization' "
+                              "AND organization_object.external_id = $1 "
+                              "AND customer_object.external_id = $2",
+                              input.organization_id,
+                              input.customer_id);
             if (scope.empty()) {
-                return std::unexpected(StoreError{
-                    "invalid_input", "organization_id is not inside the customer namespace"});
+                return std::unexpected(
+                    account ? StoreError{"invalid_input", "customer_id is unknown"}
+                            : StoreError{"invalid_input",
+                                         "organization_id is not inside the customer namespace"});
             }
             const pqxx::result workspace = tx.exec_params(
                 "SELECT 1 FROM workspaces WHERE id = $1::uuid AND customer_id = $2::uuid "
@@ -7427,14 +7438,13 @@ public:
             }
             const pqxx::result rows = tx.exec_params(
                 "INSERT INTO secret_mount_routes (mount_id, customer_id, organization_id, "
-                "workspace_id) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid) "
+                "workspace_id) VALUES ($1::uuid, $2::uuid, NULLIF($3, '')::uuid, $4::uuid) "
                 "RETURNING created_at::text",
                 input.mount_id,
                 input.customer_id,
                 input.organization_id,
                 input.workspace_id);
-            const std::string environment_external =
-                "secrets/" + input.customer_id + "/" + input.organization_id;
+            const std::string environment_external = secret_mount_environment(input);
             const pqxx::result environment =
                 tx.exec_params("INSERT INTO objects (object_type, external_id, parent_id) "
                                "VALUES ('environment', $1, $2::uuid) "
@@ -7456,7 +7466,7 @@ public:
     Result<SecretMountRoute> get_secret_mount_route(const std::string& mount_id) override {
         return with_tx<SecretMountRoute>([&](pqxx::work& tx) -> Result<SecretMountRoute> {
             const pqxx::result rows = tx.exec_params(
-                "SELECT mount_id::text, customer_id::text, organization_id::text, "
+                "SELECT mount_id::text, customer_id::text, coalesce(organization_id::text, ''), "
                 "workspace_id::text, created_at::text FROM secret_mount_routes "
                 "WHERE mount_id = $1::uuid",
                 mount_id);
@@ -7472,23 +7482,25 @@ public:
     Result<std::vector<SecretMountRoute>>
     list_secret_mount_routes(const std::string& customer_id,
                              const std::string& workspace_id) override {
-        return with_tx<std::vector<SecretMountRoute>>(
-            [&](pqxx::work& tx) -> Result<std::vector<SecretMountRoute>> {
-                const pqxx::result rows = tx.exec_params(
-                    "SELECT mount_id::text, customer_id::text, organization_id::text, "
-                    "workspace_id::text, created_at::text FROM secret_mount_routes "
-                    "WHERE customer_id = $1::uuid AND (NULLIF($2, '') IS NULL OR "
-                    "workspace_id = NULLIF($2, '')::uuid) ORDER BY created_at DESC, mount_id",
-                    customer_id,
-                    workspace_id);
-                std::vector<SecretMountRoute> routes;
-                for (const pqxx::row& row : rows) {
-                    routes.push_back({row[0].as<std::string>(), row[1].as<std::string>(),
-                                      row[2].as<std::string>(), row[3].as<std::string>(),
-                                      row[4].as<std::string>()});
-                }
-                return routes;
-            });
+        return with_tx<std::vector<SecretMountRoute>>([&](pqxx::work& tx)
+                                                          -> Result<std::vector<SecretMountRoute>> {
+            const pqxx::result rows = tx.exec_params(
+                "SELECT mount_id::text, customer_id::text, coalesce(organization_id::text, ''), "
+                "workspace_id::text, created_at::text FROM secret_mount_routes "
+                "WHERE customer_id = $1::uuid AND (NULLIF($2, '') IS NULL OR "
+                "workspace_id = NULLIF($2, '')::uuid) ORDER BY created_at DESC, mount_id",
+                customer_id,
+                workspace_id);
+            std::vector<SecretMountRoute> routes;
+            for (const pqxx::row& row : rows) {
+                routes.push_back({row[0].as<std::string>(),
+                                  row[1].as<std::string>(),
+                                  row[2].as<std::string>(),
+                                  row[3].as<std::string>(),
+                                  row[4].as<std::string>()});
+            }
+            return routes;
+        });
     }
 
     Result<WrappedDataKey> wrap_secret_data_key(const std::string& customer_id,

@@ -17,6 +17,7 @@ import { useToast } from "@/lib/toast";
 import { Banner, Button, Card, DataTable, Empty, ErrorBlock, FilterChips, KeyValue, Mono, Page, SearchInput, Skeleton, Split, Stat, StatRow, Status, Toolbar } from "@/lib/ui";
 import { NameCell, PanelEmpty, When, matches, useMetaTrail, useParam } from "@/pages/organizations/shared";
 import { RevealedValue, WriteSecretDrawer } from "./secretParts";
+import { accountLabel } from "./secretOwners";
 import { versionState, type VersionState } from "./secretValue";
 
 const PAGE = 200;
@@ -59,7 +60,7 @@ function MountFacts({ mount }: { mount: Row }) {
         rows={[
           ["Description", mount.description || null],
           ["Workspace", workspace ? <span title={mount.workspace_id}>{workspace.name}</span> : <Mono short={20}>{mount.workspace_id}</Mono>],
-          ["Organization", <Mono short={20}>{mount.organization_id}</Mono>],
+          ["Owner", mount.organization_id ? <OrganizationName id={mount.organization_id} /> : accountLabel(session.viewer.spaces.find((s) => s.id === mount.customer_id))],
           ["Created", <When value={mount.created_at} />],
           ["Mount id", <Mono short={20}>{mount.id}</Mono>],
         ]}
@@ -70,6 +71,12 @@ function MountFacts({ mount }: { mount: Row }) {
       </p>
     </Card>
   );
+}
+
+/** An organization that owns a mount, by name when the viewer can read it. */
+function OrganizationName({ id }: { id: string }) {
+  const organization = useRead<Row>("get_organization", { id }, { workspace: null, retry: false });
+  return organization.data ? <span title={id}>{organization.data.display_name || organization.data.name || id}</span> : <Mono short={20}>{id}</Mono>;
 }
 
 /* ------------------------------------------------------------------ a mount's secrets */

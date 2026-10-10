@@ -24,18 +24,20 @@ namespace lake::control {
 // the clear.
 
 // `secrets_mounts`: one record per mount, keyed by the mount id, listed by its space. A mount's
-// name is claimed in the same collection by a record keyed by the blind index of its organization
-// and name, written `if_absent`, which keeps names unique within the workspace.
+// name is claimed in the same collection by a record keyed by the blind index of its owner and
+// name, written `if_absent`, which keeps names unique within the workspace and owner.
 struct SecretMountCodec {
     static constexpr RecordCollection collection{"secrets_mounts", 1};
     static std::string lookup(const std::string& customer_id);
     static nlohmann::json encode(const SecretMount& mount);
     static std::optional<SecretMount> decode(const StoredRecord& record);
 };
-std::string secret_mount_name_key(const WorkspaceRecords& records,
-                                  const std::string& organization_id,
-                                  const std::string& name);
-std::string secret_mount_name_lookup(const std::string& organization_id);
+// The owner a name claim is scoped to: `organization:<id>` for an organization's mount (the
+// value claims have always used) and `customer:<id>` for an account's. A UUID never contains a
+// colon, so the two cannot collide.
+std::string secret_mount_owner(const SecretMount& mount);
+std::string secret_mount_name_key(const WorkspaceRecords& records, const SecretMount& mount);
+std::string secret_mount_name_lookup(const SecretMount& mount);
 nlohmann::json secret_mount_name_claim(const std::string& mount_id);
 // The mount a name claim names; nullopt for a record that is not a claim.
 std::optional<std::string> secret_mount_name_claimed(const StoredRecord& record);

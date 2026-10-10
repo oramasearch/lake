@@ -1,7 +1,7 @@
 # Secrets and Encryption Keys
 
-Lake keeps an organization's secrets (passwords, API keys, connection strings) and its encryption
-keys. Secrets are versioned JSON values you manage in the web app, through the REST API or over MCP.
+Lake keeps your secrets (passwords, API keys, connection strings) and encryption keys, for your
+own account or for an organization. Secrets are versioned JSON values you manage in the web app, through the REST API or over MCP.
 Encryption keys never leave lake: you send data to lake and get back ciphertext, a signature or an
 HMAC.
 
@@ -13,7 +13,7 @@ you show it; key material is never shown anywhere.
 
 | Term | What it is |
 |---|---|
-| **Secret mount** | A named container of secrets and keys that belongs to one organization and lives in one workspace, chosen when it is made and never changed. Access is granted on the mount. |
+| **Secret mount** | A named container of secrets and keys that lives in one workspace, chosen when it is made and never changed. Its **owner** is the account that owns the workspace (your own account for your workspaces) or an organization you administer in that account. Access is granted on the mount. |
 | **Secret** | A name in a mount (such as `database/password`) holding a JSON object, with an immutable history of versions. |
 | **Version** | One value of a secret. Writing again creates the next version; numbers are never reused. |
 | **Delete, undelete, destroy** | Delete hides a version but keeps it (reversible); undelete brings it back; destroy erases its data for good, keeping only its history row. |
@@ -43,22 +43,53 @@ when they changed. Search the paths, or filter **Live** or **Deleted**.
 
 ## Create a Mount
 
-An organization admin creates mounts.
+Anyone who administers the workspace's account creates mounts there: you, in your own workspaces,
+and an organization's owners and admins in the organization's workspaces. You need no organization
+to keep secrets.
 
 1. Open **Organization → Secrets** and press **New mount**.
 2. Choose the **Workspace**. The mount's secrets and keys are sealed in that workspace, and it cannot
    be changed later.
-3. Choose the **Organization** that owns the mount. An organization's own workspaces offer it first.
+3. Choose the **Owner**. It starts on the workspace's owner: **Your account** in your own workspaces,
+   the organization in an organization's workspaces. An organization you administer inside that
+   account is offered too.
 4. Enter a **Name** (lowercase letters, digits and dashes) and, optionally, a **Description**.
 5. Press **Create mount**. Lake opens the new mount.
 
-- REST: `POST /v1/create_secret_mount` with
-  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "organization_id": "<organization id>", "name": "payments", "description": "Payment service credentials"}`.
-- MCP: `create_secret_mount`.
+For a mount your account owns, leave out `organization_id`; `customer_id` is the id of the account
+that owns the workspace:
 
-The name is lowercase and unique within its workspace and organization. The answer's `id` is the
-`mount_id` every other call takes; none of them takes `workspace_id`, because the mount names its
-workspace.
+- REST: `POST /v1/create_secret_mount` with
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "payments", "description": "Payment service credentials"}`.
+- MCP: `create_secret_mount` with the same input.
+
+For a mount an organization owns, add its id:
+
+- REST: `POST /v1/create_secret_mount` with
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "organization_id": "<organization id>", "name": "payments"}`.
+
+The answer names the owner: `owner_type` is `customer` for an account's mount (its
+`organization_id` is `null`) and `organization` for an organization's. The name is lowercase and
+unique within its workspace and owner, so your account and an organization may each have a mount
+called `payments` in the same workspace. The answer's `id` is the `mount_id` every other call
+takes; none of them takes `workspace_id`, because the mount names its workspace.
+
+For example, with a key in `LAKE_KEY` ([REST API and OpenAPI](/docs/developer)), create a mount
+your account owns, write a secret into it and read it back:
+
+```
+curl -s https://lake.oramadev.net/v1/create_secret_mount \
+  -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
+  -d '{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "payments"}'
+curl -s https://lake.oramadev.net/v1/put_secret \
+  -H "Authorization: Bearer $LAKE_KEY" -H 'Content-Type: application/json' \
+  -d '{"mount_id": "<mount id>", "name": "database/password", "value": {"password": "<the password>"}}'
+curl -s "https://lake.oramadev.net/v1/read_secret?mount_id=<mount id>&name=database/password" \
+  -H "Authorization: Bearer $LAKE_KEY"
+```
+
+`<mount id>` is the `id` the first call answers. Replace `lake.oramadev.net` with your lake's
+address.
 
 ## Write a Secret
 
@@ -221,13 +252,15 @@ and the next rotation finishes it.
 
 | Call | Needs |
 |---|---|
-| `create_secret_mount` | `admin` on the organization |
+| `create_secret_mount` | `admin` on its owner: the account that owns the workspace, or the organization named by `organization_id` |
 | `list_secret_mounts`, `get_secret_mount`, `list_secrets`, `read_secret`, `secret_metadata`, `list_encryption_keys`, `get_encryption_key` | `read` on the mount |
 | `put_secret`, the version changes, every key operation, leases | `write` on the mount |
 | `rotate_customer_kek` | `admin` on the account |
 
-Grants on a mount are inherited through the organization like any other object
-([Grants and Effective Access](/docs/access)).
+Grants on a mount are inherited through its owner like any other object: an account's mount from
+the account, an organization's from the organization
+([Grants and Effective Access](/docs/access)). Nobody else can read or change a mount your account
+owns until you grant them access on it.
 
 ## What Is Recorded
 
@@ -240,11 +273,11 @@ lifecycle events are also appended to lake's transparency log ([Activity and Aud
 | What you see | Why, and what to do |
 |---|---|
 | **Choose a workspace** on the Secret Mounts page | You have several workspaces; pick the one the mount was created in. |
-| **No secret mounts** | None in that workspace that you can read. An organization admin creates one with **New mount**. |
-| **No organization** in New mount | A mount belongs to an organization. Create one under **Organization → Organizations** first. |
+| **No secret mounts** | None in that workspace that you can read. Press **New mount** to create one for your account. |
 | **Someone wrote a newer version** | Another write changed the secret while you edited. Close the drawer, look at the new version, and write again. |
 | `invalid_input` at `/workspace_id` | The workspace is missing, unknown or not one of the account's. |
-| `conflict` at `/name` | A mount with that name already exists in that workspace and organization. |
+| `conflict` at `/name` | A mount with that name already exists in that workspace for that owner. |
+| `invalid_input` at `/organization_id` | The organization is not inside the account that owns the workspace. Choose that account as the owner, or an organization of it. |
 | `conflict` at `/check_and_set` | Another write changed the secret first. Read it again and retry. |
 | `workspace_not_ready` | The mount's workspace Zetta is not running yet. See [Workspaces](/docs/workspaces). |
 | `not_found` at `/lease_id` | The lease id is unknown or malformed. |

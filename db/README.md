@@ -293,7 +293,14 @@ with no recorded workspace owner (`RAISE EXCEPTION`, nothing dropped); it does n
 so `copy_workspace_records` `plan`, `copy` and `verify` are a manual gate before applying. When it refuses, nothing is dropped. Either run `copy_workspace_records` `plan`, `copy` and `verify` for each table named with the previous lake image (`oramasearch/lake:20261005a`, the image on dev when this was written, or any image built before `0070`), resolve its unresolved rows and apply the schema again; or, on a development environment and only with the owner's approval (it destroys data), delete the named rows and apply again. Their `CREATE`s and columns
 are removed from the earlier sections and the earlier migration blocks run only while they exist, so
 a rerun never recreates them. Routing rows, routes, policy objects, `keystore`, `audit_events` and
-the `workspace_assignments` record stay. The latest guard is `drop_moved_tables_guard`; the operator
+the `workspace_assignments` record stay. Its guard is `drop_moved_tables_guard`; the operator
 must vendor this schema, drop the four `CREATE TABLE IF NOT EXISTS secrets_*` entries from
 `TestLakeSchemaMatchesVendoredSource` and add the guard to its rehearsal query before rollout. See
 [schema.md](../docs/control-plane/schema.md#drop-moved-tables-migration).
+
+Migration `0071_secret_mount_owners` (lake#561) drops `NOT NULL` from
+`secret_mount_routes.organization_id`: a secret mount created without an organization belongs to
+the account that owns its workspace, and its route stores NULL there. Nothing else changes and
+nothing is dropped; idempotent. The latest guard is `secret_mount_owners_guard`; the operator must
+vendor this schema and select that guard before rollout. See
+[schema.md](../docs/control-plane/schema.md#secret-mount-owners-migration).

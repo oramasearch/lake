@@ -216,18 +216,26 @@ nlohmann::json to_json(const Grant& grant) {
             {"updated_at", grant.updated_at}};
 }
 
+std::string secret_mount_environment(const SecretMountRoute& route) {
+    return route.organization_id.empty()
+               ? "secrets/" + route.customer_id
+               : "secrets/" + route.customer_id + "/" + route.organization_id;
+}
+
 nlohmann::json to_json(const SecretMountRoute& route) {
     return {{"mount_id", route.mount_id},
             {"customer_id", route.customer_id},
-            {"organization_id", route.organization_id},
+            {"organization_id", nullable(route.organization_id)},
             {"workspace_id", route.workspace_id},
             {"created_at", route.created_at}};
 }
 
 nlohmann::json to_json(const SecretMount& mount) {
+    // The owner: the customer (an account's mount, organization_id null) or an organization.
     return {{"id", mount.id},
             {"customer_id", mount.customer_id},
-            {"organization_id", mount.organization_id},
+            {"owner_type", mount.organization_id.empty() ? "customer" : "organization"},
+            {"organization_id", nullable(mount.organization_id)},
             {"workspace_id", mount.workspace_id},
             {"name", mount.name},
             {"description", mount.description},
@@ -5450,16 +5458,24 @@ Result<SecretMountRoute> InMemoryStore::create_secret_mount_route(const SecretMo
         std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
             return value.object_type == "customer" && value.external_id == input.customer_id;
         });
+    if (customer_object == policy_objects_.end()) {
+        return std::unexpected(StoreError{"invalid_input", "customer_id is unknown"});
+    }
+    // The owner: the customer itself (an account's mount, no organization), or an organization
+    // inside the customer's namespace.
+    const bool account = input.organization_id.empty();
     const auto organization_object =
-        std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
-            return value.object_type == "organization" &&
-                   value.external_id == input.organization_id;
-        });
-    if (customer_object == policy_objects_.end() || organization_object == policy_objects_.end() ||
-        organization_object->parent_id != customer_object->id) {
+        account ? policy_objects_.end()
+                : std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
+                      return value.object_type == "organization" &&
+                             value.external_id == input.organization_id;
+                  });
+    if (!account && (organization_object == policy_objects_.end() ||
+                     organization_object->parent_id != customer_object->id)) {
         return std::unexpected(
             StoreError{"invalid_input", "organization_id is not inside the customer namespace"});
     }
+    const std::string owner_object_id = account ? customer_object->id : organization_object->id;
     const auto workspace = std::ranges::find(workspaces_, input.workspace_id, &Workspace::id);
     if (workspace == workspaces_.end() || workspace->customer_id != input.customer_id ||
         workspace->desired == "deleted") {
@@ -5473,19 +5489,13 @@ Result<SecretMountRoute> InMemoryStore::create_secret_mount_route(const SecretMo
         return std::unexpected(StoreError{"conflict", "secret mount already exists"});
     }
     const std::string now = now_iso8601();
-    const std::string environment_external =
-        "secrets/" + input.customer_id + "/" + input.organization_id;
+    const std::string environment_external = secret_mount_environment(input);
     auto environment = std::ranges::find_if(policy_objects_, [&](const PolicyObject& value) {
         return value.object_type == "environment" && value.external_id == environment_external;
     });
     if (environment == policy_objects_.end()) {
-        policy_objects_.push_back(PolicyObject{new_uuid_v4(),
-                                               "environment",
-                                               environment_external,
-                                               organization_object->id,
-                                               now,
-                                               now,
-                                               true});
+        policy_objects_.push_back(PolicyObject{
+            new_uuid_v4(), "environment", environment_external, owner_object_id, now, now, true});
         environment = std::prev(policy_objects_.end());
     }
     policy_objects_.push_back(PolicyObject{

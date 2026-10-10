@@ -1330,14 +1330,23 @@ SecretTask<control::SecretMount> create_secret_mount(const ApiContext& context,
                                                 "no control-plane store is configured");
     }
     control::Store& store = *context.store;
-    // The organization must be inside the space before anything is written to the space's
-    // workspace, so a caller who names another space's workspace writes nothing there.
-    const auto organization = store.find_policy_object("organization", mount.organization_id);
+    // The owner must be inside the space before anything is written to the space's workspace, so
+    // a caller who names another space's workspace writes nothing there. Without an organization
+    // the owner is the customer itself (an account); with one, the organization must sit in the
+    // customer's namespace.
     const auto customer = store.find_policy_object("customer", mount.customer_id);
-    if (!organization || !customer || organization->parent_id != customer->id) {
+    if (!customer) {
         co_return failure<control::SecretMount>(
-            "invalid_input", "organization_id is not inside the customer namespace",
-            "/organization_id");
+            "invalid_input", "customer_id is unknown", "/customer_id");
+    }
+    if (!mount.organization_id.empty()) {
+        const auto organization = store.find_policy_object("organization", mount.organization_id);
+        if (!organization || organization->parent_id != customer->id) {
+            co_return failure<control::SecretMount>(
+                "invalid_input",
+                "organization_id is not inside the customer namespace",
+                "/organization_id");
+        }
     }
     auto opened = workspace_records(context, mount.customer_id, mount.workspace_id);
     if (!opened) {
@@ -1350,11 +1359,10 @@ SecretTask<control::SecretMount> create_secret_mount(const ApiContext& context,
     mount.created_at = control::record_instant(mount.at_us);
     mount.updated_at = mount.created_at;
 
-    // The name, claimed once in the workspace. A claim whose mount never got its route (a create
-    // that stopped part way) is taken over at the revision read.
-    const std::string claim_key =
-        control::secret_mount_name_key(records, mount.organization_id, mount.name);
-    const std::string claim_lookup = control::secret_mount_name_lookup(mount.organization_id);
+    // The name, claimed once in the workspace for its owner. A claim whose mount never got its
+    // route (a create that stopped part way) is taken over at the revision read.
+    const std::string claim_key = control::secret_mount_name_key(records, mount);
+    const std::string claim_lookup = control::secret_mount_name_lookup(mount);
     auto claimed = control::settled(co_await records.put(
         collection, claim_key, claim_lookup, control::secret_mount_name_claim(mount.id),
         RecordCondition{.if_absent = true}));
@@ -1402,11 +1410,12 @@ SecretTask<control::SecretMount> create_secret_mount(const ApiContext& context,
     auto route = store.create_secret_mount_route(
         {mount.id, mount.customer_id, mount.organization_id, mount.workspace_id, ""});
     if (!route) {
-        co_return Result(std::unexpected(
-            ZettaControlError{route.error().code, route.error().message,
-                              route.error().message.find("organization") != std::string::npos
-                                  ? "/organization_id"
-                                  : "/workspace_id"}));
+        co_return Result(std::unexpected(ZettaControlError{
+            route.error().code,
+            route.error().message,
+            route.error().message.find("organization") != std::string::npos ? "/organization_id"
+            : route.error().message.find("customer") != std::string::npos   ? "/customer_id"
+                                                                            : "/workspace_id"}));
     }
     co_return Result(std::move(mount));
 }
