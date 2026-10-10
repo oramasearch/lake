@@ -12,6 +12,7 @@ can do nothing the API cannot.
 - The Ship pages (Models, Search Indexes, Search Index, Services): [ship.md](ship.md).
 - How it works on a phone, and how to check it at 390×844: [mobile-web.md](mobile-web.md).
 - Data → Transcripts, with dictation, recording and upload: [transcripts.md](transcripts.md).
+- Data → Drives, one file manager over repository, workspace-files and virtual drives: [drives.md](drives.md).
 - The Organization, Administration and Account pages: [organization.md](organization.md).
 - The capabilities added for the app (`viewer`, `my_permissions`, `list_packages`, `list_docs`,
   `get_doc`, `mcp_setup`, `resolve_model`, `latest_agent_task`, `compile_pipeline`,
@@ -25,7 +26,7 @@ can do nothing the API cannot.
 | `/ui/<file>` | the content-hashed scripts, styles and fonts Vite built, `public, max-age=31536000, immutable` |
 | `/v1/<capability>`, `/w/<workspace_id>/v1/<capability>`, `/mcp` | the API ([../api/README.md](../api/README.md)) |
 | `POST /session`, `POST /logout`, `POST /identity/clerk-session`, the OAuth callback | sign-in and sign-out, which set or clear the HttpOnly `lake_session` cookie |
-| `/file/raw`, `/file/download`, `/drive/download`, `/exports/download`, `/share/<token>/download` | bytes, as attachments or plain text |
+| `/file/raw`, `/file/download`, `/drive/download`, `/drive/files/download`, `/exports/download`, `/share/<token>/download` | bytes, as attachments or plain text (a workspace file streamed, [../api/drives.md](../api/drives.md#uploads)) |
 | `/apps/<id>/*`, custom sign-in domains, `/apps/authorize`, `/v1/apps/auth` | an identity application's own hosted pages, still rendered by lake ([identity.md](identity.md#application-identity)) |
 | `/llms.txt`, `/llms-full.txt`, `/skills/…`, `/developer/mcp/skill`, `/v1/openapi.json` | documents for agents and API clients |
 
@@ -126,6 +127,7 @@ Workspaces)
 | `/design/agent-library` | `design/AgentLibraryPage.tsx` | the agents Orama provides, as cards (search, filter by availability) | `list_agent_library` |
 | `/train/agents`, `/train/agent`, `/train/agents/new` | `train/AgentsPage.tsx`, `AgentPage.tsx`, `FactoryPage.tsx` | the space's agents, one agent, the Agent Factory | `schedule_agent`, `unschedule_agent`, `launch_agent`, `stop_agent_launch`, `list_agent_launches`, `list_agent_schedules`, `approve_agent_proposal`; engine `list_agents`, `create_agent`, `get_agent`, `update_agent`, `delete_agent`, `agent_training_status` |
 | `/train/data`, `/train/dataset`, `/train/query` | `train/DataPage.tsx`, `DatasetPage.tsx`, `QueryPage.tsx` | load data, connections, datasets, storage; one dataset; read-only SQL | `list_stores`, `create_store`, `delete_store`, `store_connection`, `list_services`, `connect_service`, `workspace_sql`; engine connection, dataset and generator calls |
+| `/drives`, `/drives/drive?id=&folder=` | `drives/DrivesPage.tsx`, `DrivePage.tsx`, `NewDrive.tsx`, `FolderPicker.tsx`, `ShortcutDialog.tsx` | Data → Drives: the workspace's drives and recent files; one drive as a file manager over its storage (uploads of files and folders, selection, drag to move, shortcuts, drive settings) ([drives.md](drives.md)) | `list_drives`, `get_drive`, `create_drive`, `rename_drive`, `delete_drive`, `recent_drive_entries`, the entry and upload capabilities, or `drive_browse` and the drive_* writes for a repository drive |
 | `/transcripts`, `/transcript?id=` | `transcripts/TranscriptsPage.tsx`, `TranscriptPage.tsx`, `NewTranscript.tsx` | Data → Transcripts: record, upload or paste a transcript; search, read, edit, copy, delete, Ask Orama about it ([transcripts.md](transcripts.md)) | `list_transcripts`, `get_transcript`, `create_transcript`, `update_transcript`, `delete_transcript`, `transcribe` |
 | `/train/runs`, `/train/run` | `train/RunsPage.tsx`, `RunPage.tsx` | pipeline runs; one run's report, lineage, log and trace | engine `list_runs`, `list_studies`, `get_run`, `get_run_report`, `list_traces` |
 | `/train/experiments`, `/train/experiment`, `/train/experiment/run`, `/train/experiments/compare` | `experiments/*.tsx` | studies and runs with live charts ([experiments.md](experiments.md)) | see experiments.md |

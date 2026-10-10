@@ -6,11 +6,11 @@ if(NOT DEFINED INPUT_DIR OR NOT DEFINED OUTPUT_FILE)
 endif()
 
 # One entry per section, "<Section>|<slug> <slug> ...", in reading order. A slug ending in "?" is
-# optional: it is embedded when its file exists and skipped otherwise. `drives?` is Drive's page
-# (docs/guide/drives.md), written on its own branch; it slots in after the repository pages.
+# optional: it is embedded when its file exists and skipped otherwise (a page written on its own
+# branch can take its slot before it lands).
 set(GUIDE_SECTIONS
   "Get Started|index concepts workspaces account ask-orama phone"
-  "Data|repositories repository-collaboration repository-settings drives? sharing search load-data transcripts"
+  "Data|repositories repository-collaboration repository-settings drives sharing search load-data transcripts"
   "Design|design solutions"
   "Train|train agents experiments streams"
   "Ship|ship apps registry deployments services"

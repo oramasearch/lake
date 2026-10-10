@@ -24,7 +24,7 @@ may wrap across source lines.
 | Data | `repositories` | Repositories |
 | | `repository-collaboration` | Reviews, Issues and Releases |
 | | `repository-settings` | Branch Protection, Webhooks, Import and Export |
-| | `drives` | Drive (optional slot: written on its own branch, embedded once `drives.md` exists) |
+| | `drives` | Drives |
 | | `sharing` | Sharing and Shared with Me |
 | | `search` | Search |
 | | `load-data` | Datasets and Loading Data |

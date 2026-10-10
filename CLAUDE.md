@@ -42,6 +42,20 @@ records in the workspace Zetta, from a recording, uploaded audio, a cleaned `.vt
 text. The audio is never kept. Not deployed; `Lake/prod` needs the key in `spec.env`
 (`docs/deployment/aks.md#speech-to-text-key`). See `docs/api/transcripts.md`.
 
+Drives follow (lake#561, no migration): a workspace's drives are sealed `lake_drives` records that
+keep files in a repository (a new one gets its top folder marker as its first change, so `main`
+exists for every drive_* capability), as workspace files, or as shortcuts only (virtual). Workspace
+files are `lake_drive_entries` records, and each file's bytes one object under an opaque key in the
+workspace Zetta's `lake_files` bucket, sealed in 1 MiB AES-256-GCM blocks with nonces derived from
+each block (keys from `LAKE_INSTANCE_KEK` per workspace, not the workspace store's data key), so a
+resent chunk appends identical bytes, appends are durable, the bucket takes no lease, and a move
+never copies bytes. Uploads go in 1 MiB-aligned chunks (`begin_drive_upload`, `append_drive_upload`,
+`finish_drive_upload`, which records the SHA-256 read back); `GET /drive/files/download` streams a
+file after `get_drive_entry` authorizes it. Shortcuts to repositories, repository paths, drive
+items and transcripts say when they break. Data → Drives is one file manager over a
+`DriveStorage` interface with three implementations. `lake_files` has no quota yet. Not deployed.
+See `docs/api/drives.md` and `docs/ui/drives.md`.
+
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in
 [`docs/build/container-image.md`](docs/build/container-image.md).

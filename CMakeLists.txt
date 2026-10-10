@@ -55,7 +55,7 @@ add_custom_command(
   VERBATIM)
 
 # The Docs section's guides (docs/guide/*.md, lake#252), embedded so /docs needs no files at run time.
-# CONFIGURE_DEPENDS: a new page (an optional slug such as drives) is picked up without a reconfigure.
+# CONFIGURE_DEPENDS: a new page (an optional slug) is picked up without a reconfigure.
 file(GLOB LAKE_GUIDE_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/docs/guide/*.md")
 set(LAKE_EMBEDDED_GUIDE_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/web_ui_guide.cpp")
 add_custom_command(

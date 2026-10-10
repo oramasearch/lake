@@ -17,7 +17,7 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
   (`docs/api/README.md`). The app can do nothing the API cannot. The exceptions are the
   sign-in routes that set or clear the HttpOnly `lake_session` cookie (`POST /session`,
   `POST /logout`, `POST /identity/clerk-session`, the OAuth callback) and the download routes
-  that answer bytes (`/file/raw`, `/file/download`, `/drive/download`, `/exports/download`,
+  that answer bytes (`/file/raw`, `/file/download`, `/drive/download`, `/drive/files/download`, `/exports/download`,
   `/share/:token/download`).
 - **The credential is the cookie.** Sign-in sets `lake_session`; the page never sees or stores the
   secret. A 401 shows *Your session has ended* with **Sign in again**, and the page stays as it was.
@@ -44,6 +44,7 @@ Orama design tokens, the same IBM Plex faces and the same component classes the 
 | `src/lib/phone.ts`, `src/lib/sheet.ts`, `src/lib/phoneSheet.ts`, `src/styles/phone.css` | Lake on a phone, ported from rev-os: recording formats, the keyboard, the counted page lock, `useIsPhone`, `usePhoneSheet`, touch targets and 16 px fields ([mobile-web.md](mobile-web.md)). |
 | `src/lib/dictation.ts`, `src/components/dictation/Dictate.tsx`, `src/components/phone/FromYourPhone.tsx` | The microphone (`useRecorder`, `DictateButton`, `RecordingBar`) sending to `transcribe`, and the help for bringing a recording from a phone. |
 | `src/lib/transcripts.ts`, `src/pages/transcripts/` | Data → Transcripts ([transcripts.md](transcripts.md)). |
+| `src/pages/drives/` | Data → Drives: `storage.ts` (the `DriveStorage` interface and its three implementations), `paths.ts` and `targets.ts` (pure, tested by `tests/drives.test.ts`) ([drives.md](drives.md)). |
 | `src/lib/ask.ts`, `src/components/follow.tsx` | `openAsk` (a page opens Ask Orama about something) and `useFollow` (a conversation follows new answers unless the person scrolled up). |
 
 ## The look
