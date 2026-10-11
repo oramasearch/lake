@@ -4455,8 +4455,17 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     const std::string capability = proposal.value("capability", std::string());
     context.audit_details = {
         {"ask_confirm", true}, {"conversation_id", conversation_id}, {"capability", capability}};
-    const ApiResult done = called(
-        co_await call_capability(context, capability, proposal.value("input", json::object())));
+    // A proposal runs in the conversation's workspace when its input names none (an MCP
+    // connection's call_mcp_tool from Ask Orama, lake#652).
+    json proposed = proposal.value("input", json::object());
+    if (proposed.is_object() && !proposed.contains("workspace_id") && context.registry != nullptr) {
+        if (const auto target = context.registry->find(capability);
+            target && target->input_schema.contains("properties") &&
+            target->input_schema.at("properties").contains("workspace_id")) {
+            proposed["workspace_id"] = workspace_id;
+        }
+    }
+    const ApiResult done = called(co_await call_capability(context, capability, proposed));
     context.audit_details["ok"] = done.ok;
     auto outcome = control::settled(co_await append_message(
         context,

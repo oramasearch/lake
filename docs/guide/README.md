@@ -29,6 +29,7 @@ may wrap across source lines.
 | | `search` | Search |
 | | `load-data` | Datasets and Loading Data |
 | | `transcripts` | Transcripts and Speech-to-Text |
+| | `mcp-connections` | MCP Connections |
 | Design | `design` | AI Projects and Pipelines |
 | | `solutions` | AI Solutions, Methodologies and Opportunities |
 | Train | `train` | Train a Model |

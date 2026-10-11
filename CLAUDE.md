@@ -77,6 +77,20 @@ Orama's answers the new `forbidden` (403). Lake's `create_solution` is not the e
 the project and its first pipeline from the composed methodology, since the engine composes the
 governed foundation only for catalogue ids. Not deployed. See `docs/api/solutions.md`.
 
+A workspace is the client of remote MCP servers (decision 60, lake#652, no migration): Lake's own
+client (`McpClient`, Streamable HTTP and HTTP+SSE, every exchange bounded) over the server's
+transport, which reaches public addresses only (`LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1` for local
+development); each connection a sealed `lake_mcp_connections` record in the workspace Zetta, its
+bearer token or OAuth refresh token a workspace secret Lake reads server-side and never answers;
+fifteen capabilities (`create_mcp_connection` … `create_mcp_connection_agent`), a tool allowed by a
+person and either a read or a change, a change a person's or an auto-approved agent's (per tool and
+agent, audited), calls audited in the workspace and metered (`calls`, `transfer`); OAuth 2.1 sign-in
+(RFC 9728/8414 discovery, RFC 7591 registration, PKCE S256, refresh rotation); opt-in re-export
+through `/w/<workspace>/mcp` as `<prefix>__<tool>`; a connection's agent (skill `mcp:<prefix>`,
+needing the zetta change) with input and output streams and mirrored notifications, run by the store
+root's owner (`McpStreamWorker`); Data → MCP Connections in the web app. Not deployed. See
+`docs/api/mcp-connections.md` and `docs/ui/mcp-connections.md`.
+
 Every future deployment image receives OCI revision and creation labels. The binary reports the
 same embedded revision through `GET /v1/server_info`; details are in
 [`docs/build/container-image.md`](docs/build/container-image.md).

@@ -92,7 +92,7 @@ conversation) and is audited in that workspace's log.
   the status is final, then rereads the conversation with `get_ask_conversation`.
 - **`confirm_ask_proposal`** takes `payload.proposals[index]` of that stored message (anything else
   is `not_found` *That proposal is not in this conversation.*), calls its capability with its input
-  as the person, and stores *Done: {capability}.* or *That did not work: {error}* with
+  as the person (in the conversation's workspace when the input names none, lake#652), and stores *Done: {capability}.* or *That did not work: {error}* with
   `{agent: "agent-ask-orama", confirmed: {message_id, index}, ok}`. The value's `message_id` is
   that outcome message. A capability that refuses is still a successful confirm with `ok: false`.
   The call's own audit event carries `{ask_confirm: true, conversation_id, capability, ok}`; the
