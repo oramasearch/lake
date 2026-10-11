@@ -540,6 +540,7 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
               {{"repository_id", repository.id}, {"ref", "main"}, {"path", "shared/sample.txt"}});
     http.call("drive_share_people",
               {{"repository_id", repository.id}, {"ref", "main"}, {"path", "shared"}});
+    http.call("issue_assignees", {{"repository_id", repository.id}});
     const auto link = http.call("create_drive_share_link",
                                 {{"repository_id", repository.id},
                                  {"workspace_id", experiments.id},

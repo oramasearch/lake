@@ -313,6 +313,7 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "import_github_repository",
     "import_repository",
     "issue_application_jwt",
+    "issue_assignees",
     "latest_agent_task",
     "launch_agent",
     "list_agent_launches",

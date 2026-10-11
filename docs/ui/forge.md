@@ -101,13 +101,41 @@ graph result rather than repository automation configuration.
 ## Issues
 
 `/issues?repository_id=<id>[&state=&label=&assignee=]` (`IssuesPage.tsx`) lists forge issues.
-`list_issues` takes no filters, so the page filters by state, label and assignee itself; the
-filters are in the URL. Each result shows its state, labels, assignees, creation date and compact
-identity. A filter combination with no match has its own empty result.
+`list_issues` takes no filters, so the page filters itself, and the filters are in the URL:
+
+- **Open, Closed and All** are `StateTabs` with their counts. No `state` is Open (lake#598; before,
+  no `state` meant every state), `state=closed` and `state=all` the others.
+- **Label** and **Assignee** chips, each with its count; a label chip in a row filters by it too.
+- **Search** narrows by title or issue id, in the page only.
+
+Each row shows the title, its compact identity, when it was opened and by whom, its state, its
+labels (coloured from their names, `labelTone` in `issues.ts`; lake keeps no label colours), its
+assignees by name and when it last changed. The empty states say whether the repository has no
+issues, the tab has none, or the filters match none.
+
+**New issue** (the header's primary action, lake#598) opens a drawer (`NewIssue.tsx`): a title, a
+Markdown description with **Write** and **Preview** tabs, labels (the repository's labels to toggle
+and a new one typed in) and assignees (the repository's people from `issue_assignees`). It
+calls `create_issue` and opens the new issue.
 
 `/issue?repository_id=<id>&id=<issue>` (`IssuePage.tsx`) finds the issue in `list_issues` (lake has
-no `get_issue`) and shows its body and discussion (`list_issue_comments`) as Markdown, then labels,
-assignees and linked change identities.
+no `get_issue`). The header carries the title, the state chip, the identity, who opened it and
+when, the comment count, and **Edit**. The main column is the conversation, oldest first: the
+description, then each comment (`list_issue_comments`) as Markdown under its author's name and time,
+then **Add a Comment** with a preview, **Comment**, and **Close with comment** or **Reopen with
+comment**. **Edit** replaces the description with a title field and the Markdown editor. The side
+column has **State** (close or reopen), **Labels** and **Assignees** (each changed in place with the
+pencil and saved), **Details** and **References** (linked changes and paths).
+
+**Writes and permissions (lake#598).** Every write is the capability REST and MCP call:
+`create_issue`, `create_issue_comment`, and `update_issue` sending only the fields the person changed
+(`issueChanges`), so two people changing different fields both keep their change. The pages ask
+`my_permissions` for `write` on the repository, the action those capabilities check. Without it the
+controls stay visible but disabled, with the reason as their tooltip and above the list or the
+conversation: signed out, *Sign in with write access…*; signed in, *You can read these issues…*. A
+refusal from the capability is shown where the action was taken. Names come from
+`issue_assignees`, which needs `write`; a reader sees the compact identity instead, and the
+viewer reads as "you". Pure logic is in `issues.ts` and tested in `frontend/tests/issues.test.ts`.
 
 ## Releases, artifacts, webhooks and branch protection
 

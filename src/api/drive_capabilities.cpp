@@ -28,6 +28,7 @@
 #include "lake/control/store.hpp"
 #include "lake/control/workspace_records.hpp"
 #include "lake/search/index.hpp"
+#include "repository_people.hpp"
 #include "workspace_records_api.hpp"
 
 namespace lake::api {
@@ -965,96 +966,17 @@ json drive_path_schema() {
 
 // ---- Sharing with a person (lake#585) ----
 
-// Someone a folder can be shared with: a member of the repository's space, or the space's own
-// owner (a person, or the organization itself).
-struct Recipient {
-    std::string taap_id;
-    std::string kind; // user or organization
-    std::string display_name;
-    std::string email;
-    std::string handle;
-};
+// Someone a folder can be shared with: one of the repository's people (repository_people.hpp).
+using Recipient = RepositoryPerson;
 
 json recipient_json(const Recipient& recipient) {
-    return {{"taap_id", recipient.taap_id},
-            {"kind", recipient.kind},
-            {"display_name", recipient.display_name},
-            {"email", recipient.email},
-            {"handle", recipient.handle}};
+    return repository_person_json(recipient);
 }
 
 std::string lowercase(std::string value) {
     std::ranges::transform(
         value, value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value;
-}
-
-// The people of the repository's space: its owner, and for an organization the organization and
-// every person who is a member of it (or of one of its teams), each with their handle.
-std::expected<std::vector<Recipient>, ApiError>
-space_people(ApiContext& context, const control::Repository& repository) {
-    const auto failure = [](const control::StoreError& error) {
-        return std::unexpected(ApiError{error.code, error.message, {}});
-    };
-    const auto customer = context.store->get_customer(repository.customer_id);
-    if (!customer) {
-        return failure(customer.error());
-    }
-    std::vector<Recipient> people;
-    std::set<std::string> seen;
-    const auto add_user = [&](const std::string& user_id) -> std::optional<ApiError> {
-        const auto user = context.store->get_user(user_id);
-        if (!user) {
-            return user.error().code == "not_found"
-                       ? std::nullopt
-                       : std::optional<ApiError>(
-                             ApiError{user.error().code, user.error().message, {}});
-        }
-        if (user->taap_id.empty() || !seen.insert(user->taap_id).second) {
-            return std::nullopt;
-        }
-        std::string handle;
-        if (const auto own = context.store->list_customers(10, user->id); own) {
-            for (const control::Customer& space : *own) {
-                if (space.customer_type == "individual") {
-                    handle = space.name;
-                    break;
-                }
-            }
-        }
-        people.push_back({user->taap_id, "user", user->display_name, user->email, handle});
-        return std::nullopt;
-    };
-    if (customer->customer_type == "individual") {
-        if (auto error = add_user(customer->user_id)) {
-            return std::unexpected(*error);
-        }
-        return people;
-    }
-    const auto organization = context.store->get_organization(customer->organization_id);
-    if (!organization) {
-        return failure(organization.error());
-    }
-    if (!organization->taap_id.empty() && seen.insert(organization->taap_id).second) {
-        people.push_back({organization->taap_id,
-                          "organization",
-                          organization->display_name,
-                          "",
-                          customer->name});
-    }
-    const auto members = context.store->list_memberships(customer->organization_id, "", 1000);
-    if (!members) {
-        return failure(members.error());
-    }
-    for (const control::Membership& member : *members) {
-        if (member.principal_type != "user") {
-            continue;
-        }
-        if (auto error = add_user(member.principal_id)) {
-            return std::unexpected(*error);
-        }
-    }
-    return people;
 }
 
 // The person `recipient` names: an email, a handle (with or without "@") or a TAAP id, among the
@@ -1072,7 +994,7 @@ std::expected<Recipient, ApiError> resolve_recipient(ApiContext& context,
         return std::unexpected(
             ApiError{"invalid_input", "name the person by their email or handle", "/recipient"});
     }
-    const auto people = space_people(context, repository);
+    const auto people = repository_people(context, repository);
     if (!people) {
         return std::unexpected(people.error());
     }
@@ -1999,7 +1921,7 @@ void register_drive_capabilities(Registry& registry) {
             if (!repository) {
                 return store_error(repository.error());
             }
-            const auto people = space_people(context, *repository);
+            const auto people = repository_people(context, *repository);
             if (!people) {
                 return ApiResult::failure(people.error().code, people.error().message);
             }

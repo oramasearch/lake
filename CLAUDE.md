@@ -141,7 +141,10 @@ pass claims due routes and reads only the workspaces that hold them. See
 Forge records follow (lake#341, migration `0054`): issues, reviews, comments, releases, webhooks,
 exports and branch protection rules live in the workspace Zetta of their repository's workspace,
 found by repository and kind; the push path reads branch protection there once before the push
-and refuses reference updates when it cannot. See `docs/api/forge.md`.
+and refuses reference updates when it cannot. See `docs/api/forge.md`. The web app opens, discusses,
+edits, labels, assigns, closes and reopens issues through the same capabilities (lake#598, not
+deployed); `create_issue` and `create_issue_comment` record the caller as `author`, and
+`issue_assignees` lists the repository's people (`docs/ui/forge.md#issues`).
 Application users and organizations follow (lake#353, lake#354, migration `0055`): they live in the
 application's workspace Zetta, with a pool user's email and an organization's TAAP identity and name
 as claims written `if_absent`; every session issued in an application's pool is checked against the

@@ -68,6 +68,23 @@ references. A reference is an object such as `{ "change": "..." }` or `{ "path":
 `update_issue` changes its fields or its state (`open` or `closed`), and `create_issue_comment`
 adds Markdown discussion after confirming that the issue belongs to the repository.
 
+**Author (lake#598).** `create_issue` and `create_issue_comment` record the caller's TAAP identity
+as the record's `author`. Lake sets it; the input cannot name one (the schemas refuse an `author`
+member), and `update_issue` keeps it. Records written before lake#598 have no `author`, and a GitHub
+import keeps the GitHub login it read. Reviews and review comments are unchanged: liquid's forge
+client reads a review comment's `author` as an actor object.
+
+**People to assign (lake#598).** `issue_assignees` (`repository_id`) answers
+`{"people": [{taap_id, kind, display_name, email, handle}]}`: the person who owns the repository's
+workspace, or for an organization's workspace the organization and each person who is a member of
+it or of one of its teams, the same people `drive_share_people` lists for a folder
+(`src/api/repository_people.cpp`). `assignees` holds their `taap_id`s. It needs `write` on the
+repository, as assigning does, so a reader cannot list a workspace's people and their emails;
+lake does not check that an assignee is one of them. Its audit goes to the repository's workspace.
+
+Labels are free text on each issue; lake keeps no label list or colours. The web app derives a
+label's colour from its name (`labelTone`, `frontend/src/pages/repositories/issues.ts`).
+
 `create_review` binds an open review to exactly one liquid `change_id`. `update_review` transitions
 that review to `approved` or `closed`. `create_review_comment` verifies that its parent review is
 in the same repository and accepts an anchor value with required `change`, `path`, `line`, and

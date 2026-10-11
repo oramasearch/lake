@@ -4,9 +4,10 @@ A repository is also where a team works together: changes are reviewed before th
 tracked as issues, conflicting edits are resolved, build results are recorded with their evidence,
 and releases tie a tag to verified artifacts. This page covers each of those.
 
-The web app shows all of them on the repository's tabs. Creating and changing issues, reviews and
-releases is done through the API, MCP or `liquid review`; the pages read what those calls wrote.
-The exceptions on the page are resolving a conflict and retrying a webhook delivery.
+The web app shows all of them on the repository's tabs. Issues are opened, discussed and changed on
+the **Issues** tab as well as through the API and MCP. Creating and changing reviews and releases is
+done through the API, MCP or `liquid review`; the pages read what those calls wrote. The other
+writes on the pages are resolving a conflict and retrying a webhook delivery.
 
 ## Concepts
 
@@ -60,22 +61,41 @@ when an `approved` review names exactly the change being pushed
 
 1. Open the repository's **Issues** tab. Figures count **Open**, **Closed**, **Labels** and
    **Unassigned** issues.
-2. Filter by state, label and assignee; the filters stay in the address, so the link can be shared.
-3. Open an issue for its body and discussion (Markdown), its labels, assignees and linked changes.
+2. The **Open**, **Closed** and **All** tabs choose the state; the **Label** and **Assignee** chips
+   and **Search issues…** narrow the list. The tab and the chips stay in the address, so the link
+   can be shared.
+3. Open an issue for its description and conversation (Markdown), its labels, assignees and the
+   changes and paths it references.
 
-Create and update issues through the API:
+Each action in the web app is the same call as the API and MCP, and needs the same permission
+(`write` on the repository). Without it, the buttons stay disabled and say why.
+
+| To | In the web app | REST | MCP |
+|---|---|---|---|
+| Open an issue | **Issues** → **New issue**: a **Title**, a **Description** (Markdown; **Preview** shows it rendered), **Labels** (choose one the repository uses or type a new one and press **Add**) and **Assignees** (people of the repository's workspace) → **Open issue**. The new issue opens. | `POST /v1/create_issue` | `create_issue` |
+| Comment | On the issue, type under **Add a Comment** → **Comment** | `POST /v1/create_issue_comment` | `create_issue_comment` |
+| Edit the title or description | **Edit** in the header → change them → **Save** | `POST /v1/update_issue` with `title`, `body` | `update_issue` |
+| Change labels | The pencil on **Labels** → toggle or add labels → **Save** | `POST /v1/update_issue` with `labels` | `update_issue` |
+| Change assignees | The pencil on **Assignees** → tick the people → **Save** | `POST /v1/update_issue` with `assignees` | `update_issue` |
+| Close or reopen | **Close issue** or **Reopen issue** under **State**; with text in the comment box, **Close with comment** posts the comment first | `POST /v1/update_issue` with `state` | `update_issue` |
+| See who can be assigned | The **Assignees** list of the drawer or the side card | `GET /v1/issue_assignees?repository_id=<repository id>` | `issue_assignees` |
+
+The calls' bodies:
 
 - Create: `POST /v1/create_issue` with
   `{"repository_id": "<repository id>", "title": "Import fails on an empty CSV", "body": "Steps to reproduce: …", "labels": ["bug"], "assignees": ["<assignee TAAP id>"], "references": [{"path": "src/import.cpp"}]}`
   (MCP `create_issue`). Only `title` is required with `repository_id`. A reference is an object
-  naming a `change` or a `path`.
+  naming a `change` or a `path`. Lake records you as the issue's `author`.
 - Comment: `POST /v1/create_issue_comment` with
   `{"repository_id": "<repository id>", "issue_id": "<issue id>", "body": "Fixed by the change that adds the empty-file check."}`
-  (MCP `create_issue_comment`).
+  (MCP `create_issue_comment`). Lake records you as the comment's `author`.
 - Close or edit: `POST /v1/update_issue` with
   `{"repository_id": "<repository id>", "issue_id": "<issue id>", "state": "closed"}`
   (MCP `update_issue`). The same call changes `title`, `body`, `labels`, `assignees` or
-  `references`.
+  `references`; send only what changes.
+- People to assign: `GET /v1/issue_assignees?repository_id=<repository id>` (MCP
+  `issue_assignees`) answers `people`, each with the `taap_id` that `assignees` takes, a
+  display name, email and handle.
 - Read: `GET /v1/list_issues?repository_id=<repository id>` and
   `GET /v1/list_issue_comments?repository_id=<repository id>` (MCP `list_issues`,
   `list_issue_comments`). Lists are newest first; `limit` caps them.
@@ -144,6 +164,9 @@ Read releases with `GET /v1/list_releases?repository_id=<repository id>` (MCP `l
 - Issues, reviews, comments and releases live in the repository's workspace: while it is not ready
   they cannot be read or written, and they are deleted with it.
 - There is no single-issue read; `list_issues` returns them all and the page finds one in the list.
+- Labels are free text on each issue. Lake keeps no list of labels or their colours; the web app
+  colours a label from its name.
+- Issues and comments written before lake#598 have no recorded author.
 - A review covers exactly one change. Approving an ancestor or a different change does not satisfy
   a review rule.
 - Build-result pages hold 1 to 1,000 results (100 by default).
@@ -156,6 +179,7 @@ Read releases with `GET /v1/list_releases?repository_id=<repository id>` (MCP `l
 | Read issues, reviews, comments and releases of a public repository | nothing; signed out works |
 | Read them on a private or organization repository | `read` on the repository |
 | Create or update issues, reviews, comments and releases | `write` on the repository |
+| List the people an issue can be assigned to | `write` on the repository |
 | Resolve a conflict | `write` on the repository |
 
 ## Troubleshooting
@@ -168,6 +192,8 @@ Read releases with `GET /v1/list_releases?repository_id=<repository id>` (MCP `l
 | `not_found` at `/issue_id` or `/review_id` | The id belongs to another repository, is of another kind, or is not a UUID. |
 | `create_release` refused | A chosen build result has no verified attestation. Rebuild with liquid so the result is attested, or leave it out. |
 | `invalid_input` at `/resolution` | The value is not one of `left`, `right`, `accept_proposal` or `blob`, or `blob` is missing its bytes. |
+| **New issue**, **Comment**, **Edit** or **Close issue** is disabled | Its tooltip says why: you are signed out, or you can read the repository but not write it. Sign in, or ask its owner for a `write` grant ([Grants and Effective Access](/docs/access)). |
+| An assignee shows as a shortened identity | Names come from the repository's people, which only someone with `write` can list; the identity is the TAAP id the issue holds. |
 | `unauthorized` | You can read the repository but not write it. Ask its owner for a `write` grant ([Grants and Effective Access](/docs/access)). |
 
 ## Related Pages

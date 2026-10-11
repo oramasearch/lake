@@ -13,8 +13,8 @@ authorization and audit recording have one path. Their presentation rules are in
 | File | `/file?repository_id=<id>&ref=<ref>&path=<path>` | `FilePage.tsx` | `repository_file`, `list_changes`, `change_diff` | highlighted or plain source, line/range anchors, blame, backing blob, raw/download links |
 | Change log | `/changes?repository_id=<id>` | `ChangesPage.tsx` | `list_changes` | change identities and metadata |
 | Change | `/change?repository_id=<id>&id=<change>` | `ChangePage.tsx` | `get_change`, `change_diff`, `list_reviews`, `list_review_comments`, `list_artifacts` | title and message, compact identities, state, file stats, text hunks, anchored comments, conflict values, checks and attestations |
-| Issues | `/issues?repository_id=<id>` | `IssuesPage.tsx` | `list_issues` | state, labels and assignees, filtered in the page |
-| Issue | `/issue?repository_id=<id>&id=<issue>` | `IssuePage.tsx` | `list_issues`, `list_issue_comments` | body and discussion, labels, assignees, linked changes |
+| Issues | `/issues?repository_id=<id>` | `IssuesPage.tsx`, `NewIssue.tsx` | `list_issues`, `my_permissions`, `issue_assignees`, `create_issue` | Open, Closed and All tabs, label and assignee chips and search, filtered in the page; New issue (a drawer) |
+| Issue | `/issue?repository_id=<id>&id=<issue>` | `IssuePage.tsx` | `list_issues`, `list_issue_comments`, `my_permissions`, `issue_assignees`, `update_issue`, `create_issue_comment` | the description and conversation with a comment box, editing, labels, assignees, close and reopen, references |
 | Releases | `/releases?repository_id=<id>` | `ReleasesPage.tsx` | `list_releases` | notes, tag and change identity, artifact outputs and verified attestations |
 | Webhooks | `/webhooks?repository_id=<id>` | `WebhooksPage.tsx` | `list_webhooks`, `list_webhook_deliveries`, `retry_webhook_delivery` | subscriptions, durable delivery attempts, failed-attempt retry |
 | Branch protection | `/protection?repository_id=<id>` | `ProtectionPage.tsx` | `list_branch_protections`, `audit` | ref rules and their signed refused-update records |
