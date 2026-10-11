@@ -8,7 +8,7 @@ report is the repository usage page, `GET /metering?customer_id=<uuid>`. Usage o
 dimension per workspace with limits and the Usage dashboard, follows
 ([below](#usage-over-time), lake#564); it keeps no price, plan or bill.
 
-Until lake#444 the report covered only repository bytes and repository build results, so a space
+Until lake#444 the report covered only repository bytes and repository build results, so an account
 holding 12,000-row datasets, trained models and built images showed a few kilobytes and zero
 compute. The summary measures the rest where it lives and names what is still not measured.
 
@@ -24,27 +24,27 @@ Since migration `0053_metering_workspaces` lake no longer writes or reads `meter
 |---|---|---|
 | Transfer | `lake_metering_usage` in the repository's workspace: one sealed record per workspace and UTC hour | `transfer_in_bytes` counts binary request-body bytes accepted by missing-object, push, pull and chunk-upload paths; `transfer_out_bytes` counts binary response bytes of missing-object, push, pull and ranged chunk-read paths. Exact counters, added with a conditional write. |
 | Repository build compute | `lake_metering_build_records` in the repository's workspace: one sealed record per build result | Sum sandbox, execution, hash and store milliseconds of the result, round up to a whole second, and record each result id once (`if_absent`). Queue time is excluded. |
-| Repository storage | Nowhere: measured on every read | Sum the uncompressed lengths in libliquid pack-frame metadata once per digest across `LAKE_STORE_ROOT/<customer>/store` (while any workspace of the space is not switched), plus each switched workspace's bucket `usage` (lake#380). Content-addressed duplicates in the space store are counted once. |
+| Repository storage | Nowhere: measured on every read | Sum the uncompressed lengths in libliquid pack-frame metadata once per digest across `LAKE_STORE_ROOT/<customer>/store` (while any workspace of the account is not switched), plus each switched workspace's bucket `usage` (lake#380). Content-addressed duplicates in the account store are counted once. |
 
-Both collections are found by the space (`customer:<id>`) and stamped with the start of their
+Both collections are found by the account (`customer:<id>`) and stamped with the start of their
 hour, and they hold only sealed values and blind indexes
 ([workspace records](../architecture/workspace-records.md)). They carry no price.
 
-**Storage stays a space-level measurement.** Before a workspace is switched, one libliquid store
-holds every repository of its space, and a digest shared by two repositories is stored once, so its
+**Storage stays an account-level measurement.** Before a workspace is switched, one libliquid store
+holds every repository of its account, and a digest shared by two repositories is stored once, so its
 bytes cannot be split between workspaces. Repository storage is measured live on each read and no
-hourly history of it is kept anywhere, so nothing space-level is persisted centrally. With lake#380
+hourly history of it is kept anywhere, so nothing account-level is persisted centrally. With lake#380
 a switched workspace has its own store in its workspace Zetta
-([architecture/workspace-store.md](../architecture/workspace-store.md)): a space's storage is its
-space store (measured as before) while any of its workspaces is not switched, plus each switched
-workspace's bucket `usage` (the encrypted bytes Zetta holds). The space quota is enforced against
-that sum, and each workspace's bucket is created with the space's quota as its own. While a space is
+([architecture/workspace-store.md](../architecture/workspace-store.md)): an account's storage is its
+account store (measured as before) while any of its workspaces is not switched, plus each switched
+workspace's bucket `usage` (the encrypted bytes Zetta holds). The account quota is enforced against
+that sum, and each workspace's bucket is created with the account's quota as its own. While an account is
 part way through the move, the moved repositories are counted in both stores.
 
 ### Transfer off the request path
 
 A sync request never waits for a workspace. It adds its bytes to an in-process counter keyed by
-space, workspace and hour (`MeteringRecorder`, `include/lake/api/metering_recorder.hpp`), and the
+account, workspace and hour (`MeteringRecorder`, `include/lake/api/metering_recorder.hpp`), and the
 owner loop writes the counters every `ServerOptions::metering_flush_interval` (five seconds), and
 sooner when half the bound is held. Each write reads the hour's record and puts it back with
 `if_revision` (or `if_absent` for a new hour), rereading on a `409`, so several lake replicas adding
@@ -66,7 +66,7 @@ finish, before the stores close.
   (SIGTERM) flushes first. Build records lose nothing: the next usage read finds the result in its
   repository again and writes it.
 - **Reads see pending transfer.** A usage read adds this process's unflushed counters for the
-  space. Another replica's unflushed counters appear after its next flush.
+  account. Another replica's unflushed counters appear after its next flush.
 
 Counters: `lake_metering_records_written_total{collection}`, `lake_metering_flush_errors_total`,
 `lake_metering_dropped_bytes_total{reason="dropped"|"no_workspace"}`,
@@ -75,7 +75,7 @@ Counters: `lake_metering_records_written_total{collection}`, `lake_metering_flus
 
 ### Build records
 
-A usage read walks every build result of the space's repositories, as before. A result whose
+A usage read walks every build result of the account's repositories, as before. A result whose
 record the read found in its workspace counts once; one that is not recorded yet counts from the
 repository and is queued for its repository's workspace, written `if_absent` under the blind key of
 its result id by the next flush. A result is never counted twice, however often it is seen, and
@@ -89,7 +89,7 @@ workspace Zetta, and lake's control store keeps none of them. It carries no pric
 | Field | Rule |
 |---|---|
 | `storage.repositories_bytes` | Repository storage, measured now (above). |
-| `storage.images_bytes` | Unique bytes of the space's tenant images (`<space handle>/...`, build cache under `<space>/cache/` included): every manifest a tag points to, plus its config and layers, each digest once across all tags and repositories of the space. Read from the tags in each routed workspace (lake#383, [registry.md](registry.md#where-a-tenant-image-lives)), one read per repository; a workspace that cannot be read is named in `not_measured`. `null` when the lake has no workspaces. A blob that is an object of a workspace's liquid store (lake#383 phase B) is already in that store's usage, part of `repositories_bytes`, so it is left out here: `images_bytes` is the manifests and the blobs still in the instance registry. |
+| `storage.images_bytes` | Unique bytes of the account's tenant images (`<space handle>/...`, build cache under `<space>/cache/` included): every manifest a tag points to, plus its config and layers, each digest once across all tags and repositories of the account. Read from the tags in each routed workspace (lake#383, [registry.md](registry.md#where-a-tenant-image-lives)), one read per repository; a workspace that cannot be read is named in `not_measured`. `null` when the lake has no workspaces. A blob that is an object of a workspace's liquid store (lake#383 phase B) is already in that store's usage, part of `repositories_bytes`, so it is left out here: `images_bytes` is the manifests and the blobs still in the instance registry. |
 | `storage.images_in_workspace_stores_bytes` | The tenant image blobs held in workspace stores, each digest once: reported, not added to `total_bytes` again. Whether a blob is stored is decided per workspace, so a digest one workspace stores and another still reads from the instance registry counts in both fields. `null` when the lake has no workspaces. |
 | `storage.workspace_data_bytes` | The sum of `size_bytes` from Zetta `list_datasets` in each of the customer's workspaces (the on-disk row chunks of every dataset). |
 | `storage.total_bytes` | The three above added. |
@@ -176,7 +176,7 @@ Every `usage_sample_interval` (fifteen minutes) the store root's owner, and only
 never count one service twice, samples every live workspace on its maintenance thread
 (`sample_usage`, `src/api/usage_capabilities.cpp`):
 
-- **Repository storage.** A space with one live workspace: the space's whole store (the same figure
+- **Repository storage.** An account with one live workspace: the account's whole store (the same figure
   `metering_usage` reports). With several: each repository's unique bytes in its workspace, so a
   file two workspaces' repositories share counts in both.
 - **Container images.** The unique bytes of the images routed to the workspace, each digest once
@@ -413,8 +413,8 @@ capability audit event.
 ## Cutover (lake#348, lake#349)
 
 Migration `0053_metering_workspaces` records each retired row's owner in `workspace_assignments`:
-a space with exactly one live workspace owns its rows (`sole_workspace`); every other row is
-`needs_selection`. A usage row's id is md5 of its space and hour, a build row's md5 of its space
+an account with exactly one live workspace owns its rows (`sole_workspace`); every other row is
+`needs_selection`. A usage row's id is md5 of its account and hour, a build row's md5 of its account
 and result id (neither table has an id column). Usage rows without transfer carry only the retired
 storage gauge and compute that the build records hold, so they are neither assigned nor copied.
 `copy_workspace_records` with `{"collection":"metering_usage"}` copies each row's transfer under
@@ -433,9 +433,9 @@ a workspace double (dataset bytes, run seconds rounded up, the `from`/`to` windo
 workspace reported as not measured, and only finished image builds counted).
 `RegistryProtocols.UsageCountsEachImageDigestOnceForItsSpace` pushes real OCI images through the
 server into two routed workspaces, including two tags and a cache image sharing a layer and another
-space's image, and checks `images_bytes` counts each of the space's digests exactly once.
+account's image, and checks `images_bytes` counts each of the account's digests exactly once.
 `Stores/WorkspaceRecordStores.RepositoryUsageStaysInEachRepositorysWorkspace/{Memory,Postgres}`
-covers the recorder across two spaces with two workspaces each: nothing written on the request
+covers the recorder across two accounts with two workspaces each: nothing written on the request
 path, one hourly record per workspace, merged counters, a second replica's conditional increment,
 a workspace that is not ready (kept), a deleted or unknown workspace (dropped and counted), a repository
 without a workspace, the bound, and build records written once. The copy's test and the `0053`

@@ -508,6 +508,10 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
                            {"methodologies", json::array({"M-1"})}});
     const auto solution = http.call("create_solution", solution_input);
     http.call("list_solutions", transcript_scope);
+    // An agent's definition revisions (docs/api/train-agents.md, lake#653): none for an unknown agent.
+    auto revisions = transcript_scope;
+    revisions["agent_id"] = "schema-agent";
+    http.call("list_agent_revisions", revisions);
     auto solution_id = transcript_scope;
     solution_id["id"] = solution.at("solution").at("id");
     http.call("get_solution", solution_id);

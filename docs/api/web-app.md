@@ -11,36 +11,36 @@ calls the capability or the shared function, so the two cannot disagree.
 | Capability | Kind | Who | Input | Value |
 |---|---|---|---|---|
 | `viewer` | read | **anyone** | `workspace_id?`, `customer_id?` | who is calling and how this lake signs people in (below) |
-| `my_permissions` | read (also `POST`) | signed in | `object_type` (a policy object type, `workspace` for its space's permissions, or `drive folder`; another type is refused listing them, lake#594), `object_id`, `actions`, `ref?`, `path?` | `{allowed: {<action>: bool}}` |
+| `my_permissions` | read (also `POST`) | signed in | `object_type` (a policy object type, `workspace` for its account's permissions, or `drive folder`; another type is refused listing them, lake#594), `object_id`, `actions`, `ref?`, `path?` | `{allowed: {<action>: bool}}` |
 | `list_packages` | read | signed in | `customer_id?` | `{available, origin, npm, python, oci}` |
 | `list_docs` | read | **anyone** | `q?` (every word, in any order, lake#594) | `{pages: [{slug, title, section, headings, match?, anchor?, excerpt?}], sections}` |
 | `get_doc` | read | **anyone** | `slug?` (`page` is its deprecated name, lake#591) | `{slug, title, section, markdown, previous?, next?}` (each `{slug, title, section}`) |
 | `mcp_setup` | read | signed in | — | `{origin, mcp_url, tool_groups, flows, scopes}` |
 | `resolve_model` | read | anyone, for a public model | `namespace?`, `name` | `{repository_id, revision}` |
-| `latest_agent_task` | read | read on the space | `customer_id`, `workspace_id`, `subject` | `{task: <get_agent_task value> \| null}` |
-| `compile_pipeline` | action | write on the space | `customer_id`, `workspace_id`, `project`, `intent`, `dataset?`, `methodology?` | `{graph, template?}` |
-| `render_pipeline` | read | read on the space | `customer_id`, `workspace_id`, `project`, `graph`, `step?` | `{svg}` |
+| `latest_agent_task` | read | read on the account | `customer_id`, `workspace_id`, `subject` | `{task: <get_agent_task value> \| null}` |
+| `compile_pipeline` | action | write on the account | `customer_id`, `workspace_id`, `project`, `intent`, `dataset?`, `methodology?` | `{graph, template?}` |
+| `render_pipeline` | read | read on the account | `customer_id`, `workspace_id`, `project`, `graph`, `step?` | `{svg}` |
 
 The Ask Orama and Agent Factory conversation (`send_ask_message`, `settle_ask_turn`,
 `confirm_ask_proposal`, `approve_agent_proposal`) is in [ask-orama.md](ask-orama.md#capabilities-lake561)
 and [agent-factory.md](agent-factory.md). `repository_file` gained `units` for the File page
 ([repositories.md](repositories.md#repository-data-and-change-pages)), `get_organization` names the
-organization's own space as `customer_id` (null when it has none), and `list_sessions` rows declare
+organization's own account as `customer_id` (null when it has none), and `list_sessions` rows declare
 the `reason` and `last_used_at` they already carried.
 
 ## viewer
 
 `GET /v1/viewer?workspace_id=<optional>&customer_id=<optional>`. It needs no credential and never
-answers `401`: a visitor, or a browser holding a dead cookie, gets `signed_in: false` and no spaces.
+answers `401`: a visitor, or a browser holding a dead cookie, gets `signed_in: false` and no accounts.
 
 | Field | Always | What |
 |---|---|---|
 | `signed_in`, `administrator` | yes | a credential was accepted; it is the operator credential |
 | `user_id`, `taap_id`, `session_id`, `credential_kind`, `display_name`, `email` | a person | the person and the credential this request carries (`session_id` is what `revoke_session` takes) |
 | `mfa_enrolled` | yes | the person has an active TOTP enrollment (`Store::mfa_enrolled`); false for a visitor and the operator |
-| `spaces` | yes | what `list_customers` gives the caller: `{id, name, label, personal, kind, workspaces}`; `label` is *Your workspaces* for the person's own individual space, else the name; `workspaces` are its live ones (`desired` not `deleted`) as `{id, name, customer_id, status}`, `status` the operator's phase in lower case (`pending` until it reports) |
-| `customer_id` | when there is one | the space asked for when the caller can see it, else the space of the workspace asked for, else the first |
-| `workspace_id` | when there is one | the workspace asked for when it is live in one of the caller's spaces, else that space's only workspace, else absent |
+| `spaces` | yes | what `list_customers` gives the caller: `{id, name, label, personal, kind, workspaces}`; `label` is *Your workspaces* for the person's own individual account, else the name; `workspaces` are its live ones (`desired` not `deleted`) as `{id, name, customer_id, status}`, `status` the operator's phase in lower case (`pending` until it reports) |
+| `customer_id` | when there is one | the account asked for when the caller can see it, else the account of the workspace asked for, else the first |
+| `workspace_id` | when there is one | the workspace asked for when it is live in one of the caller's accounts, else that account's only workspace, else absent |
 | `clerk` | yes | `{enabled, publishable_key, frontend_api}` from `LAKE_CLERK_PUBLISHABLE_KEY` ([clerk.md](clerk.md)) |
 | `password_sign_up` | yes | lake's own sign-up is open: false under Clerk, where accounts are added by invitation |
 | `external_origin`, `public_host` | yes | lake's browser origin (`LAKE_EXTERNAL_ORIGIN`, else `https://<LAKE_PUBLIC_HOST>`, else the origin of the request) and `LAKE_PUBLIC_HOST`; clone and push URLs use the origin |
@@ -49,7 +49,7 @@ answers `401`: a visitor, or a browser holding a dead cookie, gets `signed_in: f
 
 An operator credential has `administrator: true` and no user fields. A `workspace_id` that names no
 workspace at all is `invalid_input` at `/workspace_id` (the registry checks every `workspace_id` it
-is given); a deleted one, or one outside the caller's spaces, is replaced as above. Under
+is given); a deleted one, or one outside the caller's accounts, is replaced as above. Under
 `/w/<workspace_id>/v1/viewer` the path's workspace is the one asked for.
 
 ## my_permissions
@@ -58,13 +58,13 @@ Whether the caller may take each of `actions` on one object, for the buttons a p
 they would work: Experiments' start and promote, Streams' writes and drops, Drive's Share. It never
 replaces the capability's own check.
 
-- `object_type` and `object_id` name a policy object: `customer` and a space id, `repository` and a
+- `object_type` and `object_id` name a policy object: `customer` and an account id, `repository` and a
   repository id, `organization`, `team`, and the other object types `find_policy_object` knows.
 - `object_type: "drive folder"` names a repository by `object_id` and a folder by `path` at `ref`
   (default `main`), resolved exactly as the Drive capabilities authorize it: the nearest folder with
   its own policy object, else the repository.
 - `actions` are `read`, `write`, `admin`, `deploy`, `review`, `share` and `promote`. `promote` is
-  `admin` on the object: promoting a trial is a space administrator's decision.
+  `admin` on the object: promoting a trial is an account administrator's decision.
 - An unknown object is `not_found` at `/object_id`. The operator may do everything.
 
 For example, `POST /v1/my_permissions` (a `GET` takes `actions` as a JSON array in the query):
@@ -77,7 +77,7 @@ For example, `POST /v1/my_permissions` (a `GET` takes `actions` as a JSON array 
 
 Ship → Packages: npm packages, Python projects and one-component OCI images in this lake's instance
 registries (`ArtifactRegistry::catalog()`, each `{name, versions}`), all public reads; with
-`customer_id`, also the space's own images (from `list_image_repositories`, called as the caller,
+`customer_id`, also the account's own images (from `list_image_repositories`, called as the caller,
 without its `cache/` repositories). `available` is false when this lake has no registry storage;
 `origin` is the origin install commands use (`LAKE_EXTERNAL_ORIGIN`, else `https://<LAKE_PUBLIC_HOST>`,
 else empty). The Packages page reads this capability.
@@ -109,7 +109,7 @@ both read it.
 
 Tested by `Api.*` in `tests/test_api.cpp` (the docs block), and `Docs.*` in
 `tests/test_markdown.cpp`: every guide file is embedded once under one section, links between
-guides and their anchors resolve, and no guide says "space".
+guides and their anchors resolve, and no guide says `space`.
 
 ## mcp_setup
 
@@ -191,10 +191,10 @@ redirects to `/login?error=…` ([front-door.md](../ui/front-door.md)).
   `WebApp.ViewerNamesClerkAndAnOrganizationNamesItsSpace` (registry, memory store): the operator's
   and a writer's permissions, unknown objects and actions, the Docs in order, `mcp_setup`'s groups
   and scopes, the packages catalog with and without registry storage, Clerk in `viewer`, and an
-  organization's space.
+  organization's account.
 - `HttpServer/HttpResponseIsolation.TheViewerSaysWhoIsSignedInAndWhereTheyAre` (memory and
   PostgreSQL): a visitor and a dead cookie, a person's identity, MFA before and after enrolling,
-  spaces and the current workspace, a foreign workspace refused as current, the operator.
+  accounts and the current workspace, a foreign workspace refused as current, the operator.
 - `HttpServer/HttpResponseIsolation.OperatorSignInSaysWhyATokenWasRefused`: the operator token
   error, and the right token's `SameSite=Strict` session cookie. `return_to` and `next` are
   handled by the web app.

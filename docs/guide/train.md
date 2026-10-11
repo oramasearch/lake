@@ -41,8 +41,8 @@ of the account that owns your workspaces (yours, or your organization's).
 A pipeline whose methodology does not train yet says **This Pipeline Trains Nothing Yet** instead of
 pretending to train.
 
-- REST: the project must exist first. Make it once with `POST /v1/workspace_act`
-  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_project", "input": {"name": "retention", "intent": "Predict which accounts churn"}}`,
+- REST: the project must exist first. Make it once with `POST /v1/create_project`
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "retention", "intent": "Predict which accounts churn"}`,
   then `POST /v1/compile_pipeline` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "intent": "Predict the churned column of accounts", "dataset": "datasets.accounts"}`.
   Without the project, `compile_pipeline` answers `not_found` at `/project` and says to create it.
@@ -129,12 +129,12 @@ refused and nothing is saved. **A saved change needs approval again before the p
 
 Approve:
 
-- REST: `POST /v1/workspace_act` with
-  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "approve_plan", "input": {"project": "retention", "graph": "<pipeline id>"}}`
-- MCP: `workspace_act`, with the same input.
+- REST: `POST /v1/approve_pipeline` with
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "graph": "<pipeline id>"}`
+- MCP: `approve_pipeline`, with the same input.
 
-Check only: the same call with `"capability": "gate"`:
-`{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "gate", "input": {"project": "retention", "graph": "<pipeline id>"}}`.
+Check only: `POST /v1/check_pipeline` with the same input:
+`{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "graph": "<pipeline id>"}`.
 
 Check and run:
 
@@ -195,10 +195,10 @@ Beside the report: **Lineage** (where the data came from), **Outputs**, the **Lo
 **Trace** as a waterfall of spans, and the run's facts. **Training charts** opens the run's metric
 curves on Experiments; **Workspace streams** opens Train → Streams.
 
-- REST: `POST /v1/workspace_query` with
-  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "get_run_report", "input": {"run_id": "<run id>"}}`;
+- REST: `POST /v1/get_run_report` with
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "run_id": "<run id>"}`;
   `get_run` with the same input reads its status, lineage and log.
-- MCP: `workspace_query`, with the same input.
+- MCP: `get_run_report`, with the same input.
 
 `workspace_query` is a read sent as `POST`; it changes nothing.
 
@@ -256,14 +256,14 @@ Press **Promote v3 to Ship** (the button names the version open) and confirm. La
 version, so `predict` answers with it, and unpublishes every other version of the model; a call
 naming an unpublished version's id is refused from then on. The model's serving page opens.
 
-- REST: `POST /v1/workspace_act` with `expose_model` for the version, then `unexpose_model` for each
+- REST: `POST /v1/expose_model` for the version, then `POST /v1/unexpose_model` for each
   other published version:
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "expose_model", "input": {"model_id": "<model id>"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "model_id": "<model id>"}
 ```
 
-- MCP: `workspace_act` with the same input.
+- MCP: `expose_model` with the same input.
 
 ## After Training
 

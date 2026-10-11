@@ -24,7 +24,7 @@ KEK rotation requires `admin` on the customer.
 | `verify` | mount, name, message, signature, `version?` | `{valid, key_version, algorithm}` |
 | `hmac` | mount, name, base64url `message`, `version?` | base64url HMAC-SHA-256 |
 | `derive_encryption_key` | mount, `parent_name`, child `name`, base64url `context` | stored child-key metadata and parent version |
-| `rotate_customer_kek` | `customer_id` | new KEK version and count of rewrapped data keys, across the space's workspaces |
+| `rotate_customer_kek` | `customer_id` | new KEK version and count of rewrapped data keys, across the account's workspaces |
 
 Omitting `version` selects the current named-key version. Encrypt always uses the current version.
 Decrypt and rewrap reject an envelope whose key id does not match the named key. Rewrap decrypts
@@ -52,7 +52,7 @@ Named-key rotation claims the next data-key version with `if_absent`, then advan
 `current_version` at the revision it read (a rotation that stopped in between is completed by the
 next). Old data keys remain wrapped, allowing old ciphertext to decrypt. Customer-KEK rotation
 makes a new KEK current, keeps the replaced one, rewraps every data key in each workspace of the
-space conditionally on the revision read, and then forgets the replaced KEK; a workspace that is
+account conditionally on the revision read, and then forgets the replaced KEK; a workspace that is
 not ready leaves the rotation to be finished by the next one. It never re-encrypts secret versions.
 The customer KEK never leaves the store: data keys are wrapped and unwrapped by
 `Store::wrap_secret_data_key` and `unwrap_secret_data_key`, which keeps the boundary suitable for

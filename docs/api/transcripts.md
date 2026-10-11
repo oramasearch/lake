@@ -11,11 +11,11 @@ by OpenAI with lake's own key, and **the audio is never kept**.
 | Capability | Kind | Input | Output |
 |---|---|---|---|
 | `transcribe` | action, any signed-in caller | `{name, audio_base64, language?}` | `{text, seconds?, model}` |
-| `create_transcript` | action, `write` on the space | `{customer_id, workspace_id, title, text?, audio_base64?, audio_name?, language?, source, recorded_at?}` | the transcript |
-| `list_transcripts` | read, `read` on the space | `{customer_id, workspace_id, q?, limit?, cursor?}` | `{transcripts: [{id, title, excerpt, source, seconds, created_at, created_by, created_by_name}], total, next_cursor?}` |
-| `get_transcript` | read, `read` on the space | `{customer_id, workspace_id, id}` | the transcript |
-| `update_transcript` | action, `write` on the space | `{customer_id, workspace_id, id, title?, text?}` | the transcript |
-| `delete_transcript` | action, `write` on the space | `{customer_id, workspace_id, id}` | `{deleted: true}` |
+| `create_transcript` | action, `write` on the account | `{customer_id, workspace_id, title, text?, audio_base64?, audio_name?, language?, source, recorded_at?}` | the transcript |
+| `list_transcripts` | read, `read` on the account | `{customer_id, workspace_id, q?, limit?, cursor?}` | `{transcripts: [{id, title, excerpt, source, seconds, created_at, created_by, created_by_name}], total, next_cursor?}` |
+| `get_transcript` | read, `read` on the account | `{customer_id, workspace_id, id}` | the transcript |
+| `update_transcript` | action, `write` on the account | `{customer_id, workspace_id, id, title?, text?}` | the transcript |
+| `delete_transcript` | action, `write` on the account | `{customer_id, workspace_id, id}` | `{deleted: true}` |
 
 A transcript is `{id, title, text, source, seconds, language, recorded_at, created_at, created_by,
 created_by_name}`:
@@ -68,9 +68,9 @@ too.
 - `next_cursor` is present when more follow. Pass it as `cursor` for the next page. A cursor that
   names no transcript of the list is `invalid_input` at `/cursor`.
 
-Every transcript capability authorizes through the space (`customer_id`), and `Registry::call`
-checks that `workspace_id` is a live workspace of that space. Another space's caller is
-`unauthorized` before any workspace is read. A transcript of another workspace of the same space
+Every transcript capability authorizes through the account (`customer_id`), and `Registry::call`
+checks that `workspace_id` is a live workspace of that account. Another account's caller is
+`unauthorized` before any workspace is read. A transcript of another workspace of the same account
 is `not_found`.
 
 Every transcript capability is MCP tool group **Transcripts** in `llms.txt`. `list_transcripts` and
@@ -83,7 +83,7 @@ too (`control::agent_launch_scopes`, [agent-launches.md](agent-launches.md)).
 Each transcript is one sealed record in the collection `lake_transcripts` of its workspace's Zetta
 ([workspace records](../architecture/workspace-records.md)):
 
-- The lookup is the space (`customer:<id>`), so every reader of the space reads it in that
+- The lookup is the account (`customer:<id>`), so every reader of the account reads it in that
   workspace and no other workspace sees it.
 - The body is `{customer_id, title, text, source, seconds?, language, recorded_at, created_by}`,
   sealed with the workspace's key. The workspace holds only ciphertext and a blind index.
@@ -92,7 +92,7 @@ Each transcript is one sealed record in the collection `lake_transcripts` of its
 - Nothing about a transcript is in lake's PostgreSQL. Deleting the workspace deletes its
   transcripts with its Zetta.
 
-`list_transcripts` reads the space's records in the workspace (one `list_records` walk) and filters
+`list_transcripts` reads the account's records in the workspace (one `list_records` walk) and filters
 and pages in lake. A workspace with thousands of long transcripts will want a search index in the
 workspace instead; that is not built.
 
@@ -169,7 +169,7 @@ which is not built.
 | `invalid_input` (400) | A file name whose extension is not audio or video (`memo.txt is not audio or video: send .webm, .mp4, …`, at `/name` or `/audio_name`; lake#594), not sent to OpenAI. Not base64, an empty audio, a missing or long title, neither text nor audio (`/text`), no speech heard in the audio, an unknown `source`, a bad `language`, `recorded_at` or `cursor`. |
 | `size_invalid` (413) | Audio over 25 MiB, or text over 400,000 bytes. |
 | `not_found` (404) | No such transcript in this workspace (`/id`). |
-| `unauthorized` (403) | No `read`/`write` on the space, or a scoped key without the capability. |
+| `unauthorized` (403) | No `read`/`write` on the account, or a scoped key without the capability. |
 | `busy` (503) | Lake's blocking pool is full; retry. |
 | `workspace_not_ready` | The workspace Zetta is not ready. |
 

@@ -225,7 +225,7 @@ logs. The registry stays in `lake-core`, free of the HTTP and Postgres client ty
 Build and run `ctest --test-dir build --output-on-failure`. The `Telemetry` tests check exposition,
 a measured in-memory store ping, both probe routes, and refused and authorized metrics requests.
 `RequestLog.*` checks the log line's fields; `RequestRecorder.*` the aggregation, the bound, two
-workspaces of one space and another space counted apart, a failed write kept, and deleted, unknown
+workspaces of one account and another account counted apart, a failed write kept, and deleted, unknown
 and refusing workspaces dropped; `HttpServer.RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries`
 captures stdout for repository, registry, drive and sync requests (no raw path, no names) and
 reads three workspaces' series after the owner loop's flush.

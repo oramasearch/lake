@@ -71,7 +71,7 @@ a failing or timed-out test ends. To leave a trace and to keep the runner alive:
   reports by name, rather than the runner's agent.
 
 The summary step runs even when tests fail; if ctest did not finish it says so and fails. A
-`Diagnostics` step prints memory, disk and any out-of-memory or no-space kernel message, and the
+`Diagnostics` step prints memory, disk and any out-of-memory or disk-full kernel message, and the
 `ctest-log` artifact keeps `LastTest*.log` and the JUnit files for 14 days. A newer push to a pull request cancels its older run; runs on `main` always
 finish.
 
