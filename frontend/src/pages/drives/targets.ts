@@ -145,7 +145,7 @@ export function targetHref(target: Target | null | undefined): { href: string; e
     case "project":
       return target.name ? { href: `/design/project?${q({ name: target.name })}`, external: false, workspace: true } : null;
     case "agent":
-      return target.id ? { href: `/train/agent?${q({ id: target.id })}`, external: false, workspace: true } : null;
+      return target.id ? { href: `/design/agent?${q({ id: target.id })}`, external: false, workspace: true } : null;
     case "model":
       return target.id ? { href: `/models/${encodeURIComponent(target.id)}`, external: false, workspace: false } : null;
     case "url":

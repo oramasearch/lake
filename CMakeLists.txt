@@ -235,6 +235,7 @@ add_library(lake-core STATIC
   src/control/opportunities.cpp
   src/control/solutions.cpp
   src/control/transcripts.cpp
+  src/control/agent_revisions.cpp
   src/control/project_decisions.cpp
   src/control/drives.cpp
   src/control/drive_files.cpp

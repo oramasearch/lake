@@ -89,7 +89,8 @@ export const NAV: NavItem[] = [
   { section: "design", path: "/design/opportunities", label: "Opportunities", icon: "search", audience: AO },
   { section: "design", path: "/design/solutions", label: "Solutions", icon: "audit", audience: AO },
   { section: "design", path: "/design/methodologies", label: "Methodologies", icon: "metering", audience: AO },
-  { section: "design", path: "/design/agent-library", label: "Agent Library", icon: "agent", audience: AO },
+  // Designing agents (lake#653); Train → Agents trains the ones that learn.
+  { section: "design", path: "/design/agents", label: "Agents", icon: "agent", audience: AO },
   { section: "train", path: "/train/agents", label: "Agents", icon: "agent", audience: AO },
   { section: "train", path: "/train/runs", label: "Runs", icon: "metering", audience: AO },
   { section: "train", path: "/train/experiments", label: "Experiments", icon: "metering", audience: AO },

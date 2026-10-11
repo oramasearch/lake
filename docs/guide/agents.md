@@ -2,24 +2,27 @@
 
 An agent is an AI helper that works in your workspace. Lake has two kinds:
 
-- **The Agent Library**: the specialized agents Orama provides, such as the Project Agent and
-  ExperimentsAgent. You use them where they appear in the product; you do not create or delete
-  them.
-- **Your agents**: agents you build in **Train → Agents** for a job of your own. They answer when
+- **Orama's agents** (the Agent Library): the specialized agents Orama provides, such as the
+  Project Agent and ExperimentsAgent. They are read-only: you use them where they appear in the
+  product, or duplicate one to make an agent of your own from it.
+- **Your agents**: agents you design in **Design → Agents** for a job of your own. They answer when
   you talk to them, and the ones with a trigger also run on their own.
 
-Conversations happen in [Ask Orama](/docs/ask-orama). **Train → Agents** is where you build agents
-and read what they did on their own.
+**Design → Agents** is where you design agents: what each is for, its prompt, its skills and the
+models and pipelines it may use. **Train → Agents** is where you train and improve the ones that
+learn: their performance over time, experiments, and promoting a better version. Conversations
+happen in [Ask Orama](/docs/ask-orama).
 
 Every call below names `customer_id`, the id of the account that owns your workspaces (yours, or
 your organization's), and `workspace_id`, the workspace in the page address
 ([Workspaces](/docs/workspaces)).
 
-## The Agent Library
+## Orama's Agents
 
-Open **Design → Agent Library** (it is also at the foot of **Train → Agents**). Each card says what
-the agent does for you, where to use it, and whether this Lake runs it (*Available*, or *Not running
-on this Lake*).
+Open **Design → Agents** (it was *Agent Library*). Orama's agents are marked **By Orama**; filter by
+**By Orama** to see only them. Each card says what the agent does for you, where to use it, and
+whether this Lake runs it (*Available*, or *Not available here*). Open one to see it, and choose
+**Duplicate to edit** to design an agent of your own from it.
 
 | Agent | What it does | Where you meet it |
 |---|---|---|
@@ -28,7 +31,7 @@ on this Lake*).
 | **ApplicationAgent** | Proposes and builds data apps | **Ship → Apps** |
 | **ExperimentsAgent** | Proposes editable training experiments, follows their trials and explains results | **Train → Experiments** |
 | **Auto-Suggest** | Suggests projects worth building from your data | **Design → Opportunities** |
-| **AgentCreator** | Designs a new agent with you | **Train → Agents → Build with the Agent Factory** |
+| **AgentCreator** | Designs a new agent with you | **Design → Agents → Describe it to the Agent Factory** |
 
 Agents marked *Orama internal* are Orama's own test tooling and are never offered to talk to.
 
@@ -47,37 +50,46 @@ for **Confirm and start experiment**.
 | **Orama base model** | The agent runs inside your workspace's engine, on its GPU when there is one. Its instructions are its system prompt. |
 | **Frontier model** | The agent runs on Lake's agent runtime with a frontier model (OpenAI). Only these agents can be run unattended and scheduled. |
 | **Work area** | Where it works: anywhere in this workspace, one project, or specific datasets. |
-| **Skills** | What it may do: *Search data*, *Generate a dataset*, *Train a Model*, *Summarize and explain*, *Call the API*. Granted, never assumed. |
+| **Skills** | What it may do, such as *Search data*, *Generate a dataset* or *Summarize and explain*. Granted, never assumed. The form offers whatever skills the agent runtime offers (`create_agent`'s `skills` in [the API](/developer/api)). |
+| **Revision** | One saved definition of your agent. Every create and edit is kept; you can restore any of them. |
+| **Trained version** | A checkpoint training produced for a base-model agent, with the data it learned from and its held-out score. You promote one, or roll back to one, in **Train → Agents**. |
 | **Pipelines as tools** | Approved pipelines you grant an agent; it can check, run and report on each one. |
 | **Unattended run** | One run of a frontier-model agent as a job, from **Run now** or a schedule. |
 | **Schedule** | A cron schedule that runs the agent as a job on every tick, as the person who set it. |
 
 ## See Your Agents
 
-**Train → Agents** shows figures (agents, those that run on their own, conversation only, those on
-a frontier model) and a card per agent with its purpose, its trigger or *Conversation*, its model and
-what it may do. Search, or filter by **Conversation only** and **Runs on its own**.
+**Design → Agents** shows figures (yours, Orama's, those that run on their own) and a card per agent,
+yours marked **Yours** with its purpose, its trigger or *Conversation* and its model, and Orama's
+marked **By Orama**. Search, or filter by **By Orama** and **Yours**.
 
-- REST: `POST /v1/list_agents` with
-  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>"}`
-- MCP: `list_agents`, with the same input. The engine read `get_agent`, with the agent's `id`
-  in `input`, reads one.
+- REST: `GET /v1/list_agents?customer_id=<customer id>&workspace_id=<workspace id>`
+- MCP: `list_agents`, with the same input. `get_agent`, with the agent's `id`, reads one.
 
-## Create an Agent
+## Design an Agent
 
-1. Open **Train → Agents** and choose **New agent**.
+1. Open **Design → Agents** and choose **New agent**.
 2. Fill in the drawer:
    - **Name** and **What it's for**;
+   - **Instructions**: its prompt, how it should work (stored as its manifesto);
+   - **What success looks like**: its goal;
+   - **Skills**: what it may do;
+   - **Model**: *Orama base model, inside your workspace*, a model trained in this workspace, or
+     *A frontier model (OpenAI), run by Lake*;
+   - **Pipelines it may use**: the approved pipelines it may call as tools;
    - **Where it works**: anywhere in this workspace, one project, or specific datasets, and
      **Which project or datasets**;
-   - **Instructions**: how it should work (stored as its manifesto);
-   - **What success looks like**: its goal;
-   - **What it may do**: its skills;
-   - **Model**: *Orama base model, inside your workspace* or *A frontier model (OpenAI), run by
-     Lake*;
-   - **Runs on its own**: a trigger in plain words, such as *every Monday at 09:00*. Leave it empty
-     for an agent you only talk to.
-3. Choose **Create agent**. The agent's page opens.
+   - **Runs on its own**: a schedule in plain words, such as *every Monday at 09:00*. Leave it
+     empty for an agent you only talk to.
+3. Choose **Create agent**. The agent's Design page opens.
+
+The agent's Design page shows its definition, **where it is used** (the pipelines it calls, its
+schedules, its runs, Ask Orama) and its **Revisions**. **Edit** saves a new revision; **Restore**
+on an older revision saves its definition again as the newest; **Duplicate** makes a copy under a
+new name; **Run it** opens its runs and schedules.
+
+- REST: `GET /v1/list_agent_revisions?customer_id=<customer id>&workspace_id=<workspace id>&agent_id=<agent id>`
+- MCP: `list_agent_revisions`. Restore one with `update_agent` and its `definition`.
 
 On the page, a frontier-model agent with a trigger also gets its first schedule. A trigger on a
 base-model agent is kept on the agent but does not run it. Over REST or MCP, `create_agent` only
@@ -91,11 +103,11 @@ A frontier agent's `definition` is `source` `zetta` with `instructions`, `entryp
 (each `path` and `contents`), or `source` `lake` with `repository_id`, `revision` and `entrypoint`.
 Lake refuses any other field in it with `invalid_input` and the field's path.
 
-## Build It with the Agent Factory
+## Describe It to the Agent Factory
 
 The Agent Factory designs the agent with you in a conversation with **AgentCreator**.
 
-1. Open **Train → Agents** and choose **Build with the Agent Factory**.
+1. Open **Design → Agents** and choose **Describe it to the Agent Factory**.
 2. Under **Ask it**, say what the agent should do. AgentCreator asks what it must, then shows a
    **Proposal**: what kind of agent and why, where it is stored, its work area, instructions, goal,
    skills, trigger, pipelines and every file.
@@ -118,7 +130,7 @@ refused with *The proposal changed since you saw it; review it again.*
 
 ## Talk to an Agent
 
-On an agent's page choose **Talk to this agent in Ask Orama**, or pick the agent under **Talk to** in
+On an agent's page choose **Talk in Ask Orama**, or pick the agent under **Talk to** in
 Ask Orama. A base-model agent answers from the workspace. A frontier-model agent answers from a
 running service: the first message starts it and answers *starting*; send the message again once it
 is ready.
@@ -129,17 +141,17 @@ is ready.
 
 ## Grant Pipelines as Tools
 
-On the agent's **Overview** tab, **Tools This Agent May Use** lists the pipelines granted to it, each
-with **Revoke**. **Approved Pipelines You Can Grant** lists the workspace's approved pipelines, each
-with **Grant**. Only approved pipelines can be granted; each grant is pinned to the approval it was
-granted at.
+On the agent's Design page choose **Edit**, and under **Pipelines it may use** pick the approved
+pipelines it may call. Only approved pipelines can be granted; each grant is pinned to the approval
+it was granted at. **Where It Is Used** lists them.
 
-- REST: `workspace_act` with `update_agent`, sending the agent's whole pipeline list.
-- MCP: `workspace_act`.
+- REST: `POST /v1/update_agent` with the agent's `id` and its whole `pipelines` list.
+- MCP: `update_agent`.
 
 ## Run It Now
 
-For a frontier-model agent, open the **Unattended Runs** tab. Under **Run it once with** say what it
+For a frontier-model agent, choose **Run it** on its Design page (or open it from **Train →
+Agents**), then the **Unattended Runs** tab. Under **Run it once with** say what it
 should do this time, and choose **Run now**. The run is listed under **What It Did on Its Own** with
 how it started, its status and its result; while one starts the page checks again every 5 seconds.
 **Stop** ends a run under way. A scheduled run has no **Stop**; remove its schedule instead.
@@ -186,15 +198,37 @@ List and remove:
   Removing a schedule stops a run under way; the runs already recorded stay.
 - MCP: `list_agent_schedules` and `unschedule_agent`.
 
-## Training
+## Train and Improve It
 
-A base-model agent that has training shows a **Training** tab with its training status
-(`workspace_query` with `agent_training_status`).
+**Train → Agents** lists only the agents with something to train: those on the Orama base model,
+those granted a pipeline, and those with a training schedule. An agent on a frontier model that
+calls no pipeline has nothing Lake can train, and is not listed. Each card shows whether its
+training is stale or due, its versions and its best held-out score.
+
+An agent's **Training** tab shows:
+
+- **Performance**: the held-out score of the version it runs, its versions, the success rate and
+  median time of its recent runs, its model tokens this month, and the held-out score over time.
+- **Versions and the data they learned from**, with **Promote** for a newer version and **Roll
+  back** for an older one. Each is confirmed, and is kept as a revision of its design.
+- **Launch experiment**: compare its trained versions, variations of its instructions or the
+  models it could run on. ExperimentsAgent turns this into an experiment you review and confirm on
+  **Train → Experiments**; nothing starts before you confirm.
+- **Training schedule**: when it retrains (only when you start it, when its tools or goals change,
+  daily, weekly or monthly), its training data, what it starts from and how many steps.
+
+To change what the agent is, choose **Edit its design**.
+
+- REST: `GET /v1/agent_training_status?customer_id=<customer id>&workspace_id=<workspace id>&id=<agent id>`;
+  `POST /v1/set_training_schedule` with
+  `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "id": "<agent id>", "training": {"cadence": "weekly"}}`;
+  promote with `POST /v1/update_agent` and the version's checkpoint as `model`.
+- MCP: `agent_training_status`, `set_training_schedule`, `update_agent`.
 
 ## Delete an Agent
 
-On the agent's page choose **Delete agent**, type its name and confirm. The agent is deleted, and its
-schedules with it.
+On the agent's Design page choose **Delete**, type its name and confirm. The agent is deleted, and
+its schedules with it; its revisions are kept.
 
 - REST: `POST /v1/delete_agent` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "id": "<agent id>"}`
@@ -204,8 +238,8 @@ schedules with it.
 
 | What | Needs |
 |---|---|
-| See agents, runs, schedules and the Agent Library | `read` on the account that owns the workspace (the library: any signed-in person) |
-| Create, change, grant, run, stop, schedule, delete, talk | `write` on that account |
+| See agents, revisions, training, runs, schedules and Orama's agents | `read` on the account that owns the workspace (the library: any signed-in person) |
+| Design, change, grant, train, promote, run, stop, schedule, delete, talk | `write` on that account |
 
 A run acts as the person who started it, and a scheduled run as the person who set the schedule,
 limited to the workspace's reads and actions and the repository and transcript reads. Its
@@ -226,7 +260,9 @@ credential is generated for the run and is never stored in Lake.
 | What you see | What to do |
 |---|---|
 | **New agent** is missing | The workspace is not ready yet; wait for it ([Workspaces](/docs/workspaces)). |
-| *The Agent Library is not available* | Lake could not read the library; reload the page. |
+| Orama's agents are not listed | Lake could not read the Agent Library; reload the page. |
+| An agent is missing from **Train → Agents** | It runs on a frontier model and calls no pipeline, so there is nothing to train. Give it the Orama base model or a pipeline in its design. |
+| *No Revisions Kept Yet* | The agent was created before Lake kept revisions; its next save is the first. |
 | An agent is *Not running on this Lake* | This Lake does not run that library agent; its page or Ask Orama says it is unavailable. |
 | `invalid_input` on `schedule_agent` | The trigger is not one Lake understands, or it would run more often than every five minutes. |
 | `invalid_input` on `create_agent` naming `/input/definition/…` | Remove the field it names; only the fields above are accepted. |

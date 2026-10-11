@@ -110,7 +110,7 @@ it, and it can be renamed from Workspaces ([../api/workspaces.md](../api/workspa
 `components/WorkspaceGate.tsx` wraps Design, Train and Ship content. It reads `workspace_status`
 and shows why the page is unavailable (no space, no workspace control plane, a failed status
 read), that the workspace Zetta is being prepared (checked again every 15 seconds), that it
-failed, or **Start** when it was never started (`start_workspace`). The Agent Library shows
+failed, or **Start** when it was never started (`start_workspace`). Design → Agents shows Orama's agents
 whether or not the workspace is ready, because it is lake's, not the workspace's.
 
 ## The Workspaces page

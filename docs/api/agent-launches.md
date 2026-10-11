@@ -86,7 +86,7 @@ lake#586): `Pending` until the operator reports (*Waiting for lake to set up thi
 zone (from a schedule stored before the check), runs not enabled on this lake, or otherwise *Lake
 could not set it up. Remove it and add it again*. The operator's own text, which names Kubernetes
 objects and fields, stays in `agent_cron_schedule_status` for whoever runs lake. A schedule
-belongs to its workspace, as a launch does. Creating a Python agent with a trigger in Train → Agents (or through the
+belongs to its workspace, as a launch does. Creating a Python agent with a trigger in Design → Agents (or through the
 Agent Factory) adds its first schedule; deleting the agent removes all of them.
 
 The per-agent `agent_schedules` table of 0030 and lake's in-process scheduler are retired: the
@@ -174,9 +174,10 @@ library agents do not call it yet ([lake#248](https://github.com/oramasearch/lak
 | `LAKE_INTERNAL_URL` | lake's in-cluster address, handed to agents |
 | `LAKE_AGENT_SERVICE_TOKEN` | the bearer lake presents to agent services |
 
-## Train → Agents
+## Train → Agent: runs and schedules
 
-An agent's page lists its runs (started, how, mode, status, result, *Stop*; a scheduled run has no
+Running an agent stays on its Train page (`/train/agent?id=&tab=runs`), linked from its Design page
+(lake#653). The page lists its runs (started, how, mode, status, result, *Stop*; a scheduled run has no
 *Stop*, its schedule does), refreshes every five seconds while one is starting, and for a Python
 agent offers **Run now** with an input and a **Schedules** panel: every schedule with its words,
 cron, zone, what it asks, the operator's status and last firing, a *Remove* button, and a form that

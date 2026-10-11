@@ -28,7 +28,7 @@ The rail on the left groups Lake's pages:
 |---|---|---|
 | **Home** | Ask Orama, Dashboard | Ask about anything in your Lake; the whole platform at a glance |
 | **Data** | Repositories, Shared with Me, Search, Datasets, Transcripts | Where your data lives and is found |
-| **Design** | Projects, Opportunities, Solutions, Methodologies, Agent Library | Deciding what AI to build, and designing its workflow |
+| **Design** | Projects, Opportunities, Solutions, Methodologies, Agents | Deciding what AI to build, designing its workflow and the agents that do it |
 | **Train** | Agents, Runs, Experiments, Models, Streams | Training models and agents, and watching them work |
 | **Ship** | Models, Search Indexes, Packages, Apps, Deployments, Services, Workspaces | Putting what you built to work |
 | **Organization** | Organizations, Secrets, Usage, Activity | People, credentials, usage and history |

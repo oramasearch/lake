@@ -139,6 +139,10 @@ and a handler that is `call_workspace_capability`, the `workspace_query`/`worksp
 policy, agent scopes, audit and caching are the same. `granted_by_scope` lets a credential that may
 call `workspace_query` or `workspace_act` call them. See
 [`engine-capabilities.md`](../../docs/api/engine-capabilities.md).
+After the engine accepts a `create_agent` or `update_agent`, `workspace_call` keeps the definition
+as a revision in the agent's workspace (`agent_revision_step`, lake#653) and answers
+`definition_revision`; `list_agent_revisions` (in `workspace_capabilities.cpp`) reads them. See
+[`train-agents.md`](../../docs/api/train-agents.md#definition-revisions).
 
 `experiment_capabilities.cpp` registers eleven space-scoped experiment/run operations using the
 closed contracts in `experiment_schemas.hpp`, and translates lake's experiment names to the engine's

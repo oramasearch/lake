@@ -38,6 +38,10 @@ object in the workspace Zetta's `lake_files` bucket ([drives.md](../api/drives.m
 A workspace's own AI solutions (lake#597) follow too: `lake_solutions`, found by the space, edited and
 deleted at the revision read; Orama's catalogue solutions stay the engine's and are never copied
 ([solutions.md](../api/solutions.md#where-they-live)).
+An agent's definition revisions (lake#653) are lake's own record about an engine object too:
+`lake_agent_revisions`, append-only, found by the space and the agent's id, one written after each
+`create_agent` or `update_agent` the engine accepts, since the engine keeps only an agent's latest
+definition ([train-agents.md](../api/train-agents.md#definition-revisions)).
 
 The rule it implements is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in
 a workspace Zetta, including credentials, secrets and metrics. Lake's PostgreSQL and the lake Zetta
@@ -229,7 +233,7 @@ workspace's owner and readiness, and refuses rather than falling back. Each call
   `auth_app_authorization_codes` keeps a code five minutes, its lifetime, and lake also checks the
   code's own expiry, since a copied code is written later than it was issued. Deleting a workspace deletes its Zetta and its volume, and the records go
   with them.
-- **Latency.** The page budget test holds `/ask` and `/train/agents/new` with an open conversation
+- **Latency.** The page budget test holds `/ask` and the Agent Factory (`/train/agents/new`, now served at `/design/agents/new`) with an open conversation
   at one `list_records` call in one round, and Design → Opportunities at `list_records` and
   `list_methodologies` in one round.
 - **Consistency.** Writes are linearizable per key, and a read after an acknowledged write sees it

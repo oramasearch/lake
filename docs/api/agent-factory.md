@@ -1,7 +1,7 @@
 # The Agent Factory
 
 **Status: implemented 2026-09-27 (lake#233, epic lake#228).** *Build it with the Agent Factory* in
-Train → Agents → Create an Agent (`/train/agents/new`): a conversation with **AgentCreator**
+Design → Agents → Describe it to the Agent Factory (`/design/agents/new`; `/train/agents/new` redirects there, lake#653): a conversation with **AgentCreator**
 ([`oramasearch/agent-creator`](https://github.com/oramasearch/agent-creator)), which asks what it must
 and proposes an agent in Studio's shape. **Nothing is created until the person approves.**
 
