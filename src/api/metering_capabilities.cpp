@@ -732,8 +732,8 @@ void register_metering_capabilities(Registry& registry) {
             }
             if (!workspaces.empty()) {
                 not_measured.push_back(
-                    "Model files and indexes inside a workspace: the workspace does not report "
-                    "their size yet.");
+                    "Model files, indexes and the rest of what a workspace holds: this summary "
+                    "counts its datasets only; Usage (usage_over_time) counts all of it.");
             }
             const std::uint64_t image_bytes_value = image_bytes.value_or(0);
             const std::uint64_t total_bytes =

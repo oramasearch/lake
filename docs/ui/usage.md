@@ -33,8 +33,9 @@ Top to bottom:
 - **Near a Limit.** One warning banner per limit at or past its warning percentage.
 - **Figures.** One tile per dimension: the total (a reading's latest value for storage), its unit
   in words (`formatValue`: CPU in vCPU-minutes or -hours, RAM and GPU memory in GiB-minutes or
-  -hours, GPU in GPU-minutes or -hours), and its change against the last period with an arrow. Pressing a tile
-  charts it (`?dimension=`).
+  -hours, GPU in GPU-minutes or -hours), and its change against the last period with an arrow. A
+  dimension the reading answers with `billed: false` (build, run and instance time, lake#658) says
+  *Detail, not billed* under it (`billingNote`). Pressing a tile charts it (`?dimension=`).
 - **Over Time.** A uPlot chart (`pages/usage/UsageChart.tsx`, as Train and Ship's charts) of the
   chosen dimension, stacked **By workspace** or **By kind**: the six largest bands and Other
   (`stackSeries`), in lake's colours, redrawn when the theme changes; the legend shows each band's
@@ -50,7 +51,10 @@ Top to bottom:
   vCPU-hours, GiB-hours, GPU-hours, instance-hours or a count, `toLimit`), and the warning
   percentage. Empty or 0 removes
   it.
-- **Not Measured Yet.** The reading's `not_measured` sentences, as a quiet banner.
+- **Not Measured Yet.** The reading's `not_measured` sentences, as a quiet banner. Since lake#658
+  it names only what is still not measured: workloads the operator has not reported, the engine
+  storage of a workspace whose Zetta is older, app traffic (lake#661) and unreported model tokens
+  (lake#248).
 - **Repository Usage by Hour.** A card linking `/metering` for the account.
 - **By Workspace.** Every dimension's figure per workspace, sortable, or why a workspace was not read.
 

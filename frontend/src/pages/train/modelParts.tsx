@@ -65,8 +65,10 @@ export function useModelLinks() {
   };
 }
 
-/** Where a model came from, in words: its pipeline in its project, its experiment, or neither. */
+/** Where a model came from, in words: its pipeline in its project, its experiment, made on its
+ * own (trained or brought), or none of these. A standalone model's project is never named. */
 export function SourceText({ group, experiment }: { group: ModelGroup; experiment?: { name: string } }) {
+  if (group.standalone) return <>{group.brought ? "brought from a file" : "trained on its own"}</>;
   if (group.pipeline) {
     return (
       <>

@@ -38,6 +38,56 @@ std::string space(lake::control::Store& store, const std::string& handle) {
     return customer->id;
 }
 
+// A 16 kHz mono 16-bit WAV of `seconds` of silence.
+std::string wav(double seconds) {
+    const auto put = [](std::string& out, std::uint32_t value, int width) {
+        for (int index = 0; index < width; ++index) {
+            out.push_back(static_cast<char>((value >> (8 * index)) & 0xFF));
+        }
+    };
+    const auto bytes = static_cast<std::uint32_t>(seconds * 32000);
+    std::string out = "RIFF";
+    put(out, 36 + bytes, 4);
+    out += "WAVEfmt ";
+    put(out, 16, 4);
+    put(out, 1, 2);
+    put(out, 1, 2);
+    put(out, 16000, 4);
+    put(out, 32000, 4);
+    put(out, 2, 2);
+    put(out, 16, 2);
+    out += "data";
+    put(out, bytes, 4);
+    out.append(bytes, '\0');
+    return out;
+}
+
+std::string base64(std::string_view bytes) {
+    static constexpr char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    std::size_t index = 0;
+    for (; index + 2 < bytes.size(); index += 3) {
+        const std::uint32_t n = (static_cast<unsigned char>(bytes[index]) << 16) |
+                                (static_cast<unsigned char>(bytes[index + 1]) << 8) |
+                                static_cast<unsigned char>(bytes[index + 2]);
+        for (int shift = 18; shift >= 0; shift -= 6) {
+            out.push_back(alphabet[(n >> shift) & 63]);
+        }
+    }
+    if (index < bytes.size()) {
+        std::uint32_t n = static_cast<unsigned char>(bytes[index]) << 16;
+        if (index + 1 < bytes.size()) {
+            n |= static_cast<unsigned char>(bytes[index + 1]) << 8;
+        }
+        out.push_back(alphabet[(n >> 18) & 63]);
+        out.push_back(alphabet[(n >> 12) & 63]);
+        out.push_back(index + 1 < bytes.size() ? alphabet[(n >> 6) & 63] : '=');
+        out.push_back('=');
+    }
+    return out;
+}
+
 void flush(UsageRecorder& recorder) {
     static_cast<void>(liquid::runtime::block_on(recorder.flush()));
 }
@@ -559,30 +609,29 @@ TEST(UsageSample, CountsTheSecondsOfATranscriptMadeFromAudio) {
               62)
         << "61.2 seconds, rounded up";
 
-    // gpt-4o-transcribe reports tokens, not seconds: they count as its model tokens.
+    // gpt-4o-transcribe reports tokens, not seconds (lake#658): the speech is billed by the
+    // minutes lake measures from the recording, never as model tokens.
     context.transcriber = [](const lake::api::TranscriptionRequest&) {
         lake::api::Transcription heard{"another call", std::nullopt, "gpt-4o-transcribe"};
         heard.input_tokens = 900;
         heard.output_tokens = 40;
         return std::expected<lake::api::Transcription, lake::api::ApiError>(heard);
     };
-    ASSERT_TRUE(rig.call("create_transcript",
-                         {{"customer_id", rig.customer},
-                          {"workspace_id", rig.home},
-                          {"title", "Second call"},
-                          {"source", "recording"},
-                          {"audio_base64", "AAAA"},
-                          {"audio_name", "call.webm"}},
-                         context)
-                    .ok);
+    const auto second = rig.call("create_transcript",
+                                 {{"customer_id", rig.customer},
+                                  {"workspace_id", rig.home},
+                                  {"title", "Second call"},
+                                  {"source", "recording"},
+                                  {"audio_base64", base64(wav(30.5))},
+                                  {"audio_name", "call.wav"}},
+                                 context);
+    ASSERT_TRUE(second.ok) << second.error.message;
+    EXPECT_EQ(second.value["seconds"], 30.5) << "the measured length is the transcript's";
     flush(rig.recorder);
     auto& series = rig.workspaces.records(rig.home);
-    EXPECT_EQ(
-        series.metric_total(
-            "lake_usage",
-            {{"dimension", "model_tokens"}, {"model", "gpt-4o-transcribe"}, {"kind", "input"}}),
-        900);
-    EXPECT_EQ(series.metric_total("lake_usage", {{"dimension", "speech"}}), 62);
+    EXPECT_EQ(series.metric_total("lake_usage", {{"dimension", "model_tokens"}}), 0)
+        << "speech is never billed twice";
+    EXPECT_EQ(series.metric_total("lake_usage", {{"dimension", "speech"}}), 62 + 31);
 }
 
 TEST(UsageOverTime, CountsEachModelsAnsweredPredictions) {
@@ -751,4 +800,318 @@ TEST(UsageSample, MetersCpuRamGpuAndGpuMemoryFromScheduledResources) {
     EXPECT_NE(not_measured.find("the engine of workspace lab"), std::string::npos) << not_measured;
     EXPECT_EQ(not_measured.find("service orders"), std::string::npos) << not_measured;
     EXPECT_EQ(not_measured.find("lake#612"), std::string::npos) << "CPU and memory are measured";
+}
+
+// lake#658: a finished build, agent job or cron run is charged once, whenever lake first finds it
+// finished with its resources reported, in the hour it ended: the operator may report a run long
+// after it ended (a run it never saw is backfilled from the pod spec it schedules runs with), and a
+// sample after a gap still finds it. Until then usage_over_time names it.
+TEST(UsageSample, ChargesEachFinishedJobOnceWheneverItsResourcesAreReported) {
+    constexpr std::uint64_t gib = 1024ULL * 1024 * 1024;
+    UsageRig rig;
+    auto& store = *rig.store;
+    const auto owner = store.get_customer(rig.customer);
+    ASSERT_TRUE(owner);
+    const auto repository = store.create_repository({rig.customer, "jobs", "", "private", rig.lab});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const auto build = store.create_build({.customer_id = rig.customer,
+                                           .workspace_id = rig.lab,
+                                           .repository = repository->id,
+                                           .revision = "abc",
+                                           .target = "lake.example.test/usage-rig/jobs:v1"});
+    ASSERT_TRUE(build) << build.error().message;
+    ASSERT_TRUE(store.age_build(build->id, 600));
+    ASSERT_TRUE(store.set_build_status(build->id, {.phase = "Failed"}));
+    const auto job = store.create_agent_launch({.customer_id = rig.customer,
+                                                .agent_id = "agent-1",
+                                                .agent_name = "Churn Watcher",
+                                                .mode = "job",
+                                                .trigger = "manual",
+                                                .scopes = {"workspace_query"},
+                                                .created_by_user_id = owner->user_id,
+                                                .workspace_id = rig.lab});
+    ASSERT_TRUE(job) << job.error().message;
+    ASSERT_TRUE(store.age_agent_launch(job->id, 300));
+    ASSERT_TRUE(store.set_agent_launch_status(job->id, "Succeeded", "", "", ""));
+    const auto schedule = store.create_agent_cron_schedule({.customer_id = rig.customer,
+                                                            .agent_id = "agent-2",
+                                                            .agent_name = "Nightly Report",
+                                                            .cron = "0 3 * * *",
+                                                            .time_zone = "Etc/UTC",
+                                                            .scopes = {"workspace_query"},
+                                                            .created_by_user_id = owner->user_id,
+                                                            .workspace_id = rig.lab});
+    ASSERT_TRUE(schedule) << schedule.error().message;
+    const std::string run = lake::control::new_uuid_v4();
+    ASSERT_TRUE(store.put_agent_cron_run(schedule->id, run, "nightly-1", "Running", ""));
+    ASSERT_TRUE(store.age_agent_cron_run(run, 120));
+    ASSERT_TRUE(store.put_agent_cron_run(schedule->id, run, "nightly-1", "Succeeded", "", 0));
+
+    auto context = rig.context();
+    const auto ended = std::chrono::system_clock::now();
+    // Three days later, long past the sample after they ended, and still unreported.
+    const auto later = ended + std::chrono::hours(72);
+    ASSERT_TRUE(liquid::runtime::block_on(
+        lake::api::sample_usage(context, std::chrono::seconds(900), later)));
+    flush(rig.recorder);
+    auto& lab = rig.workspaces.records(rig.lab);
+    const auto total = [&lab](const json& labels) {
+        return lab.metric_total("lake_usage", labels);
+    };
+    EXPECT_EQ(total({{"dimension", "cpu"}}), 0) << "nothing reported, nothing charged";
+    const json window{{"customer_id", rig.customer},
+                      {"from", utc(ended - std::chrono::hours(1))},
+                      {"to", utc(ended + std::chrono::hours(1))},
+                      {"granularity", "hour"},
+                      {"dimensions", json::array({"cpu", "ram"})}};
+    auto read = rig.call("usage_over_time", window);
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_NE(read.value["not_measured"].dump().find("3 finished builds, agent jobs and cron runs"),
+              std::string::npos)
+        << read.value["not_measured"].dump();
+
+    // The operator reports them, as it backfills runs it never saw.
+    ASSERT_TRUE(store.put_workload_resources({"build", build->id, 0, 2000, 4 * gib}));
+    ASSERT_TRUE(store.put_workload_resources({"agent_launch", job->id, 0, 500, gib}));
+    ASSERT_TRUE(store.put_workload_resources({"agent_cron_run", run, 0, 250, gib / 2}));
+    ASSERT_TRUE(liquid::runtime::block_on(
+        lake::api::sample_usage(context, std::chrono::seconds(900), later)));
+    flush(rig.recorder);
+    const double build_cpu = total({{"dimension", "cpu"}, {"kind", "build"}});
+    EXPECT_GE(build_cpu, 2000.0 * 600);
+    EXPECT_LE(build_cpu, 2000.0 * 602);
+    const double job_ram = total({{"dimension", "ram"}, {"object_id", job->id}});
+    EXPECT_GE(job_ram, 1024.0 * 300);
+    EXPECT_LE(job_ram, 1024.0 * 302);
+    const double run_cpu = total({{"dimension", "cpu"}, {"kind", "agent"}, {"object_id", run}});
+    EXPECT_GE(run_cpu, 250.0 * 120);
+    EXPECT_LE(run_cpu, 250.0 * 122);
+    for (const auto& point : lab.metrics.at("lake_usage").points) {
+        if (point["labels"].value("dimension", "") == "cpu") {
+            EXPECT_LT(point["at_ms"].get<std::int64_t>(), ms(ended) + 3'600'000)
+                << "charged in the hour each ended, not when it was found";
+        }
+    }
+    EXPECT_EQ(lab.rows("metering_job_records").size(), 3U) << "one record per charged job";
+
+    // Never again, by this sample or a later one.
+    ASSERT_TRUE(liquid::runtime::block_on(lake::api::sample_usage(
+        context, std::chrono::seconds(900), later + std::chrono::hours(1))));
+    flush(rig.recorder);
+    EXPECT_EQ(total({{"dimension", "cpu"}, {"kind", "build"}}), build_cpu);
+    EXPECT_EQ(total({{"dimension", "cpu"}, {"object_id", run}}), run_cpu);
+
+    read = rig.call("usage_over_time", window);
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["not_measured"].dump().find("finished build"), std::string::npos)
+        << read.value["not_measured"].dump();
+    const json* cpu = dimension(read.value, "cpu");
+    ASSERT_NE(cpu, nullptr);
+    EXPECT_GE((*cpu)["total"].get<double>(), build_cpu + run_cpu);
+}
+
+// lake#658: the engine's own report of what it holds (Zetta storage_usage) becomes storage by
+// kind: its datasets as workspace data, and its models, indexes, run artifacts, topics, files and
+// the workspace's own buckets, never lake's store or workspace-files buckets. An engine without
+// the capability keeps its datasets from list_datasets, and usage_over_time names the workspace.
+TEST(UsageSample, RecordsWhatTheEngineHoldsByKind) {
+    UsageRig rig;
+    rig.workspaces.zetta->answers["list_datasets"] = {
+        {"datasets", json::array({{{"name", "a"}, {"size_bytes", 64}}})}};
+    rig.workspaces.zetta->responder =
+        [&rig](const std::string& capability,
+               const json&) -> std::optional<lake::control::ZettaControlResult<json>> {
+        if (capability != "storage_usage" ||
+            rig.workspaces.zetta->last_url.find(rig.lab) == std::string::npos) {
+            return std::nullopt;
+        }
+        // lab's engine predates storage_usage.
+        return lake::control::ZettaControlResult<json>(std::unexpected(
+            lake::control::ZettaControlError{"unknown_capability", "no capability storage_usage"}));
+    };
+    rig.workspaces.zetta->answers["storage_usage"] = {
+        {"total_bytes", 9999},
+        {"kinds",
+         {{"datasets", 5000},
+          {"models", 700},
+          {"indexes", 300},
+          {"runs", 50},
+          {"streams", 20},
+          {"files", 10},
+          {"buckets", 999},
+          {"records", 4000},
+          {"system", 100}}},
+        {"buckets",
+         json::array({{{"bucket", "lake_store"}, {"bytes", 900}},
+                      {{"bucket", "lake_files"}, {"bytes", 9}},
+                      {{"bucket", "photos"}, {"bytes", 90}}})}};
+    auto context = rig.context();
+    ASSERT_TRUE(liquid::runtime::block_on(
+        lake::api::sample_usage(context, std::chrono::seconds(900), hour)));
+    flush(rig.recorder);
+    auto& home = rig.workspaces.records(rig.home);
+    const auto stored = [&home](const std::string& kind) {
+        return home.metric_total("lake_storage", {{"kind", kind}});
+    };
+    EXPECT_EQ(stored("workspace_data"), 5000) << "whole databases, not list_datasets' chunks";
+    EXPECT_EQ(stored("models"), 700);
+    EXPECT_EQ(stored("indexes"), 300);
+    EXPECT_EQ(stored("runs"), 50);
+    EXPECT_EQ(stored("streams"), 20);
+    EXPECT_EQ(stored("files"), 10);
+    EXPECT_EQ(stored("buckets"), 90) << "lake's own buckets are repositories and drive files";
+    EXPECT_EQ(stored("records"), 0) << "lake's bookkeeping is not billed";
+    auto& lab = rig.workspaces.records(rig.lab);
+    EXPECT_EQ(lab.metric_total("lake_storage", {{"kind", "workspace_data"}}), 64);
+    EXPECT_FALSE(lab.metrics.contains("lake_storage") &&
+                 lab.metric_total("lake_storage", {{"kind", "models"}}) > 0);
+
+    const auto read = rig.call("usage_over_time",
+                               {{"customer_id", rig.customer},
+                                {"from", utc(hour)},
+                                {"to", utc(hour + std::chrono::hours(1))},
+                                {"granularity", "hour"},
+                                {"dimensions", json::array({"storage"})}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    const std::string not_measured = read.value["not_measured"].dump();
+    EXPECT_NE(not_measured.find("inside workspace lab"), std::string::npos) << not_measured;
+    EXPECT_EQ(not_measured.find("home"), std::string::npos) << not_measured;
+    const json* storage = dimension(read.value, "storage");
+    ASSERT_NE(storage, nullptr);
+    EXPECT_EQ((*storage)["total"], 5000 + 700 + 300 + 50 + 20 + 10 + 90 + 64);
+}
+
+// lake#613: dictation names the workspace it is dictated in, and its audio minutes (or the tokens
+// a model reports instead) are that workspace's usage. A dictation that names none is refused.
+TEST(UsageOverTime, CountsDictationInTheWorkspaceItWasDictatedIn) {
+    UsageRig rig;
+    auto context = rig.context();
+    context.transcriber = [](const lake::api::TranscriptionRequest&) {
+        return std::expected<lake::api::Transcription, lake::api::ApiError>(
+            lake::api::Transcription{"add a churn project", 7.2, "whisper-1"});
+    };
+    const json dictation{{"customer_id", rig.customer},
+                         {"workspace_id", rig.lab},
+                         {"name", "dictation.webm"},
+                         {"audio_base64", "AAAA"}};
+    const auto heard = rig.call("transcribe", dictation, context);
+    ASSERT_TRUE(heard.ok) << heard.error.message;
+    EXPECT_EQ(heard.value["text"], "add a churn project");
+    context.transcriber = [](const lake::api::TranscriptionRequest&) {
+        lake::api::Transcription tokens{"and a forecast", std::nullopt, "gpt-4o-transcribe"};
+        tokens.input_tokens = 300;
+        tokens.output_tokens = 12;
+        return std::expected<lake::api::Transcription, lake::api::ApiError>(tokens);
+    };
+    json measured = dictation;
+    measured["audio_base64"] = base64(wav(4.25));
+    measured["name"] = "dictation.wav";
+    ASSERT_TRUE(rig.call("transcribe", measured, context).ok);
+    // A recording whose length cannot be read counts nothing (and the audit says so).
+    ASSERT_TRUE(rig.call("transcribe", dictation, context).ok);
+    flush(rig.recorder);
+    auto& lab = rig.workspaces.records(rig.lab);
+    EXPECT_EQ(lab.metric_total("lake_usage", {{"dimension", "speech"}, {"kind", "dictation"}}),
+              8 + 5)
+        << "7.2 seconds reported and 4.25 measured, each rounded up";
+    EXPECT_EQ(lab.metric_total("lake_usage", {{"dimension", "model_tokens"}}), 0)
+        << "a dictation records speech and no model tokens";
+    EXPECT_EQ(
+        rig.workspaces.records(rig.home).metric_total("lake_usage", {{"dimension", "speech"}}), 0);
+
+    const auto unnamed =
+        rig.call("transcribe", {{"name", "dictation.webm"}, {"audio_base64", "AAAA"}}, context);
+    EXPECT_EQ(unnamed.error.code, "invalid_input") << "a dictation names its workspace";
+
+    const auto read =
+        rig.call("usage_over_time",
+                 {{"customer_id", rig.customer},
+                  {"from", utc(std::chrono::system_clock::now() - std::chrono::hours(1))},
+                  {"to", utc(std::chrono::system_clock::now() + std::chrono::hours(1))},
+                  {"granularity", "hour"},
+                  {"dimensions", json::array({"speech"})}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(dimension(read.value, "speech")->at("total"), 13);
+    EXPECT_EQ(read.value["not_measured"].dump().find("dictation"), std::string::npos)
+        << "nothing about dictation is left unmeasured";
+}
+
+// lake#658: each answered search of a published index counts in `searches`, by index; a refused
+// one does not.
+TEST(UsageOverTime, CountsEachIndexsAnsweredSearches) {
+    UsageRig rig;
+    rig.workspaces.zetta->answers["get_index"] = {{"id", "idx-1"}, {"exposed", true}};
+    rig.workspaces.zetta->answers["search"] = {{"hits", json::array()}};
+    const json input{{"customer_id", rig.customer},
+                     {"workspace_id", rig.home},
+                     {"index_id", "idx-1"},
+                     {"query", "late invoices"}};
+    ASSERT_TRUE(rig.call("search_index", input).ok);
+    ASSERT_TRUE(rig.call("search_index", input).ok);
+    rig.workspaces.zetta->answers["get_index"] = {{"id", "idx-1"}, {"exposed", false}};
+    EXPECT_FALSE(rig.call("search_index", input).ok);
+    flush(rig.recorder);
+    EXPECT_EQ(rig.workspaces.records(rig.home).metric_total(
+                  "lake_usage", {{"dimension", "searches"}, {"object_id", "idx-1"}}),
+              2);
+    const auto read =
+        rig.call("usage_over_time",
+                 {{"customer_id", rig.customer},
+                  {"from", utc(std::chrono::system_clock::now() - std::chrono::hours(1))},
+                  {"to", utc(std::chrono::system_clock::now() + std::chrono::hours(1))},
+                  {"granularity", "hour"},
+                  {"dimensions", json::array({"searches"})}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    const json* searches = dimension(read.value, "searches");
+    ASSERT_NE(searches, nullptr);
+    EXPECT_EQ((*searches)["unit"], "calls");
+    EXPECT_EQ((*searches)["by_object"][0]["key"], "idx-1");
+    EXPECT_TRUE((*searches)["billed"].get<bool>());
+}
+
+// lake#658: transfer outside repository sync is added to the exact repository records, by
+// direction; and build, run and instance time are answered as detail that is never billed.
+TEST(UsageOverTime, AddsTransferOutsideSyncAndSaysWhatIsNotBilled) {
+    UsageRig rig;
+    rig.recorder.add_transfer(rig.home, 100, 400, hour);
+    rig.recorder.add_transfer(rig.lab, 0, 50, hour);
+    rig.recorder.add(rig.home, "instances", 900, {{"kind", "zetta"}}, hour);
+    flush(rig.recorder);
+    const auto read = rig.call("usage_over_time",
+                               {{"customer_id", rig.customer},
+                                {"from", utc(hour)},
+                                {"to", utc(hour + std::chrono::hours(1))},
+                                {"granularity", "hour"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    const json* transfer = dimension(read.value, "transfer");
+    ASSERT_NE(transfer, nullptr);
+    EXPECT_EQ((*transfer)["total"], 550);
+    for (const json& kind : (*transfer)["by_kind"]) {
+        EXPECT_EQ(kind["total"], kind["key"] == "in" ? 100 : 450) << kind.dump();
+    }
+    for (const json& entry : read.value["dimensions"]) {
+        const std::string name = entry["dimension"];
+        const bool detail = name == "instances" || name == "build_compute" || name == "run_compute";
+        EXPECT_EQ(entry["billed"].get<bool>(), !detail) << name;
+    }
+    EXPECT_NE(read.value["not_measured"].dump().find("lake#661"), std::string::npos)
+        << "app traffic is named until the operator reports it";
+}
+
+// lake#658: a dataset uploaded through the engine's upload_dataset is the workspace's transfer in.
+TEST(UsageOverTime, AnUploadedDatasetIsTransferIn) {
+    UsageRig rig;
+    rig.workspaces.zetta->answers["upload_dataset"] = {{"table", "orders"}, {"rows", 2}};
+    const std::string csv = "id,total\n1,10\n2,20\n";
+    const auto uploaded = rig.call("upload_dataset",
+                                   {{"customer_id", rig.customer},
+                                    {"workspace_id", rig.home},
+                                    {"table_name", "orders"},
+                                    {"format", "csv"},
+                                    {"content", csv}});
+    ASSERT_TRUE(uploaded.ok) << uploaded.error.message;
+    flush(rig.recorder);
+    EXPECT_EQ(rig.workspaces.records(rig.home).metric_total(
+                  "lake_usage", {{"dimension", "transfer"}, {"kind", "in"}}),
+              static_cast<double>(csv.size()));
 }

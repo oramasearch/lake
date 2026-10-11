@@ -33,6 +33,23 @@ struct MeteringUsageCodec {
 struct MeteredBuildCodec {
     static constexpr RecordCollection collection{"metering_build_records", 1};
 };
+// `lake_metering_job_records` (lake#658): one record per finished workload that is charged once
+// for how long it ran (an image build, a job-mode agent launch, an agent cron run), under the
+// blind key of `<kind>:<id>`, written `if_absent` before its CPU, RAM, GPU and GPU memory are added
+// to the workspace's `lake_usage`. A job is therefore charged at most once, whenever lake first
+// finds it finished with its resources reported, however late that is.
+struct MeteredJobCodec {
+    static constexpr RecordCollection collection{"metering_job_records", 1};
+};
+
+// One charged job as read back.
+struct MeteredJob {
+    std::string customer_id;
+    std::string kind; // build, agent_launch, agent_cron_run
+    std::string object_id;
+    std::string hour; // the UTC hour it ended in, "YYYY-MM-DDTHH:00:00Z"
+    std::uint64_t seconds = 0;
+};
 
 // One transfer record as read back: an hour's counters, or a copied legacy row's.
 struct MeteredTransfer {
@@ -61,6 +78,15 @@ add_metered_transfer(WorkspaceRecords& records,
 // when written, false when the result was already recorded.
 liquid::runtime::task<ZettaControlResult<bool>> record_metered_build(WorkspaceRecords& records,
                                                                      MeteredBuild build);
+
+// Records that a job was charged: `if_absent` under the blind key of its kind and id. True when
+// written (charge it now), false when it was charged before.
+liquid::runtime::task<ZettaControlResult<bool>> record_metered_job(WorkspaceRecords& records,
+                                                                   MeteredJob job);
+
+// The space's charged jobs in this workspace that ended at or after `since_us` (0: all).
+liquid::runtime::task<ZettaControlResult<std::vector<MeteredJob>>>
+list_metered_jobs(WorkspaceRecords& records, std::string customer_id, std::int64_t since_us = 0);
 
 // The space's records in this workspace, oldest hour first, none before `since_us` (0: all).
 // Records that do not open here or name another space are skipped.

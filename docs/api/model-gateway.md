@@ -148,10 +148,10 @@ agents use the gateway ([deployment/aks.md](../deployment/aks.md#speech-to-text-
 ## Lake's own model calls
 
 Lake itself calls a model only for speech-to-text (`transcribe`, and `create_transcript` from audio),
-which is metered as `speech` and, for a model that reports tokens, as that transcript's
-`model_tokens` ([transcripts.md](transcripts.md)). Dictation outside a transcript is
-[lake#613](https://github.com/oramasearch/lake/issues/613). Lake makes no other model call (no
-clean-up or naming of its own).
+which is metered as `speech` by the minute in the workspace it is used in, dictation included
+(lake#613), and never also as `model_tokens`: a transcription model's tokens are audit detail
+only, so no recording is billed twice ([transcripts.md](transcripts.md#how-long-a-recording-is),
+lake#658). Lake makes no other model call (no clean-up or naming of its own).
 
 ## `record_model_usage`
 

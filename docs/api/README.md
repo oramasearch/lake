@@ -1,16 +1,16 @@
 # The `/v1` API and MCP
 
-lake#248: [model-gateway.md](model-gateway.md) documents the model gateway, `model_completion` and
-its OpenAI-compatible routes `POST /openai/v1/chat/completions`, `/responses` and `/embeddings`:
-every agent model call goes through Lake with Orama's own key and is counted as the run's workspace's
-`model_tokens`, the monthly `model_tokens` limit is enforced (`usage_limit_reached`, 429), and agents
-hold no provider key.
 lake#650: [engine-capabilities.md](engine-capabilities.md) documents every capability of a
 workspace's engine as a named Lake capability (its own route, OpenAPI operation and MCP tool, with
 the engine's input schema vendored in `src/api/engine_openapi.json`), the names Lake gives the
 engine's where they would collide or say too little (`check_pipeline`, `start_run`,
 `search_workspace_index`, `get_holdout_experiment`, ...), the Lake capabilities that already
 covered the rest, and the `enum` `workspace_query` and `workspace_act` now carry on `capability`.
+lake#248: [model-gateway.md](model-gateway.md) documents the model gateway, `model_completion` and
+its OpenAI-compatible routes `POST /openai/v1/chat/completions`, `/responses` and `/embeddings`:
+every agent model call goes through Lake with Orama's own key and is counted as the run's workspace's
+`model_tokens`, the monthly `model_tokens` limit is enforced (`usage_limit_reached`, 429), and agents
+hold no provider key.
 
 lake#564 (decision 56, migration `0073_billing`): [billing.md](billing.md) documents billing, on only
 where `LAKE_BILLING` is (Orama Cloud): `price_list`, `set_price_list`, `billing_account`,
@@ -24,6 +24,10 @@ lake#623, lake#635, lake#637: [billing.md](billing.md#price-list) carries Orama 
 usage only (one rate per dimension, no plans, no fee, nothing included; Metis is priced by sales),
 time per minute, each rate with its reference rate, date and margin, worked bills, how a change of
 rates mid-month is billed, and when to revisit it.
+lake#654: [models.md](models.md#a-standalone-model-lake654) documents a standalone model, made on its
+own rather than by a project's pipeline: `train_model`, `retrain_model`, `register_model` and
+`move_model_to_project` (the workspace engine's, [engine-capabilities.md](engine-capabilities.md)),
+and Lake's `load_drive_model`, which brings a drive's model file.
 lake#645: [deletion.md](deletion.md) documents deleting and revoking what could only be created
 before, each with `dry_run: true` first and a typed confirmation in Lake Console:
 `delete_organization`, `revoke_invitation`, `revoke_grant`, `delete_secret_mount`, `delete_dataset`,
@@ -31,6 +35,14 @@ before, each with `dry_run: true` first and a typed confirmation in Lake Console
 lake#561: [drives.md](drives.md) documents drives (repository, workspace files, virtual) and workspace files in the workspace Zetta. [transcripts.md](transcripts.md) documents speech-to-text (`transcribe`) and the
 workspace transcripts kept in the workspace Zetta (`create_transcript`, `list_transcripts`,
 `get_transcript`, `update_transcript`, `delete_transcript`), the audio never kept.
+lake#652 (decision 60): [mcp-connections.md](mcp-connections.md) documents a workspace as the client
+of remote MCP servers: Lake's own client and its bounds, the connection record and its secret, the
+fifteen capabilities (`create_mcp_connection`, `list_mcp_connections`, `get_mcp_connection`,
+`update_mcp_connection`, `delete_mcp_connection`, `refresh_mcp_connection`, `test_mcp_connection`,
+`list_mcp_connection_tools`, `read_mcp_tool`, `call_mcp_tool`, `set_mcp_tool_auto_approve`,
+`list_mcp_connection_calls`, `begin_mcp_connection_sign_in`, `complete_mcp_connection_sign_in`,
+`create_mcp_connection_agent`), the read-or-change rule, who may call what, OAuth sign-in, the
+opt-in re-export through `/w/<workspace>/mcp`, and a connection's agent and streams.
 lake#597: [solutions.md](solutions.md) documents a workspace's own AI solutions, kept in the workspace
 Zetta beside Orama's read-only catalogue (`list_solutions`, `get_solution`, `create_solution`,
 `update_solution`, `delete_solution`, `duplicate_solution`; `forbidden` for Orama's).
@@ -270,6 +282,8 @@ and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
 | `model_traffic` | read | `customer_id`, `workspace_id`, `model_id?`, `from_ms?`, `to_ms?`, `step_ms?` | each model's `predict` calls, errors and mean latency, step by step, from the workspace's own series; the workspace's `predict` requests; drift not measured yet (lake#599) | [workspaces.md](workspaces.md) |
 | `get_model`, `get_dataset`, `resolve_model_file`, `resolve_dataset_file` | read | repository id and revision, or, without `revision`, a workspace model or dataset id with `customer_id` and `workspace_id`; file path where required | compatible model/dataset metadata, the workspace's trained model or dataset schema, storage/provenance, or exact file | [models.md](models.md) |
 | `delete_dataset`, `delete_model`, `delete_run`, `delete_index` | action | `customer_id`, `workspace_id`, `id`, `dry_run?` | the engine's account of what went (`removed`, `kept`); `501 not_supported` from an older engine | [models.md](models.md#deleting-from-a-workspace) |
+| `train_model`, `retrain_model`, `register_model`, `move_model_to_project` | action | `customer_id`, `workspace_id` and the engine's fields: a name, methodology, dataset and target; a model id and new settings; a model file's text; a model id and project name | a training run's `run_id`, a brought model's `model_id`, or the project; `501 not_supported` from an older engine | [models.md](models.md#a-standalone-model-lake654) |
+| `load_drive_model` | action | `customer_id`, `workspace_id`, `drive_id`, `id`, `name` or `version_of`, `kind?`, `metrics?` | `register_model`'s answer with the file's `source` | [drives.md](drives.md#a-drive-file-as-a-model-lake654) |
 | `prepare_repository_upload`, `stage_repository_file`, `commit_repository_files` | action | repository id plus upload plan, verified staged bytes, or file operations | upload modes, unique stored bytes, or immutable committed revision | [models.md](models.md) |
 | `attach_model_provenance`, `verify_model_provenance` | action | model and dataset revisions plus canonical liquid attestations, or model revision | attached or re-verified dataset-to-model training chain | [models.md](models.md) |
 | `create_repository` | action | `customer_id`, `workspace_id`, `name`, `description?`, `visibility?` | repository, with its `workspace_id` | [repositories.md](repositories.md) |

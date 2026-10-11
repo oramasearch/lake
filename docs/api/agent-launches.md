@@ -49,7 +49,9 @@ and gives the credential:
   stored in lake), the workspace's transcripts through `list_transcripts` and `get_transcript`
   (lake#561), and the App and build reads agent-runtime gives every agent (`list_apps`, `get_app`,
   `app_logs`, `receive_app_events`, `list_builds`, `get_build`, `build_logs`,
-  `receive_build_events`);
+  `receive_build_events`); and the tools of the workspace's MCP connections through
+  `list_mcp_connection_tools`, `read_mcp_tool` and `call_mcp_tool` (lake#652), where lake checks the
+  agent's `mcp:<prefix>` skill on every call ([MCP connections](mcp-connections.md#who-may-call-a-tool));
 - the **Lake reads** each of its skills grants, and nothing for a skill lake does not know.
 
 A skill's changes are never scopes: agent-runtime turns them into proposals a person confirms, and
@@ -58,7 +60,9 @@ the confirmed change runs as that person. Which reads each skill grants is agent
 `tools/agents/vendor-agent-skills.py <agent-runtime>/skills.json` into
 `src/control/agent_skills.cpp` (and the labels into
 `frontend/src/pages/train/agent-skills.json`), and `--check` says when lake's copy is behind. See
-[agent-factory.md](agent-factory.md#skills) for the skills. A schedule's runs and a conversation
+[agent-factory.md](agent-factory.md#skills) for the skills. A launch or schedule credential that
+leaves out `workspace_id` gets its launch's or schedule's workspace, as a task credential gets its
+task's (lake#652). A schedule's runs and a conversation
 service get the same scopes as a launch of the same agent.
 
 Verify: `AgentRuns.ARunsKeyCarriesTheReadsOfItsAgentsSkillsAndNoChange` and

@@ -30,6 +30,7 @@ may wrap across source lines.
 | | `load-data` | Datasets and Loading Data |
 | | `connections` | Connections (lake#651) |
 | | `transcripts` | Transcripts and Speech-to-Text |
+| | `mcp-connections` | MCP Connections |
 | Design | `design` | AI Projects and Pipelines |
 | | `solutions` | AI Solutions, Methodologies and Opportunities |
 | Train | `train` | Train a Model |

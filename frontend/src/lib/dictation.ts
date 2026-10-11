@@ -67,3 +67,15 @@ export function onSpeechToTextChange(listener: () => void): () => void {
     listeners.delete(listener);
   };
 }
+
+/** `transcribe`'s input for a dictation in the workspace a person works in (lake#613): its audio
+ * minutes are that workspace's speech-to-text usage, so a dictation names it. Null without a
+ * workspace: nothing to bill it to, so the microphone does not offer dictation there. */
+export function dictationInput(
+  scope: { customerId: string; workspaceId: string },
+  name: string,
+  audio: string,
+): { customer_id: string; workspace_id: string; name: string; audio_base64: string } | null {
+  if (!scope.customerId || !scope.workspaceId) return null;
+  return { customer_id: scope.customerId, workspace_id: scope.workspaceId, name, audio_base64: audio };
+}

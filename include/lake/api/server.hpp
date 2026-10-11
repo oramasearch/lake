@@ -157,6 +157,11 @@ struct ServerOptions {
     // An injected transcriber (tests); empty: OpenAI over the server's outbound client when
     // `openai_api_key` is set.
     Transcriber transcriber;
+    // MCP connections (decision 60, docs/api/mcp-connections.md#the-client): whether a connection
+    // may reach loopback and private addresses (LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1, local
+    // development and tests only), and an injected transport (tests); null: the server's own.
+    bool mcp_allow_private_addresses = false;
+    std::shared_ptr<McpHttp> mcp_http;
     // An injected store browser (tests' fakes; lake#656). Empty: no bucket or filesystem provider
     // is browsable yet (lake#664).
     control::StoreBrowser store_browser;
@@ -241,6 +246,9 @@ struct ServerOptions {
     std::chrono::milliseconds usage_flush_interval{std::chrono::seconds(10)};
     std::size_t usage_max_pending = 8192;
     std::chrono::milliseconds usage_sample_interval{std::chrono::minutes(15)};
+    // How often the store root's owner runs the MCP connections' streams (lake#652): mirrored
+    // notifications, input events that start a connection agent's turns, and their results.
+    std::chrono::milliseconds mcp_stream_interval{std::chrono::seconds(15)};
     // Dynamic-secret leases that are due (expired, or revoked and not yet settled) are settled in
     // their workspaces by the owner loop at this interval (docs/api/secrets.md, lake#362). It
     // reads the control store's due index, never every workspace. Zero settles on every drain().

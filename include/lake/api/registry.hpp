@@ -56,6 +56,7 @@ class TiledLog;
 namespace lake::api {
 
 struct WorkspaceContent;
+class McpHttp; // lake/api/mcp_client.hpp
 
 struct ApiError {
     std::string code;    // one of error_codes() (docs/api/errors.md)
@@ -120,10 +121,13 @@ struct TranscriptionRequest {
 };
 struct Transcription {
     std::string text;
-    std::optional<double> seconds; // the audio's length, when the provider reports it
+    // The audio's length: what the provider reports (whisper-1), else what lake measured from the
+    // recording (audio_duration_seconds, lake#658).
+    std::optional<double> seconds;
     std::string model;
     // The tokens the provider counted, when it reports usage in tokens (gpt-4o-transcribe) rather
-    // than seconds (lake#564).
+    // than seconds. Detail for the audit only: speech is billed by the minute, never as tokens
+    // (lake#658).
     std::optional<std::uint64_t> input_tokens;
     std::optional<std::uint64_t> output_tokens;
 };
@@ -448,6 +452,12 @@ struct ApiContext {
     // calls, speech-to-text seconds and model tokens are added here, off the request path. Null:
     // nothing is recorded.
     UsageRecorder* usage_recorder = nullptr;
+    // Lake's MCP client transport (decision 60, docs/api/mcp-connections.md): the server's outbound
+    // transport, or a test's. Null: a workspace's MCP connections cannot reach their servers.
+    std::shared_ptr<McpHttp> mcp_http;
+    // Whether an MCP connection may name a loopback or private address (tests, and local
+    // development with LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1). Never on a deployed Lake.
+    bool mcp_allow_private_addresses = false;
     // How invoices are paid where billing is on (docs/api/billing.md#payment-providers): `viewer`
     // and `server_info` report its status. Null: billing is off.
     std::shared_ptr<PaymentProviders> payments;
@@ -511,6 +521,11 @@ std::expected<nlohmann::json, ApiError> canonical_input(const Capability& capabi
 // and MCP publish is the contract every transport enforces. Errors carry an escaped JSON pointer
 // to the failing field or item.
 ApiResult validate_input(const Capability& capability, const nlohmann::json& input);
+
+// The agent a task, launch or schedule credential belongs to (its name, else its id), or empty for
+// a person's own credential. Those credentials act as the person who started the agent; this names
+// the agent (lake#445).
+std::string acting_agent(const ApiContext& context);
 
 // Who is asking for a capability's input schema. An agent-task credential names its task, and the
 // task names its workspace, so `workspace_id` is optional to that caller (Registry::call fills it).

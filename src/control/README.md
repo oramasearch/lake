@@ -118,6 +118,10 @@ space, edited and deleted at the revision read, with the paging and excerpt help
 `solutions.cpp` is a workspace's own AI solutions (lake#597): one record per solution in
 `lake_solutions`, found by the space, edited and deleted at the revision read, with the rules a
 solution keeps and the copy of one of Orama's catalogue entries; it was never a PostgreSQL table.
+`mcp_connections.cpp` is a workspace's MCP connections (decision 60, lake#652): one record per
+connection in `lake_mcp_connections`, found by the space, unique by name and prefix, changed and
+deleted at the revision read (`change_mcp_connection` rereads on a conflict), with the prefix rule
+and the OAuth sign-in states in `lake_mcp_oauth_states`, taken once by a delete at the revision read.
 `agent_revisions.cpp` is an agent's definition revisions (lake#653): one append-only record per
 `create_agent` or `update_agent` in `lake_agent_revisions`, found by the account and the agent's id,
 and `agent_definition_of`, the fields of an engine agent a person designs.

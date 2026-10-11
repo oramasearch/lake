@@ -10,7 +10,7 @@ endif()
 # branch can take its slot before it lands).
 set(GUIDE_SECTIONS
   "Get Started|index concepts workspaces account ask-orama phone"
-  "Data|repositories repository-collaboration repository-settings drives sharing search load-data connections transcripts"
+  "Data|repositories repository-collaboration repository-settings drives sharing search load-data connections transcripts mcp-connections"
   "Design|design solutions"
   "Train|train agents experiments streams"
   "Ship|ship apps registry deployments services"

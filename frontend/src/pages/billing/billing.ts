@@ -153,6 +153,7 @@ export const DIMENSIONS: { name: string; title: string; unit: string; classes?: 
   { name: "speech", title: "Speech to Text", unit: "seconds" },
   { name: "calls", title: "API and MCP Calls", unit: "calls" },
   { name: "predictions", title: "Model Predictions", unit: "calls" },
+  { name: "searches", title: "Index Searches", unit: "calls" },
   { name: "model_tokens", title: "Model Tokens", unit: "tokens" },
   { name: "volumes", title: "Service and Store Volumes", unit: "gib_seconds" },
 ];
@@ -167,7 +168,8 @@ export function classTitle(name: string): string {
 
 const GIB = 1024 ** 3;
 
-/** Orama Cloud's list rates (lake#623, lake#635, lake#637, lake#643; docs/api/billing.md#price-list),
+/** Orama Cloud's list rates (lake#623, lake#635, lake#637, lake#643, lake#658;
+ * docs/api/billing.md#price-list),
  * what the editor starts from when nothing is published: millionths of a dollar for every `per`
  * units. CPU per vCPU-minute (60,000 mCPU-seconds), RAM and GPU memory per GiB-minute (61,440
  * MiB-seconds), GPU per GPU-minute with a rate per class and a default for any other class. */
@@ -185,6 +187,7 @@ export const LIST_RATES: { dimension: string; class?: string; unit_micros: numbe
   { dimension: "speech", unit_micros: 7_200, per: 60 },
   { dimension: "calls", unit_micros: 2_000_000, per: 1_000_000 },
   { dimension: "predictions", unit_micros: 10_000, per: 1000 },
+  { dimension: "searches", unit_micros: 10_000, per: 1000 },
   { dimension: "model_tokens", unit_micros: 9_000_000, per: 1_000_000 },
   { dimension: "volumes", unit_micros: 200_000, per: 2_628_000 },
 ];

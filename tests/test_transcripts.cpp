@@ -285,16 +285,16 @@ TEST(Transcripts, ASearchExcerptIsTheTextAroundTheMatch) {
     EXPECT_EQ(cut, "…\xC3\xA9\xC3\xA9\xC3\xA9needle") << "a UTF-8 sequence is never split: " << cut;
 }
 
-TEST(Transcripts, TranscriptAuditGoesToTheWorkspaceAndTranscribeStaysCentral) {
+TEST(Transcripts, TranscriptAndDictationAuditGoToTheWorkspace) {
     using lake::api::AuditLog;
     for (const std::string name : {"create_transcript",
                                    "list_transcripts",
                                    "get_transcript",
                                    "update_transcript",
-                                   "delete_transcript"}) {
+                                   "delete_transcript",
+                                   "transcribe"}) {
         EXPECT_EQ(lake::api::audit_log_of(name), AuditLog::Workspace) << name;
     }
-    EXPECT_EQ(lake::api::audit_log_of("transcribe"), AuditLog::Central);
 }
 
 } // namespace

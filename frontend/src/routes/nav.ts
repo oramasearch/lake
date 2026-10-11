@@ -36,6 +36,8 @@ export const DATA_NAV: NavItem[] = [
   { section: "data", path: "/connections", label: "Connections", icon: "api", audience: AO },
   // Recordings, uploads and pasted text made into searchable transcripts (lake#561).
   { section: "data", path: "/transcripts", label: "Transcripts", icon: "audit", audience: AO },
+  // Remote MCP servers the workspace is a client of, their tools and agents (lake#652).
+  { section: "data", path: "/mcp-connections", label: "MCP Connections", icon: "api", audience: AO },
 ];
 
 /** Strip `/w/<id>` from a path: the workspace-local path the registry is keyed by. */

@@ -9,6 +9,8 @@
 #include "http_connections.hpp"
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/billing.hpp"
+#include "lake/api/mcp_client.hpp"
+#include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/request_recorder.hpp"
 #include "lake/api/server.hpp"
@@ -7005,6 +7007,388 @@ private:
     std::map<std::string, std::shared_ptr<const boost::corosio::tls_context>> tls_contexts_;
 };
 
+// The MCP connections' transport (decision 60, lake#652, docs/api/mcp-connections.md#the-client):
+// McpHttp over the same capy/corosio stack as OutboundHttpClient, on its own io thread so a slow
+// MCP server never holds up Stripe or speech-to-text. Every address a name resolves to must be
+// public unless the transport allows private addresses (tests, LAKE_MCP_ALLOW_PRIVATE_ADDRESSES),
+// so a connection cannot reach lake's own network: its Postgres, the workspace Zettas, the cloud
+// metadata address. A response is read until `enough`, the byte limit or the deadline.
+struct McpExchangeState {
+    McpHttpRequest request;
+    McpHttpResponse response;
+    McpEnough enough;
+    bool streaming = false;
+    bool allow_private = false;
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool head_ready = false;
+    bool done = false;
+    std::string queued;
+    bool closed = false;
+    std::string stream_error;
+    std::atomic<bool> cancelled{false};
+    boost::corosio::tcp_socket* socket = nullptr; // the io thread's, while it is open
+};
+
+template <class Stream>
+boost::capy::io_task<std::string> mcp_write_and_read_head(Stream& stream,
+                                                          McpExchangeState& state,
+                                                          const McpUrl& target,
+                                                          boost::http::response_parser& parser) {
+    namespace http = boost::http;
+    const http::method method = http::string_to_method(state.request.method);
+    if (method == http::method::unknown) {
+        co_return {{}, "unsupported HTTP method"};
+    }
+    http::request message(method, target.path, http::version::http_1_1);
+    boost::system::error_code ignored;
+    const bool standard = (target.scheme == "https" && target.port == "443") ||
+                          (target.scheme == "http" && target.port == "80");
+    const std::string host =
+        target.host.find(':') != std::string::npos ? "[" + target.host + "]" : target.host;
+    message.set(http::field::host, standard ? host : host + ":" + target.port, ignored);
+    message.set(http::field::connection, "close", ignored);
+    for (const auto& [name, value] : state.request.headers) {
+        message.set(name, value, ignored);
+    }
+    message.set_content_length(state.request.body.size());
+    http::serializer serializer(http::make_serializer_config(http::serializer_config{}));
+    serializer.set_message(message);
+    auto sink = serializer.sink_for(stream);
+    auto [write_error, written] =
+        co_await sink.write_eof(boost::capy::make_buffer(std::string_view(state.request.body)));
+    if (write_error) {
+        co_return {{}, "could not send the request: " + write_error.message()};
+    }
+    state.response.sent_bytes = state.request.body.size();
+    parser.reset();
+    parser.start();
+    auto [header_error] = co_await parser.read_header(stream);
+    if (header_error) {
+        co_return {{}, "could not read the response: " + header_error.message()};
+    }
+    std::lock_guard lock(state.mutex);
+    state.response.status = static_cast<int>(parser.get().status_int());
+    for (const auto& field : parser.get()) {
+        std::string name(field.name);
+        std::ranges::transform(
+            name, name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        state.response.headers[name] = std::string(field.value);
+    }
+    co_return {{}, std::string()};
+}
+
+template <class Stream>
+boost::capy::io_task<std::string>
+mcp_read_body(Stream& stream, McpExchangeState& state, boost::http::response_parser& parser) {
+    auto body = parser.source_for(stream);
+    boost::capy::const_buffer chunks[8];
+    std::size_t received = 0;
+    for (;;) {
+        if (state.cancelled.load()) {
+            co_return {{}, std::string()};
+        }
+        auto [read_error, buffers] = co_await body.pull(chunks);
+        if (read_error == boost::capy::error::eof) {
+            break;
+        }
+        if (read_error) {
+            co_return {{},
+                       state.cancelled.load()
+                           ? std::string()
+                           : "could not read the response: " + read_error.message()};
+        }
+        std::size_t consumed = 0;
+        std::string arrived;
+        for (const boost::capy::const_buffer& buffer : buffers) {
+            arrived.append(static_cast<const char*>(buffer.data()), buffer.size());
+            consumed += buffer.size();
+        }
+        body.consume(consumed);
+        received += arrived.size();
+        if (state.streaming) {
+            std::lock_guard lock(state.mutex);
+            if (state.queued.size() + arrived.size() > 8 * 1024 * 1024) {
+                co_return {{}, "the stream outpaced its reader"};
+            }
+            state.queued += arrived;
+            state.changed.notify_all();
+            continue;
+        }
+        const std::size_t room = state.request.max_response_bytes > state.response.body.size()
+                                     ? state.request.max_response_bytes - state.response.body.size()
+                                     : 0;
+        if (arrived.size() > room) {
+            state.response.body.append(arrived, 0, room);
+            state.response.truncated = true;
+            co_return {{}, std::string()};
+        }
+        state.response.body += arrived;
+        if (state.enough && state.enough(state.response.body)) {
+            co_return {{}, std::string()};
+        }
+    }
+    co_return {{}, std::string()};
+}
+
+template <class Stream>
+boost::capy::io_task<std::string> mcp_exchange_on(Stream& stream,
+                                                  McpExchangeState& state,
+                                                  const McpUrl& target,
+                                                  boost::http::response_parser& parser) {
+    auto [head_error, head] = co_await mcp_write_and_read_head(stream, state, target, parser);
+    if (head_error || !head.empty()) {
+        co_return {head_error, head};
+    }
+    co_return co_await mcp_read_body(stream, state, parser);
+}
+
+class McpOutboundHttp final : public McpHttp, public std::enable_shared_from_this<McpOutboundHttp> {
+public:
+    explicit McpOutboundHttp(bool allow_private) : allow_private_(allow_private) {
+        boost::capy::run_async(io_context_.get_executor())(keepalive());
+        worker_ = lake::Thread([this] { io_context_.run(); });
+    }
+
+    ~McpOutboundHttp() override {
+        io_context_.stop();
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+    }
+
+    McpHttpResponse exchange(const McpHttpRequest& request, const McpEnough& enough) override {
+        auto state = std::make_shared<McpExchangeState>();
+        state->request = request;
+        state->enough = enough;
+        state->allow_private = allow_private_;
+        boost::capy::run_async(io_context_.get_executor())(perform(state));
+        std::unique_lock lock(state->mutex);
+        state->changed.wait(lock, [&] { return state->done; });
+        return std::move(state->response);
+    }
+
+    std::unique_ptr<McpEventStream> open(const McpHttpRequest& request) override {
+        auto state = std::make_shared<McpExchangeState>();
+        state->request = request;
+        state->streaming = true;
+        state->allow_private = allow_private_;
+        boost::capy::run_async(io_context_.get_executor())(perform(state));
+        {
+            std::unique_lock lock(state->mutex);
+            state->changed.wait(lock, [&] { return state->head_ready || state->done; });
+        }
+        return std::make_unique<Stream>(state, shared_from_this());
+    }
+
+private:
+    class Stream final : public McpEventStream {
+    public:
+        Stream(std::shared_ptr<McpExchangeState> state, std::shared_ptr<McpOutboundHttp> owner)
+            : state_(std::move(state)), owner_(std::move(owner)) {
+            std::lock_guard lock(state_->mutex);
+            head_ = state_->response;
+        }
+        ~Stream() override {
+            state_->cancelled.store(true);
+            owner_->cancel(state_);
+        }
+        const McpHttpResponse& head() const override {
+            return head_;
+        }
+        Read read(std::chrono::milliseconds wait) override {
+            std::unique_lock lock(state_->mutex);
+            state_->changed.wait_for(
+                lock, wait, [&] { return !state_->queued.empty() || state_->closed; });
+            Read out;
+            out.bytes.swap(state_->queued);
+            if (out.bytes.empty() && state_->closed) {
+                out.closed = true;
+                out.error = state_->stream_error;
+            }
+            return out;
+        }
+
+    private:
+        std::shared_ptr<McpExchangeState> state_;
+        std::shared_ptr<McpOutboundHttp> owner_;
+        McpHttpResponse head_;
+    };
+
+    void cancel(std::shared_ptr<McpExchangeState> state) {
+        boost::capy::run_async(io_context_.get_executor())(cancel_socket(std::move(state)));
+    }
+
+    boost::capy::task<> cancel_socket(std::shared_ptr<McpExchangeState> state) {
+        if (state->socket != nullptr) {
+            state->socket->cancel();
+        }
+        co_return;
+    }
+
+    boost::capy::task<> keepalive() {
+        boost::corosio::timer timer(io_context_);
+        for (;;) {
+            timer.expires_after(std::chrono::hours(1));
+            [[maybe_unused]] auto result = co_await timer.wait();
+        }
+    }
+
+    std::shared_ptr<const boost::corosio::tls_context> tls_context_for(const std::string& host,
+                                                                       std::string& error) {
+        if (const auto found = tls_contexts_.find(host); found != tls_contexts_.end()) {
+            return found->second;
+        }
+        const std::string bundle = system_ca_bundle();
+        if (bundle.empty()) {
+            error = "no system CA bundle is available";
+            return {};
+        }
+        auto context = std::make_shared<boost::corosio::tls_context>();
+        context->set_hostname(host);
+        if (!add_ca_certificates(*context, bundle)) {
+            error = "the system CA bundle contained no usable certificates";
+            return {};
+        }
+        if (const std::error_code verify_error =
+                context->set_verify_mode(boost::corosio::tls_verify_mode::peer)) {
+            error = "could not enable TLS peer verification: " + verify_error.message();
+            return {};
+        }
+        tls_contexts_[host] = context;
+        return context;
+    }
+
+    static void finish(const std::shared_ptr<McpExchangeState>& state, std::string error) {
+        std::lock_guard lock(state->mutex);
+        if (!error.empty() && state->response.error.empty() && !state->head_ready) {
+            state->response.error = error;
+        }
+        state->stream_error = std::move(error);
+        state->done = true;
+        state->closed = true;
+        state->head_ready = true;
+        state->changed.notify_all();
+    }
+
+    boost::capy::task<> perform(std::shared_ptr<McpExchangeState> state) {
+        auto target = parse_mcp_url(state->request.url, state->allow_private);
+        if (!target) {
+            finish(state, target.error());
+            co_return;
+        }
+        boost::corosio::resolver resolver(io_context_);
+        auto [resolve_error, results] = co_await boost::capy::timeout(
+            resolver.resolve(target->host, target->port), state->request.timeout);
+        if (resolve_error) {
+            finish(state, "could not resolve the server's name: " + resolve_error.message());
+            co_return;
+        }
+        boost::corosio::tcp_socket socket(io_context_);
+        socket.open();
+        bool connected = false;
+        bool refused_address = false;
+        std::string connect_error = "the server's name resolved to no address";
+        for (const auto& entry : results) {
+            const auto endpoint = entry.get_endpoint();
+            std::vector<std::uint8_t> bytes;
+            if (endpoint.is_v4()) {
+                const auto raw = endpoint.v4_address().to_bytes();
+                bytes.assign(raw.begin(), raw.end());
+            } else {
+                const auto raw = endpoint.v6_address().to_bytes();
+                bytes.assign(raw.begin(), raw.end());
+            }
+            if (!state->allow_private && !mcp_public_address(bytes)) {
+                refused_address = true;
+                continue;
+            }
+            auto [error] =
+                co_await boost::capy::timeout(socket.connect(endpoint), state->request.timeout);
+            if (!error) {
+                connected = true;
+                break;
+            }
+            connect_error = "could not connect to the server: " + error.message();
+        }
+        if (!connected) {
+            finish(state,
+                   refused_address && connect_error.starts_with("the server's name")
+                       ? "the server's address is not a public address; Lake connects "
+                         "only to public MCP servers"
+                       : connect_error);
+            co_return;
+        }
+        state->socket = &socket;
+        namespace http = boost::http;
+        http::parser_config limits(false);
+        // Lake's own byte limit applies as the body arrives (mcp_read_body), so a response that
+        // passes it is cut and marked truncated rather than failed by the parser.
+        limits.body_limit = std::uint64_t{1} << 50;
+        http::response_parser parser(http::make_parser_config(limits));
+        std::string error;
+        bool timed_out = false;
+        const auto run = [&](auto& stream) -> boost::capy::task<> {
+            if (state->streaming) {
+                auto [timeout_error, reason] = co_await boost::capy::timeout(
+                    mcp_write_and_read_head(stream, *state, *target, parser),
+                    state->request.timeout);
+                if (timeout_error || !reason.empty()) {
+                    timed_out = static_cast<bool>(timeout_error);
+                    error = timeout_error ? "the server did not answer in time" : reason;
+                    co_return;
+                }
+                {
+                    std::lock_guard lock(state->mutex);
+                    state->head_ready = true;
+                    state->changed.notify_all();
+                }
+                auto [read_error, read_reason] = co_await mcp_read_body(stream, *state, parser);
+                error = read_reason;
+                co_return;
+            }
+            auto [timeout_error, reason] = co_await boost::capy::timeout(
+                mcp_exchange_on(stream, *state, *target, parser), state->request.timeout);
+            timed_out = static_cast<bool>(timeout_error);
+            error = timeout_error ? "the server did not answer in time" : reason;
+        };
+        if (target->scheme == "https") {
+            std::string context_error;
+            const auto context = tls_context_for(target->host, context_error);
+            if (!context) {
+                state->socket = nullptr;
+                finish(state, context_error);
+                co_return;
+            }
+            boost::corosio::openssl_stream secure(&socket, *context);
+            auto [handshake_error] = co_await boost::capy::timeout(
+                secure.handshake(boost::corosio::tls_stream::client), state->request.timeout);
+            if (handshake_error) {
+                state->socket = nullptr;
+                finish(state, "the TLS handshake with the server failed");
+                co_return;
+            }
+            co_await run(secure);
+            [[maybe_unused]] auto shutdown = co_await secure.shutdown();
+        } else {
+            co_await run(socket);
+        }
+        state->socket = nullptr;
+        {
+            std::lock_guard lock(state->mutex);
+            state->response.timed_out = timed_out;
+        }
+        // An exchange that read an answer keeps it; its transport failure is only kept for the
+        // caller when no status arrived.
+        finish(state, state->response.status == 0 || state->streaming ? error : std::string());
+    }
+
+    bool allow_private_ = false;
+    boost::corosio::io_context io_context_;
+    lake::Thread worker_;
+    std::map<std::string, std::shared_ptr<const boost::corosio::tls_context>> tls_contexts_;
+};
+
 // Where the store root stands (lake#479). `opening`: the owner thread is taking the root's lock
 // or opening its stores; `waiting`: another process holds the root and this one waits for it to
 // drain; `open`: this process owns the root and its stores are open (or it has no root);
@@ -7050,6 +7434,10 @@ boost::http::route_task count_in_flight(std::atomic<int>& counter, boost::http::
 
 } // namespace
 
+std::shared_ptr<McpHttp> make_mcp_http(bool allow_private_addresses) {
+    return std::make_shared<McpOutboundHttp>(allow_private_addresses);
+}
+
 struct ApiServer::Impl {
     ServerOptions options;
     telemetry::Metrics metrics;
@@ -7074,6 +7462,9 @@ struct ApiServer::Impl {
     std::unique_ptr<UsageRecorder> usage_recorder;
     std::chrono::steady_clock::time_point next_usage_flush{};
     std::chrono::steady_clock::time_point next_usage_sample{};
+    // The MCP connections' streams (lake#652), on the maintenance thread of the store root's owner.
+    McpStreamWorker mcp_streams;
+    std::chrono::steady_clock::time_point next_mcp_stream_pass{};
     std::chrono::steady_clock::time_point last_usage_sample{};
     UsageRecorder::Totals reported_usage;
     mutable LiquidCustomerStores sync_store;
@@ -7159,6 +7550,9 @@ struct ApiServer::Impl {
     // Speech-to-text (docs/api/transcripts.md): the injected one, else OpenAI over outbound_http
     // when a key is configured, else empty.
     Transcriber transcriber;
+    // MCP connections' transport (docs/api/mcp-connections.md#the-client): the injected one, else
+    // the server's own, which refuses private addresses unless the options allow them.
+    std::shared_ptr<McpHttp> mcp_http;
     // The model gateway's provider (docs/api/model-gateway.md): the injected one, else OpenAI's
     // API over outbound_http when LAKE_OPENAI_API_KEY is set (lake#248).
     ModelProvider model_provider;
@@ -8003,6 +8397,8 @@ struct ApiServer::Impl {
                         response.status, std::move(response.body), std::move(response.error)};
                 });
         }
+        mcp_http = options.mcp_http ? options.mcp_http
+                                    : make_mcp_http(options.mcp_allow_private_addresses);
         model_provider = options.model_provider;
         if (!model_provider && !options.openai_api_key.empty()) {
             model_provider = openai_model_provider(
@@ -8552,6 +8948,8 @@ struct ApiServer::Impl {
         ctx.clerk_publishable_key = options.clerk_publishable_key;
         ctx.sealing_public_key = options.sealing_public_key;
         ctx.transcriber = transcriber;
+        ctx.mcp_http = mcp_http;
+        ctx.mcp_allow_private_addresses = options.mcp_allow_private_addresses;
         ctx.store_browser = options.store_browser;
         ctx.model_provider = model_provider;
         ctx.payments = payments;
@@ -10106,7 +10504,8 @@ struct ApiServer::Impl {
                 return static_cast<std::uint64_t>(window->size());
             },
             false,
-            StreamedFile{show ? found->content_type : std::string("application/octet-stream")});
+            StreamedFile{show ? found->content_type : std::string("application/octet-stream")},
+            workspace_id);
     }
 
     liquid::runtime::task<ApiResult>
@@ -10578,6 +10977,11 @@ struct ApiServer::Impl {
                                               true,
                                               "BLOB_UPLOAD_INVALID");
         }
+        // A tenant push's bytes are its workspace's transfer in (lake#658), whether or not the
+        // blob is finished; instance-registry names belong to no workspace (lake#662).
+        if (*authorized && usage_recorder) {
+            usage_recorder->add_transfer((**authorized).workspace_id, bytes_read, 0);
+        }
         if (!finish) {
             route.res.set(boost::http::field::location,
                           "/v2/" + repository + "/blobs/uploads/" + upload);
@@ -10803,13 +11207,28 @@ struct ApiServer::Impl {
     struct StreamedFile {
         std::string content_type;
     };
+    //
+    // `metered_workspace` is the workspace whose transfer the bytes are (lake#658): what was sent,
+    // whole or not, is added to its `transfer` `out` when the stream ends.
     boost::http::route_task stream_blob(boost::http::route_params& route,
                                         std::string digest,
                                         std::uint64_t size,
                                         BlobReader read,
                                         bool head,
-                                        std::optional<StreamedFile> file = std::nullopt) {
+                                        std::optional<StreamedFile> file = std::nullopt,
+                                        std::string metered_workspace = {}) {
         namespace http = boost::http;
+        struct Metered {
+            UsageRecorder* recorder;
+            std::string workspace_id;
+            std::uint64_t sent = 0;
+            ~Metered() {
+                if (recorder != nullptr) {
+                    recorder->add_transfer(workspace_id, 0, sent);
+                }
+            }
+        } metered{metered_workspace.empty() ? nullptr : usage_recorder.get(),
+                  std::move(metered_workspace)};
         const auto refuse = [&](const SyncStoreError& error) -> http::route_task {
             if (!file) {
                 return registry_store_error(route, error);
@@ -10909,10 +11328,12 @@ struct ApiServer::Impl {
                     if (send_error) {
                         co_return http::route_error(send_error);
                     }
+                    metered.sent = size;
                     co_return http::route_done;
                 }
                 auto [send_error] =
                     co_await boost::capy::timeout(route.res_body.commit(copied), idle);
+                metered.sent = sent + offset;
                 if (send_error) {
                     if (send_error == boost::capy::error::timeout) {
                         std::cerr << nlohmann::json{{"event", "oci_blob_stream_idle"},
@@ -10983,13 +11404,17 @@ struct ApiServer::Impl {
                 return sync_store.read_workspace_blob(
                     customer_id, workspace_id, object, offset, into, false);
             },
-            head);
+            head,
+            std::nullopt,
+            workspace_id);
     }
 
     // A tenant blob whose record names no store object yet: streamed from the instance registry's
     // file, never read whole.
-    boost::http::route_task
-    serve_instance_blob(boost::http::route_params& route, std::string digest, bool head) {
+    boost::http::route_task serve_instance_blob(boost::http::route_params& route,
+                                                std::string digest,
+                                                bool head,
+                                                std::string metered_workspace) {
         const auto file = artifacts.blob_file(digest);
         std::error_code error;
         const std::uintmax_t size = file ? std::filesystem::file_size(*file, error) : 0;
@@ -11013,7 +11438,9 @@ struct ApiServer::Impl {
                 }
                 return static_cast<std::uint64_t>(input.gcount());
             },
-            head);
+            head,
+            std::nullopt,
+            std::move(metered_workspace));
     }
 
     boost::http::route_task serve_oci_blob(boost::http::route_params& route, bool head) {
@@ -11094,7 +11521,7 @@ struct ApiServer::Impl {
                 co_return co_await serve_workspace_blob(
                     route, tenant->customer_id, tenant->workspace_id, std::move(**recorded), head);
             }
-            co_return co_await serve_instance_blob(route, digest, head);
+            co_return co_await serve_instance_blob(route, digest, head, tenant->workspace_id);
         } else if (!artifacts.repository_has_blob(repository, digest)) {
             co_return co_await registry_error(
                 route, boost::http::status::not_found, "blob is unknown in this repository", true);
@@ -12322,6 +12749,34 @@ struct ApiServer::Impl {
             metrics.increment_counter("lake_usage_sample_errors_total",
                                       {},
                                       static_cast<double>(sampled->unmeasured.size()));
+        }
+    }
+
+    void run_mcp_streams() {
+        ApiContext context;
+        context.store = options.store.get();
+        context.workspaces = options.workspaces.get();
+        context.instance_kek = options.instance_kek;
+        context.registry = &registry;
+        context.mcp_http = mcp_http;
+        context.mcp_allow_private_addresses = options.mcp_allow_private_addresses;
+        context.usage_recorder = usage_recorder.get();
+        context.audit_recorder = audit_recorder.get();
+        context.external_origin = options.external_origin;
+        const McpStreamPass done = mcp_streams.pass(context);
+        metrics.increment_counter("lake_mcp_stream_passes_total");
+        if (done.notifications > 0) {
+            metrics.increment_counter("lake_mcp_notifications_mirrored_total",
+                                      {},
+                                      static_cast<double>(done.notifications));
+        }
+        if (done.turns > 0) {
+            metrics.increment_counter(
+                "lake_mcp_stream_turns_total", {}, static_cast<double>(done.turns));
+        }
+        if (!done.problems.empty()) {
+            metrics.increment_counter(
+                "lake_mcp_stream_problems_total", {}, static_cast<double>(done.problems.size()));
         }
     }
 
@@ -14234,6 +14689,16 @@ void ApiServer::drain() {
         impl_->next_usage_sample = now + impl_->options.usage_sample_interval;
         Impl* impl = impl_.get();
         impl_->schedule_maintenance("usage sample", [impl] { impl->sample_usage(); });
+    }
+    // A connection's streams hold sessions and start turns: the store root's owner alone runs them,
+    // so two lakes never mirror one notification twice (lake#652).
+    if (impl_->options.store && impl_->options.workspaces &&
+        (impl_->options.store_root.empty() ||
+         impl_->store_root_state.load() == StoreRootState::open) &&
+        now >= impl_->next_mcp_stream_pass) {
+        impl_->next_mcp_stream_pass = now + impl_->options.mcp_stream_interval;
+        Impl* impl = impl_.get();
+        impl_->schedule_maintenance("mcp connection streams", [impl] { impl->run_mcp_streams(); });
     }
     // The registry and search segments live under the store root: only its owner removes them.
     if (impl_->options.store &&

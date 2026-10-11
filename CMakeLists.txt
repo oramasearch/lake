@@ -236,6 +236,7 @@ add_library(lake-core STATIC
   src/control/opportunities.cpp
   src/control/solutions.cpp
   src/control/transcripts.cpp
+  src/control/mcp_connections.cpp
   src/control/agent_revisions.cpp
   src/control/project_decisions.cpp
   src/control/drives.cpp
@@ -271,6 +272,10 @@ add_library(lake-core STATIC
   src/api/drives_capabilities.cpp
   src/api/model_gateway.cpp
   src/api/transcription.cpp
+  src/api/mcp_client.cpp
+  src/api/mcp_connection_capabilities.cpp
+  src/api/mcp_connection_streams.cpp
+  src/api/audio_duration.cpp
   src/api/workspace_store_capabilities.cpp
   src/api/datasets.cpp
   src/api/stream_capabilities.cpp

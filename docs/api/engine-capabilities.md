@@ -94,6 +94,10 @@ pipeline where it says graph or plan.
 | `save_graph` | `save_pipeline` | saves a whole pipeline; `edit_pipeline` applies edits |
 | `chat` | `chat_with_agent` | `chat` alone does not say with what |
 
+An engine older than an allow-listed capability (one that answers `unknown_capability`) is answered
+`not_supported` by name, "this workspace's engine does not have <name> yet; it needs a newer
+Zetta", and nothing is changed (lake#654).
+
 `workspace_query` and `workspace_act` stay for compatibility and still take the engine's names.
 Their `capability` field carries an `enum` of the names each allows, so OpenAPI and MCP list them.
 
@@ -146,6 +150,10 @@ The groups are the ones `llms.txt` and `llms-full.txt` list them under.
 | `model_health` | same | read |
 | `expose_model` | same | write |
 | `unexpose_model` | same | write |
+| `train_model` | same | write |
+| `retrain_model` | same | write |
+| `register_model` | same | write |
+| `move_model_to_project` | same | write |
 
 ### Search indexes
 

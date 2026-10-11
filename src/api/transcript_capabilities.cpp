@@ -58,10 +58,6 @@ std::optional<ApiResult> authorize_space_read(const json& input, ApiContext& con
     return std::nullopt;
 }
 
-std::expected<std::string, ApiError> signed_in(const json&, ApiContext&) {
-    return std::string();
-}
-
 json string_schema() {
     return {{"type", "string"}};
 }
@@ -279,6 +275,8 @@ liquid::runtime::task<Heard> transcribe_audio(ApiContext& context,
         co_return refused_audio(
             ApiResult::failure(audio.error().code, audio.error().message, audio.error().path));
     }
+    // Its length, measured before the bytes go: billed when the model reports none (lake#658).
+    const std::optional<double> measured = audio_duration_seconds(audio->bytes);
     TranscriptionRequest request{.file_name = audio_file_name(name, audio->mime),
                                  .mime = {},
                                  .audio = std::move(audio->bytes),
@@ -299,6 +297,9 @@ liquid::runtime::task<Heard> transcribe_audio(ApiContext& context,
         const std::string code = ran->error.code.empty() ? "engine_error" : ran->error.code;
         co_return refused_audio(ApiResult::failure(code, ran->error.message));
     }
+    if (!ran->transcription->seconds) {
+        ran->transcription->seconds = measured;
+    }
     co_return Heard{std::move(ran->transcription), {}};
 }
 
@@ -313,6 +314,31 @@ std::expected<Transcription, ApiResult> heard(std::expected<Heard, liquid::error
     return std::move(*awaited->transcription);
 }
 
+// Speech-to-text usage of one heard recording, in its workspace (lake#564, lake#613, lake#658):
+// its audio seconds, rounded up, as `speech` of `kind` (transcript or dictation): what the model
+// reports (whisper-1), else what lake measured from the recording. Speech is billed by the minute
+// only: tokens a model reports (gpt-4o-transcribe) go to the audit as detail, never to
+// `model_tokens`. A recording whose length could not be read counts nothing and says so in the
+// audit. Only adds to the in-memory recorder.
+void record_speech(ApiContext& context,
+                   const std::string& workspace_id,
+                   const Transcription& done,
+                   std::string_view kind) {
+    if (done.input_tokens || done.output_tokens) {
+        context.audit_details["speech_tokens"] = {{"input", done.input_tokens.value_or(0)},
+                                                  {"output", done.output_tokens.value_or(0)}};
+    }
+    if (!done.seconds || *done.seconds <= 0) {
+        context.audit_details["speech_seconds"] = nullptr; // not measured
+        return;
+    }
+    const auto seconds = static_cast<std::uint64_t>(std::ceil(*done.seconds));
+    context.audit_details["speech_seconds"] = seconds;
+    if (context.usage_recorder != nullptr && !workspace_id.empty()) {
+        context.usage_recorder->add(workspace_id, "speech", seconds, {{"kind", std::string(kind)}});
+    }
+}
+
 liquid::runtime::task<ApiResult> transcribe(const json& input, ApiContext& context) {
     const std::string language = input.value("language", std::string());
     if (auto refused = language_problem(language)) {
@@ -323,6 +349,9 @@ liquid::runtime::task<ApiResult> transcribe(const json& input, ApiContext& conte
     if (!done) {
         co_return done.error();
     }
+    // The audio was heard: its seconds, or the tokens a model reports instead, are the usage of
+    // the workspace it was dictated in (lake#613, lake#658), counted off the request path.
+    record_speech(context, input.at("workspace_id"), *done, "dictation");
     json out{{"text", done->text}, {"model", done->model}};
     if (done->seconds) {
         out["seconds"] = *done->seconds;
@@ -376,26 +405,11 @@ liquid::runtime::task<ApiResult> create_transcript(const json& input, ApiContext
         if (!done) {
             co_return done.error();
         }
-        transcript.text = trimmed(std::move(done->text));
-        transcript.seconds = done->seconds;
         // The audio was heard, whatever happens to the transcript: its seconds are the
         // workspace's speech-to-text usage (lake#564), counted off the request path.
-        if (context.usage_recorder && done->seconds && *done->seconds > 0) {
-            context.usage_recorder->add(workspace_id,
-                                        "speech",
-                                        static_cast<std::uint64_t>(std::ceil(*done->seconds)),
-                                        {{"kind", "transcript"}});
-        }
-        // A model that reports tokens instead (gpt-4o-transcribe): its tokens, by model.
-        if (context.usage_recorder && (done->input_tokens || done->output_tokens)) {
-            context.usage_recorder->add_together(workspace_id,
-                                                 {{"model_tokens",
-                                                   done->input_tokens.value_or(0),
-                                                   {{"kind", "input"}, {"model", done->model}}},
-                                                  {"model_tokens",
-                                                   done->output_tokens.value_or(0),
-                                                   {{"kind", "output"}, {"model", done->model}}}});
-        }
+        record_speech(context, workspace_id, *done, "transcript");
+        transcript.text = trimmed(std::move(done->text));
+        transcript.seconds = done->seconds;
         if (transcript.text.empty()) {
             co_return ApiResult::failure(
                 "invalid_input", "no speech was heard in the audio", "/audio_base64");
@@ -545,20 +559,18 @@ void register_transcript_capabilities(Registry& registry) {
         .name = "transcribe",
         .title = "Transcribe audio",
         .description =
-            "Turn a recording into text with speech-to-text (OpenAI, through Lake's own key). "
-            "Nothing is stored and the audio is not kept: create_transcript saves a transcript. "
-            "not_supported when this Lake has no speech-to-text configured.",
-        .input_schema = {{"type", "object"},
-                         {"properties",
-                          {{"name",
-                            {{"type", "string"},
-                             {"description",
-                              "the file name, such as memo.m4a; its extension "
-                              "tells the audio's format"}}},
-                           {"audio_base64", audio},
-                           {"language", language}}},
-                         {"required", json::array({"name", "audio_base64"})},
-                         {"additionalProperties", false}},
+            "Turn a recording into text with speech-to-text (OpenAI, through Lake's own key), "
+            "dictated in a workspace: its audio minutes are that workspace's speech-to-text "
+            "usage. Nothing is stored and the audio is not kept: create_transcript saves a "
+            "transcript. not_supported when this Lake has no speech-to-text configured.",
+        .input_schema = workspace_input(
+            {{"name",
+              {{"type", "string"},
+               {"description",
+                "the file name, such as memo.m4a; its extension tells the audio's format"}}},
+             {"audio_base64", audio},
+             {"language", language}},
+            json::array({"name", "audio_base64"})),
         .output_schema = {{"type", "object"},
                           {"properties",
                            {{"text", string_schema()},
@@ -567,11 +579,10 @@ void register_transcript_capabilities(Registry& registry) {
                           {"required", json::array({"text", "model"})},
                           {"additionalProperties", false}},
         .kind = CapabilityKind::Action,
-        .object = "principal",
-        .action = "use",
-        .resolve_object = signed_in,
-        // Any signed-in person may transcribe; nothing of a space is read or written.
-        .authorizes_candidates = true,
+        // Whoever may write the workspace may dictate in it: its usage is the workspace's.
+        .object = "customer",
+        .action = "write",
+        .resolve_object = customer_object,
         .async_handler = transcribe});
     registry.add(Capability{
         .name = "create_transcript",

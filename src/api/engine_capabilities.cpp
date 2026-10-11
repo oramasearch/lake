@@ -128,6 +128,11 @@ constexpr auto engine_names = std::to_array<EngineName>({
     {"set_training_schedule", "set_training_schedule", "Agents"},
     {"agent_run", "agent_run", "Agents"},
     {"chat", "chat_with_agent", "Agents"},
+    // A model made on its own (lake#654).
+    {"train_model", "train_model", "Models"},
+    {"retrain_model", "retrain_model", "Models"},
+    {"register_model", "register_model", "Models"},
+    {"move_model_to_project", "move_model_to_project", "Models"},
 });
 
 const EngineName* by_engine(std::string_view engine) {
@@ -203,6 +208,14 @@ std::string lake_note(std::string_view engine) {
         return "Lake's create_solution keeps a workspace's own solution; this composes a "
                "catalogue solution's governed foundation into a project, as Start as a Project "
                "does.";
+    }
+    if (engine == "train_model" || engine == "retrain_model") {
+        return "The model is standalone: Design → Projects never lists the project the engine "
+               "keeps for it. The new version appears in list_models when the run finishes.";
+    }
+    if (engine == "register_model") {
+        return "load_drive_model brings a file from a drive in one call; for a model repository's "
+               "file, read it with resolve_model_file and send its contents as `weights`.";
     }
     if (engine == "get_agent" || engine == "agent_training_status") {
         return "`id` is the agent's id, as list_agents answers it.";
@@ -452,6 +465,12 @@ void register_engine_capabilities(Registry& registry) {
                         arguments.erase(field + "_id");
                     }
                 }
+                // An uploaded dataset's text comes into the workspace: its transfer in (lake#658).
+                const std::uint64_t uploaded =
+                    engine == "upload_dataset" && arguments.value("content", json()).is_string()
+                        ? arguments.at("content").get_ref<const std::string&>().size()
+                        : 0;
+                const std::string workspace_id = arguments.at("workspace_id");
                 json call{{"customer_id", arguments.at("customer_id")},
                           {"workspace_id", arguments.at("workspace_id")},
                           {"capability", engine}};
@@ -463,6 +482,9 @@ void register_engine_capabilities(Registry& registry) {
                     co_return ApiResult::failure("store_error", awaited.error().message);
                 }
                 ApiResult result = std::move(*awaited);
+                if (result.ok && uploaded > 0) {
+                    record_workspace_transfer(context, workspace_id, uploaded, 0);
+                }
                 // workspace_query and workspace_act point below `/input`; here the fields are the
                 // capability's own.
                 if (!result.ok && result.error.path.starts_with("/input")) {

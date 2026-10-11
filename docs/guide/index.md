@@ -160,6 +160,7 @@ From an AI agent it is the MCP tool `predict`. **Unpublish** stops every outside
 | Keep code and files in Lake | [Repositories](/docs/repositories), [Sharing and Shared with Me](/docs/sharing) |
 | Find anything | [Search](/docs/search) |
 | Turn recordings into searchable text | [Transcripts and Speech-to-Text](/docs/transcripts) |
+| Use another MCP server's tools from Lake | [MCP Connections](/docs/mcp-connections) |
 | Start from a ready-made business solution | [AI Solutions, Methodologies and Opportunities](/docs/solutions) |
 | Build agents and tune models | [Agents](/docs/agents), [Experiments](/docs/experiments), [Streams](/docs/streams) |
 | Ship apps, images and databases | [Apps](/docs/apps), [Packages, Builds and the Registry](/docs/registry), [Deployments and Environments](/docs/deployments), [Services and Storage](/docs/services) |

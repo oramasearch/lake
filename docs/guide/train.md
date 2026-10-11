@@ -214,11 +214,12 @@ held-out score, how many versions and runs trained it with a link to the latest 
 experiment, the dataset and features it learned from, when it was last trained, and the version
 serving in Ship.
 
-- **Search models, features or ids…** filters the list; **Pipeline**, **Experiment** and **No
-  pipeline** filter by where a model came from.
-- **Train a model** opens Design → Projects, where pipelines are built and run.
-- A model uploaded on its own, with no pipeline, is a model repository on **Data → Repositories**.
-  This page does not list model repositories yet.
+- **Search models, features or ids…** filters the list; **Pipeline**, **Experiment**,
+  **Standalone** and **No pipeline** filter by where a model came from.
+- **New model** makes a model on its own, with no project or pipeline to look after ([below](#make-a-model-on-its-own)).
+  A project's pipeline run and an experiment add their models here too.
+- A model repository on **Data → Repositories** keeps model files with their history. Bring a file
+  from one with **New model** to score or serve it.
 
 ### A Model's Training Page
 
@@ -234,7 +235,8 @@ Press a model's name to open its training page, at its latest version.
 - **What it learned from** names the dataset in the run report and the features the version reads.
 - **Pipeline** names the model step or steps it belongs to, linked to the pipeline. A model trained
   by an experiment with no pipeline names the experiment; a model with neither says *Uploaded, no
-  pipeline*.
+  pipeline*. A standalone model shows **Standalone model** instead: the dataset, the column it
+  predicts, the methodology and the held-out share, or for a brought one where its file came from.
 
 ### Retrain a Model
 
@@ -249,6 +251,45 @@ version.
 ```
 
 - MCP: `run_pipeline` with the same input.
+
+### Make a Model on Its Own
+
+A standalone model is a model of its own: no project or pipeline to look after, and versions,
+held-out scores, comparisons and serving like any other. Press **New model** on Train → Models.
+
+- **Train one**: name it, choose a dataset, a methodology and the column to predict (a methodology
+  that learns without one, such as segmentation, takes none), and keep a held-out share (0.2 by
+  default) so its score is honest. Lake trains it and opens the run; the model appears when the run
+  finishes.
+- **Bring one**: a model file from **This computer**, **A drive** or **A model repository**, with
+  the held-out AUC it got where it was trained, if you know it. The file is a gradient-boosted tree
+  model in the engine's own JSON weights format, the format every model trained in Lake is kept
+  in. Any other format is refused and nothing is kept.
+
+On its training page a standalone model shows what it trains on, and has:
+
+- **Retrain**: trains it again on what it learned from. **New version**: trains it on new data,
+  another column or another held-out share, which it keeps for its next retrain. For a brought
+  model, **New version** brings its next file.
+- **Move into a project**: makes it a project in Design → Projects, with every version, so a
+  pipeline can grow around it.
+- **Delete**: deletes every version (type the model's name to confirm). The runs that trained it
+  are kept.
+
+From an agent or your code:
+
+- REST: `POST /v1/train_model`:
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "churn", "methodology": "M-1", "dataset_path": "datasets/accounts", "target": "churned", "holdout_fraction": 0.2}
+```
+
+- `retrain_model` takes `model_id` and, to change them, `dataset_path`, `target` or
+  `holdout_fraction`. `register_model` takes `name` and the file's contents as `weights`;
+  `load_drive_model` takes a drive's file (`drive_id`, `id`) instead. `move_model_to_project` takes
+  `model_id` and `project_name`. `delete_model` takes each version's `id`.
+- MCP: the same names with the same input.
+- A workspace whose engine predates these answers `not_supported`, saying it needs a newer engine.
 
 ### Promote a Version to Ship
 

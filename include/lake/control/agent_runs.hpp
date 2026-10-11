@@ -22,7 +22,8 @@ namespace lake::control {
 
 // The lake capabilities every launched agent's credential may call: its workspace through the
 // agent path (lake#235), the repository reads a definition stored in lake needs, the workspace's
-// transcripts (lake#561), and the App and build reads agent-runtime gives every agent. Its skills
+// transcripts (lake#561), the App and build reads agent-runtime gives every agent, and the
+// tools of its MCP connections (lake#652; lake checks the agent's `mcp:<prefix>` skill on every call). Its skills
 // add their own reads (agent_launch_scopes_for) and narrow the workspace further inside
 // agent-runtime.
 inline const std::vector<std::string> agent_launch_scopes{"workspace_query",
@@ -40,7 +41,10 @@ inline const std::vector<std::string> agent_launch_scopes{"workspace_query",
                                                           "list_builds",
                                                           "get_build",
                                                           "build_logs",
-                                                          "receive_build_events"};
+                                                          "receive_build_events",
+                                                          "list_mcp_connection_tools",
+                                                          "read_mcp_tool",
+                                                          "call_mcp_tool"};
 
 // A skill a person may grant an agent (agent-runtime#7), vendored from agent-runtime's skills.json
 // by tools/agents/vendor-agent-skills.py into src/control/agent_skills.cpp: its name, the label

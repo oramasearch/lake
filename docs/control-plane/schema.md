@@ -908,6 +908,19 @@ and selects that guard before a lake with this change is rolled; a lake before i
 columns, and a lake with it on an older schema fails its organization and customer reads, so the
 schema goes first.
 
+## Metered jobs migration
+
+`0077_metered_jobs` (lake#658) widens `workload_resources.object_kind` to `agent_cron_run`: one row
+per run an agent cron schedule's CronJob starts (`object_id` the `agent_cron_runs` id), reported by
+the Orama operator from the run's pods (or its Job's pod template) and kept with `pods` 0 after they
+finish, as for a job-mode launch. Lake charges each finished build, job launch and cron run once,
+recording that it did in the run's workspace Zetta (`lake_metering_job_records`,
+[`../api/metering.md#resources`](../api/metering.md#resources)); nothing about usage is kept here.
+
+Nothing is dropped; idempotent (the check is dropped and added again on every run); guard
+`metered_jobs_guard`. The operator vendors the schema, selects that guard and reports cron runs in
+its own pull request before a lake with this change is rolled.
+
 ## Repository workspaces migration
 
 `0051_repository_workspaces` adds `repositories.workspace_id` (references `workspaces`, index
