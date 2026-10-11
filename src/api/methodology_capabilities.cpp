@@ -1316,7 +1316,7 @@ liquid::runtime::task<ApiResult> duplicate_methodology(const json& input, ApiCon
         }
         extra["network"] = entry.value("network", false);
     } else {
-        // One of Orama's: its description and search space, with a Python template, since it runs
+        // One of Orama's: its description and parameter ranges, with a Python template, since it runs
         // natively and has no Python source.
         const control::MethodologyDraft draft = control::draft_from_catalogue(entry, requested);
         name = draft.manifest.name;

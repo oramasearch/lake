@@ -71,7 +71,7 @@ local paths. An empty file means the standard library only. The image installs i
 
 ## Capabilities
 
-All take `customer_id` and `workspace_id`. Reads need `read` on the space and actions `write`; a
+All take `customer_id` and `workspace_id`. Reads need `read` on the account and actions `write`; a
 token or an agent's credential that carries `workspace_query` may call the reads, and one that
 carries `workspace_act` the actions (`granted_by_scope`), so agents use them through their skills.
 
@@ -231,7 +231,7 @@ pull of its own image), and stops resolving when the run ends:
 
 Its dispatch row and the operator's status are in PostgreSQL; what it read and produced (dataset,
 target, features, parameters, result, metrics, log, model) is a sealed `lake_methodology_runs`
-record in the workspace Zetta, found by the space and methodology. A run's phase is the operator's
+record in the workspace Zetta, found by the account and methodology. A run's phase is the operator's
 (`Building`, `Staging`, `Running`, `Collecting`, `Succeeded`, `Failed`, `Stopped`), with a message in
 Lake's words while it waits. A run the operator has not reported on within 30 minutes (its image
 build included) is withdrawn with the reason.
