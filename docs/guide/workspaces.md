@@ -50,7 +50,9 @@ Workspace**.
    seconds.
 3. When it is ready, the page you were on opens.
 
-The first workspace is named `workspace`, in the `prod` environment. Starting again is harmless.
+The first workspace is named after your account's handle (or your organization's), in the `prod`
+environment. Starting again is harmless. A first workspace created earlier as `workspace` keeps that
+name; rename it from **Ship → Workspaces** with **Rename**.
 
 - REST: `POST /v1/start_workspace` with `{"customer_id": "<customer id>"}`. The answer carries its
   `workspace_id`.

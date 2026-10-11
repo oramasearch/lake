@@ -15,9 +15,24 @@ form into `/w/<id>/`; both are gone.
 - **A workspace page** (`workspace: true` in its `routes.ts`) answers at `/w/<workspace_id><path>`.
   Its query parameters are unchanged (`/w/<id>/design/project?name=churn`).
 - **Its unprefixed address** (`/design/projects`, from an old link or the docs) opens the same page
-  in the current workspace: the remembered one when the `viewer` read accepts it, else the only
-  workspace across the viewer's spaces. With neither it shows *Choose a Workspace* with a link to
-  Workspaces. A visitor is sent to sign in (`WorkspaceRedirect` in `src/App.tsx`).
+  in the current workspace (below). Only a person who can reach no workspace at all sees *Choose a
+  Workspace* with a link to Workspaces. A visitor is sent to sign in (`WorkspaceRedirect` in
+  `src/App.tsx`).
+
+## The current workspace, and a deleted one
+
+`resolveWorkspace` in `lib/workspacePicker.ts`, called by `lib/session.tsx` (lake#638):
+
+- the URL's `/w/<id>` when it is live in one of the person's spaces;
+- else the `viewer` read's `workspace_id` when live, else the remembered one when live, else the
+  person's own first workspace, else the first workspace any organization of theirs has.
+
+So a workspace deleted since it was linked or remembered never leaves the app on *Choose a
+workspace* while another exists (Steve, 2026-10-11: the review organization's only workspace was
+deleted and the picker read "ux-review-2026… / Choose a w…"). Once the `viewer` read has settled
+(not while it is being fetched again, so a workspace made a moment ago is not taken for a deleted
+one), the session stores the fallback in `lake-workspace` and, when the URL named the deleted
+workspace, replaces `/w/<deleted>` with `/w/<fallback>` keeping the rest of the path and the query.
 - **`/w/<workspace_id>` and `/w/<workspace_id>/`** open the workspace's home,
   `/w/<workspace_id>/design/projects`, keeping the query.
 - **The rail** marks the current item by the path without its `/w/<id>` prefix (`localPath` in
@@ -48,23 +63,47 @@ It is navigation memory only:
 
 ## The picker
 
-`components/WorkspacePicker.tsx`, shown to a signed-in viewer with at least one space:
+`components/WorkspacePicker.tsx`, shown to a signed-in viewer with at least one space; its rules
+are pure functions in `lib/workspacePicker.ts` (lake#638).
 
-- **Space** lists the viewer's spaces. The viewer's own personal space is labelled *Personal
-  space*, not its generated handle; other spaces keep their names. Choosing a space with exactly
-  one live workspace opens it; otherwise it opens `/workspaces?customer_id=<space>` to choose or
-  create one.
-- **Workspace** lists the chosen space's live workspaces by name (names are unique among a space's
-  live workspaces; the environment is on Workspaces, lake#452). Pending and stopped workspaces are
-  listed. When the URL names no workspace of that space it reads *Choose a workspace*.
+- **The pill** names the current workspace first, in full where it fits. When the viewer has more
+  than one owner (their account and an organization, or several organizations) the owner follows,
+  muted: *Your account* for their own account, else the organization's name. A name cut short keeps the
+  whole of it in the tooltip (`Production — acme-research (Organization)`). At phone width the pill
+  shows the workspace name alone, cut to fit, and its menu is a sheet across the screen.
+- **The menu** groups the workspaces by owner. Each group's header is an initial, a small kind label
+  (*Your account* or *Organization*) and the owner's name as written, in the regular face: the
+  person's own name for their account (never its generated handle), the organization's name
+  otherwise. Workspaces are listed by name (names are unique among an owner's live workspaces; the
+  environment is on Workspaces, lake#452), pending and stopped ones included; an owner with none
+  says *No workspaces yet*. When the URL names no workspace the pill reads *Choose a workspace*.
+- **Long lists.** The list scrolls inside the menu. With more than eight workspaces across owners
+  (`FILTER_AFTER`) the menu opens with a filter box, focused: a workspace stays when its name or its
+  owner's name contains every word typed (case and accents ignored), an owner with nothing left is
+  hidden, and Enter opens the first one left.
 - Choosing a workspace keeps the page: a workspace page reopens at the same path and query under
   the new workspace; any other page opens the new workspace's Projects.
-- **New workspace** opens `/workspaces?customer_id=<space>`.
+- **New workspace** is one action at the menu's foot. It opens
+  `/workspaces?customer_id=<current owner>&new=1`, whose dialog asks for the **owner** (your
+  account or an organization you belong to) when there is more than one, then the name and the
+  environment.
 
-At phone width (`max-width: 40rem`) the top bar wraps: the actions keep the first row, and the
-picker (two equal columns and *New workspace*) and the trail take a full-width row below, so a
-390 px viewport shows whole space and workspace names. The taller bar is not sticky there, and
-table headers stick to the top (`lake.css`).
+![The picker at 1440 wide: one account with three workspaces and two organizations](screenshots/workspace-picker/three-1440-open.png)
+
+Screenshots at 1440 and 390 wide, from mocked answers (one account with three workspaces, two
+organizations, a second viewer with twelve workspaces for the filter, and a third whose remembered
+workspace was deleted, with Workspaces grouped by owner), are in
+[`screenshots/workspace-picker/`](screenshots/workspace-picker/). Make them again with
+`frontend/checks/workspace-picker.mjs` against `npx vite --port 5174` (its header says how); it also
+prints whether the page scrolls sideways, the pill's text and tooltip, the group headers, and
+whether the filter shows.
+
+### A new account's first workspace
+
+`start_workspace` names an account's first workspace after the account's handle (the person's
+handle, or the organization's), so the picker reads a name rather than a placeholder (lake#638). An
+account whose first workspace was created earlier as `workspace` keeps that name; lake never renames
+it, and it can be renamed from Workspaces ([../api/workspaces.md](../api/workspaces.md)).
 
 ## A workspace that is not ready
 
@@ -77,7 +116,16 @@ whether or not the workspace is ready, because it is lake's, not the workspace's
 ## The Workspaces page
 
 `/workspaces` (`pages/workspaces/WorkspacesPage.tsx`) is outside `/w/` so the first workspace can be
-created before one exists. Figures on top count the chosen customer's workspaces, the ready and
+created before one exists. It lists **every workspace the person can reach, grouped by owner** exactly
+as the picker groups them (lake#638): their account first, then each organization, each group headed
+by its initial, kind and name as written, with the picker's names, order and counts
+(`workspaceGroups`, one `list_workspaces` per owner; a workspace being deleted is gone from both). The
+figures (Workspaces, Ready, Failed, Storage) cover every owner (`workspaceFigures`). An owner with no
+workspace shows a *New workspace* row in its group, which opens the dialog for that owner; the page is
+never empty while an owner has one. The search and the phase filter apply across groups.
+`?customer_id=` only chooses the owner a new workspace defaults to. `?new=1` opens its New Workspace dialog (the picker's *New workspace*),
+which asks for the owner when the viewer has more than one. **Rename** on a row renames the workspace
+(`update_workspace {name}`); its data, address and namespace stay. Figures on top count the chosen customer's workspaces, the ready and
 failed ones and the storage they request; the list shows each workspace's name, environment and
 namespace, its phase as a state chip, its storage (requested, and observed when it differs) and its
 age, with a search and a filter by phase. **New workspace** opens a dialog that creates one from a

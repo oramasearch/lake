@@ -40,8 +40,8 @@ until `ready` is true. Details: [Workspaces](/docs/workspaces).
 Open **Ship → Workspaces** and press **New workspace**: give it a name and an environment (`dev`,
 `staging`, `prod` or another lowercase name). A Design, Train or Ship page with no
 workspace to open says *No Workspace Yet* and links to Workspaces. Through the API,
-`POST /v1/start_workspace` creates a first workspace, named `workspace` in `prod`, when you have
-none, and answers its `workspace_id`:
+`POST /v1/start_workspace` creates a first workspace, named after your account's handle, in `prod`,
+when you have none, and answers its `workspace_id`:
 
 ```json
 {"customer_id": "<customer id>"}

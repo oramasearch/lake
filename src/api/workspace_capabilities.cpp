@@ -6580,7 +6580,8 @@ void register_workspace_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "start_workspace",
         .title = "Start a workspace",
-        .description = "Make sure the space has its first workspace (named `workspace`), asking "
+        .description = "Make sure the space has its first workspace (named after the account's "
+                       "handle; one created earlier as `workspace` keeps that name), asking "
                        "the operator for it if absent, and answer its state with its "
                        "`workspace_id`. Repeating it is harmless. A space can hold many "
                        "workspaces: `create_workspace` adds another and `list_workspaces` lists "
