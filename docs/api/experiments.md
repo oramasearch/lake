@@ -206,9 +206,15 @@ answers keep the engine's `run` field.
 `max_points` (4–10000). Omit those fields for all recorded series. Each point carries its original
 step, value and wall time. Engine read-time compaction preserves extrema. Artifacts are closed
 typed data for confusion matrices, ROC/PR curves, calibration, feature importance and predictions,
-but only a trainer that logs them fills the list: the engine's GBDT training logs none, so
-`artifacts` is usually `[]`, and the capability's description no longer promises these charts
-(zetta#1239).
+and only a trainer that logs them fills the list. A GBDT **classifier** run with a held-out split
+logs three, each named `held_out` and worked out from the rows it never trained on (zetta#1247):
+`confusion_matrix` (threshold 0.5, `labels` `["0","1"]`, rows the actual class and columns the
+predicted one), `roc_curve` (`x` the false positive rate, `y` the true positive rate, at most 101
+points with their score `thresholds`) and `calibration` (ten equal-width bins, each non-empty bin's
+mean `predicted` probability, `observed` positive rate and `counts`). A regressor, a run without a
+held-out split, or a run suppressed for differential privacy logs none. The capability's
+description promises exactly that (lake#615); the run page draws them (see
+[the UI page](../ui/experiments.md)).
 
 ```json
 {"customer_id":"space-id","workspace_id":"workspace-id","run_id":"run-id","names":["train.loss"],"max_points":500}

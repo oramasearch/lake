@@ -182,7 +182,8 @@ it; a failure shows *Reconnecting* and keeps trying.
 
 A trial or tracked run opens its own page: every metric grouped by its prefix, its parameters and
 its artifacts (confusion matrices, ROC and PR curves, calibration, feature importance, sample
-predictions). On the list, tick tracked runs and choose **Compare selected runs**; on an
+predictions). A GBDT classifier trained with a held-out split shows its **Confusion Matrix**,
+**ROC Curve** and **Calibration** on the held-out rows; a regressor shows none. On the list, tick tracked runs and choose **Compare selected runs**; on an
 experiment, select trials and **Compare selected runs**. Two to eight runs share charts, with their parameter differences
 marked.
 

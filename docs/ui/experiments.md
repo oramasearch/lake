@@ -133,7 +133,12 @@ report (`heldOutScores` in `transforms.ts`, tested in `frontend/tests/experiment
 
 The parameter table marks differing values and distinguishes missing values from null. Artifacts
 include confusion matrices, ROC/PR, calibration, feature importance and sample prediction tables
-when a trainer logged them; GBDT training logs none, so the card usually says none were recorded.
+when a trainer logged them. A GBDT classifier with a held-out split logs a confusion matrix, an ROC
+curve and calibration, each named `held_out` (zetta#1247, lake#615). Each artifact is headed by its
+kind and source (*ROC Curve · held-out rows · run*); the ROC curve is drawn against the chance
+diagonal on a false-positive-rate axis, and calibration against the perfectly calibrated diagonal
+on a mean-predicted-probability axis (`artifactChart`, `artifactTitle` and `artifactSource` in
+`transforms.ts`, tested in `frontend/tests/experiments.test.ts`).
 Every chart has its exact data in a table (**Chart Data** under each metric). User-controlled
 strings are rendered as text. A differential-privacy run says *curves suppressed for differential
 privacy* and is excluded from curve drawing and live metric requests.

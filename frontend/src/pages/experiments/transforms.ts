@@ -147,3 +147,46 @@ export const MAX_COMPARED = 8;
 export function canCompare(runs: string[]): boolean {
   return runs.length >= MIN_COMPARED && runs.length <= MAX_COMPARED;
 }
+
+/** An evaluation chart's heading: what kind of chart it is, in Title Case. */
+export function artifactTitle(type: string): string {
+  const titles: Record<string, string> = {
+    confusion_matrix: "Confusion Matrix",
+    roc_curve: "ROC Curve",
+    pr_curve: "Precision-Recall Curve",
+    calibration: "Calibration",
+    feature_importance: "Feature Importance",
+    sample_predictions: "Sample Predictions",
+  };
+  return titles[type] ?? type.replace(/[_-]+/g, " ");
+}
+
+/** Where an evaluation chart's rows came from: a GBDT classifier names its charts `held_out`
+ * (zetta#1247), the rows it never trained on. Other names are shown as logged. */
+export function artifactSource(name: string): string {
+  return name === "held_out" ? "held-out rows" : name;
+}
+
+export type ArtifactChart = { data: (number | null)[][]; labels: string[]; settings: { title: string; xLabel: string; xValues?: string[] } };
+
+/** A curve artifact's plot: the series, their labels and the x axis's name. ROC and calibration
+ * carry a diagonal, the chance line and perfect calibration, to read the curve against. */
+export function artifactChart(type: string, data: Record<string, unknown>): ArtifactChart {
+  const list = (key: string) => (Array.isArray(data[key]) ? (data[key] as unknown[]) : []);
+  const numbers = (key: string) => list(key).map((v) => (typeof v === "number" && Number.isFinite(v) ? v : null));
+  const title = artifactTitle(type);
+  if (type === "feature_importance") {
+    const values = numbers("values");
+    return { data: [values.map((_, i) => i), values], labels: ["Importance"], settings: { title, xLabel: "Feature", xValues: list("features").map(String) } };
+  }
+  if (type === "calibration") {
+    const predicted = numbers("predicted");
+    return { data: [predicted, numbers("observed"), predicted], labels: ["Observed rate", "Perfectly calibrated"], settings: { title, xLabel: "Mean predicted probability" } };
+  }
+  if (type === "roc_curve") {
+    const x = numbers("x");
+    return { data: [x, numbers("y"), x], labels: ["True positive rate", "Chance"], settings: { title, xLabel: "False positive rate" } };
+  }
+  if (type === "pr_curve") return { data: [numbers("x"), numbers("y")], labels: ["Precision"], settings: { title, xLabel: "Recall" } };
+  return { data: [numbers("x"), numbers("y")], labels: [title], settings: { title, xLabel: "x" } };
+}
