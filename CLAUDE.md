@@ -269,7 +269,9 @@ repository-store work (search included, which reads stores only through the repo
 runs off the server thread, so one workspace's Zetta holds up only its own requests. Rollback by the workspace Zetta is not detected yet (lake#522), and
 every workspace store depends on `LAKE_INSTANCE_KEK`, which has no rotation or backup. Replication
 cursors go through liquid's cursor API. It needs liquid `8955519` or later (liquid#332, write-once index
-runs); no workspace is switched on dev, and the copy's snapshot
+runs), and `88c5ef4` or later for the fan-out of held puts: before it, corosio read 8 bytes before a
+continuation that a range `when_all` posted and could fault (lake#604, corosio#13), and an offload's
+completion could signal a `block_on` context that had already ended (liquid#350); no workspace is switched on dev, and the copy's snapshot
 precondition is not enforced (the move does not wait on the `0069` snapshot state yet). See `docs/architecture/workspace-store.md` and
 `docs/api/workspace-store.md`.
 A switched workspace's search index lives beside its store (decision 54 S8, lake#381, no migration):

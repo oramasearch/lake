@@ -9,7 +9,11 @@ store in its workspace Zetta, on Zetta's object capability
 ([zetta#1005](https://github.com/oramasearch/zetta/issues/1005), zetta `docs/data/object-store.md`,
 live on dev Zetta). It needs liquid at or after `8955519`, which writes each index run once
 ([liquid#332](https://github.com/oramasearch/liquid/issues/332)); an earlier liquid's index merge
-rewrote a finished run in place, which Zetta refuses. Since
+rewrote a finished run in place, which Zetta refuses. It also needs liquid at or after `88c5ef4`, which
+pins [corosio#13](https://github.com/oramasearch/corosio/pull/13): the backend fans held puts out
+through a range `when_all`, and an earlier corosio read 8 bytes before the first posted continuation,
+which crashed the store's run thread when that read fell off a page
+([lake#604](https://github.com/oramasearch/lake/issues/604)). Since
 [lake#543](https://github.com/oramasearch/lake/issues/543) it opens a workspace store only on a
 one-node workspace Zetta that reports `object_log_prefix_durability` 1 or later: a Zetta image built
 with [zetta#1237](https://github.com/oramasearch/zetta/pull/1237), which reports
