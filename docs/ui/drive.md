@@ -92,7 +92,7 @@ Liquid client contracts:
 - `DriveScenario.ReplacingAnUploadedFileKeepsThePreviousVersionRestorable` proves that two uploads
   of the same file name leave two available versions on the API, that the two
   compare and the previous one restores, and that a real deletion stays distinct (lake#123). The
-  same exercise runs on the memory store's space store and on a switched workspace store
+  same exercise runs on the memory store's account store and on a switched workspace store
   (`WorkspaceStoreDrive.*`).
 - `DriveScenario.SyncedFolderPullsAsRepositoryAndBuildsProject` proves that a drive folder is the
   same Liquid repository: the public repository client pulls and materializes it, after which CMake

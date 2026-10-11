@@ -9,10 +9,10 @@
  *
  * - `children` may be a function of the workspace's state.
  * - `before` is shown ahead of the gate or the content (the Data page's store notice).
- * - `after` is shown after either, ready or not, unless the page is unavailable (the Agents page's
- *   Agent Library, the Data page's Storage).
- * - `always` shows the content itself whether the workspace is ready or not (the Agent Library
- *   page, which is lake's, not the workspace's).
+ * - `after` is shown after either, ready or not, unless the page is unavailable (the Design → Agents
+ *   page's Orama agents, the Data page's Storage).
+ * - `always` shows the content itself whether the workspace is ready or not (a page of Lake's own,
+ *   not the workspace's).
  * - `returnTo` is where Start lands; by default the current page's list page when lake allowed it
  *   (Projects, Data, Agents, Runs, Models, Search Indexes), else Projects. */
 import { type ReactNode, useState } from "react";

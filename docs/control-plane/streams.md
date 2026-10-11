@@ -3,7 +3,7 @@
 Topic creators live in the workspace Zetta that holds the topic (lake#379). Each creator is
 one sealed record in that workspace's `lake_stream_owners` collection
 ([workspace records](../architecture/workspace-records.md)), keyed by the blind index of the
-topic name. The sealed body names the space, the topic and the creator, and the seal binds the
+topic name. The sealed body names the account, the topic and the creator, and the seal binds the
 workspace, so ownership follows that workspace incarnation: deleting or recreating the workspace
 takes its topics and their creators together. Nothing about a topic's creator is kept in lake's
 PostgreSQL. Migration `0037_streams` created `stream_owners`; migration
@@ -29,23 +29,23 @@ Lake does not infer creator ownership from a service credential or a topic's nam
 An existing ownership record refuses creation before contacting Zetta, including after an
 out-of-band topic drop or failed ownership cleanup. A second person cannot recreate that name
 under the first person's permissions; reconcile the leftover record before reusing the name.
-The regression test grants the second principal space write access explicitly, then verifies
+The regression test grants the second principal account write access explicitly, then verifies
 the ownership conflict is returned without an upstream call or recreated topic.
 
 Reading a creator costs one `get_record` on the workspace (`get_stream`, and before each write);
 `list_streams` reads no ownership. Every ownership call goes through the workspace caller, so a
 missing, malformed or unknown `workspace_id` is `invalid_input` at `/workspace_id`, a workspace of
-another space is refused, and a workspace that is not ready refuses rather than falling back to
+another account is refused, and a workspace that is not ready refuses rather than falling back to
 another workspace, the lake Zetta or PostgreSQL.
 
 `list_agent_task_stream_scopes(customer_id)`
 loads only task ID, agent and completion state in one store query so Streams can build the allowed
 sets without a query per topic or loading task bodies. Those sets authorize and filter one
-`agent-events` view and the `agent-tasks.<agent>` views used by that space. App/build topic
+`agent-events` view and the `agent-tasks.<agent>` views used by that account. App/build topic
 authorization likewise resolves durable rows and their customer IDs. Shared topics and
-subscriptions are never exposed as space-owned resources.
+subscriptions are never exposed as account-owned resources.
 
-Space policy supports `write` grants for stream publication and editing. Existing read/admin/owner
+Account policy supports `write` grants for stream publication and editing. Existing read/admin/owner
 inheritance remains; deletion requires admin and topic drop/configuration additionally require
 the exact creator. The registry records successful, failed and denied writes in the signed Lake
 audit. Zetta's CRUD handlers independently audit the Lake service credential. Preview actions

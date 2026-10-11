@@ -1,0 +1,50 @@
+[
+ [
+  "search",
+  "Search data"
+ ],
+ [
+  "generate-data",
+  "Generate a dataset"
+ ],
+ [
+  "train",
+  "Train a Model"
+ ],
+ [
+  "summarize",
+  "Summarize and explain"
+ ],
+ [
+  "call-api",
+  "Call the API"
+ ],
+ [
+  "drives",
+  "Use drives"
+ ],
+ [
+  "transcripts",
+  "Use transcripts"
+ ],
+ [
+  "repositories",
+  "Work in repositories"
+ ],
+ [
+  "datasets",
+  "Load datasets"
+ ],
+ [
+  "streams",
+  "Read and publish streams"
+ ],
+ [
+  "pipelines",
+  "Design pipelines"
+ ],
+ [
+  "usage",
+  "Read usage and billing"
+ ]
+]

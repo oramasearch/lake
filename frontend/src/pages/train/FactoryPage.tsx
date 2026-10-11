@@ -1,4 +1,4 @@
-/** Train → Agents → Agent Factory (web_ui.cpp web_ui_factory, docs/api/agent-factory.md): a
+/** Design → Agents → Agent Factory, one of the two ways an agent is designed (lake#653; web_ui.cpp web_ui_factory, docs/api/agent-factory.md): a
  * conversation with AgentCreator beside its proposal, and Approve and create. Nothing is created
  * until the person approves; Approve sends the SHA-256 of the proposal they saw, which the server
  * checks against the proposal stored in the conversation. */
@@ -30,11 +30,11 @@ export default function FactoryPage() {
   const conversationId = params.get("conversation") ?? "";
   const taskId = params.get("task") ?? "";
   const query = qs({ customer_id: customerId });
-  useTrail([{ label: "Train" }, { label: "Agents", to: ws(`/train/agents?${query}`) }, { label: "Agent Factory" }]);
+  useTrail([{ label: "Design", to: ws("/design/projects") }, { label: "Agents", to: ws(`/design/agents?${query}`) }, { label: "Agent Factory" }]);
 
   const go = useCallback(
     (conversation: string, task: string, replace = true) => {
-      navigate(ws(`/train/agents/new?${qs({ customer_id: params.get("customer_id"), conversation, task })}`), { replace });
+      navigate(ws(`/design/agents/new?${qs({ customer_id: params.get("customer_id"), conversation, task })}`), { replace });
     },
     [navigate, ws, params],
   );
@@ -70,11 +70,11 @@ export default function FactoryPage() {
 
   return (
     <Page
-      eyebrow="Train"
+      eyebrow="Design"
       title="Agent Factory"
       sub="Tell AgentCreator what you want an agent for. It asks what it must, then proposes the agent. Nothing is created until you approve the proposal."
       actions={
-        <Button to={ws(`/train/agents?${query}`)}>
+        <Button to={ws(`/design/agents?${query}`)}>
           <ArrowLeft size={14} aria-hidden /> Back to agents
         </Button>
       }
@@ -100,7 +100,7 @@ export default function FactoryPage() {
                   if (created.schedule_error) words += ` Its trigger was not scheduled: ${created.schedule_error}`;
                   if (created.check_launch_id) words += " A first check run has started.";
                   toast(words, created.schedule_error ? "bad" : "ok");
-                  navigate(created.agent_id ? ws(`/train/agent?${qs({ customer_id: customerId, id: created.agent_id })}`) : ws(`/train/agents?${query}`));
+                  navigate(created.agent_id ? ws(`/design/agent?${qs({ customer_id: customerId, id: created.agent_id })}`) : ws(`/design/agents?${query}`));
                 })
               }
             />
@@ -229,7 +229,7 @@ function Proposal({ answer, busy, error, onApprove }: { answer: Row; busy: boole
             ["Work area", `${text(area, "kind")} ${text(area, "detail")}`.trim()],
             ["Instructions", text(agent, "manifesto")],
             ["What success looks like", text(agent, "goal")],
-            ["What it may do", skillLabels(agent.skills)],
+            ["Skills", skillLabels(agent.skills)],
             ["Trigger", text(agent, "trigger") || "Conversation only"],
             ["Pipelines", pipelines || "—"],
           ]}

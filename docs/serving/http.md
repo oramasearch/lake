@@ -138,7 +138,7 @@ A connection refused at the cap while 64 refusals are already lingering gets one
 `503` write and is closed, so a flood of refusals never slows the accept loop.
 
 **Memory.** An idle connection costs about 25 KiB of lake's resident memory (the parser's 8 KiB
-header space and buffers, the serializer, the session), measured by
+header area and buffers, the serializer, the session), measured by
 `HttpConnections.AnIdleConnectionCostsLittleMemory` on macOS, plus the kernel's socket buffers,
 which the container's memory cgroup also charges. At the default cap, 4096 idle connections are
 about 100 MiB of the dev pod's 512 MiB limit (`Lake/prod`, `requests 128Mi`, `limits 512Mi`); lower

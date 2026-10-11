@@ -65,7 +65,7 @@ inline constexpr std::array<LibraryAgent, 9> agent_library{{
     {"agent-creator",
      "AgentCreator",
      "Designs a new agent with you in a conversation, and creates it only when you approve.",
-     "Train → Agents → Build it with the Agent Factory",
+     "Design → Agents → Describe it to the Agent Factory",
      "agent-runtime",
      true},
     {"agent-eval-generator",

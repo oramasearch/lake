@@ -1062,6 +1062,7 @@ TEST(Drives, EveryDriveCapabilityIsAuditedInItsWorkspace) {
                              "read_drive_file",
                              "recent_drive_entries",
                              "load_drive_dataset",
+                             "load_drive_model",
                              "drive_share_people",
                              "search_drives"}) {
         EXPECT_EQ(lake::api::audit_log_of(name), lake::api::AuditLog::Workspace) << name;
@@ -1389,6 +1390,55 @@ TEST(DrivesHttp, ARepositoryDriveWriteIsSearchedDownloadedAndLoaded) {
                          {"table_name", "notes"}})["error"]["path"],
               "/format")
         << "only CSV and JSONL load";
+
+    // Bring a model file (lake#654): its text goes to the engine's register_model, with where it
+    // came from; the engine's refusal of the file points at the file.
+    const std::string weights = R"({"objective":"binary_logistic","trees":[]})";
+    const json kept = lake.call(
+        "upload_drive_files",
+        {{"repository_id", repository_id},
+         {"ref", "main"},
+         {"path", ""},
+         {"files", json::array({{{"path", "models/churn.json"}, {"content", base64(weights)}}})}},
+        false);
+    ASSERT_TRUE(kept.value("ok", false)) << kept.dump();
+    lake.spaces.zetta->answers["register_model"] = {
+        {"model_id", "m-9"}, {"name", "partner churn"}, {"standalone", true}};
+    const json brought = lake.call("load_drive_model",
+                                   {{"drive_id", drive["value"]["id"]},
+                                    {"id", "models/churn.json"},
+                                    {"name", "partner churn"},
+                                    {"metrics", {{"held_out_auc", 0.8}}}});
+    ASSERT_TRUE(brought.value("ok", false)) << brought.dump();
+    EXPECT_EQ(brought["value"]["model_id"], "m-9");
+    EXPECT_EQ(brought["value"]["source"]["name"], "churn.json");
+    const auto registered = std::ranges::find_if(
+        lake.spaces.zetta->calls, [](const auto& call) { return call.first == "register_model"; });
+    ASSERT_NE(registered, lake.spaces.zetta->calls.end());
+    EXPECT_EQ(registered->second["weights"], weights);
+    EXPECT_EQ(registered->second["name"], "partner churn");
+    EXPECT_EQ(registered->second["metrics"]["held_out_auc"], 0.8);
+    EXPECT_EQ(registered->second["source"], "drive Docs: churn.json");
+    EXPECT_EQ(lake.call("load_drive_model",
+                        {{"drive_id", drive["value"]["id"]}, {"id", "models/churn.json"}})["error"]
+                       ["path"],
+              "/name")
+        << "a new model is named";
+    lake.spaces.zetta->responder = [](const std::string& capability, const json&)
+        -> std::optional<lake::control::ZettaControlResult<json>> {
+        if (capability != "register_model") {
+            return std::nullopt;
+        }
+        return std::unexpected(lake::control::ZettaControlError{
+            "not_supported", "/weights: the engine reads gradient-boosted tree models", "/weights"});
+    };
+    const json refused = lake.call("load_drive_model",
+                                   {{"drive_id", drive["value"]["id"]},
+                                    {"id", "models/churn.json"},
+                                    {"name", "other"}});
+    EXPECT_EQ(refused["error"]["code"], "not_supported") << refused.dump();
+    EXPECT_EQ(refused["error"]["path"], "/id") << refused.dump();
+    lake.spaces.zetta->responder = nullptr;
 
     const json deleted =
         lake.call("delete_drive_path",

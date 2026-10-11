@@ -2,7 +2,7 @@
 
 ## What
 
-`/w/<workspace_id>/ship/apps` (`frontend/src/pages/apps/AppsPage.tsx`) lists the space's apps
+`/w/<workspace_id>/ship/apps` (`frontend/src/pages/apps/AppsPage.tsx`) lists the account's apps
 (`list_apps`) with name, URL, observed phase, mode, revision or image, and binding summary. It has
 separate forms for runtime apps sourced from a lake repository (the repository choices come from
 `list_repositories`) and for image apps, both `create_app`.
@@ -81,7 +81,7 @@ The Apps list checks the Agent Library (`list_agent_library`) for a deployed `ag
 When it is available, **Build an App With the ApplicationAgent** starts an `agent_turn` with
 `agent: agent-application` and `kind: app`, puts the task id in the URL (`?task=`), and follows the
 task with `get_agent_task` every two seconds. The first turn has read tools only: workspace queries
-and SQL, datasets, services, the space's repositories (`list_repositories`, `get_repository`, tree
+and SQL, datasets, services, the account's repositories (`list_repositories`, `get_repository`, tree
 and files) and apps. The repository reads let a confirmed retry find the repository its earlier
 attempt created instead of creating a second one.
 

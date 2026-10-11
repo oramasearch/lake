@@ -234,7 +234,7 @@ liquid::runtime::task<ZettaControlResult<bool>> record_metered_job(WorkspaceReco
                                                                    MeteredJob job) {
     const auto at_us = metering_hour_us(job.hour);
     if (job.customer_id.empty() || job.kind.empty() || job.object_id.empty() || !at_us) {
-        co_return failure<bool>("invalid_input", "a job record needs its space, kind, id and hour");
+        co_return failure<bool>("invalid_input", "a job record needs its account, kind, id and hour");
     }
     const auto collection = MeteredJobCodec::collection;
     const std::string key = records.index_of(collection, job_key(job));

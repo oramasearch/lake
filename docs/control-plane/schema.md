@@ -25,7 +25,7 @@ CASCADE`):
 | `customer_type text` | `individual` or `organization` |
 | `user_id uuid UNIQUE` → `users`, `organization_id uuid UNIQUE` → `organizations` | nullable; the UNIQUEs give exactly one customer per user and per organization (NULLs don't collide); `ON DELETE CASCADE` |
 | `customer_type_check` | a customer is one or the other, never both: the type ties to exactly one non-null identity column |
-| `name varchar(256) NOT NULL` | the handle: **one global namespace** shared by individuals and organizations (`customer_name_unique`); lowercase letters, digits, inner hyphens, 1–256 chars (`customer_name_format`), so uniqueness is effectively case-insensitive and a handle can never carry spaces or uppercase. No default: the application generates handles (`{adjective}-{noun}-{number}`) and must pre-check uniqueness to answer 409 rather than 500 |
+| `name varchar(256) NOT NULL` | the handle: **one global namespace** shared by individuals and organizations (`customer_name_unique`); lowercase letters, digits, inner hyphens, 1–256 chars (`customer_name_format`), so uniqueness is effectively case-insensitive and a handle can never carry accounts or uppercase. No default: the application generates handles (`{adjective}-{noun}-{number}`) and must pre-check uniqueness to answer 409 rather than 500 |
 
 **Repositories** (migration `0002_repositories`):
 
@@ -142,7 +142,7 @@ does not update `secrets_versions`. (Since `0057` the data keys are workspace re
 
 | Table or change | Purpose |
 |---|---|
-| `secret_mount_routes` | One row per mount: its space, owning organization (NULL when the account owns the mount, [`0071`](#secret-mount-owners-migration)) and workspace (`enforce_workspace_routing`: a live workspace of the same space, never changed). Content-free dispatch; no mount name, secret name, value or key. |
+| `secret_mount_routes` | One row per mount: its account, owning organization (NULL when the account owns the mount, [`0071`](#secret-mount-owners-migration)) and workspace (`enforce_workspace_routing`: a live workspace of the same account, never changed). Content-free dispatch; no mount name, secret name, value or key. |
 | `keystore.previous_wrapped_key`, `previous_version` | The customer KEK a rotation replaced, wrapped under its own version, kept until every workspace data key is rewrapped. |
 | `secrets_dynamic_leases` | Loses its foreign key to `secrets_mounts`; a new mount has no row there (lake#362 moves leases). |
 | `workspace_assignments` (`secrets_mounts`) | Each legacy mount's owner: `sole_workspace` or `needs_selection`. Its entries, versions, keys and data keys follow it. |
@@ -157,7 +157,7 @@ read them.
 
 | Table or change | Purpose |
 |---|---|
-| `secret_lease_routes` | One row per dynamic lease (lake#362): its mount (foreign key to `secret_mount_routes`), space and workspace (`enforce_workspace_routing`: a live workspace of the same space, never changed), and `due_at`, when the expiry loop must next look at it (NULL once the lease is revoked or expired in its workspace; partial index `secret_lease_routes_due_idx`). Content-free dispatch; no role, value or ciphertext. |
+| `secret_lease_routes` | One row per dynamic lease (lake#362): its mount (foreign key to `secret_mount_routes`), account and workspace (`enforce_workspace_routing`: a live workspace of the same account, never changed), and `due_at`, when the expiry loop must next look at it (NULL once the lease is revoked or expired in its workspace; partial index `secret_lease_routes_due_idx`). Content-free dispatch; no role, value or ciphertext. |
 | `secrets_dynamic_leases` | Retired: leases live in `lake_secrets_dynamic_leases` in their mount's workspace Zetta, and [`0070_drop_moved_tables`](#drop-moved-tables-migration) drops the table. The migration reports each lease whose mount has no route. |
 | `secret_lease_workspaces_guard` | Guard table for migration `0058_secret_lease_workspaces`. |
 
@@ -262,7 +262,7 @@ stored. The migration follows metering migration `0014`.
 
 | Table | Purpose |
 |---|---|
-| `auth_applications` | Registration, isolated pool, exact origins and redirects, custom host, and theme. Split by `0059`: the row stays as content-free routing (id, space, pool, custom host, workspace), and the origins, redirects, name and theme live in the application's workspace Zetta. |
+| `auth_applications` | Registration, isolated pool, exact origins and redirects, custom host, and theme. Split by `0059`: the row stays as content-free routing (id, account, pool, custom host, workspace), and the origins, redirects, name and theme live in the application's workspace Zetta. |
 | `auth_app_signing_keys` | Per-application Ed25519 public keys and encrypted signing seeds, including rotation state. Retired by `0056`: each application's keys live in its workspace Zetta. |
 | `auth_app_users` | Pool membership and active or suspended status for application users. Retired by `0055_application_user_workspaces` (lake#353): users live in the application's workspace Zetta, and [`0070_drop_moved_tables`](#drop-moved-tables-migration) drops this table. |
 | `auth_app_organizations` | Application-facing organization profiles and metadata. Retired by `0055` (lake#354), with the users. |
@@ -329,7 +329,7 @@ about a workspace's data go to that workspace's own chain, `lake_audit_events` i
 
 | Table or change | Purpose |
 |---|---|
-| `workspace_assignments` (`audit_events`) | The workspace of each central event about a workspace's data, for the copy: an event of a workspace action that was not refused for want of authority, whose workspace its details or object name and that belongs to its space. `event_workspace`, or `workspace_deleted` (it stays central). Every other event stays central, without a row; the migration reports the counts. |
+| `workspace_assignments` (`audit_events`) | The workspace of each central event about a workspace's data, for the copy: an event of a workspace action that was not refused for want of authority, whose workspace its details or object name and that belongs to its account. `event_workspace`, or `workspace_deleted` (it stays central). Every other event stays central, without a row; the migration reports the counts. |
 | `audit_workspaces_guard` | Guard table for migration `0063_audit_workspaces`. |
 
 Nothing is dropped and `audit_events` stays append-only; the one-shot copy puts each assigned event
@@ -378,10 +378,10 @@ lake#380 change.
 
 | Table or change | Purpose |
 |---|---|
-| `oci_repository_routes` | `(customer_id, name)` → `workspace_id`, with `created_at` and `updated_at`. `name` is the path below the space: `<image>` or `cache/<image>` only, checked against OCI's lowercase grammar, with `<image>` at most 190 characters. No manifest, digest or tag. Written by a build's first push of its own target (from the build's workspace) or by `create_image_repository` (an explicit `workspace_id`); there is no default workspace. Deleted for a workspace in the `0065` cascade transaction, or by the operator's `unroute_image_repository`, which removes or moves `<image>` with `cache/<image>` in one transaction. |
+| `oci_repository_routes` | `(customer_id, name)` → `workspace_id`, with `created_at` and `updated_at`. `name` is the path below the account: `<image>` or `cache/<image>` only, checked against OCI's lowercase grammar, with `<image>` at most 190 characters. No manifest, digest or tag. Written by a build's first push of its own target (from the build's workspace) or by `create_image_repository` (an explicit `workspace_id`); there is no default workspace. Deleted for a workspace in the `0065` cascade transaction, or by the operator's `unroute_image_repository`, which removes or moves `<image>` with `cache/<image>` in one transaction. |
 | `oci_repository_routes_workspace_idx` | A workspace's routes, for the deletion cascade and listings. |
-| `enforce_oci_repository_route` (trigger `oci_repository_route_routing`) | Refuses any change of a route's space, name or workspace, and a route to a workspace that is not live in the space (`23514`). |
-| Backfill | Once: each image name the apps and builds of exactly one live workspace of the space use gets a route there, for `<name>` and `cache/<name>`; a name several workspaces use is reported with `RAISE WARNING`. The registry's files are not visible to SQL: the one-shot copy (`copy_workspace_records`, collection `oci_tags`) routes the repositories it finds by the same rule, then by the space's only live workspace, and reports the rest. |
+| `enforce_oci_repository_route` (trigger `oci_repository_route_routing`) | Refuses any change of a route's account, name or workspace, and a route to a workspace that is not live in the account (`23514`). |
+| Backfill | Once: each image name the apps and builds of exactly one live workspace of the account use gets a route there, for `<name>` and `cache/<name>`; a name several workspaces use is reported with `RAISE WARNING`. The registry's files are not visible to SQL: the one-shot copy (`copy_workspace_records`, collection `oci_tags`) routes the repositories it finds by the same rule, then by the account's only live workspace, and reports the rest. |
 | `oci_repository_routes_guard` | Guard table for migration `0068_oci_repository_routes`. |
 
 npm, Python, debuginfod and one-component OCI repositories stay with the instance and have no
@@ -647,7 +647,7 @@ creators live in each topic's workspace Zetta, and `0047_stream_owner_workspaces
 row's workspace in `workspace_assignments` for the operator's one-shot copy; it adds no column and
 drops nothing (guard `stream_owner_workspaces_guard`). Apply it
 before the Streams binary and vendor it in the operator rollout. Ownership failure behavior and
-space-scoped bus views are specified in [`streams.md`](streams.md).
+account-scoped bus views are specified in [`streams.md`](streams.md).
 
 ## Workspace routing migration
 
@@ -686,8 +686,8 @@ rows. The idempotent deployment marker is `app_forward_auth_guard`.
 ## Ask message workspaces migration
 
 `0045_ask_message_workspaces` records, in `workspace_assignments`, the workspace that owns each
-retired `ask_messages` row: the space's only live workspace (`sole_workspace`), or
-`needs_selection`; a row without a space is reported by a warning and listed by the copy as
+retired `ask_messages` row: the account's only live workspace (`sole_workspace`), or
+`needs_selection`; a row without an account is reported by a warning and listed by the copy as
 `no_customer`. Ask Orama conversations live in the owning workspace Zetta (lake#370), and lake no
 longer writes or reads the table except through the operator-only `copy_workspace_records`, which
 reapplies the same assignment before each run. No column is added and nothing is dropped; the
@@ -699,7 +699,7 @@ is deployed. Mechanism and cutover: [`../architecture/workspace-records.md`](../
 
 `0046_opportunity_workspaces` records, in `workspace_assignments`, the workspace that owns each
 retired `opportunities` row: the workspace the scan's agent task names (`task_workspace`); for a
-task written before tasks named their workspace, the space's only live workspace
+task written before tasks named their workspace, the account's only live workspace
 (`sole_workspace`); otherwise `needs_selection`. A row whose scan ran in a workspace that has since
 been deleted is recorded as `deleted_workspace` without a workspace: it went with that workspace
 and is never moved into another. Each unassigned row is reported by a warning. Design →
@@ -712,7 +712,7 @@ deployed. Mechanism and cutover: [`../architecture/workspace-records.md`](../arc
 ## Drive share link workspaces migration
 
 `0048_drive_share_link_workspaces` records, in `workspace_assignments`, the workspace that owns
-each retired `drive_share_links` row: the only live workspace of its repository's space
+each retired `drive_share_links` row: the only live workspace of its repository's account
 (`sole_workspace`), or `needs_selection`. It creates `drive_share_link_routes` (`token_hash`,
 `link_id`, `workspace_id`, `recorded_at`) and fills it for every assigned row. That table is
 dispatch: it lets a bearer token issued before lake#350, which does not name its workspace, find the
@@ -729,9 +729,9 @@ Nothing is dropped. Idempotent; guard `drive_share_link_workspaces_guard`. See
 `0049_application_webhook_workspaces` (lake#356, lake#357) adds `auth_applications.workspace_id`,
 the workspace whose Zetta holds the application's lifecycle events and delivery attempts. It is
 content-free routing, like `stores.workspace_id`. The trigger `application_workspace_routing`
-(`enforce_application_workspace`) requires a live workspace of the application's own space on
+(`enforce_application_workspace`) requires a live workspace of the application's own account on
 insert, accepts one assignment of a legacy application that has none, and refuses any other change
-of the workspace or the space. An application whose space has exactly one live workspace is
+of the workspace or the account. An application whose account has exactly one live workspace is
 assigned it (`sole_workspace`); every other is recorded as `needs_selection` with a warning. Each
 retired `auth_app_webhook_events` row's owner is recorded as its application's workspace
 (`application_workspace`) or `needs_selection`; a delivery attempt always goes where its event
@@ -795,8 +795,8 @@ schema must contain; those four entries go, and its Postgres rehearsal query nee
 ## Secret mount owners migration
 
 `0071_secret_mount_owners` (lake#561) lets an account own a secret mount. A mount created without
-`organization_id` belongs to the customer that owns its workspace (an individual's personal space,
-or an organization's space), so its route has no organization: the migration drops `NOT NULL` from
+`organization_id` belongs to the customer that owns its workspace (an individual's personal account,
+or an organization's account), so its route has no organization: the migration drops `NOT NULL` from
 `secret_mount_routes.organization_id`, and such a route stores NULL there. Its policy object hangs
 under the customer's (`customer → environment secrets/<customer> → secret_mount`); an organization's
 mount keeps `organization → environment secrets/<customer>/<organization> → secret_mount`. The route
@@ -927,10 +927,10 @@ its own pull request before a lake with this change is rolled.
 `repositories_workspace_idx`), the workspace each repository belongs to (lake#315, part 1). It is a
 content-free routing pointer, like `stores.workspace_id` (`0044`): the repository's metadata stays
 here and its content in the customer store until they move into that workspace's Zetta. Each
-earlier repository, tombstoned ones included, is assigned its space's only live workspace
-(`sole_workspace`); a space with several live workspaces or none is recorded as `needs_selection`
+earlier repository, tombstoned ones included, is assigned its account's only live workspace
+(`sole_workspace`); an account with several live workspaces or none is recorded as `needs_selection`
 and reported by a warning. The `repository_workspace_routing` trigger runs
-`enforce_workspace_routing`: a new repository must name a live workspace of its own space, and
+`enforce_workspace_routing`: a new repository must name a live workspace of its own account, and
 neither `workspace_id` nor `customer_id` changes afterwards, so `transfer_repository` is refused and
 an unassigned repository is assigned only by a reviewed migration. Nothing is dropped. Idempotent;
 guard `repository_workspaces_guard`. The operator reads no repository table, but vendors the schema
@@ -941,12 +941,12 @@ and selects that guard before the binary is deployed. See
 
 `0066_assign_unrouted_repositories` (decision 54 S14, lake#513) is the reviewed assignment `0051`
 left open. Once, each repository whose `workspace_id` is still NULL (tombstoned ones included) is
-assigned its space's only live workspace when the space now has exactly one; a repository of a
-space with several live workspaces or none is left alone and reported by a warning. Each assignment
+assigned its account's only live workspace when the account now has exactly one; a repository of a
+account with several live workspaces or none is left alone and reported by a warning. Each assignment
 is recorded in `workspace_assignments`: `repositories` from `needs_selection` to `sole_workspace`,
 `repository_descriptions` (if `0064` recorded one) to `repository_workspace`. The trigger stays:
 `enforce_workspace_routing` allows a change of `workspace_id` only on `repositories`, from NULL to a
-live workspace of the same space, while the transaction-local setting `lake.repository_assignment`
+live workspace of the same account, while the transaction-local setting `lake.repository_assignment`
 is `0066_assign_unrouted_repositories`; the block sets it around its updates and clears it, and every
 other change is refused as before. Nothing is added or dropped but the guard. Idempotent; guard
 `assign_unrouted_repositories_guard`. The operator vendors the schema and selects that guard. See
@@ -968,7 +968,7 @@ thing PostgreSQL keeps about that store; the operator does not read it. Idempote
 records live in the workspace Zetta of the repository's workspace
 ([`../api/metering.md`](../api/metering.md)), and repository storage is measured live on each read
 and stored nowhere; with lake#380 a switched workspace's storage is its bucket's `usage`. The migration only records each row's
-owner in `workspace_assignments` for the operator's copy: a space with exactly one live workspace
+owner in `workspace_assignments` for the operator's copy: an account with exactly one live workspace
 owns its rows (`sole_workspace`), every other row is `needs_selection` and reported by a warning.
 A usage row's `object_id` is `md5(customer_id || E'\n' || hour)` with the hour printed as
 `YYYY-MM-DDTHH:MI:SSZ` in UTC, a build row's `md5(customer_id || E'\n' || result_id)`, both as a
@@ -1031,7 +1031,7 @@ cutover:
 `0059_application_settings_workspaces` (lake#351) moves an application's settings, its `name`,
 `allowed_origins`, `redirect_uris` and `theme`, into one sealed record of the workspace Zetta of the
 application's workspace (`auth_applications.workspace_id`, `0049`). `auth_applications` stays as the
-content-free routing row: `id`, `customer_id` (the space and the policy object's parent), `pool_id`
+content-free routing row: `id`, `customer_id` (the account and the policy object's parent), `pool_id`
 (named by the pool's sessions, credentials and tokens), `custom_sign_in_domain` (the `Host` a
 custom-domain page is requested on, unique across lake), `workspace_id`, `created_at` and
 `updated_at`. The four settings columns lose NOT NULL and their defaults; lake writes NULL there for

@@ -181,7 +181,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 The forge capability tests create and read records in a test workspace Zetta.
-`Stores/WorkspaceRecordStores.ForgeRecordsLiveInTheirRepositorysWorkspace` covers two spaces with
+`Stores/WorkspaceRecordStores.ForgeRecordsLiveInTheirRepositorysWorkspace` covers two accounts with
 two workspaces each, records stored only at their own endpoint, ids of other repositories and
 workspaces, conditional updates, least privilege, a repository without a workspace, a workspace
 that is not ready and workspace deletion, for reads and for branch protection.

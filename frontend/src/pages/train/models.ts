@@ -7,7 +7,12 @@
  * a pipeline's model step, or each trial of an experiment, makes a new record with its own id. The
  * records of one model are its versions: the same model name from the same pipeline of the same
  * project, or from the same experiment when no pipeline is named. A pipeline may hold several
- * models (several model steps, each named). */
+ * models (several model steps, each named).
+ *
+ * A standalone model (lake#654) is made on its own, trained from a dataset (`train_model`) or
+ * brought from a file (`register_model`). The engine keeps it in a project of its own that it
+ * never lists, and marks each version `standalone`; its versions group as any other model's, and
+ * the project is never shown. */
 
 export type Row = Record<string, any>;
 
@@ -83,6 +88,10 @@ export type ModelGroup = {
   /** The published versions, newest first. */
   published: Row[];
   runs: string[];
+  /** Made on its own, not by a project's pipeline: its project is the engine's, never shown. */
+  standalone: boolean;
+  /** Brought from a file (register_model) rather than trained here. */
+  brought: boolean;
 };
 
 function created(model: Row): string {
@@ -122,9 +131,69 @@ export function groupModels(records: Row[], experimentOf?: ExperimentOf): ModelG
       score: heldOutScore(latest) ?? (scored ? heldOutScore(scored) : null),
       published: versions.filter((version) => version.exposed === true),
       runs,
+      standalone: latest.standalone === true,
+      brought: isBrought(latest),
     });
   }
   return out.sort((a, b) => created(b.latest).localeCompare(created(a.latest)));
+}
+
+/** A version brought from a file (register_model): its feature schema says so. */
+export function isBrought(model: Row | null | undefined): boolean {
+  return ((model?.feature_schema ?? {}) as Row).brought === true;
+}
+
+/** Where a brought version came from, as register_model kept it ("drive Docs: churn.json"). */
+export function broughtFrom(model: Row | null | undefined): string {
+  return text((model?.feature_schema ?? {}) as Row, "source");
+}
+
+/** What a standalone model trains on, as its pipeline's model step keeps it
+ * (`standalone_training`): dataset, target, methodology and held-out share. Null when the
+ * pipeline does not say. */
+export type Training = { dataset: string; target: string; methodology: string; entity: string; holdout: number | null };
+
+export function trainingOf(graph: Row | null | undefined): Training | null {
+  const nodes = Array.isArray(graph?.nodes) ? (graph!.nodes as Row[]) : [];
+  for (const node of nodes) {
+    if (text(node, "kind") !== "model") continue;
+    const recorded = (node.attributes as Row | undefined)?.standalone_training;
+    if (!recorded || typeof recorded !== "object") continue;
+    const holdout = (recorded as Row).holdout_fraction;
+    return {
+      dataset: text(recorded as Row, "dataset_path"),
+      target: text(recorded as Row, "target"),
+      methodology: text(recorded as Row, "methodology"),
+      entity: text(recorded as Row, "entity_column"),
+      holdout: typeof holdout === "number" ? holdout : null,
+    };
+  }
+  return null;
+}
+
+/** Whether a methodology from `list_methodologies` learns to predict a column: its `label` input
+ * is required. One that learns without (segmentation, anomaly detection) trains with no target. */
+export function needsTarget(methodology: Row | null | undefined): boolean {
+  const inputs = Array.isArray(methodology?.inputs) ? (methodology!.inputs as Row[]) : [];
+  return inputs.some((input) => text(input, "role") === "label" && input.required === true);
+}
+
+/** A model's name as `train_model` takes it: what was typed, trimmed; an error when it is empty or
+ * a standalone model already has it. */
+export function nameProblem(name: string, groups: ModelGroup[]): string | null {
+  const wanted = name.trim();
+  if (!wanted) return "Name the model.";
+  if (groups.some((group) => group.standalone && group.name === wanted)) return `A model named ${wanted} exists. Retrain it, or add a new version, from its page.`;
+  return null;
+}
+
+/** "0.2" typed as a held-out share: a number between 0 and 1, or null for none; an error otherwise. */
+export function holdoutOf(input: string): { value: number | null } | { error: string } {
+  const trimmed = input.trim();
+  if (!trimmed) return { value: null };
+  const value = Number(trimmed.endsWith("%") ? Number(trimmed.slice(0, -1)) / 100 : trimmed);
+  if (!Number.isFinite(value) || value <= 0 || value >= 1) return { error: "A held-out share is between 0 and 1, such as 0.2 (or 20%)." };
+  return { value };
 }
 
 /** The model a record id belongs to, or undefined. */

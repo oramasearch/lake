@@ -122,7 +122,7 @@ or the month ends. Every other limit only warns.
 
 ## Usage of One Agent, App, Service or Model
 
-- An agent's page (**Train → Agents**, then the agent) shows its **Model tokens** this month.
+- An agent's page (**Train → Agents** or **Design → Agents**, then the agent, then its training page) shows its **Model tokens** this month.
 - An app's page (**Ship → Apps**, then the app) shows its **CPU**, **RAM**, **GPU** and **Instance
   time** this month.
 - **Ship → Services** shows each service's CPU, RAM and volume time this month.

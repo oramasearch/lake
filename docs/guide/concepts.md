@@ -78,7 +78,7 @@ MCP tools take.
 | **Experiment and trial** | An AI model training experiment, as an experiment tracker records it: one experiment tries many settings for one objective, within budgets, and keeps the best model; each attempt is a trial with its own run and curves, ranked and compared live. See [Experiments](/docs/experiments). |
 | **Stream and topic** | A topic is a named sequence of messages in a workspace (agent events, app events, build logs, your own). Streams browses and publishes to them. See [Streams](/docs/streams). |
 | **Agent** | An AI helper that works for you. It reads what it is allowed to read and proposes changes for you to confirm. See [Agents](/docs/agents). |
-| **Agent Library** | The agents Orama provides: Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest and AgentCreator. **Design → Agent Library** lists them and whether each runs on your Lake. |
+| **Agent Library** | The agents Orama provides: Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest and AgentCreator. **Design → Agents** lists them, marked *By Orama* and read-only, beside the agents you design, and says whether each runs on your Lake. |
 | **Agent Factory** | Building a new agent in a conversation with AgentCreator. |
 | **Proposal** | A change an agent wants to make, shown in full. Nothing changes until you confirm it. |
 | **Ask Orama** | Lake's home page, and the agent in the top bar of every page. It answers from what you can read and hands work to other agents. See [Ask Orama](/docs/ask-orama). |

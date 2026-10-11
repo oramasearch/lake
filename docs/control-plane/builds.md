@@ -33,7 +33,7 @@ the row:
 | Purpose | Lake permits |
 |---|---|
 | `source` | `repository_tree` and `repository_file` for the row's repository and revision |
-| `push` | OCI push and cache pull below the target space prefix |
+| `push` | OCI push and cache pull below the target account prefix |
 | `events` | `publish_build_event` for this build ID |
 
 The operator creates a suspended Job, writes all three hashes, and releases the Job only after a
