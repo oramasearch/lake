@@ -7,6 +7,7 @@ import { SessionProvider, useSession } from "@/lib/session";
 import { TrailProvider } from "@/lib/trail";
 import { Page, Skeleton, Empty, Button } from "@/lib/ui";
 import { audienceOf, SCREENS, type Screen } from "@/routes";
+import { billingVisible } from "@/routes/nav";
 import { Shell } from "@/components/Shell";
 import { SessionEndedNotice } from "@/components/SessionEnded";
 import { ScreenBoundary } from "@/components/ScreenBoundary";
@@ -26,6 +27,13 @@ function Guard({ screen, children }: { screen: Screen; children: React.ReactNode
   const location = useLocation();
   const audience = screen.audience ?? ["account", "operator"];
   const who = audienceOf(session);
+  if (who !== "visitor" && !billingVisible(screen, session.viewer)) {
+    return (
+      <Page title="Not Available">
+        <Empty action={<Button to="/usage">Usage</Button>}>This lake does not bill. Usage is tracked as usual.</Empty>
+      </Page>
+    );
+  }
   if (!audience.includes(who)) {
     if (who === "visitor") {
       return <Navigate to={`/sign-in?next=${encodeURIComponent(location.pathname + location.search)}`} replace />;

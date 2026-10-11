@@ -2,11 +2,12 @@
  * lookups the shell, breadcrumbs and command palette share. */
 import type { Session } from "@/lib/session";
 import type { Audience, Screen, SectionKey } from "@/routes/types";
-import { HOME_NAV, currentNavIn, localPath, type NavItem } from "@/routes/nav";
+import { HOME_NAV, billingVisible, currentNavIn, localPath, type NavItem } from "@/routes/nav";
 import { screens as account } from "@/pages/account/routes";
 import { screens as admin } from "@/pages/admin/routes";
 import { screens as apps } from "@/pages/apps/routes";
 import { screens as ask } from "@/pages/ask/routes";
+import { screens as billing } from "@/pages/billing/routes";
 import { screens as design } from "@/pages/design/routes";
 import { screens as developer } from "@/pages/developer/routes";
 import { screens as drives } from "@/pages/drives/routes";
@@ -44,6 +45,7 @@ export const SCREENS: Screen[] = [
   ...organizations,
   ...admin,
   ...usage,
+  ...billing,
   ...home,
 ].sort((a, b) => (a.path === "*" ? 1 : b.path === "*" ? -1 : 0));
 
@@ -106,12 +108,16 @@ export const NAV: NavItem[] = [
   { section: "organization", path: "/secret-mounts", label: "Secrets", icon: "secrets", audience: ["account"] },
   // Usage over time across a person's workspaces (lake#564); /metering is its repository usage by hour.
   { section: "organization", path: "/usage", label: "Usage", icon: "metering", audience: ["account"] },
+  // Plans and invoices, only where the lake bills (lake#564; off on an enterprise install).
+  { section: "organization", path: "/billing", label: "Billing", icon: "metering", audience: ["account"], billing: true },
   { section: "organization", path: "/activity", label: "Activity", icon: "audit", audience: ["account"] },
   { section: "administration", path: "/customers", label: "Customers", icon: "customers", audience: ["operator"] },
   { section: "administration", path: "/organizations", label: "Organizations", icon: "organization", audience: ["operator"] },
   { section: "administration", path: "/applications", label: "Applications", icon: "api", audience: ["operator"] },
   // The operator's usage across every account (lake#564).
   { section: "administration", path: "/usage/accounts", label: "Usage", icon: "metering", audience: ["operator"] },
+  // The price list and each account's invoices (lake#564), where the lake bills.
+  { section: "administration", path: "/billing/plans", label: "Billing", icon: "metering", audience: ["operator"], billing: true },
   { section: "administration", path: "/secret-mounts", label: "Secrets", icon: "secrets", audience: ["operator"] },
   { section: "administration", path: "/audit", label: "Audit", icon: "audit", audience: ["operator"] },
   { section: "developer", path: "/developer/api", label: "API", icon: "api", audience: AO },
@@ -126,7 +132,7 @@ export function audienceOf(session: Pick<Session, "viewer">): Audience {
 
 export function navFor(session: Pick<Session, "viewer">): NavItem[] {
   const who = audienceOf(session);
-  return NAV.filter((item) => item.audience.includes(who)).map((item) =>
+  return NAV.filter((item) => item.audience.includes(who) && billingVisible(item, session.viewer)).map((item) =>
     item.path === "/repositories" && who === "visitor" ? { ...item, label: "Public Repositories" } : item,
   );
 }

@@ -32,5 +32,8 @@ export type Screen = {
   owns?: string[];
   /** Rendered without the shell (sign-in pages, public share pages). */
   bare?: boolean;
+  /** A billing page (lake#564): absent where the lake does not bill (`viewer.billing`, LAKE_BILLING
+   * off, as on an enterprise install). */
+  billing?: boolean;
   component: LazyExoticComponent<ComponentType<object>> | ComponentType<object>;
 };

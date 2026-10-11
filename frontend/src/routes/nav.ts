@@ -4,7 +4,13 @@
 import type { Audience, SectionKey } from "./types.ts";
 
 /** One rail item. `external` opens a non-page URL instead of a page. */
-export type NavItem = { section: SectionKey; path: string; label: string; icon: string; audience: Audience[]; external?: boolean };
+export type NavItem = { section: SectionKey; path: string; label: string; icon: string; audience: Audience[]; external?: boolean; billing?: boolean };
+
+/** Whether a rail item or page shows: a billing one only where the lake bills (`viewer.billing`,
+ * lake#564); an enterprise install has billing off and never shows it. */
+export function billingVisible(item: { billing?: boolean }, viewer: { billing?: boolean }): boolean {
+  return !item.billing || viewer.billing === true;
+}
 
 /** The top of the rail. A signed-in person's Home group lists Ask Orama (the home, `/`), then
  * Dashboard, the whole platform at a glance (`/dashboard`). A visitor and the operator keep the one

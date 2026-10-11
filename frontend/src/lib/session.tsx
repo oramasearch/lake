@@ -34,6 +34,8 @@ export type Viewer = {
   /** The origin repositories are cloned from and packages installed from. */
   external_origin?: string;
   public_host?: string;
+  /** Whether this lake bills (LAKE_BILLING, lake#564): Billing's pages exist only then. */
+  billing?: boolean;
   /** Lake configuration the forms need (the agent models offered by "Create an Agent"). */
   config?: { base_agent_model?: string; frontier_model?: string };
   version?: string;
