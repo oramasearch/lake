@@ -140,7 +140,7 @@ ApiResult move_workspace_store(const json& input, ApiContext& context) {
     }
     if (blocked) {
         return ApiResult::failure(
-            "conflict", "the space has repositories without a workspace; assign them first "
+            "conflict", "the account has repositories without a workspace; assign them first "
                         "(plan lists them under unassigned)");
     }
     if (mode == "switch") {
@@ -276,7 +276,7 @@ ApiResult remove_space_store(const json& input, ApiContext& context) {
     // The space id names a directory directly under the store root: only a UUID, never the
     // instance's own directory.
     if (!is_uuid(customer_id) || customer_id == context.node_name) {
-        return ApiResult::failure("invalid_input", "customer_id must be a space's UUID", "/customer_id");
+        return ApiResult::failure("invalid_input", "customer_id must be an account's UUID", "/customer_id");
     }
     if (const auto customer = context.store->get_customer(customer_id); !customer) {
         return ApiResult::failure(customer.error().code, customer.error().message, "/customer_id");
@@ -290,7 +290,7 @@ ApiResult remove_space_store(const json& input, ApiContext& context) {
         }
         const std::vector<std::string>& blockers = *found;
         if (!blockers.empty()) {
-            std::string message = "the space's store is still needed; nothing was removed:";
+            std::string message = "the account's store is still needed; nothing was removed:";
             for (std::size_t index = 0; index < blockers.size() && index < 20; ++index) {
                 message += (index == 0 ? " " : "; ") + blockers[index];
             }
@@ -306,7 +306,7 @@ ApiResult remove_space_store(const json& input, ApiContext& context) {
     }
     if (!context.sync_store) {
         return ApiResult::failure("store_unavailable",
-                                  "space stores are not configured on this Lake");
+                                  "account stores are not configured on this Lake");
     }
     auto removal = context.sync_store->remove_space_store(customer_id, dry_run, check);
     if (!removal) {
@@ -465,16 +465,17 @@ liquid::runtime::task<ApiResult> provision_workspace_store(const json& input, Ap
 void register_workspace_store_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "remove_space_store",
-        .title = "Remove a space's old store from Lake's volume",
+        .title = "Remove an account's old store from Lake's volume",
         .description =
-            "Operator only (lake#380). Removes a space's liquid store from Lake's volume "
-            "(`<LAKE_STORE_ROOT>/<space>/store` and `<space>/repositories`) once every live "
-            "workspace of the space is switched to its own store, no repository of the space lacks "
+            "Operator only (lake#380). Removes an account's liquid store from Lake's volume "
+            "(`<LAKE_STORE_ROOT>/<customer_id>/store` and `<customer_id>/repositories`) once every "
+            "live workspace of the account is switched to its own store, no repository of the "
+            "account lacks "
             "a workspace and no live repository belongs to a deleted workspace; otherwise "
-            "`conflict`, removing nothing. It refuses the space store's requests and waits for "
+            "`conflict`, removing nothing. It refuses the account store's requests and waits for "
             "the running ones, closes the store and deletes the two directories, never anything "
             "else. `dry_run` reports the directories and bytes without removing or closing "
-            "anything. A space store is created again, empty, if a workspace of the space that is "
+            "anything. An account store is created again, empty, if a workspace of the account that is "
             "not switched later uses it.",
         .input_schema = {{"type", "object"},
                          {"properties",
@@ -493,13 +494,13 @@ void register_workspace_store_capabilities(Registry& registry) {
         .name = "move_workspace_store",
         .title = "Move a workspace's repositories into its own store",
         .description =
-            "Operator only (lake#380). Moves one workspace's repositories from its space's liquid "
+            "Operator only (lake#380). Moves one workspace's repositories from its account's liquid "
             "store on Lake's volume into the workspace's own encrypted store in its workspace "
-            "Zetta. `plan` lists the repositories and their sizes and any repository of the space "
+            "Zetta. `plan` lists the repositories and their sizes and any repository of the account "
             "without a workspace, which blocks the move; `copy` copies each repository (a rerun "
             "copies only what is missing); `verify` compares every repository in both stores; "
             "`switch` holds repository requests, copies what arrived since, verifies again and "
-            "serves the workspace's repositories from its store from then on. The space's store "
+            "serves the workspace's repositories from its store from then on. The account's store "
             "is never written and is not removed. `provision` creates the store of a switched "
             "workspace that never held anything (no repository, no stored image blob, an absent "
             "or empty bucket) and refuses with conflict otherwise; repeated, it changes nothing.",

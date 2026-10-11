@@ -34,7 +34,7 @@ with lake#341, and its content moves with lake#380.
 | `get_repository` | read | `id` | `404 not_found` |
 | `create_repository` | action | `customer_id`, `workspace_id`, `name`, `description?`, `visibility?` | `400 invalid_input` at `/workspace_id` (missing, unknown or deleted workspace), at `/customer_id` (another space's workspace, or an unknown customer), bad name, bad visibility; `409 conflict` (name taken within the customer); with a description, `workspace_not_ready` while the workspace cannot be written, and nothing is created |
 | `rename_repository` | action | `id`, `name` | `404 not_found`, `409 conflict` (tombstoned or name taken) |
-| `transfer_repository` | action | `id`, `customer_id` | always `409 conflict` at `/customer_id`: a repository stays in its space and workspace; export it and import it into the other space's workspace. `404 not_found` |
+| `transfer_repository` | action | `id`, `customer_id` | always `409 conflict` at `/customer_id`: a repository stays in its account and workspace; export it and import it into the other account's workspace. `404 not_found` |
 | `set_repository_visibility` | action | `id`, `visibility` | `400 invalid_input`, `404 not_found`, `409 conflict` (tombstoned) |
 | `delete_repository` | action | `id` | `404 not_found`, `409 conflict` (already tombstoned) |
 | `repository_refs` | read | `id` | `{items: [{name, change}]}`, from the liquid repository |

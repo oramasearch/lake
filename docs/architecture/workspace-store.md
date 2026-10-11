@@ -59,7 +59,7 @@ unchanged, so a repository moves between a space store and a workspace store byt
 `lake/workspace-store/v1/<workspace id>/data-key/<version>`, and stored as a JSON document
 (`format: lake-workspace-store-key/1`, `workspace_id`, `version`, `wrapped`) at
 `keys/workspace-v1.wrapped`. The first open of a workspace store creates it with a conditional put.
-A document naming another workspace, or one that does not unwrap under this lake's KEK, is refused
+A document naming another workspace, or one that does not unwrap under this Lake's KEK, is refused
 `unauthorized`. Liquid writes `keys/` only for a keyring, which a workspace store never has; the
 backend refuses liquid keys under `keys/` and keys containing `.lake-tail-`.
 

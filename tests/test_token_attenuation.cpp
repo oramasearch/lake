@@ -410,7 +410,7 @@ TEST_P(TokenAttenuation, NeverExpiringTokensNeedTheOptInAndSurviveSignOut) {
                         {"reason", "the release pipeline"}};
     denied(browser_,
            standing,
-           "credentials that never expire are off for your space; turn on "
+           "credentials that never expire are off for your account; turn on "
            "allow_non_expiring_credentials with set_customer_credential_policy");
     ASSERT_TRUE(store_->set_customer_non_expiring_credentials(customer_id, true));
     json wildcard = standing;

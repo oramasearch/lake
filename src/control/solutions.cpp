@@ -101,7 +101,7 @@ std::string solutions_lookup(const std::string& customer_id) {
 
 std::optional<SolutionProblem> solution_problem(const WorkspaceSolution& solution) {
     if (solution.customer_id.empty()) {
-        return SolutionProblem{"a solution belongs to a space", "/customer_id"};
+        return SolutionProblem{"a solution belongs to an account", "/customer_id"};
     }
     const auto required = [](const std::string& value,
                              std::size_t bound,

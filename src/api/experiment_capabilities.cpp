@@ -115,7 +115,7 @@ ApiResult authorize_list(const json& input, ApiContext& context) {
             return ApiResult::failure(decision.error().code, decision.error().message);
         }
         if (!decision->allowed) {
-            return ApiResult::failure("unauthorized", "principal cannot read this space's experiments");
+            return ApiResult::failure("unauthorized", "principal cannot read this account's experiments");
         }
     }
     return ApiResult::success(json::object());
@@ -367,8 +367,8 @@ std::string experiment_description(const std::string& name) {
          "List the training experiments and stand-alone runs in a workspace, optionally only one "
          "project's or those in one state, to see what has been tried."},
         {"get_experiment",
-         "Read one training experiment: its search space, budgets, every trial with its score, "
-         "and the model it promoted."},
+         "Read one training experiment: the parameter ranges it searches, budgets, every trial "
+         "with its score, and the model it promoted."},
         {"list_experiment_trials",
          "List one experiment's trials with their parameters, state and objective, to see which "
          "settings did best."},

@@ -408,7 +408,7 @@
       "summary": "Compare runs"
     },
     "compile_intent": {
-      "description": "Resolve a methodology from an explicit methodology, primary solution, or intent keywords, then compile its editable graph. Unavailable methodologies are refused with their implementation issue. Requires orchestration:compile_intent.",
+      "description": "Resolve a methodology from an explicit methodology, primary solution, or intent keywords, then compile its editable graph. Unavailable methodologies are refused with their implementation issue. Without a `name`, the graph is named from the intent's own words; `template` says which template its steps started from. Requires orchestration:compile_intent.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -529,14 +529,14 @@
           },
           "definition": {
             "additionalProperties": false,
-            "description": "runtime: python. {source: \"zetta\", instructions, entrypoint, files: [{path, contents}]} (inline, at most 1 MiB) or {source: \"lake\", repository_id, revision, entrypoint}; entrypoint is module:function",
+            "description": "runtime: python. `{source: \"zetta\", instructions, entrypoint, files: [{path, contents}]}` (inline, at most 1 MiB) or `{source: \"lake\", repository_id, revision, entrypoint}`; entrypoint is `module:function`",
             "properties": {
               "entrypoint": {
                 "description": "module:function",
                 "type": "string"
               },
               "files": {
-                "description": "source zetta: the agent's files, one entry per file",
+                "description": "with `source: \"zetta\"`: the agent's files, one entry per file",
                 "items": {
                   "additionalProperties": false,
                   "properties": {
@@ -555,19 +555,19 @@
                 "type": "array"
               },
               "instructions": {
-                "description": "source zetta: the agent's instructions",
+                "description": "with `source: \"zetta\"`: the agent's instructions",
                 "type": "string"
               },
               "repository_id": {
-                "description": "source lake: the repository",
+                "description": "with `source: \"lake\"`: the repository",
                 "type": "string"
               },
               "revision": {
-                "description": "source lake: a pinned revision of the repository",
+                "description": "with `source: \"lake\"`: a pinned revision of the repository",
                 "type": "string"
               },
               "source": {
-                "description": "zetta (inline) or lake",
+                "description": "`zetta` (inline) or `lake`",
                 "type": "string"
               }
             },
@@ -1308,7 +1308,7 @@
             "type": "boolean"
           },
           "from_defaults": {
-            "description": "fill a missing objective (held_out_auc, maximize, validation split), budgets and the methodology's default search space",
+            "description": "fill a missing objective (held_out_auc, maximize, validation split), budgets and the methodology's default parameter ranges",
             "type": "boolean"
           },
           "intent": {
@@ -1775,7 +1775,7 @@
       "summary": "Expose model"
     },
     "gate": {
-      "description": "Run the correctness gate over a stored project graph and return the full validation report (per-check status + reason, verdict, block_deploy). Evaluates only — no state change. Requires orchestration:gate.",
+      "description": "Run the correctness gate over a stored project graph and return the validation report: the checks that applied (status + reason), the verdict, block_deploy, and the counts applied / not_applicable. Checks with nothing to check on this graph are counted, never reported as pass; include_not_applicable lists them too. Evaluates only — no state change. Requires orchestration:gate.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -1783,6 +1783,10 @@
             "description": "the stored graph's name, or its uuid",
             "minLength": 1,
             "type": "string"
+          },
+          "include_not_applicable": {
+            "description": "also list the checks that had nothing to check on this graph, with status not_applicable (default false: only the checks that applied are listed, and the rest are counted)",
+            "type": "boolean"
           },
           "intent": {
             "description": "reserved: say what you are trying to do; recorded on the call's trace, stripped before schema validation",
@@ -1993,6 +1997,10 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "include_entity_keys": {
+            "description": "also return entity_key_mapping.entries, every distinct text id and its derived key (default false: a count, entry_count — the list grows with the dataset's row count)",
+            "type": "boolean"
+          },
           "intent": {
             "description": "reserved: say what you are trying to do; recorded on the call's trace, stripped before schema validation",
             "type": "string"
@@ -2107,6 +2115,10 @@
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "include_entity_keys": {
+            "description": "also return entity_key_mapping.entries, every distinct text id and its derived key (default false: a count, entry_count — the list grows with the dataset's row count)",
+            "type": "boolean"
+          },
           "intent": {
             "description": "reserved: say what you are trying to do; recorded on the call's trace, stripped before schema validation",
             "type": "string"
@@ -3549,6 +3561,9 @@
             "description": "restrict matching to one indexed field (optional)",
             "type": "string"
           },
+          "fields": {
+            "description": "the row fields each hit carries back (default: the index's own fields; [] = ids and scores only). Each must be one of the index's fields."
+          },
           "intent": {
             "description": "reserved: say what you are trying to do; recorded on the call's trace, stripped before schema validation",
             "type": "string"
@@ -3753,14 +3768,14 @@
           },
           "definition": {
             "additionalProperties": false,
-            "description": "runtime: python. {source: \"zetta\", instructions, entrypoint, files: [{path, contents}]} (inline, at most 1 MiB) or {source: \"lake\", repository_id, revision, entrypoint}; entrypoint is module:function",
+            "description": "runtime: python. `{source: \"zetta\", instructions, entrypoint, files: [{path, contents}]}` (inline, at most 1 MiB) or `{source: \"lake\", repository_id, revision, entrypoint}`; entrypoint is `module:function`",
             "properties": {
               "entrypoint": {
                 "description": "module:function",
                 "type": "string"
               },
               "files": {
-                "description": "source zetta: the agent's files, one entry per file",
+                "description": "with `source: \"zetta\"`: the agent's files, one entry per file",
                 "items": {
                   "additionalProperties": false,
                   "properties": {
@@ -3779,19 +3794,19 @@
                 "type": "array"
               },
               "instructions": {
-                "description": "source zetta: the agent's instructions",
+                "description": "with `source: \"zetta\"`: the agent's instructions",
                 "type": "string"
               },
               "repository_id": {
-                "description": "source lake: the repository",
+                "description": "with `source: \"lake\"`: the repository",
                 "type": "string"
               },
               "revision": {
-                "description": "source lake: a pinned revision of the repository",
+                "description": "with `source: \"lake\"`: a pinned revision of the repository",
                 "type": "string"
               },
               "source": {
-                "description": "zetta (inline) or lake",
+                "description": "`zetta` (inline) or `lake`",
                 "type": "string"
               }
             },
@@ -4302,7 +4317,7 @@
             "type": "boolean"
           },
           "from_defaults": {
-            "description": "fill a missing objective (held_out_auc, maximize, validation split), budgets and the methodology's default search space",
+            "description": "fill a missing objective (held_out_auc, maximize, validation split), budgets and the methodology's default parameter ranges",
             "type": "boolean"
           },
           "intent": {
@@ -4358,5 +4373,5 @@
     }
   },
   "engine_version": "0.1.1",
-  "zetta_revision": "69ef07cf"
+  "zetta_revision": "bca9f382"
 }
