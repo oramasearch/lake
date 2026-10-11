@@ -1,9 +1,9 @@
-/** Billing (lake#564): amounts from millionths, prices in a person's units, the months a bill
- * covers, what choosing a plan does, invoice states, what is owed, the plan form's numbers, and the
- * rail that shows Billing only where the lake bills. `npm test`; the build runs it. */
+/** Billing (lake#564, lake#635): amounts from millionths, rates in a person's units, a line as usage ×
+ * rate = cost, the months a bill covers, invoice states, what is owed, the price list editor's rows,
+ * and the rail that shows Billing only where the lake bills. `npm test`; the build runs it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { choiceOf, choiceSentence, includedLabel, invoiceTone, microsOf, monthLabel, months, money, owed, paymentSummary, payOnline, priceInput, priceLabel, providerStatus, quantityLabel, recordedByHand } from "../src/pages/billing/billing.ts";
+import { DIMENSIONS, LIST_RATES, billedNote, invoiceTone, lineSentence, monthLabel, months, money, owed, paymentSummary, payOnline, priceLabel, providerStatus, quantityLabel, rateRows, ratesInput, recordedByHand } from "../src/pages/billing/billing.ts";
 import { billingVisible } from "../src/routes/nav.ts";
 
 test("an amount is in its currency, to the cent unless a price has fractions of one", () => {
@@ -14,14 +14,29 @@ test("an amount is in its currency, to the cent unless a price has fractions of 
   assert.equal(money(1_234_567_890, "EUR"), "€1,234.57");
 });
 
-test("a price reads in the dimension's unit, with what the plan includes", () => {
+test("a rate reads in the dimension's unit, and a line is usage × rate = cost", () => {
   assert.equal(priceLabel({ unit_micros: 1_000_000, per: 1000, unit: "calls" }, "USD"), "$1.00 per 1,000 calls");
   assert.equal(priceLabel({ unit_micros: 100_000, per: 1024 ** 3, unit: "bytes" }, "USD"), "$0.10 per 1 GiB");
   assert.equal(priceLabel({ unit_micros: 2_000_000, per: 1_000_000, unit: "tokens" }, "USD"), "$2.00 per 1M tokens");
-  assert.equal(includedLabel({ included: 1000, unit: "calls" }), "1,000 calls included");
-  assert.equal(includedLabel({ included: 0, unit: "calls" }), "");
-  assert.equal(quantityLabel({ kind: "plan", quantity: 1, unit: "month" }), "1 month");
-  assert.equal(quantityLabel({ kind: "usage", quantity: 3 * 1024 ** 3, unit: "bytes" }), "3 GiB");
+  assert.equal(quantityLabel({ quantity: 3 * 1024 ** 3, unit: "bytes" }), "3 GiB");
+  assert.equal(lineSentence({ quantity: 3500, billable: 3500, unit: "calls", unit_micros: 1_000_000, per: 1000, amount_micros: 3_500_000 }, "USD"), "3,500 calls × $1.00 per 1,000 calls = $3.50");
+  assert.equal(lineSentence({ quantity: 10, billable: 10, unit: "calls", unit_micros: 0, per: 1, amount_micros: 0 }, "USD"), "10 calls, not charged");
+});
+
+test("time is priced and billed by the minute, on the month's total (lake#637)", () => {
+  assert.equal(priceLabel({ unit_micros: 5_000, per: 60, unit: "seconds" }, "USD"), "$0.005 per minute");
+  assert.equal(priceLabel({ unit_micros: 1_350, per: 60, unit: "instance_seconds" }, "USD"), "$0.00135 per instance-minute");
+  assert.equal(priceLabel({ unit_micros: 7_200, per: 60, unit: "seconds" }, "USD"), "$0.0072 per minute");
+  assert.equal(priceLabel({ unit_micros: 300_000, per: 3600, unit: "seconds" }, "USD"), "$0.30 per hour");
+  assert.equal(priceLabel({ unit_micros: 200_000, per: 2_628_000, unit: "gib_seconds" }, "USD"), "$0.20 per GiB-month");
+  // 100 one-second builds: 100 seconds used, billed as 2 minutes.
+  const builds = { quantity: 100, billable: 120, unit: "seconds", unit_micros: 5_000, per: 60, amount_micros: 10_000 };
+  assert.equal(billedNote(builds), "billed as 2 min");
+  assert.equal(lineSentence(builds, "USD"), "2 min × $0.005 per minute = $0.01");
+  assert.equal(billedNote({ quantity: 120, billable: 120, unit: "seconds" }), "");
+  for (const rate of LIST_RATES.filter((r) => ["build_compute", "run_compute", "speech", "instances"].includes(r.dimension))) {
+    assert.equal(rate.per, 60, `${rate.dimension} is priced per minute`);
+  }
 });
 
 test("a bill covers a UTC month, and January's month before is December", () => {
@@ -29,21 +44,6 @@ test("a bill covers a UTC month, and January's month before is December", () => 
   assert.deepEqual(months(new Date("2027-01-01T00:30:00Z")), { current: "2027-01", previous: "2026-12" });
   assert.equal(monthLabel("2026-10"), "October 2026");
   assert.equal(monthLabel("soon"), "soon");
-});
-
-test("choosing a plan starts it now, changes it next month, or cancels a pending change", () => {
-  const on = (plan: string, next?: string) => ({
-    current: { effective_from: "2026-10-01", plan_id: plan, plan: null },
-    next: next ? { effective_from: "2026-11-01", plan_id: next, plan: null } : null,
-  });
-  assert.equal(choiceOf(null, "team"), "start");
-  assert.equal(choiceOf({ current: null, next: null }, "team"), "start");
-  assert.equal(choiceOf(on("free"), "team"), "next");
-  assert.equal(choiceOf(on("free"), "free"), "current");
-  assert.equal(choiceOf(on("free", "team"), "free"), "cancel");
-  assert.match(choiceSentence("next", "Team", "2026-11"), /from November 2026/);
-  assert.match(choiceSentence("start", "Team", "2026-11"), /start of this month/);
-  assert.match(choiceSentence("cancel", "Free", "2026-11"), /cancelled/);
 });
 
 test("an invoice's state is a chip, and what is owed adds up the due ones by currency", () => {
@@ -62,16 +62,31 @@ test("an invoice's state is a chip, and what is owed adds up the due ones by cur
   assert.deepEqual(owed([]), []);
 });
 
-test("the plan form turns a person's numbers into millionths and whole units", () => {
-  assert.deepEqual(priceInput({ dimension: "calls", price: "1.00", per: "1000", included: "1000" }), { dimension: "calls", unit_micros: 1_000_000, per: 1000, included: 1000 });
-  assert.deepEqual(priceInput({ dimension: "calls", price: "0.0004", per: "", included: "" }), { dimension: "calls", unit_micros: 400, per: 1, included: 0 });
-  assert.equal(priceInput({ dimension: "calls", price: "-1", per: "1", included: "0" }), null);
-  assert.equal(priceInput({ dimension: "calls", price: "1", per: "0", included: "0" }), null);
-  assert.equal(priceInput({ dimension: "calls", price: "1", per: "1.5", included: "0" }), null);
-  assert.equal(priceInput({ dimension: "", price: "1", per: "1", included: "0" }), null);
-  assert.equal(microsOf("19.99"), 19_990_000);
-  assert.equal(microsOf(""), null);
-  assert.equal(microsOf("free"), null);
+test("the price list editor starts from the published list, or the list rates, one row a dimension", () => {
+  assert.equal(DIMENSIONS.length, 10);
+  assert.equal(LIST_RATES.length, 10, "the list rates price every dimension");
+  const fresh = rateRows(null);
+  assert.equal(fresh.length, 10);
+  assert.deepEqual(fresh[0], { dimension: "storage", rate: "0.04", per: String(1024 ** 3) });
+  assert.deepEqual(fresh.find((r) => r.dimension === "model_tokens"), { dimension: "model_tokens", rate: "9", per: "1000000" });
+  const published = rateRows([{ dimension: "calls", unit_micros: 1_500_000, per: 1_000_000 }]);
+  assert.deepEqual(published.find((r) => r.dimension === "calls"), { dimension: "calls", rate: "1.5", per: "1000000" });
+  assert.deepEqual(published.find((r) => r.dimension === "storage"), { dimension: "storage", rate: "", per: "1" }, "a dimension the list does not price starts empty");
+});
+
+test("the editor's rows become set_price_list's prices: millionths, whole units, empty rates left out", () => {
+  assert.deepEqual(ratesInput(rateRows(null)), { prices: LIST_RATES });
+  assert.deepEqual(
+    ratesInput([
+      { dimension: "calls", rate: "0.0004", per: "" },
+      { dimension: "storage", rate: " ", per: "1" },
+    ]),
+    { prices: [{ dimension: "calls", unit_micros: 400, per: 1 }] },
+  );
+  assert.deepEqual(ratesInput([{ dimension: "calls", rate: "1", per: "1" }, { dimension: "speech", rate: "-1", per: "60" }]), { bad: 1 });
+  assert.deepEqual(ratesInput([{ dimension: "calls", rate: "1", per: "0" }]), { bad: 0 });
+  assert.deepEqual(ratesInput([{ dimension: "calls", rate: "1", per: "1.5" }]), { bad: 0 });
+  assert.deepEqual(ratesInput([{ dimension: "calls", rate: "free", per: "1" }]), { bad: 0 });
 });
 
 test("Billing is in the rail only where the lake bills", () => {

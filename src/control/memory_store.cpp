@@ -2149,10 +2149,6 @@ bool valid_currency(const std::string& currency) {
            std::ranges::all_of(currency, [](char c) { return c >= 'A' && c <= 'Z'; });
 }
 
-bool valid_month_start(const std::string& date) {
-    return date.size() == 10 && date[4] == '-' && date[7] == '-' && date.substr(8) == "01";
-}
-
 } // namespace
 
 Result<std::vector<BillingPlan>> InMemoryStore::billing_plans() {
@@ -2188,48 +2184,6 @@ Result<BillingPlan> InMemoryStore::put_billing_plan(const BillingPlan& plan) {
     std::ranges::sort(stored.prices, {}, &BillingPrice::dimension);
     billing_plans_[plan.id] = stored;
     return stored;
-}
-
-Result<std::vector<BillingSubscription>>
-InMemoryStore::billing_subscriptions(const std::string& customer_id) {
-    std::lock_guard lock(mutex_);
-    if (std::ranges::none_of(
-            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
-        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
-    }
-    std::vector<BillingSubscription> rows;
-    for (const BillingSubscription& row : billing_subscriptions_) {
-        if (row.customer_id == customer_id) {
-            rows.push_back(row);
-        }
-    }
-    std::ranges::sort(rows, {}, &BillingSubscription::effective_from);
-    return rows;
-}
-
-Result<std::vector<BillingSubscription>> InMemoryStore::set_billing_subscription(
-    const std::string& customer_id, const std::string& effective_from, const std::string& plan_id) {
-    if (!valid_month_start(effective_from)) {
-        return std::unexpected(
-            StoreError{"invalid_input", "a plan takes effect on the first day of a month"});
-    }
-    {
-        std::lock_guard lock(mutex_);
-        if (std::ranges::none_of(
-                customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
-            return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
-        }
-        if (!plan_id.empty() && !billing_plans_.contains(plan_id)) {
-            return std::unexpected(StoreError{"not_found", "no plan " + plan_id});
-        }
-        std::erase_if(billing_subscriptions_, [&](const BillingSubscription& row) {
-            return row.customer_id == customer_id && row.effective_from >= effective_from;
-        });
-        if (!plan_id.empty()) {
-            billing_subscriptions_.push_back({customer_id, effective_from, plan_id, now_iso8601()});
-        }
-    }
-    return billing_subscriptions(customer_id);
 }
 
 Result<Invoice> InMemoryStore::create_invoice(const Invoice& invoice) {

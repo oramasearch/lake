@@ -163,8 +163,9 @@ std::string event(const std::string& id, const std::string& type, const std::str
         .dump();
 }
 
-// A registry with billing on over one account and two workspaces, a plan in effect last month,
-// and a payment-provider source the test chooses.
+// A registry with billing on over one account and two workspaces, a price list in force last month
+// (calls at $1 per 1000), 20,000 calls last month ($20.00), and a payment-provider source the test
+// chooses.
 struct StripeRig {
     std::shared_ptr<lake::control::InMemoryStore> store =
         std::make_shared<lake::control::InMemoryStore>();
@@ -187,18 +188,21 @@ struct StripeRig {
         home = workspaces.create(customer, "home");
         lake::api::register_core_capabilities(registry, "test");
         lake::api::register_billing_capabilities(registry, payments);
-        EXPECT_TRUE(call("set_billing_plan",
-                         {{"id", "team"},
-                          {"name", "Team"},
-                          {"currency", "USD"},
-                          {"base_micros", 20'004'999},
-                          {"prices",
-                           json::array({{{"dimension", "calls"},
-                                         {"unit_micros", 1'000'000},
-                                         {"per", 1000},
-                                         {"included", 0}}})}})
-                        .ok);
-        EXPECT_TRUE(store->set_billing_subscription(customer, period + "-01", "team"));
+        EXPECT_TRUE(
+            call("set_price_list",
+                 {{"currency", "USD"},
+                  {"effective_from", period},
+                  {"prices",
+                   json::array(
+                       {{{"dimension", "calls"}, {"unit_micros", 1'000'000}, {"per", 1000}}})}})
+                .ok);
+        recorder.add(home,
+                     "calls",
+                     20'000,
+                     {{"kind", "api"}},
+                     std::chrono::sys_time<std::chrono::hours>{
+                         std::chrono::sys_days{last_month() / std::chrono::day{1}}});
+        static_cast<void>(liquid::runtime::block_on(recorder.flush()));
     }
 
     lake::api::ApiContext context() {
@@ -330,11 +334,11 @@ TEST(StripeBilling, AnInvoiceBecomesAStripeInvoiceWithItsLines) {
     EXPECT_EQ(issued.value["payment_url"], "https://invoice.stripe.test/i/in_1");
     EXPECT_EQ(issued.value["provider_status"], "open");
     EXPECT_EQ(issued.value["state"], "due");
-    EXPECT_EQ(issued.value["total_micros"], 20'004'999);
+    EXPECT_EQ(issued.value["total_micros"], 20'000'000);
     // One customer, kept on the account's billing row.
     EXPECT_EQ(stripe.customers, 1);
     EXPECT_EQ(*rig.store->billing_provider_customer(rig.customer, "stripe"), "cus_1");
-    // The plan line: $20.004999 is 2000 cents; lake's total rounds the same, so no rounding line.
+    // The calls line: $20.00 is 2000 cents; lake's total is the same, so no rounding line.
     EXPECT_EQ(stripe.amounts["in_1"], std::vector<std::int64_t>{2000});
     EXPECT_EQ(stripe.status["in_1"], "open");
 
@@ -400,11 +404,11 @@ TEST(StripeBilling, ARetryAfterAFailedStepNeverBillsTwice) {
     ASSERT_TRUE(issued.ok) << issued.error.message;
     EXPECT_EQ(stripe.customers, 1);
     EXPECT_EQ(stripe.invoices, 1) << "the retry's keys answer Stripe's first invoice";
-    // The plan's 2000 cents and calls 2505 at $1 per 1000 ($2.505: 251 cents); lake's total,
-    // $22.509999, is 2251 cents too, so there is no rounding line.
-    EXPECT_EQ(stripe.amounts["in_1"], (std::vector<std::int64_t>{2000, 251}))
+    // 22,505 calls at $1 per 1000 ($22.505: 2251 cents, half up); lake's total is the same cents,
+    // so there is no rounding line.
+    EXPECT_EQ(stripe.amounts["in_1"], (std::vector<std::int64_t>{2251}))
         << "items are kept by their keys too";
-    EXPECT_EQ(issued.value["total_micros"], 22'509'999);
+    EXPECT_EQ(issued.value["total_micros"], 22'505'000);
 }
 
 TEST(StripeBilling, StripesTotalIsLakesTotalToTheCent) {
@@ -414,11 +418,11 @@ TEST(StripeBilling, StripesTotalIsLakesTotalToTheCent) {
     lake::control::Invoice invoice;
     invoice.customer_id = "c";
     invoice.period = "2026-09";
-    invoice.plan_id = "p";
-    invoice.plan_name = "P";
+    invoice.plan_id = "usage-202609-00000000000000001";
+    invoice.plan_name = "Usage";
     invoice.currency = "USD";
     // Two lines of half a cent each round to a cent each; lake's total is one cent.
-    invoice.lines = {{"plan", "", "Plan", "month", 1, 0, 1, 5'000, 1, 5'000},
+    invoice.lines = {{"usage", "predictions", "Predictions", "calls", 1, 0, 1, 5'000, 1, 5'000},
                      {"usage", "calls", "Calls", "calls", 1, 0, 1, 5'000, 1, 5'000}};
     invoice.total_micros = 10'000;
     const auto requested = provider->request_payment({"c", "acme", "cus_9", 0}, invoice);

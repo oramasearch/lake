@@ -305,10 +305,11 @@ struct UsageLimit {
     int warn_percent = 80;
     std::string updated_at;
 };
-// Billing records (migration 0073, lake#564, decision 56, docs/api/billing.md): the price list,
-// each account's plan over time, and the invoices lake issues. Control-plane multitenancy; usage
-// stays in each workspace Zetta and only the quantity billed per dimension is frozen on a line.
-// Amounts are integer millionths of the currency's unit.
+// Billing records (migration 0073, lake#564, decision 56, docs/api/billing.md): the price list and
+// the invoices lake issues. Control-plane multitenancy; usage stays in each workspace Zetta and
+// only the quantity billed per dimension is frozen on a line. Amounts are integer millionths of the
+// currency's unit. Lake is priced by usage only (lake#635): each publication of the price list is
+// stored as one BillingPlan row (no fee, nothing included); there are no plans to choose.
 struct BillingPrice {
     std::string dimension; // a usage_dimensions() name
     std::uint64_t unit_micros = 0;
@@ -322,10 +323,6 @@ struct BillingPlan {
     int position = 0;
     std::vector<BillingPrice> prices;
     std::string created_at, updated_at;
-};
-// An account's plan from `effective_from` ("YYYY-MM-01").
-struct BillingSubscription {
-    std::string customer_id, effective_from, plan_id, created_at;
 };
 struct InvoiceLine {
     std::string kind; // plan or usage
@@ -1450,21 +1447,13 @@ public:
     virtual Result<std::vector<UsageLimit>> usage_limits(const std::string& customer_id) = 0;
     virtual Result<UsageLimit> set_usage_limit(const UsageLimit& limit) = 0;
     // Billing records (migration 0073, lake#564, docs/api/billing.md). billing_plans lists every
-    // plan, active or not, by position then id; put_billing_plan creates or replaces one with its
-    // prices. billing_subscriptions lists an account's plans by effective_from (not_found for an
-    // unknown customer); set_billing_subscription removes the account's rows from
-    // `effective_from` on and, unless `plan_id` is empty, adds one there (not_found for an unknown
-    // plan). create_invoice stores an invoice and its lines, numbering it (conflict when the
+    // stored price list publication, by position then id; put_billing_plan creates or replaces one
+    // with its prices (lake#635: billing_capabilities.cpp writes one row per publication).
+    // create_invoice stores an invoice and its lines, numbering it (conflict when the
     // account already has an invoice for the period that is not void); set_invoice_state moves a
     // due invoice to paid or void (conflict from any other state).
     virtual Result<std::vector<BillingPlan>> billing_plans() = 0;
     virtual Result<BillingPlan> put_billing_plan(const BillingPlan& plan) = 0;
-    virtual Result<std::vector<BillingSubscription>>
-    billing_subscriptions(const std::string& customer_id) = 0;
-    virtual Result<std::vector<BillingSubscription>>
-    set_billing_subscription(const std::string& customer_id,
-                             const std::string& effective_from,
-                             const std::string& plan_id) = 0;
     virtual Result<Invoice> create_invoice(const Invoice& invoice) = 0;
     virtual Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) = 0;
     virtual Result<Invoice> get_invoice(const std::string& id) = 0;

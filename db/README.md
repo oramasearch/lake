@@ -312,8 +312,9 @@ idempotent. Its guard is `usage_limits_guard`. See
 [schema.md](../docs/control-plane/schema.md#usage-limits-migration).
 
 Migration `0073_billing` (lake#564, decision 56) adds billing records as multitenancy:
-`billing_plans` and `billing_plan_prices` (the price list, a price per usage dimension),
-`billing_subscriptions` (an account's plan from the first of a month), `billing_invoices` (one
+`billing_plans` and `billing_plan_prices` (the price list, a price per usage dimension; since
+lake#635 one row per publication of the usage-only list), `billing_subscriptions` (an account's
+plan from the first of a month; unused since lake#635), `billing_invoices` (one
 account and month, a total and its payment state; at most one that is not void) and
 `billing_invoice_lines` (the quantity billed per dimension, frozen). Usage stays in each workspace
 Zetta; no workspace content is kept. Nothing is dropped; idempotent. The latest guard is

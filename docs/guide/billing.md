@@ -1,53 +1,61 @@
 # Billing and Invoices
 
-**Organization → Billing** is where your account chooses a plan, sees this month's bill as it grows,
-and finds its invoices. The bill is worked out from the usage your workspaces already record (see
-[Usage and Metering](/docs/usage)): each plan has a monthly fee and, for each kind of usage, an
-amount included every month and a price for what goes beyond it.
+**Organization → Billing** is where your account sees this month's usage and what it costs so far,
+and finds its invoices. Lake is priced by usage only: you pay for what your workspaces use, each
+kind of usage at one rate. There is no plan to choose, no monthly fee and no free allowance. The bill
+is worked out from the usage your workspaces already record (see [Usage and Metering](/docs/usage)).
 
 Billing is on for Orama Cloud. An enterprise install of lake has no billing: this page, the Billing
 item and the billing tools are absent there, and usage is tracked as usual.
+
+Metis is not billed here. It is enterprise software priced by Orama's sales team; talk to sales.
 
 ## Concepts
 
 | Term | What it is |
 |---|---|
-| **Plan** | A monthly fee and a price list for usage. Orama publishes the plans; your account is on one at a time. |
-| **Price** | For one kind of usage (a dimension, as on Usage), an amount for every so many units: "$1.00 per 1,000 calls". |
-| **Included** | The units of a dimension each month's fee already covers. Only usage beyond it is charged. |
-| **Bill** | One UTC calendar month on the plan in effect on its first day: the fee, then one line per priced dimension with what was used, what is charged and the amount. |
-| **Invoice** | A month's bill once Orama issues it, after the month ends. Its lines are kept as issued; later usage never changes it. |
+| **Price list** | Orama's rates, one for each kind of usage (a dimension, as on Usage). Every account is billed at it. |
+| **Rate** | An amount for every so many units of one dimension: "$2.00 per 1M calls", "$0.005 per minute" of build compute, "$0.04 per 1 GiB" a month of storage. |
+| **Bill** | One UTC calendar month: one line per dimension with what was used, its rate and its cost (usage × rate), and the total. |
+| **Invoice** | A month's bill once Orama issues it, after the month ends. Its lines and rates are kept as issued; later usage or new rates never change it. |
 | **State** | An invoice is **due** until it is **paid**, or **void** if Orama cancels it (the month can then be invoiced again). |
 | **Stripe** | Where invoices are paid on Orama Cloud: each invoice has a page on Stripe, and Stripe tells lake when it is paid. |
 | **Storage on a bill** | The average of each day's storage reading over the month, across your workspaces. |
 
-## Choose a Plan
+## See the Rates
 
-You need `admin` on the account.
+The rates apply to every account; there is nothing to choose or sign up for.
 
-1. Open **Organization → Billing**. **Plans** lists every plan with its fee and prices.
-2. Press **Choose** and the plan's name (**Choose Team**), read what happens, and confirm.
-   - With no plan yet, the plan applies from the start of this month.
-   - Otherwise the change starts next month; this month stays on your current plan.
-   - Choosing your current plan again cancels a change that has not started.
+| Usage | Rate |
+|---|---|
+| Storage | $0.04 per GiB-month |
+| Transfer | $0.05 per GiB |
+| Build compute | $0.005 per minute |
+| Workspace run compute | $0.004 per minute |
+| Speech to text | $0.0072 per minute |
+| API and MCP calls | $2.00 per million |
+| Model predictions | $0.01 per 1,000 |
+| Model tokens | $9.00 per million |
+| Service and app instances | $0.00135 per instance-minute |
+| Service and store volumes | $0.20 per GiB-month |
 
-- REST: `POST /v1/choose_billing_plan` with `{"customer_id": "<customer id>", "plan_id": "team"}`.
-- MCP: `choose_billing_plan` with the same input.
+Time is billed by the minute on the month's total: your workspaces' seconds of each kind are added
+up over the month and rounded up once to a whole minute, so many short jobs are never each charged
+a minute.
 
-The plans themselves:
+These are Orama Cloud's list rates; the lake you use answers its own with `price_list`, which is
+what you are billed at.
 
-- REST: `GET /v1/billing_plans`.
-- MCP: `billing_plans`.
+- REST: `GET /v1/price_list`, or the rates for another month with `GET /v1/price_list?period=2026-11`.
+- MCP: `price_list`.
 
-Your plan this month, the one chosen for next month and every change:
-
-- REST: `GET /v1/billing_account?customer_id=<customer id>`.
-- MCP: `billing_account`.
+`list` is the price list in force for the month, and `next` a list Orama has published for a later
+month, if any. The Billing page announces a coming change as **New Rates From** that month.
 
 ## See This Month's Bill
 
-**This Month So Far** on **Organization → Billing** shows the bill for the month to date: each line
-with what was used, what is included, what is charged and its amount, and the total. It reads every
+**This Month So Far** on **Organization → Billing** shows the bill for the month to date: one line
+per kind of usage with what was used, its rate and its cost, and the total so far. It reads every
 workspace's usage when you open it. If a workspace does not answer, the page says which one and that
 the bill is short until it does.
 
@@ -57,6 +65,12 @@ the bill is short until it does.
 
 `complete` is false when a workspace's usage could not be read, and `invoice` is the invoice
 already issued for that month, if there is one.
+
+Your account's billing at a glance, the price list it is billed at this month and how invoices are
+paid:
+
+- REST: `GET /v1/billing_account?customer_id=<customer id>`.
+- MCP: `billing_account`.
 
 ## Find an Invoice
 
@@ -94,26 +108,26 @@ The invoice, through the API, carries the same: `payment_url` (Stripe's page) an
 ## Limits
 
 - An invoice covers one UTC calendar month and is issued after the month ends.
-- A plan change takes effect on the first day of the next month; there is no part-month proration.
+- A month is billed at the rates in force at its end. New rates apply from the first day of a month;
+  rates published during a month price the whole of it. There is no part-month proration.
 - A workspace deleted before its month is invoiced takes its usage with it, so that usage is not
   billed.
-- One currency per plan; taxes are not added.
+- Prices are in US dollars; taxes are not added.
 
 ## Permissions
 
 | Action | Who |
 |---|---|
-| See plans | Anyone signed in |
-| See your account's plan, bill and invoices | `read` on the account |
-| Choose a plan | `admin` on the account |
-| Set prices, issue an invoice, record a payment, void an invoice | The lake operator |
+| See the price list | Anyone signed in |
+| See your account's bill and invoices | `read` on the account |
+| Publish the price list, issue an invoice, record a payment, void an invoice | The lake operator |
 | Pay an invoice on Stripe | Anyone with the invoice's Stripe page |
 
 ## Troubleshooting
 
 | You see | What it means |
 |---|---|
-| **Choose a Plan** and no bill | Your account has no plan yet. Choose one; it applies from the start of this month. |
+| **No Price List Yet** and no bill | Orama has not published its rates on this lake. Your usage is recorded; nothing is billed until the rates are published. |
 | **Some Usage Could Not Be Read** | A workspace did not answer when the bill was read. Open the page again later; the invoice waits until every workspace answers. |
 | No **Billing** item in the rail | This lake does not bill (an enterprise install). Usage is still under **Organization → Usage**. |
 | No **Pay with Stripe** on a due invoice | Card payment is not set up on this lake (**Payment** says **Invoice only**), or the invoice was issued before it was. Follow **How to Pay**. |

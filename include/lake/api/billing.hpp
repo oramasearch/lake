@@ -1,7 +1,8 @@
 #pragma once
 
-// Billing (lake#564, decision 56, docs/api/billing.md): Orama Cloud's price list, each account's
-// plan, the bill for a month worked out from its metered usage, and the invoices lake issues.
+// Billing (lake#564, decision 56, docs/api/billing.md): Orama Cloud's price list, the bill for a
+// month worked out from an account's metered usage, and the invoices lake issues. Lake is priced
+// by usage only (lake#635): one list rate per usage dimension, no plans, no fee, nothing included.
 // Billing records live in lake's control Postgres (migration 0073); usage stays in each workspace
 // Zetta and is read through usage_over_time. Off unless LAKE_BILLING turns it on: an enterprise
 // install has no billing capability, page or Docs guide, and keeps every usage capability.
@@ -12,6 +13,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -74,8 +76,9 @@ public:
     virtual std::expected<std::string, std::string> provider_customer(const PaymentAccount&) {
         return std::string();
     }
-    // Asks for payment of an invoice about to be issued: `invoice` has its account, month, plan,
-    // currency, lines and total, but no id or number yet. An error leaves the invoice unissued.
+    // Asks for payment of an invoice about to be issued: `invoice` has its account, month, price
+    // list (plan_id), currency, lines and total, but no id or number yet. An error leaves the
+    // invoice unissued.
     virtual std::expected<PaymentRequest, std::string>
     request_payment(const PaymentAccount& account, const control::Invoice& invoice) = 0;
     // Withdraws the request of an invoice lake voids, so it can no longer be paid. An error
@@ -189,11 +192,41 @@ nlohmann::json payment_status_json(const ApiContext& context);
 // micro-unit and capped at the largest bigint.
 std::uint64_t price_of(std::uint64_t billable, std::uint64_t unit_micros, std::uint64_t per);
 
-// One month's bill on a plan: the plan's fee, then one line per priced dimension (in the plan's
-// price order) with its quantity from `quantities` (0 when absent), what the plan includes, what
-// is billed beyond it and its amount. `period` is "YYYY-MM".
-std::vector<control::InvoiceLine> bill_lines(const control::BillingPlan& plan,
-                                             const std::map<std::string, std::uint64_t>& quantities,
-                                             std::string_view period);
+// One publication of the price list (lake#635): a rate per usage dimension (`unit_micros` for
+// every `per` units of the dimension's unit), in force from the first day of `effective_from`
+// ("YYYY-MM"). Stored as one billing_plans row whose id is `usage-<YYYYMM>-<publish µs>`, so ids
+// sort by the month they apply from, then by when they were published.
+struct PriceList {
+    std::string id;
+    std::string effective_from; // "YYYY-MM"
+    std::string published_at;
+    std::string currency = "USD";
+    std::vector<control::BillingPrice> prices; // `included` is always 0
+};
+
+// The id a price list published at `published_us` (microseconds since the epoch) for the month
+// `effective_from` ("YYYY-MM") is stored under; empty for a malformed month.
+std::string price_list_id(std::string_view effective_from, std::int64_t published_us);
+
+// The stored price list publications among billing_plans rows (other rows ignored), oldest first.
+std::vector<PriceList> price_lists(const std::vector<control::BillingPlan>& stored);
+
+// The list a month ("YYYY-MM") is billed at: of the publications from that month or before, the
+// one with the latest month, and of those the last published. A list published mid-month
+// therefore prices the whole month, and a month is billed at the rates in force at its end.
+// Nullopt when nothing was published for the month or before.
+std::optional<PriceList> price_list_for(const std::vector<PriceList>& lists,
+                                        std::string_view period);
+
+// What of a month's `quantity` in `unit` is billed (lake#637): time (`seconds`,
+// `instance_seconds`) by the minute, the month's summed seconds rounded up once to a whole minute;
+// every other unit as measured.
+std::uint64_t billable_quantity(std::string_view unit, std::uint64_t quantity);
+
+// One month's bill: one usage line per priced dimension (in dimension order) with its quantity
+// from `quantities` (0 when absent), its billable quantity (billable_quantity) and its amount at
+// the list rate. Nothing is included.
+std::vector<control::InvoiceLine>
+bill_lines(const PriceList& list, const std::map<std::string, std::uint64_t>& quantities);
 
 } // namespace lake::api

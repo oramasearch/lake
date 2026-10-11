@@ -556,30 +556,26 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.read("usage_over_time",
               "?customer_id=" + customer.id +
                   "&from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z&granularity=hour");
-    // Billing (lake#564): the price list, a plan, a preview, and a month invoiced and paid.
-    http.call("set_billing_plan",
-              {{"id", "schema-team"},
-               {"name", "Team"},
-               {"base_micros", 1000000},
-               {"prices", json::array({{{"dimension", "calls"}, {"unit_micros", 1000}}})}});
-    http.call("billing_plans");
-    http.read("billing_plans", "");
-    http.call("choose_billing_plan", {{"customer_id", customer.id}, {"plan_id", "schema-team"}});
+    // Billing (lake#564, lake#635): the price list, a preview, and a month invoiced and paid.
+    http.call("set_price_list",
+              {{"prices", json::array({{{"dimension", "calls"}, {"unit_micros", 1000}}})}});
+    http.call("price_list");
+    http.read("price_list", "");
+    http.call("price_list", {{"include_history", true}});
     http.call("billing_account", {{"customer_id", customer.id}});
     http.read("billing_account", "?customer_id=" + customer.id);
     http.call("bill_preview", {{"customer_id", customer.id}});
-    // January on a plan with only a fee, so its invoice reads no workspace's usage.
-    http.call("set_billing_plan",
-              {{"id", "schema-flat"}, {"name", "Flat"}, {"base_micros", 5000000}});
-    checked(store->set_billing_subscription(customer.id, "2026-01-01", "schema-flat"));
+    // January at a list with no rates, so its invoice reads no workspace's usage.
+    http.call("set_price_list", {{"effective_from", "2026-01"}, {"prices", json::array()}});
     http.call("issue_invoice", {{"customer_id", customer.id}, {"period", "2026-01"}});
     lake::control::Invoice month;
     month.customer_id = customer.id;
-    month.plan_id = "schema-team";
-    month.plan_name = "Team";
+    month.plan_id = "usage-202602-00000000000000001";
+    month.plan_name = "Usage";
     month.currency = "USD";
     month.provider = "manual";
-    month.lines = {{"plan", "", "Team plan", "month", 1, 0, 1, 1000000, 1, 1000000}};
+    month.lines = {
+        {"usage", "calls", "API and MCP Calls", "calls", 1000, 0, 1000, 1000, 1, 1000000}};
     month.period = "2026-02";
     const auto due = checked(store->create_invoice(month));
     http.call("list_invoices", {{"customer_id", customer.id}});

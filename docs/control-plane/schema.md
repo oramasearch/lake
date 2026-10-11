@@ -821,14 +821,18 @@ guard in its own pull request before a lake with this change is rolled.
 ## Billing migration
 
 `0073_billing` (lake#564, decision 56) adds billing records, in the control plane as multitenancy
-([`../api/billing.md`](../api/billing.md)):
+([`../api/billing.md`](../api/billing.md)). Since lake#635 (usage only, no migration) each
+publication of the price list is one `billing_plans` row, `usage-<YYYYMM>-<publish µs>`, with no fee
+and nothing included ([how the list is stored](../api/billing.md#how-the-list-is-stored)):
 
 - `billing_plans` (`id` text slug, `name`, `description`, three-letter `currency`, `base_micros`
   monthly fee, `active`, `position`, timestamps) and `billing_plan_prices` (plan, `dimension`,
   `unit_micros` for every `per` units beyond `included` units a month; primary key plan and
   dimension, cascading with the plan);
 - `billing_subscriptions` (customer, `effective_from` on the first of a month, enforced by a check,
-  `plan_id`; primary key customer and `effective_from`; cascading with the customer);
+  `plan_id`; primary key customer and `effective_from`; cascading with the customer). Unused since
+  lake#635: lake is priced by usage only and there is no plan to choose. The table stays, empty;
+  dropping it is not worth a migration;
 - `billing_invoices` (uuid `id`, `number` from a sequence, customer, `period` `YYYY-MM`, plan id and
   name, currency, `total_micros`, `state` `due`/`paid`/`void`, `provider`, `provider_reference`,
   `instructions`, `note`, issued, paid and voided times) with a partial unique index allowing one

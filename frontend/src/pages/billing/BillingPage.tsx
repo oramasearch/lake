@@ -1,36 +1,21 @@
-/** Billing (`/billing`, lake#564): an account's plan, this month's bill so far, plan selection and the
- * invoice history. The account is the current workspace's (`session.space`); the operator opens one
- * with `?customer_id=` and can issue an invoice for a month that has ended. Reads `billing_account`,
- * `billing_plans`, `bill_preview` and `list_invoices`; writes `choose_billing_plan` and, for the
- * operator, `issue_invoice`. The page exists only where the lake bills (`viewer.billing`). */
+/** Billing (`/billing`, lake#564, lake#635): this month's usage per dimension × its rate = cost, the
+ * running total, the invoices and how they are paid. Lake is priced by usage only: every account is
+ * billed at the one price list, with no plan to choose, no monthly fee and nothing included. The
+ * account is the current workspace's (`session.space`); the operator opens one with `?customer_id=`
+ * and can issue an invoice for a month that has ended. Reads `billing_account`, `price_list`,
+ * `bill_preview` and `list_invoices`; writes only `issue_invoice`, for the operator. The page exists
+ * only where the lake bills (`viewer.billing`). */
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Check, FileText, Receipt, Tags } from "lucide-react";
+import { FileText, Receipt, Tags } from "lucide-react";
 import { act, useRead } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
 import { useToast } from "@/lib/toast";
-import { ConfirmButton, Modal } from "@/lib/overlay";
+import { Modal } from "@/lib/overlay";
 import { date } from "@/lib/format";
-import { Badge, Banner, Button, Card, DataTable, Empty, ErrorBlock, Field, Form, Grid, Page, Skeleton, Split, Stat, StatRow, Status } from "@/lib/ui";
-import {
-  choiceOf,
-  choiceSentence,
-  includedLabel,
-  invoiceTone,
-  monthLabel,
-  months,
-  money,
-  owed,
-  paymentSummary,
-  priceLabel,
-  quantityLabel,
-  type Account,
-  type Bill,
-  type Invoice,
-  type Line,
-  type Plan,
-} from "./billing";
+import { Banner, Button, Card, DataTable, Empty, ErrorBlock, Field, Form, Page, Skeleton, Split, Stat, StatRow, Status } from "@/lib/ui";
+import { billedNote, invoiceTone, lineSentence, monthLabel, months, money, owed, paymentSummary, priceLabel, quantityLabel, type Account, type Bill, type Invoice, type Line, type PriceListAnswer } from "./billing";
 
 export default function BillingPage() {
   const session = useSession();
@@ -42,10 +27,10 @@ export default function BillingPage() {
   useTrail([{ label: "Billing" }], "Billing");
 
   const account = useRead<Account>(customerId ? "billing_account" : null, { customer_id: customerId }, { workspace: null });
-  const plans = useRead<{ plans: Plan[] }>("billing_plans", undefined, { workspace: null });
+  const prices = useRead<PriceListAnswer>("price_list", undefined, { workspace: null });
   const invoices = useRead<{ invoices: Invoice[] }>(customerId ? "list_invoices" : null, { customer_id: customerId }, { workspace: null });
-  const hasPlan = !!account.data?.current;
-  const bill = useRead<Bill>(customerId && hasPlan ? "bill_preview" : null, { customer_id: customerId }, { workspace: null, staleTime: 60_000 });
+  const hasList = !!account.data?.price_list;
+  const bill = useRead<Bill>(customerId && hasList ? "bill_preview" : null, { customer_id: customerId }, { workspace: null, staleTime: 60_000 });
 
   if (!customerId) {
     return (
@@ -58,17 +43,16 @@ export default function BillingPage() {
   }
 
   const due = owed(invoices.data?.invoices ?? []);
-  const current = account.data?.current?.plan ?? null;
-  const next = account.data?.next ?? null;
-  const nextMonth = next?.effective_from.slice(0, 7) ?? nextMonthOf(account.data?.month);
+  const next = prices.data?.next ?? null;
   return (
     <Page
       eyebrow={operator ? "Administration" : "Organization"}
       title="Billing"
-      sub="Your plan, this month's bill so far, and your invoices. The bill is worked out from your usage."
+      sub="You pay for what you use: each kind of usage at its rate, with no plan and no monthly fee."
       actions={
         <>
           <Button to="/usage">Usage</Button>
+          {operator && <Button to="/billing/plans">Price list</Button>}
           {operator && (
             <Button variant="primary" onClick={() => setIssuing(true)}>
               <FileText size={14} aria-hidden /> Issue an invoice
@@ -84,9 +68,8 @@ export default function BillingPage() {
         <Skeleton lines={6} />
       ) : (
         <>
-          <StatRow cols={4}>
-            <Stat label="Plan" value={current?.name ?? "None"} icon={Tags} sub={next ? `${next.plan?.name ?? next.plan_id} from ${monthLabel(nextMonth)}` : current ? `since ${monthLabel(account.data.current!.effective_from)}` : "choose a plan below"} />
-            <Stat label="This Month So Far" value={bill.data ? money(bill.data.total_micros, bill.data.currency) : "—"} sub={bill.data ? monthLabel(bill.data.period) : hasPlan ? "reading usage" : "no plan yet"} />
+          <StatRow cols={3}>
+            <Stat label="This Month So Far" value={bill.data ? money(bill.data.total_micros, bill.data.currency) : "—"} sub={bill.data ? monthLabel(bill.data.period) : hasList ? "reading usage" : "no price list yet"} />
             <Stat label="Due" value={due.length ? due.map((d) => money(d.micros, d.currency)).join(" + ") : "Nothing"} tone={due.length ? "bad" : undefined} sub={`${(invoices.data?.invoices ?? []).filter((i) => i.state === "due").length} invoices due`} />
             <Stat label="Payment" value={paymentSummary(account.data.provider).value} sub={paymentSummary(account.data.provider).sub} />
           </StatRow>
@@ -95,9 +78,14 @@ export default function BillingPage() {
               {operator ? account.data.provider.reason : "Card payment is not set up on this lake yet. Orama sends payment details with each invoice and records your payment."}
             </Banner>
           )}
-          {!hasPlan && (
-            <Banner tone="info" title="Choose a Plan">
-              Your account has no plan yet. A plan you choose now applies from the start of this month.
+          {!hasList && (
+            <Banner tone="info" title="No Price List Yet" action={operator ? <Button to="/billing/plans">Publish it</Button> : undefined}>
+              {operator ? "Publish the price list so accounts can be billed for their usage." : "Orama has not published its rates on this lake yet. Your usage is recorded, and nothing is billed until it is."}
+            </Banner>
+          )}
+          {next && (
+            <Banner tone="info" title={`New Rates From ${monthLabel(next.effective_from)}`}>
+              The price list changes from {monthLabel(next.effective_from)}. This month is billed at today's rates.
             </Banner>
           )}
           <Split
@@ -116,8 +104,15 @@ export default function BillingPage() {
               </>
             }
           >
-            {hasPlan && <BillCard bill={bill} />}
-            <PlansCard plans={plans} account={account.data} customerId={customerId} nextMonth={nextMonth} />
+            {hasList ? (
+              <BillCard bill={bill} />
+            ) : (
+              <Card label="This Month So Far">
+                <Empty icon={Tags} title="Nothing to bill yet">
+                  The bill appears here once a price list is published.
+                </Empty>
+              </Card>
+            )}
           </Split>
         </>
       )}
@@ -126,34 +121,27 @@ export default function BillingPage() {
   );
 }
 
-function nextMonthOf(month: string | undefined): string {
-  const match = /^(\d{4})-(\d{2})$/.exec(month ?? "");
-  if (!match) return months().current;
-  const year = Number(match[1]);
-  const m = Number(match[2]);
-  return m === 12 ? `${year + 1}-01` : `${year}-${String(m + 1).padStart(2, "0")}`;
-}
-
-/** The lines of a bill or an invoice. */
+/** The lines of a bill or an invoice: each dimension's usage, its rate and its cost. */
 export function LinesTable({ lines, currency }: { lines: Line[]; currency: string }) {
   return (
     <DataTable
       rows={lines}
       rowKey={(l, i) => `${l.kind}-${l.dimension}-${i}`}
       columns={[
+        { key: "description", label: "Usage", render: (l) => <span className="font-semibold text-ink">{l.description}</span> },
         {
-          key: "description",
-          label: "Item",
+          key: "quantity",
+          label: "Used",
+          numeric: true,
           render: (l) => (
-            <div className="min-w-0">
-              <div className="font-semibold text-ink">{l.description}</div>
-              {l.kind === "usage" && <div className="text-[12px] text-ink-3">{l.unit_micros ? priceLabel({ unit_micros: l.unit_micros, per: l.per, unit: l.unit }, currency) : "not charged"}{includedLabel(l) ? ` · ${includedLabel(l)}` : ""}</div>}
+            <div>
+              <span className="font-mono">{quantityLabel(l)}</span>
+              {billedNote(l) && <div className="text-[12px] text-ink-3">{billedNote(l)}</div>}
             </div>
           ),
         },
-        { key: "quantity", label: "Used", numeric: true, render: (l) => <span className="font-mono">{quantityLabel(l)}</span> },
-        { key: "billable", label: "Billed", numeric: true, render: (l) => <span className="font-mono">{l.kind === "plan" ? "—" : quantityLabel({ ...l, quantity: l.billable })}</span> },
-        { key: "amount", label: "Amount", numeric: true, render: (l) => <span className="font-mono">{money(l.amount_micros, currency)}</span> },
+        { key: "rate", label: "Rate", numeric: true, render: (l) => <span className="text-ink-2">{l.unit_micros ? priceLabel(l, currency) : "not charged"}</span> },
+        { key: "amount", label: "Cost", numeric: true, render: (l) => <span className="font-mono" title={lineSentence(l, currency)}>{money(l.amount_micros, currency)}</span> },
       ]}
     />
   );
@@ -161,7 +149,7 @@ export function LinesTable({ lines, currency }: { lines: Line[]; currency: strin
 
 function BillCard({ bill }: { bill: ReturnType<typeof useRead<Bill>> }) {
   return (
-    <Card label="This Month So Far" title={bill.data ? `${monthLabel(bill.data.period)} on ${bill.data.plan.name}` : undefined} padded={false} footer={bill.data && <span>Total so far <strong className="font-mono">{money(bill.data.total_micros, bill.data.currency)}</strong>. The invoice is issued after the month ends.</span>}>
+    <Card label="This Month So Far" title={bill.data ? monthLabel(bill.data.period) : undefined} padded={false} footer={bill.data && <span>Total so far <strong className="font-mono">{money(bill.data.total_micros, bill.data.currency)}</strong>. The month is billed at the rates in force at its end, and invoiced after it ends.</span>}>
       {bill.isError ? (
         <div className="p-4">
           <ErrorBlock error={bill.error} retry={() => void bill.refetch()} what="this month's bill" />
@@ -181,68 +169,6 @@ function BillCard({ bill }: { bill: ReturnType<typeof useRead<Bill>> }) {
           )}
           <LinesTable lines={bill.data.lines} currency={bill.data.currency} />
         </>
-      )}
-    </Card>
-  );
-}
-
-function PlansCard({ plans, account, customerId, nextMonth }: { plans: ReturnType<typeof useRead<{ plans: Plan[] }>>; account: Account; customerId: string; nextMonth: string }) {
-  const toast = useToast();
-  return (
-    <Card label="Plans" title="Choose a Plan" className="mt-4">
-      {plans.isError ? (
-        <ErrorBlock error={plans.error} retry={() => void plans.refetch()} what="the plans" />
-      ) : !plans.data ? (
-        <Skeleton lines={4} />
-      ) : plans.data.plans.length === 0 ? (
-        <Empty icon={Tags} title="No plans yet">
-          Orama has not published a price list on this lake.
-        </Empty>
-      ) : (
-        <Grid className="grid-cols-1 gap-3 md:grid-cols-2">
-          {plans.data.plans.map((plan) => {
-            const choice = choiceOf(account, plan.id);
-            const isCurrent = account.current?.plan_id === plan.id;
-            const isNext = account.next?.plan_id === plan.id;
-            return (
-              <Card key={plan.id} tone={isCurrent ? "active" : "default"} title={plan.name} label={isCurrent ? "Current Plan" : isNext ? `From ${monthLabel(nextMonth)}` : undefined} actions={isCurrent && !account.next ? <Badge tone="success">Current</Badge> : undefined}>
-                <div className="font-mono text-[20px] font-semibold text-ink">
-                  {money(plan.base_micros, plan.currency)}
-                  <span className="text-[12px] font-normal text-ink-3"> a month</span>
-                </div>
-                {plan.description && <p className="m-0 mt-1 text-[13px] text-ink-2">{plan.description}</p>}
-                <ul className="m-0 mt-2 list-none p-0 text-[12.5px] text-ink-2">
-                  {plan.prices.map((p) => (
-                    <li key={p.dimension} className="flex items-start gap-1.5 py-0.5">
-                      <Check size={13} className="mt-0.5 shrink-0 text-ok" aria-hidden />
-                      <span>
-                        <strong className="font-semibold text-ink">{p.title}</strong>: {includedLabel(p) ? `${includedLabel(p)}, then ` : ""}
-                        {p.unit_micros ? priceLabel(p, plan.currency) : "not charged"}
-                      </span>
-                    </li>
-                  ))}
-                  {plan.prices.length === 0 && <li className="py-0.5">Usage is not charged on this plan.</li>}
-                </ul>
-                {choice !== "current" && !isNext && (
-                  <div className="mt-3">
-                    <ConfirmButton
-                      variant={choice === "start" ? "primary" : "secondary"}
-                      title={choice === "cancel" ? `Stay on ${plan.name}` : `Choose ${plan.name}`}
-                      confirm={choiceSentence(choice, plan.name, nextMonth)}
-                      confirmLabel={choice === "cancel" ? "Stay" : "Choose plan"}
-                      onConfirm={async () => {
-                        await act("choose_billing_plan", { customer_id: customerId, plan_id: plan.id });
-                        toast(choice === "start" ? `${plan.name} plan started` : choice === "cancel" ? "Plan change cancelled" : `${plan.name} from ${monthLabel(nextMonth)}`);
-                      }}
-                    >
-                      {choice === "cancel" ? `Stay on ${plan.name}` : `Choose ${plan.name}`}
-                    </ConfirmButton>
-                  </div>
-                )}
-              </Card>
-            );
-          })}
-        </Grid>
       )}
     </Card>
   );
@@ -309,7 +235,7 @@ function IssueInvoice({ customerId, onClose }: { customerId: string; onClose: ()
   return (
     <Modal
       title="Issue an Invoice"
-      subtitle="The bill for a month that has ended, from every workspace's usage on the plan of that month. Its lines are kept as issued."
+      subtitle="The bill for a month that has ended: every workspace's usage at the rates in force at the month's end. Its lines are kept as issued."
       onClose={onClose}
       width={480}
       footer={

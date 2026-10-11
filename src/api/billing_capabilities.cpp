@@ -1,9 +1,12 @@
-// Billing (lake#564, decision 56, docs/api/billing.md): billing_plans, set_billing_plan,
-// billing_account, choose_billing_plan, bill_preview, issue_invoice, list_invoices, get_invoice,
-// record_invoice_payment and void_invoice, with the manual payment provider. Registered only where
-// LAKE_BILLING is on. The records are control-plane rows (plans, subscriptions, invoices and their
-// lines); the usage a bill prices is read from each workspace Zetta through usage_over_time, and
-// only the quantity billed per dimension is kept, on the invoice's lines. Every call is
+// Billing (lake#564, decision 56, docs/api/billing.md): price_list, set_price_list,
+// billing_account, bill_preview, issue_invoice, list_invoices, get_invoice, record_invoice_payment
+// and void_invoice, with the manual payment provider. Registered only where LAKE_BILLING is on.
+// Lake is priced by usage only (lake#635): one list rate per usage dimension, no plans, no fee and
+// nothing included, so every account is billed on the price list without choosing anything. The
+// records are control-plane rows (each publication of the price list, stored as a billing_plans
+// row, and invoices with their lines); the usage a bill prices is read from each workspace Zetta
+// through usage_over_time, and only the quantity billed per dimension is kept, on the invoice's
+// lines. Every call is
 // policy-checked and audited in the central log (decision 52): billing is account configuration.
 
 #include "lake/api/billing.hpp"
@@ -101,24 +104,23 @@ json price_json(const control::BillingPrice& price) {
             {"title", dimension ? dimension->title : std::string_view(price.dimension)},
             {"unit", dimension ? dimension->unit : std::string_view()},
             {"unit_micros", price.unit_micros},
-            {"per", price.per},
-            {"included", price.included}};
+            {"per", price.per}};
 }
 
-json plan_json(const control::BillingPlan& plan) {
+json price_list_json(const PriceList& list) {
     json prices = json::array();
-    for (const control::BillingPrice& price : plan.prices) {
+    for (const control::BillingPrice& price : list.prices) {
         prices.push_back(price_json(price));
     }
-    return {{"id", plan.id},
-            {"name", plan.name},
-            {"description", plan.description},
-            {"currency", plan.currency},
-            {"base_micros", plan.base_micros},
-            {"active", plan.active},
-            {"position", plan.position},
-            {"prices", std::move(prices)},
-            {"updated_at", plan.updated_at}};
+    return {{"id", list.id},
+            {"effective_from", list.effective_from},
+            {"published_at", list.published_at},
+            {"currency", list.currency},
+            {"prices", std::move(prices)}};
+}
+
+json optional_list_json(const std::optional<PriceList>& list) {
+    return list ? price_list_json(*list) : json(nullptr);
 }
 
 json line_json(const control::InvoiceLine& line) {
@@ -147,8 +149,7 @@ json invoice_json(const control::Invoice& invoice) {
             {"number", invoice.number},
             {"customer_id", invoice.customer_id},
             {"period", invoice.period},
-            {"plan_id", invoice.plan_id},
-            {"plan_name", invoice.plan_name},
+            {"price_list_id", invoice.plan_id},
             {"currency", invoice.currency},
             {"total_micros", invoice.total_micros},
             {"state", invoice.state},
@@ -187,18 +188,17 @@ json output_schema(json properties, json required) {
             {"required", std::move(required)}};
 }
 
-json plan_schema() {
-    return output_schema(
-        {{"id", string_schema()},
-         {"name", string_schema()},
-         {"description", string_schema()},
-         {"currency", string_schema()},
-         {"base_micros", {{"type", "integer"}}},
-         {"active", {{"type", "boolean"}}},
-         {"position", {{"type", "integer"}}},
-         {"prices", {{"type", "array"}, {"items", {{"type", "object"}}}}},
-         {"updated_at", string_schema()}},
-        json::array({"id", "name", "currency", "base_micros", "active", "prices"}));
+json price_list_schema() {
+    return output_schema({{"id", string_schema()},
+                          {"effective_from", string_schema()},
+                          {"published_at", string_schema()},
+                          {"currency", string_schema()},
+                          {"prices", {{"type", "array"}, {"items", {{"type", "object"}}}}}},
+                         json::array({"id", "effective_from", "currency", "prices"}));
+}
+
+json nullable_object() {
+    return {{"type", json::array({"object", "null"})}};
 }
 
 json invoice_schema() {
@@ -206,8 +206,7 @@ json invoice_schema() {
                           {"number", {{"type", "integer"}}},
                           {"customer_id", string_schema()},
                           {"period", string_schema()},
-                          {"plan_id", string_schema()},
-                          {"plan_name", string_schema()},
+                          {"price_list_id", string_schema()},
                           {"currency", string_schema()},
                           {"total_micros", {{"type", "integer"}}},
                           {"state", {{"type", "string"}, {"enum", {"due", "paid", "void"}}}},
@@ -225,7 +224,7 @@ json invoice_schema() {
                                       "number",
                                       "customer_id",
                                       "period",
-                                      "plan_id",
+                                      "price_list_id",
                                       "currency",
                                       "total_micros",
                                       "state",
@@ -288,54 +287,30 @@ void audit(ApiContext& context,
 }
 
 // ------------------------------------------------------------------------------------------------
-// Plans and subscriptions.
+// The price list.
 
-std::expected<control::BillingPlan, ApiResult> find_plan(ApiContext& context,
-                                                         const std::string& id) {
-    const auto plans = context.store->billing_plans();
-    if (!plans) {
-        return std::unexpected(from_store(plans.error()));
+std::expected<std::vector<PriceList>, ApiResult> published_lists(ApiContext& context) {
+    const auto stored = context.store->billing_plans();
+    if (!stored) {
+        return std::unexpected(from_store(stored.error()));
     }
-    for (const control::BillingPlan& plan : *plans) {
-        if (plan.id == id) {
-            return plan;
-        }
-    }
-    return std::unexpected(ApiResult::failure("not_found", "no plan " + id, "/plan_id"));
+    return price_lists(*stored);
 }
 
-// The subscription row in effect on the first day of `month`, if any.
-std::optional<control::BillingSubscription>
-in_effect(const std::vector<control::BillingSubscription>& rows, const Month& month) {
-    std::optional<control::BillingSubscription> found;
-    const std::string first = month.first_day();
-    for (const control::BillingSubscription& row : rows) {
-        if (row.effective_from <= first) {
-            found = row;
-        }
+// The list `month` is billed at, or a conflict saying none is published for it.
+std::expected<PriceList, ApiResult> list_for(ApiContext& context, const Month& month) {
+    auto lists = published_lists(context);
+    if (!lists) {
+        return std::unexpected(lists.error());
     }
-    return found;
-}
-
-// The plan an account is billed on for `month`, or a conflict naming why there is none.
-std::expected<control::BillingPlan, ApiResult>
-plan_for(ApiContext& context, const std::string& customer_id, const Month& month) {
-    const auto rows = context.store->billing_subscriptions(customer_id);
-    if (!rows) {
-        return std::unexpected(from_store(rows.error()));
+    auto list = price_list_for(*lists, month.name());
+    if (!list) {
+        return std::unexpected(
+            ApiResult::failure("conflict",
+                               "no price list is published for " + month.name() +
+                                   "; the operator publishes one with set_price_list"));
     }
-    const auto row = in_effect(*rows, month);
-    if (!row) {
-        return std::unexpected(ApiResult::failure("conflict",
-                                                  "this account has no plan for " + month.name() +
-                                                      "; choose one with "
-                                                      "choose_billing_plan"));
-    }
-    auto plan = find_plan(context, row->plan_id);
-    if (!plan) {
-        return std::unexpected(plan.error());
-    }
-    return plan;
+    return std::move(*list);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -362,10 +337,10 @@ std::uint64_t whole(double value) {
 liquid::runtime::task<Measured> measure(ApiContext& context,
                                         const std::string& customer_id,
                                         const Month& month,
-                                        const control::BillingPlan& plan) {
+                                        const PriceList& list) {
     Measured measured;
     json dimensions = json::array();
-    for (const control::BillingPrice& price : plan.prices) {
+    for (const control::BillingPrice& price : list.prices) {
         dimensions.push_back(price.dimension);
     }
     if (dimensions.empty()) {
@@ -423,7 +398,7 @@ liquid::runtime::task<Measured> measure(ApiContext& context,
 
 json bill_json(const std::string& customer_id,
                const Month& month,
-               const control::BillingPlan& plan,
+               const PriceList& list,
                const std::vector<control::InvoiceLine>& lines,
                const Measured& measured) {
     std::uint64_t total = 0;
@@ -432,8 +407,8 @@ json bill_json(const std::string& customer_id,
     }
     return {{"customer_id", customer_id},
             {"period", month.name()},
-            {"plan", {{"id", plan.id}, {"name", plan.name}}},
-            {"currency", plan.currency},
+            {"price_list", {{"id", list.id}, {"effective_from", list.effective_from}}},
+            {"currency", list.currency},
             {"lines", lines_json(lines)},
             {"total_micros", total},
             {"complete", measured.complete},
@@ -481,67 +456,41 @@ json provider_json(const PaymentProvider& provider, const PaymentStatus& status)
             {"reason", provider.records_payments_by_hand() ? status.reason : std::string()}};
 }
 
-json subscription_json(const control::BillingSubscription& row,
-                       const std::vector<control::BillingPlan>& plans) {
-    json plan = nullptr;
-    for (const control::BillingPlan& candidate : plans) {
-        if (candidate.id == row.plan_id) {
-            plan = plan_json(candidate);
-        }
-    }
-    return {{"effective_from", row.effective_from}, {"plan_id", row.plan_id}, {"plan", plan}};
-}
-
-// The account's billing: its plan this month, the plan chosen for next month, and its history.
+// The account's billing: the price list it is billed at this month and how invoices are paid.
+// There is nothing to choose: every account is billed on the price list (lake#635).
 ApiResult account_of(ApiContext& context,
                      const std::string& customer_id,
                      const PaymentProvider& provider,
                      const PaymentStatus& status) {
-    const auto rows = context.store->billing_subscriptions(customer_id);
-    if (!rows) {
-        return from_store(rows.error());
+    const auto customer = context.store->get_customer(customer_id);
+    if (!customer) {
+        return ApiResult::failure("not_found", "no account " + customer_id, "/customer_id");
     }
-    const auto plans = context.store->billing_plans();
-    if (!plans) {
-        return from_store(plans.error());
+    auto lists = published_lists(context);
+    if (!lists) {
+        return lists.error();
     }
     const Month now = this_month();
-    json current = nullptr;
-    json next = nullptr;
-    json history = json::array();
-    if (const auto row = in_effect(*rows, now)) {
-        current = subscription_json(*row, *plans);
-    }
-    for (const control::BillingSubscription& row : *rows) {
-        history.push_back({{"effective_from", row.effective_from}, {"plan_id", row.plan_id}});
-        if (row.effective_from > now.first_day()) {
-            next = subscription_json(row, *plans);
-        }
-    }
-    return ApiResult::success({{"customer_id", customer_id},
-                               {"month", now.name()},
-                               {"current", std::move(current)},
-                               {"next", std::move(next)},
-                               {"history", std::move(history)},
-                               {"provider", provider_json(provider, status)}});
+    return ApiResult::success(
+        {{"customer_id", customer_id},
+         {"month", now.name()},
+         {"price_list", optional_list_json(price_list_for(*lists, now.name()))},
+         {"provider", provider_json(provider, status)}});
 }
 
 json account_schema() {
-    return output_schema(
-        {{"customer_id", string_schema()},
-         {"month", string_schema()},
-         {"current", {{"type", json::array({"object", "null"})}}},
-         {"next", {{"type", json::array({"object", "null"})}}},
-         {"history", {{"type", "array"}, {"items", {{"type", "object"}}}}},
-         {"provider", {{"type", "object"}}}},
-        json::array({"customer_id", "month", "current", "next", "history", "provider"}));
+    return output_schema({{"customer_id", string_schema()},
+                          {"month", string_schema()},
+                          {"price_list", nullable_object()},
+                          {"provider", {{"type", "object"}}}},
+                         json::array({"customer_id", "month", "price_list", "provider"}));
 }
 
 json bill_schema() {
     return output_schema(
         {{"customer_id", string_schema()},
          {"period", string_schema()},
-         {"plan", {{"type", "object"}}},
+         {"price_list", {{"type", "object"}}},
          {"currency", string_schema()},
          {"lines", {{"type", "array"}, {"items", {{"type", "object"}}}}},
          {"total_micros", {{"type", "integer"}}},
@@ -551,7 +500,7 @@ json bill_schema() {
          {"invoice", {{"type", json::array({"object", "null"})}}}},
         json::array({"customer_id",
                      "period",
-                     "plan",
+                     "price_list",
                      "currency",
                      "lines",
                      "total_micros",
@@ -694,25 +643,73 @@ std::uint64_t price_of(std::uint64_t billable, std::uint64_t unit_micros, std::u
     return amount > max_amount ? max_amount : static_cast<std::uint64_t>(amount);
 }
 
-std::vector<control::InvoiceLine> bill_lines(const control::BillingPlan& plan,
-                                             const std::map<std::string, std::uint64_t>& quantities,
-                                             std::string_view period) {
+std::string price_list_id(std::string_view effective_from, std::int64_t published_us) {
+    const auto month = month_of(effective_from);
+    if (!month || published_us < 0) {
+        return {};
+    }
+    return std::format("usage-{:04}{:02}-{:017}", month->year, month->month, published_us);
+}
+
+std::vector<PriceList> price_lists(const std::vector<control::BillingPlan>& stored) {
+    std::vector<PriceList> lists;
+    for (const control::BillingPlan& row : stored) {
+        // usage-YYYYMM-<17 digits>: anything else is not a price list publication.
+        const std::string& id = row.id;
+        if (id.size() != 30 || !id.starts_with("usage-") || id[12] != '-' ||
+            !std::all_of(
+                id.begin() + 6, id.begin() + 12, [](char c) { return c >= '0' && c <= '9'; }) ||
+            !std::all_of(id.begin() + 13, id.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+            continue;
+        }
+        const std::string effective = id.substr(6, 4) + "-" + id.substr(10, 2);
+        if (!month_of(effective)) {
+            continue;
+        }
+        PriceList list;
+        list.id = id;
+        list.effective_from = effective;
+        list.published_at = row.created_at.empty() ? row.updated_at : row.created_at;
+        list.currency = row.currency;
+        list.prices = row.prices;
+        lists.push_back(std::move(list));
+    }
+    std::ranges::sort(lists, {}, &PriceList::id);
+    return lists;
+}
+
+std::optional<PriceList> price_list_for(const std::vector<PriceList>& lists,
+                                        std::string_view period) {
+    // Ids sort by the month a list applies from, then by when it was published: the last id from
+    // `period` or before is the list in force at the month's end.
+    const PriceList* found = nullptr;
+    for (const PriceList& list : lists) {
+        if (list.effective_from <= period && (found == nullptr || list.id > found->id)) {
+            found = &list;
+        }
+    }
+    return found ? std::optional<PriceList>(*found) : std::nullopt;
+}
+
+std::uint64_t billable_quantity(std::string_view unit, std::uint64_t quantity) {
+    // Time is billed by the minute (lake#637): the month's summed seconds, rounded up once to a
+    // whole minute, never each job, so many short jobs are not each charged a minute.
+    if (unit == "seconds" || unit == "instance_seconds") {
+        const std::uint64_t minutes = quantity / 60 + (quantity % 60 == 0 ? 0 : 1);
+        return minutes > max_amount / 60 ? max_amount : minutes * 60;
+    }
+    return quantity;
+}
+
+std::vector<control::InvoiceLine>
+bill_lines(const PriceList& list, const std::map<std::string, std::uint64_t>& quantities) {
     std::vector<control::InvoiceLine> lines;
-    lines.push_back({"plan",
-                     "",
-                     plan.name + " plan, " + std::string(period),
-                     "month",
-                     1,
-                     0,
-                     1,
-                     plan.base_micros,
-                     1,
-                     plan.base_micros});
-    for (const control::BillingPrice& price : plan.prices) {
+    for (const control::BillingPrice& price : list.prices) {
         const UsageDimension* dimension = find_usage_dimension(price.dimension);
         const auto found = quantities.find(price.dimension);
         const std::uint64_t quantity = found == quantities.end() ? 0 : found->second;
-        const std::uint64_t billable = quantity > price.included ? quantity - price.included : 0;
+        const std::string unit = dimension ? std::string(dimension->unit) : std::string();
+        const std::uint64_t billable = billable_quantity(unit, quantity);
         std::string description =
             dimension ? std::string(dimension->title) : std::string(price.dimension);
         if (dimension && dimension->aggregation == "last") {
@@ -721,9 +718,9 @@ std::vector<control::InvoiceLine> bill_lines(const control::BillingPlan& plan,
         lines.push_back({"usage",
                          price.dimension,
                          std::move(description),
-                         dimension ? std::string(dimension->unit) : std::string(),
+                         unit,
                          quantity,
-                         price.included,
+                         0,
                          billable,
                          price.unit_micros,
                          std::max<std::uint64_t>(price.per, 1),
@@ -904,16 +901,24 @@ void register_billing_capabilities(Registry& registry,
     }
 
     registry.add(Capability{
-        .name = "billing_plans",
-        .title = "Billing plans",
+        .name = "price_list",
+        .title = "Price list",
         .description =
-            "The price list: each plan's monthly fee and, per usage dimension, its price for every "
-            "`per` units of the dimension's unit beyond what the plan includes each month. "
-            "Amounts are millionths of the plan's currency. Retired plans are listed only with "
-            "`include_retired` (the operator).",
-        .input_schema = object_schema({{"include_retired", {{"type", "boolean"}}}}, json::array()),
-        .output_schema = output_schema({{"plans", {{"type", "array"}, {"items", plan_schema()}}}},
-                                       json::array({"plans"})),
+            "Orama Cloud's price list: one rate per usage dimension, `unit_micros` (millionths of "
+            "the currency) for every `per` units of the dimension's unit. Lake is priced by usage "
+            "only: no plans, no monthly fee, nothing included; every account is billed at this "
+            "list. `list` is the list in force for `period` (YYYY-MM; this month when left out), "
+            "null before one is published; `next` is a list published for a later month, if any. "
+            "A month is billed at the list in force at its end. `history` (every publication, "
+            "newest first) only with `include_history` and the operator.",
+        .input_schema = object_schema(
+            {{"period", period_schema}, {"include_history", {{"type", "boolean"}}}}, json::array()),
+        .output_schema =
+            output_schema({{"period", string_schema()},
+                           {"list", nullable_object()},
+                           {"next", nullable_object()},
+                           {"history", {{"type", "array"}, {"items", price_list_schema()}}}},
+                          json::array({"period", "list", "next"})),
         .kind = CapabilityKind::Read,
         .object = "principal",
         .action = "read",
@@ -922,49 +927,63 @@ void register_billing_capabilities(Registry& registry,
             if (!context.store) {
                 return no_store();
             }
-            const auto plans = context.store->billing_plans();
-            if (!plans) {
-                return from_store(plans.error());
+            const auto month = input.contains("period")
+                                   ? month_of(input.at("period").get<std::string>())
+                                   : std::optional<Month>(this_month());
+            if (!month) {
+                return ApiResult::failure("invalid_input", "period is YYYY-MM", "/period");
             }
-            const bool retired =
-                input.value("include_retired", false) && instance_administrator(context);
-            json out = json::array();
-            for (const control::BillingPlan& plan : *plans) {
-                if (plan.active || retired) {
-                    out.push_back(plan_json(plan));
+            auto lists = published_lists(context);
+            if (!lists) {
+                return lists.error();
+            }
+            const auto list = price_list_for(*lists, month->name());
+            // The next list: the one in force for the first later month that has its own.
+            std::optional<PriceList> next;
+            for (const PriceList& candidate : *lists) {
+                if (candidate.effective_from > month->name() &&
+                    (!next || candidate.effective_from < next->effective_from ||
+                     (candidate.effective_from == next->effective_from &&
+                      candidate.id > next->id))) {
+                    next = candidate;
                 }
             }
-            return ApiResult::success({{"plans", std::move(out)}});
+            json out{{"period", month->name()},
+                     {"list", optional_list_json(list)},
+                     {"next", optional_list_json(next)}};
+            if (input.value("include_history", false) && instance_administrator(context)) {
+                json history = json::array();
+                for (auto it = lists->rbegin(); it != lists->rend(); ++it) {
+                    history.push_back(price_list_json(*it));
+                }
+                out["history"] = std::move(history);
+            }
+            return ApiResult::success(std::move(out));
         }});
 
     const json price_input =
         object_schema({{"dimension", {{"type", "string"}, {"enum", dimension_names}}},
                        {"unit_micros", integer_schema()},
-                       {"per", integer_schema(1)},
-                       {"included", integer_schema()}},
+                       {"per", integer_schema(1)}},
                       json::array({"dimension", "unit_micros"}));
     registry.add(Capability{
-        .name = "set_billing_plan",
-        .title = "Set a billing plan",
+        .name = "set_price_list",
+        .title = "Publish the price list",
         .description =
-            "Operator or instance administrator only. Creates or replaces one plan of the price "
-            "list: its name, monthly fee (`base_micros`), currency and its prices, one per usage "
-            "dimension (`unit_micros` for every `per` units beyond `included` units a month). A "
-            "dimension without a price is not charged. `active: false` retires the plan: no "
-            "account can choose it, and accounts on it stay on it.",
+            "Operator or instance administrator only. Publishes the price list: one rate per "
+            "usage dimension (`unit_micros` for every `per` units of the dimension's unit; a "
+            "dimension without a rate is not charged), in `currency` (USD by default), in force "
+            "from the first day of `effective_from` (YYYY-MM; this month when left out). A month "
+            "is billed at the list in force at its end, so a list published mid-month prices the "
+            "whole month; invoices already issued keep their rates. Every publication is kept.",
         .input_schema =
-            object_schema({{"id", {{"type", "string"}, {"pattern", "^[a-z][a-z0-9-]{0,62}$"}}},
-                           {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}}},
-                           {"description", {{"type", "string"}, {"maxLength", 1024}}},
-                           {"currency", {{"type", "string"}, {"pattern", "^[A-Z]{3}$"}}},
-                           {"base_micros", integer_schema()},
-                           {"active", {{"type", "boolean"}}},
-                           {"position", {{"type", "integer"}, {"minimum", 0}, {"maximum", 10000}}},
+            object_schema({{"currency", {{"type", "string"}, {"pattern", "^[A-Z]{3}$"}}},
+                           {"effective_from", period_schema},
                            {"prices", {{"type", "array"}, {"items", price_input}}}},
-                          json::array({"id", "name", "base_micros"})),
-        .output_schema = plan_schema(),
+                          json::array({"prices"})),
+        .output_schema = price_list_schema(),
         .kind = CapabilityKind::Action,
-        .object = "billing plan",
+        .object = "billing price list",
         .action = "admin",
         .resolve_object = administrator_only,
         .handler = [](const json& input, ApiContext& context) {
@@ -974,50 +993,73 @@ void register_billing_capabilities(Registry& registry,
             if (!context.store) {
                 return no_store();
             }
-            control::BillingPlan plan;
-            plan.id = input.at("id");
-            plan.name = input.at("name");
-            plan.description = input.value("description", "");
-            plan.currency = input.value("currency", "USD");
-            plan.base_micros = input.at("base_micros").get<std::uint64_t>();
-            plan.active = input.value("active", true);
-            plan.position = input.value("position", 0);
+            const auto month = input.contains("effective_from")
+                                   ? month_of(input.at("effective_from").get<std::string>())
+                                   : std::optional<Month>(this_month());
+            if (!month) {
+                return ApiResult::failure(
+                    "invalid_input", "effective_from is YYYY-MM", "/effective_from");
+            }
+            control::BillingPlan row;
+            row.name = "Usage";
+            row.description = "Usage price list from " + month->name();
+            row.currency = input.value("currency", "USD");
+            row.base_micros = 0;
+            row.active = true;
             std::set<std::string> seen;
-            const json prices = input.value("prices", json::array());
+            const json prices = input.at("prices");
             for (std::size_t index = 0; index < prices.size(); ++index) {
                 const json& price = prices[index];
                 const std::string dimension = price.at("dimension");
                 if (!seen.insert(dimension).second) {
                     return ApiResult::failure("invalid_input",
-                                              "each dimension has one price",
+                                              "each dimension has one rate",
                                               "/prices/" + std::to_string(index) + "/dimension");
                 }
-                plan.prices.push_back({dimension,
-                                       price.at("unit_micros").get<std::uint64_t>(),
-                                       price.value("per", std::uint64_t{1}),
-                                       price.value("included", std::uint64_t{0})});
+                row.prices.push_back({dimension,
+                                      price.at("unit_micros").get<std::uint64_t>(),
+                                      price.value("per", std::uint64_t{1}),
+                                      0});
             }
-            const auto stored = context.store->put_billing_plan(plan);
+            auto lists = published_lists(context);
+            if (!lists) {
+                return lists.error();
+            }
+            std::set<std::string> taken;
+            for (const PriceList& list : *lists) {
+                taken.insert(list.id);
+            }
+            std::int64_t published_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::system_clock::now().time_since_epoch())
+                                            .count();
+            row.id = price_list_id(month->name(), published_us);
+            while (taken.contains(row.id)) {
+                row.id = price_list_id(month->name(), ++published_us);
+            }
+            const auto stored = context.store->put_billing_plan(row);
             if (!stored) {
                 return from_store(stored.error());
             }
-            context.audit_kind = "billing.plan.set";
-            context.audit_object = "billing_plan/" + plan.id;
-            context.audit_details = {{"plan_id", plan.id},
-                                     {"base_micros", plan.base_micros},
-                                     {"currency", plan.currency},
-                                     {"active", plan.active},
-                                     {"prices", plan.prices.size()}};
-            return ApiResult::success(plan_json(*stored));
+            const auto published = price_lists({*stored});
+            if (published.empty()) {
+                return ApiResult::failure("store_error", "the price list was not kept");
+            }
+            context.audit_kind = "billing.price_list.set";
+            context.audit_object = "billing_price_list/" + stored->id;
+            context.audit_details = {{"price_list_id", stored->id},
+                                     {"effective_from", month->name()},
+                                     {"currency", stored->currency},
+                                     {"prices", stored->prices.size()}};
+            return ApiResult::success(price_list_json(published.front()));
         }});
 
     registry.add(Capability{
         .name = "billing_account",
         .title = "Billing account",
         .description =
-            "An account's billing: the plan it is billed on this UTC month (`current`), the plan "
-            "chosen from next month (`next`, when it changes), every plan change, and how "
-            "invoices are paid (`provider`).",
+            "An account's billing: the price list it is billed at this UTC month (`price_list`, "
+            "null before one is published) and how invoices are paid (`provider`). Every account "
+            "is billed for its usage at the price list; there is no plan to choose.",
         .input_schema =
             object_schema({{"customer_id", string_schema()}}, json::array({"customer_id"})),
         .output_schema = account_schema(),
@@ -1045,84 +1087,13 @@ void register_billing_capabilities(Registry& registry,
         }});
 
     registry.add(Capability{
-        .name = "choose_billing_plan",
-        .title = "Choose a billing plan",
-        .description =
-            "Choose the account's plan. An account without a plan is billed on it from the start "
-            "of this UTC month; otherwise the change starts next month, and choosing the current "
-            "plan again cancels a change not yet started. Only an active plan can be chosen.",
-        .input_schema =
-            object_schema({{"customer_id", string_schema()}, {"plan_id", string_schema()}},
-                          json::array({"customer_id", "plan_id"})),
-        .output_schema = account_schema(),
-        .kind = CapabilityKind::Action,
-        .object = "customer",
-        .action = "admin",
-        .resolve_object = customer_object,
-        .resolves_operator_audit_target = true,
-        .async_handler = [providers](const json& input,
-                                     ApiContext& context) -> liquid::runtime::task<ApiResult> {
-            if (!context.store) {
-                co_return no_store();
-            }
-            auto resolved = co_await resolve(*providers, context);
-            if (!resolved || !resolved->provider) {
-                co_return unresolved(resolved);
-            }
-            const std::string customer_id = input.at("customer_id");
-            const std::string plan_id = input.at("plan_id");
-            auto plan = find_plan(context, plan_id);
-            if (!plan) {
-                co_return plan.error();
-            }
-            if (!plan->active) {
-                co_return ApiResult::failure(
-                    "invalid_input", "plan " + plan_id + " is retired", "/plan_id");
-            }
-            const auto rows = context.store->billing_subscriptions(customer_id);
-            if (!rows) {
-                co_return from_store(rows.error());
-            }
-            const Month now = this_month();
-            const auto current = in_effect(*rows, now);
-            std::string effective_from;
-            control::Result<std::vector<control::BillingSubscription>> written;
-            if (!current) {
-                effective_from = now.first_day();
-                written =
-                    context.store->set_billing_subscription(customer_id, effective_from, plan_id);
-            } else if (current->plan_id == plan_id) {
-                effective_from = current->effective_from;
-                written = context.store->set_billing_subscription(
-                    customer_id, now.next().first_day(), "");
-            } else {
-                effective_from = now.next().first_day();
-                written =
-                    context.store->set_billing_subscription(customer_id, effective_from, plan_id);
-            }
-            if (!written) {
-                co_return from_store(written.error());
-            }
-            ApiResult result =
-                account_of(context, customer_id, *resolved->provider, providers->status());
-            if (result.ok) {
-                audit(context,
-                      customer_id,
-                      "billing.plan.choose",
-                      {{"plan_id", plan_id},
-                       {"effective_from", effective_from},
-                       {"previous_plan_id", current ? current->plan_id : std::string()}});
-            }
-            co_return result;
-        }});
-
-    registry.add(Capability{
         .name = "bill_preview",
         .title = "Bill preview",
         .description =
-            "The bill for one UTC month (`period`, YYYY-MM; this month when left out) on the plan "
-            "in effect that month, worked out now from the usage of every live workspace of the "
-            "account, read from each workspace's own records. Nothing is stored. `complete` is "
+            "The bill for one UTC month (`period`, YYYY-MM; this month when left out): each usage "
+            "dimension's quantity times its rate on the price list in force for the month, worked "
+            "out now from the usage of every live workspace of the account, read from each "
+            "workspace's own records. Nothing is stored. `complete` is "
             "false when a workspace's usage could not be read (`unread_workspaces`); `invoice` is "
             "the invoice already issued for the month, if any.",
         .input_schema = object_schema({{"customer_id", string_schema()}, {"period", period_schema}},
@@ -1145,22 +1116,19 @@ void register_billing_capabilities(Registry& registry,
             if (!month) {
                 co_return ApiResult::failure("invalid_input", "period is YYYY-MM", "/period");
             }
-            auto plan = plan_for(context, customer_id, *month);
-            if (!plan) {
-                co_return plan.error();
+            auto list = list_for(context, *month);
+            if (!list) {
+                co_return list.error();
             }
-            auto measured = co_await measure(context, customer_id, *month, *plan);
+            auto measured = co_await measure(context, customer_id, *month, *list);
             if (!measured) {
                 co_return ApiResult::failure("store_error", measured.error().message);
             }
             if (measured->failure) {
                 co_return *measured->failure;
             }
-            json bill = bill_json(customer_id,
-                                  *month,
-                                  *plan,
-                                  bill_lines(*plan, measured->quantities, month->name()),
-                                  *measured);
+            json bill = bill_json(
+                customer_id, *month, *list, bill_lines(*list, measured->quantities), *measured);
             bill["invoice"] = nullptr;
             if (const auto invoices = context.store->list_invoices(customer_id)) {
                 for (const control::Invoice& invoice : *invoices) {
@@ -1172,7 +1140,7 @@ void register_billing_capabilities(Registry& registry,
             audit(context,
                   customer_id,
                   "billing.bill.preview",
-                  {{"period", month->name()}, {"plan_id", plan->id}});
+                  {{"period", month->name()}, {"price_list_id", list->id}});
             co_return ApiResult::success(std::move(bill));
         }});
 
@@ -1181,8 +1149,9 @@ void register_billing_capabilities(Registry& registry,
         .title = "Issue an invoice",
         .description =
             "Operator or instance administrator only. Issues the invoice for one UTC month that "
-            "has ended: the bill worked out from the account's usage on the plan in effect that "
-            "month, with each line's quantity frozen, then asks the payment provider to collect "
+            "has ended: each usage dimension's quantity times its rate on the price list in force "
+            "for that month, with each line's quantity and rate frozen, then asks the payment "
+            "provider to collect "
             "it. Refused while any workspace's usage cannot be read (store_unavailable, try "
             "again) and when the month already has an invoice that is not void (conflict).",
         .input_schema = object_schema({{"customer_id", string_schema()}, {"period", period_schema}},
@@ -1232,11 +1201,11 @@ void register_billing_capabilities(Registry& registry,
                     ++attempt;
                 }
             }
-            auto plan = plan_for(context, customer_id, *month);
-            if (!plan) {
-                co_return plan.error();
+            auto list = list_for(context, *month);
+            if (!list) {
+                co_return list.error();
             }
-            auto measured = co_await measure(context, customer_id, *month, *plan);
+            auto measured = co_await measure(context, customer_id, *month, *list);
             if (!measured) {
                 co_return ApiResult::failure("store_error", measured.error().message);
             }
@@ -1256,10 +1225,10 @@ void register_billing_capabilities(Registry& registry,
             control::Invoice invoice;
             invoice.customer_id = customer_id;
             invoice.period = month->name();
-            invoice.plan_id = plan->id;
-            invoice.plan_name = plan->name;
-            invoice.currency = plan->currency;
-            invoice.lines = bill_lines(*plan, measured->quantities, month->name());
+            invoice.plan_id = list->id;
+            invoice.plan_name = "Usage";
+            invoice.currency = list->currency;
+            invoice.lines = bill_lines(*list, measured->quantities);
             for (const control::InvoiceLine& line : invoice.lines) {
                 invoice.total_micros = add_capped(invoice.total_micros, line.amount_micros);
             }
@@ -1292,7 +1261,7 @@ void register_billing_capabilities(Registry& registry,
                   {{"invoice_id", stored->id},
                    {"number", stored->number},
                    {"period", stored->period},
-                   {"plan_id", stored->plan_id},
+                   {"price_list_id", stored->plan_id},
                    {"total_micros", stored->total_micros},
                    {"currency", stored->currency},
                    {"provider", stored->provider},
