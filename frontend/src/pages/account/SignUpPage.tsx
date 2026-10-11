@@ -8,7 +8,7 @@ import { Button, Field, fieldError, Form, Notice, Page } from "@/lib/ui";
 import { useSession } from "@/lib/session";
 import { AuthFrame, useSignedInRedirect } from "./AuthFrame";
 import { ClerkSignIn } from "./ClerkSignIn";
-import { leaveFor, messageOf, NO_WORKSPACE, returnQuery, returnTarget } from "./signIn";
+import { landingAfterSignIn, leaveFor, messageOf, NO_WORKSPACE, returnQuery, returnTarget } from "./signIn";
 
 const INSTALL = `git clone --recurse-submodules git@github.com:oramasearch/liquid.git
 cd liquid
@@ -19,7 +19,7 @@ export PATH="$HOME/.local/bin:$PATH"`;
 
 export default function SignUpPage() {
   const { viewer } = useSession();
-  const signedIn = useSignedInRedirect((administrator, clerk) => (administrator || clerk ? "/repositories" : "/sessions"));
+  const signedIn = useSignedInRedirect((administrator) => landingAfterSignIn(administrator));
   if (signedIn) return null;
   if (viewer.clerk.enabled) return <ClerkSignIn mode="sign-up" />;
   return <NativeSignUp />;

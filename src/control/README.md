@@ -102,6 +102,9 @@ status changes conditional on the revision read; the retired table (migration
 `transcripts.cpp` is the transcripts collection (lake#561): one record per transcript, found by the
 space, edited and deleted at the revision read, with the paging and excerpt helpers
 `list_transcripts` uses; it was never a PostgreSQL table.
+`solutions.cpp` is a workspace's own AI solutions (lake#597): one record per solution in
+`lake_solutions`, found by the space, edited and deleted at the revision read, with the rules a
+solution keeps and the copy of one of Orama's catalogue entries; it was never a PostgreSQL table.
 `stream_owners.cpp` is the second
 (lake#379): one `if_absent` record per topic, keyed by the topic's blind index; the stores hold no
 topic creator (the retired table is dropped by `0070`). `drive_share_links.cpp` is the drive share

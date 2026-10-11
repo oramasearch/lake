@@ -2,6 +2,7 @@
  * lookups the shell, breadcrumbs and command palette share. */
 import type { Session } from "@/lib/session";
 import type { Audience, Screen, SectionKey } from "@/routes/types";
+import { HOME_NAV, currentNavIn, localPath, type NavItem } from "@/routes/nav";
 import { screens as account } from "@/pages/account/routes";
 import { screens as admin } from "@/pages/admin/routes";
 import { screens as apps } from "@/pages/apps/routes";
@@ -20,7 +21,8 @@ import { screens as train } from "@/pages/train/routes";
 import { screens as transcripts } from "@/pages/transcripts/routes";
 import { screens as workspaces } from "@/pages/workspaces/routes";
 
-export type { Screen, SectionKey, Audience };
+export type { Screen, SectionKey, Audience, NavItem };
+export { localPath };
 
 /** Every page. The catch-all ("*", home group) is last. */
 export const SCREENS: Screen[] = [
@@ -45,6 +47,7 @@ export const SCREENS: Screen[] = [
 
 const SECTION_LABELS: Record<SectionKey, string> = {
   top: "",
+  home: "Home",
   data: "Data",
   design: "Design",
   train: "Train",
@@ -60,16 +63,14 @@ export function sectionLabel(key: SectionKey): string {
   return SECTION_LABELS[key];
 }
 
-/** One rail item. `external` opens a non-page URL instead of a page. */
-export type NavItem = { section: SectionKey; path: string; label: string; icon: string; audience: Audience[]; external?: boolean };
-
 const AO: Audience[] = ["account", "operator"];
 const ALL: Audience[] = ["visitor", "account", "operator"];
 
 /** The rail, in lake's order (web_ui.cpp nav_items). Organization is the account holder's group;
  * the operator sees Administration instead. */
 export const NAV: NavItem[] = [
-  { section: "top", path: "/", label: "Home", icon: "home", audience: ALL },
+  // A signed-in person's Home group: Ask Orama at `/`, then Dashboard (lake#600).
+  ...HOME_NAV,
   // Data: where a person's data lives and is found (Steve, 2026-10-10). Datasets is the Train →
   // Data page, kept at its address.
   { section: "data", path: "/repositories", label: "Repositories", icon: "repository", audience: ALL },
@@ -126,18 +127,6 @@ export function navFor(session: Pick<Session, "viewer">): NavItem[] {
   );
 }
 
-/** Strip `/w/<id>` from a path: the workspace-local path the registry is keyed by. */
-export function localPath(pathname: string): string {
-  const match = /^\/w\/[^/]+(\/.*)?$/.exec(pathname);
-  if (!match) return pathname;
-  return match[1] && match[1] !== "/" ? match[1] : "/";
-}
-
-function owns(prefix: string, path: string): boolean {
-  if (prefix === "/") return path === "/";
-  return path === prefix || path.startsWith(prefix + "/");
-}
-
 /** The screen a page path belongs to (exact match first, then patterns with `:params`). */
 export function matchScreen(pathname: string): Screen | undefined {
   const path = localPath(pathname);
@@ -153,15 +142,7 @@ export function matchScreen(pathname: string): Screen | undefined {
 /** The rail item that is current for a path: the item whose path or owned paths cover it. The
  * first match wins, as on the server. */
 export function currentNav(pathname: string, items: NavItem[]): NavItem | undefined {
-  const path = localPath(pathname);
-  for (const item of items) {
-    if (item.external) continue;
-    const screen = SCREENS.find((s) => s.path === item.path);
-    const prefixes = [item.path, ...(screen?.owns ?? [])];
-    if (prefixes.some((p) => owns(p, path))) return item;
-    if (item.path === "/design/projects" && path === "/design") return item;
-  }
-  return undefined;
+  return currentNavIn(pathname, items, (path) => SCREENS.find((s) => s.path === path)?.owns ?? []);
 }
 
 /** A workspace page's address under the current workspace. */
@@ -172,7 +153,7 @@ export function workspacePath(workspaceId: string | null, path: string): string 
 /** Whether a page path is a workspace page (lake's workspace_page_path). */
 export function isWorkspacePath(path: string): boolean {
   if (["/workspaces", "/workspaces/create", "/workspaces/delete", "/workspace/select"].includes(path)) return false;
-  return ["/design", "/train", "/ship", "/ask", "/workspace", "/workspaces", "/transcripts", "/transcript"].some((p) => path === p || path.startsWith(p + "/"));
+  return ["/design", "/train", "/ship", "/workspace", "/workspaces", "/transcripts", "/transcript"].some((p) => path === p || path.startsWith(p + "/"));
 }
 
 /** The pages the palette offers: rail items the viewer can open, plus account pages. */
@@ -188,7 +169,7 @@ export function navigableScreens(session: Pick<Session, "viewer">): Screen[] {
     }
   }
   if (session.viewer.signed_in && !session.viewer.administrator) {
-    for (const path of ["/settings", "/sessions", "/tokens", "/ask"]) {
+    for (const path of ["/settings", "/sessions", "/tokens"]) {
       const screen = SCREENS.find((s) => s.path === path);
       if (screen) out.push(screen);
     }

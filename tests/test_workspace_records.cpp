@@ -29,6 +29,7 @@
 #include "lake/api/forge.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/registry.hpp"
+#include "lake/api/rest.hpp"
 #include "lake/api/transcription.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_runs.hpp"
@@ -52,6 +53,7 @@
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/repository_records.hpp"
 #include "lake/control/secret_records.hpp"
+#include "lake/control/solutions.hpp"
 #include "lake/control/stream_owners.hpp"
 #include "lake/control/transcripts.hpp"
 #include "lake/control/workspace_audit.hpp"
@@ -923,6 +925,298 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
         }
         EXPECT_EQ(t.call(second, capability, input).error.code, "unauthorized") << capability;
     }
+}
+
+// A workspace's own AI solutions beside Orama's read-only catalogue (docs/api/solutions.md,
+// lake#597): created, listed with Orama's, edited, duplicated and deleted in their own workspace;
+// Orama's refused for edit and delete by the server; another workspace and another space refused.
+TEST_P(WorkspaceRecordStores, SolutionsAreTheWorkspacesOwnAndOramasStayReadOnly) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const auto in = [&](const auto& space, std::size_t workspace, json input) {
+        input["customer_id"] = space.customer_id;
+        input["workspace_id"] = space.workspaces[workspace];
+        return input;
+    };
+
+    // Orama's catalogue, as the workspace's engine answers it.
+    const json churn{
+        {"id", "S-1"},
+        {"name", "Churn & Retention"},
+        {"promise", "Find who may leave, explain why, and route the right retention work."},
+        {"use_case", "Identify preventable churn early enough for a governed intervention."},
+        {"composition",
+         json::array({{{"methodology", "M-1"}, {"role", "primary"}, {"minimum_level", 1}},
+                      {{"methodology", "M-5"}, {"role", "attachable"}, {"minimum_level", 2}}})},
+        {"pipeline_order", json::array({"M-2", "M-1", "M-5"})},
+        {"measurement",
+         {{"design", "holdout"},
+          {"outcome", {{"name", "retained revenue"}, {"unit", "USD"}, {"window_days", 90}}}}},
+        {"measurement_design", "Permanent holdout with randomized treatment cells."},
+        {"decision_policy_template", "Risk and treatment tiers with contact caps."},
+        {"status", "catalogue"},
+        {"runnable", true}};
+    bool catalogue_listed = true;
+    t.zetta->responder =
+        [&](const std::string& capability,
+            const json& input) -> std::optional<lake::control::ZettaControlResult<json>> {
+        if (capability == "list_solutions") {
+            if (!catalogue_listed) {
+                return lake::control::ZettaControlResult<json>(std::unexpected(
+                    lake::control::ZettaControlError{"unknown_capability", "unknown"}));
+            }
+            return lake::control::ZettaControlResult<json>(
+                json{{"solutions", json::array({churn})}});
+        }
+        if (capability == "get_solution") {
+            if (input.value("solution", std::string()) == "S-1") {
+                return lake::control::ZettaControlResult<json>(json{{"solution", churn}});
+            }
+            return lake::control::ZettaControlResult<json>(std::unexpected(
+                lake::control::ZettaControlError{"not_found", "no solution named"}));
+        }
+        return std::nullopt;
+    };
+
+    // Create: the catalogue's shape as far as a person can author it.
+    const json late{{"name", " Late payments "},
+                    {"problem", "Invoices are paid late and cash runs short."},
+                    {"decision", "Which customers collections calls first each morning."},
+                    {"measurement",
+                     {{"metric", "days sales outstanding"}, {"baseline", "52"}, {"target", "40"}}},
+                    {"methodologies", json::array({"M-1", {{"id", "M-3"}, {"minimum_level", 2}}})},
+                    {"pipeline", "collections/late-payers"},
+                    {"notes", "Start with the enterprise accounts."}};
+    const auto created = t.call(first, "create_solution", in(first, 0, late));
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const json own = created.value["solution"];
+    const std::string id = own["id"];
+    EXPECT_TRUE(lake::control::workspace_solution_id(id));
+    EXPECT_EQ(own["source"], "workspace");
+    EXPECT_EQ(own["editable"], true);
+    EXPECT_EQ(own["name"], "Late payments") << "trimmed";
+    EXPECT_EQ(own["decision"], late["decision"]);
+    EXPECT_EQ(own["measurement"],
+              (json{{"metric", "days sales outstanding"}, {"baseline", "52"}, {"target", "40"}}));
+    EXPECT_EQ(own["methodologies"],
+              (json::array(
+                  {{{"id", "M-1"}, {"minimum_level", 1}}, {{"id", "M-3"}, {"minimum_level", 2}}})));
+    EXPECT_EQ(own["pipeline"], "collections/late-payers");
+    EXPECT_TRUE(own["duplicated_from"].is_null());
+    EXPECT_TRUE(own["updated_at"].is_null());
+    EXPECT_EQ(own["created_by"], first.principal.user_id);
+    const auto author = t.store->get_user(first.principal.user_id);
+    ASSERT_TRUE(author);
+    EXPECT_EQ(own["created_by_name"],
+              author->display_name.empty() ? author->email : author->display_name);
+
+    // Sealed at rest in the workspace's own Zetta; no other workspace holds it.
+    const auto& rows =
+        t.zetta->records["http://" + first.workspaces[0] + ".test"].rows("solutions");
+    ASSERT_EQ(rows.size(), 1U);
+    for (const auto& [key, row] : rows) {
+        EXPECT_EQ(row.dump().find("Late payments"), std::string::npos) << "sealed at rest";
+        EXPECT_EQ(row.dump().find("collections"), std::string::npos) << "sealed at rest";
+    }
+    EXPECT_TRUE(
+        t.zetta->records["http://" + first.workspaces[1] + ".test"].rows("solutions").empty());
+
+    // Refusals name the field.
+    json no_metric = late;
+    no_metric["measurement"] = {{"baseline", "52"}};
+    EXPECT_EQ(t.call(first, "create_solution", in(first, 0, no_metric)).error.path,
+              "/measurement/metric");
+    json blank_decision = late;
+    blank_decision["decision"] = "  ";
+    const auto blank = t.call(first, "create_solution", in(first, 0, blank_decision));
+    EXPECT_EQ(blank.error.code, "invalid_input");
+    EXPECT_EQ(blank.error.path, "/decision");
+    json twice = late;
+    twice["methodologies"] = json::array({"M-1", "M-1"});
+    EXPECT_EQ(t.call(first, "create_solution", in(first, 0, twice)).error.path,
+              "/methodologies/1/id");
+    json too_high = late;
+    too_high["methodologies"] = json::array({{{"id", "M-1"}, {"minimum_level", 5}}});
+    EXPECT_EQ(t.call(first, "create_solution", in(first, 0, too_high)).error.path,
+              "/methodologies/0/minimum_level");
+    json long_name = late;
+    long_name["name"] = std::string(lake::control::max_solution_name_bytes + 1, 'a');
+    EXPECT_EQ(t.call(first, "create_solution", in(first, 0, long_name)).error.path, "/name");
+
+    // List both kinds, each marked; `source` keeps one kind.
+    const auto list = [&](std::size_t workspace, json extra) {
+        return t.call(first, "list_solutions", in(first, workspace, std::move(extra)));
+    };
+    auto listed = list(0, json::object());
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["solutions"].size(), 2U);
+    EXPECT_EQ(listed.value["solutions"][0]["id"], "S-1");
+    EXPECT_EQ(listed.value["solutions"][0]["source"], "orama");
+    EXPECT_EQ(listed.value["solutions"][0]["editable"], false);
+    EXPECT_EQ(listed.value["solutions"][0]["promise"], churn["promise"]) << "the engine's fields";
+    EXPECT_EQ(listed.value["solutions"][1], own);
+    EXPECT_EQ(listed.value["catalogue"], (json{{"available", true}, {"message", nullptr}}));
+    EXPECT_EQ(list(0, {{"source", "orama"}}).value["solutions"].size(), 1U);
+    const auto mine = list(0, {{"source", "workspace"}});
+    ASSERT_EQ(mine.value["solutions"].size(), 1U);
+    EXPECT_EQ(mine.value["solutions"][0]["id"], id);
+    EXPECT_EQ(list(0, {{"source", "everyone"}}).error.path, "/source");
+    const auto other_workspace = list(1, json::object());
+    ASSERT_EQ(other_workspace.value["solutions"].size(), 1U) << "another workspace: Orama's only";
+    EXPECT_EQ(other_workspace.value["solutions"][0]["source"], "orama");
+
+    // Read both kinds; yours only in its own workspace.
+    const auto get = [&](std::size_t workspace, const std::string& which) {
+        return t.call(first, "get_solution", in(first, workspace, {{"id", which}}));
+    };
+    const auto got_orama = get(0, "S-1");
+    ASSERT_TRUE(got_orama.ok) << got_orama.error.message;
+    EXPECT_EQ(got_orama.value["solution"]["source"], "orama");
+    EXPECT_EQ(got_orama.value["solution"]["editable"], false);
+    EXPECT_EQ(got_orama.value["solution"]["name"], "Churn & Retention");
+    EXPECT_EQ(get(0, id).value["solution"], own);
+    EXPECT_EQ(get(1, id).error.code, "not_found");
+    EXPECT_EQ(get(0, "S-99").error.code, "not_found");
+    EXPECT_EQ(get(0, lake::control::new_uuid_v4()).error.code, "not_found");
+
+    // Edit yours: the fields sent replace theirs, the others are kept.
+    const auto renamed = t.call(first,
+                                "update_solution",
+                                in(first,
+                                   0,
+                                   {{"id", id},
+                                    {"name", "Late payers"},
+                                    {"measurement", {{"metric", "DSO"}, {"target", "38"}}}}));
+    ASSERT_TRUE(renamed.ok) << renamed.error.message;
+    EXPECT_EQ(renamed.value["solution"]["name"], "Late payers");
+    EXPECT_EQ(renamed.value["solution"]["measurement"],
+              (json{{"metric", "DSO"}, {"baseline", nullptr}, {"target", "38"}}));
+    EXPECT_EQ(renamed.value["solution"]["problem"], own["problem"]);
+    EXPECT_EQ(renamed.value["solution"]["methodologies"], own["methodologies"]);
+    EXPECT_EQ(renamed.value["solution"]["created_at"], own["created_at"]);
+    EXPECT_EQ(renamed.value["solution"]["updated_by"], first.principal.user_id);
+    EXPECT_TRUE(renamed.value["solution"]["updated_at"].is_string());
+    EXPECT_EQ(get(0, id).value["solution"]["name"], "Late payers");
+    const auto cleared =
+        t.call(first,
+               "update_solution",
+               in(first, 0, {{"id", id}, {"methodologies", json::array()}, {"notes", ""}}));
+    ASSERT_TRUE(cleared.ok) << cleared.error.message;
+    EXPECT_TRUE(cleared.value["solution"]["methodologies"].empty());
+    EXPECT_TRUE(cleared.value["solution"]["notes"].is_null());
+    EXPECT_EQ(t.call(first, "update_solution", in(first, 0, {{"id", id}})).error.code,
+              "invalid_input");
+    EXPECT_EQ(
+        t.call(first, "update_solution", in(first, 0, {{"id", id}, {"problem", " "}})).error.path,
+        "/problem");
+    EXPECT_EQ(
+        t.call(first, "update_solution", in(first, 1, {{"id", id}, {"name", "x"}})).error.code,
+        "not_found")
+        << "another workspace of the space cannot edit it";
+
+    // Orama's are read-only: the server refuses, with the reason and what to do instead.
+    const auto edit_orama =
+        t.call(first, "update_solution", in(first, 0, {{"id", "S-1"}, {"name", "Mine now"}}));
+    EXPECT_EQ(edit_orama.error.code, "forbidden");
+    EXPECT_EQ(edit_orama.error.path, "/id");
+    EXPECT_NE(edit_orama.error.message.find("S-1 (Churn & Retention) is one of Orama's catalogue "
+                                            "solutions, which are read-only and cannot be edited"),
+              std::string::npos)
+        << edit_orama.error.message;
+    EXPECT_NE(edit_orama.error.message.find("duplicate_solution"), std::string::npos);
+    const auto delete_orama = t.call(first, "delete_solution", in(first, 0, {{"id", "S-1"}}));
+    EXPECT_EQ(delete_orama.error.code, "forbidden");
+    EXPECT_NE(delete_orama.error.message.find("cannot be deleted"), std::string::npos);
+    EXPECT_EQ(lake::api::rest_status(delete_orama), 403);
+    EXPECT_EQ(t.call(first, "delete_solution", in(first, 0, {{"id", "S-99"}})).error.code,
+              "not_found");
+    EXPECT_EQ(get(0, "S-1").value["solution"]["name"], "Churn & Retention") << "unchanged";
+
+    // Duplicate Orama's into an editable one of your own.
+    const auto from_orama = t.call(first, "duplicate_solution", in(first, 0, {{"id", "S-1"}}));
+    ASSERT_TRUE(from_orama.ok) << from_orama.error.message;
+    const json copy = from_orama.value["solution"];
+    EXPECT_EQ(copy["source"], "workspace");
+    EXPECT_EQ(copy["editable"], true);
+    EXPECT_EQ(copy["name"], "Churn & Retention");
+    EXPECT_EQ(copy["problem"], churn["use_case"]);
+    EXPECT_EQ(copy["decision"], churn["promise"]);
+    EXPECT_EQ(copy["measurement"]["metric"], "retained revenue (USD)");
+    EXPECT_EQ(copy["methodologies"],
+              (json::array(
+                  {{{"id", "M-1"}, {"minimum_level", 1}}, {{"id", "M-5"}, {"minimum_level", 2}}})));
+    EXPECT_EQ(copy["pipeline"], "Methodologies in order: M-2, M-1, M-5");
+    EXPECT_EQ(copy["duplicated_from"], "S-1");
+    EXPECT_NE(copy["notes"].get<std::string>().find("Duplicated from Orama's S-1"),
+              std::string::npos);
+    const auto edited_copy =
+        t.call(first, "update_solution", in(first, 0, {{"id", copy["id"]}, {"name", "Our churn"}}));
+    ASSERT_TRUE(edited_copy.ok) << edited_copy.error.message;
+    EXPECT_EQ(edited_copy.value["solution"]["name"], "Our churn");
+
+    // Duplicate another of yours, named.
+    const auto from_own = t.call(
+        first, "duplicate_solution", in(first, 0, {{"id", id}, {"name", "Late payers, EMEA"}}));
+    ASSERT_TRUE(from_own.ok) << from_own.error.message;
+    EXPECT_NE(from_own.value["solution"]["id"], id);
+    EXPECT_EQ(from_own.value["solution"]["name"], "Late payers, EMEA");
+    EXPECT_EQ(from_own.value["solution"]["duplicated_from"], id);
+    EXPECT_EQ(from_own.value["solution"]["measurement"]["metric"], "DSO");
+    EXPECT_TRUE(from_own.value["solution"]["updated_at"].is_null());
+    const auto unnamed = t.call(first, "duplicate_solution", in(first, 0, {{"id", id}}));
+    ASSERT_TRUE(unnamed.ok) << unnamed.error.message;
+    EXPECT_EQ(unnamed.value["solution"]["name"], "Late payers (copy)");
+    EXPECT_EQ(t.call(first, "duplicate_solution", in(first, 0, {{"id", "S-99"}})).error.code,
+              "not_found");
+    EXPECT_EQ(t.call(first, "duplicate_solution", in(first, 1, {{"id", id}})).error.code,
+              "not_found")
+        << "another workspace cannot copy it";
+    EXPECT_EQ(list(0, {{"source", "workspace"}}).value["solutions"].size(), 4U);
+
+    // Delete yours, in its own workspace only.
+    EXPECT_EQ(t.call(first, "delete_solution", in(first, 1, {{"id", id}})).error.code, "not_found");
+    const auto deleted = t.call(first, "delete_solution", in(first, 0, {{"id", id}}));
+    ASSERT_TRUE(deleted.ok) << deleted.error.message;
+    EXPECT_EQ(deleted.value, (json{{"deleted", true}}));
+    EXPECT_EQ(get(0, id).error.code, "not_found");
+    EXPECT_EQ(t.call(first, "delete_solution", in(first, 0, {{"id", id}})).error.code, "not_found");
+    EXPECT_EQ(list(0, {{"source", "workspace"}}).value["solutions"].size(), 3U);
+
+    // An engine that does not list Orama's: yours are still listed, and the answer says why.
+    catalogue_listed = false;
+    const auto without = list(0, json::object());
+    ASSERT_TRUE(without.ok) << without.error.message;
+    EXPECT_EQ(without.value["solutions"].size(), 3U);
+    EXPECT_EQ(without.value["catalogue"]["available"], false);
+    EXPECT_NE(without.value["catalogue"]["message"].get<std::string>().find("does not list"),
+              std::string::npos);
+
+    // Another space is refused before any workspace is read.
+    const std::string kept = copy["id"];
+    for (const std::string capability : {"list_solutions",
+                                         "get_solution",
+                                         "create_solution",
+                                         "update_solution",
+                                         "delete_solution",
+                                         "duplicate_solution"}) {
+        json input = in(first, 0, {{"id", kept}});
+        if (capability == "list_solutions") {
+            input.erase("id");
+        }
+        if (capability == "create_solution") {
+            input = in(first, 0, late);
+        }
+        if (capability == "update_solution") {
+            input["name"] = "x";
+        }
+        EXPECT_EQ(t.call(second, capability, input).error.code, "unauthorized") << capability;
+    }
+    EXPECT_EQ(get(0, kept).value["solution"]["name"], "Our churn") << "unchanged";
 }
 
 TEST(WorkspaceRecords, AnOpportunityStatusChangeRereadsAfterAConcurrentWrite) {

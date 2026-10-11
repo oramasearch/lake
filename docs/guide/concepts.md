@@ -71,7 +71,7 @@ MCP tools take.
 | **Hold-out** | The share of rows kept out of training to measure the model. A score without one is *in-sample* and flatters the model. |
 | **Held-out metrics** | Scores measured on the held-out rows, named as the run report names them: `held_out_auc`, `held_out_log_loss`, `held_out_accuracy`, `held_out_rmse`, `held_out_mae`. A run's report leads with its held-out score. |
 | **Methodology** | A modelling method the engine runs, such as segmentation, forecasting or anomaly detection. **Design → Methodologies** lists each one, what it needs and whether your workspace runs it. |
-| **AI solution** | An AI system that answers one business problem end to end: the decision it drives, the methodologies it composes and how its return is measured. You build one in an AI project; **Design → Solutions** is Orama's catalogue of ready-made ones to start from. See [AI Solutions, Methodologies and Opportunities](/docs/solutions). |
+| **AI solution** | An AI system that answers one business problem end to end: the decision it drives, the methodologies it composes and how its return is measured. You build one in an AI project; **Design → Solutions** holds Orama's catalogue of ready-made ones, which are read-only, and the ones you write or duplicate yourself. See [AI Solutions, Methodologies and Opportunities](/docs/solutions). |
 | **Opportunity** | An AI project worth building that Auto-Suggest found by scanning your workspace's data. It is kept until you create a project from it or dismiss it. |
 | **Model** | A learned function that turns inputs into a prediction, a score or a ranking. A model can be one step inside a pipeline, and one pipeline can hold several models (a segmentation feeding a churn classifier, for example). A model also stands on its own: you can upload one as a model repository (weights, card and history) without any pipeline. Each run that trains a model adds a **version** of it. **Train → Models** lists the models a workspace trains, with their versions and held-out scores; **Ship → Models** serves them: a **published** version can be called from outside lake with `predict`. See [Models and Search Indexes](/docs/ship). |
 | **Search index** | A full-text index over a dataset's text columns. A published index answers outside searches with `search_index`. See [Models and Search Indexes](/docs/ship). |
@@ -81,7 +81,7 @@ MCP tools take.
 | **Agent Library** | The agents Orama provides: Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest and AgentCreator. **Design → Agent Library** lists them and whether each runs on your lake. |
 | **Agent Factory** | Building a new agent in a conversation with AgentCreator. |
 | **Proposal** | A change an agent wants to make, shown in full. Nothing changes until you confirm it. |
-| **Ask Orama** | The agent in the top bar of every page. It answers from what you can read and hands work to other agents. See [Ask Orama](/docs/ask-orama). |
+| **Ask Orama** | lake's home page, and the agent in the top bar of every page. It answers from what you can read and hands work to other agents. See [Ask Orama](/docs/ask-orama). |
 
 ### Ship
 

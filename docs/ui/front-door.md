@@ -5,7 +5,9 @@ server-rendered homepage checked on 2026-10-01 against lake `36679e1` on the dev
 
 The homepage (`/`, `frontend/src/pages/home/HomePage.tsx`) says what lake is for: designing,
 training and shipping AI on the customer's own data, in a workspace of their own. It reads only
-`viewer`. Repositories are one link under Ship.
+`viewer`. Repositories are one link under Ship. Visitors and the operator see it. A signed-in
+person lands on Ask Orama instead, full page, and finds the platform at a glance under Home →
+Dashboard (`/dashboard`; lake#600, [README.md](README.md#the-shell)).
 
 **Sign-in.** When `LAKE_CLERK_PUBLISHABLE_KEY` is set (`viewer.clerk.enabled`), Sign in opens
 Clerk's form and lake's own password, TOTP and passkey pages leave the navigation; see
@@ -29,8 +31,7 @@ Orama's cloud or your own.**
 
 Under Clerk the visitor actions are **Sign in** and **Read the docs**, followed by
 **Accounts are added by invitation while lake is in development.** Without Clerk they are
-**Create account**, Sign in and Read the docs. A signed-in account instead gets **Getting started** (the Docs) and
-**Load your data**.
+**Create account**, Sign in and Read the docs. The operator instead gets **Getting started** (the Docs) and **Load your data**.
 
 Three cards follow, one per verb. Each states only what lake does today:
 
@@ -49,7 +50,7 @@ The rail and top bar come from `NAV` in `frontend/src/routes.tsx` and `component
 | Viewer | Rail | Top bar |
 |---|---|---|
 | Signed out or dead credential | Home, Public Repositories · **Developer:** Docs | Sign in; also Create account when Clerk is off and password sign-up is open |
-| Ordinary account | Home, Repositories, Shared with Me, Search · **Design:** Projects, Opportunities, Solutions, Methodologies, Agent Library · **Train:** Agents, Data, Runs, Experiments, Streams · **Ship:** Models, Search Indexes, Packages, Apps, Deployments, Services, Workspaces · **Organization:** Organizations, Secrets, Usage, Activity · **Developer:** API, MCP, Docs | Space and workspace picker, Go to, theme, Ask Orama, the account menu: Settings, Sessions, Passkeys (omitted when Clerk is on), Tokens, Sign out |
+| Ordinary account | **Home:** Ask Orama (`/`), Dashboard (`/dashboard`) · **Data:** Repositories, Drives, Shared with Me, Search, Datasets, Transcripts · **Design:** Projects, Opportunities, Solutions, Methodologies, Agent Library · **Train:** Agents, Runs, Experiments, Streams · **Ship:** Models, Search Indexes, Packages, Apps, Deployments, Services, Workspaces · **Organization:** Organizations, Secrets, Usage, Activity · **Developer:** API, MCP, Docs | Space and workspace picker, Go to, theme, Ask Orama, the account menu: Settings, Sessions, Passkeys (omitted when Clerk is on), Tokens, Sign out |
 | Operator | Home, Repositories, Search · **Design** · **Train** · **Ship** (as an account) · **Administration:** Customers, Organizations, Applications, Usage, Secrets, Audit · **Developer:** API, MCP, Docs | the picker when the operator can see a space, Go to, theme, Sign out |
 
 - **Activity** (`/activity`) is the account's own audit events through `my_audit`: newest first,

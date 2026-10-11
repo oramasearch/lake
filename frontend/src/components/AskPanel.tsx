@@ -1,7 +1,7 @@
 /** Ask Orama beside every page, replacing the server-rendered dock and its iframe: a header, the
  * conversation, and the message box at the bottom. `from` is the page it was opened from (path and
- * query), which every turn is told about. The conversation is the one the Ask Orama page shows
- * (pages/ask/conversation.tsx); "Full view" opens it there.
+ * query), which every turn is told about. The conversation is the one the Ask Orama home (`/`)
+ * shows (pages/ask/thread.ts); "Open as a page" opens it there (lake#600).
  *
  * The panel works in the session's current workspace. Its conversation is remembered for this tab
  * per workspace, so closing and reopening the panel, or moving between pages, keeps it.
@@ -10,7 +10,7 @@
  * viewport so the message box sits just above the keyboard, the page behind locked, inside the safe
  * areas, following each new answer unless the person scrolled up to read. A page can open it about
  * something (`openAsk`, lib/ask.ts): the request's context goes with the next message. */
-import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ExternalLink, FileText, Maximize2, Minimize2, Plus, Sparkles, X } from "lucide-react";
 import { useSession } from "@/lib/session";
@@ -18,29 +18,10 @@ import { ASK_DEFAULT_WIDTH, setResizingAsk } from "@/lib/askWidth";
 import type { AskRequest } from "@/lib/ask";
 import { useIsPhone, usePhoneSheet } from "@/lib/phoneSheet";
 import { NewReplyChip, useFollow } from "@/components/follow";
-import { qs, useAsync } from "@/pages/train/workspace";
-import { AskComposer, AskMessages, TurnInStreams, sendMessage, useAppPath, useConversation, useTalkTo } from "@/pages/ask/conversation";
-
-type PanelState = { conversation: string; task: string; agent: string };
-const EMPTY: PanelState = { conversation: "", task: "", agent: "agent-ask-orama" };
-const KEY = "lake-ask-panel:";
-
-function recall(workspaceId: string): PanelState {
-  try {
-    const stored = JSON.parse(sessionStorage.getItem(KEY + workspaceId) ?? "null");
-    return stored && typeof stored === "object" ? { ...EMPTY, ...stored } : EMPTY;
-  } catch {
-    return EMPTY;
-  }
-}
-
-function keep(workspaceId: string, state: PanelState) {
-  try {
-    sessionStorage.setItem(KEY + workspaceId, JSON.stringify(state));
-  } catch {
-    /* storage blocked: the conversation lasts while the panel is open */
-  }
-}
+import { useAsync } from "@/pages/train/workspace";
+import { homeLink } from "@/pages/ask/home";
+import { EMPTY_THREAD, useThread } from "@/pages/ask/thread";
+import { AskComposer, AskMessages, TurnInStreams, sendMessage, useConversation, useTalkTo } from "@/pages/ask/conversation";
 
 /** The panel's left edge: drag it, use the arrow keys on it, or double-click it to reset. */
 function ResizeHandle({ width, onResize }: { width: number; onResize: (width: number) => void }) {
@@ -151,42 +132,14 @@ export function AskPanel({
   );
 }
 
-/** Every panel control reading the same workspace's remembered state hears a change. */
-const listeners = new Set<() => void>();
-function announce() {
-  listeners.forEach((l) => l());
-}
-
-function usePanelState(workspaceId: string): [PanelState, (next: Partial<PanelState>) => void] {
-  const [state, setState] = useState<PanelState>(() => recall(workspaceId));
-  useEffect(() => {
-    const listener = () => setState(recall(workspaceId));
-    listeners.add(listener);
-    return () => {
-      listeners.delete(listener);
-    };
-  }, [workspaceId]);
-  const update = useCallback(
-    (next: Partial<PanelState>) => {
-      const merged = { ...recall(workspaceId), ...next };
-      keep(workspaceId, merged);
-      announce();
-    },
-    [workspaceId],
-  );
-  return [state, update];
-}
-
 function PanelActions({ workspaceId, from }: { workspaceId: string; from: string }) {
-  const [state, update] = usePanelState(workspaceId);
-  const path = useAppPath();
-  const full = path(`/ask?${qs({ conversation: state.conversation, from, agent: state.agent === "agent-ask-orama" ? "" : state.agent, task: state.task })}`);
+  const [state, update] = useThread(workspaceId);
   return (
     <>
-      <button type="button" className="icon-button" onClick={() => update({ ...EMPTY, agent: state.agent })} title="Start a new conversation" aria-label="Start a new conversation">
+      <button type="button" className="icon-button" onClick={() => update({ ...EMPTY_THREAD, agent: state.agent })} title="Start a new conversation" aria-label="Start a new conversation">
         <Plus size={16} aria-hidden />
       </button>
-      <Link to={full} className="icon-button" title="Open as a page" aria-label="Open the conversation as a page">
+      <Link to={homeLink(from)} className="icon-button" title="Open as a page" aria-label="Open the conversation as a page">
         <ExternalLink size={15} aria-hidden />
       </Link>
     </>
@@ -194,7 +147,7 @@ function PanelActions({ workspaceId, from }: { workspaceId: string; from: string
 }
 
 function PanelConversation({ workspaceId, from, request, onRequestDone }: { workspaceId: string; from: string; request: AskRequest | null; onRequestDone?: () => void }) {
-  const [state, update] = usePanelState(workspaceId);
+  const [state, update] = useThread(workspaceId);
   const { space } = useSession();
   const onSettled = useCallback(() => update({ task: "" }), [update]);
   const conversation = useConversation({ kind: "ask", conversationId: state.conversation, taskId: state.task, onSettled });

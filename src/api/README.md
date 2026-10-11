@@ -132,6 +132,11 @@ cleaning, and OpenAI's multipart request and answer. The HTTP exchange is the in
 `TranscriptPost`, which `http_server.cpp` builds over its outbound client when
 `LAKE_OPENAI_API_KEY` is set. See `docs/api/transcripts.md`.
 
+`solution_capabilities.cpp` registers the six solution capabilities (lake#597): a workspace's own
+solutions are sealed `lake_solutions` records in the workspace Zetta, listed and read beside Orama's
+catalogue, which it reads through the workspace's engine (`list_solutions`, `get_solution`);
+`update_solution` and `delete_solution` answer `forbidden` for Orama's. See `docs/api/solutions.md`.
+
 Repository terminal instructions receive a validated explicit `ServerOptions::external_origin` or
 the HTTPS fallback derived from trusted `public_host`. Request and proxy headers cannot select
 their URL; the web app shows the commands. Existing registry sync operations implement clone and
