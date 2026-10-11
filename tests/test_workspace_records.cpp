@@ -3830,6 +3830,97 @@ TEST_P(WorkspaceRecordStores, McpConnectionsLiveInTheirWorkspaceAndKeepTheirToke
     EXPECT_TRUE(t.call(first, "read_secret", {{"mount_id", mount_id}, {"name", "ticket-desk"}}).ok);
 }
 
+// OAuth 2.1 (lake#652): discovery, dynamic client registration, PKCE S256, the refresh token as
+// a workspace secret written as the person, a state taken once, and refresh with rotation.
+TEST_P(WorkspaceRecordStores, McpConnectionsSignInWithOAuthAndKeepOnlyARefreshToken) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    lake::test::McpTestServer server;
+    server.required_bearer = "nobody-has-this-yet";
+    t.mcp_http = lake::api::make_mcp_http(true);
+    const auto& first = t.spaces[0];
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = first.workspaces[0];
+        return input;
+    };
+    const auto mount = t.call(first, "create_secret_mount", in({{"name", "oauth"}}));
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::string mount_id = mount.value["id"];
+    const auto created =
+        t.call(first,
+               "create_mcp_connection",
+               in({{"name", "Docs"}, {"url", server.url()}, {"auth", {{"kind", "oauth"}}}}));
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["status"], "needs_sign_in");
+    const std::string id = created.value["id"];
+
+    const auto begun =
+        t.call(first, "begin_mcp_connection_sign_in", in({{"id", id}, {"mount_id", mount_id}}));
+    ASSERT_TRUE(begun.ok) << begun.error.message;
+    const std::string url = begun.value["authorization_url"];
+    EXPECT_EQ(url.rfind(server.base() + "/authorize?", 0), 0U) << url;
+    EXPECT_EQ(begun.value["redirect_uri"], "https://lake.test/mcp-connections/oauth/callback");
+    const auto query = lake::test::McpTestServer::form(url.substr(url.find('?') + 1));
+    EXPECT_EQ(query.at("code_challenge_method"), "S256");
+    EXPECT_EQ(query.at("resource"), server.base() + "/mcp");
+    EXPECT_EQ(query.at("state"), begun.value["state"].get<std::string>());
+    ASSERT_EQ(server.clients().size(), 1U) << "registered itself";
+    EXPECT_EQ(server.clients()[0].redirect_uris,
+              std::vector<std::string>{"https://lake.test/mcp-connections/oauth/callback"});
+    EXPECT_EQ(query.at("client_id"), server.clients()[0].id);
+
+    // The person consents at the server, which sends the code back.
+    const std::string code = server.issue_code(query.at("client_id"),
+                                               query.at("redirect_uri"),
+                                               query.at("code_challenge"),
+                                               query.at("resource"));
+    EXPECT_EQ(t.call(t.spaces[1],
+                     "complete_mcp_connection_sign_in",
+                     in({{"state", begun.value["state"]}, {"code", code}}))
+                  .error.code,
+              "unauthorized");
+    const auto done = t.call(first,
+                             "complete_mcp_connection_sign_in",
+                             in({{"state", begun.value["state"]}, {"code", code}}));
+    ASSERT_TRUE(done.ok) << done.error.message;
+    EXPECT_EQ(done.value["status"], "connected");
+    EXPECT_EQ(done.value["tool_count"], 4);
+    EXPECT_EQ(done.value["auth"]["secret"]["field"], "refresh_token");
+    EXPECT_EQ(t.call(first,
+                     "complete_mcp_connection_sign_in",
+                     in({{"state", begun.value["state"]}, {"code", code}}))
+                  .error.code,
+              "not_found")
+        << "a state is taken once";
+    const std::string first_refresh = server.refresh_token();
+    auto kept = t.call(first, "read_secret", {{"mount_id", mount_id}, {"name", "mcp-docs"}});
+    ASSERT_TRUE(kept.ok) << kept.error.message;
+    EXPECT_EQ(kept.value["value"]["refresh_token"], first_refresh);
+    EXPECT_FALSE(kept.value["value"].contains("access_token")) << "only the refresh token is kept";
+    EXPECT_EQ(done.value.dump().find(first_refresh), std::string::npos) << "never answered";
+
+    // The access token the server stops taking is renewed with the refresh token, which rotates.
+    ASSERT_TRUE(t.call(first,
+                       "update_mcp_connection",
+                       in({{"id", id}, {"tools", {{"echo", {{"allowed", true}}}}}}))
+                    .ok);
+    server.required_bearer = "revoked";
+    const auto called =
+        t.call(first,
+               "read_mcp_tool",
+               in({{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "after"}}}}));
+    ASSERT_TRUE(called.ok) << called.error.message;
+    EXPECT_EQ(server.token_grants(),
+              (std::vector<std::string>{"authorization_code", "refresh_token"}));
+    kept = t.call(first, "read_secret", {{"mount_id", mount_id}, {"name", "mcp-docs"}});
+    EXPECT_EQ(kept.value["value"]["refresh_token"], server.refresh_token());
+    EXPECT_NE(server.refresh_token(), first_refresh) << "the rotated token is the one kept";
+}
+
 INSTANTIATE_TEST_SUITE_P(Stores, WorkspaceRecordStores, testing::Values(false, true),
                          [](const auto& info) { return info.param ? "Postgres" : "Memory"; });
 

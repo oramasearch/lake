@@ -99,6 +99,8 @@ actions `write`. Each is audited in the workspace's own log ([audit](audit.md#wh
 | `call_mcp_tool` | action | `connection_id`, `tool`, `arguments?` | Runs an allowed tool, a change included |
 | `set_mcp_tool_auto_approve` | action | `connection_id`, `tool`, `agent`, `auto_approve` | Grants or takes back one unattended agent's right to run one change tool |
 | `list_mcp_connection_calls` | read | `id`, `limit?` | `{calls}`: the connection's recent calls and changes from the workspace audit, newest first |
+| `begin_mcp_connection_sign_in` | action | `id`, `mount_id`, `secret_name?`, `client_id?` | Starts an OAuth sign-in: `{authorization_url, state, redirect_uri, issuer}` ([signing in](#signing-in)) |
+| `complete_mcp_connection_sign_in` | action | `state`, `code` | Finishes it: the refresh token becomes a workspace secret, then the server is discovered |
 | `create_mcp_connection_agent` | action | `id`, `prompt`, `name?` | An agent on agent-runtime whose only tools are this connection's ([its agent](#a-connections-agent-and-streams)) |
 
 `auth` is `{kind: none}`, `{kind: bearer, secret: {mount_id, name, field}}` or `{kind: oauth}`. A
@@ -162,6 +164,49 @@ events back.
 Each exchange with a server is the workspace's usage ([metering](metering.md#usage-over-time)):
 one `calls` with `kind: mcp_connection` and `object_id` the connection, and the bytes sent and
 received as `transfer` with `kind: mcp_out` and `mcp_in`, through the existing `UsageRecorder`.
+
+## Signing in
+
+A connection with `auth: {kind: oauth}` signs in with OAuth 2.1, as the MCP authorization
+specification describes; a person does it once, and Lake keeps the refresh token.
+
+1. `begin_mcp_connection_sign_in {id, mount_id}` (a person only; an agent's credential is
+   `unauthorized`):
+   - **Discovery.** Lake asks the server without a credential; its `401` names the protected
+     resource metadata (RFC 9728, `WWW-Authenticate: Bearer resource_metadata=…`), else Lake reads
+     `/.well-known/oauth-protected-resource` at the server's origin. Its `authorization_servers[0]`
+     is the issuer (else the server's own origin), whose metadata is
+     `/.well-known/oauth-authorization-server` (RFC 8414, then `openid-configuration`). An issuer
+     that does not list `S256` in `code_challenge_methods_supported` is refused. Every URL is
+     checked like the server's: public addresses, `https`.
+   - **Registration.** Lake registers itself as a public client (RFC 7591: `client_name: Lake`, the
+     redirect URI, `authorization_code` and `refresh_token`, `token_endpoint_auth_method: none`),
+     once per connection and redirect URI. A server that registers no clients needs the client id
+     it issued, passed as `client_id`.
+   - **PKCE.** A 32-byte verifier from the system's random generator, its S256 challenge, and a
+     `state` of `<customer>.<workspace>.<random>`; the verifier, the redirect URI, the client and
+     where the token goes are a sealed `lake_mcp_oauth_states` record kept ten minutes.
+   - The answer's `authorization_url` carries `response_type=code`, `client_id`, `redirect_uri`,
+     `code_challenge`, `code_challenge_method=S256`, `state`, `resource` (RFC 8707: the server's
+     resource) and the resource metadata's `scope`. The redirect URI is
+     `<Lake's origin>/mcp-connections/oauth/callback`, a page of the web app.
+2. The person signs in at the authorization server, which sends them back to the callback page
+   with `code` and `state`; the page calls `complete_mcp_connection_sign_in {state, code}`:
+   - the state is taken once (a second use, an expired one, another workspace's or another person's
+     is `not_found`), and the code is exchanged at the token endpoint with the verifier and
+     `resource`;
+   - the **refresh token** (with a registration's client secret, if the server issued one) is written
+     with `put_secret` **as the person** to `secret_name` (default `mcp-<prefix>`) in the mount, so
+     their permission on the mount is checked and the write audited there; the access token is
+     never stored. A server that issues no refresh token gets its access token kept there with its
+     expiry instead, and the person signs in again when it lapses;
+   - the connection names that secret, records who signed in and when, and discovers the server.
+
+A call obtains an access token with the refresh token (`grant_type=refresh_token`, with `resource`)
+and keeps it in the process's memory until shortly before `expires_in`. A **rotated** refresh token
+is written back as a new version of the same secret. A server that refuses the access token gets
+one more call with a fresh one; a refused refresh token makes the connection `needs_sign_in` and the
+call `sign_in_required`.
 
 ## Lake's MCP re-exports a connection (opt-in)
 

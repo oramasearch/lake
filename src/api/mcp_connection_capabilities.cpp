@@ -191,6 +191,42 @@ std::string base64url(const unsigned char* data, std::size_t size) {
     return out;
 }
 
+// `size` random bytes from the system's CSPRNG, as unpadded base64url.
+std::string random_token(std::size_t size) {
+    std::vector<unsigned char> bytes(size);
+    if (RAND_bytes(bytes.data(), static_cast<int>(bytes.size())) != 1) {
+        return {};
+    }
+    return base64url(bytes.data(), bytes.size());
+}
+
+// A random UUIDv4 from the CSPRNG, the key of a sign-in's state record.
+std::string random_uuid() {
+    unsigned char bytes[16];
+    if (RAND_bytes(bytes, sizeof bytes) != 1) {
+        return {};
+    }
+    bytes[6] = static_cast<unsigned char>((bytes[6] & 0x0f) | 0x40);
+    bytes[8] = static_cast<unsigned char>((bytes[8] & 0x3f) | 0x80);
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string out;
+    for (int i = 0; i < 16; ++i) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) {
+            out.push_back('-');
+        }
+        out.push_back(digits[bytes[i] >> 4]);
+        out.push_back(digits[bytes[i] & 15]);
+    }
+    return out;
+}
+
+std::string pkce_challenge(const std::string& verifier) {
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int size = 0;
+    EVP_Digest(verifier.data(), verifier.size(), digest, &size, EVP_sha256(), nullptr);
+    return base64url(digest, size);
+}
+
 std::string percent(std::string_view value) {
     static constexpr char digits[] = "0123456789ABCDEF";
     std::string out;
@@ -419,6 +455,26 @@ TokenAnswer oauth_post(McpHttp& http,
                 "HTTP " + std::to_string(response.status) +
                     (reason.empty() ? std::string() : " (" + reason.substr(0, 80) + ")")};
     }
+    if (!parsed.is_object()) {
+        return {json(), "the answer is not a JSON object"};
+    }
+    return {std::move(parsed), {}};
+}
+
+TokenAnswer oauth_get(McpHttp& http, const std::string& url, std::chrono::milliseconds timeout) {
+    McpHttpRequest request;
+    request.method = "GET";
+    request.url = url;
+    request.timeout = timeout;
+    request.max_response_bytes = 64 * 1024;
+    request.headers = {{"Accept", "application/json"},
+                       {"User-Agent", "Lake-MCP-Client/" + std::string(lake::version_string())}};
+    const McpHttpResponse response = http.exchange(request, {});
+    if (response.status != 200) {
+        return {json(),
+                response.status == 0 ? response.error : "HTTP " + std::to_string(response.status)};
+    }
+    json parsed = json::parse(response.body, nullptr, false);
     if (!parsed.is_object()) {
         return {json(), "the answer is not a JSON object"};
     }
@@ -1596,6 +1652,391 @@ liquid::runtime::task<ApiResult> list_calls(const json& input, ApiContext& conte
     co_return ApiResult::success({{"calls", std::move(rows)}});
 }
 
+// ---- OAuth 2.1 sign-in -------------------------------------------------------------------------
+
+// The well-known URL of `kind` for an issuer or resource URL (RFC 8414 section 3, RFC 9728
+// section 3): the well-known segment goes between the origin and the path.
+std::string well_known(const McpUrl& url, std::string_view kind) {
+    std::string path = url.path.substr(0, url.path.find('?'));
+    if (path == "/") {
+        path.clear();
+    }
+    return url.origin() + "/.well-known/" + std::string(kind) + path;
+}
+
+struct Discovered {
+    json oauth;
+    std::string error;
+};
+
+// Where a server's authorization server is, and its endpoints: the protected resource metadata
+// the server's 401 names (else the well-known one), then the authorization server's metadata.
+Discovered discover_oauth(McpHttp& http,
+                          const McpConnection& connection,
+                          const std::string& metadata_url,
+                          bool allow_private) {
+    const auto timeout = std::chrono::seconds(15);
+    auto server = parse_mcp_url(connection.url, allow_private);
+    if (!server) {
+        return {json(), server.error()};
+    }
+    const std::string resource_url =
+        metadata_url.empty() ? well_known(*server, "oauth-protected-resource") : metadata_url;
+    TokenAnswer resource = oauth_get(http, resource_url, timeout);
+    std::string issuer;
+    std::string resource_id = server->origin() + server->path.substr(0, server->path.find('?'));
+    if (resource.error.empty()) {
+        const json servers = resource.body.value("authorization_servers", json::array());
+        if (servers.is_array() && !servers.empty() && servers[0].is_string()) {
+            issuer = servers[0].get<std::string>();
+        }
+        if (!text(resource.body, "resource").empty()) {
+            resource_id = text(resource.body, "resource");
+        }
+    }
+    if (issuer.empty()) {
+        issuer = server->origin(); // the 2025-03-26 rule: the server's origin is its own issuer
+    }
+    auto issuer_url = parse_mcp_url(issuer, allow_private);
+    if (!issuer_url) {
+        return {json(), "the authorization server's address is refused: " + issuer_url.error()};
+    }
+    TokenAnswer metadata =
+        oauth_get(http, well_known(*issuer_url, "oauth-authorization-server"), timeout);
+    if (!metadata.error.empty()) {
+        metadata = oauth_get(http, well_known(*issuer_url, "openid-configuration"), timeout);
+    }
+    if (!metadata.error.empty()) {
+        return {json(), "the authorization server published no metadata (" + metadata.error + ")"};
+    }
+    const json& body = metadata.body;
+    const json methods = body.value("code_challenge_methods_supported", json::array());
+    if (!methods.is_array() ||
+        std::find(methods.begin(), methods.end(), json("S256")) == methods.end()) {
+        return {json(),
+                "the authorization server does not offer PKCE with S256, which Lake requires"};
+    }
+    json oauth{{"issuer", text(body, "issuer").empty() ? issuer : text(body, "issuer")},
+               {"authorization_endpoint", text(body, "authorization_endpoint")},
+               {"token_endpoint", text(body, "token_endpoint")},
+               {"registration_endpoint", text(body, "registration_endpoint")},
+               {"resource", resource_id}};
+    for (const char* endpoint : {"authorization_endpoint", "token_endpoint"}) {
+        if (!parse_mcp_url(text(oauth, endpoint), allow_private)) {
+            return {json(),
+                    std::string("the authorization server's ") + endpoint + " is not https"};
+        }
+    }
+    const json scopes =
+        resource.error.empty() ? resource.body.value("scopes_supported", json()) : json();
+    if (scopes.is_array()) {
+        std::string scope;
+        for (const json& one : scopes) {
+            if (one.is_string()) {
+                scope += (scope.empty() ? "" : " ") + one.get<std::string>();
+            }
+        }
+        oauth["scope"] = scope;
+    }
+    return {std::move(oauth), {}};
+}
+
+liquid::runtime::task<ApiResult> begin_sign_in(const json& input, ApiContext& context) {
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.at("workspace_id");
+    const std::string id = input.at("id");
+    const std::string mount_id = input.at("mount_id");
+    context.audit_object = "mcp_connection/" + id;
+    context.audit_details["connection_id"] = id;
+    if (caller_of(context).agent) {
+        co_return ApiResult::failure("unauthorized", "a person signs in to a connection");
+    }
+    if (!context.mcp_http) {
+        co_return ApiResult::failure("not_supported", "this Lake cannot reach MCP servers");
+    }
+    const std::string origin = public_origin(context);
+    if (origin.empty()) {
+        co_return ApiResult::failure("not_supported",
+                                     "this Lake has no public address for a sign-in to return to");
+    }
+    auto records = settle(co_await records_of(context, input));
+    if (!records) {
+        co_return records.error();
+    }
+    auto connection = settle(co_await connection_of(*records, customer_id, id));
+    if (!connection) {
+        co_return connection.error();
+    }
+    if (connection->auth_kind != "oauth") {
+        co_return ApiResult::failure(
+            "invalid_input", "this connection does not sign in with OAuth", "/id");
+    }
+    // The mount must be this workspace's and the person must be able to write it: the code's
+    // tokens are written there as the person, at the end.
+    auto mount = called(co_await call(context, "get_secret_mount", {{"mount_id", mount_id}}));
+    if (!mount.ok || mount.value.value("workspace_id", "") != workspace_id) {
+        co_return ApiResult::failure(
+            "invalid_input", "choose a secret mount of this workspace you can read", "/mount_id");
+    }
+    const std::string secret_name = input.contains("secret_name") ? trimmed(input.at("secret_name"))
+                                                                  : "mcp-" + connection->prefix;
+    const std::string redirect_uri = origin + "/mcp-connections/oauth/callback";
+    auto http = context.mcp_http;
+    const bool allow_private = context.mcp_allow_private_addresses;
+    const McpConnection current = *connection;
+    const std::string chosen_client = input.value("client_id", std::string());
+    struct Prepared {
+        json oauth;
+        std::string error;
+        std::string client_secret;
+    };
+    auto prepared =
+        co_await run_blocking([http, current, allow_private, redirect_uri, chosen_client]() {
+            Prepared out;
+            // The server's 401 names its protected resource metadata (RFC 9728).
+            std::string metadata_url;
+            {
+                McpClientOptions options;
+                options.url = current.url;
+                options.transport = current.transport;
+                options.allow_private_addresses = allow_private;
+                options.limits.timeout = std::chrono::seconds(15);
+                McpClient probe(http, options);
+                auto started = probe.initialize();
+                if (!started && started.error().kind == "auth_required") {
+                    metadata_url = started.error().resource_metadata;
+                }
+                probe.close();
+            }
+            Discovered found = discover_oauth(*http, current, metadata_url, allow_private);
+            if (!found.error.empty()) {
+                out.error = found.error;
+                return out;
+            }
+            out.oauth = std::move(found.oauth);
+            out.oauth["client_id"] = chosen_client;
+            // Dynamic client registration (RFC 7591), once per connection.
+            const std::string known = text(current.oauth, "client_id");
+            if (!chosen_client.empty()) {
+                return out;
+            }
+            if (!known.empty() && text(current.oauth, "registration_redirect") == redirect_uri &&
+                text(current.oauth, "token_endpoint") == text(out.oauth, "token_endpoint")) {
+                out.oauth["client_id"] = known;
+                out.oauth["registration_redirect"] = redirect_uri;
+                return out;
+            }
+            const std::string registration = text(out.oauth, "registration_endpoint");
+            if (registration.empty()) {
+                out.error = "the authorization server registers no clients; give the client id it "
+                            "issued you as client_id";
+                return out;
+            }
+            if (!parse_mcp_url(registration, allow_private)) {
+                out.error = "the authorization server's registration endpoint is not https";
+                return out;
+            }
+            TokenAnswer registered = oauth_post(
+                *http,
+                registration,
+                json{{"client_name", "Lake"},
+                     {"redirect_uris", json::array({redirect_uri})},
+                     {"grant_types", json::array({"authorization_code", "refresh_token"})},
+                     {"response_types", json::array({"code"})},
+                     {"token_endpoint_auth_method", "none"}}
+                    .dump(),
+                true,
+                std::chrono::seconds(15));
+            if (!registered.error.empty() || text(registered.body, "client_id").empty()) {
+                out.error =
+                    "the authorization server refused to register Lake (" +
+                    (registered.error.empty() ? std::string("no client_id") : registered.error) +
+                    ")";
+                return out;
+            }
+            out.oauth["client_id"] = text(registered.body, "client_id");
+            out.oauth["registration_redirect"] = redirect_uri;
+            out.client_secret = text(registered.body, "client_secret");
+            return out;
+        });
+    if (!prepared) {
+        co_return ApiResult::failure("busy", prepared.error().message);
+    }
+    if (!prepared->error.empty()) {
+        co_return ApiResult::failure("engine_error",
+                                     "Lake could not start the sign-in: " + prepared->error);
+    }
+    const std::string verifier = random_token(32);
+    const std::string key = random_uuid();
+    if (verifier.empty() || key.empty()) {
+        co_return ApiResult::failure("crypto_error", "no randomness for the sign-in");
+    }
+    control::McpOAuthState state{key,
+                                 customer_id,
+                                 id,
+                                 verifier,
+                                 redirect_uri,
+                                 text(prepared->oauth, "client_id"),
+                                 prepared->client_secret,
+                                 mount_id,
+                                 secret_name,
+                                 acting_person(context)};
+    auto saved = control::settled(co_await control::record_mcp_oauth_state(*records, state));
+    if (!saved) {
+        co_return failed(saved.error());
+    }
+    auto changed = control::settled(co_await control::change_mcp_connection(
+        *records,
+        customer_id,
+        id,
+        [&](McpConnection& next) -> std::optional<control::ZettaControlError> {
+            json keep = prepared->oauth;
+            keep["signed_in_at"] = next.oauth.value("signed_in_at", json());
+            keep["signed_in_by"] = next.oauth.value("signed_in_by", json());
+            next.oauth = std::move(keep);
+            return std::nullopt;
+        }));
+    if (!changed) {
+        co_return failed(changed.error());
+    }
+    const std::string public_state = customer_id + "." + workspace_id + "." + key;
+    std::string url = text(prepared->oauth, "authorization_endpoint");
+    url += (url.find('?') == std::string::npos ? "?" : "&") +
+           form({{"response_type", "code"},
+                 {"client_id", text(prepared->oauth, "client_id")},
+                 {"redirect_uri", redirect_uri},
+                 {"code_challenge", pkce_challenge(verifier)},
+                 {"code_challenge_method", "S256"},
+                 {"state", public_state},
+                 {"resource", text(prepared->oauth, "resource")},
+                 {"scope", text(prepared->oauth, "scope")}});
+    context.audit_details["issuer"] = text(prepared->oauth, "issuer");
+    co_return ApiResult::success({{"authorization_url", url},
+                                  {"state", public_state},
+                                  {"redirect_uri", redirect_uri},
+                                  {"issuer", text(prepared->oauth, "issuer")}});
+}
+
+liquid::runtime::task<ApiResult> complete_sign_in(const json& input, ApiContext& context) {
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.at("workspace_id");
+    const std::string public_state = input.at("state");
+    const std::string prefix = customer_id + "." + workspace_id + ".";
+    if (!public_state.starts_with(prefix)) {
+        co_return ApiResult::failure("not_found", "that sign-in is not this workspace's", "/state");
+    }
+    if (caller_of(context).agent) {
+        co_return ApiResult::failure("unauthorized", "a person signs in to a connection");
+    }
+    auto records = settle(co_await records_of(context, input));
+    if (!records) {
+        co_return records.error();
+    }
+    auto taken = control::settled(co_await control::take_mcp_oauth_state(
+        *records, customer_id, public_state.substr(prefix.size())));
+    if (!taken) {
+        co_return failed(taken.error());
+    }
+    if (taken->started_by != acting_person(context)) {
+        co_return ApiResult::failure(
+            "not_found", "that sign-in was started by someone else", "/state");
+    }
+    context.audit_object = "mcp_connection/" + taken->connection_id;
+    context.audit_details["connection_id"] = taken->connection_id;
+    auto connection = settle(co_await connection_of(*records, customer_id, taken->connection_id));
+    if (!connection) {
+        co_return connection.error();
+    }
+    const std::string verifier = taken->verifier;
+    const std::string client_secret = taken->client_secret;
+    const std::string token_endpoint = text(connection->oauth, "token_endpoint");
+    const std::string body = form({{"grant_type", "authorization_code"},
+                                   {"code", input.at("code").get<std::string>()},
+                                   {"redirect_uri", taken->redirect_uri},
+                                   {"client_id", taken->client_id},
+                                   {"client_secret", client_secret},
+                                   {"code_verifier", verifier},
+                                   {"resource", text(connection->oauth, "resource")}});
+    auto http = context.mcp_http;
+    if (!http) {
+        co_return ApiResult::failure("not_supported", "this Lake cannot reach MCP servers");
+    }
+    auto exchanged = co_await run_blocking([http, token_endpoint, body]() {
+        return oauth_post(*http, token_endpoint, body, false, std::chrono::seconds(20));
+    });
+    if (!exchanged) {
+        co_return ApiResult::failure("busy", exchanged.error().message);
+    }
+    if (!exchanged->error.empty() || text(exchanged->body, "access_token").empty()) {
+        co_return ApiResult::failure(
+            "engine_error",
+            "the authorization server refused the sign-in (" +
+                (exchanged->error.empty() ? std::string("no access token") : exchanged->error) +
+                ")");
+    }
+    json secret{{"client_id", taken->client_id}};
+    if (!client_secret.empty()) {
+        secret["client_secret"] = client_secret;
+    }
+    const std::string refresh_token = text(exchanged->body, "refresh_token");
+    std::int64_t expires_in = 3600;
+    if (exchanged->body.contains("expires_in") &&
+        exchanged->body.at("expires_in").is_number_integer()) {
+        expires_in = std::clamp<std::int64_t>(
+            exchanged->body.at("expires_in").get<std::int64_t>(), 60, 86400);
+    }
+    if (!refresh_token.empty()) {
+        secret["refresh_token"] = refresh_token;
+    } else {
+        // A server that issues no refresh token: its access token, until it expires.
+        secret["access_token"] = text(exchanged->body, "access_token");
+        secret["expires_at"] = control::record_instant(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                (std::chrono::system_clock::now() + std::chrono::seconds(expires_in))
+                    .time_since_epoch())
+                .count());
+    }
+    // Written as the person: their permission on the mount, audited in its workspace.
+    auto put = called(co_await call(
+        context,
+        "put_secret",
+        {{"mount_id", taken->mount_id}, {"name", taken->secret_name}, {"value", secret}}));
+    if (!put.ok) {
+        co_return ApiResult::failure(put.error.code,
+                                     "the sign-in worked but its token could not be kept: " +
+                                         put.error.message,
+                                     "/state");
+    }
+    {
+        std::lock_guard lock(token_mutex());
+        token_cache()[connection->id] = {text(exchanged->body, "access_token"),
+                                         std::chrono::steady_clock::now() +
+                                             std::chrono::seconds(expires_in - 30)};
+    }
+    const std::string person = acting_person(context);
+    const std::string field = refresh_token.empty() ? "access_token" : "refresh_token";
+    auto changed = control::settled(co_await control::change_mcp_connection(
+        *records,
+        customer_id,
+        connection->id,
+        [&](McpConnection& next) -> std::optional<control::ZettaControlError> {
+            next.secret_ref = lake_secret_ref({taken->mount_id, taken->secret_name, field});
+            next.oauth["signed_in_at"] = now_text();
+            next.oauth["signed_in_by"] = person;
+            next.status = "connected";
+            next.last_error.clear();
+            return std::nullopt;
+        }));
+    if (!changed) {
+        co_return failed(changed.error());
+    }
+    auto refreshed = settle(co_await refresh(context, *records, *changed));
+    if (!refreshed) {
+        co_return refreshed.error();
+    }
+    co_return ApiResult::success(connection_json(*refreshed, true));
+}
+
 // ---- Its own agent -----------------------------------------------------------------------------
 
 liquid::runtime::task<ApiResult> create_agent(const json& input, ApiContext& context) {
@@ -2000,6 +2441,35 @@ void register_mcp_connection_capabilities(Registry& registry) {
         CapabilityKind::Read,
         "read",
         list_calls);
+    add(registry,
+        "begin_mcp_connection_sign_in",
+        "Sign In to an MCP Server",
+        "Start an OAuth 2.1 sign-in for a connection: Lake finds the server's authorization server "
+        "(RFC 9728, RFC 8414), registers itself as a client when the server allows it (RFC 7591), "
+        "and answers the `authorization_url` to open, with PKCE (S256). The refresh token lands in "
+        "the secret `secret_name` (default mcp-<prefix>) of the mount `mount_id` when the person "
+        "comes back.",
+        workspace_input({{"id", string_schema()},
+                         {"mount_id", string_schema()},
+                         {"secret_name", string_schema()},
+                         {"client_id", string_schema()}},
+                        json::array({"id", "mount_id"})),
+        open_object(),
+        CapabilityKind::Action,
+        "write",
+        begin_sign_in);
+    add(registry,
+        "complete_mcp_connection_sign_in",
+        "Finish Signing In to an MCP Server",
+        "Finish a sign-in with the `state` and `code` the authorization server sent back: Lake "
+        "exchanges the code (with its PKCE verifier) for tokens, keeps the refresh token as a "
+        "workspace secret written as the person, and discovers the server's tools.",
+        workspace_input({{"state", string_schema()}, {"code", string_schema()}},
+                        json::array({"state", "code"})),
+        connection_schema(),
+        CapabilityKind::Action,
+        "write",
+        complete_sign_in);
     add(registry,
         "create_mcp_connection_agent",
         "Create an Agent for a Connection",
