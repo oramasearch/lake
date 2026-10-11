@@ -14,23 +14,24 @@
 #include <optional>
 #include <regex>
 
+#include "agent_task_records_api.hpp"
+#include "lake/api/datasets.hpp"
 #include "lake/api/oauth.hpp"
 #include "lake/api/pipeline.hpp"
+#include "lake/api/request_recorder.hpp"
+#include "lake/api/workspace_deletion.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
-#include "lake/control/identity_crypto.hpp"
 #include "lake/control/agent_runs.hpp"
+#include "lake/control/ask_messages.hpp"
+#include "lake/control/identity_crypto.hpp"
+#include "lake/control/opportunities.hpp"
 #include "lake/control/policy.hpp"
+#include "lake/control/project_decisions.hpp"
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
-#include "lake/api/datasets.hpp"
-#include "lake/api/workspace_deletion.hpp"
-#include "agent_task_records_api.hpp"
 #include "workspace_bus.hpp"
 #include "workspace_records_api.hpp"
-#include "lake/control/ask_messages.hpp"
-#include "lake/control/opportunities.hpp"
-#include "lake/control/project_decisions.hpp"
 
 namespace lake::api {
 
@@ -1672,6 +1673,71 @@ void register_search_capabilities(Registry& registry) {
 // feature columns and answered ranked by risk with what drives it (Zetta's `score`). Each ranked
 // entry names its row and that row's entity key (lake#450): the engine numbers the rows it was
 // given, and lake maps each number back to the row.
+// The predict call itself; register_predict_capability times it and counts it per model.
+// `known` is set once the workspace has answered that the model exists, so a made-up id never
+// becomes a series label.
+liquid::runtime::task<ApiResult> predict_rows(const json& input, ApiContext& context, bool& known) {
+    if (!context.workspaces) {
+        co_return unavailable();
+    }
+    const std::string customer = input.at("customer_id");
+    const std::string model = input.at("model_id");
+    const std::string key = input.value("entity_column", std::string("entity"));
+    set_audit(context, "model.predict", input, "score");
+    auto described =
+        co_await call_workspace(context, customer, "get_model", true, {{"model_id", model}});
+    if (!described) {
+        co_return ApiResult::failure("store_unavailable", described.error().message);
+    }
+    if (!*described) {
+        co_return ApiResult::failure(
+            "not_found", "no model " + model + " (use its id from Ship → Models)", "/model_id");
+    }
+    known = true;
+    if (!(**described).value("exposed", false)) {
+        co_return ApiResult::failure(
+            "invalid_input", "model " + model + " is not published", "/model_id");
+    }
+    const json& rows = input.at("rows");
+    json score{{"model", model}, {"rows", rows}};
+    if (input.contains("top_k")) {
+        score["top_k"] = input["top_k"];
+    }
+    auto scored = co_await call_workspace(context, customer, "score", true, std::move(score));
+    if (!scored) {
+        co_return ApiResult::failure("store_unavailable", scored.error().message);
+    }
+    if (!*scored) {
+        // "score: row 2 has no 'tenure'" is about /rows/2/tenure.
+        const std::string message = scored->error().message;
+        static const std::regex row_field(R"(row (\d+) has (?:no|a non-numeric) '([^']+)')");
+        std::smatch match;
+        if (std::regex_search(message, match, row_field)) {
+            co_return ApiResult::failure(
+                "invalid_input", message, "/rows/" + match[1].str() + "/" + match[2].str());
+        }
+        co_return workspace_failure(scored->error(), input);
+    }
+    json value = std::move(**scored);
+    if (value.is_object() && value.contains("ranked") && value["ranked"].is_array()) {
+        for (json& entry : value["ranked"]) {
+            if (!entry.is_object() || !entry.contains("entity") ||
+                !entry["entity"].is_number_integer()) {
+                continue;
+            }
+            const auto index = entry["entity"].get<std::int64_t>();
+            entry.erase("entity");
+            entry["row"] = index;
+            if (index >= 0 && static_cast<std::size_t>(index) < rows.size() &&
+                rows[static_cast<std::size_t>(index)].contains(key)) {
+                entry["entity"] = rows[static_cast<std::size_t>(index)].at(key);
+            }
+        }
+    }
+    value["entity_column"] = key;
+    co_return ApiResult::success(std::move(value));
+}
+
 void register_predict_capability(Registry& registry) {
     registry.add(Capability{
         .name = "predict",
@@ -1701,70 +1767,252 @@ void register_predict_capability(Registry& registry) {
         .resolve_object = customer_object,
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            const auto started = std::chrono::steady_clock::now();
+            bool known = false;
+            auto completed = co_await predict_rows(input, context, known);
+            ApiResult result = completed
+                                   ? std::move(*completed)
+                                   : ApiResult::failure("store_error", completed.error().message);
+            // The per-model series (lake#599): every answer about a model that exists, refusals
+            // included, in the workspace the call named. RequestRecorder only counts here; the
+            // owner loop writes.
+            if (context.request_recorder != nullptr && known) {
+                const ErrorCode* code = result.ok ? nullptr : find_error_code(result.error.code);
+                const double elapsed_ms = std::chrono::duration<double, std::milli>(
+                                              std::chrono::steady_clock::now() - started)
+                                              .count();
+                context.request_recorder->add_model_call(
+                    input.value("workspace_id", context.workspace_id),
+                    input.value("model_id", std::string()),
+                    result.ok ? 200 : (code != nullptr ? code->status : 500),
+                    elapsed_ms);
+            }
+            co_return result;
+        },
+        .input_aliases = {{"model", "model_id"}}});
+}
+
+// A workspace's predict traffic (lake#599): calls, errors and mean latency per model from the
+// workspace Zetta's `lake_model_calls` and `lake_model_call_ms` series, and the workspace's
+// `predict` requests from `lake_requests` (docs/serving/telemetry.md). A series not written yet
+// reads as no traffic. Prediction drift is not measured: the engine keeps no reference
+// distribution of the training data to compare against.
+namespace model_traffic_detail {
+
+constexpr std::int64_t minute_ms = RequestRecorder::resolution_ms;
+constexpr std::int64_t day_ms = 24LL * 60 * 60 * 1000;
+
+struct Steps {
+    double calls = 0;
+    double errors = 0;
+    double ms = 0;
+};
+
+struct Totals {
+    double calls = 0;
+    double client_errors = 0;
+    double server_errors = 0;
+    double ms = 0;
+    std::map<std::int64_t, Steps> steps;
+};
+
+bool is_error(const std::string& status_class) {
+    return status_class == "4xx" || status_class == "5xx";
+}
+
+} // namespace model_traffic_detail
+
+void register_model_traffic_capability(Registry& registry) {
+    using namespace model_traffic_detail;
+    registry.add(Capability{
+        .name = "model_traffic",
+        .title = "A model's prediction traffic",
+        .description =
+            "How the workspace's published models are being called: per model, the `predict` "
+            "calls, client and server errors and mean latency over a time range, step by step "
+            "(`from_ms`, `to_ms`, `step_ms`, all optional: the last 24 hours in about 48 steps), "
+            "and the workspace's `predict` requests by status class. `model_id` keeps one model. "
+            "Read from the workspace's own series; `drift` says prediction drift is not measured "
+            "yet.",
+        .input_schema =
+            customer_input_schema({{"model_id", {{"type", "string"}}},
+                                   {"from_ms", {{"type", "integer"}, {"minimum", 0}}},
+                                   {"to_ms", {{"type", "integer"}, {"minimum", 0}}},
+                                   {"step_ms", {{"type", "integer"}, {"minimum", minute_ms}}}},
+                                  json::array()),
+        .output_schema = {{"type", "object"}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.workspaces) {
                 co_return unavailable();
             }
             const std::string customer = input.at("customer_id");
-            const std::string model = input.at("model_id");
-            const std::string key = input.value("entity_column", std::string("entity"));
-            set_audit(context, "model.predict", input, "score");
-            auto described = co_await call_workspace(
-                context, customer, "get_model", true, {{"model_id", model}});
-            if (!described) {
-                co_return ApiResult::failure("store_unavailable", described.error().message);
-            }
-            if (!*described) {
-                co_return ApiResult::failure("not_found",
-                                             "no model " + model +
-                                                 " (use its id from Ship → Models)",
-                                             "/model_id");
-            }
-            if (!(**described).value("exposed", false)) {
+            const std::string model = input.value("model_id", std::string());
+            const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::system_clock::now().time_since_epoch())
+                                            .count();
+            std::int64_t to_ms = input.contains("to_ms") ? input.at("to_ms").get<std::int64_t>()
+                                                         : now_ms - now_ms % minute_ms + minute_ms;
+            const std::int64_t from_ms = input.contains("from_ms")
+                                             ? input.at("from_ms").get<std::int64_t>()
+                                             : to_ms - day_ms;
+            if (from_ms >= to_ms) {
                 co_return ApiResult::failure(
-                    "invalid_input", "model " + model + " is not published", "/model_id");
+                    "invalid_input", "from_ms is before to_ms", "/from_ms");
             }
-            const json& rows = input.at("rows");
-            json score{{"model", model}, {"rows", rows}};
-            if (input.contains("top_k")) {
-                score["top_k"] = input["top_k"];
+            if (to_ms - from_ms > 31 * day_ms) {
+                co_return ApiResult::failure(
+                    "invalid_input",
+                    "the range is at most 31 days, as long as the series keeps",
+                    "/from_ms");
             }
-            auto scored =
-                co_await call_workspace(context, customer, "score", true, std::move(score));
-            if (!scored) {
-                co_return ApiResult::failure("store_unavailable", scored.error().message);
-            }
-            if (!*scored) {
-                // "score: row 2 has no 'tenure'" is about /rows/2/tenure.
-                const std::string message = scored->error().message;
-                static const std::regex row_field(
-                    R"(row (\d+) has (?:no|a non-numeric) '([^']+)')");
-                std::smatch match;
-                if (std::regex_search(message, match, row_field)) {
-                    co_return ApiResult::failure(
-                        "invalid_input", message, "/rows/" + match[1].str() + "/" + match[2].str());
+            std::int64_t step_ms = 0;
+            if (input.contains("step_ms")) {
+                step_ms = input.at("step_ms").get<std::int64_t>();
+                if (step_ms % minute_ms != 0) {
+                    co_return ApiResult::failure("invalid_input",
+                                                 "step_ms is a whole number of minutes (60000)",
+                                                 "/step_ms");
                 }
-                co_return workspace_failure(scored->error(), input);
+            } else {
+                // About 48 steps, each a whole number of minutes.
+                const std::int64_t minutes = (to_ms - from_ms + minute_ms - 1) / minute_ms;
+                step_ms = std::max<std::int64_t>(1, (minutes + 47) / 48) * minute_ms;
             }
-            json value = std::move(**scored);
-            if (value.is_object() && value.contains("ranked") && value["ranked"].is_array()) {
-                for (json& entry : value["ranked"]) {
-                    if (!entry.is_object() || !entry.contains("entity") ||
-                        !entry["entity"].is_number_integer()) {
+            if ((to_ms - from_ms) / step_ms > 10'000) {
+                co_return ApiResult::failure(
+                    "invalid_input", "at most 10000 steps; make step_ms larger", "/step_ms");
+            }
+
+            // One query of a series, its `series` as the value; a series never written reads
+            // as none.
+            const auto query = [&](std::string metric,
+                                   json labels,
+                                   json group_by) -> liquid::runtime::task<ApiResult> {
+                json request{{"metric", std::move(metric)},
+                             {"from_ms", from_ms},
+                             {"to_ms", to_ms},
+                             {"step_ms", step_ms},
+                             {"group_by", std::move(group_by)}};
+                if (!labels.empty()) {
+                    request["labels"] = std::move(labels);
+                }
+                auto answered = control::settled(co_await call_workspace(
+                    context, customer, "query_metric", false, std::move(request)));
+                if (!answered) {
+                    if (answered.error().code == "not_found") {
+                        co_return ApiResult::success(json::array());
+                    }
+                    co_return workspace_failure(answered.error(), input);
+                }
+                co_return ApiResult::success(answered->value("series", json::array()));
+            };
+            const auto settle = [](std::expected<ApiResult, liquid::error> completed) {
+                return completed ? std::move(*completed)
+                                 : ApiResult::failure("store_error", completed.error().message);
+            };
+
+            const json model_labels = model.empty() ? json::object() : json{{"model_id", model}};
+            const json by_model = json::array({"model_id", "status_class"});
+            const ApiResult calls = settle(co_await query(
+                std::string(RequestRecorder::model_calls_metric), model_labels, by_model));
+            if (!calls.ok) {
+                co_return calls;
+            }
+            const ApiResult ms = settle(co_await query(
+                std::string(RequestRecorder::model_call_ms_metric), model_labels, by_model));
+            if (!ms.ok) {
+                co_return ms;
+            }
+            const ApiResult requests = settle(co_await query(std::string(RequestRecorder::metric),
+                                                             {{"capability", "predict"}},
+                                                             json::array({"status_class"})));
+            if (!requests.ok) {
+                co_return requests;
+            }
+
+            std::map<std::string, Totals> models;
+            const auto fold = [&](const json& series, bool duration) {
+                for (const json& one : series) {
+                    const json labels = one.value("labels", json::object());
+                    const std::string id = labels.value("model_id", std::string());
+                    const std::string status_class = labels.value("status_class", std::string());
+                    if (id.empty()) {
                         continue;
                     }
-                    const auto index = entry["entity"].get<std::int64_t>();
-                    entry.erase("entity");
-                    entry["row"] = index;
-                    if (index >= 0 && static_cast<std::size_t>(index) < rows.size() &&
-                        rows[static_cast<std::size_t>(index)].contains(key)) {
-                        entry["entity"] = rows[static_cast<std::size_t>(index)].at(key);
+                    Totals& totals = models[id];
+                    const double total = one.value("total", 0.0);
+                    if (duration) {
+                        totals.ms += total;
+                    } else {
+                        totals.calls += total;
+                        if (status_class == "4xx") {
+                            totals.client_errors += total;
+                        } else if (status_class == "5xx") {
+                            totals.server_errors += total;
+                        }
+                    }
+                    for (const json& point : one.value("points", json::array())) {
+                        Steps& step = totals.steps[point.value("at_ms", std::int64_t{0})];
+                        const double value = point.value("value", 0.0);
+                        if (duration) {
+                            step.ms += value;
+                        } else {
+                            step.calls += value;
+                            step.errors += is_error(status_class) ? value : 0;
+                        }
                     }
                 }
+            };
+            fold(calls.value, false);
+            fold(ms.value, true);
+
+            json listed = json::array();
+            for (const auto& [id, totals] : models) {
+                json steps = json::array();
+                for (const auto& [at_ms, step] : totals.steps) {
+                    json entry{{"at_ms", at_ms}, {"calls", step.calls}, {"errors", step.errors}};
+                    if (step.calls > 0) {
+                        entry["mean_ms"] = step.ms / step.calls;
+                    }
+                    steps.push_back(std::move(entry));
+                }
+                json entry{{"model_id", id},
+                           {"calls", totals.calls},
+                           {"errors", totals.client_errors + totals.server_errors},
+                           {"client_errors", totals.client_errors},
+                           {"server_errors", totals.server_errors},
+                           {"steps", std::move(steps)}};
+                if (totals.calls > 0) {
+                    entry["mean_ms"] = totals.ms / totals.calls;
+                }
+                listed.push_back(std::move(entry));
             }
-            value["entity_column"] = key;
-            co_return ApiResult::success(std::move(value));
-        },
-        .input_aliases = {{"model", "model_id"}}});
+            json by_class = json::object();
+            double request_total = 0;
+            for (const json& one : requests.value) {
+                const std::string status_class =
+                    one.value("labels", json::object()).value("status_class", std::string("other"));
+                const double total = one.value("total", 0.0);
+                by_class[status_class] = by_class.value(status_class, 0.0) + total;
+                request_total += total;
+            }
+            co_return ApiResult::success(
+                {{"from_ms", from_ms},
+                 {"to_ms", to_ms},
+                 {"step_ms", step_ms},
+                 {"models", std::move(listed)},
+                 {"requests", {{"total", request_total}, {"by_status_class", std::move(by_class)}}},
+                 {"drift",
+                  {{"measured", false},
+                   {"why",
+                    "the workspace keeps no reference distribution of a model's training data "
+                    "to compare its predictions with"}}}});
+        }});
 }
 
 // The Zetta connector for a service kind, from the service's delivered connection, or nothing when
@@ -6193,6 +6441,7 @@ void register_workspace_capabilities(Registry& registry) {
     register_connect_capabilities(registry);
     register_search_capabilities(registry);
     register_predict_capability(registry);
+    register_model_traffic_capability(registry);
     registry.add(Capability{
         .name = "workspace_status",
         .title = "Workspace status",

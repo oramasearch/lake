@@ -8387,6 +8387,7 @@ struct ApiServer::Impl {
         ctx.metering = options.metering;
         ctx.metering_recorder = metering_recorder.get();
         ctx.audit_recorder = audit_recorder.get();
+        ctx.request_recorder = request_recorder.get();
         if (artifacts.available()) {
             ctx.workspace_content = &workspace_content;
         }
@@ -12018,6 +12019,10 @@ struct ApiServer::Impl {
                {},
                now.recorded,
                reported_request_series.recorded);
+        report("lake_request_series_model_calls_written_total",
+               {},
+               now.model_calls,
+               reported_request_series.model_calls);
         report("lake_request_series_flush_errors_total",
                {},
                now.flush_errors,
