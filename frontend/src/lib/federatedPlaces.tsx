@@ -10,10 +10,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, type NavigateFunction } from "react-router-dom";
 import { useQueries, type UseQueryResult } from "@tanstack/react-query";
-import { BookMarked, BookOpen, Bot, Boxes, Code2, Database, FileAudio, FolderKanban, HardDrive, type LucideIcon } from "lucide-react";
+import { BookMarked, BookOpen, Bot, Boxes, Code2, Database, FileAudio, FolderKanban, HardDrive, Lightbulb, type LucideIcon } from "lucide-react";
 import { ApiError, postRead, read, type Row } from "@/lib/api";
 import { useSession } from "@/lib/session";
 import { Highlight } from "@/components/Highlight";
+import { CatalogueGlyph, type CatalogueKind } from "@/components/CatalogueIcon";
+import { methodologyIcon, solutionIcon, type IconChoice } from "@/lib/catalogueIcons";
 import { matchIcon } from "@/pages/drives/MatchLink";
 import { matchLink, matchWhere, type SearchDrivesResult } from "@/pages/drives/search";
 import { PLACE_IDS, WORKSPACE_PLACES, matches, mergeWorkspaces, wsPath, type CodeOptions, type Hit, type PlaceAnswer, type PlaceId, type Scope } from "@/lib/federated";
@@ -33,6 +35,14 @@ export const NO_CODE_OPTIONS: CodeOptions = { ref: "", change: "", history: fals
 
 function engine<T>(scope: Scope, capability: string, input: Row, signal: AbortSignal) {
   return postRead<T>("workspace_query", { customer_id: scope.customerId, workspace_id: scope.workspaceId, capability, input }, { workspace: null, signal });
+}
+
+/** A hit's icon that is a solution's or methodology's catalogue icon (lake#639), drawn bare a little
+ * larger than the size asked, so its detail reads beside the hit. */
+function catalogueHitIcon(choice: IconChoice, kind: CatalogueKind) {
+  return function CatalogueHitIcon({ size = 14, className }: { size?: number; className?: string }) {
+    return <CatalogueGlyph choice={choice} kind={kind} size={size + 6} tile={false} className={className} />;
+  };
 }
 
 const RUNS: Record<PlaceId, { label: string; icon: LucideIcon; run: Place["run"] }> = {
@@ -106,6 +116,40 @@ const RUNS: Record<PlaceId, { label: string; icon: LucideIcon; run: Place["run"]
       return (value.projects ?? [])
         .filter((p) => matches(q, p.name, p.description, p.decision))
         .map((p) => ({ key: p.name, title: String(p.name), detail: p.description || undefined, to: wsPath(scope, `/design/project?name=${encodeURIComponent(p.name)}`) }));
+    },
+  },
+  solutions: {
+    label: "Solutions",
+    icon: Lightbulb,
+    // Orama's catalogue and the workspace's own (lake's list_solutions), and the methodologies the
+    // workspace's engine lists (absent on an older engine), each with its catalogue icon (lake#639).
+    run: async (q, scope, _o, signal) => {
+      const [solutions, methodologies] = await Promise.all([
+        read<{ solutions?: Row[] }>("list_solutions", { customer_id: scope.customerId, workspace_id: scope.workspaceId }, { workspace: null, signal }),
+        engine<{ methodologies?: Row[] }>(scope, "list_methodologies", {}, signal).catch(() => ({ methodologies: [] as Row[] })),
+      ]);
+      return [
+        ...(solutions.solutions ?? [])
+          .filter((e) => matches(q, e.name, e.id, e.promise, e.problem, e.decision))
+          .map((e) => ({
+            key: `solution:${e.id}`,
+            title: String(e.name ?? e.id),
+            lead: e.source === "workspace" ? undefined : `${e.id} `,
+            detail: e.promise || e.decision || e.problem || undefined,
+            icon: catalogueHitIcon(solutionIcon(e), "solution"),
+            to: wsPath(scope, `/design/solution?id=${encodeURIComponent(e.id)}`),
+          })),
+        ...(methodologies.methodologies ?? [])
+          .filter((m) => matches(q, m.name, m.id, m.family))
+          .map((m) => ({
+            key: `methodology:${m.id}`,
+            title: String(m.name ?? m.id),
+            lead: `${m.id} `,
+            detail: m.family ? `Methodology · ${m.family}` : "Methodology",
+            icon: catalogueHitIcon(methodologyIcon(m), "methodology"),
+            to: wsPath(scope, `/design/methodology?id=${encodeURIComponent(m.id)}`),
+          })),
+      ];
     },
   },
   agents: {

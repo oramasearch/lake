@@ -22,6 +22,7 @@ import {
   change,
   formatValue,
   fromLimit,
+  limitNote,
   limitScale,
   limitTone,
   mergeReadings,
@@ -347,7 +348,7 @@ function LimitsCard({ limits, spaceNames, onSet }: { limits: Limits[]; spaceName
   return (
     <Card label="Limits" title={rows.length ? `${rows.length} set` : "None set"} actions={limits.length === 1 ? <Button variant="ghost" onClick={() => onSet(limits[0].customer_id)}>Set a limit</Button> : undefined}>
       {rows.length === 0 ? (
-        <p className="m-0 text-[13px] text-ink-2">No limits yet. A limit warns from a percentage you choose; the storage limit also refuses new repository writes above it.</p>
+        <p className="m-0 text-[13px] text-ink-2">No limits yet. A limit warns from a percentage you choose; the storage limit also refuses new repository writes above it, and the model tokens limit refuses agents' model calls.</p>
       ) : (
         <div className="space-y-3">
           {rows.map((l) => {
@@ -365,7 +366,7 @@ function LimitsCard({ limits, spaceNames, onSet }: { limits: Limits[]; spaceName
                 </div>
                 <Meter value={l.used ?? 0} max={l.limit} tone={tone === "bad" ? "bad" : undefined} label={l.percent === null ? "—" : `${Math.round(l.percent)}%`} />
                 <div className="mt-1 text-[12px] text-ink-3">
-                  {l.enforced ? "Enforced on new repository writes" : "This month; warns from " + l.warn_percent + "%"}
+                  {limitNote(l)}
                   {l.state === "warning" && " · near the limit"}
                   {l.state === "over" && " · over the limit"}
                 </div>
@@ -424,7 +425,7 @@ function SetLimit({ customerId, limits, reading, onClose }: { customerId: string
   return (
     <Modal
       title="Set a Usage Limit"
-      subtitle="A limit warns as usage nears it. Only the storage limit is enforced: new repository writes are refused above it, and existing content stays readable."
+      subtitle="A limit warns as usage nears it. Two are enforced: above the storage limit new repository writes are refused, and existing content stays readable; at the model tokens limit agents' model calls are refused until the month ends."
       onClose={onClose}
       width={520}
       footer={

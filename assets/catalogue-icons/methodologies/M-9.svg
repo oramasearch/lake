@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Three items in ranked order, the first highlighted">
+<title>M-9 Learning-to-rank</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#0f62fe)}.d{fill:var(--cat-accent,#0f62fe)}.t{fill:var(--cat-tint,#0f62fe33)}.s{stroke-dasharray:2 2.5}</style>
+<path class="l" d="M9 12h8M9 18h5"/>
+<circle class="d" cx="5" cy="12" r="1.25"/>
+<circle class="d" cx="5" cy="18" r="1.25"/>
+<path class="a" d="M9 6h11"/>
+<circle class="d" cx="5" cy="6" r="1.75"/>
+</svg>

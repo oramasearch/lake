@@ -12,19 +12,31 @@ it waits; phases 2–4 add them.
 
 ## What a person sees
 
-**Train → Data** (`/train/data`) ends with a **Storage** panel. It shows whether or not the account's
-workspace is ready: stores do not need the workspace.
+**Data → Drives → Storage** (`/drives?tab=storage`, lake#656; it was a panel at the end of Data →
+Datasets until then, and `/train/data#storage` still leads there) lists the workspace's stores. It
+shows whether or not the workspace is ready: stores do not need the workspace. The Lake Console
+says *storage* for a store and *drive* for where people work with files; "store" is the API's word.
+The page is described in [../ui/drives.md](../ui/drives.md#storage).
 
-- **The table:** name, type (*Volume*, *Bucket*, …), provider (*cluster disk*, …), size in GiB, the
-  status with the operator's message under it (for a volume: the claim binds when a service first
+- **The figures:** how many stores (or how many are changing), how many open as a drive, the
+  volumes, and the GiB asked for in all.
+- **The table:** name, type (*Volume*, *Bucket*, …), provider (*cluster disk*, …), size in GiB,
+  this month's volume time (`usage_over_time`, dimension `volumes`, by object, linking to Usage),
+  the status with the operator's message under it (for a volume: the claim binds when a service first
   mounts it), the endpoint, and the actions. A store with no status yet reads *Waiting for the
   operator*; a Ready one whose connection has not reached lake's mount reads *Connecting*; a
   withdrawn one reads *Deleting* until the operator has removed it, then it leaves the list. The
   page checks again every 3 seconds while any store is changing.
+- **Open as a drive** (a Ready bucket or filesystem): a drive with `storage: store` over it
+  ([drives.md](drives.md#store-drives)), browsed in place. A volume reads *Shown, not browsed*:
+  its contents belong to the service that mounts it. No bucket or filesystem provider is offered
+  or browsable yet ([lake#664](https://github.com/oramasearch/lake/issues/664)). Which services and
+  apps mount a store, and its used space, are not recorded yet
+  ([lake#666](https://github.com/oramasearch/lake/issues/666)).
 - **Show connection** (once Ready): answers with the Data page itself, showing every field the
   operator delivered (for a volume: `claim`, `namespace`, `size_gi`, `storage_class`) once. It is
   never put in a URL, a redirect or the list, and lake keeps no copy.
-- **Delete:** inside a *Delete* disclosure, a warning that deleting a store deletes the data in it,
+- **Delete:** a dialog with a warning that deleting a store deletes the data in it,
   and a field where the person types the store's name. The operator deletes the resource (for a
   volume, the claim and its data), which cannot be recovered.
 - **New Storage:** one *Type and provider* select holding every pair (`value="volume:cluster"`);
@@ -37,7 +49,7 @@ A store belongs to the workspace it was created in (lake#465, migration `0044_st
 the panel lists the current workspace's stores, and the operator places each store in its
 workspace's namespace.
 
-The web app's Data page calls `create_store`, `delete_store` (with `confirm`) and
+The web app's Storage tab calls `create_store`, `delete_store` (with `confirm`) and
 `store_connection` under the workspace's `/w/<id>/` path; a failure is shown with its reason. The
 server form routes were retired in lake#561.
 
@@ -68,7 +80,7 @@ The worked flow *Create a volume* in `llms.txt` and the skill: `list_store_provi
 ## Configuration
 
 Stores use the services configuration: `LAKE_SERVICE_DIR` (the mounted Secret
-`lake-<lake>-services`) holds each Ready store's `<slug>.json`. Without it the Data page says
+`lake-<lake>-services`) holds each Ready store's `<slug>.json`. Without it the Storage tab says
 Design, Train and Ship are not available, and the store capabilities answer `store_unavailable`.
 
 ## Verify
@@ -95,7 +107,7 @@ ctest --test-dir build -R 'Stor'
 - `OperatorContract.*`: the operator's own SQL against lake's schema (see
   [`../control-plane/storage.md`](../control-plane/storage.md#verify)).
 
-On a deployment with the operator's store reconciler: on Train → Data, create a volume, see it
+On a deployment with the operator's store reconciler: on Data → Drives → Storage, create a volume, see it
 Ready with *Show connection*, and delete it by typing its name.
 
 ## Changing it

@@ -4,7 +4,8 @@
 import { FlaskConical, Workflow } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 import { Button, Card, Empty, Grid, KeyValue, Page, Skeleton, Split } from "@/lib/ui";
-import { WorkspaceGate } from "@/components/WorkspaceGate";
+import { WorkspaceGate, useWorkspaceStatus } from "@/components/WorkspaceGate";
+import { MethodologyIcon, SolutionIcon } from "@/components/CatalogueIcon";
 import { qs, useWq, useWsPath } from "./api";
 import { joined, solutionUses, text, type J } from "./logic";
 import { Panel, RunsBadge, entityCrumb, useDesignTrail } from "./parts";
@@ -14,8 +15,12 @@ export default function MethodologyPage() {
   const [params] = useSearchParams();
   const id = params.get("id") ?? "";
   useDesignTrail({ label: "Methodologies", path: "/design/methodologies" }, [id ? entityCrumb(id) : { label: "Methodology" }], id ? `Methodology: ${id}` : "Methodology");
+  // The same read the body makes (one request), for the icon beside the title.
+  const ready = useWorkspaceStatus().q.data?.ready === true;
+  const listed = useWq<J>("list_methodologies", {}, { retry: false, enabled: ready });
+  const entry = !listed.isError && Array.isArray(listed.data?.methodologies) ? (listed.data!.methodologies as J[]).find((e) => text(e, "id") === id) : undefined;
   return (
-    <Page eyebrow="Design · Methodology" title={id || "Methodology"}>
+    <Page eyebrow="Design · Methodology" title={id || "Methodology"} icon={entry ? <MethodologyIcon entry={entry} size={64} /> : undefined}>
       <WorkspaceGate>
         <Methodology id={id} />
       </WorkspaceGate>
@@ -85,7 +90,7 @@ function Methodology({ id }: { id: string }) {
         {users.length ? (
           <Grid className="grid-cols-1 gap-2 sm:grid-cols-2">
             {users.map((s, index) => (
-              <Card key={text(s, "id") || index} to={ws(`/design/solution?${qs({ id: text(s, "id") })}`)} label={text(s, "id")} title={text(s, "name")} actions={<RunsBadge entry={s} />} />
+              <Card key={text(s, "id") || index} to={ws(`/design/solution?${qs({ id: text(s, "id") })}`)} icon={<SolutionIcon entry={s} size={32} />} label={text(s, "id")} title={text(s, "name")} actions={<RunsBadge entry={s} />} />
             ))}
           </Grid>
         ) : (

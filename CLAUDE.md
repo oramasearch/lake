@@ -65,6 +65,17 @@ a resent chunk answers the true `received`, and unfinished uploads are listed an
 24 hours (lake#588); `load_drive_dataset` loads a drive's CSV or JSONL file (lake#593); the web app
 retries an edge 503 read under the one `shouldRetry` rule and names who answered (lake#573,
 `docs/ui/web-app.md#a-read-answered-503`).
+Data → Connections (lake#651, no migration): the databases a workspace reads have their own page
+(`/connections`, one connection's tables at `/connections/connection?name=`), out of Datasets,
+whose Load data picks from them; old `?browse=`/`#connections` links redirect
+(`docs/ui/connections.md`). Storage moves from Datasets to the Storage tab of Data → Drives, and a
+bucket or filesystem store opens as a fourth drive kind, `store` (lake#656, no migration):
+`create_drive {storage: "store", store_id}` and the entry capabilities browse it in place through
+`control::StoreContents` and the injected `StoreBrowser` (an item's id is its path; deleting the
+drive never deletes the store; a volume is refused). No provider is browsable yet, so without a
+browser it answers `not_supported` (lake#664); which services and apps mount a store is not
+recorded (lake#666). Not deployed. See `docs/api/drives.md#store-drives` and
+`docs/ui/drives.md#storage`.
 
 A workspace's own AI solutions follow (lake#597, no migration): sealed `lake_solutions` records in
 the workspace Zetta in the catalogue's shape (name, business problem, decision, measurement with

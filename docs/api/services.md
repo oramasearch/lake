@@ -41,7 +41,7 @@ writes the connection (orama-operator#183), so this lasts seconds, not the minut
 - **Show connection** (every kind but Zetta, once Ready): answers with the page itself, showing
   every field the operator delivered for that kind (a Postgres URI, Kafka's bootstrap and SASL
   settings, and so on) once. It is never put in a URL, a redirect or the list.
-- **Delete:** type the service's name. When a Train → Data connection uses the service, the form says so. The operator deletes the cluster and its data, which cannot
+- **Delete:** type the service's name. When a connection (Data → Connections) uses the service, the form says so. The operator deletes the cluster and its data, which cannot
   be recovered; the row shows *Deleting* until it is gone.
 
 ### Status, and why a service is stuck (lake#452)
@@ -151,6 +151,6 @@ cluster is quiet, and whenever node size, images or operators change.
 - **SQLite has one instance and no replication:** its volume is the only copy until backups
   exist. It is reached over `lake-sqlite`'s HTTP API with a bearer token, not the SQLite file format.
 - Addresses are inside the cluster only. A Postgres service is reachable from the customer's other
-  services, for example as a Zetta connection on Train → Data, not from the internet.
+  services, for example as a Zetta connection on Data → Connections, not from the internet.
 - A service cannot be resized or renamed.
 - Design, Train and Ship use the default Zetta service only.

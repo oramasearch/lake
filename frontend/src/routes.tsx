@@ -2,12 +2,13 @@
  * lookups the shell, breadcrumbs and command palette share. */
 import type { Session } from "@/lib/session";
 import type { Audience, Screen, SectionKey } from "@/routes/types";
-import { HOME_NAV, billingVisible, currentNavIn, localPath, type NavItem } from "@/routes/nav";
+import { DATA_NAV, HOME_NAV, billingVisible, currentNavIn, localPath, type NavItem } from "@/routes/nav";
 import { screens as account } from "@/pages/account/routes";
 import { screens as admin } from "@/pages/admin/routes";
 import { screens as apps } from "@/pages/apps/routes";
 import { screens as ask } from "@/pages/ask/routes";
 import { screens as billing } from "@/pages/billing/routes";
+import { screens as connections } from "@/pages/connections/routes";
 import { screens as design } from "@/pages/design/routes";
 import { screens as developer } from "@/pages/developer/routes";
 import { screens as drives } from "@/pages/drives/routes";
@@ -36,6 +37,7 @@ export const SCREENS: Screen[] = [
   ...workspaces,
   ...design,
   ...train,
+  ...connections,
   ...transcripts,
   ...experiments,
   ...streams,
@@ -75,16 +77,7 @@ const ALL: Audience[] = ["visitor", "account", "operator"];
 export const NAV: NavItem[] = [
   // A signed-in person's Home group: Ask Orama at `/`, then Dashboard (lake#600).
   ...HOME_NAV,
-  // Data: where a person's data lives and is found (Steve, 2026-10-10). Datasets is the Train →
-  // Data page, kept at its address.
-  { section: "data", path: "/repositories", label: "Repositories", icon: "repository", audience: ALL },
-  // A workspace's drives: files in a repository, as workspace files, or as shortcuts (lake#561).
-  { section: "data", path: "/drives", label: "Drives", icon: "repository", audience: AO },
-  { section: "data", path: "/shared-with-me", label: "Shared with Me", icon: "repository", audience: ["account"] },
-  { section: "data", path: "/search", label: "Search", icon: "search", audience: AO },
-  { section: "data", path: "/train/data", label: "Datasets", icon: "metering", audience: AO },
-  // Recordings, uploads and pasted text made into searchable transcripts (lake#561).
-  { section: "data", path: "/transcripts", label: "Transcripts", icon: "audit", audience: AO },
+  ...DATA_NAV,
   { section: "design", path: "/design/projects", label: "Projects", icon: "audit", audience: AO },
   { section: "design", path: "/design/opportunities", label: "Opportunities", icon: "search", audience: AO },
   { section: "design", path: "/design/solutions", label: "Solutions", icon: "audit", audience: AO },
@@ -180,6 +173,9 @@ export function navigableScreens(session: Pick<Session, "viewer">): Screen[] {
       out.push({ ...screen, title: item.label, section: item.section });
     }
   }
+  // Storage is a tab of Drives (lake#656); Go to finds it by its own name.
+  const storage = SCREENS.find((s) => s.path === "/storage");
+  if (storage && session.viewer.signed_in && seen.has("/drives")) out.push(storage);
   if (session.viewer.signed_in && !session.viewer.administrator) {
     for (const path of ["/settings", "/sessions", "/tokens"]) {
       const screen = SCREENS.find((s) => s.path === path);

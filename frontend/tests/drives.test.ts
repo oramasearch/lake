@@ -1,10 +1,15 @@
 /** Drives (lake#561): paths, names, the upload and move plans, range selection, upload chunks and
- * what a shortcut opens. `npm test`; the build runs it. */
+ * what a shortcut opens; Drives → Storage and storage drives (lake#656). `npm test`; the build runs
+ * it. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ancestors, chunkBySize, chunkRanges, cleanPath, datasetFormat, datasetName, driveSlug, expandTo, isWithin, joinPath, nameOf, parentOf, planMoves, planUpload, rangeSelect, sortEntries, validName } from "../src/pages/drives/paths.ts";
 import { cleanTarget, nameAfterTarget, selectsOnFocus, storageLabel, targetHref, targetProblem } from "../src/pages/drives/targets.ts";
 import { folderKey, matchLink, matchWhere, parentKey, type DriveMatch } from "../src/pages/drives/search.ts";
+import { browsable, driveForStore, phaseTone, storeFigures, storeKindWords, storePhase } from "../src/pages/drives/stores.ts";
+import { STORAGE } from "../src/pages/drives/targets.ts";
+import { movedFromDatasets } from "../src/pages/connections/connections.ts";
+import { readFileSync } from "node:fs";
 
 test("drive paths", () => {
   assert.equal(cleanPath("/a//b/./c/"), "a/b/c");
@@ -173,4 +178,59 @@ test("where a drive search match opens", () => {
   assert.deepEqual(matchLink(shortcut, scope), { href: "https://orama.test/", newTab: true, download: false });
   assert.deepEqual(matchLink({ ...shortcut, target: { kind: "transcript", id: "t1" } }, scope), { to: "/transcript?id=t1", workspace: true });
   assert.deepEqual(matchLink({ ...shortcut, status: "broken", target: { kind: "transcript", id: "t1" } }, scope), { to: "/drives/drive?id=d1&focus=s1", workspace: true });
+});
+
+test("Drives → Storage: each store's state, figures and whether it opens as a drive (lake#656)", () => {
+  const providers = [{ type: "volume", provider: "cluster", label: "Volume — cluster disk" }];
+  assert.deepEqual(storeKindWords(providers, "volume", "cluster"), ["Volume", "cluster disk"]);
+  assert.deepEqual(storeKindWords(providers, "object", "r2"), ["object", "r2"]);
+  assert.equal(storePhase({ phase: "Ready", connected: true }), "Ready");
+  assert.equal(storePhase({ phase: "Ready", connected: false }), "Connecting");
+  assert.equal(storePhase({}), "Waiting for the operator");
+  assert.equal(storePhase({ desired: "absent", phase: "Ready" }), "Deleting");
+  assert.equal(phaseTone("Failed"), "danger");
+  // A volume is shown, not browsed; a bucket or filesystem opens once Ready.
+  assert.equal(browsable({ type: "volume", phase: "Ready" }), "volume");
+  assert.equal(browsable({ type: "object", phase: "Ready" }), "yes");
+  assert.equal(browsable({ type: "filesystem", phase: "Ready", connected: false }), "not_ready");
+  assert.equal(browsable({ type: "network_filesystem", phase: "Ready" }), "other");
+  const stores = [
+    { id: "a", type: "volume", phase: "Ready", size_gi: 10 },
+    { id: "b", type: "object", phase: "Ready", size_gi: 5 },
+    { id: "c", type: "object", phase: "Provisioning", size_gi: 1 },
+    { id: "d", type: "volume", desired: "absent", phase: "Ready", size_gi: 50 },
+  ];
+  assert.deepEqual(storeFigures(stores), { count: 4, changing: 2, browsable: 1, volumes: 1, sizeGi: 16 });
+  assert.deepEqual(storeFigures([]), { count: 0, changing: 0, browsable: 0, volumes: 0, sizeGi: 0 });
+  assert.equal(driveForStore([{ id: "d1", store_id: "b" }, { id: "d2", store_id: null }], "b")?.id, "d1");
+  assert.equal(driveForStore([{ id: "d2", store_id: null }], "b"), undefined);
+});
+
+test("a storage drive is a fourth kind, and an old #storage link opens Drives → Storage", () => {
+  const store = STORAGE.find((s) => s.id === "store");
+  assert.ok(store);
+  assert.equal(store.label, "Storage");
+  assert.match(store.detail, /never deletes the storage/);
+  assert.equal(storageLabel("store"), "Storage");
+  assert.equal(movedFromDatasets("", "#storage"), "/drives?tab=storage");
+  // A match in a storage drive opens by its path, as an entry id.
+  const match: DriveMatch = {
+    drive: { id: "d", name: "Media", storage: "store", repository_id: null, store_id: "s" },
+    kind: "folder",
+    id: "Reports/2026",
+    parent_id: "Reports",
+    name: "2026",
+    path: "Reports/2026",
+    folder: "Reports",
+  };
+  assert.equal(folderKey(match), "Reports/2026");
+  assert.equal(parentKey(match), "Reports");
+  assert.deepEqual(matchLink(match, { customerId: "c", workspaceId: "w" }), { to: "/drives/drive?id=d&folder=Reports%2F2026", workspace: true });
+});
+
+test("Datasets keeps datasets only: no storage and no connections on its page (lake#651, lake#656)", () => {
+  const page = readFileSync(new URL("../src/pages/train/DataPage.tsx", import.meta.url), "utf8");
+  for (const gone of ["list_stores", "create_store", "delete_store", "store_connection", "list_store_providers", "connect_service", "delete_connection", "list_source_tables"]) {
+    assert.ok(!page.includes(`"${gone}"`), `Datasets no longer calls ${gone}`);
+  }
 });

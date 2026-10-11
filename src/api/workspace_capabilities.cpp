@@ -2154,7 +2154,7 @@ std::optional<json> zetta_connector(const control::ManagedService& service,
     return std::nullopt;
 }
 
-// Train → Data → Connect one of your services (lake#188): make a Zetta connection to one of the
+// Data → Connections → Connect one of your services (lake#188, lake#651): make a Zetta connection to one of the
 // customer's own Ready services from the connection the operator delivered, so nobody types or
 // sees its password. Saving under an existing name replaces it, which is how Refresh works.
 void register_connect_capabilities(Registry& registry) {

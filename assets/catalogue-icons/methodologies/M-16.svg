@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A feasible region with its best corner marked">
+<title>M-16 Optimization / operations research</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#0f62fe)}.d{fill:var(--cat-accent,#0f62fe)}.t{fill:var(--cat-tint,#0f62fe33)}.s{stroke-dasharray:2 2.5}</style>
+<path class="t" d="M6.5 18V10l4.5-3.5L17 9l2 9z"/>
+<path class="l" d="M3 3v18h18"/>
+<path class="l" d="M6.5 18V10l4.5-3.5L17 9l2 9z"/>
+<path class="a s" d="M13 5.4l8 7.2"/>
+<circle class="d" cx="17" cy="9" r="1.75"/>
+</svg>

@@ -118,9 +118,11 @@ constexpr std::array group_rules{
                          n == "dismiss_opportunity" || engine_capability_group(n) == "Solutions";
               }},
     GroupRule{"Drives",
-              "A workspace's file managers, in three kinds: workspace files (`storage: files`, "
+              "A workspace's file managers, in four kinds: workspace files (`storage: files`, "
               "moved and renamed without copying), a liquid repository with history "
-              "(`storage: repository`), or folders of shortcuts (`storage: virtual`). Create, "
+              "(`storage: repository`), folders of shortcuts (`storage: virtual`), or one of the "
+              "workspace's bucket or filesystem stores browsed in place (`storage: store` with "
+              "`store_id`; an item's id is its path; a volume is never browsed). Create, "
               "list and search drives; list, read, move and delete their items; upload files in "
               "chunks (begin_drive_upload, append_drive_upload, finish_drive_upload); load a CSV "
               "or JSONL file as a dataset (load_drive_dataset); share folders and links.",
@@ -205,7 +207,9 @@ constexpr std::array group_rules{
               [](std::string_view n) { return contains_any(n, {"service"}); }},
     GroupRule{"Storage",
               "Buckets, filesystems, network filesystems and volumes Lake provisions for you "
-              "(a cluster volume today), how to reach them, and volume snapshots.",
+              "(a cluster volume today), how to reach them, and volume snapshots. The Lake "
+              "Console shows them as Data → Drives → Storage; a bucket or filesystem opens as a "
+              "drive (create_drive with storage store).",
               [](std::string_view n) {
                   // Exact names: restore_drive_version and others also contain "store".
                   return n == "list_store_providers" || n == "list_stores" || n == "create_store" ||
@@ -425,9 +429,10 @@ constexpr std::string_view rules =
 
 constexpr std::string_view what_lake_does =
     "- **Data**: repositories (liquid version control with reviews, issues and releases), drives "
-    "in three kinds (workspace files, a repository with history, or virtual folders of "
-    "shortcuts), datasets, transcripts with speech-to-text, and search across everything you can "
-    "open.\n"
+    "in four kinds (workspace files, a repository with history, virtual folders of shortcuts, or "
+    "a bucket or filesystem of the workspace's storage, browsed in place) with the workspace's "
+    "storage beside them, datasets, connections (the databases a workspace reads, on the Connections "
+    "page), transcripts with speech-to-text, and search across everything you can open.\n"
     "- **Design**: AI projects and their pipelines, Orama's AI solutions and your own.\n"
     "- **Train**: runs, experiments and their trials, agents, streams and models.\n"
     "- **Ship**: published models with traffic and monitoring, search indexes, apps, services and "
@@ -542,7 +547,22 @@ const std::vector<Flow>& flows() {
           {"create_service", "`kind: \"postgres\"`, a `name`; optional `instances`, `storage_gi`"},
           {"list_services", "poll until the service is `Ready`"},
           {"service_connection", "its endpoint and credentials (keep them secret)"},
-          {"connect_service", "make it a Train → Data connection of your workspace"}}},
+          {"connect_service", "make it a connection of your workspace (Data → Connections)"}}},
+        {"Read a database through a connection",
+         "A connection is a database the workspace reads (Postgres or Snowflake), listed on the "
+         "Lake Console's Data → Connections page; its credential is sealed in the workspace and "
+         "never returned.",
+         {{"workspace_act",
+           "`capability: \"create_connection\"`, `input: {name, connector: {type: \"postgres\", "
+           "host, port, user, database, token}}`"},
+          {"workspace_query", "`capability: \"list_connections\"`: each with its connector and "
+                              "`credential` state"},
+          {"workspace_query",
+           "`capability: \"list_source_tables\"`, `input: {connection, include_columns: true}`"},
+          {"workspace_act",
+           "`capability: \"create_dataset_from_query\"`, `input: {connection, query, "
+           "table_name}`: one read-only SELECT loaded into a dataset"},
+          {"workspace_act", "`capability: \"delete_connection\"`, `input: {name}`"}}},
         {"Create a volume",
          "A store is a bucket, filesystem, network filesystem or volume Lake provisions for your "
          "workspace; today a cluster volume.",
@@ -551,6 +571,17 @@ const std::vector<Flow>& flows() {
            "`type: \"volume\"`, `provider: \"cluster\"`, a `name`; optional `size_gi`"},
           {"list_stores", "poll until the store is `Ready`"},
           {"store_connection", "the claim, namespace, size and storage class to mount"}}},
+        {"Open a bucket as a drive",
+         "A bucket or filesystem store opens as a drive, browsed in place: nothing is copied, an "
+         "item's id is its path in the store, and deleting the drive never deletes the store. A "
+         "volume is never browsed. No bucket or filesystem provider is offered yet, so today "
+         "create_drive answers not_supported with the reason.",
+         {{"list_stores", "a `Ready` store whose `type` is `object` or `filesystem`"},
+          {"create_drive", "`name`, `storage: \"store\"`, `store_id`"},
+          {"list_drive_entries", "`drive_id`, optional `path`: the store's folders and files"},
+          {"upload_drive_entries",
+           "`drive_id`, `files: [{path, content: <base64>}]` (16 MiB a call), written to the "
+           "store"}}},
         {"Keep files in a drive",
          "A drive is a workspace's file manager: workspace files (`storage: \"files\"`), a liquid "
          "repository with history, or folders of shortcuts (virtual).",

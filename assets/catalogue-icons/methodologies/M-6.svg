@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A treated bar rising above the control's level">
+<title>M-6 Causal inference &amp; uplift</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#0f62fe)}.d{fill:var(--cat-accent,#0f62fe)}.t{fill:var(--cat-tint,#0f62fe33)}.s{stroke-dasharray:2 2.5}</style>
+<rect class="t" x="14" y="7" width="6" height="13" rx="1.5"/>
+<rect class="l" x="4" y="12" width="6" height="8" rx="1.5"/>
+<rect class="l" x="14" y="7" width="6" height="13" rx="1.5"/>
+<path class="a s" d="M3 12h18"/>
+<path class="a" d="M17 16.5v-6M15 12.5l2-2 2 2"/>
+</svg>

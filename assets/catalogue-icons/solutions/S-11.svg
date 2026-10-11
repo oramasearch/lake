@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A person and an arrow to the centre of a target">
+<title>S-11 Next-Best-Action</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#8e6a00)}.d{fill:var(--cat-accent,#8e6a00)}.t{fill:var(--cat-tint,#8e6a0033)}.s{stroke-dasharray:2 2.5}</style>
+<circle class="l" cx="6.5" cy="11.5" r="2.75"/>
+<path class="l" d="M2 20c0-3.3 2-5.25 4.5-5.25s4.5 1.95 4.5 5.25"/>
+<circle class="l" cx="17.5" cy="8" r="4"/>
+<path class="a" d="M10.5 13c2.3-2.3 4-3.6 5.8-4.4"/>
+<circle class="d" cx="17.5" cy="8" r="1.6"/>
+</svg>

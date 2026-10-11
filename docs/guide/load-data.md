@@ -3,9 +3,11 @@
 A **dataset** is a table in your workspace: the data its pipelines train on, its search indexes
 cover and its agents read. Every dataset lives in the workspace it was loaded into; another workspace never sees it.
 
-Open **Data → Datasets** to see them. The page has four figures (Datasets, Run outputs,
-Connections, Stores), the datasets table, the **Connections** card and the **Storage** card. Its
-header has **Query with SQL** and **Load data**, which appear once the workspace is ready.
+Open **Data → Datasets** to see them. The page has two figures (Datasets, Run outputs) and the
+datasets table. Its header has **Query with SQL** and **Load data**, which appear once the
+workspace is ready. The databases the workspace reads are on **Data → Connections**
+([Connections](/docs/connections)), and storage is the **Storage** tab of **Data → Drives**; an old
+link to Datasets' connections or storage opens those pages.
 
 There are three ways to bring data in, all under **Load data**:
 
@@ -113,51 +115,15 @@ generators.
 
 Generated data is for demos and tests: it is synthetic, not drawn from your records.
 
-## Connect a Database
+## Pull a Table From a Connection
 
-A **connection** is a database the workspace reads from. The **Connections** card on
-**Data → Datasets** (*Databases Your Data Lives In*) lists them with where they point, the service
-they came from and when they were saved.
+A **connection** is a database the workspace reads from. Connections have their own page,
+**Data → Connections** ([Connections](/docs/connections)): add one there, browse its tables, and
+load one into a dataset from the table's row. Datasets offers the same pull:
 
-### Connect One of Your Services
-
-When the workspace runs a Postgres service (**Ship → Services**), the Connections card offers it
-under **Connect One of Your Services**. Press **Connect** beside a Ready service, or **Refresh** for
-one already connected. The workspace reaches it inside the cluster with the credential Lake already
-holds; you type no password, and none is shown. Other service kinds are not connectable yet and say
-so.
-
-`POST /v1/connect_service`
-
-```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "service_id": "<service id>"}
-```
-
-Add `"name"` to choose the connection's name; it defaults to the service's name. The MCP tool is
-`connect_service`.
-
-### Add a Connection to Another Database
-
-1. On the Connections card press **Add connection**.
-2. Fill in **Name** (letters, digits, `_` and `-`), **Type** (**Postgres** or **Snowflake**), the
-   host and port or the Snowflake account, warehouse and role, **Database**, **Schema**, **User**
-   and **Password or access token**.
-3. Press **Save connection**.
-
-Use a read-only account: only a single `SELECT` ever runs against it. The password is sent to the
-workspace once, which stores it and never returns it; Lake keeps no copy. Through the API this is
-`create_connection` inside `workspace_act`; `list_connections` inside `workspace_query` lists
-connections without their credentials.
-
-### Browse a Connection's Tables
-
-**Browse tables** on a connection's row lists its tables with their kind and columns, without
-pulling anything. Through the API it is `list_source_tables` inside `workspace_query`.
-
-### Pull a Table Into a Dataset
-
-1. Press **Load data** and choose **From a connection**.
-2. Choose the connection under **From**.
+1. Press **Load data** and choose **From a connection**. With no connection yet, the drawer links
+   to **Connections** to add one.
+2. Choose the connection under **From** (the workspace's existing connections).
 3. Write one read-only **Query**, for example `SELECT account_id, plan, seats FROM accounts`.
 4. Name the dataset under **Dataset name**.
 5. Optionally limit **At most this many rows** (a whole number).
@@ -171,11 +137,6 @@ pulling anything. Through the API it is `list_source_tables` inside `workspace_q
 
 The credential stays with the workspace: the pull names the saved connection, so the password does
 not travel again.
-
-### Remove a Connection
-
-**Remove** on a connection's row asks first, then removes it (`delete_connection` inside
-`workspace_act`). Datasets already pulled from it stay.
 
 ## Look at a Dataset
 
@@ -260,28 +221,9 @@ Delete a dataset no run is still reading: the deletion does not wait for one. It
 
 ## Storage
 
-The **Storage** card (*Buckets, Filesystems and Volumes*) holds storage for your services, private
-to this workspace. It shows whether or not the workspace is ready.
-
-1. Press **New storage**.
-2. Choose **Type and provider**. Today one pair is offered: **Volume — cluster disk**. The others
-   are listed, disabled, with the reason they are not offered.
-3. Enter a **Name** (lowercase letters, digits and `-`, starting with a letter, at most 31
-   characters) and a **Size (GiB)** from 1 to 100 (default 10).
-4. Press **Create storage**. The card checks again every 3 seconds while a store is changing; it reads *Waiting
-   for the operator*, then *Connecting*, then Ready.
-5. Once Ready, **Show connection** shows what a service mounts to use it. It is shown once and
-   not stored by Lake.
-
-`POST /v1/create_store`
-
-```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "type": "volume", "provider": "cluster", "name": "scratch", "size_gi": 10}
-```
-
-`list_stores` lists them, `store_connection` reads a Ready store's connection, and `delete_store`
-deletes one when `confirm` is its exact name (**Delete** on the card). Deleting a store deletes the data in it, which
-cannot be recovered; the page asks you to type the name first.
+Storage (buckets, filesystems and volumes for your services) is the **Storage** tab of **Data →
+Drives** ([Drives](/docs/drives#storage), [Services and Storage](/docs/services#storage)). An old
+link to Datasets' Storage card opens that tab.
 
 ## Permissions
 
@@ -311,7 +253,6 @@ members hold `read` unless they were granted more ([Grants and Effective Access]
 | `invalid_input` at `/statement` | The query does not start with `SELECT` or `WITH` (the message quotes how it starts), or holds several statements. |
 | *This workspace requires an approval before it reaches an outside database* | The workspace enforces consent for outside sources, which Lake cannot give (`consent_required`). |
 | `workspace_not_ready` | The workspace is starting. Wait until **Ship → Workspaces** shows it Ready, or press **Start** on the page. |
-| *Connecting* on a store for a long time | The operator has made it but its connection has not reached Lake yet. |
 | `unauthorized` | You have `read` but not `write` on the account; ask an owner or admin. |
 
 ## Related Pages
@@ -319,6 +260,7 @@ members hold `read` unless they were granted more ([Grants and Effective Access]
 - [Getting Started](/docs)
 - [Workspaces](/docs/workspaces)
 - [Drives](/docs/drives): keep files, and load a CSV from one
+- [Connections](/docs/connections): the databases a workspace reads, and pulling a table
 - [Services and Storage](/docs/services)
 - [AI Projects and Pipelines](/docs/design): train on a dataset
 - [Search](/docs/search)

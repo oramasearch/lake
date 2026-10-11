@@ -1,14 +1,17 @@
 // Drives (docs/api/drives.md, lake#561): a workspace's drives, each a sealed `lake_drives` record
 // in its workspace Zetta that keeps its files in a repository, as workspace files, or as shortcuts
-// only (virtual). Workspace files are `lake_drive_entries` records and, for each file, one sealed
-// object in the workspace Zetta's `lake_files` bucket (drive_files.hpp). A repository drive is
-// browsed and written with the drive_* capabilities of drive_capabilities.cpp.
+// only (virtual), or that browses one of the workspace's bucket or filesystem stores in place
+// (store, lake#656). Workspace files are `lake_drive_entries` records and, for each file, one
+// sealed object in the workspace Zetta's `lake_files` bucket (drive_files.hpp). A repository drive
+// is browsed and written with the drive_* capabilities of drive_capabilities.cpp.
 
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -23,6 +26,7 @@
 #include "lake/control/drives.hpp"
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
+#include "lake/control/store_contents.hpp"
 #include "lake/control/transcripts.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "workspace_records_api.hpp"
@@ -221,23 +225,27 @@ json drive_json(const control::Drive& drive) {
         {"name", drive.name},
         {"storage", drive.storage},
         {"repository_id", drive.repository_id.empty() ? json(nullptr) : json(drive.repository_id)},
+        {"store_id", drive.store_id.empty() ? json(nullptr) : json(drive.store_id)},
         {"created_by", drive.created_by},
         {"created_at", drive.created_at}};
     return out;
 }
 
 json drive_schema() {
-    return {{"type", "object"},
-            {"properties",
-             {{"id", {{"type", "string"}}},
-              {"name", {{"type", "string"}}},
-              {"storage", {{"type", "string"}, {"enum", {"repository", "files", "virtual"}}}},
-              {"repository_id", {{"type", json::array({"string", "null"})}}},
-              {"created_by", {{"type", "string"}}},
-              {"created_at", {{"type", "string"}}}}},
-            {"required",
-             json::array({"id", "name", "storage", "repository_id", "created_by", "created_at"})},
-            {"additionalProperties", false}};
+    return {
+        {"type", "object"},
+        {"properties",
+         {{"id", {{"type", "string"}}},
+          {"name", {{"type", "string"}}},
+          {"storage", {{"type", "string"}, {"enum", {"repository", "files", "virtual", "store"}}}},
+          {"repository_id", {{"type", json::array({"string", "null"})}}},
+          {"store_id", {{"type", json::array({"string", "null"})}}},
+          {"created_by", {{"type", "string"}}},
+          {"created_at", {{"type", "string"}}}}},
+        {"required",
+         json::array(
+             {"id", "name", "storage", "repository_id", "store_id", "created_by", "created_at"})},
+        {"additionalProperties", false}};
 }
 
 json entry_json(const control::DriveEntry& entry, const std::string& path) {
@@ -629,6 +637,515 @@ Status status_of(std::expected<Status, liquid::error> completed) {
 
 // ---- Drives ----
 
+// ---- Store drives (lake#656) ----
+//
+// A drive with `storage: store` is one of the workspace's bucket or filesystem stores, browsed in
+// place through the store's own provider (control::StoreContents, opened by the injected
+// StoreBrowser with what the operator delivered for the store). Nothing is copied into Lake: an
+// item's id is its path in the store, and the drive's record only names the store. Deleting the
+// drive never deletes the store. Volumes are refused: their contents belong to the service that
+// mounts them.
+
+struct StoreOpened {
+    std::shared_ptr<control::StoreContents> contents;
+    std::optional<ApiResult> failure;
+};
+
+// The workspace's store `store_id`, Ready and delivered, opened by the store browser; or why not
+// (at `field`).
+StoreOpened open_store(ApiContext& context,
+                       const std::string& customer_id,
+                       const std::string& workspace_id,
+                       const std::string& store_id,
+                       const std::string& field) {
+    const auto refuse = [&](std::string code, std::string message) {
+        return StoreOpened{nullptr, ApiResult::failure(std::move(code), std::move(message), field)};
+    };
+    if (!context.workspaces) {
+        return refuse("store_unavailable", "this Lake has no storage");
+    }
+    const auto found = context.workspaces->store(customer_id, store_id, workspace_id);
+    if (!found) {
+        return refuse(found.error().code == "not_found" ? "not_found" : found.error().code,
+                      found.error().code == "not_found" ? "no such store in this workspace"
+                                                        : found.error().message);
+    }
+    if (const std::string kind = control::store_kind_refusal(found->type); !kind.empty()) {
+        return refuse("invalid_input", kind);
+    }
+    if (found->desired != "present" || found->phase != "Ready") {
+        return refuse("workspace_not_ready", "the store is not ready");
+    }
+    const auto connection = context.workspaces->store_connection(*found);
+    if (!connection) {
+        return refuse("workspace_not_ready",
+                      "the store is ready and its connection is still being delivered to Lake; "
+                      "try again in a minute");
+    }
+    if (!context.store_browser) {
+        return refuse("not_supported", control::store_browse_refusal(found->type, found->provider));
+    }
+    auto opened = context.store_browser(*found, *connection);
+    if (!opened) {
+        return refuse(opened.error().code, opened.error().message);
+    }
+    return {std::move(*opened), std::nullopt};
+}
+
+StoreOpened store_of(ApiContext& context, const control::Drive& drive, const json& input) {
+    return open_store(
+        context, drive.customer_id, input.at("workspace_id"), drive.store_id, "/drive_id");
+}
+
+json store_entry_json(const control::Drive& drive, const control::StoreItem& item) {
+    const std::string parent = control::store_parent(item.path);
+    const std::string name = control::store_name(item.path);
+    json out{{"id", item.path},
+             {"drive_id", drive.id},
+             {"parent_id", parent.empty() ? json(nullptr) : json(parent)},
+             {"kind", item.folder ? "folder" : "file"},
+             {"name", name},
+             {"path", item.path},
+             {"created_by", ""},
+             {"created_at", item.modified_at},
+             {"modified_by", ""},
+             {"modified_at", item.modified_at}};
+    if (!item.folder) {
+        out["size"] = item.size;
+        out["content_type"] =
+            item.content_type.empty() ? control::drive_media_type(name) : item.content_type;
+        out["sha256"] = nullptr;
+        out["state"] = "ready";
+    }
+    return out;
+}
+
+ApiResult store_failed(const control::ZettaControlError& error, std::string path) {
+    return ApiResult::failure(error.code, error.message, error.path.empty() ? path : error.path);
+}
+
+// An item's path from `input.<field>` ("" is the top), or the refusal.
+std::expected<std::string, ApiResult>
+store_path(const json& input, std::string_view field, bool top_allowed) {
+    const std::string path = input.value(std::string(field), std::string());
+    if (!control::valid_store_path(path) || (path.empty() && !top_allowed)) {
+        return std::unexpected(ApiResult::failure(
+            "invalid_input",
+            "a store path is names joined by \"/\", each 1 to 255 bytes with no backslash or "
+            "control character",
+            "/" + std::string(field)));
+    }
+    return path;
+}
+
+// The item at `path`, which must be there (and a folder, when `folder`).
+struct StoreFound {
+    std::optional<control::StoreItem> item;
+    std::optional<ApiResult> failure;
+};
+
+liquid::runtime::task<StoreFound> store_find(control::StoreContents& contents,
+                                             std::string path,
+                                             std::string field,
+                                             std::optional<bool> folder = std::nullopt) {
+    auto found = control::settled(co_await contents.stat(path));
+    if (!found) {
+        co_return StoreFound{std::nullopt, store_failed(found.error(), field)};
+    }
+    if (!*found || (folder && (*found)->folder != *folder)) {
+        co_return StoreFound{std::nullopt,
+                             ApiResult::failure("not_found",
+                                                folder && *folder
+                                                    ? "no such folder in this drive"
+                                                    : (folder ? "no such file in this drive"
+                                                              : "no such item in this drive"),
+                                                field)};
+    }
+    co_return StoreFound{std::move(**found), std::nullopt};
+}
+
+StoreFound awaited_found(std::expected<StoreFound, liquid::error> completed) {
+    return completed ? std::move(*completed)
+                     : StoreFound{std::nullopt,
+                                  ApiResult::failure("store_error", completed.error().message)};
+}
+
+liquid::runtime::task<ApiResult>
+store_list(const json& input, ApiContext& context, const control::Drive& drive) {
+    StoreOpened store = store_of(context, drive, input);
+    if (store.failure) {
+        co_return *store.failure;
+    }
+    const std::string field = input.contains("folder_id") ? "folder_id" : "path";
+    auto folder = store_path(input, field, true);
+    if (!folder) {
+        co_return folder.error();
+    }
+    if (!folder->empty()) {
+        StoreFound found =
+            awaited_found(co_await store_find(*store.contents, *folder, "/" + field, true));
+        if (found.failure) {
+            co_return *found.failure;
+        }
+    }
+    auto listed = control::settled(co_await store.contents->list(*folder));
+    if (!listed) {
+        co_return store_failed(listed.error(), "/" + field);
+    }
+    json ancestors = json::array();
+    std::string prefix;
+    if (!folder->empty()) {
+        std::size_t start = 0;
+        while (true) {
+            const std::size_t slash = folder->find('/', start);
+            prefix = folder->substr(0, slash);
+            ancestors.push_back({{"id", prefix}, {"name", folder->substr(start, slash - start)}});
+            if (slash == std::string::npos) {
+                break;
+            }
+            start = slash + 1;
+        }
+    }
+    json items = json::array();
+    for (const control::StoreItem& item : *listed) {
+        items.push_back(store_entry_json(drive, item));
+    }
+    context.audit_details["folder_id"] = *folder;
+    context.audit_details["store_id"] = drive.store_id;
+    co_return ApiResult::success({{"drive", drive_json(drive)},
+                                  {"folder_id", folder->empty() ? json(nullptr) : json(*folder)},
+                                  {"path", *folder},
+                                  {"ancestors", std::move(ancestors)},
+                                  {"items", std::move(items)},
+                                  {"uploads", json::array()}});
+}
+
+liquid::runtime::task<ApiResult>
+store_get(const json& input, ApiContext& context, const control::Drive& drive) {
+    StoreOpened store = store_of(context, drive, input);
+    if (store.failure) {
+        co_return *store.failure;
+    }
+    auto path = store_path(input, "id", false);
+    if (!path) {
+        co_return path.error();
+    }
+    StoreFound found = awaited_found(co_await store_find(*store.contents, *path, "/id"));
+    if (found.failure) {
+        co_return *found.failure;
+    }
+    context.audit_details["entry_id"] = *path;
+    co_return ApiResult::success(store_entry_json(drive, *found.item));
+}
+
+liquid::runtime::task<ApiResult>
+store_make_folder(const json& input, ApiContext& context, const control::Drive& drive) {
+    StoreOpened store = store_of(context, drive, input);
+    if (store.failure) {
+        co_return *store.failure;
+    }
+    auto parent = store_path(input, "parent_id", true);
+    if (!parent) {
+        co_return parent.error();
+    }
+    auto relative = store_path(input, "path", false);
+    if (!relative) {
+        co_return relative.error();
+    }
+    const std::string path = control::join_store_path(*parent, *relative);
+    // `mkdir -p`: a folder already there is answered as it is; a file on the way is a conflict.
+    std::string level;
+    for (std::size_t start = 0;;) {
+        const std::size_t slash = path.find('/', start);
+        level = path.substr(0, slash);
+        auto at = control::settled(co_await store.contents->stat(level));
+        if (!at) {
+            co_return store_failed(at.error(), "/path");
+        }
+        if (*at && !(*at)->folder) {
+            co_return ApiResult::failure(
+                "conflict", "“" + level + "” is a file, not a folder", "/path");
+        }
+        if (slash == std::string::npos) {
+            break;
+        }
+        start = slash + 1;
+    }
+    auto made = control::settled(co_await store.contents->make_folder(path));
+    if (!made) {
+        co_return store_failed(made.error(), "/path");
+    }
+    StoreFound found = awaited_found(co_await store_find(*store.contents, path, "/path", true));
+    if (found.failure) {
+        co_return *found.failure;
+    }
+    context.audit_details["entry_id"] = path;
+    co_return ApiResult::success(store_entry_json(drive, *found.item));
+}
+
+liquid::runtime::task<ApiResult>
+store_move(const json& input, ApiContext& context, const control::Drive& drive) {
+    StoreOpened store = store_of(context, drive, input);
+    if (store.failure) {
+        co_return *store.failure;
+    }
+    auto from = store_path(input, "id", false);
+    if (!from) {
+        co_return from.error();
+    }
+    StoreFound found = awaited_found(co_await store_find(*store.contents, *from, "/id"));
+    if (found.failure) {
+        co_return *found.failure;
+    }
+    const bool renaming = input.contains("name");
+    std::string parent = control::store_parent(*from);
+    if (input.contains("parent_id")) {
+        auto chosen = store_path(input, "parent_id", true);
+        if (!chosen) {
+            co_return chosen.error();
+        }
+        parent = *chosen;
+    }
+    const std::string name =
+        renaming ? input.at("name").get<std::string>() : control::store_name(*from);
+    if (!control::valid_drive_name(name)) {
+        co_return ApiResult::failure("invalid_input", "the new name is not valid", "/name");
+    }
+    if (parent == *from || parent.starts_with(*from + "/")) {
+        co_return ApiResult::failure(
+            "invalid_input", "a folder cannot move into itself", "/parent_id");
+    }
+    if (!parent.empty()) {
+        StoreFound folder =
+            awaited_found(co_await store_find(*store.contents, parent, "/parent_id", true));
+        if (folder.failure) {
+            co_return *folder.failure;
+        }
+    }
+    const std::string to = control::join_store_path(parent, name);
+    if (to != *from) {
+        auto taken = control::settled(co_await store.contents->stat(to));
+        if (!taken) {
+            co_return store_failed(taken.error(), "/id");
+        }
+        if (*taken) {
+            co_return ApiResult::failure("conflict",
+                                         "the folder already has an item named “" + name + "”",
+                                         renaming ? "/name" : "/parent_id");
+        }
+        auto moved = control::settled(co_await store.contents->move(*from, to));
+        if (!moved) {
+            co_return store_failed(moved.error(), "/id");
+        }
+    }
+    StoreFound now = awaited_found(co_await store_find(*store.contents, to, "/id"));
+    if (now.failure) {
+        co_return *now.failure;
+    }
+    context.audit_details["entry_id"] = to;
+    context.audit_details["moved_from"] = *from;
+    co_return ApiResult::success(store_entry_json(drive, *now.item));
+}
+
+liquid::runtime::task<ApiResult>
+store_remove(const json& input, ApiContext& context, const control::Drive& drive) {
+    StoreOpened store = store_of(context, drive, input);
+    if (store.failure) {
+        co_return *store.failure;
+    }
+    auto path = store_path(input, "id", false);
+    if (!path) {
+        co_return path.error();
+    }
+    StoreFound found = awaited_found(co_await store_find(*store.contents, *path, "/id"));
+    if (found.failure) {
+        co_return *found.failure;
+    }
+    auto removed = control::settled(co_await store.contents->remove(*path));
+    if (!removed) {
+        co_return store_failed(removed.error(), "/id");
+    }
+    context.audit_details["entry_id"] = *path;
+    context.audit_details["entries_removed"] = 1;
+    co_return ApiResult::success({{"deleted", true}, {"entries_removed", 1}});
+}
+
+// "name (2).ext", "name (3).ext", … : the first name free in the store's folder.
+liquid::runtime::task<control::ZettaControlResult<std::string>>
+store_free_name(control::StoreContents& contents, std::string folder, std::string name) {
+    const std::size_t dot = name.rfind('.');
+    const bool extension = dot != std::string::npos && dot > 0;
+    const std::string stem = extension ? name.substr(0, dot) : name;
+    const std::string suffix = extension ? name.substr(dot) : std::string();
+    for (int n = 2; n < 1000; ++n) {
+        const std::string candidate = stem + " (" + std::to_string(n) + ")" + suffix;
+        auto taken =
+            control::settled(co_await contents.stat(control::join_store_path(folder, candidate)));
+        if (!taken) {
+            co_return control::ZettaControlResult<std::string>(std::unexpected(taken.error()));
+        }
+        if (!*taken) {
+            co_return control::ZettaControlResult<std::string>(candidate);
+        }
+    }
+    co_return control::ZettaControlResult<std::string>(
+        std::unexpected(control::ZettaControlError{"conflict", "no free name for “" + name + "”"}));
+}
+
+liquid::runtime::task<ApiResult> store_upload(const json& input,
+                                              ApiContext& context,
+                                              const control::Drive& drive,
+                                              std::vector<std::string> paths,
+                                              std::vector<std::string> contents,
+                                              std::uint64_t total) {
+    StoreOpened store = store_of(context, drive, input);
+    if (store.failure) {
+        co_return *store.failure;
+    }
+    auto parent = store_path(input, "parent_id", true);
+    if (!parent) {
+        co_return parent.error();
+    }
+    if (!parent->empty()) {
+        StoreFound folder =
+            awaited_found(co_await store_find(*store.contents, *parent, "/parent_id", true));
+        if (folder.failure) {
+            co_return *folder.failure;
+        }
+    }
+    const std::string on_conflict = input.value("on_conflict", "rename");
+    const json& list = input.at("files");
+    json items = json::array();
+    for (std::size_t index = 0; index < paths.size(); ++index) {
+        const std::string field = "/files/" + std::to_string(index);
+        if (!control::valid_store_path(paths[index]) || paths[index].empty()) {
+            co_return ApiResult::failure("invalid_input",
+                                         "each name in the path is a valid file or folder name",
+                                         field + "/path");
+        }
+        std::string path = control::join_store_path(*parent, paths[index]);
+        auto taken = control::settled(co_await store.contents->stat(path));
+        if (!taken) {
+            co_return store_failed(taken.error(), field + "/path");
+        }
+        if (*taken) {
+            if ((*taken)->folder || on_conflict == "refuse") {
+                co_return ApiResult::failure("conflict",
+                                             "the folder already has an item named “" +
+                                                 control::store_name(path) + "”",
+                                             field + "/path");
+            }
+            if (on_conflict == "rename") {
+                auto free = control::settled(co_await store_free_name(
+                    *store.contents, control::store_parent(path), control::store_name(path)));
+                if (!free) {
+                    co_return store_failed(free.error(), field + "/path");
+                }
+                path = control::join_store_path(control::store_parent(path), *free);
+            }
+        }
+        std::string type = list.at(index).value("content_type", "");
+        if (type.empty()) {
+            type = control::drive_media_type(control::store_name(path));
+        }
+        auto written = control::settled(
+            co_await store.contents->write(path, std::move(contents[index]), std::move(type)));
+        if (!written) {
+            co_return store_failed(written.error(), field + "/content");
+        }
+        items.push_back(store_entry_json(drive, *written));
+    }
+    context.audit_details["files"] = items.size();
+    context.audit_details["bytes"] = total;
+    context.audit_details["store_id"] = drive.store_id;
+    co_return ApiResult::success({{"items", std::move(items)}});
+}
+
+liquid::runtime::task<ApiResult>
+store_read(const json& input, ApiContext& context, const control::Drive& drive) {
+    StoreOpened store = store_of(context, drive, input);
+    if (store.failure) {
+        co_return *store.failure;
+    }
+    auto path = store_path(input, "id", false);
+    if (!path) {
+        co_return path.error();
+    }
+    StoreFound found = awaited_found(co_await store_find(*store.contents, *path, "/id", false));
+    if (found.failure) {
+        co_return *found.failure;
+    }
+    const control::StoreItem& item = *found.item;
+    const std::uint64_t offset = input.value("offset", std::uint64_t{0});
+    if (offset > item.size) {
+        co_return ApiResult::failure("invalid_input", "offset is past the file's end", "/offset");
+    }
+    const std::uint64_t length =
+        std::min(input.value("length", item.size - offset), item.size - offset);
+    if (length > max_inline_bytes) {
+        co_return ApiResult::failure(
+            "size_invalid",
+            "one call reads at most 16 MiB: read the file in ranges (offset, length), or download "
+            "it from /drive/files/download",
+            "/length");
+    }
+    auto bytes = control::settled(co_await store.contents->read(*path, offset, length));
+    if (!bytes) {
+        co_return store_failed(bytes.error(), "/id");
+    }
+    const json entry = store_entry_json(drive, item);
+    context.audit_details["entry_id"] = *path;
+    context.audit_details["bytes"] = bytes->size();
+    co_return ApiResult::success({{"id", *path},
+                                  {"name", control::store_name(*path)},
+                                  {"size", item.size},
+                                  {"content_type", entry.at("content_type")},
+                                  {"sha256", ""},
+                                  {"offset", offset},
+                                  {"content_base64", encode_base64(*bytes)}});
+}
+
+// A store drive's names for search_drives: every folder and file, walked from the top, at most
+// `store_search_items` of them; why not, when the store cannot be read.
+constexpr std::size_t store_search_items = 10'000;
+
+struct StoreWalk {
+    std::vector<control::StoreItem> items;
+    std::string problem;
+};
+
+liquid::runtime::task<StoreWalk>
+store_walk(ApiContext& context, const control::Drive& drive, const json& input) {
+    StoreOpened store = store_of(context, drive, input);
+    if (store.failure) {
+        co_return StoreWalk{{}, store.failure->error.message};
+    }
+    StoreWalk out;
+    std::vector<std::string> folders{""};
+    while (!folders.empty() && out.items.size() < store_search_items) {
+        const std::string folder = folders.back();
+        folders.pop_back();
+        auto listed = control::settled(co_await store.contents->list(folder));
+        if (!listed) {
+            co_return StoreWalk{{}, listed.error().message};
+        }
+        for (control::StoreItem& item : *listed) {
+            if (item.folder) {
+                folders.push_back(item.path);
+            }
+            out.items.push_back(std::move(item));
+        }
+    }
+    if (out.items.size() > store_search_items) {
+        out.items.resize(store_search_items);
+    }
+    co_return out;
+}
+
+StoreWalk awaited_walk(std::expected<StoreWalk, liquid::error> completed) {
+    return completed ? std::move(*completed) : StoreWalk{{}, completed.error().message};
+}
+
 liquid::runtime::task<ApiResult> create_drive(const json& input, ApiContext& context) {
     if (!context.store) {
         co_return ApiResult::failure("store_unavailable", "workspaces are not configured");
@@ -726,6 +1243,23 @@ liquid::runtime::task<ApiResult> create_drive(const json& input, ApiContext& con
         co_return ApiResult::failure(
             "invalid_input", "only a repository drive names a repository", "/repository_id");
     }
+    if (drive.storage == "store") {
+        // An existing bucket or filesystem store of this workspace, opened now so a store Lake
+        // cannot browse is refused with the reason before any drive names it. Nothing is copied.
+        const std::string store_id = input.value("store_id", std::string());
+        if (store_id.empty()) {
+            co_return ApiResult::failure(
+                "invalid_input", "a store drive names one of the workspace's stores", "/store_id");
+        }
+        StoreOpened store = open_store(context, customer_id, workspace_id, store_id, "/store_id");
+        if (store.failure) {
+            co_return *store.failure;
+        }
+        drive.store_id = store_id;
+    } else if (input.contains("store_id")) {
+        co_return ApiResult::failure(
+            "invalid_input", "only a store drive names a store", "/store_id");
+    }
     auto stored = control::settled(co_await control::record_drive(*records, std::move(drive)));
     if (!stored) {
         co_return failed(stored.error());
@@ -735,6 +1269,9 @@ liquid::runtime::task<ApiResult> create_drive(const json& input, ApiContext& con
     if (!stored->repository_id.empty()) {
         context.audit_details["repository_id"] = stored->repository_id;
         context.audit_details["repository_created"] = created_repository;
+    }
+    if (!stored->store_id.empty()) {
+        context.audit_details["store_id"] = stored->store_id;
     }
     co_return ApiResult::success(drive_json(*stored));
 }
@@ -845,7 +1382,8 @@ liquid::runtime::task<ApiResult> delete_drive(const json& input, ApiContext& con
             "invalid_input", "type the drive's name exactly to delete it", "/confirm_name");
     }
     std::size_t removed_entries = 0;
-    if (opened.drive.storage != "repository") {
+    // A repository drive's repository and a store drive's store stay: the drive only names them.
+    if (opened.drive.storage != "repository" && opened.drive.storage != "store") {
         Read read = awaited(co_await read_tree(opened));
         if (read.failure) {
             co_return *read.failure;
@@ -877,6 +1415,10 @@ liquid::runtime::task<ApiResult> delete_drive(const json& input, ApiContext& con
         // A repository drive only names its repository; the repository stays.
         out["repository_id"] = opened.drive.repository_id;
     }
+    if (!opened.drive.store_id.empty()) {
+        // A store drive only names its store; the store and its contents stay.
+        out["store_id"] = opened.drive.store_id;
+    }
     co_return ApiResult::success(std::move(out));
 }
 
@@ -892,6 +1434,9 @@ liquid::runtime::task<ApiResult> list_drive_entries(const json& input, ApiContex
     Opened opened = awaited(co_await open_drive(input, context, true));
     if (opened.failure) {
         co_return *opened.failure;
+    }
+    if (opened.drive.storage == "store") {
+        co_return called_as(co_await store_list(input, context, opened.drive));
     }
     Read read = awaited(co_await read_tree(opened));
     if (read.failure) {
@@ -954,6 +1499,9 @@ liquid::runtime::task<ApiResult> get_drive_entry(const json& input, ApiContext& 
     if (opened.failure) {
         co_return *opened.failure;
     }
+    if (opened.drive.storage == "store") {
+        co_return called_as(co_await store_get(input, context, opened.drive));
+    }
     Read read = awaited(co_await read_tree(opened));
     if (read.failure) {
         co_return *read.failure;
@@ -986,6 +1534,9 @@ liquid::runtime::task<ApiResult> create_drive_folder_entry(const json& input, Ap
     Opened opened = awaited(co_await open_drive(input, context, true));
     if (opened.failure) {
         co_return *opened.failure;
+    }
+    if (opened.drive.storage == "store") {
+        co_return called_as(co_await store_make_folder(input, context, opened.drive));
     }
     Read read = awaited(co_await read_tree(opened));
     if (read.failure) {
@@ -1022,6 +1573,12 @@ liquid::runtime::task<ApiResult> create_drive_shortcut(const json& input, ApiCon
     if (opened.drive.storage == "repository") {
         co_return ApiResult::failure(
             "invalid_input", "shortcuts live in a workspace-files or virtual drive", "/drive_id");
+    }
+    if (opened.drive.storage == "store") {
+        co_return ApiResult::failure("invalid_input",
+                                     "a store drive holds the store's own files; put shortcuts in "
+                                     "a workspace-files or virtual drive",
+                                     "/drive_id");
     }
     Read read = awaited(co_await read_tree(opened));
     if (read.failure) {
@@ -1075,6 +1632,9 @@ liquid::runtime::task<ApiResult> move_drive_entry(const json& input, ApiContext&
     Opened opened = awaited(co_await open_drive(input, context, true));
     if (opened.failure) {
         co_return *opened.failure;
+    }
+    if (opened.drive.storage == "store") {
+        co_return called_as(co_await store_move(input, context, opened.drive));
     }
     Read read = awaited(co_await read_tree(opened));
     if (read.failure) {
@@ -1130,6 +1690,9 @@ liquid::runtime::task<ApiResult> delete_drive_entry(const json& input, ApiContex
     Opened opened = awaited(co_await open_drive(input, context, true));
     if (opened.failure) {
         co_return *opened.failure;
+    }
+    if (opened.drive.storage == "store") {
+        co_return called_as(co_await store_remove(input, context, opened.drive));
     }
     Read read = awaited(co_await read_tree(opened));
     if (read.failure) {
@@ -1319,6 +1882,12 @@ liquid::runtime::task<Finished> finish_file(Opened& opened,
 }
 
 std::optional<ApiResult> files_drive_only(const Opened& opened) {
+    if (opened.drive.storage == "store") {
+        return ApiResult::failure("invalid_input",
+                                  "a store drive takes upload_drive_entries (at most 16 MiB a "
+                                  "call); chunked uploads are for workspace-files drives",
+                                  "/drive_id");
+    }
     if (opened.drive.storage != "files") {
         return ApiResult::failure("invalid_input",
                                   "a virtual drive holds folders and shortcuts only; upload into a "
@@ -1534,6 +2103,10 @@ liquid::runtime::task<ApiResult> upload_drive_entries(const json& input, ApiCont
     if (opened.failure) {
         co_return *opened.failure;
     }
+    if (opened.drive.storage == "store") {
+        co_return called_as(co_await store_upload(
+            input, context, opened.drive, std::move(paths), std::move(contents), total));
+    }
     if (auto refused = files_drive_only(opened)) {
         co_return *refused;
     }
@@ -1592,6 +2165,9 @@ liquid::runtime::task<ApiResult> read_drive_file(const json& input, ApiContext& 
     Opened opened = awaited(co_await open_drive(input, context, true));
     if (opened.failure) {
         co_return *opened.failure;
+    }
+    if (opened.drive.storage == "store") {
+        co_return called_as(co_await store_read(input, context, opened.drive));
     }
     auto found = control::settled(co_await control::get_drive_entry(
         *opened.records, opened.drive.customer_id, opened.drive.id, input.at("id")));
@@ -1717,7 +2293,7 @@ liquid::runtime::task<ApiResult> load_drive_dataset(const json& input, ApiContex
     // The file's name decides its format, so a file that is neither CSV nor JSONL is refused
     // before its bytes are read.
     std::string name = id.substr(id.rfind('/') == std::string::npos ? 0 : id.rfind('/') + 1);
-    if (opened.drive.storage == "files") {
+    if (opened.drive.storage == "files" || opened.drive.storage == "store") {
         ApiResult entry = called_as(co_await call_as(context,
                                                      "get_drive_entry",
                                                      {{"customer_id", customer_id},
@@ -2006,7 +2582,8 @@ liquid::runtime::task<ApiResult> search_drives(const json& input, ApiContext& co
                     {"name", drive.name},
                     {"storage", drive.storage},
                     {"repository_id",
-                     drive.repository_id.empty() ? json(nullptr) : json(drive.repository_id)}};
+                     drive.repository_id.empty() ? json(nullptr) : json(drive.repository_id)},
+                    {"store_id", drive.store_id.empty() ? json(nullptr) : json(drive.store_id)}};
     };
 
     // Every match is kept (bounded by what the drives hold) so the order does not depend on the
@@ -2028,6 +2605,39 @@ liquid::runtime::task<ApiResult> search_drives(const json& input, ApiContext& co
                              {"name", drive.name},
                              {"path", ""},
                              {"folder", ""}}});
+        }
+        if (drive.storage == "store") {
+            StoreWalk walk = awaited_walk(co_await store_walk(context, drive, input));
+            if (!walk.problem.empty()) {
+                skipped.push_back(
+                    {{"drive", drive_ref(drive)}, {"reason", std::move(walk.problem)}});
+                continue;
+            }
+            for (const control::StoreItem& item : walk.items) {
+                const std::string name = control::store_name(item.path);
+                if (!matches(name)) {
+                    continue;
+                }
+                const std::string folder = control::store_parent(item.path);
+                json found{{"drive", drive_ref(drive)},
+                           {"kind", item.folder ? "folder" : "file"},
+                           {"id", item.path},
+                           {"parent_id", folder.empty() ? json(nullptr) : json(folder)},
+                           {"name", name},
+                           {"path", item.path},
+                           {"folder", folder}};
+                if (!item.folder) {
+                    found["size"] = item.size;
+                    found["content_type"] = item.content_type.empty()
+                                                ? control::drive_media_type(name)
+                                                : item.content_type;
+                    if (!item.modified_at.empty()) {
+                        found["modified_at"] = item.modified_at;
+                    }
+                }
+                hits.push_back({std::move(found)});
+            }
+            continue;
         }
         if (drive.storage == "repository") {
             RepositoryPaths read =
@@ -2159,7 +2769,8 @@ void register_drives_capabilities(Registry& registry) {
                        {"properties",
                         {{"deleted", {{"type", "boolean"}, {"const", true}}},
                          {"entries_removed", {{"type", "integer"}, {"minimum", 0}}},
-                         {"repository_id", string_schema()}}},
+                         {"repository_id", string_schema()},
+                         {"store_id", string_schema()}}},
                        {"required", json::array({"deleted", "entries_removed"})},
                        {"additionalProperties", false}};
     const json on_conflict{{"type", "string"},
@@ -2169,20 +2780,26 @@ void register_drives_capabilities(Registry& registry) {
                             "file the first free name, replace replaces it once the upload "
                             "finishes, refuse answers conflict"}};
 
-    action("create_drive",
-           "Create a drive",
-           "Create a drive in a workspace. `storage` is repository (a liquid repository with "
-           "history: an existing `repository_id` of this workspace, or a new repository named "
-           "`repository_name`, which gets its first change at once), files (workspace files in the "
-           "workspace Zetta, moved and renamed without copying) or virtual (folders of shortcuts).",
-           workspace_input(
-               {{"name", string_schema()},
-                {"storage", {{"type", "string"}, {"enum", {"repository", "files", "virtual"}}}},
-                {"repository_id", string_schema()},
-                {"repository_name", string_schema()}},
-               json::array({"name", "storage"})),
-           drive_schema(),
-           create_drive);
+    action(
+        "create_drive",
+        "Create a drive",
+        "Create a drive in a workspace. `storage` is repository (a liquid repository with "
+        "history: an existing `repository_id` of this workspace, or a new repository named "
+        "`repository_name`, which gets its first change at once), files (workspace files in the "
+        "workspace Zetta, moved and renamed without copying), virtual (folders of shortcuts) or "
+        "store (one of the workspace's Ready bucket or filesystem stores, `store_id`, browsed in "
+        "place without copying; deleting the drive never deletes the store; a volume is "
+        "refused).",
+        workspace_input(
+            {{"name", string_schema()},
+             {"storage",
+              {{"type", "string"}, {"enum", {"repository", "files", "virtual", "store"}}}},
+             {"repository_id", string_schema()},
+             {"repository_name", string_schema()},
+             {"store_id", string_schema()}},
+            json::array({"name", "storage"})),
+        drive_schema(),
+        create_drive);
     read("list_drives",
          "List Drives",
          "The workspace's drives, by name, each with how it stores its files (repository, files or "
@@ -2210,15 +2827,17 @@ void register_drives_capabilities(Registry& registry) {
            "Delete a drive",
            "Delete a drive; `confirm_name` must be its name. A workspace-files drive's folders, "
            "files and shortcuts are deleted with it and cannot be restored. A repository drive's "
-           "repository is never deleted: delete it from the repository's own page.",
+           "repository and a store drive's store are never deleted: delete them from their own "
+           "pages.",
            workspace_input({{"id", string_schema()}, {"confirm_name", string_schema()}},
                            json::array({"id", "confirm_name"})),
            deleted,
            delete_drive);
     read("list_drive_entries",
          "List a Drive Folder",
-         "The folders, files and shortcuts in one folder of a workspace-files or virtual drive: "
-         "`folder_id`, or a slash `path` from the top; neither is the top. Each shortcut carries "
+         "The folders, files and shortcuts in one folder of a workspace-files, virtual or store "
+         "drive: `folder_id`, or a slash `path` from the top; neither is the top. In a store "
+         "drive an item's id is its path in the store. Each shortcut carries "
          "`status`: ok, broken (with a reason) or unknown when Lake cannot check its kind. "
          "`uploads` lists the folder's unfinished uploads with `age_seconds`: each holds its name "
          "until it is finished, deleted (delete_drive_entry) or expires 24 hours after it began.",
@@ -2241,7 +2860,8 @@ void register_drives_capabilities(Registry& registry) {
          true);
     read("get_drive_entry",
          "Read a Drive Item",
-         "One folder, file or shortcut of a workspace-files or virtual drive, with its path.",
+         "One folder, file or shortcut of a workspace-files, virtual or store drive, with its "
+         "path.",
          workspace_input({{"drive_id", string_schema()}, {"id", string_schema()}},
                          json::array({"drive_id", "id"})),
          entry_schema(),
@@ -2338,7 +2958,8 @@ void register_drives_capabilities(Registry& registry) {
         finish_drive_upload);
     action("upload_drive_entries",
            "Upload small files",
-           "Upload small files into a workspace-files drive in one call (at most 16 MiB in all), "
+           "Upload small files into a workspace-files or store drive in one call (at most 16 MiB "
+           "in all), "
            "each at a relative `path` whose folders are made where missing (or a `name` in the "
            "folder: the same item shape as upload_drive_files).",
            workspace_input(
@@ -2359,8 +2980,9 @@ void register_drives_capabilities(Registry& registry) {
            upload_drive_entries);
     read("read_drive_file",
          "Read a Workspace File",
-         "A workspace file's bytes as base64: the whole file, or `length` bytes from `offset`; at "
-         "most 16 MiB per call. Browsers download from GET /drive/files/download.",
+         "A workspace file's (or a store drive file's) bytes as base64: the whole file, or "
+         "`length` bytes from `offset`; at most 16 MiB per call. Browsers download from GET "
+         "/drive/files/download.",
          workspace_input({{"drive_id", string_schema()},
                           {"id", string_schema()},
                           {"offset", {{"type", "integer"}, {"minimum", 0}}},
@@ -2427,19 +3049,21 @@ void register_drives_capabilities(Registry& registry) {
                    json::array({"items"})),
          recent_drive_entries,
          true);
-    const json drive_ref =
-        object_of({{"id", string_schema()},
-                   {"name", string_schema()},
-                   {"storage", {{"type", "string"}, {"enum", {"repository", "files", "virtual"}}}},
-                   {"repository_id", {{"type", json::array({"string", "null"})}}}},
-                  json::array({"id", "name", "storage", "repository_id"}));
+    const json drive_ref = object_of(
+        {{"id", string_schema()},
+         {"name", string_schema()},
+         {"storage", {{"type", "string"}, {"enum", {"repository", "files", "virtual", "store"}}}},
+         {"repository_id", {{"type", json::array({"string", "null"})}}},
+         {"store_id", {{"type", json::array({"string", "null"})}}}},
+        json::array({"id", "name", "storage", "repository_id", "store_id"}));
     const json nullable_string{{"type", json::array({"string", "null"})}};
     read(
         "search_drives",
         "Search Drives",
         "Find drives, folders, files and shortcuts whose name contains `q` (A to Z in either "
         "case) across the workspace's drives, or one `drive_id`: workspace-files and virtual "
-        "drives by their items' names, repository drives by the names of the paths at `main`. "
+        "drives by their items' names, repository drives by the names of the paths at `main`, "
+        "store drives by the names in the store (at most 10,000 items each). "
         "Each match names its drive and folder path; drives first, then by drive and path.",
         workspace_input({{"q", {{"type", "string"}, {"minLength", 1}, {"maxLength", 255}}},
                          {"drive_id", string_schema()},
@@ -2487,6 +3111,18 @@ find_workspace_file(ApiContext& context,
     if (!records) {
         co_return Result(std::unexpected(records.error()));
     }
+    // A store drive's file is read from its store (lake#656).
+    auto drive = control::settled(co_await control::get_drive(*records, customer_id, drive_id));
+    if (!drive) {
+        co_return Result(std::unexpected(drive.error()));
+    }
+    if (*drive && (*drive)->storage == "store") {
+        co_return control::settled(co_await find_store_file(context,
+                                                            std::move(customer_id),
+                                                            std::move(workspace_id),
+                                                            std::move(drive_id),
+                                                            std::move(id)));
+    }
     auto found =
         control::settled(co_await control::get_drive_entry(*records, customer_id, drive_id, id));
     if (!found) {
@@ -2501,6 +3137,51 @@ find_workspace_file(ApiContext& context,
         entry.id, entry.name, entry.content_type, entry.sha256, entry.object_key, entry.size});
 }
 
+liquid::runtime::task<control::ZettaControlResult<WorkspaceFile>>
+find_store_file(ApiContext& context,
+                std::string customer_id,
+                std::string workspace_id,
+                std::string drive_id,
+                std::string id) {
+    using Result = control::ZettaControlResult<WorkspaceFile>;
+    auto records = workspace_records(context, customer_id, workspace_id);
+    if (!records) {
+        co_return Result(std::unexpected(records.error()));
+    }
+    auto drive = control::settled(co_await control::get_drive(*records, customer_id, drive_id));
+    if (!drive) {
+        co_return Result(std::unexpected(drive.error()));
+    }
+    if (!*drive || (*drive)->storage != "store") {
+        co_return Result(std::unexpected(
+            control::ZettaControlError{"not_found", "no such store drive", "/drive_id"}));
+    }
+    StoreOpened store = store_of(context, **drive, {{"workspace_id", workspace_id}});
+    if (store.failure) {
+        co_return Result(std::unexpected(
+            control::ZettaControlError{store.failure->error.code, store.failure->error.message}));
+    }
+    auto item = control::settled(co_await store.contents->stat(id));
+    if (!item) {
+        co_return Result(std::unexpected(item.error()));
+    }
+    if (!*item || (*item)->folder) {
+        co_return Result(std::unexpected(
+            control::ZettaControlError{"not_found", "no such file in this drive", "/id"}));
+    }
+    WorkspaceFile out{id,
+                      control::store_name(id),
+                      (*item)->content_type.empty()
+                          ? control::drive_media_type(control::store_name(id))
+                          : (*item)->content_type,
+                      "",
+                      id,
+                      (*item)->size};
+    out.store_drive_id = drive_id;
+    out.etag = (*item)->etag;
+    co_return Result(std::move(out));
+}
+
 // The plaintext of a workspace file window, for GET /drive/files/download (http_server.cpp).
 liquid::runtime::task<control::ZettaControlResult<std::string>>
 read_workspace_file(ApiContext& context,
@@ -2509,7 +3190,31 @@ read_workspace_file(ApiContext& context,
                     std::string object_key,
                     std::uint64_t size,
                     std::uint64_t offset,
-                    std::uint64_t length) {
+                    std::uint64_t length,
+                    std::string store_drive_id) {
+    if (!store_drive_id.empty()) {
+        // A store drive's file: `object_key` is its path in the store.
+        auto records = workspace_records(context, customer_id, workspace_id);
+        if (!records) {
+            co_return control::ZettaControlResult<std::string>(std::unexpected(records.error()));
+        }
+        auto drive =
+            control::settled(co_await control::get_drive(*records, customer_id, store_drive_id));
+        if (!drive || !*drive) {
+            co_return control::ZettaControlResult<std::string>(std::unexpected(
+                drive ? control::ZettaControlError{"not_found", "no such store drive"}
+                      : drive.error()));
+        }
+        StoreOpened store = store_of(context, **drive, {{"workspace_id", workspace_id}});
+        if (store.failure) {
+            co_return control::ZettaControlResult<std::string>(
+                std::unexpected(control::ZettaControlError{store.failure->error.code,
+                                                           store.failure->error.message}));
+        }
+        (void)size;
+        co_return control::settled(
+            co_await store.contents->read(std::move(object_key), offset, length));
+    }
     Files files = file_store(context, customer_id, workspace_id);
     if (files.failure) {
         co_return control::ZettaControlResult<std::string>(std::unexpected(

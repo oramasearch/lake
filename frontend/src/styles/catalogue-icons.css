@@ -1,0 +1,68 @@
+/* The catalogue icons (lake#639, components/CatalogueIcon.tsx, docs/ui/catalogue-icons.md): ink
+   lines in the text colour, one accent (blue for a methodology, amber for a solution), a flat tint of
+   that accent, and a soft periwinkle tile at card and page sizes. Every colour is a lake token, so
+   the icons follow the light and dark themes. */
+.cat-icon {
+  --cat-accent: var(--lake-action);
+  --cat-tint: color-mix(in srgb, var(--cat-accent) 20%, transparent);
+  --cat-tile: var(--lake-ai-soft);
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--lake-text-primary);
+  line-height: 0;
+}
+.cat-icon[data-kind="solution"] {
+  --cat-accent: var(--lake-warning);
+}
+.cat-icon svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.cat-icon-tile {
+  background: var(--cat-tile);
+  border-radius: 25%;
+}
+.cat-icon-tile svg {
+  width: 66.67%;
+  height: 66.67%;
+}
+.cat-icon .cat-line,
+.cat-icon .cat-accent {
+  fill: none;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.cat-icon .cat-line {
+  stroke: currentColor;
+}
+.cat-icon .cat-accent {
+  stroke: var(--cat-accent);
+}
+.cat-icon .cat-dot {
+  fill: var(--cat-accent);
+  stroke: none;
+}
+.cat-icon .cat-tint {
+  fill: var(--cat-tint);
+  stroke: none;
+}
+.cat-icon .cat-dash {
+  stroke-dasharray: 2 2.5;
+}
+.cat-icon .cat-monogram {
+  fill: var(--cat-accent);
+  font-family: var(--lake-font-sans);
+  font-size: 13px;
+  font-weight: 600;
+}
+/* A detail page's icon beside its title: 64 px, 48 px on a phone. */
+@media (max-width: 40rem) {
+  .page-icon .cat-icon {
+    width: 48px !important;
+    height: 48px !important;
+  }
+}

@@ -63,7 +63,7 @@ are: `lake-prod-instance-kek` (`key`, the instance key: bootstrap), `lake-prod-c
 control database: bootstrap), `lake-prod-admin`, `lake-prod-agent-service-token`,
 `lake-prod-agent-bus` (operator-minted lake and agent credentials), `lake-prod-sealing-key` (the
 cluster delivery key; never mounted), `lake-prod-zetta-zetta-*` and `prod-ws-<id>-zetta-*` (Zetta
-admin and cluster tokens), `lake-prod-openai` (`OPENAI_API_KEY`, lake's and its agents' OpenAI key),
+admin and cluster tokens), `lake-prod-openai` (`OPENAI_API_KEY`, lake's OpenAI key; agents reach models through lake's model gateway and hold none once `spec.agents.openaiSecretName` is removed, lake#248),
 `cloudflare-api-token` (`accountID`, `token`, `zoneID`; the operator's DNS records, from
 `spec.dnsSecretRef`), `oramasearch-dockerhub` (Orama's private images), and in `orama-system` the
 operator's own (`cloudflare-api-token`, `cloudflare-r2`, `oramasearch-dockerhub`), the Cloud v1 dev

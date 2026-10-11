@@ -28,12 +28,16 @@ namespace lake::control {
 //   virtual     folders of shortcuts only: links to things that live elsewhere (a repository or
 //               a path in one, a workspace file, a dataset, a transcript, a project, an agent, a
 //               model or a web address).
+//   store       one of the workspace's bucket or filesystem stores (lake#656), browsed in place
+//               through its provider (store_contents.hpp): nothing is copied, items are addressed
+//               by their path, and deleting the drive never deletes the store.
 struct Drive {
     std::string id;
     std::string customer_id;
     std::string name;
-    std::string storage;       // repository, files or virtual
+    std::string storage;       // repository, files, virtual or store
     std::string repository_id; // storage repository only
+    std::string store_id;      // storage store only
     std::string created_by;
     std::string created_at;
     std::int64_t at_us = 0;
