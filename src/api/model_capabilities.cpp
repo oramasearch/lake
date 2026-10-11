@@ -498,6 +498,7 @@ Capability dataset_capability() {
             json value = std::move(**called);
             value["id"] = datasets::id_of(database, dataset);
             value["kind"] = datasets::kind_of(database);
+            datasets::annotate_one(value);
             context.audit_customer_id = *customer_id;
             context.audit_kind = "workspace.query";
             context.audit_object = "customer/" + *customer_id + "/workspace";

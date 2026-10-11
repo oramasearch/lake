@@ -13,7 +13,7 @@ as you: it can never do more than the key you give it.
 | **Endpoint** | `https://<your lake>/mcp`, for example `https://lake.oramadev.net/mcp`. JSON-RPC 2.0 over streamable HTTP, protocol version `2025-06-18`. |
 | **Key** | A lake API token sent as `Authorization: Bearer <key>`. The same keys work for MCP and REST. |
 | **Tool** | One capability. Its name, input schema and output schema are exactly those of the REST operation. |
-| **Read tool** | A tool that changes nothing, marked `readOnlyHint: true`. Write tools are marked `destructiveHint: true`, so a client can ask you before it runs one. |
+| **Read tool** | A tool that changes nothing, marked `readOnlyHint: true`. Only a tool that deletes, destroys, removes or revokes something is marked `destructiveHint: true`, so a client asks you before those; a tool that is safe to call twice is marked `idempotentHint: true`. |
 | **The lake skill** | A public `SKILL.md` that teaches an agent what lake is, which tool does what and the rules to keep. |
 
 Everything below is on one page: **Developer → MCP**. Its strip at the top shows the MCP URL with

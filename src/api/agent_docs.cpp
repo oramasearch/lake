@@ -17,8 +17,9 @@ bool contains_any(std::string_view name, std::initializer_list<std::string_view>
 
 // workspace_query is registered as an action (it runs through the workspace's allow-list) but it
 // only reads; a read-only key includes it.
+// The same rule as MCP's readOnlyHint (lake#594), so `predict` is a read in both.
 bool writes(const Capability& capability) {
-    return capability.kind == CapabilityKind::Action && capability.name != "workspace_query";
+    return capability_writes(capability);
 }
 
 struct GroupRule {

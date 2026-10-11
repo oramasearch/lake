@@ -720,6 +720,14 @@ TEST_P(WorkspaceRecordStores, TranscriptsLiveInTheirWorkspaceAndKeepNoAudio) {
     const auto failing =
         t.call(first, "transcribe", {{"name", "x.wav"}, {"audio_base64", "c2lsZW5jZQ=="}});
     EXPECT_EQ(failing.error.code, "engine_error");
+    // A text file is refused before it reaches the speech service (lake#594).
+    const std::size_t sent_before = heard.size();
+    const auto text_file =
+        t.call(first, "transcribe", {{"name", "memo.txt"}, {"audio_base64", audio}});
+    EXPECT_EQ(text_file.error.code, "invalid_input");
+    EXPECT_EQ(text_file.error.path, "/name");
+    EXPECT_NE(text_file.error.message.find("memo.txt is not audio or video"), std::string::npos);
+    EXPECT_EQ(heard.size(), sent_before) << "nothing was sent";
     for (const auto& space : t.spaces) {
         for (const auto& workspace : space.workspaces) {
             EXPECT_TRUE(

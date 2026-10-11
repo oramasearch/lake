@@ -1509,6 +1509,18 @@ TEST(Workspaces, DatasetRulesNameCsvIdAndEngineResults) {
     EXPECT_EQ(listed["datasets"][0]["kind"], "data");
     EXPECT_EQ(listed["datasets"][1]["id"], "entity_resolution_results/pairs_1a2b");
     EXPECT_EQ(listed["datasets"][1]["kind"], "result");
+
+    // `format` is what the person loaded; a name SQL cannot name says so (lake#594).
+    json csv = {{"name", "accounts"}, {"format", "jsonl"}, {"source_format", "csv"}};
+    datasets::annotate_one(csv);
+    EXPECT_EQ(csv["format"], "csv");
+    EXPECT_EQ(csv["storage_format"], "jsonl");
+    EXPECT_EQ(csv["sql_queryable"], true);
+    json old = {{"name", "ux-review-2026-10-01-accounts"}, {"format", "jsonl"}};
+    datasets::annotate_one(old);
+    EXPECT_EQ(old["format"], "jsonl") << "no source_format: the engine's format stays";
+    EXPECT_EQ(old["sql_queryable"], false);
+    EXPECT_NE(old["sql_note"].get<std::string>().find("load it again"), std::string::npos);
 }
 
 // Uploads are checked before they reach the workspace, a taken name is never renamed silently,

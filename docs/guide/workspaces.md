@@ -72,6 +72,11 @@ The first workspace is named `workspace`, in the `prod` environment. Starting ag
 
 - MCP: `create_workspace` with the same input. The answer's `id` is the new `workspace_id`.
 
+`environment` says what the workspace is for. Use `dev`, `staging` or `prod`, or any lowercase
+DNS label of up to 47 characters (letters, digits and inner hyphens, such as `qa` or `eu-prod`). It
+names the workspace's namespace on the cluster and changes nothing else, so it is a label rather
+than a fixed list.
+
 ## Check Whether It Is Ready
 
 **Ship → Workspaces** shows every workspace's name, environment, phase, storage and age, with a

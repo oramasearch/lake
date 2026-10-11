@@ -48,9 +48,11 @@ nlohmann::json mcp_tools(const Registry& registry, SchemaAudience audience) {
                                {"title", capability->title},
                                {"description", capability->description},
                                {"inputSchema", audience_input_schema(*capability, audience)}};
-        const bool read_only =
-            capability->kind == CapabilityKind::Read || capability->action == "read";
-        tool["annotations"] = {{"readOnlyHint", read_only}, {"destructiveHint", !read_only}};
+        // lake#594: only a delete or destroy is destructive, so a client warns for those alone.
+        const bool writes = capability_writes(*capability);
+        tool["annotations"] = {{"readOnlyHint", !writes},
+                               {"destructiveHint", capability_destroys(*capability)},
+                               {"idempotentHint", capability_idempotent(*capability)}};
         if (capability->output_schema.is_object() && !capability->output_schema.empty()) {
             tool["outputSchema"] = success_envelope_schema(capability->output_schema);
         }

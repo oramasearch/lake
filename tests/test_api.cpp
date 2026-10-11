@@ -3632,6 +3632,44 @@ TEST(Rest, PathsMethodsAndQueryCoercion) {
     EXPECT_EQ(rest_status(ApiResult::failure("store_unavailable", "")), 503);
 }
 
+// lake#594: a newcomer reads every operation by a human title, and an MCP client warns only before
+// a delete or destroy.
+TEST(Mcp, EveryToolHasAHumanTitleAndOnlyDeletesAreDestructive) {
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "0.0.1");
+    std::vector<std::string> untitled;
+    for (const auto& capability : registry.list()) {
+        if (capability->transport != CapabilityTransport::Json) {
+            continue;
+        }
+        if (capability->title.empty() || capability->title == capability->name ||
+            capability->title.contains('_')) {
+            untitled.push_back(capability->name + " (" + capability->title + ")");
+        }
+    }
+    EXPECT_TRUE(untitled.empty()) << json(untitled).dump();
+    const json tools = lake::api::mcp_tools(registry, lake::api::SchemaAudience::Caller);
+    const auto tool = [&](std::string_view name) {
+        return *std::ranges::find_if(tools, [&](const json& t) { return t["name"] == name; });
+    };
+    EXPECT_EQ(tool("create_drive")["annotations"]["destructiveHint"], false);
+    EXPECT_EQ(tool("create_drive")["annotations"]["readOnlyHint"], false);
+    EXPECT_EQ(tool("delete_workspace")["annotations"]["destructiveHint"], true);
+    EXPECT_EQ(tool("destroy_secret_versions")["annotations"]["destructiveHint"], true);
+    EXPECT_EQ(tool("set_member_role")["annotations"]["idempotentHint"], true);
+    EXPECT_EQ(tool("create_drive")["annotations"]["idempotentHint"], false);
+    EXPECT_EQ(tool("list_drives")["annotations"]["readOnlyHint"], true);
+    // predict is a read in tools/list and in mcp_setup alike.
+    EXPECT_EQ(tool("predict")["annotations"]["readOnlyHint"], true);
+    EXPECT_FALSE(lake::api::capability_writes(*registry.find("predict")));
+    // workspace_sql also takes POST with a JSON body, so a long statement need not fit a URL.
+    const json doc = openapi_document(registry, "0.0.1");
+    EXPECT_TRUE(doc["paths"]["/v1/workspace_sql"].contains("get"));
+    EXPECT_TRUE(doc["paths"]["/v1/workspace_sql"].contains("post"));
+    // Every operation's summary is its human title.
+    EXPECT_EQ(doc["paths"]["/v1/delete_workspace"]["post"]["summary"], "Delete a workspace");
+}
+
 TEST(Rest, OpenApiCoversEveryCapability) {
     Surface s;
     const json doc = openapi_document(s.registry, "0.0.1");
@@ -7254,6 +7292,17 @@ TEST(ApiErrors, RestSaysWhetherACredentialIsMissingInvalidOrExpired) {
     EXPECT_NE(response_header(invalid, "WWW-Authenticate").find("error=\"invalid_token\""),
               std::string::npos);
 
+    // viewer needs no key, but a rejected one is refused there too (lake#594); a visitor with
+    // none is answered signed_in: false.
+    const std::string bad_viewer =
+        http_get(server.port(), "/v1/viewer", "Bearer not-a-lake-credential");
+    EXPECT_NE(bad_viewer.find(" 401 "), std::string::npos) << bad_viewer;
+    EXPECT_EQ(body(bad_viewer)["error"]["reason"], "invalid");
+    const std::string visitor = http_get(server.port(), "/v1/viewer");
+    EXPECT_NE(visitor.find(" 200 "), std::string::npos) << visitor;
+    EXPECT_EQ(body(visitor)["value"]["signed_in"], false);
+    EXPECT_FALSE(body(visitor)["value"]["config"].contains("base_agent_model"));
+
     std::this_thread::sleep_for(std::chrono::milliseconds(2100));
     const std::string expired =
         http_get(server.port(), "/v1/list_customers", "Bearer " + token->secret);
@@ -7419,6 +7468,25 @@ TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
                {{"object_type", "customer"}, {"object_id", customer_id}, {"actions", {"fly"}}})
             .error.code,
         "invalid_input");
+    // A workspace answers its space's permissions; a drive says to ask about its workspace;
+    // an unknown type lists the ones it takes (lake#594).
+    const auto workspace =
+        s.store.create_workspace({customer_id, "analytics", "dev", "taap:1:ed25519:web-owner"});
+    ASSERT_TRUE(workspace);
+    const ApiResult on_workspace = s.call(
+        "my_permissions",
+        {{"object_type", "workspace"}, {"object_id", workspace->id}, {"actions", every}});
+    ASSERT_TRUE(on_workspace.ok) << on_workspace.error.message;
+    EXPECT_EQ(on_workspace.value["allowed"]["write"], true);
+    const ApiResult on_drive =
+        s.call("my_permissions",
+               {{"object_type", "drive"}, {"object_id", workspace->id}, {"actions", every}});
+    EXPECT_EQ(on_drive.error.code, "invalid_input");
+    EXPECT_EQ(on_drive.error.path, "/object_type");
+    const ApiResult odd = s.call(
+        "my_permissions", {{"object_type", "planet"}, {"object_id", "x"}, {"actions", every}});
+    EXPECT_EQ(odd.error.path, "/object_type");
+    EXPECT_NE(odd.error.message.find("\"workspace\""), std::string::npos);
 
     const auto writer = s.store.create_user({"taap:1:ed25519:web-writer", "", "Writer"});
     ASSERT_TRUE(writer);

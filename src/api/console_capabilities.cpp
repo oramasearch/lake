@@ -129,8 +129,7 @@ json viewer_schema() {
          {"public_host", string_schema()},
          {"config",
           object_schema(
-              {{"base_agent_model", string_schema()}, {"frontier_model", string_schema()}},
-              json::array({"base_agent_model", "frontier_model"}))},
+              {{"frontier_model", string_schema()}}, json::array({"frontier_model"}))},
          {"version", string_schema()},
          {"revision", string_schema()}},
         json::array({"signed_in",
@@ -179,7 +178,7 @@ ApiResult viewer(const json& input, ApiContext& context, const std::string& vers
              {"password_sign_up", !clerk.has_value()},
              {"external_origin", public_origin(context)},
              {"public_host", context.public_host},
-             {"config", {{"base_agent_model", ""}, {"frontier_model", ""}}},
+             {"config", {{"frontier_model", ""}}},
              {"version", version},
              {"revision", std::string(build_revision_string())}};
     if (!context.authorized || context.store == nullptr) {
@@ -188,8 +187,9 @@ ApiResult viewer(const json& input, ApiContext& context, const std::string& vers
     const control::WorkspaceConfig defaults;
     const control::WorkspaceConfig& config =
         context.workspaces != nullptr ? context.workspaces->config() : defaults;
-    out["config"] = {{"base_agent_model", config.base_agent_model},
-                     {"frontier_model", config.frontier_model}};
+    // The base model's path on the workspace's volume is lake's own (lake#594); create_agent
+    // fills it in for a native agent.
+    out["config"] = {{"frontier_model", config.frontier_model}};
     if (!context.operator_credential && !context.acting_user_id.empty()) {
         out["user_id"] = context.acting_user_id;
         out["taap_id"] = context.acting_identity;
@@ -275,6 +275,12 @@ constexpr std::string_view permission_actions[] = {
 
 // The policy object a my_permissions call is about: a drive folder is the nearest folder (or the
 // repository) the Drive capabilities authorize, every other type the object of that type and id.
+// The object types my_permissions takes (lake#594): the policy objects (db/schema.sql
+// objects_type_check), a workspace (its space's permissions) and a drive folder.
+const std::vector<std::string> permission_object_types = {
+    "customer", "workspace", "organization", "team", "member", "repository", "path",
+    "environment", "secret_mount", "secret", "application", "drive folder"};
+
 std::expected<std::string, ApiError> permission_object(const json& input, ApiContext& context) {
     const std::string type = input.at("object_type");
     const std::string id = input.at("object_id");
@@ -288,6 +294,30 @@ std::expected<std::string, ApiError> permission_object(const json& input, ApiCon
                                       {"ref", input.value("ref", std::string("main"))},
                                       {"path", input.value("path", std::string())}},
                                      context);
+    }
+    // A workspace and its drives are authorized on the space that owns them (lake#594).
+    if (type == "workspace") {
+        const auto workspace = context.store->get_workspace(id);
+        if (!workspace || workspace->desired == "deleted") {
+            return std::unexpected(ApiError{"not_found", "no workspace " + id, "/object_id"});
+        }
+        const auto space = context.store->find_policy_object("customer", workspace->customer_id);
+        if (!space) {
+            return std::unexpected(ApiError{space.error().code, space.error().message, "/object_id"});
+        }
+        return space->id;
+    }
+    if (type == "drive") {
+        return std::unexpected(ApiError{
+            "invalid_input",
+            "a drive is authorized on its workspace: send object_type workspace and the drive's "
+            "workspace_id as object_id",
+            "/object_type"});
+    }
+    if (std::ranges::find(permission_object_types, type) == permission_object_types.end()) {
+        return std::unexpected(ApiError{"invalid_input",
+                                        "expected one of " + json(permission_object_types).dump(),
+                                        "/object_type"});
     }
     const auto object = context.store->find_policy_object(type, id);
     if (!object) {
@@ -705,12 +735,18 @@ void register_console_capabilities(Registry& registry, std::string_view version)
         .description =
             "Whether you may take each of `actions` on one object, so a page shows only the "
             "buttons you can use. `object_type` and `object_id` name a policy object (`customer` "
-            "and a space id, `repository` and a repository id, ...); `drive folder` names a "
-            "repository by `object_id` and a folder by `path` at `ref` (default `main`), as the "
-            "Drive capabilities authorize it. `promote` is `admin` on the object. It never "
+            "and a space id, `workspace` and a workspace id (its space's permissions, which "
+            "also govern its drives), `repository` and a repository id, ...); `drive folder` "
+            "names a repository by `object_id` and a folder by `path` at `ref` (default "
+            "`main`), as the Drive capabilities authorize it. `promote` is `admin` on the object. It never "
             "replaces the check each capability makes itself.",
         .input_schema =
-            object_schema({{"object_type", string_schema()},
+            object_schema({{"object_type",
+                            {{"type", "string"},
+                             {"description",
+                              "customer, workspace, organization, team, member, repository, "
+                              "path, environment, secret_mount, secret, application or drive "
+                              "folder"}}},
                            {"object_id", string_schema()},
                            {"actions",
                             {{"type", "array"},

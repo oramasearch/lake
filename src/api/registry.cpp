@@ -256,6 +256,37 @@ const ErrorCode* find_error_code(std::string_view code) {
     return found == documented_error_codes.end() ? nullptr : &*found;
 }
 
+bool capability_writes(const Capability& capability) {
+    return capability.kind == CapabilityKind::Action && capability.action != "read" &&
+           capability.name != "workspace_query";
+}
+
+namespace {
+bool named_with(const Capability& capability, std::initializer_list<std::string_view> prefixes) {
+    return std::ranges::any_of(prefixes, [&](std::string_view prefix) {
+        return std::string_view(capability.name).starts_with(prefix);
+    });
+}
+} // namespace
+
+bool capability_destroys(const Capability& capability) {
+    return capability_writes(capability) &&
+           named_with(capability,
+                      {"delete_", "destroy_", "remove_", "revoke_", "drop_", "purge_", "unroute_",
+                       "scim_delete_"});
+}
+
+bool capability_idempotent(const Capability& capability) {
+    if (!capability_writes(capability)) {
+        return true;
+    }
+    // Each sets a value or removes something by name: a second identical call finds it done.
+    return named_with(capability,
+                      {"set_", "unset_", "upsert_", "scim_upsert_", "scim_patch_", "delete_",
+                       "destroy_", "remove_", "revoke_", "drop_", "purge_", "settle_",
+                       "unexpose_", "update_"});
+}
+
 ApiResult ApiResult::success(nlohmann::json output) {
     ApiResult result;
     result.ok = true;
@@ -679,7 +710,13 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         context.workspace_id = input.at("workspace_id").is_string()
             ? input.at("workspace_id").get<std::string>() : std::string();
     }
-    if (entry.requires_auth && !context.authorized && !entry.allows_anonymous_public_read) {
+    // A bearer key lake rejected is refused on every call, including those that need none
+    // (`viewer`, the Docs): a script with a mistyped key learns so at once instead of reading
+    // `signed_in: false` (lake#594). A browser's stale session cookie is still a visitor.
+    const bool rejected_bearer = !context.authorized && !context.credential_rejection.empty() &&
+                                 context.authentication_method == "bearer";
+    if ((entry.requires_auth && !context.authorized && !entry.allows_anonymous_public_read) ||
+        rejected_bearer) {
         state.result = unauthenticated(context);
         state.proceed = false;
     } else if (ApiResult validation = validate_input(entry, input); !validation.ok) {

@@ -622,6 +622,13 @@ void register_workspace_call(Registry& registry, bool read) {
             }
             json arguments = input.value("input", json::object());
             const json sent = arguments;
+            // A native agent runs lake's base model, which only lake knows (viewer no longer
+            // answers its path, lake#594): an agent created without one gets it here.
+            if (!read && capability == "create_agent" && context.workspaces != nullptr &&
+                arguments.value("runtime", std::string()) == "native" &&
+                arguments.value("model", std::string()).empty()) {
+                arguments["model"] = context.workspaces->config().base_agent_model;
+            }
             // The engine refuses an empty name and a name in use with one message that names
             // neither (lake#452); lake says which.
             std::string project_name;
@@ -719,6 +726,7 @@ void register_workspace_call(Registry& registry, bool read) {
                 const std::string database = value.value("database", std::string("datasets"));
                 value["id"] = datasets::id_of(database, value["name"].get<std::string>());
                 value["kind"] = datasets::kind_of(database);
+                datasets::annotate_one(value);
             } else if (!requested_table.empty() && value.is_object()) {
                 const std::string table = value.value("table", std::string());
                 if (!table.empty() && table != requested_table) {
@@ -2070,12 +2078,15 @@ void register_sql_capability(Registry& registry) {
                        "the table's columns, and a parse error gives the position where it "
                        "stopped. list_datasets (through workspace_query) names the tables. "
                        "Anything but a read is refused; the workspace's administrative SQL is not "
-                       "reachable.",
+                       "reachable. A long statement can be sent as POST with a JSON body.",
         .input_schema = customer_input_schema(
             {{"statement", {{"type", "string"}}}, {"database", {{"type", "string"}}}},
             json::array({"statement"})),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
+        // A statement of any length travels as a JSON body (lake#594), as the engine's own sql
+        // takes it; GET with a query string still works.
+        .post_alias = true,
         .object = "customer",
         .action = "read",
         .resolve_object = customer_object,
@@ -4166,7 +4177,9 @@ void register_conversation_capabilities(Registry& registry) {
             "default; `agent` picks another chat agent) or the Agent Factory (`kind` factory, "
             "AgentCreator): lake stores your message in the workspace's conversation, then asks "
             "the agent. A library agent answers in the background: follow `task_id` with "
-            "get_agent_task and call settle_ask_turn once it finished. An agent of the space "
+            "get_agent_task, then call settle_ask_turn {conversation_id, task_id, kind} once it "
+            "finished, because the answer is saved in the conversation only by that call (the "
+            "web app makes it; an API or MCP client must too). An agent of the space "
             "answers at once, stored as `reply_id`. Without `conversation_id` a new conversation "
             "starts. `page` names the page it was asked from, by its path and query values.",
         .input_schema = customer_input_schema({{"conversation_id", {{"type", "string"}}},
@@ -5919,8 +5932,19 @@ void register_workspace_capabilities(Registry& registry) {
         json required = json::array();
         if (creating || updating) {
             properties["name"] = {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}};
-            properties["environment"] = {{"type", "string"}, {"minLength", 1}, {"maxLength", 47},
-                {"pattern", "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"}};
+            // A label, not an enum (lake#594): it names the workspace's namespace
+            // (`<environment>-ws-<id>`) and its `orama.cloud/environment` label, and a team may
+            // keep its own (`qa`, `eu-prod`). The usual values are listed for a newcomer.
+            properties["environment"] = {
+                {"type", "string"},
+                {"minLength", 1},
+                {"maxLength", 47},
+                {"pattern", "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"},
+                {"examples", {"dev", "staging", "prod"}},
+                {"description",
+                 "what the workspace is for: usually dev, staging or prod, or any lowercase DNS "
+                 "label of up to 47 characters (letters, digits and inner hyphens). It names the "
+                 "workspace's Kubernetes namespace and changes nothing else."}};
         }
         if (creating) {
             required = json::array({"name", "environment"});
@@ -5932,9 +5956,15 @@ void register_workspace_capabilities(Registry& registry) {
             properties["confirm"] = {{"type", "string"}};
             properties["dry_run"] = {{"type", "boolean"}};
         }
+        // A human title for each (lake#594); the raw id was shown as the title before.
+        const std::string title = listing                          ? "List workspaces"
+                                  : operation == "get_workspace"   ? "Get a workspace"
+                                  : creating                       ? "Create a workspace"
+                                  : updating                       ? "Update a workspace"
+                                                                   : "Delete a workspace";
         registry.add(Capability{
             .name = operation,
-            .title = operation,
+            .title = title,
             .description = workspace_description(operation),
             .input_schema = listing || creating ? control_input_schema(properties, required)
                                                 : customer_input_schema(properties, required),
@@ -6100,11 +6130,17 @@ void register_workspace_capabilities(Registry& registry) {
         .name = "list_agent_library",
         .title = "The Agent Library",
         .description =
-            "Every specialized agent Orama ships (Ask Orama, the Project Agent, "
-            "ApplicationAgent, Auto-Suggest, AgentCreator and the evaluation and corpus agents): "
-            "what each does, where you meet it, and whether this lake runs it.",
+            "Every specialized agent Orama ships for you to use (Ask Orama, the Project Agent, "
+            "ApplicationAgent, Auto-Suggest, AgentCreator, ...): what each does, where you meet "
+            "it, and whether this lake runs it. Orama's internal tooling (the corpus and "
+            "evaluation generators) is listed only with `include_internal: true`.",
         .input_schema = {{"type", "object"},
-                         {"properties", json::object()},
+                         {"properties",
+                          {{"include_internal",
+                            {{"type", "boolean"},
+                             {"description",
+                              "also list Orama's internal agents, marked `internal: true` "
+                              "(default false)"}}}}},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -6117,10 +6153,17 @@ void register_workspace_capabilities(Registry& registry) {
         // The library is the same for everyone signed in.
         .authorizes_candidates = true,
         .handler =
-            [](const json&, ApiContext& context) {
+            [](const json& input, ApiContext& context) {
                 const std::map<std::string, std::string> none;
-                return ApiResult::success(control::agent_library_json(
-                    context.workspaces ? context.workspaces->config().agent_endpoints : none));
+                json library = control::agent_library_json(
+                    context.workspaces ? context.workspaces->config().agent_endpoints : none);
+                // Internal tooling only when asked (lake#594).
+                if (!input.value("include_internal", false) && library.contains("agents")) {
+                    std::erase_if(library["agents"].get_ref<json::array_t&>(), [](const json& agent) {
+                        return agent.value("internal", false);
+                    });
+                }
+                return ApiResult::success(std::move(library));
             }});
     register_workspace_call(registry, true);
     register_workspace_call(registry, false);
