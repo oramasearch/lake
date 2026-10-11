@@ -140,21 +140,19 @@ public:
         // failed step) returns Stripe's first result instead of a second invoice.
         const std::string key = std::format(
             "lake-invoice-{}-{}-{}", invoice.customer_id, invoice.period, account.attempt);
-        auto draft =
-            post("/v1/invoices",
-                 {{"customer", account.provider_customer_id},
-                  {"currency", "usd"},
-                  {"collection_method", "send_invoice"},
-                  {"days_until_due", "30"},
-                  {"auto_advance", "false"},
-                  {"pending_invoice_items_behavior", "exclude"},
-                  {"description",
-                   std::format("Orama Cloud, {} plan, {}", invoice.plan_name, invoice.period)},
-                  {"metadata[lake_customer_id]", invoice.customer_id},
-                  {"metadata[lake_period]", invoice.period},
-                  {"metadata[lake_plan_id]", invoice.plan_id}},
-                 key,
-                 "create the invoice");
+        auto draft = post("/v1/invoices",
+                          {{"customer", account.provider_customer_id},
+                           {"currency", "usd"},
+                           {"collection_method", "send_invoice"},
+                           {"days_until_due", "30"},
+                           {"auto_advance", "false"},
+                           {"pending_invoice_items_behavior", "exclude"},
+                           {"description", std::format("Orama Cloud usage, {}", invoice.period)},
+                           {"metadata[lake_customer_id]", invoice.customer_id},
+                           {"metadata[lake_period]", invoice.period},
+                           {"metadata[lake_price_list_id]", invoice.plan_id}},
+                          key,
+                          "create the invoice");
         if (!draft) {
             return std::unexpected(draft.error());
         }

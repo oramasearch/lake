@@ -274,12 +274,6 @@ public:
     Result<UsageLimit> set_usage_limit(const UsageLimit& limit) override;
     Result<std::vector<BillingPlan>> billing_plans() override;
     Result<BillingPlan> put_billing_plan(const BillingPlan& plan) override;
-    Result<std::vector<BillingSubscription>>
-    billing_subscriptions(const std::string& customer_id) override;
-    Result<std::vector<BillingSubscription>>
-    set_billing_subscription(const std::string& customer_id,
-                             const std::string& effective_from,
-                             const std::string& plan_id) override;
     Result<Invoice> create_invoice(const Invoice& invoice) override;
     Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) override;
     Result<Invoice> get_invoice(const std::string& id) override;
@@ -473,7 +467,6 @@ private:
     std::map<std::string, std::uint64_t> storage_quotas_;
     std::map<std::pair<std::string, std::string>, UsageLimit> usage_limits_;
     std::map<std::string, BillingPlan> billing_plans_;
-    std::vector<BillingSubscription> billing_subscriptions_;
     std::vector<Invoice> invoices_;
     std::map<std::pair<std::string, std::string>, std::string> billing_provider_customers_;
     std::set<std::pair<std::string, std::string>> payment_events_;

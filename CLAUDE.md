@@ -155,11 +155,15 @@ warn); `record_model_usage` takes an agent's own credential. Usage is a dashboar
 billing here. See `docs/api/metering.md#usage-over-time`.
 Billing follows, for Orama Cloud only (lake#564, decision 56, migration `0073_billing`): billing
 records live in PostgreSQL as multitenancy (`billing_plans`, `billing_plan_prices`,
-`billing_subscriptions`, `billing_invoices`, `billing_invoice_lines`) and usage stays in each
-workspace Zetta, read through `usage_over_time`; an invoice freezes only the quantity billed per
-dimension. Ten capabilities (`billing_plans`, `set_billing_plan`, `billing_account`,
-`choose_billing_plan`, `bill_preview`, `issue_invoice`, `list_invoices`, `get_invoice`,
-`record_invoice_payment`, `void_invoice`), audited centrally, are registered only where
+`billing_invoices`, `billing_invoice_lines`) and usage stays in each workspace Zetta, read through
+`usage_over_time`; an invoice freezes only the quantity and rate billed per dimension. Lake is
+priced by usage only (lake#635, no migration): one price list, one rate per usage dimension, no
+plans, no fee, nothing included, every account billed at it; each publication is a `billing_plans`
+row, a month is billed at the list in force at its end, `billing_subscriptions` is unused, and Metis
+is priced by sales, not here. Time is priced and billed per minute on the month's summed seconds
+(lake#637). Nine capabilities (`price_list`, `set_price_list`, `billing_account`, `bill_preview`,
+`issue_invoice`, `list_invoices`, `get_invoice`, `record_invoice_payment`, `void_invoice`), audited
+centrally, are registered only where
 `LAKE_BILLING=on`; off (an enterprise install), they, the Billing pages, `viewer.billing` and the
 Billing guide are absent. Payment goes through the `PaymentProvider` interface. Not deployed; the
 operator must vendor the schema and select `billing_guard`. See `docs/api/billing.md`.

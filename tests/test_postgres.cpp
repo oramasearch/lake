@@ -1082,9 +1082,10 @@ TEST(PostgresUsageLimits, OneLimitPerDimensionAndZeroRemovesIt) {
     EXPECT_EQ(store->usage_limits(lake::control::new_uuid_v4()).error().code, "not_found");
 }
 
-// Billing records (migration 0073, lake#564, decision 56): the price list, each account's plan over
-// time, and invoices with frozen lines and payment state, in the control plane.
-TEST(PostgresBilling, PlansSubscriptionsAndInvoicesFollowTheContract) {
+// Billing records (migration 0073, lake#564, decision 56): the price list (one stored row per
+// publication since lake#635) and invoices with frozen lines and payment state, in the control
+// plane. billing_subscriptions stays in the schema, unused since lake#635 (no plans to choose).
+TEST(PostgresBilling, PriceListsAndInvoicesFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {
         GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
@@ -1141,23 +1142,6 @@ TEST(PostgresBilling, PlansSubscriptionsAndInvoicesFollowTheContract) {
     plan.id = plan_id;
     plan.prices = {{"calls", 1, 1, 0}, {"calls", 2, 1, 0}};
     EXPECT_EQ(store->put_billing_plan(plan).error().code, "invalid_input");
-
-    // Subscriptions: a row from a month on replaces later ones; an empty plan only removes.
-    EXPECT_TRUE(store->billing_subscriptions(customer->id)->empty());
-    ASSERT_TRUE(store->set_billing_subscription(customer->id, "2026-09-01", plan_id));
-    ASSERT_TRUE(store->set_billing_subscription(customer->id, "2026-11-01", plan_id));
-    const auto rows = store->set_billing_subscription(customer->id, "2026-10-01", plan_id);
-    ASSERT_TRUE(rows) << rows.error().message;
-    ASSERT_EQ(rows->size(), 2U);
-    EXPECT_EQ((*rows)[0].effective_from, "2026-09-01");
-    EXPECT_EQ((*rows)[1].effective_from, "2026-10-01");
-    EXPECT_EQ(store->set_billing_subscription(customer->id, "2026-10-01", "")->size(), 1U);
-    EXPECT_EQ(store->set_billing_subscription(customer->id, "2026-10-15", plan_id).error().code,
-              "invalid_input");
-    EXPECT_EQ(
-        store->set_billing_subscription(customer->id, "2026-12-01", "no-such-plan").error().code,
-        "not_found");
-    EXPECT_EQ(store->billing_subscriptions(lake::control::new_uuid_v4()).error().code, "not_found");
 
     // An invoice and its lines; one a month unless void.
     lake::control::Invoice invoice;

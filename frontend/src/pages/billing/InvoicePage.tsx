@@ -40,7 +40,7 @@ export default function InvoicePage() {
           {invoice.data && <Status value={invoice.data.state} tone={invoiceTone(invoice.data.state)} />}
         </span>
       }
-      sub={invoice.data ? `${monthLabel(invoice.data.period)} on the ${invoice.data.plan_name} plan.` : undefined}
+      sub={invoice.data ? `Usage in ${monthLabel(invoice.data.period)}, at the rates in force at the month's end.` : undefined}
       actions={
         <>
           <Button onClick={() => window.print()}>
@@ -80,7 +80,6 @@ export default function InvoicePage() {
                   rows={[
                     ["Number", <span className="font-mono">{invoice.data.number}</span>],
                     ["Month", monthLabel(invoice.data.period)],
-                    ["Plan", invoice.data.plan_name],
                     ["Issued", dateTime(invoice.data.issued_at)],
                     ["State", <Status value={invoice.data.state} tone={invoiceTone(invoice.data.state)} />],
                     ...(invoice.data.paid_at ? ([["Paid", dateTime(invoice.data.paid_at)]] as [string, string][]) : []),
