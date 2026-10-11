@@ -60,6 +60,12 @@ and [identity reference](https://github.com/oramasearch/liquid/blob/main/docs/re
 Malformed encoding, truncated CBOR, and invalid signatures remain refusals before user creation.
 Encoding and CBOR errors say what failed and tell the visitor to export the complete document again.
 
+A new account's first workspace, made by `start_workspace`, is named after the account's handle
+(the person's or the organization's), not `workspace` (lake#638), so the top bar's picker reads a
+name. An existing first workspace called `workspace` is never renamed by lake; its owner can rename
+it (`update_workspace`, **Rename** on Workspaces). `Workspaces.StartWorkspaceNamesTheFirstWorkspaceAfterTheHandle`
+checks both.
+
 After sign-up, `/repositories` offers a private repository form once the space has a workspace;
 before that it links to `/workspaces`, because every repository belongs to one workspace and there
 is no default (lake#315). The form chooses the workspace, which names its space.
