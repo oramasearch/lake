@@ -57,7 +57,8 @@ every pipeline list (lake#438).
 **Shape.** lake exposes JSON capabilities three ways, the way Zetta does: REST under `/v1`, an
 OpenAPI 3.1 document at `GET /v1/openapi.json`, and MCP at `POST /mcp`. One capability registry
 (`include/lake/api/registry.hpp`) is the single source all three read: a capability is a name,
-a kind (`read` → `GET /v1/<name>`, input in the query string; `action` → `POST /v1/<name>`,
+a kind (`read` → `GET /v1/<name>`, input in the query string, each value coerced by its declared
+type ([arrays in a query string](#arrays-in-a-query-string)); `action` → `POST /v1/<name>`,
 input as the JSON body), an input schema, an output schema, an authorization object and action,
 an object resolver, and a handler. REST and MCP go through the same `Registry::call` or coroutine
 `Registry::call_async`, so they
@@ -144,6 +145,29 @@ bindings, logs, events and the read-only app registry pull token. It is separate
 [`builds.md`](builds.md) defines asynchronous in-cluster image builds, configured Ship App runtime
 bases, cancellation, status, public digest pull references, retained progress and build-scoped
 credentials.
+
+## Arrays in a query string
+
+A read's query values are coerced by the input schema (`rest_input_from_query`,
+`src/api/rest.cpp`): an integer, number or boolean property from its text, an object from JSON.
+An **array** input (`compare_runs.runs`, `my_permissions.actions`, `get_run_metrics.names`, and any
+other) takes, in any mix (lake#576):
+
+- repeated keys, as OpenAPI declares them (`style: form`, `explode: true`):
+  `GET /v1/compare_runs?customer_id=<space>&workspace_id=<workspace>&runs=<r1>&runs=<r2>`;
+- a comma list:
+  `GET /v1/compare_runs?customer_id=<space>&workspace_id=<workspace>&runs=<r1>,<r2>`;
+- a JSON array, URL-encoded:
+  `GET /v1/compare_runs?customer_id=<space>&workspace_id=<workspace>&runs=%5B%22<r1>%22,%22<r2>%22%5D`.
+
+Each item is coerced by the array's `items` type (`steps=1,2` is `[1, 2]` for integer items), and
+an empty value adds nothing, so `runs=` is `[]` and the schema's `minItems` says what is missing.
+An item that itself holds a comma can be sent only in the JSON form, or with `POST` and a JSON body.
+Before lake#576 only the JSON form worked and repeated keys answered `400` (`expected type
+"array"`), so the GET form of every read with an array input could not be called as OpenAPI
+described it. `Rest.ArrayInputsDecodeFromRepeatedKeysCommaListsAndJsonArrays` (`tests/test_api.cpp`)
+and `Experiments.CompareRunsAnswersItsGetFormWithRepeatedKeysOrACommaList`
+(`tests/test_experiments.cpp`) cover it.
 
 ## Operational routes
 
