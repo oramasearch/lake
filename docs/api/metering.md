@@ -169,7 +169,7 @@ three, and the Usage page marks their tiles *Detail, not billed*.
 | `calls` | calls | `api`, `mcp` | every capability call routed to the workspace, the same attribution as `lake_requests` ([telemetry](../serving/telemetry.md#the-workspace-request-series)), answered or refused |
 | `predictions` | calls | — (`object_id` is the model) | each answered `predict` of a model the workspace has |
 | `searches` | calls | — (`object_id` is the index) | each answered `search_index` of a published index (lake#658) |
-| `model_tokens` | tokens | `input`, `output` (also `agent`, `launch_id`, `model`) | what an agent reports with `record_model_usage` (below); never speech-to-text, which is `speech` |
+| `model_tokens` | tokens | `input`, `output` (also `agent`, `launch_id`, `model`) | every agent model call through the [model gateway](model-gateway.md) (`/openai/v1/*`, lake#248), counted from the provider's own `usage`; what an agent reports with `record_model_usage` for a call made outside Lake (below); and the tokens a speech-to-text model reports for a transcript (`model` only); never speech-to-text, which is `speech` (lake#658) |
 | `instances` | instance-seconds | the service kind (`zetta`, `postgres`, …) or `app` (`object_id` is the service or app) | the owner loop's sample of running services and apps; detail, never billed |
 | `volumes` | GiB-seconds | `service`, `store` (`object_id`) | the owner loop's sample of running services' and stores' volumes |
 
@@ -279,8 +279,6 @@ class; `""` for a GPU of no known class).
   not report `storage_usage` yet (a Zetta before it): named by workspace.
 - App traffic through the ingress (`transfer`): the operator does not report it yet
   ([lake#661](https://github.com/oramasearch/lake/issues/661)).
-- Model tokens are counted only when an agent reports them; agent-runtime and the library agents do
-  not yet ([lake#248](https://github.com/oramasearch/lake/issues/248)).
 - Usage before this change: the series start empty, and nothing is copied into them.
 
 ### What is not usage
@@ -350,8 +348,10 @@ audited as `metering.limit.set`) sets the account's limit on one dimension in it
 it. Limits are rows of `customer_usage_limits` (migration `0072_usage_limits`), content-free account
 configuration like the storage quota. **Storage's limit is the repository storage quota**:
 `set_usage_limit` with `storage` sets `set_storage_quota`'s quota, still enforced on new repository
-writes (below), and keeps its warning percentage. Every other limit is per UTC calendar month and
-warns without refusing anything. Lake is priced by usage only, with no plans or included amounts
+writes (below), and keeps its warning percentage. **The `model_tokens` limit is enforced by the
+model gateway**: once this UTC month's tokens reach it, model calls are refused with
+`usage_limit_reached` ([model-gateway.md](model-gateway.md#limits), lake#248). Every other limit is
+per UTC calendar month and warns without refusing anything. Lake is priced by usage only, with no plans or included amounts
 (lake#635, [billing.md](billing.md#usage-only-lake635)); enforcing a limit is an extension point.
 
 `usage_limits {customer_id}` answers each limit with what is used (storage: the repository bytes
@@ -367,8 +367,12 @@ tokens one of its turns or runs spent. Only an agent's own credential may call i
 launch (`lal.`) or schedule (`las.`) credential, or a library agent's bus credential naming its
 `task_id`. Lake adds both counts together to the usage of the workspace the task, launch or schedule
 runs in, labelled with the agent's name, the run's id (`launch_id`) and `model_name`, and audits it
-in that workspace. Anyone else is refused `unauthorized`. agent-runtime and the library agents do not
-call it yet ([lake#248](https://github.com/oramasearch/lake/issues/248)).
+in that workspace. Anyone else is refused `unauthorized`.
+
+Agents do not report their own tokens: every model call they make goes through the
+[model gateway](model-gateway.md) (lake#248), which counts the provider's own `usage` for the run's
+workspace with the same labels and enforces the `model_tokens` limit. `record_model_usage` remains for
+a model call made outside Lake; a call through the gateway must not be reported again.
 
 ### Verify
 
@@ -380,7 +384,7 @@ their days, readings taking their latest; another account's workspace, unknown d
 backwards or too long window, and a stranger refused; each model's answered predictions);
 `UsageLimits.*` (a warning at 80%, over at 100%, storage's limit is the quota, `0` removes);
 `RecordModelUsage.*` (a launch credential's tokens in its workspace by agent, launch and model; a
-person refused); `UsageSample.*` (stored bytes by kind, instance and volume seconds of a running
+person refused); `tests/test_model_gateway.cpp` (the gateway's counting, limit and refusals); `UsageSample.*` (stored bytes by kind, instance and volume seconds of a running
 service and none for a pending one, a transcript's audio seconds rounded up; and
 `MetersCpuRamGpuAndGpuMemoryFromScheduledResources`, lake#643: a workspace engine, a service, a GPU
 app with its class, a finished build and agent job counted once for how long they ran, a workload

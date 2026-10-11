@@ -33,6 +33,7 @@
 #include "lake/control/drive_files.hpp"
 #include "lake/control/drives.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/store_contents.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/search/index.hpp"
 #include "one_thread_io.hpp"
@@ -136,6 +137,8 @@ struct Spaces {
         std::vector<std::string> workspaces;
     };
     std::vector<Space> spaces;
+    // The store browser every call gets (lake#656); empty, as on a Lake that browses no provider.
+    lake::control::StoreBrowser browser;
 
     Spaces() {
         std::filesystem::create_directories(dir);
@@ -180,6 +183,7 @@ struct Spaces {
         context.workspaces = service.get();
         context.instance_kek = std::string(kek);
         context.object_transport = objects;
+        context.store_browser = browser;
         context.authorized = true;
         context.session_credential = true;
         context.acting_user_id = space.principal.user_id;
@@ -225,6 +229,135 @@ file_store(lake::test::FakeZettaObjects& fake,
             lake::control::ObjectEndpoint{Spaces::url(workspace), "token"},
             std::string(lake::control::drive_files_bucket)),
         std::move(*cipher));
+}
+
+// A bucket's contents in memory (lake#656): what a provider's StoreContents does, keyed by path,
+// with folders as their own entries.
+class FakeBucket final : public lake::control::StoreContents {
+public:
+    using Item = lake::control::StoreItem;
+    template <class T> using Result = lake::control::ZettaControlResult<T>;
+
+    std::map<std::string, std::string> files;
+    std::set<std::string> folders;
+
+    liquid::runtime::task<Result<std::vector<Item>>> list(std::string folder) override {
+        std::vector<Item> out;
+        for (const std::string& path : folders) {
+            if (lake::control::store_parent(path) == folder) {
+                out.push_back({path, true});
+            }
+        }
+        for (const auto& [path, bytes] : files) {
+            if (lake::control::store_parent(path) == folder) {
+                out.push_back(item(path));
+            }
+        }
+        co_return Result<std::vector<Item>>(std::move(out));
+    }
+    liquid::runtime::task<Result<std::optional<Item>>> stat(std::string path) override {
+        if (folders.contains(path)) {
+            co_return Result<std::optional<Item>>(Item{path, true});
+        }
+        if (files.contains(path)) {
+            co_return Result<std::optional<Item>>(item(path));
+        }
+        co_return Result<std::optional<Item>>(std::nullopt);
+    }
+    liquid::runtime::task<Result<std::string>>
+    read(std::string path, std::uint64_t offset, std::uint64_t length) override {
+        const auto found = files.find(path);
+        if (found == files.end()) {
+            co_return Result<std::string>(
+                std::unexpected(lake::control::ZettaControlError{"not_found", "gone"}));
+        }
+        co_return Result<std::string>(found->second.substr(offset, length));
+    }
+    liquid::runtime::task<Result<Item>>
+    write(std::string path, std::string bytes, std::string content_type) override {
+        make(lake::control::store_parent(path));
+        files[path] = std::move(bytes);
+        types[path] = std::move(content_type);
+        co_return Result<Item>(item(path));
+    }
+    liquid::runtime::task<Result<void>> make_folder(std::string path) override {
+        make(path);
+        co_return Result<void>();
+    }
+    liquid::runtime::task<Result<void>> move(std::string from, std::string to) override {
+        const auto moved = [&](const std::string& path) {
+            return path == from ? to : to + path.substr(from.size());
+        };
+        const auto inside = [&](const std::string& path) {
+            return path == from || path.starts_with(from + "/");
+        };
+        std::map<std::string, std::string> next_files;
+        for (auto& [path, bytes] : files) {
+            next_files[inside(path) ? moved(path) : path] = std::move(bytes);
+        }
+        files = std::move(next_files);
+        std::set<std::string> next_folders;
+        for (const std::string& path : folders) {
+            next_folders.insert(inside(path) ? moved(path) : path);
+        }
+        folders = std::move(next_folders);
+        co_return Result<void>();
+    }
+    liquid::runtime::task<Result<void>> remove(std::string path) override {
+        std::erase_if(files, [&](const auto& file) {
+            return file.first == path || file.first.starts_with(path + "/");
+        });
+        std::erase_if(folders, [&](const std::string& folder) {
+            return folder == path || folder.starts_with(path + "/");
+        });
+        co_return Result<void>();
+    }
+
+private:
+    std::map<std::string, std::string> types;
+
+    Item item(const std::string& path) const {
+        const auto type = types.find(path);
+        return {path,
+                false,
+                files.at(path).size(),
+                type == types.end() ? "" : type->second,
+                "2026-10-11T12:00:00Z",
+                "v-" + std::to_string(files.at(path).size())};
+    }
+    void make(const std::string& path) {
+        for (std::string level = path; !level.empty(); level = lake::control::store_parent(level)) {
+            folders.insert(level);
+        }
+    }
+};
+
+// A store of the space's first workspace as the operator leaves it: Ready, with its connection
+// delivered beside the services'. Written past the provider table, as the operator test does,
+// since no bucket is offered yet (lake#664).
+lake::control::ManagedStore ready_store(Spaces& s,
+                                        const Spaces::Space& space,
+                                        std::string type,
+                                        std::string provider,
+                                        std::string name,
+                                        bool ready = true) {
+    lake::control::NewManagedStore store;
+    store.customer_id = space.customer_id;
+    store.workspace_id = space.workspaces[0];
+    store.type = std::move(type);
+    store.provider = std::move(provider);
+    store.name = std::move(name);
+    store.created_by_taap_id = space.principal.taap_id;
+    const auto created = s.store->create_store(store);
+    EXPECT_TRUE(created) << created.error().message;
+    if (ready) {
+        EXPECT_TRUE(s.store->set_store_status(created->id, "Ready", "", "bucket.test"));
+        std::ofstream(s.dir / (created->slug + ".json")) << json{
+            {"type", created->type},
+            {"provider", created->provider},
+            {"bucket", created->slug}}.dump();
+    }
+    return *created;
 }
 
 } // namespace
@@ -1307,4 +1440,197 @@ TEST(DrivesHttp, SearchFindsTheNamesOfARepositoryDrivesPaths) {
                                    {"workspace_id", space.workspaces[0]},
                                    {"q", "lake-folder"}});
     EXPECT_TRUE(marker["value"]["items"].empty()) << "the empty-folder marker is never found";
+}
+
+TEST(Drives, AStoreDriveBrowsesItsStoreInPlaceAndLeavesItWhenDeleted) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const auto bucket = ready_store(s, first, "object", "r2", "media");
+    auto contents = std::make_shared<FakeBucket>();
+    contents->files["Reports/q3.csv"] = "account,plan\n1,pro\n";
+    contents->folders.insert("Reports");
+    std::vector<std::string> opened;
+    s.browser = [&](const lake::control::ManagedStore& store, const json& connection)
+        -> lake::control::ZettaControlResult<std::shared_ptr<lake::control::StoreContents>> {
+        opened.push_back(store.id);
+        EXPECT_EQ(connection.value("bucket", ""), store.slug) << "the operator's connection";
+        return std::shared_ptr<lake::control::StoreContents>(contents);
+    };
+
+    EXPECT_EQ(s.in(first, "create_drive", {{"name", "Media"}, {"storage", "store"}}).error.path,
+              "/store_id");
+    EXPECT_EQ(s.in(first,
+                   "create_drive",
+                   {{"name", "Media"}, {"storage", "files"}, {"store_id", bucket.id}})
+                  .error.path,
+              "/store_id");
+    EXPECT_EQ(s.in(first,
+                   "create_drive",
+                   {{"name", "Media"}, {"storage", "store"}, {"store_id", bucket.id}},
+                   1)
+                  .error.code,
+              "not_found")
+        << "a store of another workspace";
+    const ApiResult drive = s.in(
+        first, "create_drive", {{"name", "Media"}, {"storage", "store"}, {"store_id", bucket.id}});
+    ASSERT_TRUE(drive.ok) << drive.error.message;
+    EXPECT_EQ(drive.value["storage"], "store");
+    EXPECT_EQ(drive.value["store_id"], bucket.id);
+    EXPECT_TRUE(drive.value["repository_id"].is_null());
+    const std::string id = drive.value["id"];
+    EXPECT_TRUE(contents->files.size() == 1) << "creating the drive copies nothing";
+
+    // Browse: the store's own folders and files, each addressed by its path.
+    const ApiResult top = s.in(first, "list_drive_entries", {{"drive_id", id}});
+    ASSERT_TRUE(top.ok) << top.error.message;
+    ASSERT_EQ(top.value["items"].size(), 1U);
+    EXPECT_EQ(top.value["items"][0]["kind"], "folder");
+    EXPECT_EQ(top.value["items"][0]["id"], "Reports");
+    EXPECT_TRUE(top.value["folder_id"].is_null());
+    const ApiResult reports =
+        s.in(first, "list_drive_entries", {{"drive_id", id}, {"folder_id", "Reports"}});
+    ASSERT_TRUE(reports.ok) << reports.error.message;
+    ASSERT_EQ(reports.value["items"].size(), 1U);
+    EXPECT_EQ(reports.value["items"][0]["path"], "Reports/q3.csv");
+    EXPECT_EQ(reports.value["items"][0]["parent_id"], "Reports");
+    EXPECT_EQ(reports.value["items"][0]["content_type"], "text/csv");
+    EXPECT_EQ(reports.value["items"][0]["size"], 19);
+    EXPECT_EQ(reports.value["ancestors"], json::array({{{"id", "Reports"}, {"name", "Reports"}}}));
+    EXPECT_EQ(s.in(first, "list_drive_entries", {{"drive_id", id}, {"path", "Nope"}}).error.code,
+              "not_found");
+    EXPECT_EQ(s.in(first, "list_drive_entries", {{"drive_id", id}, {"path", "a/../b"}}).error.code,
+              "invalid_input");
+
+    // Upload, folders, read, move, search.
+    const ApiResult uploaded = s.in(
+        first,
+        "upload_drive_entries",
+        {{"drive_id", id},
+         {"parent_id", "Reports"},
+         {"files", json::array({{{"path", "2026/notes.txt"}, {"content", base64("hello")}}})}});
+    ASSERT_TRUE(uploaded.ok) << uploaded.error.message;
+    EXPECT_EQ(uploaded.value["items"][0]["id"], "Reports/2026/notes.txt");
+    EXPECT_EQ(contents->files.at("Reports/2026/notes.txt"), "hello") << "written to the store";
+    const ApiResult again = s.in(
+        first,
+        "upload_drive_entries",
+        {{"drive_id", id},
+         {"files", json::array({{{"path", "Reports/2026/notes.txt"}, {"content", base64("x")}}})}});
+    ASSERT_TRUE(again.ok) << again.error.message;
+    EXPECT_EQ(again.value["items"][0]["name"], "notes (2).txt") << "a taken name is renamed";
+    EXPECT_EQ(
+        s.in(first,
+             "upload_drive_entries",
+             {{"drive_id", id},
+              {"on_conflict", "refuse"},
+              {"files", json::array({{{"path", "Reports/q3.csv"}, {"content", base64("x")}}})}})
+            .error.code,
+        "conflict");
+    EXPECT_EQ(
+        s.in(first, "begin_drive_upload", {{"drive_id", id}, {"path", "big.bin"}, {"size", 10}})
+            .error.path,
+        "/drive_id")
+        << "chunked uploads are for workspace-files drives";
+    EXPECT_EQ(s.in(first,
+                   "create_drive_shortcut",
+                   {{"drive_id", id},
+                    {"name", "Site"},
+                    {"target", {{"kind", "url"}, {"url", "https://x.test"}}}})
+                  .error.path,
+              "/drive_id");
+    const ApiResult folder =
+        s.in(first, "create_drive_folder_entry", {{"drive_id", id}, {"path", "Archive/Old"}});
+    ASSERT_TRUE(folder.ok) << folder.error.message;
+    EXPECT_EQ(folder.value["id"], "Archive/Old");
+    EXPECT_TRUE(contents->folders.contains("Archive"));
+    EXPECT_EQ(
+        s.in(first, "create_drive_folder_entry", {{"drive_id", id}, {"path", "Reports/q3.csv/x"}})
+            .error.code,
+        "conflict");
+    const ApiResult read =
+        s.in(first, "read_drive_file", {{"drive_id", id}, {"id", "Reports/2026/notes.txt"}});
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["content_base64"], base64("hello"));
+    const ApiResult got = s.in(first, "get_drive_entry", {{"drive_id", id}, {"id", "Archive"}});
+    ASSERT_TRUE(got.ok) << got.error.message;
+    EXPECT_EQ(got.value["kind"], "folder");
+    const ApiResult moved = s.in(
+        first, "move_drive_entry", {{"drive_id", id}, {"id", "Reports"}, {"parent_id", "Archive"}});
+    ASSERT_TRUE(moved.ok) << moved.error.message;
+    EXPECT_EQ(moved.value["id"], "Archive/Reports");
+    EXPECT_TRUE(contents->files.contains("Archive/Reports/q3.csv")) << "moved in the store";
+    EXPECT_EQ(s.in(first,
+                   "move_drive_entry",
+                   {{"drive_id", id}, {"id", "Archive"}, {"parent_id", "Archive/Old"}})
+                  .error.path,
+              "/parent_id")
+        << "a folder cannot move into itself";
+    const ApiResult renamed = s.in(
+        first, "move_drive_entry", {{"drive_id", id}, {"id", "Archive/Old"}, {"name", "Older"}});
+    ASSERT_TRUE(renamed.ok) << renamed.error.message;
+    EXPECT_EQ(renamed.value["path"], "Archive/Older");
+    const ApiResult found = s.in(first, "search_drives", {{"q", "Q3"}});
+    ASSERT_TRUE(found.ok) << found.error.message;
+    ASSERT_EQ(found.value["items"].size(), 1U);
+    EXPECT_EQ(found.value["items"][0]["path"], "Archive/Reports/q3.csv");
+    EXPECT_EQ(found.value["items"][0]["drive"]["store_id"], bucket.id);
+    EXPECT_EQ(found.value["items"][0]["folder"], "Archive/Reports");
+    EXPECT_TRUE(s.in(first, "recent_drive_entries", json::object()).value["items"].empty())
+        << "recent files are workspace files";
+
+    // Delete an item, then the drive: the store and what is in it stay.
+    const ApiResult removed =
+        s.in(first, "delete_drive_entry", {{"drive_id", id}, {"id", "Archive/Older"}});
+    ASSERT_TRUE(removed.ok) << removed.error.message;
+    EXPECT_FALSE(contents->folders.contains("Archive/Older"));
+    const ApiResult gone = s.in(first, "delete_drive", {{"id", id}, {"confirm_name", "Media"}});
+    ASSERT_TRUE(gone.ok) << gone.error.message;
+    EXPECT_EQ(gone.value["store_id"], bucket.id);
+    EXPECT_EQ(gone.value["entries_removed"], 0);
+    EXPECT_TRUE(contents->files.contains("Archive/Reports/q3.csv"))
+        << "deleting the drive never deletes the store's contents";
+    const ApiResult stores = s.in(first, "list_stores", json::object());
+    ASSERT_TRUE(stores.ok) << stores.error.message;
+    ASSERT_EQ(stores.value["stores"].size(), 1U);
+    EXPECT_EQ(stores.value["stores"][0]["id"], bucket.id);
+    EXPECT_EQ(stores.value["stores"][0]["desired"], "present") << "the store survives";
+    EXPECT_FALSE(opened.empty());
+}
+
+TEST(Drives, AVolumeIsShownNotBrowsedAndAStoreLakeCannotBrowseIsRefused) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const auto volume = ready_store(s, first, "volume", "cluster", "scratch");
+    const auto bucket = ready_store(s, first, "object", "s3", "archive");
+    const auto waiting = ready_store(s, first, "object", "r2", "later", false);
+    const auto create = [&](const std::string& name, const std::string& store_id) {
+        return s.in(
+            first, "create_drive", {{"name", name}, {"storage", "store"}, {"store_id", store_id}});
+    };
+    // No store browser, as on a Lake that browses no provider yet.
+    const ApiResult refused = create("Archive", bucket.id);
+    EXPECT_EQ(refused.error.code, "not_supported");
+    EXPECT_EQ(refused.error.path, "/store_id");
+    EXPECT_NE(refused.error.message.find("Bucket — AWS S3"), std::string::npos)
+        << refused.error.message;
+    EXPECT_NE(refused.error.message.find(lake::control::store_browse_issue), std::string::npos);
+
+    s.browser = [](const lake::control::ManagedStore&, const json&)
+        -> lake::control::ZettaControlResult<std::shared_ptr<lake::control::StoreContents>> {
+        return std::shared_ptr<lake::control::StoreContents>(std::make_shared<FakeBucket>());
+    };
+    const ApiResult shown = create("Scratch", volume.id);
+    EXPECT_EQ(shown.error.code, "invalid_input");
+    EXPECT_NE(shown.error.message.find("shown, not browsed"), std::string::npos);
+    EXPECT_EQ(create("Later", waiting.id).error.code, "workspace_not_ready");
+    EXPECT_EQ(create("Nothing", "00000000-0000-4000-8000-000000000000").error.code, "not_found");
+    EXPECT_TRUE(s.in(first, "list_drives", json::object()).value["drives"].empty());
+    EXPECT_EQ(lake::control::store_kind_refusal("filesystem"), "");
+    EXPECT_FALSE(lake::control::valid_store_path("/a"));
+    EXPECT_FALSE(lake::control::valid_store_path("a//b"));
+    EXPECT_FALSE(lake::control::valid_store_path("a/"));
+    EXPECT_TRUE(lake::control::valid_store_path("a b/c.txt"));
+    EXPECT_EQ(lake::control::join_store_path("", "a"), "a");
+    EXPECT_EQ(lake::control::store_parent("a/b/c"), "a/b");
+    EXPECT_EQ(lake::control::store_name("a/b/c"), "c");
 }

@@ -103,6 +103,19 @@ instance and volume time, CPU, RAM, GPU and GPU memory from the operator's `work
 `usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
 `set_usage_limit` and `record_model_usage`; `metering_capabilities.cpp`'s `queue_repository_builds`
 is the build-record queueing the sample shares with `metering_usage`. See
+answered predictions and `create_transcript` the audio's seconds or tokens; `ApiServer::drain`
+flushes it every `usage_flush_interval` and, as the store root's owner, schedules
+`usage_capabilities.cpp`'s `sample_usage` (stored bytes, instance and volume time, CPU, RAM, GPU and
+GPU memory from the operator's `workload_resources` (lake#643), new build results)
+every `usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_time`, `usage_limits`,
+`set_usage_limit`, `record_model_usage` and `model_completion`, the model gateway (lake#248): an
+agent's model call, sent through `ApiContext::model_provider` on the blocking pool, its tokens added
+to the run's workspace usage and refused past the monthly `model_tokens` limit. `model_gateway.cpp`
+holds the gateway's pure parts (the request as forwarded, the usage of every answer shape, the
+provider's refusals, `openai_model_provider`), and `http_server.cpp` serves the OpenAI-compatible
+`POST /openai/v1/<endpoint>` over `model_completion` and builds the provider over its outbound client
+when `LAKE_OPENAI_API_KEY` is set (`docs/api/model-gateway.md`). `metering_capabilities.cpp`'s
+`queue_repository_builds` is the build-record queueing the sample shares with `metering_usage`. See
 [metering](../../docs/api/metering.md#usage-over-time).
 
 Billing (lake#564, decision 56): `billing_capabilities.cpp` registers the ten billing capabilities and

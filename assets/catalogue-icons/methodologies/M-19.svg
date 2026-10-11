@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A tag with one point labelled among unlabelled ones">
+<title>M-19 Label efficiency</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#0f62fe)}.d{fill:var(--cat-accent,#0f62fe)}.t{fill:var(--cat-tint,#0f62fe33)}.s{stroke-dasharray:2 2.5}</style>
+<path class="l" d="M4 4h7l9 9-7 7-9-9z"/>
+<circle class="d" cx="8" cy="8" r="1.25"/>
+<circle class="d" cx="12.5" cy="12.5" r="1.25"/>
+<circle class="a" cx="15" cy="15" r="1"/>
+<circle class="a" cx="11" cy="16" r="1"/>
+</svg>

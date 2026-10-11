@@ -10,6 +10,7 @@ import { useToast } from "@/lib/toast";
 import { Banner, Button, Card, Chip, Empty, ErrorBlock, Grid, Page, Section, Skeleton, Stat, StatRow } from "@/lib/ui";
 import { relative } from "@/lib/format";
 import { WorkspaceGate } from "@/components/WorkspaceGate";
+import { MethodologyIcon, SolutionIcon } from "@/components/CatalogueIcon";
 import { qs, useScope, useScopedRead, useWq, useWsPath } from "./api";
 import { findMethodology, groupOpportunities, taskIsActive, text, type J } from "./logic";
 import { FormError, Markdown, Panel, Refusal, useDesignTrail, useSubmit } from "./parts";
@@ -240,6 +241,14 @@ function OpportunityCard({
   return (
     <Card
       tone={picked ? "active" : "default"}
+      icon={
+        // The catalogue solution it recommends, else the methodology it needs (lake#639).
+        text(row, "solution") ? (
+          <SolutionIcon entry={{ id: text(row, "solution"), methodologies: text(row, "methodology") ? [text(row, "methodology")] : [] }} size={32} />
+        ) : text(row, "methodology") ? (
+          <MethodologyIcon entry={entry ?? { id: text(row, "methodology") }} size={32} />
+        ) : undefined
+      }
       label={[text(row, "solution") ? `Catalogue solution ${text(row, "solution")}` : "", text(row, "methodology")].filter(Boolean).join(" · ") || undefined}
       title={
         <label className="opportunity-pick flex cursor-pointer items-start gap-2">

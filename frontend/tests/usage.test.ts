@@ -9,6 +9,7 @@ import {
   change,
   formatValue,
   fromLimit,
+  limitNote,
   limitTone,
   mergeReadings,
   rangeOf,
@@ -184,4 +185,10 @@ test("build, run and instance time read as detail that is not billed (lake#658)"
   assert.equal(breakdownName({ key: "models", total: 0, points: [] }), "Models");
   assert.equal(breakdownName({ key: "indexes", total: 0, points: [] }), "Indexes");
   assert.equal(breakdownName({ key: "dictation", total: 0, points: [] }), "Dictation");
+});
+
+test("a limit says what it does at its line: storage and model tokens refuse, the rest warn", () => {
+  assert.equal(limitNote({ dimension: "storage", enforced: true, warn_percent: 80 }), "Enforced on new repository writes");
+  assert.equal(limitNote({ dimension: "model_tokens", enforced: true, warn_percent: 80 }), "This month; agents' model calls are refused at the limit");
+  assert.equal(limitNote({ dimension: "cpu", enforced: false, warn_percent: 75 }), "This month; warns from 75%");
 });

@@ -383,6 +383,8 @@ constexpr std::array workspace = std::to_array<std::string_view>({
     "map_review_anchors",
     // The operator's delivery of a secret to a Kubernetes Secret: the mount's workspace (lake#625).
     "mint_sealed_secret",
+    // A model call through the model gateway: the workspace the agent's run belongs to (lake#248).
+    "model_completion",
     "model_traffic",
     "move_drive_entry",
     "move_drive_path",

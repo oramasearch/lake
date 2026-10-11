@@ -670,8 +670,8 @@ void register_model_capabilities(Registry& registry) {
         .name = "resolve_model",
         .title = "Find a model by name",
         .description =
-            "The model repository a model page names, by `name` and optionally its space "
-            "(`namespace`, the space's handle), with the revision the page shows. A model you "
+            "The model repository a model page names, by `name` and optionally its account "
+            "(`namespace`, the account's handle), with the revision the page shows. A model you "
             "may not read is not_found, as if it did not exist; a public model needs no "
             "credential. Read it with get_model {id: repository_id, revision}.",
         .input_schema = {{"type", "object"},

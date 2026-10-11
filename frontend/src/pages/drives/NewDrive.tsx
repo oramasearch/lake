@@ -1,5 +1,7 @@
-/** New drive (create_drive), in a drawer: its name, how it keeps its files, and for a repository
- * drive a new repository (named from the drive) or one this workspace already has. */
+/** New drive (create_drive), in a drawer: its name, how it keeps its files, for a repository
+ * drive a new repository (named from the drive) or one this workspace already has, and for a
+ * storage drive one of the workspace's buckets or filesystems (lake#656). Drives → Storage opens it
+ * with that storage chosen. */
 import { useState } from "react";
 import { act, useRead, type Row } from "@/lib/api";
 import { Drawer } from "@/lib/overlay";
@@ -9,11 +11,16 @@ import type { Repository } from "@/pages/repositories/forge";
 import { driveSlug, validName } from "./paths";
 import { STORAGE, type Storage } from "./targets";
 import type { Drive } from "./storage";
+import { browsable } from "./stores";
 
-export function NewDrive({ onClose, onCreated }: { onClose: () => void; onCreated: (drive: Drive) => void }) {
+export function NewDrive({ onClose, onCreated, store }: { onClose: () => void; onCreated: (drive: Drive) => void; store?: Row }) {
   const { customerId, workspaceId } = useWorkspace();
-  const [name, setName] = useState("");
-  const [storage, setStorage] = useState<Storage>("files");
+  const [name, setName] = useState(store ? String(store.name ?? "") : "");
+  const [storage, setStorage] = useState<Storage>(store ? "store" : "files");
+  const [storeId, setStoreId] = useState(store ? String(store.id ?? "") : "");
+  const stores = useRead<{ stores?: Row[] }>(storage === "store" && customerId ? "list_stores" : null, { customer_id: customerId, workspace_id: workspaceId });
+  const storeList = (stores.data?.stores ?? []).filter((s) => s.desired !== "absent");
+  const openable = storeList.filter((s) => browsable(s) === "yes");
   const [source, setSource] = useState<"new" | "existing">("new");
   const [slug, setSlug] = useState("");
   const [slugTouched, setSlugTouched] = useState(false);
@@ -34,6 +41,7 @@ export function NewDrive({ onClose, onCreated }: { onClose: () => void; onCreate
         if (source === "existing") input.repository_id = repositoryId;
         else input.repository_name = repositoryName;
       }
+      if (storage === "store") input.store_id = storeId;
       onCreated(await act<Drive>("create_drive", input));
     } catch (e) {
       setError(e);
@@ -41,7 +49,8 @@ export function NewDrive({ onClose, onCreated }: { onClose: () => void; onCreate
       setBusy(false);
     }
   };
-  const ready = !!name.trim() && !nameProblem && (storage !== "repository" || (source === "new" ? !!repositoryName : !!repositoryId));
+  const ready =
+    !!name.trim() && !nameProblem && (storage !== "repository" || (source === "new" ? !!repositoryName : !!repositoryId)) && (storage !== "store" || !!storeId);
 
   return (
     <Drawer
@@ -65,7 +74,7 @@ export function NewDrive({ onClose, onCreated }: { onClose: () => void; onCreate
           if (ready) void submit();
         }}
       >
-        {!["name", "repository_name", "repository_id"].some((field) => fieldError(error, field)) && <FormError error={error} />}
+        {!["name", "repository_name", "repository_id", "store_id"].some((field) => fieldError(error, field)) && <FormError error={error} />}
         <Field label="Name" required error={nameProblem ?? fieldError(error, "name")}>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Team files" autoFocus />
         </Field>
@@ -89,6 +98,26 @@ export function NewDrive({ onClose, onCreated }: { onClose: () => void; onCreate
             ))}
           </div>
         </fieldset>
+        {storage === "store" && (
+          <Field
+            label="Storage"
+            help="Only a bucket or filesystem opens as a drive; a volume belongs to the service that mounts it. Nothing is copied, and deleting the drive never deletes the storage."
+            error={fieldError(error, "store_id")}
+          >
+            <select value={storeId} onChange={(e) => setStoreId(e.target.value)}>
+              <option value="">{stores.isLoading ? "Loading storage…" : openable.length ? "Choose storage…" : "No bucket or filesystem is ready"}</option>
+              {storeList.map((s) => {
+                const kind = browsable(s);
+                return (
+                  <option key={String(s.id)} value={String(s.id)} disabled={kind !== "yes"}>
+                    {String(s.name)}
+                    {kind === "volume" ? " (volume: shown, not browsed)" : kind === "not_ready" ? " (not ready)" : kind === "other" ? " (not browsable)" : ""}
+                  </option>
+                );
+              })}
+            </select>
+          </Field>
+        )}
         {storage === "repository" && (
           <fieldset className="m-0 border-0 p-0">
             <legend className="label mb-2">Repository</legend>

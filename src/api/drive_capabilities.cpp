@@ -264,7 +264,7 @@ std::expected<control::Workspace, ApiError> share_link_workspace(ApiContext& con
         (!customer_id.empty() && workspace->customer_id != customer_id)) {
         return std::unexpected(ApiError{
             "invalid_input",
-            "workspace_id must name a workspace Zetta in the repository's space",
+            "workspace_id must name a workspace Zetta in the repository's account",
             std::move(field)});
     }
     return *workspace;
@@ -1013,9 +1013,9 @@ std::expected<Recipient, ApiError> resolve_recipient(ApiContext& context,
     }
     return std::unexpected(ApiError{
         "invalid_input",
-        "no one in this space has that " + std::string(by_email ? "email" : "handle") +
-            ": share with a member of the space (drive_share_people lists them), or invite the "
-            "person to the space first",
+        "no one in this account has that " + std::string(by_email ? "email" : "handle") +
+            ": share with a member of the account (drive_share_people lists them), or invite the "
+            "person to the account first",
         "/recipient"});
 }
 
@@ -1725,7 +1725,7 @@ void register_drive_capabilities(Registry& registry) {
         .title = "Share drive folder",
         .description =
             "Give a person (or an organization) a live grant on a folder, with a role. Name them "
-            "by `recipient`: their email or handle, one of the space's people (drive_share_people "
+            "by `recipient`: their email or handle, one of the account's people (drive_share_people "
             "lists them). A program may name a TAAP identity Lake knows in `principal_taap_id` "
             "instead. Lake writes and signs the grant's attestation itself and answers it with its "
             "digest, which the grant keeps as evidence; `attestation_digest` is optional, and only "
@@ -1739,7 +1739,7 @@ void register_drive_capabilities(Registry& registry) {
                {"recipient",
                 {{"type", "string"},
                  {"description",
-                  "The person's email or handle (\"@ana\" or \"ana\"), among the space's "
+                  "The person's email or handle (\"@ana\" or \"ana\"), among the account's "
                   "people."}}},
                {"principal_taap_id",
                 {{"type", "string"},
@@ -1856,7 +1856,7 @@ void register_drive_capabilities(Registry& registry) {
         .name = "drive_share_people",
         .title = "People to Share With",
         .description =
-            "The people a folder can be shared with by name: the repository's space's owner, and "
+            "The people a folder can be shared with by name: the owner of the repository's account, and "
             "for an organization the organization and its members, each with their TAAP identity, "
             "display name, email and handle. share_drive_folder's `recipient` takes the email or "
             "handle.",
@@ -1909,7 +1909,7 @@ void register_drive_capabilities(Registry& registry) {
         .title = "Drive effective access",
         .description = "Show every direct and inherited role plus the folder's active and expired "
                        "share links held in one workspace (`workspace_id`, a workspace of the "
-                       "repository's space).",
+                       "repository's account).",
         .input_schema = share_links_input_schema(),
         .output_schema = {{"type", "object"}},
         .kind = CapabilityKind::Read,
@@ -2060,7 +2060,7 @@ void register_drive_capabilities(Registry& registry) {
         .title = "Create drive share link",
         .description = "Create a folder-scoped link with an explicit role and expiry. The link is "
                        "held in the workspace Zetta of `workspace_id`, a workspace of the "
-                       "repository's space; its bearer token names that workspace.",
+                       "repository's account; its bearer token names that workspace.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"repository_id", {{"type", "string"}}},

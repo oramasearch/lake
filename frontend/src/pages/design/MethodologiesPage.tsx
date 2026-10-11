@@ -4,6 +4,7 @@ import { useState } from "react";
 import { FlaskConical, SearchX } from "lucide-react";
 import { Card, Empty, FilterChips, Grid, Page, SearchInput, Section, Skeleton, Stat, StatRow, Toolbar } from "@/lib/ui";
 import { WorkspaceGate } from "@/components/WorkspaceGate";
+import { MethodologyIcon } from "@/components/CatalogueIcon";
 import { qs, useWq, useWsPath } from "./api";
 import { joined, text, type J } from "./logic";
 import { matches } from "./catalogue";
@@ -76,6 +77,7 @@ function Families() {
               <Card
                 key={text(entry, "id") || row}
                 to={ws(`/design/methodology?${qs({ id: text(entry, "id") })}`)}
+                icon={<MethodologyIcon entry={entry} size={32} />}
                 label={text(entry, "id")}
                 title={text(entry, "name")}
                 actions={<RunsBadge entry={entry} />}

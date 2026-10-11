@@ -29,6 +29,8 @@ WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY frontend/ ./
+# The icon test checks the website's exported copy (lake#639), which lives beside frontend/.
+COPY assets/catalogue-icons/ /assets/catalogue-icons/
 RUN npm run build
 
 # ---------- build stage ----------

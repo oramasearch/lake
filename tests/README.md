@@ -72,6 +72,9 @@ workspace alias checks, audit, REST/MCP parity and actual calls, `start_experime
 confirmation (`Experiments.AgentDocsNameTheLiveReadAndTheConfirmation`; lake#449, lake#463), and
 lake's experiment names translated to and from the engine's study names
 (`Experiments.LakeSaysExperimentAndTheEngineKeepsItsStudyNames`, lake#561).
+`Docs.AgentDocsSayLakeAndNeverSpace` (`test_markdown.cpp`, lake#647) renders llms.txt,
+llms-full.txt, the skill and every description in OpenAPI and `tools/list` and fails on "space" or
+a lowercase "lake" in their prose.
 `Docs.GuidesSpeakOfExperiments` and `frontend/tests/wording.test.ts` keep "study" out of the guides
 and the pages. `test_workspaces.cpp` covers trial runs and experiment models named by their
 experiment, the promoted marker,
@@ -476,6 +479,13 @@ together dropped together, readings keeping their latest, deleted and refusing w
 `usage_over_time` across workspaces by hour, day and month and its refusals, limits, `record_model_usage`,
 the owner loop's `sample_usage` and the speech-to-text seconds and tokens of a transcript.
 `record_fixture.hpp`'s time series now answers a gauge's `last` reading per step.
+
+The model gateway (lake#248): `test_model_gateway.cpp` covers the request as forwarded (a stream
+asked for its usage), the usage of every answer shape (chat, Responses, embeddings, both streams),
+the provider's refusals without echoing Lake's key, `model_completion` counting a task's and a
+launch's tokens in the run's workspace with the prompt kept out of the audit, every other caller
+refused before the provider, the monthly `model_tokens` limit refusing with `usage_limit_reached`,
+and the OpenAI-compatible `/openai/v1/*` route over a real server, all against a fake provider.
 
 Billing (lake#564): `test_billing.cpp` covers prices and bill lines, choosing a plan now or next
 month, a month's bill from two workspaces' usage, invoices frozen, voided, reissued and paid, an

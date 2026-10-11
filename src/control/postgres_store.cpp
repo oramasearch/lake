@@ -1162,7 +1162,7 @@ std::string format_ciphertext(const Ciphertext& value) {
 Result<Ciphertext> parse_ciphertext(std::string_view value) {
     constexpr std::string_view prefix = "lake:v1:";
     if (!value.starts_with(prefix)) {
-        return std::unexpected(StoreError{"invalid_input", "ciphertext is not a lake v1 value"});
+        return std::unexpected(StoreError{"invalid_input", "ciphertext is not a lake:v1 value"});
     }
     const std::size_t key_end = value.find(':', prefix.size());
     const std::size_t version_end =
@@ -1940,7 +1940,7 @@ public:
                                organization_id);
             if (rows.empty())
                 return std::unexpected(
-                    StoreError{"not_found", "no space for organization " + organization_id});
+                    StoreError{"not_found", "no account for organization " + organization_id});
             return customer_of(rows[0]);
         });
     }
@@ -1968,7 +1968,7 @@ public:
                 in.customer_id);
             if (workspace.empty()) {
                 return std::unexpected(StoreError{
-                    "invalid_input", "workspace_id must name a workspace in this space"});
+                    "invalid_input", "workspace_id must name a workspace in this account"});
             }
             const pqxx::result rows =
                 tx.exec_params(std::string("INSERT INTO repositories (id, customer_id, name, "
@@ -2649,7 +2649,7 @@ public:
         return with_tx<OrganizationSpace>([&](pqxx::work& tx) -> Result<OrganizationSpace> {
             if (in.owner_user_id.empty() || in.owner_taap_id.empty()) {
                 return std::unexpected(StoreError{
-                    "invalid_input", "a personal space is converted by the person who owns it"});
+                    "invalid_input", "a person's own account is converted by the person who owns it"});
             }
             if (!user_matches_identity(tx, in.owner_user_id, in.owner_taap_id)) {
                 return std::unexpected(
@@ -2665,11 +2665,11 @@ public:
             const Customer current = customer_of(customers[0]);
             if (current.customer_type != "individual") {
                 return std::unexpected(
-                    StoreError{"conflict", "this space already belongs to an organization"});
+                    StoreError{"conflict", "this account already belongs to an organization"});
             }
             if (current.user_id != in.owner_user_id) {
                 return std::unexpected(StoreError{
-                    "unauthorized", "only the person whose personal space this is can convert it"});
+                    "unauthorized", "only the person whose own account this is can convert it"});
             }
             const pqxx::result customer_objects =
                 tx.exec_params("SELECT id::text FROM objects WHERE object_type = 'customer' "
@@ -2677,7 +2677,7 @@ public:
                                in.customer_id);
             if (customer_objects.empty()) {
                 return std::unexpected(
-                    StoreError{"store_error", "the space's policy object is missing"});
+                    StoreError{"store_error", "the account's policy object is missing"});
             }
             const std::string evidence = "convert_personal_space/" + in.request_id;
             OrganizationSpace space;
@@ -3160,7 +3160,7 @@ public:
                 tx.exec(std::string("SELECT ") + identity_columns +
                         " FROM lake_identity WHERE current ORDER BY created_at DESC LIMIT 1");
             if (rows.empty()) {
-                return std::unexpected(audit::Error{"not_found", "no lake identity exists"});
+                return std::unexpected(audit::Error{"not_found", "no Lake identity exists"});
             }
             return identity_of(rows[0]);
         });
@@ -3175,7 +3175,7 @@ public:
                                    taap_id);
                 if (rows.empty()) {
                     return std::unexpected(
-                        audit::Error{"not_found", "no lake identity for " + taap_id});
+                        audit::Error{"not_found", "no Lake identity for " + taap_id});
                 }
                 return identity_of(rows[0]);
             });
@@ -3206,7 +3206,7 @@ public:
                                                         previous.id);
             if (updated.affected_rows() != 1) {
                 return std::unexpected(
-                    audit::Error{"conflict", "the lake identity changed before rotation"});
+                    audit::Error{"conflict", "the Lake identity changed before rotation"});
             }
             tx.exec_params("INSERT INTO lake_identity "
                            "(id, taap_id, public_key, wrapped_seed, created_at, "
@@ -3794,7 +3794,7 @@ public:
         if (managed_service_slug("ws", workspace_id).empty() ||
             managed_service_slug("ws", customer_id).empty()) {
             return std::unexpected(
-                StoreError{"invalid_input", "workspace_id must name a live workspace of this space"});
+                StoreError{"invalid_input", "workspace_id must name a live workspace of this account"});
         }
         return with_tx<OciRepositoryRoute>([&](pqxx::work& tx) -> Result<OciRepositoryRoute> {
             const auto workspace = tx.exec_params(
@@ -3803,7 +3803,7 @@ public:
                 workspace_id, customer_id);
             if (workspace.empty()) {
                 return std::unexpected(StoreError{
-                    "invalid_input", "workspace_id must name a live workspace of this space"});
+                    "invalid_input", "workspace_id must name a live workspace of this account"});
             }
             tx.exec_params("INSERT INTO oci_repository_routes (customer_id, name, workspace_id) "
                            "VALUES ($1::uuid, $2, $3::uuid) ON CONFLICT (customer_id, name) "
@@ -3873,7 +3873,7 @@ public:
         }
         if (!to_workspace_id.empty() && managed_service_slug("ws", to_workspace_id).empty()) {
             return std::unexpected(StoreError{
-                "invalid_input", "workspace_id must name a live workspace of this space"});
+                "invalid_input", "workspace_id must name a live workspace of this account"});
         }
         const std::string cache = name.starts_with("cache/") ? name : "cache/" + name;
         return with_tx<std::vector<OciRepositoryRoute>>(
@@ -3884,7 +3884,7 @@ public:
                                    to_workspace_id, customer_id)
                         .empty()) {
                     return std::unexpected(StoreError{
-                        "invalid_input", "workspace_id must name a live workspace of this space"});
+                        "invalid_input", "workspace_id must name a live workspace of this account"});
                 }
                 // Deleted and written again in this transaction: a concurrent first push waits on
                 // the deleted keys and then finds the new route.
@@ -4185,7 +4185,7 @@ public:
             }
             if (!rows[0][27].as<bool>()) {
                 return std::unexpected(
-                    StoreError{"unauthorized", "user is not a member of this space"});
+                    StoreError{"unauthorized", "user is not a member of this account"});
             }
             return web_app_from(rows[0]);
         });
@@ -4277,7 +4277,7 @@ public:
         const auto workspace = get_workspace(input.workspace_id);
         if (!workspace || workspace->customer_id != input.customer_id ||
             workspace->desired == "deleted") {
-            return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+            return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this account"});
         }
         return with_tx<WebApp>([&](pqxx::work& tx) -> Result<WebApp> {
             const pqxx::result customers = tx.exec_params(
@@ -4484,7 +4484,7 @@ public:
         const auto workspace = get_workspace(input.workspace_id);
         if (!workspace || workspace->customer_id != input.customer_id ||
             workspace->desired == "deleted") {
-            return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+            return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this account"});
         }
         return with_tx<Build>([&](pqxx::work& tx) -> Result<Build> {
             const pqxx::result repositories = tx.exec_params(
@@ -5158,7 +5158,7 @@ public:
         const auto workspace = get_workspace(in.workspace_id);
         if (!workspace || workspace->customer_id != in.customer_id ||
             workspace->desired == "deleted") {
-            return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this space"});
+            return std::unexpected(StoreError{"invalid_input", "workspace_id must name a workspace Zetta in this account"});
         }
         if (in.agent.empty() || in.scopes.empty() || (!in.id.empty() && !agent_task_uuid(in.id)) ||
             (!in.parent_task_id.empty() && !agent_task_uuid(in.parent_task_id))) {
@@ -7944,7 +7944,7 @@ public:
                 input.customer_id);
             if (workspace.empty()) {
                 return std::unexpected(StoreError{
-                    "invalid_input", "workspace_id must name a live workspace of this space"});
+                    "invalid_input", "workspace_id must name a live workspace of this account"});
             }
             const pqxx::result rows = tx.exec_params(
                 "INSERT INTO secret_mount_routes (mount_id, customer_id, organization_id, "

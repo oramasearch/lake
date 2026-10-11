@@ -158,9 +158,9 @@ liquid::error mapped(const ObjectResponse& response, std::string context) {
 // (lake#543): one without the prefix durability lake relies on, and one of several nodes, where the
 // incarnation is not yet per owner.
 constexpr std::string_view durability_refusal =
-    "the workspace Zetta does not report the object log durability lake needs";
+    "the workspace Zetta does not report the object log durability Lake needs";
 constexpr std::string_view several_nodes_refusal =
-    "the workspace Zetta has more than one node, and lake checks its incarnation on one node only";
+    "the workspace Zetta has more than one node, and Lake checks its incarnation on one node only";
 
 // The answer's `value`, or an empty object.
 nlohmann::json answered_value(const ObjectResponse& response) {
@@ -179,7 +179,7 @@ std::string durability_shortfall(const nlohmann::json& value) {
                "oramasearch/zetta#1237";
     }
     if (durability.get<std::int64_t>() < static_cast<std::int64_t>(workspace_store_prefix_durability)) {
-        return "it reports object_log_prefix_durability " + durability.dump() + ", and lake needs " +
+        return "it reports object_log_prefix_durability " + durability.dump() + ", and Lake needs " +
                std::to_string(workspace_store_prefix_durability) + " or later";
     }
     const auto incarnation = value.find("incarnation");
@@ -446,7 +446,7 @@ liquid::result<void> ZettaObjectClient::observe_incarnation(const ObjectResponse
     std::lock_guard lock(incarnation_mutex_);
     if (several && restarted_.empty()) {
         restarted_ = std::string(several_nodes_refusal) +
-                     ": an object answer named more than one owner or node; lake opens no "
+                     ": an object answer named more than one owner or node; Lake opens no "
                      "workspace store on it until the incarnation is per owner (lake#543)";
         return refused(liquid::errc::unsupported, restarted_, context);
     }
@@ -541,7 +541,7 @@ liquid::runtime::task<ObjectResponse> ZettaObjectClient::send_checked(ObjectRequ
                     std::lock_guard lock(incarnation_mutex_);
                     if (restarted_.empty()) {
                         if (!renewed) {
-                            restarted_ = "the workspace Zetta restarted and this lake process no longer "
+                            restarted_ = "the workspace Zetta restarted and this Lake process no longer "
                                          "holds the workspace store's lease (" +
                                          renewed.error().message +
                                          "): the store is opened again (lake#543)";
@@ -890,7 +890,7 @@ liquid::runtime::task<ObjectLease> ZettaObjectClient::acquire(std::string holder
                                       : std::string();
             error.message = "the workspace store is owned by " +
                             (current.empty() ? std::string("another holder") : current) +
-                            "; one lake process owns a workspace store at a time";
+                            "; one Lake process owns a workspace store at a time";
         }
         co_return std::unexpected(std::move(error));
     }
@@ -1161,7 +1161,7 @@ WorkspaceStoreCipher::unwrap(const Key& wrapping,
     auto opened = gcm_open(wrapping, key_associated(workspace_id, version), *sealed);
     if (!opened || opened->size() != 32) {
         return refused<Output>(liquid::errc::unauthorized,
-                               "the workspace store key does not unwrap under this lake's "
+                               "the workspace store key does not unwrap under this Lake's "
                                "LAKE_INSTANCE_KEK",
                                std::string(workspace_store_key_object));
     }
@@ -1352,7 +1352,7 @@ liquid::result<void> check_liquid_key(std::string_view key) {
     if (key.starts_with("keys/") || key.starts_with(workspace_store_search_prefix) ||
         key.find(tail_marker) != std::string_view::npos) {
         return refused(liquid::errc::invalid_argument,
-                       "the key is reserved by lake's workspace store encryption", std::string(key));
+                       "the key is reserved by Lake's workspace store encryption", std::string(key));
     }
     return {};
 }
@@ -1387,7 +1387,7 @@ liquid::result<ParsedHeader> parse_header(std::string_view bytes, const std::str
     if (bytes.size() != header_size ||
         !std::equal(header_magic.begin(), header_magic.end(), bytes.begin())) {
         return refused<ParsedHeader>(liquid::errc::corrupt,
-                                     "the object is not a lake workspace store object", key);
+                                     "the object is not a Lake workspace store object", key);
     }
     if (get_u32(bytes, 8) != header_format) {
         return refused<ParsedHeader>(liquid::errc::unsupported,
@@ -1618,10 +1618,10 @@ liquid::runtime::task<void> ZettaObjectBackend::ensure_cipher() {
                 liquid::errc::corrupt,
                 !shared_->options.create_key
                     ? "the workspace store has no data key: its workspace was switched to it, so "
-                      "the store was wiped, recreated, or this is the wrong workspace Zetta; lake "
+                      "the store was wiped, recreated, or this is the wrong workspace Zetta; Lake "
                       "will not serve it as an empty store"
                     : "the workspace store has no data key but holds objects: it was damaged or "
-                      "this is the wrong workspace Zetta; lake will not create a new key over it",
+                      "this is the wrong workspace Zetta; Lake will not create a new key over it",
                 std::string(workspace_store_key_object)));
         }
         auto key = secrets_crypto::random_key();

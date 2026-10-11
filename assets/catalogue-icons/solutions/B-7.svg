@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A credit card above a limit gauge">
+<title>B-7 Credit Underwriting &amp; Limit Management</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#8e6a00)}.d{fill:var(--cat-accent,#8e6a00)}.t{fill:var(--cat-tint,#8e6a0033)}.s{stroke-dasharray:2 2.5}</style>
+<rect class="l" x="3" y="3.5" width="14" height="9.5" rx="1.5"/>
+<path class="l" d="M3 7h14"/>
+<path class="a" d="M11.5 19.5a4.5 4.5 0 0 1 9 0"/>
+<path class="a" d="M16 19.5l2.4-2.9"/>
+<circle class="d" cx="16" cy="19.5" r="1.25"/>
+</svg>

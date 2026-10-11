@@ -351,6 +351,13 @@ export function limitTone(state: string): "bad" | "warn" | undefined {
   return state === "over" ? "bad" : state === "warning" ? "warn" : undefined;
 }
 
+/** What a limit does at its line: storage refuses repository writes, model tokens refuse agents'
+ * model calls through Lake's model gateway (lake#248), every other limit warns. */
+export function limitNote(limit: { dimension: string; enforced: boolean; warn_percent: number }): string {
+  if (!limit.enforced) return `This month; warns from ${limit.warn_percent}%`;
+  return limit.dimension === "model_tokens" ? "This month; agents' model calls are refused at the limit" : "Enforced on new repository writes";
+}
+
 /** A link to the Usage dashboard for some workspaces, a range and the dimension to chart. */
 export function usageLink(opts: { workspaces?: string[]; range?: RangeKey; dimension?: string; customerId?: string } = {}): string {
   const params = new URLSearchParams();

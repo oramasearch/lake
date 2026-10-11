@@ -148,7 +148,7 @@ add_metered_transfer(WorkspaceRecords& records,
                      int attempts) {
     const auto at_us = metering_hour_us(hour);
     if (customer_id.empty() || !at_us) {
-        co_return failure<void>("invalid_input", "a transfer needs its space and UTC hour");
+        co_return failure<void>("invalid_input", "a transfer needs its account and UTC hour");
     }
     const auto collection = MeteringUsageCodec::collection;
     const std::string key = records.index_of(collection, "hour:" + hour);
@@ -203,7 +203,7 @@ liquid::runtime::task<ZettaControlResult<bool>> record_metered_build(WorkspaceRe
                                                                      MeteredBuild build) {
     const auto at_us = metering_hour_us(build.hour);
     if (build.customer_id.empty() || build.result_id.empty() || !at_us) {
-        co_return failure<bool>("invalid_input", "a build record needs its space, result and hour");
+        co_return failure<bool>("invalid_input", "a build record needs its account, result and hour");
     }
     const auto collection = MeteredBuildCodec::collection;
     const std::string key = records.index_of(collection, "result:" + build.result_id);

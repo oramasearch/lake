@@ -1,6 +1,7 @@
 // Usage over time (lake#564, docs/api/metering.md#usage-over-time): usage_over_time, usage_limits,
-// set_usage_limit, record_model_usage, and the owner loop's usage sample. Every workspace's usage
-// is read from its own workspace Zetta; lake's control store holds only the limits.
+// set_usage_limit, record_model_usage, model_completion (the model gateway, lake#248), and the
+// owner loop's usage sample. Every workspace's usage is read from its own workspace Zetta; lake's
+// control store holds only the limits.
 
 #include <algorithm>
 #include <chrono>
@@ -12,6 +13,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -22,6 +24,7 @@
 
 #include "lake/api/capabilities.hpp"
 #include "lake/api/images.hpp"
+#include "lake/api/model_gateway.hpp"
 #include "lake/api/sync_store.hpp"
 #include "lake/api/usage_recorder.hpp"
 #include "lake/control/agent_bus.hpp"
@@ -1099,11 +1102,8 @@ liquid::runtime::task<UsageReading> read_usage(ApiContext& context, const UsageQ
                 rows.error());
         }
     }
-    if (wants("model_tokens")) {
-        reading.not_measured.push_back(
-            "Model tokens: counted only when an agent reports them with record_model_usage; "
-            "agent-runtime and the library agents do not report them yet (lake#248).");
-    }
+    // Model tokens are counted by the model gateway as each call is answered (lake#248).
+    // Speech is measured for every transcript and dictation (lake#613, lake#658).
     if (wants("storage")) {
         // A workspace sampled in the window whose engine reported no models (its Zetta has no
         // storage_usage yet): its models, indexes, run artifacts, topics, files and buckets are
@@ -1356,7 +1356,8 @@ liquid::runtime::task<ApiResult> limits_of(const std::string& customer_id, ApiCo
                  limit.limit,
                  limit.warn_percent,
                  used == reading.totals.end() ? std::nullopt : std::optional<double>(used->second),
-                 false,
+                 // The model gateway refuses model calls past this one (lake#248).
+                 name == "model_tokens",
                  "month");
     }
     co_return ApiResult::success({{"customer_id", customer_id},
@@ -1375,6 +1376,7 @@ struct Reporter {
     std::string workspace_id;
     std::string agent;
     std::string launch_id;
+    std::string customer_id;
 };
 
 std::expected<Reporter, ApiResult> reporter_of(const json& input, ApiContext& context) {
@@ -1399,14 +1401,14 @@ std::expected<Reporter, ApiResult> reporter_of(const json& input, ApiContext& co
             return std::unexpected(
                 ApiResult::failure("conflict", "the task is not one of this agent's", "/task_id"));
         }
-        return Reporter{task->workspace_id, task->agent, task->id};
+        return Reporter{task->workspace_id, task->agent, task->id, task->customer_id};
     }
     if (context.credential_kind == "agent_task") {
         const auto task = context.store->get_agent_task(id_after("task:"));
         if (!task) {
             return std::unexpected(refused());
         }
-        return Reporter{task->workspace_id, task->agent, task->id};
+        return Reporter{task->workspace_id, task->agent, task->id, task->customer_id};
     }
     if (context.credential_kind == "agent_launch") {
         const auto launch = context.store->get_agent_launch(id_after("launch:"));
@@ -1415,7 +1417,8 @@ std::expected<Reporter, ApiResult> reporter_of(const json& input, ApiContext& co
         }
         return Reporter{launch->workspace_id,
                         launch->agent_name.empty() ? launch->agent_id : launch->agent_name,
-                        launch->id};
+                        launch->id,
+                        launch->customer_id};
     }
     if (context.credential_kind == "agent_schedule") {
         const auto schedule = context.store->get_agent_cron_schedule(id_after("schedule:"));
@@ -1424,13 +1427,223 @@ std::expected<Reporter, ApiResult> reporter_of(const json& input, ApiContext& co
         }
         return Reporter{schedule->workspace_id,
                         schedule->agent_name.empty() ? schedule->agent_id : schedule->agent_name,
-                        schedule->id};
+                        schedule->id,
+                        schedule->customer_id};
     }
     return std::unexpected(refused());
 }
 
 std::expected<std::string, ApiError> agent_object(const json&, ApiContext&) {
     return std::string("agent_usage");
+}
+
+// ------------------------------------------------------------------------------------------------
+// The model gateway (lake#248, docs/api/model-gateway.md).
+
+// Who a model call is made for: an agent's own task, launch or schedule credential, never a
+// person's key or a library agent's bus credential (which names no turn).
+std::expected<Reporter, ApiResult> model_caller(const json& input, ApiContext& context) {
+    if (!context.authorized) {
+        return std::unexpected(ApiResult::failure(
+            "unauthenticated",
+            "a model call needs the agent's task, launch or schedule credential as its key"));
+    }
+    if (context.credential_kind != "agent_task" && context.credential_kind != "agent_launch" &&
+        context.credential_kind != "agent_schedule") {
+        return std::unexpected(ApiResult::failure(
+            "unauthorized",
+            "only an agent's own task, launch or schedule credential may call a model through "
+            "Lake"));
+    }
+    return reporter_of(input, context);
+}
+
+// An account's monthly model-token limit and this month's use, as this process last read them.
+// Reading the use reads every workspace of the account, so it is read at most once a minute; the
+// tokens this process counts in between are added to it. Each replica keeps its own, so a limit
+// is exceeded by at most about a minute of every replica's calls.
+struct ModelTokenAllowance {
+    std::uint64_t limit = 0; // 0: no limit
+    double used = 0;
+    std::chrono::steady_clock::time_point read_at;
+};
+constexpr std::chrono::seconds allowance_refresh{60};
+
+std::mutex& allowance_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+std::map<std::string, ModelTokenAllowance>& allowances() {
+    static std::map<std::string, ModelTokenAllowance> by_customer;
+    return by_customer;
+}
+
+std::optional<ApiResult> over_model_limit(const ModelTokenAllowance& allowance) {
+    if (allowance.limit == 0 || allowance.used < static_cast<double>(allowance.limit)) {
+        return std::nullopt;
+    }
+    return ApiResult::failure(
+        "usage_limit_reached",
+        std::format("This account has used its monthly limit of {} model tokens. An administrator "
+                    "of the account raises or removes it with set_usage_limit (Usage in the "
+                    "Lake Console).",
+                    allowance.limit));
+}
+
+// The refusal when the account's model tokens are at or over its monthly limit, if they are.
+liquid::runtime::task<std::optional<ApiResult>> model_limit_refusal(const std::string& customer_id,
+                                                                    ApiContext& context) {
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard lock(allowance_mutex());
+        const auto found = allowances().find(customer_id);
+        if (found != allowances().end() && now - found->second.read_at < allowance_refresh) {
+            co_return over_model_limit(found->second);
+        }
+    }
+    const auto stored = context.store->usage_limits(customer_id);
+    if (!stored) {
+        co_return ApiResult::failure("store_unavailable",
+                                     "the account's usage limits could not be read: " +
+                                         stored.error().message);
+    }
+    ModelTokenAllowance allowance{.read_at = now};
+    for (const control::UsageLimit& limit : *stored) {
+        if (limit.dimension == "model_tokens") {
+            allowance.limit = limit.limit;
+        }
+    }
+    if (allowance.limit > 0 && context.workspaces) {
+        const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::system_clock::now().time_since_epoch())
+                                        .count();
+        const std::int64_t month = period_floor(now_ms, Granularity::month);
+        UsageQuery query;
+        query.customer_id = customer_id;
+        query.dimensions.insert("model_tokens");
+        if (const auto rows = context.store->list_workspaces(customer_id)) {
+            for (const control::Workspace& row : *rows) {
+                if (row.desired != "deleted") {
+                    query.workspaces.push_back(row);
+                }
+            }
+        }
+        query.periods =
+            *periods_of(month, period_after(month, Granularity::month), Granularity::month);
+        auto read = co_await read_usage(context, query);
+        if (!read) {
+            co_return ApiResult::failure("store_unavailable",
+                                         "this month's model tokens could not be read: " +
+                                             read.error().message);
+        }
+        if (const auto total = read->totals.find("model_tokens"); total != read->totals.end()) {
+            allowance.used = total->second;
+        }
+    }
+    std::lock_guard lock(allowance_mutex());
+    allowances()[customer_id] = allowance;
+    co_return over_model_limit(allowance);
+}
+
+void count_model_tokens(const std::string& customer_id, std::uint64_t tokens) {
+    std::lock_guard lock(allowance_mutex());
+    if (const auto found = allowances().find(customer_id); found != allowances().end()) {
+        found->second.used += static_cast<double>(tokens);
+    }
+}
+
+liquid::runtime::task<ApiResult> model_completion(const json& input, ApiContext& context) {
+    if (!context.store) {
+        co_return ApiResult::failure("store_unavailable", "no control-plane store is configured");
+    }
+    auto caller = model_caller(input, context);
+    if (!caller) {
+        co_return caller.error();
+    }
+    if (caller->workspace_id.empty()) {
+        co_return ApiResult::failure("conflict", "this run belongs to no workspace");
+    }
+    const std::string endpoint = input.at("endpoint");
+    context.audit_workspace_id = caller->workspace_id;
+    context.audit_object = "agent_usage/" + caller->launch_id;
+    // What was asked of which model and what it cost; never the prompt or the answer.
+    context.audit_details = {{"endpoint", endpoint}};
+    auto prepared = prepare_model_request(endpoint, input.at("request"));
+    if (!prepared) {
+        co_return ApiResult::failure(
+            prepared.error().code, prepared.error().message, prepared.error().path);
+    }
+    const std::string requested = prepared->at("model");
+    const auto stream_field = prepared->find("stream");
+    const bool stream = stream_field != prepared->end() && stream_field->is_boolean() &&
+                        stream_field->get<bool>();
+    context.audit_details["model"] = requested;
+    context.audit_details["streamed"] = stream;
+    if (!context.model_provider) {
+        co_return ApiResult::failure("not_supported",
+                                     "No model provider is configured on this Lake; an "
+                                     "administrator sets LAKE_OPENAI_API_KEY.");
+    }
+    auto refusal = co_await model_limit_refusal(caller->customer_id, context);
+    if (!refusal) {
+        co_return ApiResult::failure("store_error", refusal.error().message);
+    }
+    if (*refusal) {
+        context.audit_details["refused"] = "usage_limit";
+        co_return std::move(**refusal);
+    }
+    ModelProviderRequest request{endpoint, prepared->dump(), stream};
+    auto ran = co_await run_blocking(
+        [provider = context.model_provider, request]() { return provider(request); });
+    if (!ran) {
+        co_return ApiResult::failure("busy", ran.error().message);
+    }
+    const ModelProviderResponse& response = *ran;
+    context.audit_details["provider_status"] = response.status;
+    if (!response.error.empty() || response.status < 200 || response.status >= 300) {
+        const ApiError failure =
+            model_provider_failure(response.status, response.body, response.error);
+        co_return ApiResult::failure(failure.code, failure.message);
+    }
+    const ModelUsage usage = model_usage(response.body, stream);
+    const std::string model = usage.model.empty() ? requested : usage.model;
+    const bool recorded = usage.reported && context.usage_recorder != nullptr;
+    if (recorded) {
+        const Labels labels{
+            {"agent", caller->agent}, {"launch_id", caller->launch_id}, {"model", model}};
+        Labels in = labels, out = labels;
+        in["kind"] = "input";
+        out["kind"] = "output";
+        std::vector<UsageRecorder::Increment> increments;
+        increments.push_back({"model_tokens", usage.input_tokens, std::move(in)});
+        increments.push_back({"model_tokens", usage.output_tokens, std::move(out)});
+        context.usage_recorder->add_together(caller->workspace_id, std::move(increments));
+    }
+    count_model_tokens(caller->customer_id, usage.input_tokens + usage.output_tokens);
+    context.audit_details["answered_model"] = model;
+    context.audit_details["input_tokens"] = usage.input_tokens;
+    context.audit_details["output_tokens"] = usage.output_tokens;
+    context.audit_details["usage_reported"] = usage.reported;
+    json out{{"workspace_id", caller->workspace_id},
+             {"agent", caller->agent},
+             {"launch_id", caller->launch_id},
+             {"model", model},
+             {"input_tokens", usage.input_tokens},
+             {"output_tokens", usage.output_tokens},
+             {"usage_reported", usage.reported},
+             {"recorded", recorded},
+             {"streamed", stream}};
+    if (stream) {
+        out["events"] = response.body;
+    } else {
+        json answer = json::parse(response.body, nullptr, false);
+        if (!answer.is_object()) {
+            co_return ApiResult::failure("engine_error",
+                                         "the model provider answered without a JSON object");
+        }
+        out["response"] = std::move(answer);
+    }
+    co_return ApiResult::success(std::move(out));
 }
 
 } // namespace
@@ -2113,6 +2326,63 @@ void register_usage_capabilities(Registry& registry) {
                                        {"launch_id", reporter->launch_id},
                                        {"recorded", recorded}});
         }});
+    registry.add(Capability{
+        .name = "model_completion",
+        .title = "Call a model through Lake",
+        .description =
+            "The model gateway: an agent's model call, sent to the model provider with Lake's own "
+            "key and counted as `model_tokens` in the workspace its task, launch or schedule runs "
+            "in. Only an agent's own task, launch or schedule credential may call it. `endpoint` "
+            "is the OpenAI API path (`chat/completions`, `responses` or `embeddings`) and "
+            "`request` its JSON body. Agents normally reach it as the OpenAI-compatible "
+            "`POST /openai/v1/<endpoint>`, with the OpenAI SDK's base URL set to "
+            "`<lake>/openai/v1` and the credential as its API key. Refused with "
+            "`usage_limit_reached` once the account's monthly `model_tokens` limit is used up.",
+        .input_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"endpoint",
+                {{"type", "string"},
+                 {"enum", json::array({"chat/completions", "responses", "embeddings"})},
+                 {"description", "the OpenAI API path the request is for"}}},
+               {"request",
+                {{"type", "object"},
+                 {"description",
+                  "the OpenAI request body: `model` and the endpoint's own fields, such as "
+                  "`messages` and `tools`; `stream: true` answers the whole event stream"}}}}},
+             {"required", json::array({"endpoint", "request"})},
+             {"additionalProperties", false}},
+        .output_schema = {{"type", "object"},
+                          {"properties",
+                           {{"workspace_id", {{"type", "string"}}},
+                            {"agent", {{"type", "string"}}},
+                            {"launch_id", {{"type", "string"}}},
+                            {"model", {{"type", "string"}}},
+                            {"input_tokens", {{"type", "integer"}}},
+                            {"output_tokens", {{"type", "integer"}}},
+                            {"usage_reported", {{"type", "boolean"}}},
+                            {"recorded", {{"type", "boolean"}}},
+                            {"streamed", {{"type", "boolean"}}},
+                            {"response", {{"type", "object"}}},
+                            {"events", {{"type", "string"}}}}},
+                          {"required",
+                           json::array({"workspace_id",
+                                        "agent",
+                                        "launch_id",
+                                        "model",
+                                        "input_tokens",
+                                        "output_tokens",
+                                        "usage_reported",
+                                        "recorded",
+                                        "streamed"})}},
+        .kind = CapabilityKind::Action,
+        // Authorized by the agent's own credential, which the handler checks; like
+        // record_model_usage.
+        .requires_auth = false,
+        .object = "agent_usage",
+        .action = "write",
+        .resolve_object = agent_object,
+        .async_handler = model_completion});
 }
 
 } // namespace lake::api
