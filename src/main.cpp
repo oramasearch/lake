@@ -103,7 +103,7 @@ int usage() {
     std::println("  LAKE_APPS_RUNTIME_IMAGE is the base image for source-backed Ship App builds");
     std::println(
         "  LAKE_APPS_RESERVED_NAMES adds comma-separated names that Ship apps cannot use");
-    std::println("  LAKE_APPS_PER_CUSTOMER caps live apps per space (default 0: no limit)");
+    std::println("  LAKE_APPS_PER_CUSTOMER caps live apps per account (default 0: no limit)");
     std::println(
         "  LAKE_APP_REPLICAS_PER_CUSTOMER caps desired app replicas (default 0: no limit)");
     std::println(

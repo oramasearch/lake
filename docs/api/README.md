@@ -123,6 +123,11 @@ Database `ERROR:` and `DETAIL:` diagnostics are logged server-side and replaced 
 `ApiResult` is constructed. Capability handlers may provide a more specific product message and
 JSON pointer, such as repository-name conflicts at `/name`; REST and MCP therefore expose the
 same actionable error without schema names, SQL text or tenant identifiers from the database.
+A message, from the API layer or from the stores, transparency, audit and search code beneath it,
+calls the product **Lake** and never says "space": it says the account, the workspace or the
+organization, whichever is true (decision 59, lake#647). Field names (`customer_id`), key-derivation
+and AEAD labels (`lake data key/…`), attestation types, pool ids and the `lake:v1` prefix keep
+their form.
 
 Registry input validation descends through declared object properties and array `items`, checking
 types, required fields, `enum` values, numeric bounds (`minimum`, `maximum`, `exclusiveMinimum`,

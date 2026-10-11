@@ -300,7 +300,7 @@ says why.
 
 - **`workspace_id is required`**: Design, Train and Ship calls need it; see
   [Find Your Ids](#find-your-ids), or call under the [workspace prefix](#the-workspace-prefix).
-- **`customer_id is not the space that owns workspace …`** (at `/customer_id`): the workspace
+- **`customer_id is not the account that owns workspace …`** (at `/customer_id`): the workspace
   belongs to another account. Use the `customer_id` that `list_workspaces` lists it under.
 - **`unexpected field …`**: the input has a field the schema does not declare. Check the spelling
   against the operation on **Developer → API → Operations**.
