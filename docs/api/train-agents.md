@@ -41,7 +41,7 @@ The definition a person designs, in New agent and Edit:
 | Name, What it's for | `name`, `purpose` (and `description`) |
 | Instructions (its prompt) | `manifesto`; `system_prompt` for a native agent; composed into a Python agent's `definition.instructions` |
 | What success looks like | `goal` |
-| Skills | `skills`: whatever the runtime offers, read from the `enum` of `skills` in `create_agent`'s schema in Lake's OpenAPI (the engine's own schema, vendored by lake#650), never a list written in the page. A skill Lake has no words for is shown by its own name; one the agent has that is no longer offered is kept |
+| Skills | `skills`: whatever agent-runtime offers, from its `skills.json` vendored into `frontend/src/pages/train/agent-skills.json` by `tools/agents/vendor-agent-skills.py` (agent-runtime#7; the twelve and what each grants are in [agent-factory](agent-factory.md)), never a list written in the page; the engine's `create_agent` schema accepts each (a test checks it). A skill the runtime no longer lists that the agent has is kept and shown by its own name |
 | Model | Orama base model (`runtime: native`; an empty `model` is filled with the base checkpoint by Lake, on `create_agent` and now also on `update_agent`), a model trained in this workspace (`model:<id>`, from `list_models`), or a frontier model (`runtime: python`, run on agent-runtime) |
 | Pipelines it may use | `pipelines`: approved pipelines only (`list_projects`); the engine pins each grant to its approval |
 | Where it works | `work_area` `{kind, detail}` |
@@ -173,7 +173,7 @@ cd frontend && npm test
 first, the base model on an update, and an unrecorded revision that does not fail the change) and
 `AgentRuns.CreateAgentRefusesDefinitionFieldsZettaWouldDrop`. `frontend/tests/agents.test.ts`
 covers the read-only rule for Orama's agents, the By Orama / Yours filter, Duplicate of each kind,
-New agent's and Edit's input, the skills read from OpenAPI, revision changes, the filter to
+New agent's and Edit's input, the skills vendored from agent-runtime, revision changes, the filter to
 trainable agents, and promote and roll back.
 
 ## Change it
@@ -183,4 +183,4 @@ A new specialized agent is a row in `control::agent_library` plus its key in the
 (zetta `docs/agent/README.md`), vendored into `src/api/engine_openapi.json`, then
 `agent_definition_of` (so revisions keep it), and `AgentForm`/`agentInput` in
 `frontend/src/lib/agents.ts` with its field in `AgentFields` (`frontend/src/pages/train/agents.tsx`).
-A new skill needs no change here: it is read from the schema.
+A new skill needs no change here: vendoring agent-runtime's `skills.json` again adds it to the pages.

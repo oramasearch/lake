@@ -50,7 +50,7 @@ for **Confirm and start experiment**.
 | **Orama base model** | The agent runs inside your workspace's engine, on its GPU when there is one. Its instructions are its system prompt. |
 | **Frontier model** | The agent runs on Lake's agent runtime with a frontier model (OpenAI). Only these agents can be run unattended and scheduled. |
 | **Work area** | Where it works: anywhere in this workspace, one project, or specific datasets. |
-| **Skills** | What it may do, such as *Search data*, *Generate a dataset* or *Summarize and explain*. Granted, never assumed. The form offers whatever skills the agent runtime offers (`create_agent`'s `skills` in [the API](/developer/api)). |
+| **Skills** | What it may do: *Search data*, *Generate a dataset*, *Train a Model*, *Summarize and explain*, *Call the API*, *Use drives*, *Use transcripts*, *Work in repositories*, *Load datasets*, *Read and publish streams*, *Design pipelines*, *Read usage and billing*. Granted, never assumed. They are the agent runtime's own skills (agent-runtime#7), vendored into Lake. A skill lets the agent read what it covers; anything it would change, it proposes, and you confirm it. |
 | **Revision** | One saved definition of your agent. Every create and edit is kept; you can restore any of them. |
 | **Trained version** | A checkpoint training produced for a base-model agent, with the data it learned from and its held-out score. You promote one, or roll back to one, in **Train → Agents**. |
 | **Pipelines as tools** | Approved pipelines you grant an agent; it can check, run and report on each one. |

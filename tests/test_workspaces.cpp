@@ -2302,6 +2302,68 @@ TEST(AgentRuns, ALaunchCredentialActsAsTheLauncherWithTheLaunchScopes) {
     EXPECT_FALSE(store.context_for(credential)) << "a stopped launch's credential stops too";
 }
 
+TEST(AgentRuns, ARunsKeyCarriesTheReadsOfItsAgentsSkillsAndNoChange) {
+    AgentRuns r;
+    const auto has = [](const std::vector<std::string>& scopes, std::string_view name) {
+        return std::ranges::find(scopes, name) != scopes.end();
+    };
+    // An agent with no skill: the scopes every run has, and nothing a skill adds.
+    r.w.caller->answers["get_agent"] = {{"id", "a-1"}, {"name", "Plain"}, {"runtime", "python"}};
+    const auto plain = r.call("launch_agent", {{"agent_id", "a-1"}});
+    ASSERT_TRUE(plain.ok) << plain.error.message;
+    EXPECT_EQ(r.store.get_agent_launch(plain.value["id"])->scopes,
+              lake::control::agent_launch_scopes);
+
+    // drives and usage (agent-runtime#7): their reads, never their changes, never another
+    // skill's reads.
+    r.w.caller->answers["get_agent"] = {{"id", "a-2"},
+                                        {"name", "Drive reader"},
+                                        {"runtime", "python"},
+                                        {"skills", {"drives", "usage", "not-a-skill"}}};
+    const auto launched = r.call("launch_agent", {{"agent_id", "a-2"}});
+    ASSERT_TRUE(launched.ok) << launched.error.message;
+    const auto scopes = r.store.get_agent_launch(launched.value["id"])->scopes;
+    for (const std::string& base : lake::control::agent_launch_scopes) {
+        EXPECT_TRUE(has(scopes, base)) << base;
+    }
+    EXPECT_TRUE(has(scopes, "drive_browse"));
+    EXPECT_TRUE(has(scopes, "read_drive_file"));
+    EXPECT_TRUE(has(scopes, "metering_usage"));
+    EXPECT_FALSE(has(scopes, "upload_drive_files")) << "a change is a proposal, never a scope";
+    EXPECT_FALSE(has(scopes, "delete_drive")) << "a change is a proposal, never a scope";
+    EXPECT_FALSE(has(scopes, "list_issues")) << "repositories is not granted";
+    EXPECT_FALSE(has(scopes, "read_secret"));
+
+    // A schedule's runs carry the same scopes as a launch of the same agent.
+    const auto scheduled =
+        r.call("schedule_agent", {{"agent_id", "a-2"}, {"trigger", "every Monday at 09:00"}});
+    ASSERT_TRUE(scheduled.ok) << scheduled.error.message;
+    EXPECT_EQ(r.store.get_agent_cron_schedule(scheduled.value["id"])->scopes, scopes);
+}
+
+TEST(AgentRuns, EverySkillLakeOffersIsOneAgentRuntimeDefines) {
+    // src/control/agent_skills.cpp is vendored from agent-runtime's skills.json; the original five
+    // come first, in Studio's order.
+    std::vector<std::string_view> names;
+    for (const auto& skill : lake::control::agent_skills()) {
+        names.push_back(skill.name);
+        EXPECT_FALSE(skill.label.empty()) << skill.name;
+    }
+    const std::vector<std::string_view> expected{"search",
+                                                 "generate-data",
+                                                 "train",
+                                                 "summarize",
+                                                 "call-api",
+                                                 "drives",
+                                                 "transcripts",
+                                                 "repositories",
+                                                 "datasets",
+                                                 "streams",
+                                                 "pipelines",
+                                                 "usage"};
+    EXPECT_EQ(names, expected);
+}
+
 TEST(AgentRuns, LaunchStopAndScheduleAPythonAgentButNeverANativeOne) {
     AgentRuns r;
     r.w.caller->answers["get_agent"] = {{"id", "a-1"}, {"name", "Watcher"}, {"runtime", "python"}};

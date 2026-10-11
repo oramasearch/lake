@@ -227,6 +227,7 @@ add_library(lake-core STATIC
   src/control/agent_bus.cpp
   src/control/agent_runs.cpp
   src/control/time_zones.cpp
+  src/control/agent_skills.cpp
   src/control/web_apps.cpp
   src/control/zetta_workspace.cpp
   src/control/workspace_records.cpp

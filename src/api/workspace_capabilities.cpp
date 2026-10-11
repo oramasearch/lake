@@ -4985,7 +4985,7 @@ void register_agent_run_capabilities(Registry& registry) {
                                         .mode = mode,
                                         .trigger = "manual",
                                         .input = input.value("input", json(nullptr)),
-                                        .scopes = control::agent_launch_scopes,
+                                        .scopes = control::agent_launch_scopes_for(*agent),
                                         .created_by_user_id = context.acting_user_id,
                                         .created_by_taap_id = context.acting_identity,
                                         .workspace_id = input.at("workspace_id")});
@@ -5157,7 +5157,7 @@ void register_agent_run_capabilities(Registry& registry) {
                                               .time_zone = time_zone,
                                               .description = trigger,
                                               .input = std::move(run_input),
-                                              .scopes = control::agent_launch_scopes,
+                                              .scopes = control::agent_launch_scopes_for(*agent),
                                               .created_by_user_id = context.acting_user_id,
                                               .created_by_taap_id = context.acting_identity,
                                               .workspace_id = input.at("workspace_id")});
@@ -5732,7 +5732,7 @@ void register_agent_run_capabilities(Registry& registry) {
                                             .agent_name = record->value("name", std::string()),
                                             .mode = "service",
                                             .trigger = "conversation",
-                                            .scopes = control::agent_launch_scopes,
+                                            .scopes = control::agent_launch_scopes_for(*record),
                                             .created_by_user_id = context.acting_user_id,
                                             .created_by_taap_id = context.acting_identity,
                                             .workspace_id = input.at("workspace_id")});

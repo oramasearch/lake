@@ -6,6 +6,8 @@
  * - Train → Agents lists only the workspace's agents with something to train: those whose
  *   behaviour comes from a model, a pipeline or a training schedule. */
 
+import agentSkills from "../pages/train/agent-skills.json" with { type: "json" };
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type J = Record<string, any>;
 
@@ -119,18 +121,19 @@ export function trainableBecause(agent: J): string[] {
 
 /* ------------------------------------------------------------------ skills */
 
-/** The words for the skills Lake knows of; any other skill the runtime offers is shown by its
- * own name, made readable. */
-const SKILL_WORDS: Record<string, string> = {
-  search: "Search data",
-  "generate-data": "Generate a dataset",
-  train: "Train a model",
-  summarize: "Summarize and explain",
-  "call-api": "Call the API",
-};
+/** The skills a person may grant an agent, with their labels, in the runtime's order: agent-runtime's
+ * own skills.json, vendored by tools/agents/vendor-agent-skills.py (agent-runtime#7), the one list
+ * the pages, the engine's `create_agent` schema and a launch's scopes all follow. Never written
+ * here. */
+export const AGENT_SKILLS: [string, string][] = (agentSkills as unknown as [string, string][]).filter((s) => Array.isArray(s) && typeof s[0] === "string");
 
+/** The keys of the skills the runtime offers. */
+export const OFFERED_SKILLS: string[] = AGENT_SKILLS.map(([key]) => key);
+
+/** A skill's label: the runtime's, or, for one it no longer lists, its own name made readable. */
 export function skillLabel(skill: string): string {
-  if (SKILL_WORDS[skill]) return SKILL_WORDS[skill];
+  const known = AGENT_SKILLS.find(([key]) => key === skill);
+  if (known) return known[1];
   const words = skill.replace(/^mcp:/, "MCP: ").replace(/[-_]+/g, " ").trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
@@ -138,29 +141,6 @@ export function skillLabel(skill: string): string {
 export function skillLabels(skills: unknown): string {
   const labels = (Array.isArray(skills) ? skills : []).filter((s): s is string => typeof s === "string").map(skillLabel);
   return labels.length ? labels.join(", ") : "—";
-}
-
-/** The skills an agent may be given, from Lake's OpenAPI document: the `enum` of `skills` in
- * `create_agent`'s request body, which Lake takes from the engine's own schema (lake#650), so a
- * skill the runtime adds appears without a change here. Empty when the document does not say. */
-export function skillsFromOpenApi(document: unknown): string[] {
-  const doc = document && typeof document === "object" ? (document as J) : {};
-  const operation = doc.paths?.["/v1/create_agent"]?.post;
-  const schema = operation?.requestBody?.content?.["application/json"]?.schema;
-  const resolved = resolveRef(doc, schema);
-  const skills = resolveRef(doc, resolved?.properties?.skills);
-  const items = resolveRef(doc, skills?.items);
-  const values = Array.isArray(items?.enum) ? items.enum : [];
-  return values.filter((v: unknown): v is string => typeof v === "string");
-}
-
-function resolveRef(doc: J, schema: unknown): J | undefined {
-  if (!schema || typeof schema !== "object") return undefined;
-  const ref = (schema as J).$ref;
-  if (typeof ref !== "string" || !ref.startsWith("#/")) return schema as J;
-  let at: unknown = doc;
-  for (const part of ref.slice(2).split("/")) at = at && typeof at === "object" ? (at as J)[part.replace(/~1/g, "/").replace(/~0/g, "~")] : undefined;
-  return at && typeof at === "object" ? (at as J) : undefined;
 }
 
 /** The skills offered in a form: the runtime's, then any the agent already has that it no longer

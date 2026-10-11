@@ -37,10 +37,32 @@ older than five minutes.
 per launch, `lal.<launch id>.<secret>`, puts it in a Secret owned by the Job or Deployment, and
 writes only its SHA-256 (`credential_sha256`). lake's stores resolve such a bearer by comparing
 digests in constant time (`context_for`): it acts as the person who launched it, limited to the
-launch's `scopes` (`control::agent_launch_scopes`: `workspace_query`, `workspace_act`,
-`workspace_openapi`, `list_agent_library`, `repository_tree`, `repository_file`, and the workspace's
-transcripts through `list_transcripts` and `get_transcript`, lake#561). A launch that is
-stopped (`desired = absent`) or not yet reported has no usable credential.
+launch's `scopes`. A launch that is stopped (`desired = absent`) or not yet reported has no usable
+credential.
+
+**A run's scopes follow its agent's skills** (agent-runtime#7). `control::agent_launch_scopes_for`
+reads the agent record's `skills` when lake stores the launch, schedule or conversation service,
+and gives the credential:
+
+- what every run has (`control::agent_launch_scopes`): `workspace_query`, `workspace_act`,
+  `workspace_openapi`, `list_agent_library`, `repository_tree`, `repository_file` (a definition
+  stored in lake), the workspace's transcripts through `list_transcripts` and `get_transcript`
+  (lake#561), and the App and build reads agent-runtime gives every agent (`list_apps`, `get_app`,
+  `app_logs`, `receive_app_events`, `list_builds`, `get_build`, `build_logs`,
+  `receive_build_events`);
+- the **Lake reads** each of its skills grants, and nothing for a skill lake does not know.
+
+A skill's changes are never scopes: agent-runtime turns them into proposals a person confirms, and
+the confirmed change runs as that person. Which reads each skill grants is agent-runtime's decision
+(`skills.py`, published as `skills.json`); lake vendors it with
+`tools/agents/vendor-agent-skills.py <agent-runtime>/skills.json` into
+`src/control/agent_skills.cpp` (and the labels into
+`frontend/src/pages/train/agent-skills.json`), and `--check` says when lake's copy is behind. See
+[agent-factory.md](agent-factory.md#skills) for the skills. A schedule's runs and a conversation
+service get the same scopes as a launch of the same agent.
+
+Verify: `AgentRuns.ARunsKeyCarriesTheReadsOfItsAgentsSkillsAndNoChange` and
+`AgentRuns.EverySkillLakeOffersIsOneAgentRuntimeDefines` (tests/test_workspaces.cpp).
 
 ## Schedules
 

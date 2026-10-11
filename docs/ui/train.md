@@ -25,7 +25,7 @@ happens. A header action that needs the workspace (Load data, New agent) shows o
 
 `workspace.tsx` holds the calls and helpers the pages share (`wq`, `wa`, `useWq`, `useSpaceRead`,
 `timeAgo`, `useWorkspaceReady`); `agents.tsx` what the agent pages share (the named engine reads,
-the skills read from OpenAPI, the definition form `AgentFields`), over the pure rules in
+the definition form `AgentFields`, offering the runtime's skills from `agent-skills.json`), over the pure rules in
 `frontend/src/lib/agents.ts`; `datasets.tsx` the lean dataset list and `ObjectTable`; `RunsPage.tsx` the run and experiment
 helpers the Run and Models pages share (`useExperimentRefs`, `TrialSubject`).
 

@@ -404,4 +404,31 @@ HttpAgentCaller::turn(std::string endpoint, std::string service_token, nlohmann:
     co_return ZettaControlResult<nlohmann::json>(std::move(answer));
 }
 
+std::vector<std::string> agent_launch_scopes_for(const std::vector<std::string>& skills) {
+    std::vector<std::string> scopes = agent_launch_scopes;
+    for (const AgentSkill& skill : agent_skills()) {
+        if (std::ranges::find(skills, skill.name) == skills.end()) {
+            continue;
+        }
+        for (const std::string_view read : skill.reads) {
+            if (std::ranges::find(scopes, read) == scopes.end()) {
+                scopes.emplace_back(read);
+            }
+        }
+    }
+    return scopes;
+}
+
+std::vector<std::string> agent_launch_scopes_for(const nlohmann::json& agent) {
+    std::vector<std::string> skills;
+    if (const auto found = agent.find("skills"); found != agent.end() && found->is_array()) {
+        for (const nlohmann::json& skill : *found) {
+            if (skill.is_string()) {
+                skills.push_back(skill.get<std::string>());
+            }
+        }
+    }
+    return agent_launch_scopes_for(skills);
+}
+
 } // namespace lake::control

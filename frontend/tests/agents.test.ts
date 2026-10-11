@@ -6,10 +6,13 @@
  * with promote and roll back of a trained version.
  */
 import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
 import {test} from "node:test";
 
 import {
+    AGENT_SKILLS,
     BLANK_AGENT,
+    OFFERED_SKILLS,
     agentForm,
     agentInput,
     agentSource,
@@ -29,7 +32,6 @@ import {
     scoreSeries,
     skillChoices,
     skillLabel,
-    skillsFromOpenApi,
     sourceLabel,
     switchInput,
     switchKind,
@@ -158,19 +160,18 @@ test("Edit keeps what the form does not show: a trained model, a Python agent's 
     assert.equal(edited.model_name, "gpt-4o");
 });
 
-test("the skills are the runtime's, read from create_agent's schema in Lake's OpenAPI", () => {
-    const skills = {type : "array", items : {type : "string", enum : [ "search", "drives", "transcripts", "mcp:github" ]}};
-    const inline = {paths : {"/v1/create_agent" : {post : {requestBody : {content : {"application/json" : {schema : {properties : {skills}}}}}}}}};
-    assert.deepEqual(skillsFromOpenApi(inline), [ "search", "drives", "transcripts", "mcp:github" ]);
-    const referenced = {
-        paths : {"/v1/create_agent" : {post : {requestBody : {content : {"application/json" : {schema : {$ref : "#/components/schemas/create_agent"}}}}}}},
-        components : {schemas : {create_agent : {properties : {skills : {$ref : "#/components/schemas/skills"}}}, skills}},
-    };
-    assert.deepEqual(skillsFromOpenApi(referenced), [ "search", "drives", "transcripts", "mcp:github" ]);
-    assert.deepEqual(skillsFromOpenApi(undefined), []);
-    assert.deepEqual(skillsFromOpenApi({paths : {}}), []);
-    assert.equal(skillLabel("search"), "Search data");
-    assert.equal(skillLabel("read-drives"), "Read drives", "a skill Lake has no words for is shown by its name");
+test("the skills are the runtime's, vendored from agent-runtime's skills.json, never written here", () => {
+    const vendored = JSON.parse(readFileSync(new URL("../src/pages/train/agent-skills.json", import.meta.url), "utf8"));
+    assert.deepEqual(OFFERED_SKILLS, vendored.map(([key]: [string, string]) => key));
+    assert.ok(OFFERED_SKILLS.length >= 12, "agent-runtime#7's twelve");
+    for (const skill of [ "search", "drives", "transcripts", "pipelines", "usage" ]) assert.ok(OFFERED_SKILLS.includes(skill), skill);
+    assert.deepEqual(AGENT_SKILLS, vendored);
+    // The engine accepts every one: create_agent's schema in Lake's vendored engine OpenAPI.
+    const engine = JSON.parse(readFileSync(new URL("../../src/api/engine_openapi.json", import.meta.url), "utf8"));
+    const accepted = engine.capabilities.create_agent.input_schema.properties.skills.items.enum;
+    for (const skill of OFFERED_SKILLS) assert.ok(accepted.includes(skill), `${skill} is accepted by create_agent`);
+    assert.equal(skillLabel("search"), vendored.find(([key]: [string, string]) => key === "search")[1]);
+    assert.equal(skillLabel("read-drives"), "Read drives", "a skill the runtime no longer lists is shown by its name");
     assert.equal(skillLabel("mcp:github"), "MCP: github");
     assert.deepEqual(skillChoices([ "search" ], [ "train", "search" ]), [ "search", "train" ], "a skill the agent has is kept");
 });
