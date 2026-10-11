@@ -31,6 +31,7 @@
 #include "lake/control/store.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/version.hpp"
+#include "mcp_connection_internal.hpp"
 #include "workspace_records_api.hpp"
 
 namespace lake::api {
@@ -2141,6 +2142,15 @@ void add(Registry& registry,
 }
 
 } // namespace
+
+liquid::runtime::task<std::optional<std::string>>
+mcp_connection_bearer(const ApiContext& context, const control::McpConnection& connection) {
+    Credential credential = settled_credential(co_await credential_for(context, connection));
+    if (credential.refused) {
+        co_return std::nullopt;
+    }
+    co_return credential.credential.bearer;
+}
 
 bool is_mcp_exported_tool_name(std::string_view name) {
     return name.find("__") != std::string_view::npos;

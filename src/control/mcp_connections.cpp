@@ -142,6 +142,8 @@ json McpConnectionCodec::encode(const McpConnection& connection) {
             {"notifications_topic", connection.notifications_topic},
             {"subscribe_resources", connection.subscribe_resources},
             {"streams_set_by", connection.streams_set_by},
+            {"input_cursor", connection.input_cursor},
+            {"pending_launches", connection.pending_launches},
             {"status", connection.status},
             {"last_error", connection.last_error},
             {"refreshed_at", connection.refreshed_at},
@@ -190,6 +192,14 @@ std::optional<McpConnection> McpConnectionCodec::decode(const StoredRecord& reco
         }
     }
     connection.streams_set_by = text(body, "streams_set_by");
+    if (body.contains("input_cursor") && body.at("input_cursor").is_number_integer()) {
+        connection.input_cursor = body.at("input_cursor").get<std::uint64_t>();
+    }
+    for (const json& launch : body.value("pending_launches", json::array())) {
+        if (launch.is_string()) {
+            connection.pending_launches.push_back(launch.get<std::string>());
+        }
+    }
     connection.status = text(body, "status");
     connection.last_error = text(body, "last_error");
     connection.refreshed_at = text(body, "refreshed_at");

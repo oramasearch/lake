@@ -65,6 +65,10 @@ struct McpConnection {
     std::vector<std::string> subscribe_resources;
     // The person whose authority the stream worker acts with: who last set a stream or the agent.
     std::string streams_set_by;
+    // The stream worker's place: the last input event that started a turn, and the launches still
+    // running whose results go to the output stream.
+    std::uint64_t input_cursor = 0;
+    std::vector<std::string> pending_launches;
     std::string status = "new"; // new, connected, needs_sign_in or failing
     std::string last_error;
     std::string refreshed_at;

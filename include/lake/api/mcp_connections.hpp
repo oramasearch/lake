@@ -4,8 +4,10 @@
 // capabilities over them, and what Lake's own MCP endpoint needs to re-export a connection's
 // allowed tools under its prefix.
 
+#include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <liquid/runtime.hpp>
 #include <nlohmann/json.hpp>
@@ -38,5 +40,30 @@ liquid::runtime::task<nlohmann::json> call_exported_mcp_tool(const Registry& reg
                                                              std::string workspace_id,
                                                              std::string name,
                                                              nlohmann::json arguments);
+
+// The stream worker (docs/api/mcp-connections.md#a-connections-agent-and-streams), run by the store
+// root's owner only, on its maintenance thread: for each Ready workspace's connections, it mirrors
+// the server's notifications to the connection's notifications topic (one session kept open per
+// connection between passes, its subscriptions renewed when they change), starts a job of the
+// connection's agent for each new event on its input topic, as the person who set the streams, and
+// publishes each finished job's result to its output topic. Answers what one pass did.
+struct McpStreamPass {
+    std::size_t workspaces = 0;
+    std::size_t connections = 0;
+    std::size_t notifications = 0;
+    std::size_t turns = 0;
+    std::size_t results = 0;
+    std::vector<std::string> problems;
+};
+class McpStreamWorker {
+public:
+    McpStreamWorker();
+    ~McpStreamWorker();
+    McpStreamPass pass(ApiContext& context);
+
+private:
+    struct Sessions;
+    std::unique_ptr<Sessions> sessions_;
+};
 
 } // namespace lake::api

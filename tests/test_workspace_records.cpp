@@ -20,6 +20,7 @@
 
 #include "api/forge_records_api.hpp"
 #include "api/secret_records_api.hpp"
+#include "api/workspace_bus.hpp"
 #include "api/workspace_records_api.hpp"
 #include "audit_test_support.hpp"
 #include "control/secrets_crypto.hpp"
@@ -29,6 +30,7 @@
 #include "lake/api/forge.hpp"
 #include "lake/api/mcp.hpp"
 #include "lake/api/mcp_client.hpp"
+#include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
@@ -3919,6 +3921,102 @@ TEST_P(WorkspaceRecordStores, McpConnectionsSignInWithOAuthAndKeepOnlyARefreshTo
     kept = t.call(first, "read_secret", {{"mount_id", mount_id}, {"name", "mcp-docs"}});
     EXPECT_EQ(kept.value["value"]["refresh_token"], server.refresh_token());
     EXPECT_NE(server.refresh_token(), first_refresh) << "the rotated token is the one kept";
+}
+
+// A connection's streams (lake#652): the store root's owner mirrors the server's notifications to a
+// workspace topic, starts a job of the connection's agent for each new input event as the person
+// who set the streams, and publishes each finished job's result as agent-events carries it.
+TEST_P(WorkspaceRecordStores, McpConnectionStreamsMirrorNotificationsAndDriveTheAgent) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    lake::test::McpTestServer server;
+    server.get_stream_events = 2;
+    t.mcp_http = lake::api::make_mcp_http(true);
+    const auto& first = t.spaces[0];
+    const std::string home = first.workspaces[0];
+    const auto in = [&](json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = home;
+        return input;
+    };
+    const auto created =
+        t.call(first, "create_mcp_connection", in({{"name", "Inbox"}, {"url", server.url()}}));
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value["id"];
+    t.zetta->answers["get_agent"] = {
+        {"id", "agent-9"},
+        {"name", "Inbox Agent"},
+        {"runtime", "python"},
+        {"skills", json::array({"mcp:inbox"})},
+        {"definition", {{"source", "zetta"}, {"instructions", "x"}, {"files", json::array()}}}};
+    const auto streams = t.call(first,
+                                "update_mcp_connection",
+                                in({{"id", id},
+                                    {"agent_id", "agent-9"},
+                                    {"input_topic", "inbox-in"},
+                                    {"output_topic", "inbox-out"},
+                                    {"notifications_topic", "inbox-notices"},
+                                    {"subscribe_resources", json::array({"memo://inbox"})}}));
+    ASSERT_TRUE(streams.ok) << streams.error.message;
+    EXPECT_EQ(streams.value["streams"]["input_topic"], "inbox-in");
+
+    // One event waits on the input stream.
+    {
+        auto context = t.context(first);
+        lake::api::WorkspaceApiBus bus(context, first.customer_id, home);
+        ASSERT_TRUE(liquid::runtime::block_on(bus.create_topic("inbox-in")));
+        ASSERT_TRUE(liquid::runtime::block_on(bus.publish("inbox-in", {{"ticket", "T-5"}}, "e-1")));
+    }
+    lake::api::McpStreamWorker worker;
+    lake::api::ApiContext owner;
+    owner.store = t.store.get();
+    owner.workspaces = t.service.get();
+    owner.instance_kek = std::string(kek);
+    owner.registry = &t.registry;
+    owner.mcp_http = t.mcp_http;
+    owner.mcp_allow_private_addresses = true;
+    std::size_t mirrored = 0;
+    std::size_t turns = 0;
+    for (int pass = 0; pass < 10 && (mirrored < 2 || turns < 1); ++pass) {
+        const auto done = worker.pass(owner);
+        mirrored += done.notifications;
+        turns += done.turns;
+        for (const auto& problem : done.problems) {
+            ADD_FAILURE() << problem;
+        }
+    }
+    EXPECT_EQ(server.subscribed().count("memo://inbox"), 1U);
+    EXPECT_EQ(mirrored, 2U);
+    auto& topics = t.zetta->topics;
+    ASSERT_TRUE(topics.contains("inbox-notices"));
+    EXPECT_EQ(topics["inbox-notices"].events.size(), 2U);
+    EXPECT_NE(topics["inbox-notices"].events[0].dump().find("notifications/resources/updated"),
+              std::string::npos);
+    EXPECT_EQ(turns, 1U) << "one job for the one event";
+    const auto again = worker.pass(owner);
+    EXPECT_EQ(again.turns, 0U) << "an event starts one turn only";
+
+    // The job, as the person; its result goes to the output stream once it finishes.
+    const auto launches = t.store->list_agent_launches(first.customer_id, "agent-9", 10, home);
+    ASSERT_TRUE(launches);
+    ASSERT_EQ(launches->size(), 1U);
+    EXPECT_EQ((*launches)[0].created_by_user_id, first.principal.user_id);
+    EXPECT_EQ((*launches)[0].input["event"]["ticket"], "T-5");
+    auto* memory = dynamic_cast<lake::control::InMemoryStore*>(t.store.get());
+    if (memory == nullptr) {
+        return; // the operator's status is written directly only in the memory store
+    }
+    ASSERT_TRUE(memory->set_agent_launch_status((*launches)[0].id, "Succeeded", "triaged", "", ""));
+    const auto finished = worker.pass(owner);
+    EXPECT_EQ(finished.results, 1U);
+    ASSERT_TRUE(topics.contains("inbox-out"));
+    ASSERT_EQ(topics["inbox-out"].events.size(), 1U);
+    EXPECT_NE(topics["inbox-out"].events[0].dump().find("task_id"), std::string::npos);
+    EXPECT_NE(topics["inbox-out"].events[0].dump().find("triaged"), std::string::npos);
+    EXPECT_EQ(worker.pass(owner).results, 0U) << "published once";
 }
 
 INSTANTIATE_TEST_SUITE_P(Stores, WorkspaceRecordStores, testing::Values(false, true),

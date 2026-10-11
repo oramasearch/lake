@@ -10,6 +10,7 @@
 #include "lake/api/audit_recorder.hpp"
 #include "lake/api/billing.hpp"
 #include "lake/api/mcp_client.hpp"
+#include "lake/api/mcp_connections.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/request_recorder.hpp"
 #include "lake/api/server.hpp"
@@ -7458,6 +7459,9 @@ struct ApiServer::Impl {
     std::unique_ptr<UsageRecorder> usage_recorder;
     std::chrono::steady_clock::time_point next_usage_flush{};
     std::chrono::steady_clock::time_point next_usage_sample{};
+    // The MCP connections' streams (lake#652), on the maintenance thread of the store root's owner.
+    McpStreamWorker mcp_streams;
+    std::chrono::steady_clock::time_point next_mcp_stream_pass{};
     std::chrono::steady_clock::time_point last_usage_sample{};
     UsageRecorder::Totals reported_usage;
     mutable LiquidCustomerStores sync_store;
@@ -12689,6 +12693,34 @@ struct ApiServer::Impl {
         }
     }
 
+    void run_mcp_streams() {
+        ApiContext context;
+        context.store = options.store.get();
+        context.workspaces = options.workspaces.get();
+        context.instance_kek = options.instance_kek;
+        context.registry = &registry;
+        context.mcp_http = mcp_http;
+        context.mcp_allow_private_addresses = options.mcp_allow_private_addresses;
+        context.usage_recorder = usage_recorder.get();
+        context.audit_recorder = audit_recorder.get();
+        context.external_origin = options.external_origin;
+        const McpStreamPass done = mcp_streams.pass(context);
+        metrics.increment_counter("lake_mcp_stream_passes_total");
+        if (done.notifications > 0) {
+            metrics.increment_counter("lake_mcp_notifications_mirrored_total",
+                                      {},
+                                      static_cast<double>(done.notifications));
+        }
+        if (done.turns > 0) {
+            metrics.increment_counter(
+                "lake_mcp_stream_turns_total", {}, static_cast<double>(done.turns));
+        }
+        if (!done.problems.empty()) {
+            metrics.increment_counter(
+                "lake_mcp_stream_problems_total", {}, static_cast<double>(done.problems.size()));
+        }
+    }
+
     void log_store_owner(nlohmann::json event) const {
         event["event"] = "store_owner";
         event["node"] = options.node_name;
@@ -14520,6 +14552,16 @@ void ApiServer::drain() {
         impl_->next_usage_sample = now + impl_->options.usage_sample_interval;
         Impl* impl = impl_.get();
         impl_->schedule_maintenance("usage sample", [impl] { impl->sample_usage(); });
+    }
+    // A connection's streams hold sessions and start turns: the store root's owner alone runs them,
+    // so two lakes never mirror one notification twice (lake#652).
+    if (impl_->options.store && impl_->options.workspaces &&
+        (impl_->options.store_root.empty() ||
+         impl_->store_root_state.load() == StoreRootState::open) &&
+        now >= impl_->next_mcp_stream_pass) {
+        impl_->next_mcp_stream_pass = now + impl_->options.mcp_stream_interval;
+        Impl* impl = impl_.get();
+        impl_->schedule_maintenance("mcp connection streams", [impl] { impl->run_mcp_streams(); });
     }
     // The registry and search segments live under the store root: only its owner removes them.
     if (impl_->options.store &&

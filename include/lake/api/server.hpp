@@ -236,6 +236,9 @@ struct ServerOptions {
     std::chrono::milliseconds usage_flush_interval{std::chrono::seconds(10)};
     std::size_t usage_max_pending = 8192;
     std::chrono::milliseconds usage_sample_interval{std::chrono::minutes(15)};
+    // How often the store root's owner runs the MCP connections' streams (lake#652): mirrored
+    // notifications, input events that start a connection agent's turns, and their results.
+    std::chrono::milliseconds mcp_stream_interval{std::chrono::seconds(15)};
     // Dynamic-secret leases that are due (expired, or revoked and not yet settled) are settled in
     // their workspaces by the owner loop at this interval (docs/api/secrets.md, lake#362). It
     // reads the control store's due index, never every workspace. Zero settles on every drain().

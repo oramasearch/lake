@@ -166,7 +166,11 @@ through `control::mcp_connections`, the credential read from the workspace's sec
 (`as_lake`, never answered), discovery merged into the person's tool decisions, who may call a
 change (a person, or an agent with a person's per-tool grant and its `mcp:<prefix>` skill),
 metering through the `UsageRecorder` (`calls`, `transfer`), the audit read back for a connection's
-calls, and the re-export `mcp.cpp` calls for `/w/<workspace>/mcp`.
+calls, and the re-export `mcp.cpp` calls for `/w/<workspace>/mcp`. `mcp_connection_streams.cpp` is
+`McpStreamWorker`, run by the store root's owner on the maintenance thread: notifications mirrored to
+a connection's topic, one agent job per input event as the person who set the streams, and each
+finished job's result on the output topic; `mcp_connection_internal.hpp` lends it the connection's
+bearer, never a capability.
 
 `solution_capabilities.cpp` registers the six solution capabilities (lake#597): a workspace's own
 solutions are sealed `lake_solutions` records in the workspace Zetta, listed and read beside Orama's

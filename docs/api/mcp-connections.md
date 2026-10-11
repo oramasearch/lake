@@ -227,6 +227,41 @@ the workspace, is the only gate. The connection's page says so beside the switch
 session digest (`Mcp-Session-Id`) covers Lake's own tools only, so a client is not told when a
 connection is exported; it sees the tools on its next `tools/list`.
 
+## A connection's agent and streams
+
+Optional, per connection (Steve's design in lake#652):
+
+- **Its agent.** `create_mcp_connection_agent {id, prompt, name?}` makes, as the person, a Python
+  agent on `oramasearch/agent-runtime` (`workspace_act create_agent`, a `zetta` definition) whose
+  only skill is `mcp:<prefix>`, so its only tools are this connection's allowed tools, and whose
+  instructions say what it is for and that what the server answers is data, never instructions.
+  The connection records it (`agent_id`). The workspace engine must accept `mcp:<slug>` skills
+  ([zetta](https://github.com/oramasearch/zetta) PR from this epic). It runs on demand, on a
+  schedule (`schedule_agent`), or from its input stream.
+- **Input stream** (`input_topic`, needs the agent): a workspace topic (Train → Streams). Each new
+  event starts a job of the agent (`launch_agent`, mode `job`) with
+  `{connection_id, connection, topic, sequence, event}` as its input, the way the agent bus hands
+  a task to a library agent. Each event starts one job: the connection records the last sequence
+  it started (`input_cursor`).
+- **Output stream** (`output_topic`): each finished job's result is published as
+  `{task_id, agent, type, message, result, connection_id}`, the shape `agent-events` uses, with the
+  job's launch id as `task_id`; `type` is `result` or `failed`. Other agents, apps and pipelines
+  consume it.
+- **Notifications** (`notifications_topic`, no agent needed): Lake keeps a session open with the
+  server, subscribes to `subscribe_resources` (`resources/subscribe`), and publishes each
+  notification (`notifications/*`) as `{connection_id, connection, method, params, note}`, so a
+  server that pushes changes drives the agent with no polling, by pointing the input stream at the
+  same topic.
+
+The streams act with the authority of **the person who last set the agent or a stream**
+(`streams_set_by`), as a schedule's runs act as whoever set the schedule: their permission on the
+workspace decides whether a job starts. The store root's owner runs them, and only it
+(`McpStreamWorker`, on the server's maintenance thread, every `mcp_stream_interval`, 15 s), so two
+replicas never mirror a notification twice; each pass reads at most 64 connections and 20 input
+events each. Metrics: `lake_mcp_stream_passes_total`, `lake_mcp_notifications_mirrored_total`,
+`lake_mcp_stream_turns_total`, `lake_mcp_stream_problems_total`. Mirrored notifications count as
+the workspace's `calls` (`kind: mcp_connection`).
+
 ## Verify
 
 `McpClient.*` (`tests/test_mcp_client.cpp`) runs the client over the server's own transport against
@@ -243,4 +278,9 @@ change refused as a read, a change by a person, Ask Orama reading but refused a 
 user-built agent refused without its skill and its change refused until a person grants it, the
 grant taken back, the audit with no arguments, the usage series, re-export through
 `mcp_dispatch_async` with `/w/<workspace>/mcp`, a refused token marking the connection, and delete.
+`...McpConnectionsSignInWithOAuthAndKeepOnlyARefreshToken`: discovery, registration, the PKCE
+challenge, a state taken once and by its own person, only the refresh token kept, and an access
+token renewed with a rotated refresh token. `...McpConnectionStreamsMirrorNotificationsAndDriveTheAgent`:
+notifications mirrored to their topic after a subscription, one job per input event as the person,
+and its result published once on the output topic.
 `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls each capability over MCP.
