@@ -117,7 +117,7 @@ and the message says to duplicate it instead.
 On one of your own solutions, press **Start as a project** (or **Start as a project** in the side
 column). In the drawer, give the **Project name**, choose the **Methodology** its first pipeline
 uses (one the solution composes; the first by default) and optionally a dataset under **From
-data**, then press **Start**. lake creates the project with your solution's problem and decision,
+data**, then press **Start**. Lake creates the project with your solution's problem and decision,
 and builds its first pipeline from the decision with that methodology. The project opens (or, with
 a dataset, the new pipeline at its Run form).
 
@@ -138,7 +138,7 @@ review. Nothing else is created until you confirm.
    - **Dataset**: the data the solution works on;
    - **Delivery**: **Webhook**, **Salesforce connector** or **HubSpot connector**, with the
      **Webhook URL or connector endpoint** and the **Owner** who receives the actions;
-   - **Value per outcome**, **Investment** and **Currency**. These are your inputs: lake supplies
+   - **Value per outcome**, **Investment** and **Currency**. These are your inputs: Lake supplies
      no defaults.
 3. Press **Start**. The project opens and the Project Agent reads the dataset (*Foundation
    proposal: the Project Agent is reading the dataset…*).
@@ -223,7 +223,7 @@ Through the API it is `list_methodologies` inside `workspace_query`:
 ```
 
 Each entry carries `runnable`. An engine that predates the registry answers `unknown_capability`;
-lake then treats it as running only churn classification (`M-1`), and the page says *No
+Lake then treats it as running only churn classification (`M-1`), and the page says *No
 Methodology Registry Yet*.
 
 ## Opportunities
@@ -268,7 +268,7 @@ Then list, create and dismiss:
 {"customer_id": "<customer id>", "workspace_id": "<workspace id>", "opportunity_id": "<opportunity id>"}
 ```
 
-When Auto-Suggest is not running on this lake, the page says *a new scan is not available*;
+When Auto-Suggest is not running on this Lake, the page says *a new scan is not available*;
 earlier Opportunities stay listed. **Design → Agent Library** shows which agents run
 ([Agents](/docs/agents)).
 

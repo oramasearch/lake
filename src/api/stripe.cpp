@@ -77,9 +77,10 @@ std::string stripe_failure(std::string_view what, const StripeResponse& response
         return std::format("Stripe could not be reached to {}: {}", what, response.error);
     }
     if (response.status == 401 || response.status == 403) {
-        return std::format("Stripe refused lake's key to {} (HTTP {}); check LAKE_STRIPE_SECRET_KEY",
-                           what,
-                           response.status);
+        return std::format(
+            "Stripe refused Lake's key to {} (HTTP {}); check LAKE_STRIPE_SECRET_KEY",
+            what,
+            response.status);
     }
     const json body = json::parse(response.body, nullptr, false);
     std::string message;
@@ -114,7 +115,7 @@ public:
         }
         auto created = post("/v1/customers",
                             {{"name", account.name.empty() ? account.customer_id : account.name},
-                             {"description", "lake account " + account.customer_id},
+                             {"description", "Lake account " + account.customer_id},
                              {"metadata[lake_customer_id]", account.customer_id}},
                             "lake-customer-" + account.customer_id,
                             "create the customer");
@@ -328,7 +329,7 @@ verify_stripe_signature(std::string_view body,
     }
     if (webhook_secret.empty()) {
         return std::unexpected(
-            NoticeRejection{"invalid_signature", "lake has no webhook secret to check it with"});
+            NoticeRejection{"invalid_signature", "Lake has no webhook secret to check it with"});
     }
     std::string payload(timestamp);
     payload.push_back('.');
@@ -351,7 +352,7 @@ verify_stripe_signature(std::string_view body,
     if (skew > tolerance.count()) {
         return std::unexpected(NoticeRejection{
             "stale_timestamp",
-            std::format("the signature's timestamp is {} s from lake's clock (at most {} s)",
+            std::format("the signature's timestamp is {} s from Lake's clock (at most {} s)",
                         skew,
                         tolerance.count())});
     }

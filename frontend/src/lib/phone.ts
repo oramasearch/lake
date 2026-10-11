@@ -143,7 +143,7 @@ export function kindOf(name: string): FileKind | null {
 export function fileProblem(file: { name: string; size: number }, want: FileKind): string | null {
   const kind = kindOf(file.name);
   if (kind !== want) {
-    return want === "audio" ? `That isn't a recording lake takes. Choose ${ACCEPTED_RECORDINGS}.` : `That isn't a text file lake takes. Choose ${ACCEPTED_TEXT}.`;
+    return want === "audio" ? `That isn't a recording Lake takes. Choose ${ACCEPTED_RECORDINGS}.` : `That isn't a text file Lake takes. Choose ${ACCEPTED_TEXT}.`;
   }
   if (file.size === 0) return "That file is empty.";
   const limit = want === "audio" ? MAX_AUDIO_BYTES : MAX_TEXT_BYTES;

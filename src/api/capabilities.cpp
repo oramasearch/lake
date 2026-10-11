@@ -1821,7 +1821,7 @@ std::expected<control::NewToken, ApiError> attenuated_token(const json& input,
         }
         if (!context.non_expiring_credentials_allowed) {
             return std::unexpected(ApiError{"unauthorized",
-                                            "this lake does not allow credentials that never "
+                                            "this Lake does not allow credentials that never "
                                             "expire (LAKE_ALLOW_NON_EXPIRING_CREDENTIALS)"});
         }
         const auto customers = context.store->list_customers(10, context.acting_user_id);
@@ -2001,7 +2001,7 @@ void register_server_info(Registry& registry, std::string_view version) {
     registry.add(Capability{
         .name = "server_info",
         .title = "Server info",
-        .description = "Name, node, version and API level of this lake, and whether Deployments "
+        .description = "Name, node, version and API level of this Lake, and whether Deployments "
                        "are set up on it. No authentication.",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},
@@ -2281,7 +2281,7 @@ void register_identity_capabilities(Registry& registry) {
         .name = "sign_up_password",
         .title = "Sign up with password",
         .description = "Create a pool-scoped user with an Argon2id password "
-                       "credential and issue a browser session. In the lake pool, atomically "
+                       "credential and issue a browser session. In the Lake pool, atomically "
                        "provision one personal customer with an inherited admin ownership grant, "
                        "a generated immutable handle, and the configured default storage quota. "
                        "Duplicate email or identity returns conflict; sign in to resume.",
@@ -2360,7 +2360,7 @@ void register_identity_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "sign_in_taap",
         .title = "Sign in with TAAP key",
-        .description = "Verify a fresh liquid identity assertion and issue a lake session.",
+        .description = "Verify a fresh liquid identity assertion and issue a Lake session.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"pool_id", {{"type", "string"}}},
@@ -3422,7 +3422,7 @@ void register_sso_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "upsert_scim_group",
         .title = "Provision SCIM group",
-        .description = "Create or update a SCIM group and map its users to a lake team.",
+        .description = "Create or update a SCIM group and map its users to a Lake team.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"provider_id", {{"type", "string"}}},
@@ -3998,7 +3998,7 @@ void register_repository_capabilities(Registry& registry) {
         .description =
             "Read one file of a repository at a branch, tag or change, with its contents and size. "
             "With `units: true`, also the file's syntax units (`start_line`, `end_line`, `kind`) "
-            "for the formats lake parses (C and C++); `units` is absent for any other format.",
+            "for the formats Lake parses (C and C++); `units` is absent for any other format.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"id", {{"type", "string"}}},
@@ -4677,7 +4677,7 @@ void register_organization_capabilities(Registry& registry) {
         .title = "Create membership",
         .description = "Grant owner, admin, or member in an organization or team. Lake signs the "
                        "membership's attestation itself and keeps its digest as evidence; "
-                       "attestation_digest is optional and accepted only when it is lake's.",
+                       "attestation_digest is optional and accepted only when it is Lake's.",
         .input_schema =
             {{"type", "object"},
              {"properties",
@@ -4874,7 +4874,7 @@ void register_organization_capabilities(Registry& registry) {
         .title = "Accept invitation",
         .description = "Accept a pending invitation into a membership. Lake signs the membership's "
                        "attestation itself; attestation_digest is optional and accepted only when "
-                       "it is lake's.",
+                       "it is Lake's.",
         .input_schema =
             {{"type", "object"},
              {"properties",
@@ -5181,7 +5181,7 @@ void register_policy_capabilities(Registry& registry) {
         .description =
             "Grant a policy role on an object. Lake signs the grant's attestation itself "
             "and keeps its digest as evidence; attestation_digest is optional and "
-            "accepted only when it is lake's.",
+            "accepted only when it is Lake's.",
         .input_schema =
             {{"type", "object"},
              {"properties",
@@ -5607,7 +5607,7 @@ void register_audit_capabilities(Registry& registry) {
     registry.add(
         Capability{.name = "identity",
                    .title = "Lake identity",
-                   .description = "The public TAAP/1 identity document for this lake instance.",
+                   .description = "The public TAAP/1 identity document for this Lake instance.",
                    .input_schema = {{"type", "object"},
                                     {"properties", json::object()},
                                     {"additionalProperties", false}},
@@ -5629,8 +5629,8 @@ void register_audit_capabilities(Registry& registry) {
                    }});
     registry.add(Capability{
         .name = "rotate_identity",
-        .title = "Rotate lake identity",
-        .description = "Rotate the lake TAAP/1 Ed25519 identity with a "
+        .title = "Rotate Lake identity",
+        .description = "Rotate the Lake TAAP/1 Ed25519 identity with a "
                        "dual-signed rotation document.",
         .input_schema = {{"type", "object"},
                          {"properties", json::object()},

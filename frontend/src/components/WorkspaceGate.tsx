@@ -25,8 +25,9 @@ import { startReturn, START_RETURNS } from "@/pages/design/logic";
 
 export type WorkspaceState = { requested?: boolean; phase?: string; message?: string; ready?: boolean; workspace_id?: string };
 
-/** What lake answers when it has no workspace control plane (workspace_capabilities.cpp). */
-const NOT_CONFIGURED = "workspaces are not configured on this lake";
+/** What the server answers when it has no workspace control plane (workspace_capabilities.cpp),
+ * matched without the product name, which the server spells in its own message. */
+const NOT_CONFIGURED = /^workspaces are not configured\b/i;
 
 function localPath(pathname: string): string {
   const match = /^\/w\/[^/]+(\/.*)?$/.exec(pathname);
@@ -77,8 +78,8 @@ export function WorkspaceGate({
     const message = (q.error as ApiError)?.message ?? "";
     // Lake showed the reason in an empty panel, and nothing else.
     return (
-      <Empty icon={ServerOff} title={message === NOT_CONFIGURED ? "Not Available on This Lake" : "Workspace Unavailable"}>
-        {message === NOT_CONFIGURED ? "Design, Train and Ship are not available on this lake yet: it has no workspace control plane configured." : message}
+      <Empty icon={ServerOff} title={NOT_CONFIGURED.test(message) ? "Not Available on This Lake" : "Workspace Unavailable"}>
+        {NOT_CONFIGURED.test(message) ? "Design, Train and Ship are not available on this Lake yet: it has no workspace control plane configured." : message}
       </Empty>
     );
   }
@@ -109,7 +110,7 @@ function GatePanel({ state, customerId, returnTo }: { state: WorkspaceState; cus
         <div className="space-y-3">
           <Banner tone="warn" title="Your Workspace Could Not Be Prepared">
             {quota
-              ? `This lake already runs as many workspaces as it allows (${message}). An operator can raise the limit; yours starts as soon as there is room, or cancel the request below.`
+              ? `This Lake already runs as many workspaces as it allows (${message}). An operator can raise the limit; yours starts as soon as there is room, or cancel the request below.`
               : message}
           </Banner>
           <Card
@@ -124,7 +125,7 @@ function GatePanel({ state, customerId, returnTo }: { state: WorkspaceState; cus
     return (
       <div role="status">
         <Empty icon={Spinner} title="Preparing Your Workspace" action={<Status value={state.phase || "Not picked up yet"} tone="warning" />}>
-          lake is preparing a workspace of your own, where your projects, data and models live apart from every other customer's.{" "}
+          Lake is preparing a workspace of your own, where your projects, data and models live apart from every other customer's.{" "}
           {state.phase ? `Status: ${state.phase}.` : "It has not been picked up yet."}
           <div className="mt-1 text-[12px] text-ink-3">This page checks again every 15 seconds.</div>
         </Empty>

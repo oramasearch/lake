@@ -142,7 +142,7 @@ constexpr std::array<ErrorCode, 31> documented_error_codes{{
      "message says why and what to do instead."},
     {"consent_required",
      403,
-     "The workspace requires an approval before it reaches an outside source, which lake cannot "
+     "The workspace requires an approval before it reaches an outside source, which Lake cannot "
      "give."},
     {"not_found", 404, "The addressed object does not exist, or the caller cannot see it."},
     {"unknown_capability", 404, "No capability has this name."},
@@ -169,7 +169,7 @@ constexpr std::array<ErrorCode, 31> documented_error_codes{{
     {"engine_error",
      422,
      "The workspace engine or the outside service refused the call; the message is its."},
-    {"not_supported", 501, "This lake or its workspace engine cannot do what was asked yet."},
+    {"not_supported", 501, "This Lake or its workspace engine cannot do what was asked yet."},
     {"quota_exceeded",
      507,
      "The customer's storage quota is full; existing content stays readable."},

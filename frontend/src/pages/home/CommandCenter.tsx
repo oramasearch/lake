@@ -201,7 +201,7 @@ export default function CommandCenter() {
     <Page
       eyebrow="Home"
       title="Dashboard"
-      sub="Everything in lake at a glance: what you have, what is running, and what needs you."
+      sub="Everything in Lake at a glance: what you have, what is running, and what needs you."
       actions={
         <>
           <Button to={usageLink({ workspaces: all ? [] : chosenIds })}>

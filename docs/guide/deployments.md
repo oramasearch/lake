@@ -2,7 +2,7 @@
 
 A repository can be deployed to named **environments**, such as `production` or `staging`, with
 liquid's `liquid deploy` command. The Orama operator runs each deployment and reports its phase;
-lake mirrors what the operator reports, so you can see what is running, which change it runs and
+Lake mirrors what the operator reports, so you can see what is running, which change it runs and
 where it is served, and change an environment's configuration and domains.
 
 **Ship → Deployments** shows every environment across the repositories you can open. Each
@@ -20,7 +20,7 @@ an app ([Apps](/docs/apps)).
 | **Deployment** | One request to run a change or an image in an environment, with the phase the operator reports, its namespace and its address. |
 | **Environment variable** | A plain configuration value of one environment. Credentials are not environment variables. |
 | **Domain** | A host name that serves an environment, with its TLS certificate from ACME or provided by you. |
-| **Stale** | When lake cannot reach the operator's control plane, the pages keep showing the last state lake mirrored and say since when it is stale. |
+| **Stale** | When Lake cannot reach the operator's control plane, the pages keep showing the last state Lake mirrored and say since when it is stale. |
 
 ## Deploy with Liquid
 
@@ -37,8 +37,8 @@ liquid deploy list --env staging
 - **Roll back** with `liquid deploy --to <change or deployment>`: a rollback is another deployment of
   an earlier change or deployment.
 
-An image built in lake is named on [Packages, Builds and the Registry](/docs/registry). The
-environment appears in lake once the operator has reported it; lake checks the operator every 15
+An image built in Lake is named on [Packages, Builds and the Registry](/docs/registry). The
+environment appears in Lake once the operator has reported it; Lake checks the operator every 15
 seconds.
 
 ## Ship → Deployments

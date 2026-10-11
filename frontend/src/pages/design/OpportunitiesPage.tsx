@@ -66,7 +66,7 @@ function Opportunities() {
       ) : library.isError ? (
         <ErrorBlock error={library.error} retry={() => void library.refetch()} what="the Agent Library" />
       ) : !running ? (
-        <Banner tone="quiet">Auto-Suggest is not running on this lake, so a new scan is not available.</Banner>
+        <Banner tone="quiet">Auto-Suggest is not running on this Lake, so a new scan is not available.</Banner>
       ) : (
         <Banner
           title={groups.lastScan ? `Last scanned ${relative(groups.lastScan)}` : "Scan your workspace"}

@@ -743,12 +743,12 @@ void register_console_capabilities(Registry& registry, std::string_view version)
         .name = "viewer",
         .title = "Who is signed in",
         .description =
-            "Who is calling and how this lake signs people in, for the web app: signed in or "
+            "Who is calling and how this Lake signs people in, for the web app: signed in or "
             "not, operator or person, the person's identity, session and MFA state, the spaces "
             "they can see with each space's live workspaces, the current space and workspace "
             "(`workspace_id` when it is live in one of those spaces, else the space's only "
             "workspace), Clerk's publishable key and Frontend API host when Clerk signs people "
-            "in, the browser origin, the agent model settings, and this lake's version. Needs no "
+            "in, the browser origin, the agent model settings, and this Lake's version. Needs no "
             "credential: a visitor gets `signed_in: false` and no spaces.",
         .input_schema =
             object_schema({{"workspace_id", string_schema()}, {"customer_id", string_schema()}}),
@@ -809,10 +809,10 @@ void register_console_capabilities(Registry& registry, std::string_view version)
         .name = "list_packages",
         .title = "List packages",
         .description =
-            "What this lake's registries hold, for Ship → Packages: npm packages, Python "
+            "What this Lake's registries hold, for Ship → Packages: npm packages, Python "
             "projects and one-component OCI images with their versions (public reads), plus the "
             "tenant images of `customer_id` when given, and the origin install commands use. "
-            "`available` is false when this lake has no registry storage.",
+            "`available` is false when this Lake has no registry storage.",
         .input_schema = object_schema({{"customer_id", string_schema()}}),
         .output_schema =
             object_schema({{"available", {{"type", "boolean"}}},
@@ -885,7 +885,7 @@ void register_console_capabilities(Registry& registry, std::string_view version)
         .name = "mcp_setup",
         .title = "MCP setup",
         .description =
-            "What Developer → MCP shows: lake's origin and MCP endpoint, every tool by product "
+            "What Developer → MCP shows: Lake's origin and MCP endpoint, every tool by product "
             "group (name, title, whether it writes), the worked flows, and the scopes a "
             "read-only key and an every-tool key carry. Create the key itself with create_token.",
         .input_schema = object_schema(json::object()),

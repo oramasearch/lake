@@ -190,7 +190,7 @@ export function JsonBox({ value, max = "max-h-64" }: { value: string; max?: stri
 /** Fetch a same-origin document with the browser session and save it as `filename`. */
 export async function downloadFrom(path: string, filename: string, transform?: (text: string) => string) {
   const response = await fetch(path, { credentials: "same-origin", headers: { Accept: "application/json, text/plain, */*" } });
-  if (!response.ok) throw new Error(response.status === 404 ? "Not available on this lake." : `The download failed (${response.status}).`);
+  if (!response.ok) throw new Error(response.status === 404 ? "Not available on this Lake." : `The download failed (${response.status}).`);
   let text = await response.text();
   if (transform) text = transform(text);
   const url = URL.createObjectURL(new Blob([text], { type: response.headers.get("Content-Type") || "text/plain" }));
@@ -355,7 +355,7 @@ export function KeyCreator({ purpose, scopes, onCreated }: { purpose: Purpose; s
         </Field>
       )}
       {form.lifetime === "never" && form.access === "all" && (
-        <p className="m-0 text-[12px] text-ink-3">A key that never expires names what it may call, so this one names every capability lake has today.</p>
+        <p className="m-0 text-[12px] text-ink-3">A key that never expires names what it may call, so this one names every capability Lake has today.</p>
       )}
       {error && <Notice tone="danger">{error}</Notice>}
       <div className="flex flex-wrap items-center gap-3">
@@ -377,7 +377,7 @@ export function NewKeyCallout({ value, onDone, purpose }: { value: string; onDon
         <ShieldCheck size={15} aria-hidden /> Your New Key: Copy It Now
       </div>
       <p className="mt-0.5 mb-0 text-[12.5px] text-ink-2">
-        This is the only time lake shows it. Keep it in a password manager or your client's secret settings.{" "}
+        This is the only time Lake shows it. Keep it in a password manager or your client's secret settings.{" "}
         {purpose === "mcp" ? "It is filled into every setup block below until you leave this page." : "It is filled into Quick start and every operation's curl until you leave this page."}
       </p>
       <div className="mt-2.5 flex items-center gap-2 rounded-[6px] border border-hairline bg-surface px-3 py-2">
@@ -421,7 +421,7 @@ export function KeysTable({ scopes }: { scopes?: KeyScopes }) {
         what="your keys"
         rows={tokens}
         rowKey={(row) => row.id}
-        empty="No keys yet. Create one above to call lake from a program or an agent."
+        empty="No keys yet. Create one above to call Lake from a program or an agent."
         initialSort={{ key: "created", dir: "descending" }}
         columns={[
           {

@@ -318,7 +318,7 @@ export default function AppPage() {
                     </Button>
                   }
                 >
-                  Builds are not available on this lake yet.
+                  Builds are not available on this Lake yet.
                 </Empty>
               ) : (
                 <>
@@ -351,7 +351,7 @@ export default function AppPage() {
             ) : (
               <Terminal title="Logs · last 200 lines" empty="No log lines yet." actions={<button type="button" className="button button-ghost" onClick={() => void logs.refetch()}>Refresh</button>}>
                 {logs.isError || !Array.isArray(logs.data?.items)
-                  ? "Logs are not available on this lake yet."
+                  ? "Logs are not available on this Lake yet."
                   : logs.data!.items!.map((item) => `${String(item.ts ?? "")} ${String(item.pod ?? "")}/${String(item.container ?? "")} ${String(item.line ?? "")}\n`).join("")}
               </Terminal>
             ))}

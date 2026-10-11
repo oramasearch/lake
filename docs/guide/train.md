@@ -2,7 +2,7 @@
 
 This page is about training models with a **pipeline**, an execution graph of steps from your data
 to a result. A pipeline can hold one model or several, and a model need not come from a pipeline at
-all ([Concepts and Glossary](/docs/concepts)). You describe what to predict, lake builds a pipeline in
+all ([Concepts and Glossary](/docs/concepts)). You describe what to predict, Lake builds a pipeline in
 your workspace, you approve it, and a run trains its models on your data and measures them on rows
 they did not see. This page covers building the pipeline, changing it, running it, and reading what
 the run says. Experiments that try many settings are on [Experiments](/docs/experiments).

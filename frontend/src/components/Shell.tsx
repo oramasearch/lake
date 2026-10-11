@@ -178,10 +178,10 @@ export function Shell({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // The document title: "lake — <page>".
+  // The document title: "Lake — <page>", or "Lake Console" on a page with no title (lake#642).
   useEffect(() => {
-    const title = trailState.title ?? screen?.title ?? "lake";
-    document.title = title === "lake" ? "lake" : `lake — ${title}`;
+    const title = trailState.title ?? screen?.title;
+    document.title = title ? `Lake — ${title}` : "Lake Console";
   }, [trailState.title, screen?.title]);
 
   // ⌘K or / opens search; G then a letter jumps to a group; never while typing.
@@ -356,12 +356,13 @@ export function Shell({ children }: { children: ReactNode }) {
           <Link
             to={workspaceId && viewer.signed_in ? `/w/${workspaceId}/design/projects` : "/"}
             className={cx("flex items-center gap-2.5 border-b border-hairline py-3 no-underline", rail ? "justify-center px-0" : "px-4")}
+            aria-label="Lake Console"
           >
             <LakeMark />
             {!rail && (
               <div className="min-w-0 leading-tight">
                 <div className="font-mono text-[9.5px] tracking-[0.2em] text-ink-3 uppercase">Orama</div>
-                <div className="text-[15px] font-semibold tracking-[-0.01em] text-ink">lake</div>
+                <div className="text-[15px] font-semibold tracking-[-0.01em] text-ink">Lake</div>
               </div>
             )}
           </Link>
@@ -534,7 +535,7 @@ function RailPerson({ rail, onToggle }: { rail: boolean; onToggle: () => void })
           )}
         </button>
       ) : (
-        !rail && <span className="flex-1 font-mono text-[10px] tracking-[0.06em] text-ink-3 uppercase">{viewer.version ? `lake ${viewer.version}` : "lake"}</span>
+        !rail && <span className="flex-1 font-mono text-[10px] tracking-[0.06em] text-ink-3 uppercase">{viewer.version ? `Lake ${viewer.version}` : "Lake"}</span>
       )}
       <button
         type="button"

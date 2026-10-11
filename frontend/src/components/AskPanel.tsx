@@ -105,7 +105,7 @@ export function AskPanel({
         <div className="min-w-0 flex-1">
           <h2 className="m-0 text-base">Ask Orama</h2>
           <p className="muted m-0 truncate text-xs" title={from}>
-            {from ? `About the page ${from.split("?")[0]}` : "Ask about anything in your lake. Changes are proposed for you to confirm."}
+            {from ? `About the page ${from.split("?")[0]}` : "Ask about anything in your Lake. Changes are proposed for you to confirm."}
           </p>
         </div>
         {workspaceId && space ? <PanelActions workspaceId={workspaceId} from={from} /> : null}

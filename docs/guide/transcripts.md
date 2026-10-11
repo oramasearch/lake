@@ -12,8 +12,8 @@ record on the phone, and the transcript is in the workspace a moment later.
   gave, when it was said, who added it and when.
 - **Where it lives.** Each transcript is a sealed record in the workspace it was added to. Other workspaces never see it, and deleting the workspace deletes its
   transcripts.
-- **Speech-to-text.** Lake turns audio into text with OpenAI's transcription model, using lake's
-  own key. **The audio is never kept**: lake reads it into memory for the one call, sends it to
+- **Speech-to-text.** Lake turns audio into text with OpenAI's transcription model, using Lake's
+  own key. **The audio is never kept**: Lake reads it into memory for the one call, sends it to
   OpenAI and drops it. No audio is written to a record, a file, a log or the audit.
 - **Captions are cleaned.** A `.vtt` or `.srt` file loses its timings, cue numbers, header and
   styling; a `<v Name>` voice becomes `Name: `; a line the next cue repeats is kept once; each cue
@@ -38,7 +38,7 @@ one of four ways:
 4. Listen back, give it a title (it starts as the time of the recording), and press **Transcribe
    and save**.
 
-While lake transcribes, the sheet shows the time elapsed; keep it open. A recording stops itself
+While Lake transcribes, the sheet shows the time elapsed; keep it open. A recording stops itself
 after 60 minutes or just before 25 MB.
 
 ### Upload Audio
@@ -68,7 +68,7 @@ On success the new transcript's page opens and the page says *Transcript saved*.
 ### From the API
 
 `create_transcript` takes `title`, `source` and either `text` or `audio_base64`. With `text`, the
-text is kept. With audio and no text, lake transcribes the audio first.
+text is kept. With audio and no text, Lake transcribes the audio first.
 
 `POST /v1/create_transcript`
 
@@ -147,8 +147,8 @@ It answers the text and the model used. Any signed-in caller may use it.
 
 ## Speech-to-Text That Is Not Configured
 
-Speech-to-text needs a key on the lake you use. When it has none, recording and audio calls answer
-`not_supported` with *Speech-to-text is not configured on this lake.* The app then turns speech off
+Speech-to-text needs a key on the Lake you use. When it has none, recording and audio calls answer
+`not_supported` with *Speech-to-text is not configured on this Lake.* The app then turns speech off
 for the tab: **Record** and **Upload audio** are disabled with that sentence, the list shows it as
 a banner, the microphones hide, and **Upload text** and **Paste** still work.
 
@@ -178,15 +178,15 @@ an agent's key reads them when its scope carries `list_transcripts` and `get_tra
 | `language` | letters and `-`, at most 16 characters |
 | A dictation | 10 minutes |
 
-Transcription happens while you wait. The proxies in front of lake close a response after about a
-minute, so a very long recording can answer 504 at the edge even though lake finishes; short phone
+Transcription happens while you wait. The proxies in front of Lake close a response after about a
+minute, so a very long recording can answer 504 at the edge even though Lake finishes; short phone
 recordings transcribe well within it. Split a long recording, or upload its text.
 
 ## Troubleshooting
 
 | What you see | Why, and what to do |
 |---|---|
-| `not_supported` (501) | Speech-to-text is not configured on this lake. Use **Upload text** or **Paste**. |
+| `not_supported` (501) | Speech-to-text is not configured on this Lake. Use **Upload text** or **Paste**. |
 | `engine_error` (422) | OpenAI could not transcribe the audio, is busy or over its quota, or could not be reached. The message says which; try again shortly. |
 | `size_invalid` (413) at `/audio_base64` or `/text` | The audio is over 25 MiB or the text over 400,000 bytes. Split it. |
 | `invalid_input` at `/text` | Neither text nor audio was sent, or no speech was heard in the audio. |

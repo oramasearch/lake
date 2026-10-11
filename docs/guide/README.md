@@ -56,7 +56,7 @@ may wrap across source lines.
 
 ## Rules for writing them
 
-- Write for a customer who has never seen lake. Each area page says what it is for, its concepts,
+- Write for a customer who has never seen Lake. Each area page says what it is for, its concepts,
   then step-by-step tasks, then limits, permissions, troubleshooting and **Related Pages**.
 - Every step names where to click (the rail group and item, then the exact button label from the
   page's component in `frontend/src/pages/`), then the REST call and the MCP tool for the same step.
@@ -72,7 +72,11 @@ may wrap across source lines.
   reader; it is the engine's name, which only code spans may quote (`study-events.*`,
   ExperimentsAgent's `study` field). An experiment's attempts are **trials**, each a training
   **run**. `Docs.GuidesSpeakOfExperiments` checks the prose (lake#561).
-- Headings are Title Case (lake's rule, `docs/ui/design-system.md` → *Capitalization*).
+- Call the product **Lake**, with a capital L (decision 59, lake#642), and the web app the **Lake
+  Console**. Technical names keep their form: hostnames (`lake.live`, `lake.oramadev.net`), the MCP
+  server name, CLI commands, `LAKE_*` variables, identifiers and paths, in code spans where they
+  stand alone. `Docs.GuidesCallTheProductLake` checks the prose.
+- Headings are Title Case (Lake's rule, `docs/ui/design-system.md` → *Capitalization*).
 - Keep Ship's ApplicationAgent steps explicit about reviewing the exact proposal before any write.
 - Keep Train's ExperimentsAgent steps explicit about editing and confirming the exact experiment
   before it starts.

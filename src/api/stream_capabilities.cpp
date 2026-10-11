@@ -727,7 +727,7 @@ Task mutate(ApiContext& context, const json& input, const std::string& name) {
 std::string stream_description(const std::string& name) {
     static const std::map<std::string, std::string> descriptions = {
         {"list_streams",
-         "List the streams (topics) of a workspace and the lake bus with their held messages "
+         "List the streams (topics) of a workspace and the Lake bus with their held messages "
          "and subscribers, to find the one to read."},
         {"get_stream",
          "Read one stream's settings, sequence range and subscriptions with their lag, and "
@@ -736,7 +736,7 @@ std::string stream_description(const std::string& name) {
          "Read a stream's messages from a sequence number, optionally waiting for new ones, "
          "without consuming them."},
         {"create_stream",
-         "Create a stream in a workspace or on the lake bus, owned by you; needs the person's "
+         "Create a stream in a workspace or on the Lake bus, owned by you; needs the person's "
          "confirmation."},
         {"update_stream",
          "Change the retention or other settings of a stream you created; `dry_run` shows the "

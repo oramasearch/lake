@@ -168,7 +168,7 @@ function FolderSharing({ id, refName, path, workspaceId }: { id: string; refName
       )}
       {created && (
         <Notice title="Copy this link now">
-          <p className="m-0">It is shown once; lake keeps only its hash.</p>
+          <p className="m-0">It is shown once; Lake keeps only its hash.</p>
           <CopyBlock value={new URL(created, window.location.origin).toString()} />
         </Notice>
       )}

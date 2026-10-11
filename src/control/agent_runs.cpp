@@ -173,7 +173,7 @@ std::expected<std::string, std::string> normalize_cron(std::string_view expressi
         const int next = index + 1 < minutes.size() ? minutes[index + 1] : minutes.front() + 60;
         if (minutes.size() > 1 && next - minutes[index] < 5) {
             return std::unexpected("'" + text +
-                                   "' runs more often than lake allows: a schedule may run at "
+                                   "' runs more often than Lake allows: a schedule may run at "
                                    "most once every five minutes (the shortest is */5 * * * *)");
         }
     }
@@ -187,7 +187,7 @@ std::expected<std::string, std::string> trigger_cron(std::string_view trigger) {
         "; use every N minutes (5 to 59, or whole hours), every N hours or days, hourly, daily, "
         "weekly, every day|weekday|<weekday> at HH:MM, or a cron expression";
     const auto unplaceable = [&] {
-        return std::unexpected("lake cannot place " + quoted + " in time" + understood);
+        return std::unexpected("Lake cannot place " + quoted + " in time" + understood);
     };
     if (text == "hourly") {
         return "0 * * * *";
@@ -251,7 +251,7 @@ std::expected<std::string, std::string> trigger_cron(std::string_view trigger) {
     const std::string_view when = rest.substr(0, at);
     const auto time = clock_time(rest.substr(at + 4));
     if (!time) {
-        return std::unexpected(quoted + " has no time of day lake can read; write it as HH:MM, "
+        return std::unexpected(quoted + " has no time of day Lake can read; write it as HH:MM, "
                                         "such as 09:00");
     }
     const std::int64_t hour = *time / 3600, minute = *time % 3600 / 60;
@@ -291,7 +291,7 @@ AgentScheduleProgress agent_schedule_progress(const AgentCronSchedule& schedule)
         return {"Stopped", "Removed: it runs no more."};
     }
     if (schedule.phase.empty() && schedule.observed_generation == 0) {
-        return {"Pending", "Waiting for lake to set up this schedule."};
+        return {"Pending", "Waiting for Lake to set up this schedule."};
     }
     if (schedule.phase == "Ready") {
         return {"Ready", "Scheduled."};
@@ -308,12 +308,12 @@ AgentScheduleProgress agent_schedule_progress(const AgentCronSchedule& schedule)
     }
     if (schedule.message.find("not enabled") != std::string::npos) {
         return {"Failed",
-                not_scheduled + "Unattended agent runs are not enabled on this lake; ask the "
+                not_scheduled + "Unattended agent runs are not enabled on this Lake; ask the "
                                 "person who runs it to turn them on."};
     }
     return {"Failed",
             not_scheduled + "Lake could not set it up. Remove it and add it again; if it fails "
-                            "again, ask the person who runs this lake."};
+                            "again, ask the person who runs this Lake."};
 }
 
 std::optional<std::chrono::sys_seconds> utc_seconds(std::string_view text) {

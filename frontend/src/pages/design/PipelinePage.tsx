@@ -30,7 +30,7 @@ import {
 } from "./logic";
 import { FormError, GatePanel, Identifier, Markdown, Panel, PipelineSvg, Refusal, RunBadge, When, entityCrumb, useDesignTrail, useSubmit } from "./parts";
 
-const SUB = "The steps lake runs and how data flows between them. A changed pipeline is approved again before it runs.";
+const SUB = "The steps Lake runs and how data flows between them. A changed pipeline is approved again before it runs.";
 
 export default function PipelinePage() {
   const [params] = useSearchParams();
@@ -803,8 +803,8 @@ function Govern({
           <FormError error={approve.error} />
           <p className="m-0 text-[12.5px] text-ink-2">
             {approved
-              ? `Approved${graph.approved_at ? ` ${whenUtc(graph.approved_at)}` : ""}. lake verifies and runs only an approved pipeline.`
-              : "lake verifies and runs only an approved pipeline."}
+              ? `Approved${graph.approved_at ? ` ${whenUtc(graph.approved_at)}` : ""}. Lake verifies and runs only an approved pipeline.`
+              : "Lake verifies and runs only an approved pipeline."}
           </p>
           <div>
             {approved ? (
@@ -828,7 +828,7 @@ function Govern({
           }
         >
           <FormError error={check.error} />
-          <p className="m-0 text-[12.5px] text-ink-2">Run lake's correctness checks without running anything.</p>
+          <p className="m-0 text-[12.5px] text-ink-2">Run Lake's correctness checks without running anything.</p>
           <div>
             <Button type="submit" loading={check.busy}>
               Check

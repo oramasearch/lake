@@ -75,12 +75,12 @@ export default function BillingPage() {
           </StatRow>
           {account.data.provider.reason && (
             <Banner tone="quiet" title="Invoice Only">
-              {operator ? account.data.provider.reason : "Card payment is not set up on this lake yet. Orama sends payment details with each invoice and records your payment."}
+              {operator ? account.data.provider.reason : "Card payment is not set up on this Lake yet. Orama sends payment details with each invoice and records your payment."}
             </Banner>
           )}
           {!hasList && (
             <Banner tone="info" title="No Price List Yet" action={operator ? <Button to="/billing/plans">Publish it</Button> : undefined}>
-              {operator ? "Publish the price list so accounts can be billed for their usage." : "Orama has not published its rates on this lake yet. Your usage is recorded, and nothing is billed until it is."}
+              {operator ? "Publish the price list so accounts can be billed for their usage." : "Orama has not published its rates on this Lake yet. Your usage is recorded, and nothing is billed until it is."}
             </Banner>
           )}
           {next && (

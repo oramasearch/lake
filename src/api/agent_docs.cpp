@@ -27,7 +27,9 @@ struct GroupRule {
     bool (*matches)(std::string_view name);
 };
 
-// First match wins, so the narrow groups come before Repositories, which takes the rest.
+// First match wins, so the narrow groups come first. Every group names what it holds; a capability
+// none of them claims falls to `ungrouped`, which Docs.EveryCapabilityHasADeliberateGroup keeps
+// empty (lake#642).
 constexpr std::array group_rules{
     GroupRule{
         "Experiments",
@@ -45,10 +47,10 @@ constexpr std::array group_rules{
         }},
     GroupRule{"Transcripts",
               "What people said, added to a workspace from a recording, an uploaded audio or "
-              "caption file, or pasted text, and kept in its workspace Zetta. Ask Orama and "
-              "agents read them with list_transcripts (q searches title and text) and "
-              "get_transcript. transcribe turns audio into text and keeps nothing; the audio is "
-              "never stored.",
+              "caption file, or pasted text, and kept in the workspace. Ask Orama and agents read "
+              "them with list_transcripts (q searches title and text) and get_transcript. "
+              "transcribe turns audio into text with speech-to-text and keeps nothing; the audio "
+              "is never stored.",
               [](std::string_view n) {
                   return n == "transcribe" || n == "create_transcript" || n == "list_transcripts" ||
                          n == "get_transcript" || n == "update_transcript" ||
@@ -56,30 +58,55 @@ constexpr std::array group_rules{
               }},
     GroupRule{"Solutions",
               "The AI solutions a workspace can start: Orama's catalogue (S-1, …, read-only) and "
-              "the workspace's own, kept in its workspace Zetta. list_solutions and get_solution "
+              "the workspace's own, kept in the workspace. list_solutions and get_solution "
               "answer both, each with `source` (orama or workspace) and `editable`. "
               "create_solution, update_solution and delete_solution change only the workspace's "
               "own and answer `forbidden` for Orama's; duplicate_solution copies either kind into "
-              "a new editable one.",
+              "a new editable one. Auto-Suggest's opportunities become projects.",
               [](std::string_view n) {
                   return n == "list_solutions" || n == "get_solution" || n == "create_solution" ||
                          n == "update_solution" || n == "delete_solution" ||
-                         n == "duplicate_solution";
+                         n == "duplicate_solution" || n == "list_opportunities" ||
+                         n == "dismiss_opportunity";
+              }},
+    GroupRule{"Drives",
+              "A workspace's file managers, in three kinds: workspace files (`storage: files`, "
+              "moved and renamed without copying), a liquid repository with history "
+              "(`storage: repository`), or folders of shortcuts (`storage: virtual`). Create, "
+              "list and search drives; list, read, move and delete their items; upload files in "
+              "chunks (begin_drive_upload, append_drive_upload, finish_drive_upload); load a CSV "
+              "or JSONL file as a dataset (load_drive_dataset); share folders and links.",
+              [](std::string_view n) { return n.find("drive") != std::string_view::npos; }},
+    GroupRule{"Search",
+              "Search everything you can open: repository code and history (search), drives "
+              "(search_drives), transcripts (list_transcripts with q) and the Docs (list_docs "
+              "with q). A published search index is searched with search_index.",
+              [](std::string_view n) { return n == "search"; }},
+    GroupRule{"Usage and billing",
+              "Usage over time per dimension (API and MCP calls, predictions, speech-to-text, "
+              "model tokens, instance and volume time, storage), from each workspace; usage "
+              "limits; and the bill. Lake is priced by usage only, one rate per dimension on the "
+              "price list; bill_preview works out a month's bill, invoices are issued monthly and "
+              "paid through Stripe. An enterprise install has no billing, and these answer "
+              "not_found.",
+              [](std::string_view n) {
+                  return contains_any(n, {"usage", "invoice", "price_list", "bill", "metering"}) ||
+                         n == "set_storage_quota";
               }},
     GroupRule{"Streams",
               "Ask Orama and ApplicationAgent may freely read list_streams, get_stream and "
               "browse_stream. Stream writes require the person's confirmation; deletes require "
-              "space administration. System streams are browse-only. browse_stream never "
+              "admin on the account. System streams are browse-only. browse_stream never "
               "consumes messages; use wait_ms for bounded live reads over REST or MCP.",
               [](std::string_view n) { return n.find("stream") != std::string_view::npos; }},
     GroupRule{"Agents",
-              "The Agent Library of specialized agents Orama ships, and the agents you build in "
-              "Train > Agents: create them through workspace_act, talk to any of them with "
-              "agent_turn, run Python agents with launch_agent and give them cron schedules with "
-              "schedule_agent (each its own Kubernetes CronJob, at most once every five minutes). "
-              "A Python agent's definition is {source: zetta, instructions, entrypoint, files: "
-              "[{path, contents}]}; lake refuses any other field. Runs and schedules belong to "
-              "the workspace they were started in.",
+              "The Agent Library of specialized agents Orama ships, Ask Orama, and the agents you "
+              "build in Train > Agents: create them through workspace_act, talk to any of them "
+              "with agent_turn, run Python agents with launch_agent and give them cron schedules "
+              "with schedule_agent (each its own Kubernetes CronJob, at most once every five "
+              "minutes). A Python agent's definition is {source: zetta, instructions, entrypoint, "
+              "files: [{path, contents}]}; Lake refuses any other field. Runs and schedules belong "
+              "to the workspace they were started in.",
               [](std::string_view n) {
                   return n == "list_agent_library" || n == "launch_agent" ||
                          n == "list_agent_launches" || n == "stop_agent_launch" ||
@@ -93,25 +120,40 @@ constexpr std::array group_rules{
                          n == "latest_agent_task";
               }},
     GroupRule{"Workspace: Design, Train and Ship",
-              "Your Zetta workspace: projects and pipelines, data, runs, models and search "
-              "indexes. workspace_query and workspace_act reach every allowed Zetta capability.",
+              "Your workspace: projects and pipelines, data, runs, models and search indexes, and "
+              "publishing models (with traffic and monitoring) and indexes. workspace_query and "
+              "workspace_act reach every capability the workspace allows.",
               [](std::string_view n) {
                   return contains_any(n, {"pipeline"}) || n.starts_with("workspace_") ||
                          n == "start_workspace" || n == "delete_workspace" || n == "search_index" ||
-                         n == "predict" || n == "model_traffic";
+                         n == "predict" || n == "model_traffic" || n == "list_runs" ||
+                         n.ends_with("_workspace") || n.ends_with("_workspaces") ||
+                         n == "set_workspace_storage" || n == "copy_workspace_records";
               }},
+    GroupRule{
+        "Apps and packages",
+        "Apps that run from a repository or an image, with their builds, logs, environment, "
+        "sign-in and bound services; the images, npm packages and Python distributions "
+        "published to Lake; and the deployments, environments and domains the operator reports.",
+        [](std::string_view n) {
+            return n.ends_with("_app") || n.find("_app_") != std::string_view::npos ||
+                   n.starts_with("app_") || n == "list_apps" ||
+                   contains_any(
+                       n, {"build", "image", "package", "deployment", "environment", "domain"});
+        }},
     GroupRule{"Services",
-              "Databases, streams and engines lake runs for you (Postgres, Zetta, Kafka, "
+              "Databases, streams and engines Lake runs for you (Postgres, Zetta, Kafka, "
               "ClickHouse, TiDB, Cassandra, Valkey, SQLite, DuckDB, Polars), their connections, "
               "and connecting one to your workspace.",
               [](std::string_view n) { return contains_any(n, {"service"}); }},
     GroupRule{"Storage",
-              "Buckets, filesystems, network filesystems and volumes lake provisions for you "
-              "(a cluster volume today), and how to reach them.",
+              "Buckets, filesystems, network filesystems and volumes Lake provisions for you "
+              "(a cluster volume today), how to reach them, and volume snapshots.",
               [](std::string_view n) {
                   // Exact names: restore_drive_version and others also contain "store".
                   return n == "list_store_providers" || n == "list_stores" || n == "create_store" ||
-                         n == "delete_store" || n == "store_connection";
+                         n == "delete_store" || n == "store_connection" ||
+                         contains_any(n, {"volume_snapshot", "space_store", "workspace_store"});
               }},
     GroupRule{"Audit and transparency",
               "The signed audit log, the transparency log and its proofs, timestamps and TUF "
@@ -121,7 +163,8 @@ constexpr std::array group_rules{
                       n, {"audit", "transparency", "timestamp", "tuf", "replicat", "checkpoint"});
               }},
     GroupRule{"Secrets, keys and certificates",
-              "Static and dynamic secrets, encryption keys, signing, and the customer PKI.",
+              "Static and dynamic secrets, encryption keys, signing, the customer PKI and ACME "
+              "certificates.",
               [](std::string_view n) {
                   return contains_any(n,
                                       {"secret",
@@ -133,7 +176,8 @@ constexpr std::array group_rules{
                                        "pki",
                                        "certificate",
                                        "svid",
-                                       "kek"}) ||
+                                       "kek",
+                                       "acme_"}) ||
                          n == "sign" || n == "verify";
               }},
     GroupRule{"Identity and sessions",
@@ -158,8 +202,8 @@ constexpr std::array group_rules{
                                        "jwt"});
               }},
     GroupRule{"Organizations and access",
-              "Organizations, teams, members, invitations, grants, customers, SSO and SCIM, "
-              "applications, usage and quotas.",
+              "Organizations, teams, members, invitations, grants, accounts, SSO and SCIM, and "
+              "applications that sign their own users in through Lake.",
               [](std::string_view n) {
                   return n == "my_permissions" || contains_any(n,
                                                                {"organization",
@@ -174,38 +218,62 @@ constexpr std::array group_rules{
                                                                 "scim",
                                                                 "federation",
                                                                 "application",
-                                                                "quota",
-                                                                "metering",
                                                                 "role",
-                                                                "admin"});
+                                                                "admin",
+                                                                "personal_space",
+                                                                "credential_policy"});
               }},
     GroupRule{"Server",
-              "What this lake is.",
+              "What this Lake is: its name, version and setup, the Docs, and the MCP setup.",
               [](std::string_view n) {
                   return n == "server_info" || n == "mcp" || n == "viewer" || n == "list_docs" ||
                          n == "get_doc" || n == "mcp_setup";
               }},
     GroupRule{"Repositories",
               "Repositories and their files, changes, reviews, issues, releases, webhooks, "
-              "artifacts, drive, models and datasets, environments and search.",
-              [](std::string_view) { return true; }},
+              "artifacts, models and datasets, and liquid sync.",
+              [](std::string_view n) {
+                  return contains_any(n,
+                                      {"repositor",
+                                       "change",
+                                       "review",
+                                       "issue",
+                                       "release",
+                                       "webhook",
+                                       "artifact",
+                                       "refs",
+                                       "branch",
+                                       "conflict",
+                                       "object",
+                                       "chunk",
+                                       "model",
+                                       "dataset"}) ||
+                         n == "push" || n == "pull" || n == "find_missing" || n == "list_exports";
+              }},
+    GroupRule{
+        ungrouped, "Capabilities no group claims yet.", [](std::string_view) { return true; }},
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 14> group_order{"Workspace: Design, Train and Ship",
+constexpr std::array<std::string_view, 19> group_order{"Workspace: Design, Train and Ship",
                                                        "Experiments",
-                                                       "Transcripts",
                                                        "Solutions",
-                                                       "Streams",
                                                        "Agents",
+                                                       "Streams",
+                                                       "Drives",
+                                                       "Transcripts",
+                                                       "Search",
+                                                       "Apps and packages",
                                                        "Services",
                                                        "Storage",
                                                        "Repositories",
                                                        "Organizations and access",
+                                                       "Usage and billing",
                                                        "Identity and sessions",
                                                        "Secrets, keys and certificates",
                                                        "Audit and transparency",
-                                                       "Server"};
+                                                       "Server",
+                                                       ungrouped};
 
 std::string required_fields(const Capability& capability) {
     std::string out;
@@ -223,19 +291,20 @@ std::string mcp_endpoint(std::string_view origin) {
 
 std::string how_to_connect(std::string_view origin) {
     return std::format(
-        "lake's MCP server is `{0}` (Streamable HTTP, JSON-RPC 2.0, protocol {1}: `initialize`, "
+        "Lake's MCP server is `{0}` (Streamable HTTP, JSON-RPC 2.0, protocol {1}: `initialize`, "
         "`ping`, `tools/list`, `tools/call`). Authenticate with `Authorization: Bearer <key>`: a "
-        "lake API token. Create one on {2}/developer/mcp (or {2}/tokens). A token lasts as long as "
+        "Lake API token. Create one on {2}/developer/mcp (or {2}/tokens). A token lasts as long as "
         "the sign-in that made it (at most 30 days) unless it is a standing key that never "
-        "expires, which a space must allow and which names its tools and a reason.\n\n"
+        "expires, which the account or organization must allow and which names its tools and a "
+        "reason.\n\n"
         "- Claude Code: `claude mcp add --transport http lake {0} --header \"Authorization: "
         "Bearer $LAKE_KEY\"`\n"
         "- REST: every tool is also `{2}/v1/<tool>` (a read is GET with a query string, an "
         "action is POST with a JSON body); the schema is `{2}/v1/openapi.json`.\n"
         "- Answers are `{{\"ok\": true, \"value\": …}}` or `{{\"ok\": false, \"error\": "
         "{{\"code\", \"message\"}}}}`.\n"
-        "- After lake is upgraded, reconnect your MCP client to lake (or restart it). "
-        "lake declares `tools.listChanged` and sends `notifications/tools/list_changed` to a "
+        "- After Lake is upgraded, reconnect your MCP client to Lake (or restart it). "
+        "Lake declares `tools.listChanged` and sends `notifications/tools/list_changed` to a "
         "session that began on an older tool list, but a client that connected before an upgrade "
         "or ignores the notice keeps the tools and schemas it first listed.\n",
         mcp_endpoint(origin),
@@ -276,7 +345,8 @@ constexpr std::string_view rules =
     "- `workspace_sql` runs one read-only `SELECT` or `WITH`.\n"
     "- Deleting a workspace, a service, a store or a repository destroys its data: ask the "
     "person first.\n"
-    "- Names: a space is always `customer_id`, a workspace `workspace_id`, a run `run_id`, a "
+    "- Names: an account (yours or an organization's) is always `customer_id`, a workspace "
+    "`workspace_id`, a run `run_id`, a "
     "model `model_id` and an index `index_id`, including inside `workspace_query` and "
     "`workspace_act` input. The older `run`, `model`, `index` and get_customer's `id` still work "
     "and are deprecated. A dataset id is `<database>/<name>` everywhere.\n"
@@ -286,7 +356,30 @@ constexpr std::string_view rules =
     "carries `reason` (`missing`, `invalid` or `expired`) and `help`, the page that makes a new "
     "key.\n";
 
+constexpr std::string_view what_lake_does =
+    "- **Data**: repositories (liquid version control with reviews, issues and releases), drives "
+    "in three kinds (workspace files, a repository with history, or virtual folders of "
+    "shortcuts), datasets, transcripts with speech-to-text, and search across everything you can "
+    "open.\n"
+    "- **Design**: AI projects and their pipelines, Orama's AI solutions and your own.\n"
+    "- **Train**: runs, experiments and their trials, agents, streams and models.\n"
+    "- **Ship**: published models with traffic and monitoring, search indexes, apps, services and "
+    "packages.\n"
+    "- **Ask Orama**: ask about anything in your Lake; a change is proposed for the person to "
+    "confirm.\n"
+    "- **Organizations, access and SSO**: organizations, teams, members, invitations, grants, "
+    "single sign-on and SCIM.\n"
+    "- **Secrets**: static and dynamic secrets, encryption keys and certificates.\n"
+    "- **Usage and billing**: usage over time per dimension and its limits, and a monthly bill "
+    "priced by usage only, paid through Stripe. An enterprise install has no billing.\n";
+
 } // namespace
+
+std::string_view group_of(std::string_view capability) {
+    return std::ranges::find_if(group_rules,
+                                [&](const GroupRule& r) { return r.matches(capability); })
+        ->title;
+}
 
 std::vector<Group> tool_groups(const Registry& registry) {
     std::vector<Group> groups;
@@ -298,9 +391,7 @@ std::vector<Group> tool_groups(const Registry& registry) {
         if (capability->transport != CapabilityTransport::Json) {
             continue;
         }
-        const auto rule = std::ranges::find_if(
-            group_rules, [&](const GroupRule& r) { return r.matches(capability->name); });
-        const auto group = std::ranges::find(groups, rule->title, &Group::title);
+        const auto group = std::ranges::find(groups, group_of(capability->name), &Group::title);
         group->tools.push_back({capability->name,
                                 capability->title,
                                 capability->description,
@@ -371,14 +462,14 @@ const std::vector<Flow>& flows() {
            "`model_id`, `rows` (each with its key in `entity`): the rows ranked by risk, each "
            "answered with its `entity` key and `row`"}}},
         {"Stand up a Postgres service and connect it",
-         "A service is a database, stream or engine lake runs for your space.",
+         "A service is a database, stream or engine Lake runs for your account.",
          {{"list_service_kinds", "the kinds, their expected start times, which are preview"},
           {"create_service", "`kind: \"postgres\"`, a `name`; optional `instances`, `storage_gi`"},
           {"list_services", "poll until the service is `Ready`"},
           {"service_connection", "its endpoint and credentials (keep them secret)"},
           {"connect_service", "make it a Train → Data connection of your workspace"}}},
         {"Create a volume",
-         "A store is a bucket, filesystem, network filesystem or volume lake provisions for your "
+         "A store is a bucket, filesystem, network filesystem or volume Lake provisions for your "
          "workspace; today a cluster volume.",
          {{"list_store_providers", "every type and provider, and which are available"},
           {"create_store",
@@ -413,6 +504,36 @@ const std::vector<Flow>& flows() {
            "text, or `audio_base64` and `audio_name` to transcribe it first)"},
           {"list_transcripts", "optional `q` searches titles and text"},
           {"get_transcript", "`id`: the whole text"}}},
+        {"A drive of each kind",
+         "A repository drive keeps files with history in a liquid repository; a virtual drive "
+         "holds only shortcuts to things that live elsewhere.",
+         {{"create_drive",
+           "`name`, `storage: \"repository\"` and `repository_name` (a new repository, which "
+           "gets its first change at once) or `repository_id` (one of this workspace's)"},
+          {"create_drive", "`name`, `storage: \"virtual\"`: folders of shortcuts only"},
+          {"create_drive_shortcut",
+           "`drive_id`, `name`, `target: {kind: \"transcript\", id}` (or a repository, a "
+           "repository path, a drive item, a dataset, a model, a project, an agent or a URL)"},
+          {"list_drives", "every drive of the workspace with its `storage`"},
+          {"load_drive_dataset",
+           "`drive_id`, `id` (a CSV or JSONL file of a workspace-files drive), `table_name`: "
+           "loads it into a dataset of the workspace"}}},
+        {"Search everything",
+         "Search what you can open, place by place, as the Lake Console's search does.",
+         {{"search", "`query`: repository code, ranked (`history: true` searches past changes)"},
+          {"search_drives", "`q`: drives, folders, files and shortcuts by name"},
+          {"list_transcripts", "`q`: transcripts by title and text"},
+          {"list_docs", "`q`: the Docs"}}},
+        {"See usage and the bill",
+         "Usage is recorded per dimension in each workspace; Lake bills by usage only, one rate "
+         "per dimension. An install without billing answers not_found to the billing calls.",
+         {{"usage_over_time",
+           "`customer_id`, `from`, `to` (RFC 3339 UTC), `granularity: \"day\"`: each "
+           "dimension's total and a value per day, by workspace"},
+          {"usage_limits", "`customer_id`: each limit with what is used this month and its state"},
+          {"price_list", "the rates in force, one per usage dimension"},
+          {"bill_preview", "`customer_id`, optional `period` (YYYY-MM): this month's bill so far"},
+          {"list_invoices", "`customer_id`: issued invoices, newest first, with payment state"}}},
         {"Search a published index",
          "A search index is BM25F over a dataset; outside callers can search it once it is "
          "published.",
@@ -428,13 +549,14 @@ const std::vector<Flow>& flows() {
 
 std::string llms_txt(const Registry& registry, std::string_view origin) {
     std::string out = std::format(
-        "# lake\n\n"
-        "> lake is Orama's hosted platform: private liquid repositories, and Zetta workspaces in "
-        "each customer space (a call names one with `workspace_id`) where you Design (projects and pipelines), Train (data, runs) and Ship "
-        "(models, search indexes, services). Everything a person can do on the site is a "
-        "capability in one registry, served as REST, OpenAPI and MCP.\n\n"
+        "# Lake\n\n"
+        "> Lake is Orama's platform for designing, training and shipping AI on your own data. "
+        "Each account (yours or an organization's) has workspaces, and every data call names one "
+        "with `workspace_id`. Everything a person can do in the Lake Console is a capability in "
+        "one registry, served as REST, OpenAPI and MCP.\n\n"
+        "## What Lake Does\n\n{2}\n"
         "## Connect\n\n{0}\n"
-        "## The lake skill for Claude\n\n"
+        "## The Lake skill for Claude\n\n"
         "Download [SKILL.md]({1}/skills/lake/SKILL.md) (public, no key needed) and install it:\n\n"
         "```sh\nmkdir -p ~/.claude/skills/lake && curl -fsSL {1}/skills/lake/SKILL.md -o "
         "~/.claude/skills/lake/SKILL.md\n```\n\n"
@@ -446,7 +568,8 @@ std::string llms_txt(const Registry& registry, std::string_view origin) {
         "- [MCP setup and keys]({1}/developer/mcp)\n\n"
         "## Tools\n\n",
         how_to_connect(origin),
-        origin);
+        origin,
+        what_lake_does);
     for (const Group& group : tool_groups(registry)) {
         out += std::format("### {}\n\n{}\n\n", group.title, group.summary);
         for (const Tool& tool : group.tools) {
@@ -461,10 +584,10 @@ std::string llms_txt(const Registry& registry, std::string_view origin) {
 }
 
 std::string llms_full_txt(const Registry& registry, std::string_view origin) {
-    std::string out = std::format(
-        "# lake — every tool\n\n{}\nThe lake skill for Claude: {}/skills/lake/SKILL.md (public).\n\n",
-        how_to_connect(origin),
-        origin);
+    std::string out = std::format("# Lake — every tool\n\n{}\nThe Lake skill for Claude: "
+                                  "{}/skills/lake/SKILL.md (public).\n\n",
+                                  how_to_connect(origin),
+                                  origin);
     for (const Group& group : tool_groups(registry)) {
         out += std::format("## {}\n\n{}\n\n", group.title, group.summary);
         for (const Tool& tool : group.tools) {
@@ -486,20 +609,23 @@ std::string skill_md(const Registry& registry, std::string_view origin) {
     std::string out = std::format(
         "---\n"
         "name: lake\n"
-        "description: Work in lake ({0}) through its MCP server — Design, Train and Ship in a "
-        "Zetta workspace (projects, pipelines, data, runs, models, search indexes), managed "
-        "services (Postgres, Kafka, ClickHouse, …), and repositories. Use when asked to build or "
-        "run a pipeline, stand up or connect a database service, search an index, or do anything "
-        "on lake.\n"
+        "description: Work in Lake ({0}) through its MCP server — Design, Train and Ship in a "
+        "workspace (projects, pipelines, data, runs, experiments, models, search indexes), "
+        "drives, transcripts, agents, apps, managed services (Postgres, Kafka, ClickHouse, …), "
+        "repositories, usage and billing. Use when asked to build or run a pipeline, load data, "
+        "keep files in a drive, search, stand up or connect a database service, check usage or "
+        "the bill, or do anything on Lake.\n"
         "---\n\n"
-        "# lake\n\n"
+        "# Lake\n\n"
+        "## What Lake Does\n\n{2}\n"
         "## Connect\n\n{1}\n"
         "Check the connection with `server_info`, then `tools/list`. Full reference: "
         "{0}/llms.txt and {0}/llms-full.txt (every tool's input schema). The latest copy of this "
         "skill is always at {0}/skills/lake/SKILL.md.\n\n"
         "## Which tools for which task\n\n",
         origin,
-        how_to_connect(origin));
+        how_to_connect(origin),
+        what_lake_does);
     for (const Group& group : tool_groups(registry)) {
         if (group.title == "Server") {
             continue;

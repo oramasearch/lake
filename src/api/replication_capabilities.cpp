@@ -217,7 +217,7 @@ void register_replication_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "replicate_transparency_log",
         .title = "Replicate transparency log",
-        .description = "Pull and verify the next append-only log suffix from another lake.",
+        .description = "Pull and verify the next append-only log suffix from another Lake.",
         .input_schema = {{"type", "object"},
                          {"properties", {{"source_url", {{"type", "string"}, {"minLength", 1}}}}},
                          {"required", json::array({"source_url"})},
@@ -279,7 +279,7 @@ void register_replication_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "replicate_repository",
         .title = "Replicate repository",
-        .description = "Pull verified liquid objects and refs from another lake instance.",
+        .description = "Pull verified liquid objects and refs from another Lake instance.",
         .input_schema = {{"type", "object"},
                          {"properties",
                           {{"repository_id", {{"type", "string"}}},

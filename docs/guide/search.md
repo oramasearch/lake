@@ -1,6 +1,6 @@
 # Search
 
-lake searches everything you can open: your repositories, the code in them, the datasets,
+Lake searches everything you can open: your repositories, the code in them, the datasets,
 transcripts, projects, agents, models and drives of every workspace you have, and these Docs.
 There are two ways in: the **Search** box in the top bar, for a quick look as you type, and
 **Data → Search**, for every result with the places you choose.
@@ -76,7 +76,7 @@ drive alone ([Drives](/docs/drives#find-a-file)).
 
 ## Code Search
 
-Code search reads the search index lake keeps over your repositories. It understands three kinds
+Code search reads the search index Lake keeps over your repositories. It understands three kinds
 of query:
 
 | You type | It finds |
@@ -201,11 +201,11 @@ Each place is the capability its own page reads:
 | What you see | Why, and what to do |
 |---|---|
 | A workspace in `building_workspaces` | Its index is being built (after a move or because it was lost). It answers nothing yet; search again later. |
-| A workspace in `stale_workspaces` | A write to its index failed. It answers what it held before, and lake retries the write on its own. |
+| A workspace in `stale_workspaces` | A write to its index failed. It answers what it held before, and Lake retries the write on its own. |
 | A workspace in `skipped_workspaces` | The workspace is stopped, or its store is moving or unavailable, so its repositories were left out. Start it on **Ship → Workspaces**. |
 | `invalid_input` at `/workspace_id` | The workspace is not one whose index can be searched, or is not in an account you can read. |
 | `invalid_input` naming `change` or `history` | An exact change and complete history need `customer` and `repository`, and cannot be combined with `ref` or with each other. |
-| *Searching … is not available on this lake yet* | That place's capability is not on this lake. The other places still answer. |
+| *Searching … is not available on this Lake yet* | That place's capability is not on this Lake. The other places still answer. |
 | `unauthenticated` (401) | Sign in again, or send a valid key. |
 
 ## Related Pages

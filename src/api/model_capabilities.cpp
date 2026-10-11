@@ -463,7 +463,7 @@ Capability dataset_capability() {
             }
             if (!context.workspaces) {
                 co_return ApiResult::failure("store_unavailable",
-                                             "workspaces are not configured on this lake");
+                                             "workspaces are not configured on this Lake");
             }
             const auto customer_id = workspace_dataset_customer(input, context);
             if (!customer_id) {
@@ -552,7 +552,7 @@ Capability model_capability() {
             }
             if (!context.workspaces) {
                 co_return ApiResult::failure("store_unavailable",
-                                             "workspaces are not configured on this lake");
+                                             "workspaces are not configured on this Lake");
             }
             const auto customer_id = workspace_dataset_customer(input, context);
             if (!customer_id) {

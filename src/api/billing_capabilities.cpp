@@ -763,7 +763,7 @@ std::shared_ptr<PaymentProviders> environment_payment_providers(const StripeKeys
     }
     std::shared_ptr<PaymentProvider> provider = stripe ? stripe(keys) : nullptr;
     if (!provider) {
-        return manual("this lake has no Stripe client");
+        return manual("this Lake has no Stripe client");
     }
     return fixed_payment_providers(std::move(provider));
 }
@@ -806,7 +806,7 @@ liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& pr
     }
     std::shared_ptr<PaymentProvider> provider = resolved->provider;
     if (provider->records_payments_by_hand()) {
-        co_return answer(404, "not_found", "this lake takes no payment notices");
+        co_return answer(404, "not_found", "this Lake takes no payment notices");
     }
     const auto now = std::chrono::system_clock::now();
     auto notice = provider->read_notice(body, signature, now);
@@ -876,7 +876,7 @@ liquid::runtime::task<NoticeOutcome> receive_payment_notice(PaymentProviders& pr
                 "customer/" + invoice.customer_id + "/billing",
                 "success",
                 std::move(details))) {
-        co_return answer(503, "store_unavailable", "lake could not record the notice");
+        co_return answer(503, "store_unavailable", "Lake could not record the notice");
     }
     co_return NoticeOutcome{200,
                             {{"received", true},
@@ -1400,7 +1400,7 @@ void register_billing_capabilities(Registry& registry,
         .description =
             "Operator or instance administrator only. Marks a due invoice paid, with the payment's "
             "`reference` (a bank transfer's, say) and an optional `note`. For the manual "
-            "provider, where Orama collects payment outside lake.",
+            "provider, where Orama collects payment outside Lake.",
         .input_schema = object_schema({{"invoice_id", string_schema()},
                                        {"reference", {{"type", "string"}, {"maxLength", 256}}},
                                        {"note", {{"type", "string"}, {"maxLength", 1024}}}},

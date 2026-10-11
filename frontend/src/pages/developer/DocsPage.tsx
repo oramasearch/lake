@@ -80,7 +80,7 @@ export default function DocsPage() {
           {searching ? (
             <SearchPanel q={q} pages={pages} first={first} onPick={() => setQ("")} />
           ) : !slug ? (
-            contents.isLoading ? <Skeleton lines={8} /> : contents.isError ? null : <Empty icon={BookOpen} title="No Guides">No guides are included in this lake.</Empty>
+            contents.isLoading ? <Skeleton lines={8} /> : contents.isError ? null : <Empty icon={BookOpen} title="No Guides">No guides are included in this Lake.</Empty>
           ) : guide.isLoading ? (
             <Skeleton lines={14} />
           ) : guide.isError ? (

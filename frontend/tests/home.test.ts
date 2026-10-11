@@ -104,7 +104,7 @@ test("an empty workspace is offered its first steps", () => {
     "How do I load my first dataset?",
     "Help me turn a business question into a project.",
     "What is in this workspace, and what should I look at first?",
-    "What can lake do with my data?",
+    "What can Lake do with my data?",
   ]);
   const some = starterQuestions({ datasets: ["sales"] });
   assert.equal(some.length, 4);

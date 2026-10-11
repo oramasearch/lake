@@ -3,7 +3,7 @@
 Status: the homepage and navigation of the web app (lake#561). The copy is unchanged from the
 server-rendered homepage checked on 2026-10-01 against lake `36679e1` on the dev cluster.
 
-The homepage (`/`, `frontend/src/pages/home/HomePage.tsx`) says what lake is for: designing,
+The homepage (`/`, `frontend/src/pages/home/HomePage.tsx`) says what Lake is for: designing,
 training and shipping AI on the customer's own data, in a workspace of their own. It reads only
 `viewer`. Repositories are one link under Ship. Visitors and the operator see it. A signed-in
 person lands on Ask Orama instead, full page, and finds the platform at a glance under Home →
@@ -22,7 +22,7 @@ Every bold phrase in this section is quoted word for word from `frontend/src/pag
 (the invitation sentence is `INVITATION_NOTE` in `frontend/src/pages/account/signIn.ts`). Change
 the page and this section together; the check is under [Verify and change](#verify-and-change).
 
-**lake by Orama**
+**Lake by Orama**
 
 **Design, train, and ship AI on your own data.**
 
@@ -30,10 +30,10 @@ the page and this section together; the check is under [Verify and change](#veri
 Orama's cloud or your own.**
 
 Under Clerk the visitor actions are **Sign in** and **Read the docs**, followed by
-**Accounts are added by invitation while lake is in development.** Without Clerk they are
+**Accounts are added by invitation while Lake is in development.** Without Clerk they are
 **Create account**, Sign in and Read the docs. The operator instead gets **Getting started** (the Docs) and **Load your data**.
 
-Three cards follow, one per verb. Each states only what lake does today:
+Three cards follow, one per verb. Each states only what Lake does today:
 
 1. **Design**. **Start from the business question and the decision it should improve. A project
    turns it into a pipeline you can read, change and approve.** Signed in, it links Projects.

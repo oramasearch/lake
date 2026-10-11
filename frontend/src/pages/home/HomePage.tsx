@@ -20,12 +20,12 @@ export default function HomePage() {
 }
 
 function Landing() {
-  useTrail([{ label: "Home", to: "/" }, { label: "Welcome to lake" }], "design, train, and ship AI");
+  useTrail([{ label: "Home", to: "/" }, { label: "Welcome to Lake" }], "design, train, and ship AI");
   const { viewer } = useSession();
   const signedIn = viewer.signed_in;
   return (
     <Page
-      eyebrow="lake by Orama"
+      eyebrow="Lake by Orama"
       title="Design, train, and ship AI on your own data."
       sub="Load your data into your own workspace, train models on it, and call them from your code, in Orama's cloud or your own."
     >

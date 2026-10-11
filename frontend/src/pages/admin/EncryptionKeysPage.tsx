@@ -76,7 +76,7 @@ export default function EncryptionKeysPage() {
             <PanelEmpty title="No key matches">Clear the search to see every key.</PanelEmpty>
           ) : (
             <Empty icon={KeyRound} title="No keys yet" action={newKey}>
-              A key encrypts, signs and computes HMACs inside lake; its material never leaves.
+              A key encrypts, signs and computes HMACs inside Lake; its material never leaves.
             </Empty>
           )
         }
@@ -155,7 +155,7 @@ function NewKey({ mountId, keys, onClose }: { mountId: string; keys: Row[]; onCl
   };
   const fieldFault = ["name", "parent_name", "context"].some((f) => fieldError(error, f));
   return (
-    <Modal title="New Encryption Key" subtitle="One key encrypts, signs (Ed25519) and computes HMAC-SHA-256; its material stays in lake." onClose={onClose} sheet>
+    <Modal title="New Encryption Key" subtitle="One key encrypts, signs (Ed25519) and computes HMAC-SHA-256; its material stays in Lake." onClose={onClose} sheet>
       <Form onSubmit={submit} error={fieldFault ? null : error}>
         <Field label="Name" required help="Lowercase letters, digits and dashes; unique in this mount." error={fieldError(error, "name")}>
           <input value={name} onChange={(e) => setName(e.target.value)} pattern={HANDLE_PATTERN} placeholder="customer-data" autoComplete="off" spellCheck={false} />
@@ -193,7 +193,7 @@ type Operation = "encrypt" | "decrypt" | "rewrap" | "sign" | "verify" | "hmac";
 const OPERATIONS: { value: Operation; label: string; help: string }[] = [
   { value: "encrypt", label: "Encrypt", help: "Text → ciphertext under the current version." },
   { value: "decrypt", label: "Decrypt", help: "Ciphertext from this key → the text." },
-  { value: "rewrap", label: "Rewrap", help: "Old ciphertext → ciphertext under the current version; the text never leaves lake." },
+  { value: "rewrap", label: "Rewrap", help: "Old ciphertext → ciphertext under the current version; the text never leaves Lake." },
   { value: "sign", label: "Sign", help: "Text → an Ed25519 signature." },
   { value: "verify", label: "Verify", help: "Text and a signature → valid or not." },
   { value: "hmac", label: "HMAC", help: "Text → an HMAC-SHA-256." },

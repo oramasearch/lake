@@ -12,7 +12,7 @@ import "@/styles/account.css";
 export function AuthFrame({ children, title }: { children: ReactNode; title: string }) {
   const [theme, toggleTheme] = useTheme();
   useEffect(() => {
-    document.title = `lake — ${title}`;
+    document.title = `Lake — ${title}`;
   }, [title]);
   return (
     <div className="auth-plane">
@@ -30,12 +30,12 @@ export function AuthFrame({ children, title }: { children: ReactNode; title: str
         {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
       </button>
       <div className="auth-layout">
-        <section className="auth-brand" aria-label="lake">
+        <section className="auth-brand" aria-label="Lake Console">
           <Link to="/" className="auth-brand-link">
             <LakeMark size={30} />
             <span className="auth-kicker">Orama</span>
           </Link>
-          <p className="auth-name">lake</p>
+          <p className="auth-name">Lake</p>
           <p className="auth-tagline">Design, train and ship AI on your own data, in your own workspace.</p>
           <ul className="auth-stages">
             <li>Design</li>

@@ -665,7 +665,7 @@ TEST_F(PlatformFixture, WithoutThePlatformMirrorEveryCallSaysDeploymentsAreNotSe
         EXPECT_FALSE(result.ok) << name;
         EXPECT_EQ(result.error.code, "not_supported") << name;
         EXPECT_EQ(lake::api::rest_status(result), 501) << name;
-        EXPECT_NE(result.error.message.find("not set up on this lake"), std::string::npos) << name;
+        EXPECT_NE(result.error.message.find("not set up on this Lake"), std::string::npos) << name;
         EXPECT_NE(result.error.message.find("an operator turns them on"), std::string::npos)
             << name;
         EXPECT_EQ(result.error.message.find("Zetta"), std::string::npos) << name;

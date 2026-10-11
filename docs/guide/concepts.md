@@ -1,8 +1,8 @@
 # Concepts and Glossary
 
-Checked against lake's source on 2026-10-10.
+Checked against Lake's source on 2026-10-10.
 
-lake is where you **design, train and ship AI**. What you build is an **AI solution**: an AI
+Lake is where you **design, train and ship AI**. What you build is an **AI solution**: an AI
 system that answers one business problem end to end. You build it in an **AI project**, and the
 project's **pipeline** is the workflow that builds it: Design decides what to build, Train builds
 and measures it, Ship puts it in front of the people and systems that use it.
@@ -22,7 +22,7 @@ propose changes anything until you confirm it.
 
 ## Glossary
 
-The words lake uses, grouped by where you meet them. Each entry says what the thing is and which
+The words Lake uses, grouped by where you meet them. Each entry says what the thing is and which
 page covers it. Ids named in code (`customer_id`, `workspace_id`, …) are the inputs the REST API and
 MCP tools take.
 
@@ -30,8 +30,8 @@ MCP tools take.
 
 | Term | What it is |
 |---|---|
-| **Account** | Who owns workspaces, repositories, keys and apps: you, or an organization. Its id is the `customer_id` of every call. When you sign up, lake makes one for you; an organization has its own. |
-| **Workspace** | An isolated environment with an engine of its own, where datasets, projects, runs, models, transcripts and Ask Orama conversations live. An account can have many workspaces, for example one per environment (`dev`, `staging`, `prod`). Its id is the `workspace_id` every Design, Train and Ship call names; lake never picks one for you. See [Workspaces](/docs/workspaces). |
+| **Account** | Who owns workspaces, repositories, keys and apps: you, or an organization. Its id is the `customer_id` of every call. When you sign up, Lake makes one for you; an organization has its own. |
+| **Workspace** | An isolated environment with an engine of its own, where datasets, projects, runs, models, transcripts and Ask Orama conversations live. An account can have many workspaces, for example one per environment (`dev`, `staging`, `prod`). Its id is the `workspace_id` every Design, Train and Ship call names; Lake never picks one for you. See [Workspaces](/docs/workspaces). |
 | **Workspace engine** | The engine a workspace runs on, which holds its data. Everything that belongs to a workspace is kept in it, sealed with the workspace's own key, apart from every other customer's. |
 | **Workspace picker** | The pill in the top bar that names the current workspace. Choosing another keeps the page you are on. |
 | **Environment** | A workspace's label, such as `dev`, `staging` or `prod` (any lowercase DNS label). |
@@ -57,7 +57,7 @@ MCP tools take.
 | **Share link** | An expiring, revocable link to a folder, opened without signing in. Revoking stops the next open; a copy already downloaded stays with its recipient. See [Sharing and Shared with Me](/docs/sharing). |
 | **Shared with Me** | The folders other people shared with you directly. |
 | **Dataset** | A table in a workspace, from an uploaded file, a connection or a generator. Its id is `<database>/<name>`. Tables a run writes are listed apart as *Run outputs*. See [Datasets and Loading Data](/docs/load-data). |
-| **Connection** | A database a workspace reads from, such as a Postgres service lake runs for you. Its password reaches the workspace only and is never shown again. |
+| **Connection** | A database a workspace reads from, such as a Postgres service Lake runs for you. Its password reaches the workspace only and is never shown again. |
 | **Transcript** | The text of a meeting, call or voice memo, kept in a workspace and searchable. Audio sent for speech-to-text is never kept. See [Transcripts and Speech-to-Text](/docs/transcripts). |
 | **Search** | One query across repositories, code, datasets, transcripts, projects, agents, models and these Docs. See [Search](/docs/search). |
 
@@ -73,40 +73,40 @@ MCP tools take.
 | **Methodology** | A modelling method the engine runs, such as segmentation, forecasting or anomaly detection. **Design → Methodologies** lists each one, what it needs and whether your workspace runs it. |
 | **AI solution** | An AI system that answers one business problem end to end: the decision it drives, the methodologies it composes and how its return is measured. You build one in an AI project; **Design → Solutions** holds Orama's catalogue of ready-made ones, which are read-only, and the ones you write or duplicate yourself. See [AI Solutions, Methodologies and Opportunities](/docs/solutions). |
 | **Opportunity** | An AI project worth building that Auto-Suggest found by scanning your workspace's data. It is kept until you create a project from it or dismiss it. |
-| **Model** | A learned function that turns inputs into a prediction, a score or a ranking. A model can be one step inside a pipeline, and one pipeline can hold several models (a segmentation feeding a churn classifier, for example). A model also stands on its own: you can upload one as a model repository (weights, card and history) without any pipeline. Each run that trains a model adds a **version** of it. **Train → Models** lists the models a workspace trains, with their versions and held-out scores; **Ship → Models** serves them: a **published** version can be called from outside lake with `predict`. See [Models and Search Indexes](/docs/ship). |
+| **Model** | A learned function that turns inputs into a prediction, a score or a ranking. A model can be one step inside a pipeline, and one pipeline can hold several models (a segmentation feeding a churn classifier, for example). A model also stands on its own: you can upload one as a model repository (weights, card and history) without any pipeline. Each run that trains a model adds a **version** of it. **Train → Models** lists the models a workspace trains, with their versions and held-out scores; **Ship → Models** serves them: a **published** version can be called from outside Lake with `predict`. See [Models and Search Indexes](/docs/ship). |
 | **Search index** | A full-text index over a dataset's text columns. A published index answers outside searches with `search_index`. See [Models and Search Indexes](/docs/ship). |
 | **Experiment and trial** | An AI model training experiment, as an experiment tracker records it: one experiment tries many settings for one objective, within budgets, and keeps the best model; each attempt is a trial with its own run and curves, ranked and compared live. See [Experiments](/docs/experiments). |
 | **Stream and topic** | A topic is a named sequence of messages in a workspace (agent events, app events, build logs, your own). Streams browses and publishes to them. See [Streams](/docs/streams). |
 | **Agent** | An AI helper that works for you. It reads what it is allowed to read and proposes changes for you to confirm. See [Agents](/docs/agents). |
-| **Agent Library** | The agents Orama provides: Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest and AgentCreator. **Design → Agent Library** lists them and whether each runs on your lake. |
+| **Agent Library** | The agents Orama provides: Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest and AgentCreator. **Design → Agent Library** lists them and whether each runs on your Lake. |
 | **Agent Factory** | Building a new agent in a conversation with AgentCreator. |
 | **Proposal** | A change an agent wants to make, shown in full. Nothing changes until you confirm it. |
-| **Ask Orama** | lake's home page, and the agent in the top bar of every page. It answers from what you can read and hands work to other agents. See [Ask Orama](/docs/ask-orama). |
+| **Ask Orama** | Lake's home page, and the agent in the top bar of every page. It answers from what you can read and hands work to other agents. See [Ask Orama](/docs/ask-orama). |
 
 ### Ship
 
 | Term | What it is |
 |---|---|
-| **App** | A running web application lake hosts for you, from a repository or a container image, with its own address, logs, environment and bindings. See [Apps](/docs/apps). |
+| **App** | A running web application Lake hosts for you, from a repository or a container image, with its own address, logs, environment and bindings. See [Apps](/docs/apps). |
 | **Build** | Turning a repository into a container image inside the cluster. Its log streams live. |
-| **Package and registry** | The images, npm and Python packages lake serves. **Ship → Packages** lists them with their install commands. See [Packages, Builds and the Registry](/docs/registry). |
+| **Package and registry** | The images, npm and Python packages Lake serves. **Ship → Packages** lists them with their install commands. See [Packages, Builds and the Registry](/docs/registry). |
 | **Environment** | Where a repository's deployments run, with its domains and logs. See [Deployments and Environments](/docs/deployments). |
 | **Deployment** | One version of a repository running in an environment. |
-| **Service** | A database, stream or engine lake runs for you: Postgres, Zetta, Kafka, ClickHouse, TiDB, Cassandra, Valkey. Zetta is Orama's data and AI engine, the one every workspace runs on. See [Services and Storage](/docs/services). |
-| **Storage** | A volume lake provisions for a workspace's services. |
+| **Service** | A database, stream or engine Lake runs for you: Postgres, Zetta, Kafka, ClickHouse, TiDB, Cassandra, Valkey. Zetta is Orama's data and AI engine, the one every workspace runs on. See [Services and Storage](/docs/services). |
+| **Storage** | A volume Lake provisions for a workspace's services. |
 
 ### Credentials, Audit and Usage
 
 | Term | What it is |
 |---|---|
 | **Session** | Your signed-in browser. Revoking it signs that browser out on its next request. |
-| **Token or key** | A lake API credential for scripts and AI agents, limited to the capabilities you name. It acts as you. See [Tokens and Keys](/docs/tokens). |
+| **Token or key** | A Lake API credential for scripts and AI agents, limited to the capabilities you name. It acts as you. See [Tokens and Keys](/docs/tokens). |
 | **Passkey** | A device-bound credential for signing in without a password. |
 | **Secret mount** | A place for secrets and encryption keys, belonging to one workspace. Pages show metadata only, never values. See [Secrets and Encryption Keys](/docs/secrets). |
 | **Audit** | A signed, hash-chained record of every call: who, what, on which object, and the outcome. Events about a workspace's data are kept in that workspace; the rest centrally. See [Activity and Audit](/docs/activity). |
-| **Transparency log** | lake's public, append-only log of signed statements, checkable by anyone. See [Security Model](/docs/security). |
+| **Transparency log** | Lake's public, append-only log of signed statements, checkable by anyone. See [Security Model](/docs/security). |
 | **Usage** | What your account stores, transfers and computes, with its storage limit. See [Usage and Metering](/docs/usage). |
-| **Capability** | One thing lake can do, such as `create_workspace`. The site, REST (`/v1/<capability>`) and MCP all call the same capabilities, with the same permissions and audit. See [REST API and OpenAPI](/docs/developer). |
+| **Capability** | One thing Lake can do, such as `create_workspace`. The site, REST (`/v1/<capability>`) and MCP all call the same capabilities, with the same permissions and audit. See [REST API and OpenAPI](/docs/developer). |
 
 ## Related Pages
 

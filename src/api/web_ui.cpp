@@ -237,11 +237,11 @@ std::string web_ui_error(std::string_view code, std::string_view message) {
     return std::format(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<meta name=\"color-scheme\" content=\"light dark\"><title>lake — error</title>{}{}"
+        "<meta name=\"color-scheme\" content=\"light dark\"><title>Lake — error</title>{}{}"
         "</head><body class=\"hosted-shell\"><main class=\"hosted-main\" id=\"main-content\">"
         "<div class=\"hosted-card\" role=\"alert\"><p class=\"eyebrow\">{}</p>"
         "<h1>We Could Not Load This Page</h1><p class=\"sub\">{}</p>"
-        "<p><a class=\"button primary\" href=\"/\">Back to lake</a></p></div></main></body></html>",
+        "<p><a class=\"button primary\" href=\"/\">Back to Lake</a></p></div></main></body></html>",
         theme_preference_script,
         stylesheet_link(),
         web_ui_escape(code),

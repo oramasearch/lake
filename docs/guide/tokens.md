@@ -2,7 +2,7 @@
 
 A **key** (also called an API token) lets a script, a program, an AI agent or the `liquid` command
 act as you without your password. You give it a name, say what it may call, and choose how long it
-lasts. It is shown once; lake keeps only its hash.
+lasts. It is shown once; Lake keeps only its hash.
 
 ## Concepts
 
@@ -71,7 +71,7 @@ permissions. See [The liquid CLI](/docs/cli).
 
 ## Search-Only Keys
 
-A published search index can be called from outside lake with a key that can do nothing else. On
+A published search index can be called from outside Lake with a key that can do nothing else. On
 **Ship → Search Indexes**, open the index and use **Create a search key**; it makes a key scoped to
 `search_index` only ([Models and Search Indexes](/docs/ship)). It works for any published index
 you can read until you revoke it, and lasts as long as the session that made it, at most 30 days.
@@ -84,9 +84,9 @@ A standing key keeps working after you sign out, for a service that runs unatten
 
 - a non-empty reason;
 - named scopes (never `*`; an *every tool* standing key made on the Developer pages names every
-  capability lake has today);
+  capability Lake has today);
 - your account's opt-in, which an admin of the account turns on;
-- the lake instance allowing it (an operator can turn standing keys off for the whole lake).
+- the Lake instance allowing it (an operator can turn standing keys off for the whole Lake).
 
 Turn on the opt-in (needs `admin` on the account):
 

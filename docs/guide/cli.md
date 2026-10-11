@@ -1,9 +1,9 @@
 # The liquid CLI
 
-`liquid` is the command line for lake's repositories. It captures your writes as you save, names
-them as changes, and pushes and pulls them to a repository on lake. It also opens and approves
+`liquid` is the command line for Lake's repositories. It captures your writes as you save, names
+them as changes, and pushes and pulls them to a repository on Lake. It also opens and approves
 reviews, lists and resolves conflicts, and shows your identity for sign-up. This page covers what
-you need to work with lake; liquid's own reference (`liquid <command> --help`) lists every command
+you need to work with Lake; liquid's own reference (`liquid <command> --help`) lists every command
 and flag.
 
 ## Concepts
@@ -15,8 +15,8 @@ and flag.
 | **Reference** | A name pointing at a change, such as `main`. |
 | **Checkout** | A local copy of a repository, made by `liquid clone` or `liquid init`. `push`, `pull` and most commands run inside one. |
 | **Identity** | Your device's TAAP identity: a key pair whose private half never leaves the device. Every drip and change is signed with it. |
-| **Repository URL** | `<lake origin>/v1/repositories/<repository id>`, the address every command that talks to lake takes. The repository's **Clone** dialog shows it. |
-| **`LIQUID_TOKEN`** | The environment variable liquid reads its lake token from. It is sent as the bearer credential and never printed or put in a URL. |
+| **Repository URL** | `<lake origin>/v1/repositories/<repository id>`, the address every command that talks to Lake takes. The repository's **Clone** dialog shows it. |
+| **`LIQUID_TOKEN`** | The environment variable liquid reads its Lake token from. It is sent as the bearer credential and never printed or put in a URL. |
 
 ## Install liquid
 
@@ -44,14 +44,14 @@ liquid identity show
 liquid identity show --document
 ```
 
-The second form prints only the public identity document (base64url), which lake's own sign-up
+The second form prints only the public identity document (base64url), which Lake's own sign-up
 asks for. The private key stays on your device. `liquid identity rotate` replaces the signing key
 with a linked successor, optionally moving it to a FIDO2 or PIV hardware key
 (`--to fido2`, `--to piv:9c`).
 
 ## Make a Token for liquid
 
-liquid authenticates to lake with a token, not a password.
+liquid authenticates to Lake with a token, not a password.
 
 1. Open the account menu → **Tokens** → **New token**.
 2. Name it, and in **Capability scopes, comma separated** enter
@@ -72,7 +72,7 @@ lifetimes are covered in [Tokens and Keys](/docs/tokens).
 
 ## Clone a Repository
 
-Open the repository on lake and press **Clone**. The dialog's first block is:
+Open the repository on Lake and press **Clone**. The dialog's first block is:
 
 ```sh
 liquid clone https://lake.oramadev.net/v1/repositories/<repository id> analytics
@@ -110,7 +110,7 @@ liquid pull https://lake.oramadev.net/v1/repositories/<repository id>
 liquid refs
 ```
 
-- `push` sends your changes and only the objects lake does not have yet. The reply lists every
+- `push` sends your changes and only the objects Lake does not have yet. The reply lists every
   reference as applied or refused, with the reason for a refusal.
 - `push --atomic` refuses every reference update when any one is refused, so a push lands whole or
   not at all.
@@ -122,7 +122,7 @@ Push and pull need the network. Every other command works offline against the ch
 
 ## Reviews from the Command Line
 
-`liquid review` works on lake's reviews for the repository named by `--lake <repository URL>`:
+`liquid review` works on Lake's reviews for the repository named by `--lake <repository URL>`:
 
 ```sh
 liquid review list --lake https://lake.oramadev.net/v1/repositories/<repository id> --state open
@@ -151,7 +151,7 @@ The same conflicts show on the repository's **Conflicts** page, where they can a
 
 | Command | What it does |
 |---|---|
-| `liquid init [path]` | Make a new local repository from the files in a directory. To publish it to lake, create the repository on lake first, then push to its URL. |
+| `liquid init [path]` | Make a new local repository from the files in a directory. To publish it to Lake, create the repository on Lake first, then push to its URL. |
 | `liquid history <path>` | A file's history across moves; `--restore <change>` brings an old version back as a new write. |
 | `liquid blame <path>` | Which change last wrote each line. |
 | `liquid import git <path>` | Import a Git repository's history into liquid. |
@@ -179,15 +179,15 @@ The same conflicts show on the repository's **Conflicts** page, where they can a
 
 | You see | Why, and what to do |
 |---|---|
-| `unauthorized` (401) on push or pull | `LIQUID_TOKEN` is not set, mistyped, expired or revoked, or comes from another lake. Make a new token on this lake and export it. |
+| `unauthorized` (401) on push or pull | `LIQUID_TOKEN` is not set, mistyped, expired or revoked, or comes from another Lake. Make a new token on this Lake and export it. |
 | `unauthorized` (403) | The token lacks one of the sync scopes, or you lack `read` or `write` on the repository. |
 | A reference reported as refused | Branch protection turned it away; the reason names the rule ([Branch Protection](/docs/repository-settings#branch-protection)). |
 | `conflict` (409) | The repository's identity differs from the checkout's: you are pushing a different repository to this URL. |
 | `locked` (423) | Another push holds the reference; push again. |
-| `busy` (429) | The storage limit is reached, or lake is busy. |
+| `busy` (429) | The storage limit is reached, or Lake is busy. |
 | `unavailable` (503) | The repository's store is being handed over; push again. |
 | `needs the network for …`, exit 69 | `LIQUID_OFFLINE=1` is set. Unset it to push or pull. |
-| The Clone dialog shows no commands | This lake has no external origin configured; the operator must set one. |
+| The Clone dialog shows no commands | This Lake has no external origin configured; the operator must set one. |
 
 ## Related Pages
 

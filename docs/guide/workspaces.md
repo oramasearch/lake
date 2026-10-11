@@ -13,11 +13,11 @@ page works in exactly one of them.
   tabs. An address without `/w/` (from an old link) opens the same page in your current workspace.
 - **Every call names it.** Design, Train and Ship calls take `customer_id` (the id of the account
   that owns your workspaces: yours, or your organization's) and `workspace_id`. A call without
-  `workspace_id` is refused; lake never picks a default.
+  `workspace_id` is refused; Lake never picks a default.
 - **Desired state and observed phase.** Creating, stopping or deleting a workspace records what you
   asked for. The Orama operator then provisions or removes the workspace's engine and reports its phase
   (for example `Ready` or `Failed`). A workspace is *ready* when the operator reports it ready and
-  lake can reach it.
+  Lake can reach it.
 - **What stays outside a workspace.** Repositories, organizations, your account pages, Services,
   Deployments and Workspaces itself are outside `/w/`. A repository still belongs to one workspace,
   chosen when it is created, and its page names it.
@@ -97,12 +97,12 @@ Every Design, Train and Ship page waits for its workspace:
 |---|---|
 | **Start Your Workspace** | No workspace was ever requested. Press **Start your workspace**. |
 | **Preparing Your Workspace** | Requested; the operator is provisioning it. The page checks every 15 seconds. |
-| **Your Workspace Could Not Be Prepared** | The operator reported `Failed`, with its reason. *workspace quota reached* means this lake already runs as many workspaces as it allows; an operator can raise the limit. **Cancel workspace** opens Workspaces so you can withdraw it. |
+| **Your Workspace Could Not Be Prepared** | The operator reported `Failed`, with its reason. *workspace quota reached* means this Lake already runs as many workspaces as it allows; an operator can raise the limit. **Cancel workspace** opens Workspaces so you can withdraw it. |
 | **Workspace Unavailable** | The status could not be read; the reason is shown. |
-| **Not Available on This Lake** | This lake has no workspace control plane, so Design, Train and Ship are not available on it. |
+| **Not Available on This Lake** | This Lake has no workspace control plane, so Design, Train and Ship are not available on it. |
 | **No Workspace Yet** | You have no account to hold workspaces yet. |
 
-The **Agent Library** opens whether the workspace is ready or not, because it is lake's, not the
+The **Agent Library** opens whether the workspace is ready or not, because it is Lake's, not the
 workspace's.
 
 ## Rename, Stop and Start a Workspace
@@ -123,7 +123,7 @@ Through MCP, call `update_workspace` with the same input.
 
 Each workspace's volumes have a desired size, `storage_gi`, 5 GiB by default. **Ship →
 Workspaces** shows the size requested and, when it differs, the size the operator observed. Only
-the operator or the instance administrator changes it, and a size never goes down. Ask your lake's
+the operator or the instance administrator changes it, and a size never goes down. Ask your Lake's
 operator for more room. How much your account stores in all is on **Organization → Usage**
 ([Usage and Metering](/docs/usage)).
 
@@ -144,7 +144,7 @@ are the only copy left.
 3. Type the workspace's name under **Type `<name>` to confirm** and press **Delete workspace and
    everything in it**. A wrong name is refused and nothing changes.
 
-The row then reads *Deletion requested* until the operator reports it deleted. lake records one
+The row then reads *Deletion requested* until the operator reports it deleted. Lake records one
 audit event per destroyed repository, app, build and image in the central log, so the history
 survives the workspace.
 
@@ -163,8 +163,8 @@ Then the deletion itself, with `confirm` equal to the workspace's name:
 
 Through MCP, call `delete_workspace` with the same inputs.
 
-If lake stops part way, the workspace is still deleted and `deletion.completed` is `false` with the
-reason in `deletion.pending`; lake finishes it on its own, and calling `delete_workspace` again
+If Lake stops part way, the workspace is still deleted and `deletion.completed` is `false` with the
+reason in `deletion.pending`; Lake finishes it on its own, and calling `delete_workspace` again
 resumes it.
 
 ## Who Can Use a Workspace
@@ -185,7 +185,7 @@ workspaces are yours alone unless you grant someone access.
 ## Limits
 
 - Workspace reads time out after 15 seconds and actions after 60.
-- A lake may cap how many workspaces and services an account runs; the operator's refusal names the
+- A Lake may cap how many workspaces and services an account runs; the operator's refusal names the
   limit.
 - Names are unique among an account's live workspaces.
 - Stopping and renaming are API-only.
@@ -200,7 +200,7 @@ workspaces are yours alone unless you grant someone access.
 | `invalid_input` at `/environment` | Use `dev`, `staging`, `prod` or a lowercase DNS label. |
 | `invalid_input` at `/confirm` | The name typed for deletion does not match. |
 | `unauthorized` (403) | You lack the role above on the account. |
-| `store_unavailable` (503) | This lake has no workspace control plane, or it cannot be reached now. |
+| `store_unavailable` (503) | This Lake has no workspace control plane, or it cannot be reached now. |
 | A page under `/w/<id>/` answers that the id does not match | A call named a different workspace than the address; open the page from the picker. |
 
 ## Related Pages

@@ -1,6 +1,6 @@
 # Organizations, Members and Teams
 
-An **organization** is how a group of people shares lake. It has its own workspaces, repositories
+An **organization** is how a group of people shares Lake. It has its own workspaces, repositories
 and apps, kept apart from yours, and people in it as owners, admins or members. Teams group people
 inside an organization so you can give a set of them access at once.
 
@@ -12,7 +12,7 @@ your own workspaces into an organization.
 | Term | What it is |
 |---|---|
 | **Organization** | A named group of people with its own workspaces, repositories and apps. Its own account has an id, the `customer_id` that every call about its workspaces names. |
-| **Membership** | One person (or workload) in an organization or one of its teams, with a role. Every membership keeps the digest of the attestation lake signed for it (`lake.org_membership/1`) and the identity of the administrator who granted it. |
+| **Membership** | One person (or workload) in an organization or one of its teams, with a role. Every membership keeps the digest of the attestation Lake signed for it (`lake.org_membership/1`) and the identity of the administrator who granted it. |
 | **Role** | `owner`, `admin` or `member`. See [Roles](#roles). |
 | **Team** | A named group inside an organization. A membership can be in the organization itself or in one team. |
 | **Invitation** | An offer of a membership, addressed to an email address or to a handle, with a role and an expiry. It becomes a membership only when the person joins. |
@@ -52,7 +52,7 @@ administer, and the invitations waiting for you. Search and the role filter narr
 1. Open **Organization → Organizations** and press **New organization**.
 2. Enter the **Organization name**, for example *Acme Research*.
 3. Optionally enter a **Handle (optional)**: lowercase letters, numbers and inner hyphens, such as
-   `acme-research`. Leave it empty and lake generates one.
+   `acme-research`. Leave it empty and Lake generates one.
 4. Press **Create organization**.
 
 You become its owner, the organization gets its own account (separate from yours), and the page
@@ -67,12 +67,12 @@ create a workspace for it on **Ship → Workspaces** ([Workspaces](/docs/workspa
 
 ## Turn Your Workspace into an Organization
 
-If you started lake on your own and now want colleagues in, you can turn your own account (its
+If you started Lake on your own and now want colleagues in, you can turn your own account (its
 handle, repositories, workspaces and apps) into an organization's, without moving anything.
 
 1. Open **Organization → Organizations** and press **Convert your workspace**.
 2. Read what happens: the handle, repositories, workspaces and apps stay where they are, so links
-   and clones keep working; you become the organization's owner; lake gives you a new, empty
+   and clones keep working; you become the organization's owner; Lake gives you a new, empty
    account with a generated handle.
 3. Enter the **Organization name**.
 4. Type your current handle exactly where the dialog asks, then press **Turn into an

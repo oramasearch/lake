@@ -23,7 +23,7 @@ or your organization's), and, where a service or store is created, `workspace_id
 
 ## Ship → Services
 
-The page opens with figures (**Services**, against your limit when the lake sets one; **Ready**;
+The page opens with figures (**Services**, against your limit when the Lake sets one; **Ready**;
 **Changing**, checked every 3 seconds; **Failed**), then **Your Services**: a table with a search, a
 filter by kind, and per service its name and kind, size (instances and storage), status with the
 operator's message, its in-cluster address and its actions. Below it, the **Service Catalog**
@@ -40,7 +40,7 @@ shows every kind as a card.
 2. Choose the **Kind** (Zetta is first), and fill in **Name** (lowercase letters, digits and dashes,
    starting with a letter), **Instances** (1 to 3) and **Storage (GiB)** (1 to 100).
 3. Press **Create service**. The service is listed and its status follows the operator: waiting for
-   the operator, the operator's own steps, *Connecting* while its connection reaches lake, then
+   the operator, the operator's own steps, *Connecting* while its connection reaches Lake, then
    **Ready**.
 
 A service is created in the workspace in the page address; with no workspace chosen, the drawer asks
@@ -80,7 +80,7 @@ and your workspace, not from the internet.
 1. Open **Data → Datasets**.
 2. Under **Connect One of Your Services**, press **Connect** next to a Ready Postgres service (or
    **Refresh** to renew an existing connection). Nothing is typed: the workspace uses the credential
-   lake already holds.
+   Lake already holds.
 3. Pull tables from the new connection into datasets ([Datasets and Loading Data](/docs/load-data)).
 
 - REST: `POST /v1/connect_service`:
@@ -177,7 +177,7 @@ deletes the data in it, which cannot be recovered.
 ## Limits
 
 - Instances 1 to 3 (SQLite exactly 1); storage 1 to 100 GiB per service and per store.
-- A lake's operator may cap the number of services per account; the figures then say how many your
+- A Lake's operator may cap the number of services per account; the figures then say how many your
   workspaces may run at once, and past it `create_service` answers `quota_exceeded`.
 - A service cannot be resized or renamed.
 - There are no backups yet for any kind. A SQLite service has one instance and no replication, so
@@ -199,15 +199,15 @@ deletes the data in it, which cannot be recovered.
 | You see | What it means | What to do |
 |---|---|---|
 | *Waiting for the operator* | The operator has not reported on it yet. | Wait; the page checks again every 3 seconds. |
-| *Connecting* | The service is Ready, and its connection is on its way to lake. | Wait for **Ready**; **Show connection** appears then. |
-| *Unassigned* | The service belongs to no workspace, so the operator no longer reconciles it. | Ask the lake's administrator to assign or remove it. |
-| *Deleting* for a long time | The operator has not finished removing it; the row says how long it has waited. | Ask the lake's administrator. |
-| *Failed* | The operator could not create it; its message is under the status. | Delete it and create it again, or ask the lake's administrator. |
+| *Connecting* | The service is Ready, and its connection is on its way to Lake. | Wait for **Ready**; **Show connection** appears then. |
+| *Unassigned* | The service belongs to no workspace, so the operator no longer reconciles it. | Ask the Lake's administrator to assign or remove it. |
+| *Deleting* for a long time | The operator has not finished removing it; the row says how long it has waited. | Ask the Lake's administrator. |
+| *Failed* | The operator could not create it; its message is under the status. | Delete it and create it again, or ask the Lake's administrator. |
 | `conflict` | A live service or store already has that name. | Choose another name. |
-| `quota_exceeded` | The account runs as many services as the lake allows. | Delete one you no longer need. |
+| `quota_exceeded` | The account runs as many services as the Lake allows. | Delete one you no longer need. |
 | `workspace_not_ready` on a store's connection | The store is not Ready yet, or is being deleted. | Wait for **Ready**. |
 | `invalid_input` on `create_store` | The type and provider pair is not offered. | Use `volume` and `cluster`. |
-| `store_unavailable` | Services are not configured on this lake. | Ask the lake's operator. |
+| `store_unavailable` | Services are not configured on this Lake. | Ask the Lake's operator. |
 | *The workspace can't read … yet* next to a service | Only Postgres can be connected to the workspace today. | Use a Postgres service as a data source. |
 
 ## Related Pages

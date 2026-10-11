@@ -126,8 +126,8 @@ liquid push https://lake.oramadev.net/v1/repositories/<repository id>
 ```
 
 `liquid pull <the same URL>` brings in what others pushed. The address is
-`<lake origin>/v1/repositories/<repository id>`; the page fills in your lake's origin. If the page
-says the commands are unavailable, this lake has no external origin configured, and the operator
+`<lake origin>/v1/repositories/<repository id>`; the page fills in your Lake's origin. If the page
+says the commands are unavailable, this Lake has no external origin configured, and the operator
 must set one.
 
 A token can also be made by API: `POST /v1/create_token` with

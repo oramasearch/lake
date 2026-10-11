@@ -401,14 +401,14 @@ function StartOwnSolution({ solution, onClose }: { solution: J; onClose: () => v
       <Form id="start-own-solution" onSubmit={submit}>
         <FormError error={error} />
         <p className="m-0 text-[13px] text-ink-2">
-          lake creates the project with this solution's problem and decision, then builds its first pipeline from the decision. A solution of your own does not get the governed foundation (policy, holdout and ROI readout) that Orama's solutions do.
+          Lake creates the project with this solution's problem and decision, then builds its first pipeline from the decision. A solution of your own does not get the governed foundation (policy, holdout and ROI readout) that Orama's solutions do.
         </p>
         <Field label="Project name" required help="Lowercase letters, digits, - and _.">
           <input name="name" pattern="[a-z0-9][a-z0-9_\-]{0,62}" value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        <Field label="Methodology" help={composed.length ? "The methodology its first pipeline uses." : "This solution composes no methodology; lake chooses from the decision."}>
+        <Field label="Methodology" help={composed.length ? "The methodology its first pipeline uses." : "This solution composes no methodology; Lake chooses from the decision."}>
           <select name="methodology" value={methodology} onChange={(e) => setMethodology(e.target.value)}>
-            <option value="">Let lake choose from the decision</option>
+            <option value="">Let Lake choose from the decision</option>
             {composed.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.id}
@@ -537,7 +537,7 @@ function StartSolution({ solution, levels, datasets, datasetsError, onClose }: {
         <Field label="Investment" required>
           <input name="investment" type="number" step="any" min={0} value={investment} onChange={(e) => setInvestment(e.target.value)} />
         </Field>
-        <Field label="Currency" required help="These are your inputs. lake does not supply defaults.">
+        <Field label="Currency" required help="These are your inputs. Lake does not supply defaults.">
           <input name="currency" placeholder="USD" value={currency} onChange={(e) => setCurrency(e.target.value)} />
         </Field>
       </Form>

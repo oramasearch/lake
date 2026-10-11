@@ -242,7 +242,7 @@ nlohmann::json
 openapi_document(const Registry& registry, std::string_view version, SchemaAudience audience) {
     nlohmann::json document;
     document["openapi"] = "3.1.0";
-    document["info"] = {{"title", "lake control surface"},
+    document["info"] = {{"title", "Lake control surface"},
                         {"version", std::string(version)},
                         {"description",
                          "The capability registry rendered as HTTP routes: JSON reads are GET "

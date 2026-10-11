@@ -1,7 +1,7 @@
 # Branch Protection, Webhooks, Import and Export
 
 The settings that govern a repository beyond its files: which pushes a reference accepts, which
-outside systems hear about its events, and how a repository moves in and out of lake with its
+outside systems hear about its events, and how a repository moves in and out of Lake with its
 history, reviews and grants intact.
 
 These are capabilities first. The web app shows webhooks and their deliveries (with **Retry**),
@@ -13,8 +13,8 @@ and imports are created through the API or MCP.
 | Term | What it is |
 |---|---|
 | **Branch protection rule** | A rule on one reference (`main`) or a prefix ending in `*` (`release/*`) that every push to it must pass. |
-| **Refused update** | A push to a protected reference that a rule turned away. The push's reply names the reference and the rule's reason, and lake records a signed audit event. |
-| **Webhook** | A URL lake posts a repository's issue, review and release events to, signed with a secret you choose. Every attempt is kept. |
+| **Refused update** | A push to a protected reference that a rule turned away. The push's reply names the reference and the rule's reason, and Lake records a signed audit event. |
+| **Webhook** | A URL Lake posts a repository's issue, review and release events to, signed with a secret you choose. Every attempt is kept. |
 | **Export archive** | A signed `lake_export/1` JSON file holding a repository's history and content, issues, reviews, releases, webhooks, direct grants and build evidence, and optionally a Git copy. |
 | **Import** | Recreating a repository from an export archive, or from a Git checkout plus recorded GitHub data, as a new repository in a workspace you name. |
 
@@ -106,7 +106,7 @@ Verify the signature over the raw body before trusting it. Any 2xx answer counts
 
 An export is a portable, signed copy: the history and every object, the issues, reviews, comments,
 releases and webhooks (without secrets), direct grants and build evidence. Each part has a SHA-256
-digest in a manifest, and the manifest is signed by this lake's identity, so the destination can
+digest in a manifest, and the manifest is signed by this Lake's identity, so the destination can
 check it without reaching back here.
 
 1. Open `/exports?repository_id=<repository id>` (the **Repository Export** page).
@@ -141,7 +141,7 @@ changes its own.
 
 `POST /v1/import_github_repository` (MCP `import_github_repository`) imports a Git history together
 with GitHub's issues, comments, pull requests, review comments and workflow files. Send
-`customer_id`, `workspace_id`, the new `name`, `git_directory` (a Git checkout the lake server can
+`customer_id`, `workspace_id`, the new `name`, `git_directory` (a Git checkout the Lake server can
 read) and `recording`: the GitHub REST responses for `repository`, `issues`, `issue_comments`,
 `pulls`, `review_comments` and `workflows`, collected beforehand. Lake makes no call to GitHub
 itself, and no GitHub credential is stored.
@@ -182,7 +182,7 @@ not, and the report is kept with the repository.
 |---|---|
 | A push says a reference was refused | A rule turned it away; the reason names the rule. Get the change approved, push a fast-forward, or ask to be added to `allowed_pushers`. |
 | Every reference refused with `branch_protection_unavailable` | The repository's workspace could not be read before the push. Wait until it is ready and push again. |
-| Deliveries fail with *webhook sender is not configured* | This lake cannot send outbound webhooks. Attempts are kept and can be retried once it can. |
+| Deliveries fail with *webhook sender is not configured* | This Lake cannot send outbound webhooks. Attempts are kept and can be retried once it can. |
 | `invalid_digest` or `invalid_signature` on import | The archive was changed or damaged after export. Export it again. |
 | `conflict` at `/name` on import | A live repository already has that name. Choose another. |
 | `invalid_input` at `/workspace_id` | The destination workspace is missing, unknown or deleted. |

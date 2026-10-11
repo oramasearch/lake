@@ -236,7 +236,7 @@ test("every JSON setup parses, and each client's fields are the ones it reads", 
   assert.equal(parse("gemini").mcpServers.lake.httpUrl, endpoint);
   const vscode = parse("vscode");
   assert.equal(vscode.servers.lake.type, "http");
-  assert.deepEqual(vscode.inputs[0], { type: "promptString", id: "lake-key", description: "lake MCP key", password: true });
+  assert.deepEqual(vscode.inputs[0], { type: "promptString", id: "lake-key", description: "Lake MCP key", password: true });
   const desktop = parse("claude-desktop").mcpServers.lake;
   assert.deepEqual(desktop.args, ["-y", "mcp-remote", endpoint, "--header", "Authorization:${LAKE_AUTH_HEADER}"]);
   assert.equal(desktop.env.LAKE_AUTH_HEADER, "Bearer K");

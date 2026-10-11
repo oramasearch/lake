@@ -99,12 +99,21 @@ the page is sent `Cache-Control: private, no-store`. Three more things keep late
 - **Effects have block bodies.** `useEffect(() => { … })`; the build checks it
   (`scripts/check-effects.mjs`).
 - **Words, not stored values.** Show labels, not codes; dates through `format.ts`.
-- **No page names Zetta.** Page text says lake or the workspace ("lake builds the steps", "sealed
+- **The product is Lake, with a capital L** (decision 59, lake#642). Page text says **Lake**, and
+  **Lake Console** where it names the app itself: the bare document title, the brand link's and the
+  sign-in brand's accessible names, and `index.html`'s title. Other pages are titled
+  "Lake — <page>". Technical names keep their form: hostnames (`lake.live`, `lake.oramadev.net`),
+  the MCP server name `lake`, CLI commands, `LAKE_*` variables, identifiers, paths and anything in
+  `<code>`. `tests/name.test.ts` fails the build on a string or JSX text that names the product
+  lowercase. The server's messages the pages show say Lake too (the registry's descriptions and
+  person-facing errors), so a page that recognizes one matches it without the name
+  (`WorkspaceGate`).
+- **No page names Zetta.** Page text says Lake or the workspace ("Lake builds the steps", "sealed
   in this workspace"); the engine's name is for comments, identifiers and addresses only.
   `tests/copy.test.ts` fails the build on a page string that names it (lake#583).
 - **Title Case** for headings and rail items, sentence case for body text, buttons and labels
   (`docs/ui/design-system.md` → *Capitalization*).
-- **Copy stays as it was.** Headings, explanations, empty states and confirmations keep lake's
+- **Copy stays as it was.** Headings, explanations, empty states and confirmations keep Lake's
   existing wording unless it was wrong.
 - **Confirmations name what happens** ("Delete the repository?"), never "Are you sure?".
 - **Markdown is rendered in the browser** with `react-markdown` and `remark-gfm`, never with raw

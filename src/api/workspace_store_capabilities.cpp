@@ -82,7 +82,7 @@ ApiResult move_workspace_store(const json& input, ApiContext& context) {
     }
     if (!context.sync_store || !context.workspaces) {
         return ApiResult::failure("store_unavailable",
-                                  "workspace stores are not configured on this lake");
+                                  "workspace stores are not configured on this Lake");
     }
     const std::string workspace_id = input.at("workspace_id");
     const std::string mode = input.at("mode");
@@ -305,7 +305,8 @@ ApiResult remove_space_store(const json& input, ApiContext& context) {
         return sync_failure(checked.error());
     }
     if (!context.sync_store) {
-        return ApiResult::failure("store_unavailable", "space stores are not configured on this lake");
+        return ApiResult::failure("store_unavailable",
+                                  "space stores are not configured on this Lake");
     }
     auto removal = context.sync_store->remove_space_store(customer_id, dry_run, check);
     if (!removal) {
@@ -363,7 +364,7 @@ liquid::runtime::task<ApiResult> provision_workspace_store(const json& input, Ap
     }
     if (!context.sync_store || !context.workspaces) {
         co_return ApiResult::failure("store_unavailable",
-                                     "workspace stores are not configured on this lake");
+                                     "workspace stores are not configured on this Lake");
     }
     const std::string workspace_id = input.at("workspace_id");
     context.audit_kind = "workspace_store.move";
@@ -464,9 +465,9 @@ liquid::runtime::task<ApiResult> provision_workspace_store(const json& input, Ap
 void register_workspace_store_capabilities(Registry& registry) {
     registry.add(Capability{
         .name = "remove_space_store",
-        .title = "Remove a space's old store from lake's volume",
+        .title = "Remove a space's old store from Lake's volume",
         .description =
-            "Operator only (lake#380). Removes a space's liquid store from lake's volume "
+            "Operator only (lake#380). Removes a space's liquid store from Lake's volume "
             "(`<LAKE_STORE_ROOT>/<space>/store` and `<space>/repositories`) once every live "
             "workspace of the space is switched to its own store, no repository of the space lacks "
             "a workspace and no live repository belongs to a deleted workspace; otherwise "
@@ -493,7 +494,7 @@ void register_workspace_store_capabilities(Registry& registry) {
         .title = "Move a workspace's repositories into its own store",
         .description =
             "Operator only (lake#380). Moves one workspace's repositories from its space's liquid "
-            "store on lake's volume into the workspace's own encrypted store in its workspace "
+            "store on Lake's volume into the workspace's own encrypted store in its workspace "
             "Zetta. `plan` lists the repositories and their sizes and any repository of the space "
             "without a workspace, which blocks the move; `copy` copies each repository (a rerun "
             "copies only what is missing); `verify` compares every repository in both stores; "
@@ -507,7 +508,8 @@ void register_workspace_store_capabilities(Registry& registry) {
                           {{"workspace_id", {{"type", "string"}}},
                            {"mode",
                             {{"type", "string"},
-                             {"enum", json::array({"plan", "copy", "verify", "switch", "provision"})}}}}},
+                             {"enum",
+                              json::array({"plan", "copy", "verify", "switch", "provision"})}}}}},
                          {"required", json::array({"workspace_id", "mode"})},
                          {"additionalProperties", false}},
         .output_schema = {{"type", "object"}},

@@ -1,19 +1,19 @@
 # Using Lake on a Phone
 
-lake works in your phone's browser: Safari on an iPhone, Chrome on Android. Every page fits the
+Lake works in your phone's browser: Safari on an iPhone, Chrome on Android. Every page fits the
 screen without sideways scrolling, Ask Orama becomes a full-screen conversation, and you can speak
 instead of typing. A phone is also the easiest way to capture a meeting: record it, or upload a
-voice memo or a recorded call, and lake turns it into a searchable transcript.
+voice memo or a recorded call, and Lake turns it into a searchable transcript.
 
 ## Concepts
 
-- **The same app.** There is nothing to install. Open your lake's address in the browser and sign
+- **The same app.** There is nothing to install. Open your Lake's address in the browser and sign
   in; every page, permission and audit record is the same as on a computer.
 - **A phone-shaped layout below 768 pixels wide.** The rail becomes a drawer, the top bar shows
   icons, dialogs you type into fill the screen with their main button above the keyboard, and
   tables scroll inside their own box.
-- **Speech-to-text.** Dictation and recordings are turned into text by OpenAI with your lake's own
-  key. The audio is used for that one call and **never kept**. When your lake has no
+- **Speech-to-text.** Dictation and recordings are turned into text by OpenAI with your Lake's own
+  key. The audio is used for that one call and **never kept**. When your Lake has no
   speech-to-text key, the microphones are hidden and only the text ways stay offered.
 
 ## Find Your Way Around
@@ -48,7 +48,7 @@ The microphone is in Ask Orama's message box, and in the text of a new or edited
 
 1. Tap the microphone. The first time, the browser asks for permission to use it; allow it.
 2. Speak. Tap stop when you are done.
-3. lake transcribes what you said and adds it to the box, after anything already typed, to edit
+3. Lake transcribes what you said and adds it to the box, after anything already typed, to edit
    before you send or save.
 
 A dictation stops by itself after 10 minutes. Your phone keyboard's own dictation key also works and
@@ -68,7 +68,7 @@ Through MCP, call `transcribe` with the same input. It answers the `text`.
 2. Tap **Record**, then the red microphone (**Start recording**). Keep the page open while you
    record.
 3. Tap **Stop recording** when done (or cancel to discard it). Listen back if you like.
-4. Name it (the title starts as the recording's time) and tap **Transcribe and save**. lake
+4. Name it (the title starts as the recording's time) and tap **Transcribe and save**. Lake
    transcribes it, keeps the text, drops the audio, and opens the new transcript.
 
 An iPhone records `.m4a`, Android Chrome `.webm`. A recording stops itself after 60 minutes or just
@@ -93,14 +93,14 @@ steps for the phone you are using:
 - *A call you recorded:* in the Phone app, open Recents, the contact, **History**, then the call,
   and tap **Share** to Files or Drive. A file manager cannot see it until you share it.
 
-Then in lake:
+Then in Lake:
 
 1. **Data → Transcripts → New transcript → Upload audio**.
 2. Choose the file from Files (on an iPhone) or Files or My Files (on Android).
 3. Name it and tap **Transcribe and save**.
 
 Text files work the same way through **Upload text**: `.txt`, `.md`, and `.vtt` or `.srt` captions,
-whose timings lake removes. **Paste** takes text you type, paste or dictate.
+whose timings Lake removes. **Paste** takes text you type, paste or dictate.
 
 Through the API, a transcript from audio is `POST /v1/create_transcript`:
 
@@ -131,8 +131,8 @@ on the account that owns the workspace; reading them needs `read`.
 ## Limits
 
 - Audio is at most 25 MB, a text file at most 5 MB. A larger file is refused before it is sent.
-- lake transcribes while you wait. The proxies in front of lake may close a long wait sooner than
-  lake does, so a long recording can answer a timeout; short phone recordings transcribe well
+- Lake transcribes while you wait. The proxies in front of Lake may close a long wait sooner than
+  Lake does, so a long recording can answer a timeout; short phone recordings transcribe well
   within it.
 - A phone held sideways is wider than 768 pixels and gets the computer layout.
 - The system Back gesture goes back a page; it does not close an open sheet. Use the sheet's own
@@ -143,8 +143,8 @@ on the account that owns the workspace; reading them needs `read`.
 
 | You see | What to do |
 |---|---|
-| *Speech-to-text is not configured on this lake.* | Your lake has no speech-to-text key. **Upload text** and **Paste** still work; ask your lake's operator to add the key. |
-| The browser never asks for the microphone, or refuses it | Allow the microphone for your lake's site in the browser's settings, then reload. |
+| *Speech-to-text is not configured on this Lake.* | Your Lake has no speech-to-text key. **Upload text** and **Paste** still work; ask your Lake's operator to add the key. |
+| The browser never asks for the microphone, or refuses it | Allow the microphone for your Lake's site in the browser's settings, then reload. |
 | `size_invalid` (413) | The audio is over 25 MB or the text over 400,000 bytes. Split the recording. |
 | `engine_error` (422) | OpenAI could not transcribe it; the message says why. Try again, or upload the text. |
 | A timeout while transcribing a long recording | The proxy closed the wait. Use a shorter recording. |
