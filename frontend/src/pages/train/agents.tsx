@@ -5,15 +5,12 @@ import type { Row } from "@/lib/api";
 import { useRead } from "@/lib/api";
 import { Card, Chip, Empty, Section, Skeleton } from "@/lib/ui";
 import { text } from "./workspace";
+import agentSkills from "./agent-skills.json";
 
-/** Studio's skills (orama-design studioAgents.js): granted, never assumed. */
-export const AGENT_SKILLS: [string, string][] = [
-  ["search", "Search data"],
-  ["generate-data", "Generate a dataset"],
-  ["train", "Train a Model"],
-  ["summarize", "Summarize and explain"],
-  ["call-api", "Call the API"],
-];
+/** The skills a person may grant an agent, granted, never assumed: Studio's five (orama-design
+ * studioAgents.js) and Lake's own areas (agent-runtime#7). Vendored from agent-runtime's
+ * skills.json by tools/agents/vendor-agent-skills.py, which says what each one lets an agent do. */
+export const AGENT_SKILLS: [string, string][] = agentSkills as [string, string][];
 
 export function skillLabels(skills: unknown): string {
   const labels = (Array.isArray(skills) ? skills : [])

@@ -47,7 +47,7 @@ for **Confirm and start experiment**.
 | **Orama base model** | The agent runs inside your workspace's engine, on its GPU when there is one. Its instructions are its system prompt. |
 | **Frontier model** | The agent runs on Lake's agent runtime with a frontier model (OpenAI). Only these agents can be run unattended and scheduled. |
 | **Work area** | Where it works: anywhere in this workspace, one project, or specific datasets. |
-| **Skills** | What it may do: *Search data*, *Generate a dataset*, *Train a Model*, *Summarize and explain*, *Call the API*. Granted, never assumed. |
+| **Skills** | What it may do: *Search data*, *Generate a dataset*, *Train a Model*, *Summarize and explain*, *Call the API*, *Use drives*, *Use transcripts*, *Work in repositories*, *Load datasets*, *Read and publish streams*, *Design pipelines*, *Read usage and billing*. Granted, never assumed. A skill lets the agent read what it covers; anything it would change, it proposes, and you confirm it. |
 | **Pipelines as tools** | Approved pipelines you grant an agent; it can check, run and report on each one. |
 | **Unattended run** | One run of a frontier-model agent as a job, from **Run now** or a schedule. |
 | **Schedule** | A cron schedule that runs the agent as a job on every tick, as the person who set it. |
