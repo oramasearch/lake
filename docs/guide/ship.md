@@ -13,30 +13,31 @@ address `/w/<workspace id>/…`. [Getting Started](/docs) says where to find bot
 
 | Term | What it is |
 |---|---|
-| **Model** | A learned function that makes a prediction. **Ship → Models** lists the models your workspace trained: each one's name, the project, pipeline and run it came from, its score on held-out rows, the features it reads and when it was trained. A pipeline can train several models. A model uploaded on its own lives as a model repository, with no pipeline ([Repositories](/docs/repositories)). |
+| **Model** | A learned function that makes a prediction. Each training of it is a **version** with its own model id. **Train → Models** is about training it: its versions, held-out scores and what it learned from ([Train a Model](/docs/train)). **Ship → Models** is about serving it: calling it, who may, where its answers go and how it is doing. A pipeline can train several models. A model uploaded on its own lives as a model repository, with no pipeline ([Repositories](/docs/repositories)). |
+| **Predict key** | A lake API token whose only scope is `predict`: it can call published models and do nothing else. |
 | **Published** | A model or index that answers calls from outside lake. Anything not published can still be used inside lake, but `predict` and `search_index` refuse it. |
-| **Promoted** | The model an experiment chose as its best trial ([Experiments](/docs/experiments)). It is marked **promoted** on Ship → Models. |
+| **Promoted** | The model an experiment chose as its best trial ([Experiments](/docs/experiments)). It is marked **promoted** on Train → Models and Ship → Models. Promoting a version to Ship from **Train → Models** publishes it. |
 | **Search index** | A full-text (BM25F) index over one dataset's columns. |
 | **Search key** | A lake API token whose only scope is `search_index`: it can search published indexes and do nothing else. |
 | **Lake key** | Any lake API token, made on Developer → API or Developer → MCP ([Tokens and Keys](/docs/tokens)). |
 
 ## Ship → Models
 
-**Ship → Models** lists every model in the workspace. The figures on top count the models (and how
-many have weights), the published ones, the ones with a held-out score and the ones an experiment
-promoted. The table shows each model's name, its project and pipeline, when it was trained, its
-score and whether it is published. A model trained by an experiment names its experiment and trial,
-and the model an experiment promoted carries a **promoted** chip.
+**Ship → Models** serves every model in the workspace, one row per model with its versions grouped
+as on Train → Models. The figures on top count the published models, and every model's calls,
+errors and mean latency over the last 24 hours. Each row shows the version serving and its model
+id, its calls, error rate and latency, and **Publish**, **Call** and **Unpublish**. The model's name
+opens its serving page; **training** under it opens Train → Models.
 
-- **Search models…** filters by name.
-- **Published** and **Not published** filter by state; when the workspace has several kinds of
-  model, a second row of chips filters by kind.
-- **Runs** in the header opens Train → Runs, where every model came from.
+- **Search models…** filters by name, pipeline, project or id.
+- **Published** and **Not published** filter by state.
+- **Train → Models** in the header opens the training side.
 
 ### Publish a Model
 
 1. Open **Ship → Models**.
-2. Press **Publish** on the model's row. The row then shows **Call** and **Unpublish**.
+2. Press **Publish v2** on the model's row (the button names its latest version). The row then
+   shows **Call** and **Unpublish**. To publish another version, promote it from Train → Models.
 
 - REST: `POST /v1/workspace_act` with the engine's `expose_model`:
 
@@ -99,6 +100,40 @@ at once; you can publish it again later.
 ```
 
 - MCP: `workspace_act` with the same input.
+
+### A Model's Serving Page
+
+Press a model's name on **Ship → Models**. Its page has four views; **Training** in the header opens
+the same model on Train → Models.
+
+- **Inference**: the endpoint (`POST /v1/predict`, and the MCP tool `predict`), the model id, the
+  call to paste, and **Try It**: edit the rows (prefilled with one row keyed by the model's
+  features) and press **Predict** to see the rows ranked by risk and the whole answer. Try It calls
+  `predict` as you, so the version must be published.
+- **Access**: who may call it. A call needs a lake key of someone with `read` on the workspace; the
+  list shows your keys scoped to `predict` (or to everything). **New predict key** makes a token
+  whose only scope is `predict` and shows its secret once. A call carrying a key is answered from
+  any origin; a browser signed in to lake is refused when the calling page is not lake's own. Lake
+  keeps no per-model list of origins.
+- **Destinations**: where its answers go. Each answer goes back to the caller only; no app, topic
+  or webhook receives a model's answers yet. An app calls a model as any code does.
+- **Monitoring**: calls, errors (refused and failed), mean latency and the workspace's `predict`
+  requests over 1 hour, 24 hours, 7 days or 30 days, as figures and charts, and the recent minutes
+  with calls. Lake counts calls by the minute in your workspace and keeps no row a caller sent.
+  Prediction drift against the training data is not measured yet.
+
+**Publish** and **Unpublish** are in the side column, beside the model's facts.
+
+### Watch a Model from Code
+
+- REST: `GET /v1/model_traffic?customer_id=<customer id>&workspace_id=<workspace id>&model_id=<model id>`
+- MCP: the tool `model_traffic`, with the same input.
+
+Without `model_id` it answers every model with calls. `from_ms`, `to_ms` and `step_ms` (a whole
+number of minutes) choose the range and its steps; the default is the last 24 hours in about 48
+steps. Each model answers `calls`, `errors`, `client_errors`, `server_errors`, `mean_ms` and its
+`steps`; `requests` counts the workspace's `predict` requests by status class, and `drift` says it
+is not measured yet.
 
 ### List Models from Code
 
@@ -207,6 +242,9 @@ published, runs the search in your workspace and records the query.
 - A model or index is reached only through lake (`/v1/predict`, `/v1/search_index` or the MCP tools
   of the same names), never at your workspace Zetta's own address.
 - `search_index` answers at most 100 hits per call.
+- A model's calls are counted by the minute and kept 30 days; `model_traffic` reads at most 31 days
+  and 10,000 steps at once. Counts can lag by up to ten seconds, and a lake that stops abruptly can
+  lose its last ten seconds of counts.
 - Workspace reads time out after 15 seconds and actions after 60.
 - A key lasts as long as the sign-in that made it, at most 30 days, unless your account allows keys
   that never expire ([Tokens and Keys](/docs/tokens)).
@@ -215,7 +253,7 @@ published, runs the search in your workspace and records the query.
 
 | Step | Needs |
 |---|---|
-| See models and indexes, search in the playground | `read` on the account that owns the workspace |
+| See models and indexes, their traffic (`model_traffic`), search in the playground | `read` on the account that owns the workspace |
 | Call `predict` or `search_index` | `read` on the account, and a key whose scopes include the capability |
 | Publish, unpublish, create an index, create a key | `write` on the account |
 
@@ -233,7 +271,7 @@ published, runs the search in your workspace and records the query.
 
 ## Related Pages
 
-- [Train a Model](/docs/train): where models come from, and the held-out score.
+- [Train a Model](/docs/train): where models come from, their versions, and the held-out score.
 - [Experiments](/docs/experiments): experiments, trials and promotion.
 - [Datasets and Loading Data](/docs/load-data): the datasets an index covers.
 - [Apps](/docs/apps): ship a whole data app instead of an endpoint.

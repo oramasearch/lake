@@ -51,7 +51,8 @@ The exported metric families are:
   `lake_request_series_dropped_total{reason}` (`bound`, `workspace_deleted`, `refused`) and the
   gauge `lake_request_series_pending`: requests on their way to their workspaces' `lake_requests`
   series, written by the owner loop every ten seconds ([below](#the-workspace-request-series),
-  lake#384)
+  lake#384); `lake_request_series_model_calls_written_total` counts the `predict` calls written to
+  the per-model series ([below](#the-per-model-prediction-series), lake#599)
 - `lake_workspace_store_requests_total{kind,outcome}` and
   `lake_workspace_store_request_duration_seconds{kind}`: each request lake sends to a workspace
   Zetta's object routes for a switched workspace's repository store, one count per attempt
@@ -148,6 +149,39 @@ empty.
 
 Read it with the workspace's `query_metric`, for example
 `{"metric":"lake_requests","from_ms":…,"to_ms":…,"group_by":["route","status_class"]}`.
+
+### The per-model prediction series
+
+Ship → Models monitors each model from its own workspace (lake#599). Each `predict` call about a
+model the workspace has, refused or answered, adds to two counters in that workspace Zetta,
+created by lake like `lake_requests` (counter, `resolution_ms` 60000, `retention_ms` 30 days):
+
+| Metric | Value | Labels |
+|---|---|---|
+| `lake_model_calls` | one per call | `model_id`, `status_class` |
+| `lake_model_call_ms` | the call's duration inside lake, in whole milliseconds | `model_id`, `status_class` |
+
+The duration runs from the handler's start to its answer: the published check (`get_model`) and the
+engine's `score`, not the network to the caller. A model id the workspace does not know is never a
+label, so a caller cannot grow the series with made-up ids. The calls go through the same
+`RequestRecorder` as `lake_requests` (`add_model_call`): the same bound across every metric, held
+only in memory on the request path, written by the same flush. A call and its duration are kept or
+dropped together, so the mean never counts a call without its time; the dropped totals count
+calls, not milliseconds. A workspace that defines one metric differently refuses only that metric.
+
+`model_traffic` reads the two series and `lake_requests` (`capability` `predict`) with
+`query_metric` and answers each model's calls, errors (4xx refused, 5xx failed) and mean latency,
+step by step ([workspaces](../api/workspaces.md)). The series counts calls, never the rows sent or
+the scores answered. Prediction drift is not measured: the engine keeps no reference distribution
+of a model's training data to compare against.
+
+**Verify.** `RequestRecorder.CountsEachModelsCallsAndTheirDuration`,
+`RequestRecorder.AModelCallIsKeptWithItsDurationOrDroppedWithIt`,
+`ModelTraffic.PredictCountsEachCallOfAModel` and
+`ModelTraffic.AnswersCallsErrorsAndMeanLatencyPerModel` (`tests/test_request_series.cpp`).
+
+**Change.** A new per-model measure is a new counter metric added in `add_model_call` and read in
+`model_traffic` (`src/api/workspace_capabilities.cpp`); never add a row's content as a label.
 
 ## Why
 

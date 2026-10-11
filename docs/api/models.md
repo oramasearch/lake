@@ -45,6 +45,25 @@ deletions, cuts one liquid change, and updates `main`. Read revisions may be nam
 `blake3:` change digests. Upload preparation and commits use Lake tokens and never place a token
 in a log or response.
 
+## A workspace model: versions, training and serving (lake#599)
+
+A model is a learned function. The workspace engine keeps one record per training, each with its
+own id, the id `get_model`, `expose_model` and `predict` take. The web app groups the records of one
+model, the same model name from the same pipeline of the same project (or the same experiment when
+no pipeline is named), as its **versions**; a pipeline may hold several models, one per model step.
+Grouping is the web app's (`frontend/src/pages/train/models.ts`); no capability changes for it.
+
+- **Train → Models** is about training: each model's versions and held-out scores over time,
+  comparing versions, what each learned from (`get_run_report`), its pipeline steps (`get_graph`),
+  retraining (`run_pipeline` with the pipeline and `model_name`) and promoting a version to Ship.
+- **Ship → Models** is about serving: publishing (`expose_model`, `unexpose_model`), the `predict`
+  call and a try-it panel, the keys scoped to `predict`, where answers go, and monitoring from
+  `model_traffic` ([workspaces.md](workspaces.md),
+  [../serving/telemetry.md](../serving/telemetry.md#the-per-model-prediction-series)).
+
+A model uploaded on its own is a model repository (the routes above). Lake does not record which
+repositories hold a model, so Train → Models does not list them yet.
+
 ## Training provenance
 
 Training provenance uses two canonical libliquid attestations, not a Lake-specific envelope:

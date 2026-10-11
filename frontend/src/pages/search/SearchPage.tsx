@@ -151,8 +151,9 @@ const PLACES: Place[] = [
     run: async (q, scope, _o, signal) => {
       const value = await engine<{ models?: Row[] }>(scope, "list_models", {}, signal);
       return (value.models ?? [])
-        .filter((m) => matches(q, m.name, m.id, m.methodology, m.description))
-        .map((m) => ({ key: m.id ?? m.name, title: m.name ?? m.id, detail: m.methodology ?? m.description, to: wsPath(scope, "/ship/models") }));
+        // A model opens its training page, which links to serving it (lake#599).
+        .filter((m) => matches(q, m.name, m.id, m.kind, m.pipeline_name, m.project_name))
+        .map((m) => ({ key: m.id ?? m.name, title: m.name ?? m.id, detail: [m.kind, m.pipeline_name || "no pipeline", m.project_name].filter(Boolean).join(" · "), to: wsPath(scope, `/train/model?id=${encodeURIComponent(m.id ?? "")}`) }));
     },
   },
   {

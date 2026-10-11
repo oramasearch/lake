@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -109,24 +110,49 @@ public:
             }
             return json{{"metric", name}, {"recorded", points.size()}};
         }
-        // query_metric: one series per distinct label set, with its total.
-        std::map<std::string, std::pair<json, double>> series;
+        // query_metric (zetta docs/data/time-series.md): the points in [from_ms, to_ms) whose
+        // labels include `labels`, one series per value of the `group_by` labels (none: one
+        // series for everything), each with its total and, by `step_ms`, its points.
         const json wanted = input.value("labels", json::object());
+        const json group_by = input.value("group_by", json::array());
+        const auto from_ms = input.value("from_ms", std::int64_t{0});
+        const auto to_ms = input.value("to_ms", std::numeric_limits<std::int64_t>::max());
+        const auto step_ms = input.value("step_ms", std::int64_t{0});
+        struct Series {
+            json labels = json::object();
+            double total = 0;
+            std::map<std::int64_t, double> steps;
+        };
+        std::map<std::string, Series> series;
         for (const auto& point : found->second.points) {
             bool matches = true;
             for (const auto& [key, value] : wanted.items()) {
                 matches = matches && point.at("labels").value(key, json()) == value;
             }
-            if (!matches) {
+            const auto at_ms = point.value("at_ms", std::int64_t{0});
+            if (!matches || at_ms < from_ms || at_ms >= to_ms) {
                 continue;
             }
-            auto& entry = series[point.at("labels").dump()];
-            entry.first = point.at("labels");
-            entry.second += point.at("value").get<double>();
+            json labels = json::object();
+            for (const auto& name : group_by) {
+                if (point.at("labels").contains(name.get<std::string>())) {
+                    labels[name.get<std::string>()] =
+                        point.at("labels").at(name.get<std::string>());
+                }
+            }
+            auto& entry = series[labels.dump()];
+            entry.labels = labels;
+            const double value = point.at("value").get<double>();
+            entry.total += value;
+            entry.steps[step_ms > 0 ? at_ms - (at_ms - from_ms) % step_ms : from_ms] += value;
         }
         json rows = json::array();
         for (const auto& [ignored, entry] : series) {
-            rows.push_back({{"labels", entry.first}, {"total", entry.second}});
+            json points = json::array();
+            for (const auto& [at_ms, value] : entry.steps) {
+                points.push_back({{"at_ms", at_ms}, {"value", value}});
+            }
+            rows.push_back({{"labels", entry.labels}, {"total", entry.total}, {"points", points}});
         }
         return json{{"metric", found->second.definition}, {"aggregate", "sum"}, {"series", rows}};
     }

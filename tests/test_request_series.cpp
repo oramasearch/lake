@@ -15,6 +15,8 @@
 #include <nlohmann/json.hpp>
 
 #include "api/request_log.hpp"
+#include "lake/api/capabilities.hpp"
+#include "lake/api/registry.hpp"
 #include "lake/api/request_recorder.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/memory_store.hpp"
@@ -215,6 +217,196 @@ TEST(RequestRecorder, KeepsAFailedWriteAndDropsADeletedWorkspace) {
     flush(recorder);
     EXPECT_EQ(recorder.pending(), 0U);
     EXPECT_EQ(recorder.totals().dropped_refused, 1U);
+}
+
+// The per-model prediction series (lake#599): each predict call adds one call and its duration
+// under its model and status class, in the same bounded recorder and the same flush.
+TEST(RequestRecorder, CountsEachModelsCallsAndTheirDuration) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    lake::test::RecordWorkspaces workspaces(store);
+    const std::string customer = space(*store, "series-models");
+    const std::string home = workspaces.create(customer, "home");
+
+    RequestRecorder recorder(store.get(), workspaces.service.get());
+    recorder.add_model_call(home, "model-a", 200, 10.2, minute);
+    recorder.add_model_call(home, "model-a", 200, 29.6, minute + std::chrono::seconds(20));
+    recorder.add_model_call(home, "model-a", 422, 5, minute);
+    recorder.add_model_call(home, "model-b", 200, 7, minute + std::chrono::minutes(1));
+    recorder.add_model_call(home, "", 200, 7, minute);      // no model: ignored
+    recorder.add_model_call("", "model-a", 200, 7, minute); // no workspace: ignored
+    // (a, 2xx), (a, 4xx), (b, 2xx): a call and a duration each.
+    EXPECT_EQ(recorder.pending(), 6U);
+
+    flush(recorder);
+    auto& series = workspaces.records(home);
+    ASSERT_TRUE(series.metrics.contains("lake_model_calls"));
+    ASSERT_TRUE(series.metrics.contains("lake_model_call_ms"));
+    EXPECT_FALSE(series.metrics.contains("lake_requests")) << "no request was counted";
+    for (const char* name : {"lake_model_calls", "lake_model_call_ms"}) {
+        const json& definition = series.metrics.at(name).definition;
+        EXPECT_EQ(definition["kind"], "counter");
+        EXPECT_EQ(definition["resolution_ms"], 60000);
+        EXPECT_EQ(definition["retention_ms"], 30LL * 24 * 60 * 60 * 1000);
+    }
+    EXPECT_EQ(series.metric_total("lake_model_calls", {{"model_id", "model-a"}}), 3);
+    EXPECT_EQ(
+        series.metric_total("lake_model_calls", {{"model_id", "model-a"}, {"status_class", "4xx"}}),
+        1);
+    EXPECT_EQ(series.metric_total("lake_model_calls", {{"model_id", "model-b"}}), 1);
+    EXPECT_EQ(series.metric_total("lake_model_call_ms",
+                                  {{"model_id", "model-a"}, {"status_class", "2xx"}}),
+              40)
+        << "milliseconds, each rounded";
+    const auto totals = recorder.totals();
+    EXPECT_EQ(totals.model_calls, 4U);
+    EXPECT_EQ(totals.recorded, 0U) << "requests are counted apart";
+    EXPECT_EQ(totals.points, 6U);
+}
+
+TEST(RequestRecorder, AModelCallIsKeptWithItsDurationOrDroppedWithIt) {
+    auto store = std::make_shared<lake::control::InMemoryStore>();
+    lake::test::RecordWorkspaces workspaces(store);
+    const std::string customer = space(*store, "series-model-bound");
+    const std::string home = workspaces.create(customer, "home");
+
+    RequestRecorder recorder(store.get(), workspaces.service.get(), 3);
+    recorder.add(home, "/a", "", 200, minute);
+    recorder.add_model_call(home, "model-a", 200, 4, minute); // two more counts: three held
+    recorder.add_model_call(home, "model-b", 200, 4, minute); // needs two: dropped whole
+    recorder.add_model_call(home, "model-a", 200, 6, minute); // held counts still merge
+    EXPECT_EQ(recorder.pending(), 3U);
+    EXPECT_EQ(recorder.totals().dropped_bound, 1U) << "one call, not its duration";
+
+    flush(recorder);
+    auto& series = workspaces.records(home);
+    EXPECT_EQ(series.metric_total("lake_model_calls", {{"model_id", "model-a"}}), 2);
+    EXPECT_EQ(series.metric_total("lake_model_call_ms", {{"model_id", "model-a"}}), 10);
+    EXPECT_EQ(series.metric_total("lake_model_calls", {{"model_id", "model-b"}}), 0);
+
+    // A workspace that defines lake_model_calls differently refuses that metric alone.
+    const std::string conflicting = workspaces.create(customer, "conflicting");
+    workspaces.records(conflicting).metrics["lake_model_calls"] =
+        lake::test::RecordTables::Metric{{{"metric", "lake_model_calls"}, {"kind", "gauge"}}, {}};
+    recorder.add(conflicting, "/a", "", 200, minute);
+    recorder.add_model_call(conflicting, "model-a", 200, 4, minute);
+    flush(recorder);
+    EXPECT_EQ(recorder.pending(), 0U);
+    EXPECT_EQ(recorder.totals().dropped_refused, 1U) << "the call; its duration is not a call";
+    EXPECT_EQ(workspaces.records(conflicting).metric_total("lake_requests"), 1);
+    EXPECT_EQ(workspaces.records(conflicting).metric_total("lake_model_call_ms"), 4);
+}
+
+namespace {
+
+// A ready workspace whose model m-1 is published, and the registry that serves predict and
+// model_traffic over it, the recorder in its context.
+struct PredictRig {
+    std::shared_ptr<lake::control::InMemoryStore> store =
+        std::make_shared<lake::control::InMemoryStore>();
+    lake::test::RecordWorkspaces workspaces{store};
+    std::string customer = space(*store, "series-predict");
+    std::string home = workspaces.create(customer, "home");
+    RequestRecorder recorder{store.get(), workspaces.service.get()};
+    lake::api::Registry registry;
+
+    PredictRig() {
+        lake::api::register_core_capabilities(registry, "test");
+        workspaces.zetta->answers["get_model"] = {{"id", "m-1"}, {"exposed", true}};
+        workspaces.zetta->answers["score"] = {
+            {"ranked", json::array({{{"entity", 0}, {"risk", 0.9}}})}};
+    }
+
+    lake::api::ApiResult call(const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = store.get();
+        context.workspaces = workspaces.service.get();
+        context.request_recorder = &recorder;
+        context.authorized = true;
+        context.acting_identity = "admin";
+        context.operator_credential = true;
+        context.request_id = lake::control::new_uuid_v4();
+        input["customer_id"] = customer;
+        input["workspace_id"] = home;
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        return std::move(*completed);
+    }
+};
+
+} // namespace
+
+TEST(ModelTraffic, PredictCountsEachCallOfAModel) {
+    PredictRig rig;
+    const json rows = json::array({{{"entity", "acct-a"}, {"tenure", 4}}});
+    ASSERT_TRUE(rig.call("predict", {{"model_id", "m-1"}, {"rows", rows}}).ok);
+    ASSERT_TRUE(rig.call("predict", {{"model_id", "m-1"}, {"rows", rows}}).ok);
+
+    // An unpublished model's refusal is counted as a client error of that model.
+    rig.workspaces.zetta->answers["get_model"] = {{"id", "m-1"}, {"exposed", false}};
+    const auto refused = rig.call("predict", {{"model_id", "m-1"}, {"rows", rows}});
+    EXPECT_FALSE(refused.ok);
+
+    flush(rig.recorder);
+    auto& series = rig.workspaces.records(rig.home);
+    EXPECT_EQ(series.metric_total("lake_model_calls", {{"model_id", "m-1"}}), 3);
+    EXPECT_EQ(
+        series.metric_total("lake_model_calls", {{"model_id", "m-1"}, {"status_class", "2xx"}}), 2);
+    EXPECT_EQ(
+        series.metric_total("lake_model_calls", {{"model_id", "m-1"}, {"status_class", "4xx"}}), 1);
+}
+
+TEST(ModelTraffic, AnswersCallsErrorsAndMeanLatencyPerModel) {
+    PredictRig rig;
+    // Nothing written yet: no traffic, and drift said not measured.
+    const auto empty = rig.call("model_traffic", json::object());
+    ASSERT_TRUE(empty.ok) << empty.error.message;
+    EXPECT_TRUE(empty.value["models"].empty());
+    EXPECT_EQ(empty.value["requests"]["total"], 0);
+    EXPECT_EQ(empty.value["drift"]["measured"], false);
+    EXPECT_EQ(empty.value["step_ms"].get<std::int64_t>() % 60000, 0);
+
+    rig.recorder.add_model_call(rig.home, "m-1", 200, 10, minute);
+    rig.recorder.add_model_call(rig.home, "m-1", 200, 30, minute + std::chrono::seconds(10));
+    rig.recorder.add_model_call(rig.home, "m-1", 503, 20, minute + std::chrono::minutes(5));
+    rig.recorder.add_model_call(rig.home, "m-2", 200, 8, minute);
+    rig.recorder.add(rig.home, "/v1/predict", "predict", 200, minute);
+    rig.recorder.add(rig.home, "/v1/predict", "predict", 422, minute);
+    rig.recorder.add(rig.home, "/v1/get_repository", "get_repository", 200, minute);
+    flush(rig.recorder);
+
+    const auto from_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(minute.time_since_epoch()).count();
+    const auto traffic =
+        rig.call("model_traffic",
+                 {{"from_ms", from_ms}, {"to_ms", from_ms + 600'000}, {"step_ms", 300'000}});
+    ASSERT_TRUE(traffic.ok) << traffic.error.message;
+    ASSERT_EQ(traffic.value["models"].size(), 2U);
+    const json& first = traffic.value["models"][0];
+    EXPECT_EQ(first["model_id"], "m-1");
+    EXPECT_EQ(first["calls"], 3);
+    EXPECT_EQ(first["errors"], 1);
+    EXPECT_EQ(first["server_errors"], 1);
+    EXPECT_EQ(first["client_errors"], 0);
+    EXPECT_EQ(first["mean_ms"], 20);
+    ASSERT_EQ(first["steps"].size(), 2U);
+    EXPECT_EQ(first["steps"][0]["at_ms"], from_ms);
+    EXPECT_EQ(first["steps"][0]["calls"], 2);
+    EXPECT_EQ(first["steps"][0]["mean_ms"], 20);
+    EXPECT_EQ(first["steps"][1]["errors"], 1);
+    EXPECT_EQ(traffic.value["requests"]["total"], 2) << "predict requests only";
+    EXPECT_EQ(traffic.value["requests"]["by_status_class"]["4xx"], 1);
+
+    const auto one = rig.call(
+        "model_traffic", {{"model_id", "m-2"}, {"from_ms", from_ms}, {"to_ms", from_ms + 600'000}});
+    ASSERT_TRUE(one.ok) << one.error.message;
+    ASSERT_EQ(one.value["models"].size(), 1U);
+    EXPECT_EQ(one.value["models"][0]["model_id"], "m-2");
+
+    const auto backwards = rig.call("model_traffic", {{"from_ms", from_ms}, {"to_ms", from_ms}});
+    EXPECT_EQ(backwards.error.code, "invalid_input");
+    const auto ragged = rig.call(
+        "model_traffic", {{"from_ms", from_ms}, {"to_ms", from_ms + 600'000}, {"step_ms", 90'000}});
+    EXPECT_EQ(ragged.error.path, "/step_ms");
 }
 
 // Against a real Zetta when LAKE_TEST_ZETTA_URL and LAKE_TEST_ZETTA_TOKEN name one (a local

@@ -234,6 +234,7 @@ void close_execution_context(const void* context);
 void forget_execution_context(const void* context);
 class MeteringRecorder;
 class AuditRecorder;
+class RequestRecorder;
 
 struct WorkspaceCallTiming {
     std::atomic<std::size_t> count{0};
@@ -407,6 +408,9 @@ struct ApiContext {
     // The workspace audit's writer (docs/api/audit.md#workspace-audit). Null: this lake has no
     // workspace Zettas, and every event is recorded in the central log.
     AuditRecorder* audit_recorder = nullptr;
+    // The per-workspace request and per-model prediction series (docs/serving/telemetry.md):
+    // `predict` counts each call of a model here (lake#599). Null: nothing is counted.
+    RequestRecorder* request_recorder = nullptr;
 };
 
 using CapabilityHandler =

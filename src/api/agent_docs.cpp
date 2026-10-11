@@ -98,7 +98,7 @@ constexpr std::array group_rules{
               [](std::string_view n) {
                   return contains_any(n, {"pipeline"}) || n.starts_with("workspace_") ||
                          n == "start_workspace" || n == "delete_workspace" || n == "search_index" ||
-                         n == "predict";
+                         n == "predict" || n == "model_traffic";
               }},
     GroupRule{"Services",
               "Databases, streams and engines lake runs for you (Postgres, Zetta, Kafka, "
