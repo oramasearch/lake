@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A stream of data with a loop that keeps the model fresh">
+<title>M-21 Online / streaming learning</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#0f62fe)}.d{fill:var(--cat-accent,#0f62fe)}.t{fill:var(--cat-tint,#0f62fe33)}.s{stroke-dasharray:2 2.5}</style>
+<path class="l" d="M3 7c2-2 4-2 6 0s4 2 6 0M3 12c2-2 4-2 6 0s2.5 1.6 4 1"/>
+<path class="a" d="M20.5 16a4 4 0 1 1-1.2-2.85"/>
+<path class="a" d="M19.5 10.5v2.9h-2.9"/>
+</svg>

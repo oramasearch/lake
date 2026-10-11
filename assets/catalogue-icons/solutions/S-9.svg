@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="A paper plane sent out with a trail">
+<title>S-9 Automated Outbound</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#8e6a00)}.d{fill:var(--cat-accent,#8e6a00)}.t{fill:var(--cat-tint,#8e6a0033)}.s{stroke-dasharray:2 2.5}</style>
+<path class="t" d="M21 3L10.5 13.5l3 7.5z"/>
+<path class="l" d="M21 3L3 10.5l7.5 3 3 7.5z"/>
+<path class="a" d="M21 3L10.5 13.5"/>
+<path class="a s" d="M3 21l3.5-3.5"/>
+</svg>

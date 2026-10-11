@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Stacked stock boxes with a refill arrow">
+<title>S-6 Replenishment &amp; Inventory Action</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#8e6a00)}.d{fill:var(--cat-accent,#8e6a00)}.t{fill:var(--cat-tint,#8e6a0033)}.s{stroke-dasharray:2 2.5}</style>
+<rect class="l" x="3" y="13.5" width="6.5" height="6.5" rx="1.25"/>
+<rect class="l" x="10.5" y="13.5" width="6.5" height="6.5" rx="1.25"/>
+<rect class="l" x="6.75" y="6" width="6.5" height="6.5" rx="1.25"/>
+<path class="a" d="M19.75 20V8M17.5 10.25L19.75 8 22 10.25"/>
+</svg>

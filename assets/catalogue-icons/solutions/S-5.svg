@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Past demand as bars, the next periods as dashed bars">
+<title>S-5 Demand Forecasting</title>
+<style>.l,.a{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}.l{stroke:currentColor}.a{stroke:var(--cat-accent,#8e6a00)}.d{fill:var(--cat-accent,#8e6a00)}.t{fill:var(--cat-tint,#8e6a0033)}.s{stroke-dasharray:2 2.5}</style>
+<rect class="t" x="13" y="11" width="3" height="9.5" rx="1"/>
+<rect class="t" x="17.5" y="7" width="3" height="13.5" rx="1"/>
+<path class="l" d="M3 20.5h18"/>
+<rect class="l" x="4" y="13" width="3" height="7.5" rx="1"/>
+<rect class="l" x="8.5" y="10" width="3" height="10.5" rx="1"/>
+<rect class="a s" x="13" y="11" width="3" height="9.5" rx="1"/>
+<rect class="a s" x="17.5" y="7" width="3" height="13.5" rx="1"/>
+</svg>
