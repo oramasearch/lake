@@ -6,6 +6,7 @@
 #include <map>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "lake/control/platform.hpp"
@@ -19,6 +20,20 @@ namespace lake::api {
 namespace {
 
 using nlohmann::json;
+
+// A lake started without the operator's platform source has no Deployments: the answer is
+// `not_supported` (501), never `store_unavailable`, because asking again changes nothing until an
+// operator configures it (lake#575, docs/api/platform.md#a-lake-without-the-platform-mirror).
+// The message names no engine: the web app shows it to people (lake#583). The configuration
+// (LAKE_OPERATOR_ZETTA_URL, LAKE_OPERATOR_ZETTA_TOKEN) is in the page it points to.
+constexpr std::string_view kNotSetUp =
+    "deployments are not set up on this lake: an operator turns them on by connecting lake to "
+    "the cluster operator's platform source (docs/api/platform.md#a-lake-without-the-platform-"
+    "mirror)";
+
+ApiResult not_set_up() {
+    return ApiResult::failure("not_supported", std::string(kNotSetUp));
+}
 
 ApiResult platform_error(const control::PlatformError& error) {
     return ApiResult::failure(error.code, error.message);
@@ -46,8 +61,7 @@ std::expected<std::string, ApiError> repository_object(const json& input, ApiCon
 // role is refused before any workspace call.
 std::expected<std::string, ApiError> environment_object(const json& input, ApiContext& context) {
     if (!context.platform || !context.store) {
-        return std::unexpected(
-            ApiError{"store_unavailable", "the platform mirror is not configured", {}});
+        return std::unexpected(ApiError{"not_supported", std::string(kNotSetUp), {}});
     }
     const std::string environment = input.at("environment").get<std::string>();
     if (const auto repository = context.store->get_repository(input.at("repository_id"));
@@ -219,8 +233,7 @@ void register_platform_capabilities(Registry& registry) {
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.platform || !context.store) {
-                co_return ApiResult::failure("store_unavailable",
-                                             "the platform mirror is not configured");
+                co_return not_set_up();
             }
             const std::string repository_id = input.at("repository_id");
             const auto readable = may_read_an_environment(input, context);
@@ -266,8 +279,7 @@ void register_platform_capabilities(Registry& registry) {
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.platform) {
-                co_return ApiResult::failure("store_unavailable",
-                                             "the platform mirror is not configured");
+                co_return not_set_up();
             }
             const std::string repository_id = input.at("repository_id");
             const std::string environment = input.at("environment");
@@ -306,8 +318,7 @@ void register_platform_capabilities(Registry& registry) {
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.platform || !context.store) {
-                co_return ApiResult::failure("store_unavailable",
-                                             "the platform mirror is not configured");
+                co_return not_set_up();
             }
             const std::string repository_id = input.at("repository_id");
             const std::string environment = input.value("environment", "");
@@ -399,8 +410,7 @@ void register_platform_capabilities(Registry& registry) {
         .async_handler = [](const json& input,
                             ApiContext& context) -> liquid::runtime::task<ApiResult> {
             if (!context.platform) {
-                co_return ApiResult::failure("store_unavailable",
-                                             "the platform mirror is not configured");
+                co_return not_set_up();
             }
             const std::string direction = input.value("direction", "forward");
             if (direction != "forward" && direction != "backward") {
@@ -458,8 +468,7 @@ void register_platform_capabilities(Registry& registry) {
             .async_handler = [deleted](const json& input,
                                        ApiContext& context) -> liquid::runtime::task<ApiResult> {
                 if (!context.platform) {
-                    co_return ApiResult::failure("store_unavailable",
-                                                 "the platform mirror is not configured");
+                    co_return not_set_up();
                 }
                 const std::string key = input.at("key");
                 const std::string value = input.value("value", "");
@@ -527,8 +536,7 @@ void register_platform_capabilities(Registry& registry) {
             .async_handler = [deleted](const json& input,
                                        ApiContext& context) -> liquid::runtime::task<ApiResult> {
                 if (!context.platform) {
-                    co_return ApiResult::failure("store_unavailable",
-                                                 "the platform mirror is not configured");
+                    co_return not_set_up();
                 }
                 const std::string host = input.at("host");
                 const std::string tls = input.value("tls", "");
