@@ -605,3 +605,157 @@ export function layoutGraph(graph: Graph) {
     height: LAYOUT.top + rows * LAYOUT.rowHeight,
   };
 }
+
+// --- A workspace's own solutions beside Orama's (lake#597, docs/api/solutions.md) -------------
+
+/**
+ * Who a solution is from: Orama's catalogue (read-only) or the workspace's own (editable). An
+ * entry without `source` (an engine read) is Orama's.
+ */
+export type SolutionSource = "orama"|"workspace";
+export function solutionSource(entry: J): SolutionSource {
+    return text(entry, "source") === "workspace" ? "workspace" : "orama";
+}
+
+/** The badge a solution card and page carry: "Orama" or "Yours". */
+export function sourceLabel(entry: J): "Orama"|"Yours" {
+    return solutionSource(entry) === "workspace" ? "Yours" : "Orama";
+}
+
+/**
+ * The solutions a toolbar keeps: by source, by Orama's run state (which only Orama's carry) and
+ * by a search over the id, name and the text a person reads.
+ */
+export function filterSolutions(
+    entries: J[],
+    filter: {source: SolutionSource|null; state : string | null; search : string}): J[] {
+    const needle = filter.search.trim().toLowerCase();
+    return entries.filter((entry) => {
+        if (filter.source && solutionSource(entry) !== filter.source)
+            return false;
+        if (filter.state &&
+            (solutionSource(entry) !== "orama" || runsBadge(entry).label !== filter.state))
+            return false;
+        if (!needle)
+            return true;
+        return [ "id", "name", "promise", "problem", "use_case", "decision", "notes" ].some(
+            (field) => text(entry, field).toLowerCase().includes(needle));
+    });
+}
+
+/**
+ * A solution's methodologies as a person types them: "M-1, M-3:2" (an id, and its minimum level
+ * after a colon when above 1).
+ */
+export function formatMethodologies(list: unknown): string {
+    return solutionMethodologies({methodologies : Array.isArray(list) ? list : []})
+        .map((m) => (m.level > 1 ? `${m.id}:${m.level}` : m.id))
+        .join(", ");
+}
+
+/**
+ * Parses what `formatMethodologies` writes, refusing what lake would: a level outside 1-4, an id
+ * with spaces, or an id listed twice.
+ */
+export function parseMethodologies(value: string): {id: string; minimum_level : number}[] {
+    const out: {id: string; minimum_level : number}[] = [];
+    for (const raw of value.split(/[,\n]/)) {
+        const item = raw.trim();
+        if (!item)
+            continue;
+        const [id, level, ...rest] = item.split(":").map((s) => s.trim());
+        if (rest.length || !/^[A-Za-z0-9._-]{1,64}$/.test(id))
+            throw new Error(`"${item}" is not a methodology id such as M-1 or M-3:2.`);
+        const minimum = level === undefined || level === "" ? 1 : Number(level);
+        if (!Number.isInteger(minimum) || minimum < 1 || minimum > 4)
+            throw new Error(`${id}'s minimum level must be 1 to 4.`);
+        if (out.some((m) => m.id === id))
+            throw new Error(`${id} is listed twice.`);
+        out.push({id, minimum_level : minimum});
+    }
+    return out;
+}
+
+/** The fields of a solution's form, as typed. */
+export type SolutionForm = {
+    name: string; problem : string; decision : string; metric : string; baseline : string;
+    target : string;
+    methodologies : string;
+    pipeline : string;
+    notes : string
+};
+
+export function solutionForm(solution: J|null): SolutionForm {
+    const m: J = solution?.measurement && typeof solution.measurement === "object"
+                     ? solution.measurement
+                     : {};
+    return {
+        name : text(solution, "name"),
+        problem : text(solution, "problem"),
+        decision : text(solution, "decision"),
+        metric : text(m, "metric"),
+        baseline : text(m, "baseline"),
+        target : text(m, "target"),
+        methodologies : formatMethodologies(solution?.methodologies),
+        pipeline : text(solution, "pipeline"),
+        notes : text(solution, "notes"),
+    };
+}
+
+/**
+ * The input create_solution and update_solution take from the form (every field sent, so an
+ * emptied one is cleared).
+ */
+export function solutionInput(form: SolutionForm): J {
+    return {
+        name : form.name.trim(),
+        problem : form.problem.trim(),
+        decision : form.decision.trim(),
+        measurement : {
+            metric : form.metric.trim(),
+            baseline : form.baseline.trim(),
+            target : form.target.trim()
+        },
+        methodologies : parseMethodologies(form.methodologies),
+        pipeline : form.pipeline.trim(),
+        notes : form.notes.trim(),
+    };
+}
+
+/** A pipeline reference `<project>/<pipeline>` as a link's parts; null for a template's text. */
+export function pipelineReference(value: string): {project: string; graph : string}|null {
+    const match = /^([a-z0-9][a-z0-9_-]{0,62})\/([^/\s][^/]*)$/.exec(value.trim());
+    return match ? {project : match[1], graph : match[2].trim()} : null;
+}
+
+/**
+ * What a project started from one of your own solutions records as its decision: the decision it
+ * drives and how its return is measured.
+ */
+export function startDecision(solution: J): string {
+    const m: J = solution?.measurement && typeof solution.measurement === "object"
+                     ? solution.measurement
+                     : {};
+    const metric = text(m, "metric");
+    const from = text(m, "baseline");
+    const to = text(m, "target");
+    let measured = metric ? `Measured by ${metric}` : "";
+    if (measured && from && to)
+        measured += `, from ${from} to ${to}`;
+    else if (measured && to)
+        measured += `, to ${to}`;
+    else if (measured && from)
+        measured += `, from ${from}`;
+    const decision = text(solution, "decision");
+    return [ decision, measured ? `${measured}.` : "" ].filter(Boolean).join(" ");
+}
+
+/**
+ * The sentence a project started from one of your own solutions builds its first pipeline from
+ * (compile_pipeline's intent): the decision, for the problem.
+ */
+export function startIntent(solution: J): string {
+    const decision = text(solution, "decision");
+    const problem = text(solution, "problem");
+    return [ decision, problem ? `The problem: ${problem}` : "" ].filter(Boolean).join(" ");
+}
