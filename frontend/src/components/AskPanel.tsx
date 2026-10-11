@@ -12,7 +12,7 @@
  * something (`openAsk`, lib/ask.ts): the request's context goes with the next message. */
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { FileText, Maximize2, Plus, Sparkles, X } from "lucide-react";
+import { ExternalLink, FileText, Maximize2, Minimize2, Plus, Sparkles, X } from "lucide-react";
 import { useSession } from "@/lib/session";
 import { ASK_DEFAULT_WIDTH, setResizingAsk } from "@/lib/askWidth";
 import type { AskRequest } from "@/lib/ask";
@@ -94,6 +94,8 @@ export function AskPanel({
   width,
   onResize,
   overlay,
+  expanded = false,
+  onToggleExpanded,
   request,
   onRequestDone,
 }: {
@@ -102,6 +104,9 @@ export function AskPanel({
   width: number;
   onResize: (width: number) => void;
   overlay: boolean;
+  /** Widened over the page (the expand button), until it is collapsed again. */
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
   /** What a page opened the panel about, until it is sent or dismissed. */
   request?: AskRequest | null;
   onRequestDone?: () => void;
@@ -112,9 +117,9 @@ export function AskPanel({
   // The home indicator's strip matters only while the keyboard is down.
   const style = { width, ...(phone ? { "--sheet-safe-bottom": keyboard ? "0px" : "env(safe-area-inset-bottom)" } : {}) } as CSSProperties;
   return (
-    <aside className="ask-panel" data-overlay={overlay || undefined} data-sheet={phone || undefined} style={style} aria-label="Ask Orama">
-      <ResizeHandle width={width} onResize={onResize} />
-      <div className="ask-head flex items-center gap-2 border-b border-[var(--lake-border-subtle)] px-4 py-2">
+    <aside className="ask-panel" data-overlay={overlay || undefined} data-expanded={expanded || undefined} data-sheet={phone || undefined} style={style} aria-label="Ask Orama">
+      {!expanded && <ResizeHandle width={width} onResize={onResize} />}
+      <div className="ask-head flex h-12 shrink-0 items-center gap-2 border-b border-[var(--lake-border-subtle)] px-4">
         <Sparkles size={15} aria-hidden />
         <div className="min-w-0 flex-1">
           <h2 className="m-0 text-base">Ask Orama</h2>
@@ -123,6 +128,11 @@ export function AskPanel({
           </p>
         </div>
         {workspaceId && space ? <PanelActions workspaceId={workspaceId} from={from} /> : null}
+        {!phone && onToggleExpanded && (
+          <button type="button" className="icon-button" onClick={onToggleExpanded} title={expanded ? "Back to the side" : "Expand over the page"} aria-label={expanded ? "Back to the side" : "Expand over the page"} aria-pressed={expanded}>
+            {expanded ? <Minimize2 size={15} aria-hidden /> : <Maximize2 size={15} aria-hidden />}
+          </button>
+        )}
         <button type="button" className="icon-button" onClick={onClose} aria-label="Close Ask Orama">
           <X size={16} aria-hidden />
         </button>
@@ -176,8 +186,8 @@ function PanelActions({ workspaceId, from }: { workspaceId: string; from: string
       <button type="button" className="icon-button" onClick={() => update({ ...EMPTY, agent: state.agent })} title="Start a new conversation" aria-label="Start a new conversation">
         <Plus size={16} aria-hidden />
       </button>
-      <Link to={full} className="icon-button" title="Full view" aria-label="Open in the Ask Orama page">
-        <Maximize2 size={15} aria-hidden />
+      <Link to={full} className="icon-button" title="Open as a page" aria-label="Open the conversation as a page">
+        <ExternalLink size={15} aria-hidden />
       </Link>
     </>
   );

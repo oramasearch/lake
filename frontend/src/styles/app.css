@@ -407,10 +407,14 @@ button:disabled:hover {
   color: var(--lake-text-on-action);
   background: var(--lake-action-filled);
 }
+/* Ask Orama runs from just below the brand strip to the bottom, its 48px head level with the shell
+   bar, so nothing is left empty above it. Expanding or collapsing slides its width; a drag of the
+   resize handle does not animate (data-resizing on <html>, lib/askWidth.ts). */
 .ask-panel {
   position: fixed;
   z-index: calc(var(--lake-z-sticky) + 1);
-  top: 50px;
+  top: 2px;
+  transition: width 200ms var(--lake-motion-ease, ease);
   right: 0;
   bottom: 0;
   max-width: 100vw;
@@ -458,3 +462,12 @@ button:disabled:hover {
   margin-top: var(--lake-space-1);
 }
 
+
+html[data-resizing-ask] .ask-panel {
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ask-panel {
+    transition: none;
+  }
+}

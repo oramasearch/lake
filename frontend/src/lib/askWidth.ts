@@ -14,6 +14,8 @@ export function resizingAsk(): boolean {
 }
 export function setResizingAsk(value: boolean) {
   dragging = value;
+  // The panel animates expand and collapse, never a drag (app.css).
+  if (typeof document !== "undefined") document.documentElement.toggleAttribute("data-resizing-ask", value);
 }
 
 export function clampAskWidth(width: number): number {

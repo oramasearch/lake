@@ -49,8 +49,11 @@ operator sign-in, passkey sign-in and the public share pages).
   Orama and the account menu. **G** then **D**, **T**, **S**, **O** or **A** jumps to that group's
   first page.
 - **Ask Orama** opens beside the page (`components/AskPanel.tsx`) in the current workspace. The
-  conversation is kept per workspace for the browser tab (`sessionStorage`). **Full view** opens
-  the same conversation on `/ask`. Before, this was a docked iframe of the server's Ask page. Its
+  conversation is kept per workspace for the browser tab (`sessionStorage`). The panel runs from the
+  brand strip to the bottom of the window, its 48px head level with the shell bar (lake#567).
+  **Expand over the page** widens it in place across everything but the rail, with a 200ms width
+  transition (none while the edge is dragged, none under reduced motion), and **Back to the side**
+  returns it. **Open as a page** opens the same conversation on `/ask`. Before, this was a docked iframe of the server's Ask page. Its
   message box has the microphone (dictation, `components/dictation/Dictate.tsx`) and **From your
   phone**; a page can open it about something (`openAsk`, `lib/ask.ts`), as the transcript page
   does.

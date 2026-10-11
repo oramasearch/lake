@@ -130,6 +130,8 @@ export function Shell({ children }: { children: ReactNode }) {
   const [drawer, setDrawer] = useState(false);
   const [palette, setPalette] = useState(false);
   const [ask, setAsk] = useState(false);
+  // Ask Orama widened over the page by its expand button; closing it returns it to the side.
+  const [askExpanded, setAskExpanded] = useState(false);
   const [askRequest, setAskRequest] = useState<AskRequest | null>(null);
   const askToggledAt = useRef(Number.NEGATIVE_INFINITY);
   const pendingG = useRef(0);
@@ -141,7 +143,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const viewport = useViewportWidth();
   // Ask Orama pushes the page aside only while the page keeps room to read; narrower, it lies over
   // the page, which keeps its own layout (rev-os's assistant rule).
-  const askPushes = ask && viewport >= 1280 && viewport - (rail ? 60 : 232) - askWidth >= 900;
+  const askPushes = ask && !askExpanded && viewport >= 1280 && viewport - (rail ? 60 : 232) - askWidth >= 900;
 
   useEffect(() => {
     setDrawer(false);
@@ -401,14 +403,17 @@ export function Shell({ children }: { children: ReactNode }) {
           <AskPanel
             onClose={() => {
               setAsk(false);
+              setAskExpanded(false);
               setAskRequest(null);
             }}
             request={askRequest}
             onRequestDone={() => setAskRequest(null)}
             from={localPath(location.pathname) + location.search}
-            width={askWidth}
+            width={askExpanded ? Math.max(askWidth, viewport - (rail ? 60 : 232)) : askWidth}
             onResize={setAskWidth}
             overlay={!askPushes}
+            expanded={askExpanded}
+            onToggleExpanded={() => setAskExpanded((e) => !e)}
           />
         </Suspense>
       )}
