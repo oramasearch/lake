@@ -21,6 +21,23 @@ export const HOME_NAV: NavItem[] = [
   { section: "home", path: "/dashboard", label: "Dashboard", icon: "dashboard", audience: ["account"] },
 ];
 
+const AO: Audience[] = ["account", "operator"];
+
+/** The Data group: where a person's data lives and is found (Steve, 2026-10-10). Datasets is the
+ * Train → Data page, kept at its address; Connections (lake#651) sits between it and Transcripts. */
+export const DATA_NAV: NavItem[] = [
+  { section: "data", path: "/repositories", label: "Repositories", icon: "repository", audience: ["visitor", "account", "operator"] },
+  // A workspace's drives: files in a repository, as workspace files, or as shortcuts (lake#561).
+  { section: "data", path: "/drives", label: "Drives", icon: "repository", audience: AO },
+  { section: "data", path: "/shared-with-me", label: "Shared with Me", icon: "repository", audience: ["account"] },
+  { section: "data", path: "/search", label: "Search", icon: "search", audience: AO },
+  { section: "data", path: "/train/data", label: "Datasets", icon: "metering", audience: AO },
+  // The databases a workspace reads, out of Datasets (lake#651).
+  { section: "data", path: "/connections", label: "Connections", icon: "api", audience: AO },
+  // Recordings, uploads and pasted text made into searchable transcripts (lake#561).
+  { section: "data", path: "/transcripts", label: "Transcripts", icon: "audit", audience: AO },
+];
+
 /** Strip `/w/<id>` from a path: the workspace-local path the registry is keyed by. */
 export function localPath(pathname: string): string {
   const match = /^\/w\/[^/]+(\/.*)?$/.exec(pathname);

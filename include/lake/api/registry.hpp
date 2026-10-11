@@ -18,6 +18,7 @@
 
 #include "lake/api/sync_store.hpp"
 #include "lake/control/policy.hpp"
+#include "lake/control/store_contents.hpp"
 #include "lake/control/workspace_store.hpp"
 #include "lake/transparency/checkpoint.hpp"
 #include "lake/transparency/timestamps.hpp"
@@ -334,6 +335,10 @@ struct ApiContext {
     // `files` storage, docs/api/drives.md): the HTTP server's pooled client, or a test's fake.
     // Null: this lake keeps no workspace files.
     std::shared_ptr<control::ObjectTransport> object_transport;
+    // Opens a bucket or filesystem store's contents for a drive with `storage: store` (lake#656,
+    // store_contents.hpp). Empty: Lake browses no provider yet (lake#664), and such a drive is
+    // refused with the reason.
+    control::StoreBrowser store_browser;
     SyncStore* sync_store = nullptr;
     MeteringConfig metering;
     // Repository transfer and build records on their way to the workspace Zettas (lake#348,

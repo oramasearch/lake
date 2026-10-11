@@ -7,6 +7,9 @@
  * - `FilesStorage`: workspace files in the workspace Zetta, through list_drive_entries and the
  *   upload capabilities; an item's key is its id, and a move rewrites one record.
  * - `VirtualStorage`: the same records holding only folders and shortcuts.
+ * - `StoreStorage`: one of the workspace's buckets or filesystems, browsed in place through the
+ *   same entry capabilities (lake#656); an item's key is its path in the store, uploads go through
+ *   `upload_drive_entries` (16 MiB a call), and there are no shortcuts.
  *
  * Every call goes through `/v1`, as the rest of the app does. */
 import { act, read } from "@/lib/api";
@@ -19,6 +22,8 @@ export type Drive = {
   name: string;
   storage: Storage;
   repository_id: string | null;
+  /** The store a `store` drive opens (lake#656); null for the other kinds. */
+  store_id?: string | null;
   created_by: string;
   created_at: string;
 };
@@ -388,8 +393,54 @@ export class VirtualStorage extends FilesStorage {
   }
 }
 
+/** The largest file a store drive takes: what one upload_drive_entries call carries. */
+export const STORE_FILE_LIMIT = 16 * 1024 * 1024;
+
+/** A store drive (lake#656): a bucket or filesystem of the workspace, browsed in place. Listing,
+ * folders, moves, deletes and downloads are the workspace-files calls, keyed by path; uploads go
+ * several files to a call, none larger than 16 MiB. */
+export class StoreStorage extends FilesStorage {
+  readonly can: DriveStorage["can"] = { upload: true, shortcuts: false, history: false, share: false };
+
+  async upload(folder: string, items: UploadItem<File>[], progress?: (p: Progress) => void): Promise<UploadReport> {
+    const total = items.reduce((sum, item) => sum + item.size, 0);
+    const refused: string[] = [];
+    let sent = 0;
+    let uploaded = 0;
+    let batch: UploadItem<File>[] = [];
+    let batchBytes = 0;
+    const flush = async () => {
+      if (!batch.length) return;
+      progress?.({ sent, total, file: batch[0].relativePath });
+      const files = await Promise.all(batch.map(async (item) => ({ path: item.relativePath, content: await base64Of(item.file), ...(item.file.type ? { content_type: item.file.type } : {}) })));
+      await act("upload_drive_entries", this.input({ parent_id: folder, files }));
+      uploaded += batch.length;
+      sent += batchBytes;
+      progress?.({ sent, total, file: batch[batch.length - 1].relativePath });
+      batch = [];
+      batchBytes = 0;
+    };
+    for (const item of items) {
+      if (item.size > STORE_FILE_LIMIT) {
+        refused.push(`${item.relativePath} (${displaySize(item.size)}: a storage drive takes files of up to 16 MiB)`);
+        continue;
+      }
+      if (batch.length && batchBytes + item.size > SMALL_BATCH) await flush();
+      batch.push(item);
+      batchBytes += item.size;
+    }
+    await flush();
+    return { uploaded, refused };
+  }
+
+  async createShortcut(): Promise<void> {
+    throw new Error("A storage drive holds the storage's own files; put shortcuts in a workspace-files or virtual drive.");
+  }
+}
+
 export function storageFor(drive: Drive, scope: Scope): DriveStorage {
   if (drive.storage === "repository") return new RepositoryStorage(drive);
+  if (drive.storage === "store") return new StoreStorage(drive, scope);
   if (drive.storage === "virtual") return new VirtualStorage(drive, scope);
   return new FilesStorage(drive, scope);
 }

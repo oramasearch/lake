@@ -8529,6 +8529,7 @@ struct ApiServer::Impl {
         ctx.clerk_publishable_key = options.clerk_publishable_key;
         ctx.sealing_public_key = options.sealing_public_key;
         ctx.transcriber = transcriber;
+        ctx.store_browser = options.store_browser;
         ctx.payments = payments;
         ctx.object_transport = object_transport;
         ctx.artifact_catalog = [this] {
@@ -10060,14 +10061,19 @@ struct ApiServer::Impl {
         auto shared = std::make_shared<ApiContext>(context);
         const std::string key = found->object_key;
         const std::uint64_t size = found->size;
+        const std::string store_drive_id = found->store_drive_id;
+        const std::string etag = !found->sha256.empty() ? found->sha256
+                                 : !found->etag.empty() ? found->etag
+                                                        : "size-" + std::to_string(size);
         co_return co_await stream_blob(
             route,
-            "\"" + found->sha256 + "\"",
+            "\"" + etag + "\"",
             size,
-            [shared, customer_id, workspace_id, key, size](
+            [shared, customer_id, workspace_id, key, size, store_drive_id](
                 std::uint64_t offset, std::span<std::byte> into) -> SyncStoreResult<std::uint64_t> {
                 auto window = control::settled(liquid::runtime::block_on(read_workspace_file(
-                    *shared, customer_id, workspace_id, key, size, offset, into.size())));
+                    *shared, customer_id, workspace_id, key, size, offset, into.size(),
+                    store_drive_id)));
                 if (!window) {
                     return std::unexpected(
                         SyncStoreError{window.error().code, window.error().message});

@@ -3,7 +3,7 @@
 Lake runs databases, streams and engines for you on its own cluster: Zetta, Postgres, Kafka,
 ClickHouse, TiDB, Cassandra, Valkey, SQLite, DuckDB and Polars. Each service is its own, with its
 data kept apart from every other customer's. **Ship → Services** creates them, shows their state
-and hands you their connection. **Storage** (on **Data → Datasets**) provisions volumes your
+and hands you their connection. **Storage** (the **Storage** tab of **Data → Drives**) provisions volumes your
 services mount.
 
 Lake records what you ask for; the Orama operator creates and deletes the clusters and reports
@@ -77,11 +77,11 @@ and your workspace, not from the internet.
 
 ### Use a Postgres Service as a Data Source
 
-1. Open **Data → Datasets**.
+1. Open **Data → Connections** ([Connections](/docs/connections)).
 2. Under **Connect One of Your Services**, press **Connect** next to a Ready Postgres service (or
    **Refresh** to renew an existing connection). Nothing is typed: the workspace uses the credential
    Lake already holds.
-3. Pull tables from the new connection into datasets ([Datasets and Loading Data](/docs/load-data)).
+3. Open the new connection and load its tables into datasets ([Connections](/docs/connections)).
 
 - REST: `POST /v1/connect_service`:
 
@@ -119,9 +119,17 @@ Your workspace's own engine is not deleted here: deleting the workspace deletes 
 
 ## Storage
 
-**Data → Datasets** ends with the **Storage** card, *Buckets, Filesystems and Volumes*: storage for
-your services, private to the workspace. It lists each store's name, type, provider, size, status
-with the operator's message, and its actions. It works whether or not the workspace is ready.
+**Data → Drives → Storage** (the **Storage** tab of Drives; it was a card on **Data → Datasets**,
+and an old link there leads here) holds *Buckets, Filesystems and Volumes*: storage for your
+services and apps, private to the workspace. Go to (⌘K) finds it as **Storage**. It shows four
+figures (Storage, Opens as a drive, Volumes, Size) and lists each one's name, type, provider, size,
+its volume time this month (linking to **Usage**), status with the operator's message, and its
+actions. It works whether or not the workspace is ready. The API calls each one a *store*.
+
+A bucket or filesystem can be opened as a drive (**Open as a drive**): its files are browsed in
+place on **Data → Drives**, and deleting that drive never deletes the storage
+([Drives](/docs/drives)). A volume is shown, not browsed: its contents belong to the service that
+mounts it.
 
 Today one kind is offered: a **volume on the cluster disk**. Buckets and shared filesystems are
 listed in the form and disabled, each with the reason; they cannot be created.
@@ -132,7 +140,7 @@ listed in the form and disabled, each with the reason; they cannot be created.
 
 ### Create a Volume
 
-1. On **Data → Datasets**, in the **Storage** card, press **New storage**.
+1. On **Data → Drives**, open the **Storage** tab and press **New storage**.
 2. Keep **Type and provider** on *Volume — cluster disk*, fill in **Name** (lowercase letters,
    digits and `-`, starting with a letter, at most 31 characters) and **Size (GiB)** (1 to 100,
    default 10).
