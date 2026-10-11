@@ -19,6 +19,7 @@
 #include "lake/control/policy.hpp"
 #include "lake/control/store.hpp"
 #include "lake/search/index.hpp"
+#include "repository_people.hpp"
 #include "workspace_records_api.hpp"
 
 namespace lake::api {
@@ -226,6 +227,16 @@ ForgeTask<ApiResult> update_record(RepositoryForge& forge, const control::ForgeR
     co_return ApiResult::success(control::to_json(**updated));
 }
 
+// Who wrote an issue or an issue comment (lake#598): the caller's TAAP identity, set by lake and
+// never taken from the input (the schemas refuse an `author` member). A GitHub import keeps the
+// GitHub login it read instead. Reviews and review comments are left as they were: liquid's forge
+// client reads a review comment's `author` as an actor object.
+void stamp_author(const std::string& kind, json& value, const ApiContext& context) {
+    if ((kind == "issue" || kind == "issue_comment") && !context.acting_identity.empty()) {
+        value["author"] = context.acting_identity;
+    }
+}
+
 ForgeTask<ApiResult> create_kind(std::string kind, const json& input, ApiContext& context) {
     auto forge = open_forge(input, context);
     if (!forge) {
@@ -245,6 +256,7 @@ ForgeTask<ApiResult> create_opened(std::string kind, const json& input, ApiConte
     json value = input;
     value.erase("repository_id");
     value["state"] = "open";
+    stamp_author(kind, value, context);
     co_return settled_result(
         co_await create_record(*forge, std::move(kind), std::move(value), context));
 }
@@ -293,6 +305,7 @@ ForgeTask<ApiResult> create_comment(std::string kind, std::string parent_kind,
     }
     json value = input;
     value.erase("repository_id");
+    stamp_author(kind, value, context);
     co_return settled_result(
         co_await create_record(*forge, std::move(kind), std::move(value), context));
 }
@@ -915,6 +928,56 @@ void register_forge_capabilities(Registry& registry) {
             return create_comment("issue_comment", "issue", "issue_id", input, context);
         }});
     add_list(registry, "list_issue_comments", "List issue comments", "issue_comment", true);
+    registry.add(Capability{
+        .name = "issue_assignees",
+        .title = "People to Assign",
+        .description =
+            "The people an issue on a repository can be assigned to: the person who owns the "
+            "repository's workspace, or the organization and its members, each with their TAAP "
+            "identity (what `assignees` holds), display name, email and handle. Needs `write` on "
+            "the repository, as assigning does.",
+        .input_schema = repository_input(json::object(), json::array()),
+        .output_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"people",
+                {{"type", "array"},
+                 {"items",
+                  {{"type", "object"},
+                   {"properties",
+                    {{"taap_id", {{"type", "string"}}},
+                     {"kind",
+                      {{"type", "string"}, {"enum", json::array({"user", "organization"})}}},
+                     {"display_name", {{"type", "string"}}},
+                     {"email", {{"type", "string"}}},
+                     {"handle", {{"type", "string"}}}}},
+                   {"required",
+                    json::array({"taap_id", "kind", "display_name", "email", "handle"})},
+                   {"additionalProperties", false}}}}}}},
+             {"required", json::array({"people"})},
+             {"additionalProperties", false}},
+        .kind = CapabilityKind::Read,
+        .object = "repository",
+        .action = "write",
+        .resolve_object = repository_object,
+        .handler = [](const json& input, ApiContext& context) {
+            const auto repository = context.store->get_repository(input.at("repository_id"));
+            if (!repository) {
+                return from_store_error(repository.error());
+            }
+            const auto people = repository_people(context, *repository);
+            if (!people) {
+                return failure(people.error());
+            }
+            json out = json::array();
+            for (const RepositoryPerson& person : *people) {
+                out.push_back(repository_person_json(person));
+            }
+            context.audit_customer_id = repository->customer_id;
+            context.audit_object = "repository/" + repository->id;
+            context.audit_details = {{"people", out.size()}};
+            return ApiResult::success({{"people", std::move(out)}});
+        }});
 
     registry.add(Capability{.name = "create_review",
                             .title = "Create change review",

@@ -1973,6 +1973,101 @@ TEST_P(WorkspaceRecordStores, ForgeRecordsLiveInTheirRepositorysWorkspace) {
               1U);
 }
 
+// lake#598: the issue pages name who wrote an issue or a comment, and offer the repository's people
+// to assign; the page's writes are the capabilities' own, permission-checked the same way.
+TEST_P(WorkspaceRecordStores, IssuesNameTheirAuthorAndOfferTheRepositorysPeople) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const auto repository = t.store->create_repository(
+        {first.customer_id, "issues", "", "private", first.workspaces[0]});
+    ASSERT_TRUE(repository) << repository.error().message;
+    const std::string id = repository->id;
+
+    // Lake records the author; the input cannot name one.
+    const auto created = t.call(first,
+                                "create_issue",
+                                {{"repository_id", id},
+                                 {"title", "Import fails on an empty CSV"},
+                                 {"body", "Steps:\n\n1. Upload `empty.csv`"},
+                                 {"labels", json::array({"bug"})},
+                                 {"assignees", json::array({first.principal.taap_id})}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["value"]["author"], first.principal.taap_id);
+    EXPECT_EQ(created.value["value"]["state"], "open");
+    const std::string issue = created.value["id"];
+    const auto forged = t.call(first,
+                               "create_issue",
+                               {{"repository_id", id},
+                                {"title", "Someone else wrote this"},
+                                {"author", second.principal.taap_id}});
+    EXPECT_EQ(forged.error.code, "invalid_input");
+
+    const auto comment = t.call(
+        first,
+        "create_issue_comment",
+        {{"repository_id", id}, {"issue_id", issue}, {"body", "Fixed by the empty-file check."}});
+    ASSERT_TRUE(comment.ok) << comment.error.message;
+    EXPECT_EQ(comment.value["value"]["author"], first.principal.taap_id);
+    EXPECT_EQ(comment.value["value"]["issue_id"], issue);
+
+    // Edit, relabel, unassign, close and reopen: each keeps the author and the other fields.
+    const auto edited = t.call(first,
+                               "update_issue",
+                               {{"repository_id", id},
+                                {"issue_id", issue},
+                                {"title", "Import fails on an empty file"},
+                                {"body", "Any empty file."},
+                                {"labels", json::array({"bug", "import"})},
+                                {"assignees", json::array()}});
+    ASSERT_TRUE(edited.ok) << edited.error.message;
+    EXPECT_EQ(edited.value["value"]["title"], "Import fails on an empty file");
+    EXPECT_EQ(edited.value["value"]["labels"], json::array({"bug", "import"}));
+    EXPECT_EQ(edited.value["value"]["assignees"], json::array());
+    EXPECT_EQ(edited.value["value"]["author"], first.principal.taap_id);
+    for (const std::string state : {"closed", "open"}) {
+        const auto moved = t.call(
+            first, "update_issue", {{"repository_id", id}, {"issue_id", issue}, {"state", state}});
+        ASSERT_TRUE(moved.ok) << moved.error.message;
+        EXPECT_EQ(moved.value["value"]["state"], state);
+        EXPECT_EQ(moved.value["value"]["title"], "Import fails on an empty file");
+    }
+    EXPECT_EQ(t.call(first,
+                     "update_issue",
+                     {{"repository_id", id}, {"issue_id", issue}, {"state", "done"}})
+                  .error.code,
+              "invalid_input");
+
+    // The people to assign: a personal space's owner, with the identity `assignees` holds.
+    const auto people = t.call(first, "issue_assignees", {{"repository_id", id}});
+    ASSERT_TRUE(people.ok) << people.error.message;
+    ASSERT_EQ(people.value["people"].size(), 1U);
+    EXPECT_EQ(people.value["people"][0]["taap_id"], first.principal.taap_id);
+    EXPECT_EQ(people.value["people"][0]["kind"], "user");
+    EXPECT_FALSE(people.value["people"][0]["handle"].get<std::string>().empty());
+
+    // Someone without `write` on the repository can neither list its people nor write its issues.
+    EXPECT_EQ(t.call(second, "issue_assignees", {{"repository_id", id}}).error.code,
+              "unauthorized");
+    EXPECT_EQ(t.call(second,
+                     "update_issue",
+                     {{"repository_id", id}, {"issue_id", issue}, {"state", "closed"}})
+                  .error.code,
+              "unauthorized");
+    EXPECT_EQ(t.call(second,
+                     "create_issue_comment",
+                     {{"repository_id", id}, {"issue_id", issue}, {"body", "trespass"}})
+                  .error.code,
+              "unauthorized");
+    const auto missing = t.call(first, "issue_assignees", json::object());
+    EXPECT_EQ(missing.error.code, "invalid_input");
+    EXPECT_EQ(missing.error.path, "/repository_id");
+}
+
 // The operator's deployment control plane as lake reads it (docs/api/platform.md): three tables of
 // rows, filtered by nothing (every row is this lake's).
 struct PlatformControl final : lake::control::ZettaControl {
