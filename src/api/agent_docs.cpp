@@ -339,10 +339,10 @@ const std::vector<Flow>& flows() {
          "Train from a dataset, read the report, publish the model and score new rows.",
          {{"workspace_act",
            "`capability: \"create_project\"`, `input: {name, description, intent}`"},
-          {"workspace_act",
-           "`capability: \"capture_intent\"`, `input: {project, text: <what to predict>}`, then "
-           "`capability: \"compile_intent\"`, `input: {project, input_id}`: a pipeline built from "
-           "the sentence"},
+          {"compile_pipeline",
+           "`project`, `intent: <what to predict>`, `dataset: \"datasets.<name>\"`: a pipeline "
+           "built from the sentence (one call; the Train Docs use the same); answers its "
+           "`graph`"},
           {"workspace_act", "`capability: \"approve_plan\"`, `input: {project, graph}`"},
           {"run_pipeline",
            "`dataset_path: \"datasets.<name>\"`, `holdout_fraction: 0.2`, `model_name`; answers "
@@ -370,6 +370,34 @@ const std::vector<Flow>& flows() {
            "`type: \"volume\"`, `provider: \"cluster\"`, a `name`; optional `size_gi`"},
           {"list_stores", "poll until the store is `Ready`"},
           {"store_connection", "the claim, namespace, size and storage class to mount"}}},
+        {"Keep files in a drive",
+         "A drive is a workspace's file manager: workspace files (`storage: \"files\"`), a liquid "
+         "repository with history, or folders of shortcuts (virtual).",
+         {{"create_drive",
+           "`name`, `storage: \"files\"`; answers the drive and its `id` (the `drive_id` of later "
+           "calls)"},
+          {"upload_drive_entries",
+           "`drive_id`, `files: [{path, content: <base64>}]` (16 MiB in all; larger files go through "
+           "begin_drive_upload, append_drive_upload, finish_drive_upload)"},
+          {"list_drive_entries", "`drive_id`, optional `path`: a folder's files and folders"},
+          {"read_drive_file", "`drive_id`, `id`: the file's bytes as `content_base64`"}}},
+        {"Keep a secret",
+         "A secret is a versioned key-value object in a mount of one workspace; values are sealed "
+         "and only read_secret returns one.",
+         {{"create_secret_mount", "`customer_id`, `workspace_id`, `name` (a lowercase handle)"},
+          {"put_secret",
+           "`mount_id`, `name: \"database/password\"`, `value: {password: …}`; answers the new "
+           "version's metadata, never the value"},
+          {"list_secrets", "`mount_id`, optional `prefix`: names and versions, never values"},
+          {"read_secret", "`mount_id`, `name`, optional `version`: the value"}}},
+        {"Keep a transcript",
+         "A transcript is searchable text of what was said, from pasted text, captions or audio; "
+         "the audio is never kept.",
+         {{"create_transcript",
+           "`title`, `source: \"text\"` with `text` (or `\"upload\"` with a .vtt/.srt's "
+           "text, or `audio_base64` and `audio_name` to transcribe it first)"},
+          {"list_transcripts", "optional `q` searches titles and text"},
+          {"get_transcript", "`id`: the whole text"}}},
         {"Search a published index",
          "A search index is BM25F over a dataset; outside callers can search it once it is "
          "published.",

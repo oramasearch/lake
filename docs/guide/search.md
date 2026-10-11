@@ -81,14 +81,14 @@ you.
 
 Narrow it to one repository's complete history:
 
-`GET /v1/search?query=timeout&customer=<customer id>&repository=<repository id>&history=true`
+`GET /v1/search?query=timeout&customer_id=<customer id>&repository=<repository id>&history=true`
 
 The inputs:
 
 | Input | Meaning |
 |---|---|
 | `query` | Required. Ranked text, `"quoted"` text or `/regex/`, with an optional `in:artifact:` scope |
-| `customer` | The account whose repositories to search (its id, the same value as `customer_id` elsewhere). Empty: every account you can read |
+| `customer_id` | The account whose repositories to search, as everywhere else (`customer` still works). Empty: every account you can read |
 | `workspace_id` | Search only the index of one workspace |
 | `repository` | One repository id |
 | `ref` | A branch or tag name |

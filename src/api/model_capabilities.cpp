@@ -579,7 +579,9 @@ Capability model_capability() {
             context.audit_object = "customer/" + *customer_id + "/workspace";
             context.audit_details = {{"capability", "get_model"}};
             co_return ApiResult::success(std::move(**called));
-        }};
+        },
+        // The workspace's own get_model names it model_id (lake#591): either spelling works.
+        .input_aliases = {{"model_id", "id"}}};
 }
 
 json write_input_schema() {

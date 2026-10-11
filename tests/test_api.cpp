@@ -7454,6 +7454,11 @@ TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
     EXPECT_EQ(first.value["next"]["slug"], guide.at(1).slug);
     EXPECT_EQ(first.value["section"], guide.front().section);
     EXPECT_FALSE(first.value.contains("previous"));
+    // get_doc takes the `slug` list_docs answers; `page` is its deprecated name (lake#591).
+    const ApiResult by_slug = s.call("get_doc", {{"slug", guide.at(1).slug}});
+    ASSERT_TRUE(by_slug.ok) << by_slug.error.message;
+    EXPECT_EQ(by_slug.value["slug"], guide.at(1).slug);
+    EXPECT_EQ(s.call("get_doc", {{"slug", "no-such-guide"}}).error.path, "/slug");
     const ApiResult last = s.call("get_doc", {{"page", guide.back().slug}});
     ASSERT_TRUE(last.ok);
     EXPECT_FALSE(last.value.contains("next"));
@@ -7499,6 +7504,21 @@ TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
     EXPECT_NE(text.value["pages"][0]["excerpt"].get<std::string>().find("held_out_auc"),
               std::string::npos);
     EXPECT_TRUE(s.call("list_docs", {{"q", "no guide says zqxwv"}}).value["pages"].empty());
+    // Every word, in any order (lake#594): the words of a heading, reversed, still find it.
+    const ApiResult words = s.call("list_docs", {{"q", "csv upload"}});
+    ASSERT_TRUE(words.ok) << words.error.message;
+    EXPECT_FALSE(words.value["pages"].empty());
+    for (const json& page : words.value["pages"]) {
+        std::string body(
+            std::ranges::find(guide, page["slug"].get<std::string>(), &WebUiGuidePage::slug)
+                ->markdown);
+        std::ranges::transform(body, body.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        EXPECT_NE(body.find("csv"), std::string::npos) << page["slug"];
+        EXPECT_NE(body.find("upload"), std::string::npos) << page["slug"];
+    }
+    EXPECT_TRUE(s.call("list_docs", {{"q", "upload zqxwv"}}).value["pages"].empty());
     EXPECT_EQ(s.call("list_docs", {{"q", std::string(201, 'a')}}).error.path, "/q");
     EXPECT_EQ(s.call("mcp_setup").error.code, "unauthenticated");
 

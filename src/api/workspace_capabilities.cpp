@@ -686,7 +686,25 @@ void register_workspace_call(Registry& registry, bool read) {
                         "/input/name");
                 }
                 // Point at the field the workspace names (lake#256, lake#450), in lake's codes.
-                co_return workspace_failure(called->error(), sent, "/input", renamed);
+                ApiResult failed = workspace_failure(called->error(), sent, "/input", renamed);
+                // An engine enum refusal lists the values, as lake's own do (lake#591).
+                if (failed.error.message.ends_with(" is not one of the values it accepts") &&
+                    failed.error.path.starts_with("/input/")) {
+                    auto described = co_await call_workspace(
+                        context, input.at("customer_id"), "openapi.json", true, json::object());
+                    if (described && *described) {
+                        std::string field = failed.error.path.substr(7);
+                        if (const auto back = std::ranges::find_if(
+                                renamed, [&](const auto& pair) { return pair.second == field; });
+                            back != renamed.end()) {
+                            field = back->first;
+                        }
+                        if (const auto values = engine_input_enum(**described, capability, field)) {
+                            failed.error.message = "expected one of " + values->dump();
+                        }
+                    }
+                }
+                co_return failed;
             }
             json value = std::move(**called);
             if (value.is_object() &&
@@ -1235,13 +1253,15 @@ void register_store_capabilities(Registry& registry) {
 // One Zetta call in the customer's workspace, as an ApiResult.
 liquid::runtime::task<ApiResult>
 zetta(ApiContext& context, std::string customer, std::string capability, bool read, json input) {
+    const json input_copy = input;
     auto called =
         co_await call_workspace(context, customer, std::move(capability), read, std::move(input));
     if (!called) {
         co_return ApiResult::failure("store_unavailable", called.error().message);
     }
     if (!*called) {
-        co_return ApiResult::failure((*called).error().code, (*called).error().message);
+        // In lake's words, at the field the engine names (lake#591).
+        co_return workspace_failure((*called).error(), input_copy);
     }
     co_return ApiResult::success(**called);
 }
@@ -2805,6 +2825,15 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
         result = called(co_await act("compile_intent", std::move(input)));
     }
     if (!result.ok) {
+        // The steps are workspace_act calls, but the caller sent `project` at the top level: the
+        // path names that field, and a missing project says how to make one (lake#591).
+        if (result.error.path.starts_with("/input/")) {
+            result.error.path.erase(0, 6);
+        }
+        if (result.error.code == "not_found" && result.error.path == "/project") {
+            result.error.message +=
+                "; create the project first with workspace_act create_project {name, intent}";
+        }
         co_return result;
     }
     const std::string graph = result.value.value("name", result.value.value("graph", std::string()));
@@ -5204,11 +5233,79 @@ std::map<std::string, std::string> canonical_workspace_input(std::string_view ca
     return renamed;
 }
 
+std::string engine_words_in_lake_terms(std::string text) {
+    const auto replace_all = [&text](std::string_view from, std::string_view to) {
+        for (std::size_t at = text.find(from); at != std::string::npos;
+             at = text.find(from, at + to.size())) {
+            text.replace(at, from.size(), to);
+        }
+    };
+    // Capabilities lake does not serve, named as the call a lake caller makes (lake#591).
+    replace_all("(load the table first with add_dataset)",
+                "(load the table first with workspace_act upload_dataset)");
+    replace_all("load the table first with add_dataset",
+                "load the table first with workspace_act upload_dataset");
+    replace_all("(approve_plan)", "(workspace_act with capability approve_plan)");
+    return text;
+}
+
+namespace {
+// The engine's JSON Schema validator speaks in its own terms; lake's own refusals say "unexpected
+// field x" and "expected one of [...]" (lake#591). `field` is the field the message is about.
+std::string schema_words_in_lake_terms(std::string message, const std::string& field) {
+    if (message.contains("instance invalid as per false-schema") && !field.empty()) {
+        return "unexpected field " + field;
+    }
+    if (message.contains("instance not found in required enum")) {
+        return (field.empty() ? std::string("the value") : field) +
+               " is not one of the values it accepts";
+    }
+    return message;
+}
+} // namespace
+
+std::optional<json>
+engine_input_enum(const json& openapi, std::string_view capability, std::string_view field) {
+    if (!openapi.is_object() || field.empty() || field.contains('/')) {
+        return std::nullopt;
+    }
+    const auto paths = openapi.find("paths");
+    if (paths == openapi.end() || !paths->is_object()) {
+        return std::nullopt;
+    }
+    const auto operations = paths->find("/v1/" + std::string(capability));
+    if (operations == paths->end() || !operations->is_object()) {
+        return std::nullopt;
+    }
+    for (const auto& [method, operation] : operations->items()) {
+        if (!operation.is_object()) {
+            continue;
+        }
+        const json body = operation.value(
+            json::json_pointer("/requestBody/content/application~1json/schema"), json::object());
+        if (const json values = body.value(
+                json::json_pointer("/properties/" + std::string(field) + "/enum"), json());
+            values.is_array()) {
+            return std::optional<json>(std::in_place, values);
+        }
+        for (const json& parameter : operation.value("parameters", json::array())) {
+            if (parameter.is_object() && parameter.value("name", std::string()) == field) {
+                if (const json values =
+                        parameter.value(json::json_pointer("/schema/enum"), json());
+                    values.is_array()) {
+                    return std::optional<json>(std::in_place, values);
+                }
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 ApiResult workspace_failure(const control::ZettaControlError& error,
                             const json& input,
                             std::string_view prefix,
                             const std::map<std::string, std::string>& renamed) {
-    std::string message = error.message;
+    std::string message = engine_words_in_lake_terms(error.message);
     std::string field;
     // The engine's schema check leads with a pointer: "/format: instance not found in required
     // enum". The pointer belongs in `path`, the field's name in the message.
@@ -5250,6 +5347,12 @@ ApiResult workspace_failure(const control::ZettaControlError& error,
     if (!field.empty() && (code == "engine_error" || code == "invalid_argument")) {
         code = "invalid_input";
     }
+    if (const std::size_t colon = message.find(": ");
+        colon != std::string::npos && !field.empty() && message.starts_with(field + ": ") &&
+        message.contains("instance not found in required enum")) {
+        message.erase(0, colon + 2);
+    }
+    message = schema_words_in_lake_terms(std::move(message), field);
     return ApiResult::failure(std::move(code),
                               std::move(message),
                               field.empty() ? std::string() : std::string(prefix) + "/" + field);
@@ -5270,6 +5373,7 @@ bool workspace_uses_get(std::string_view capability) {
 // A workspace capability's description as a customer reads it (lake#257): the engine's issue
 // references ("(#1008)") and permission notes ("Requires orchestration:add_dataset.") removed.
 static std::string customer_description(std::string text) {
+    text = engine_words_in_lake_terms(std::move(text));
     for (std::size_t at = text.find("(#"); at != std::string::npos; at = text.find("(#", at)) {
         const std::size_t close = text.find(')', at);
         if (close == std::string::npos) {
