@@ -216,6 +216,20 @@ public:
                                          std::string credential_sha256,
                                          std::optional<int> exit_code = std::nullopt,
                                          nlohmann::json result = nullptr);
+    Result<MethodologyRun> create_methodology_run(const NewMethodologyRun&) override;
+    Result<MethodologyRun> get_methodology_run(const std::string& id) override;
+    Result<std::vector<MethodologyRun>> list_methodology_runs(const std::string& customer_id,
+                                                              const std::string& workspace_id,
+                                                              const std::string& methodology_id,
+                                                              int limit) override;
+    Result<MethodologyRun> withdraw_methodology_run(const std::string& id,
+                                                    const std::string& reason) override;
+    Result<std::size_t> expire_unstarted_methodology_runs(std::int64_t seconds,
+                                                          const std::string& reason) override;
+    Result<void> put_methodology_run_status(const std::string& id,
+                                            const MethodologyRunStatus& status) override;
+    // Moves a run's creation `seconds` into the past, as age_agent_launch does.
+    Result<void> age_methodology_run(const std::string& id, std::int64_t seconds);
     Result<AgentCronSchedule> create_agent_cron_schedule(const NewAgentCronSchedule&) override;
     Result<AgentCronSchedule> get_agent_cron_schedule(const std::string& id) override;
     Result<std::vector<AgentCronSchedule>>
@@ -499,6 +513,7 @@ private:
     std::vector<AgentSession> agent_sessions_;
     std::set<std::string> non_expiring_customers_;
     std::vector<AgentLaunch> agent_launches_;
+    std::vector<MethodologyRun> methodology_runs_;
     std::vector<AgentCronSchedule> agent_cron_schedules_;
     std::vector<std::pair<std::string, AgentLaunch>> agent_cron_runs_; // schedule id, run
     std::vector<AgentTask> agent_tasks_;

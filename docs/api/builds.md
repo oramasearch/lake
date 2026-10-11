@@ -27,6 +27,12 @@ that customer. A build ID belonging to another customer is reported as absent af
 authorized the requested customer. Every call uses the signed registry audit path; credential
 hashes and plaintext credentials are excluded from capability output and audit details.
 
+A workspace methodology's image (lake#655) is a `build_image` Lake queues itself for Validate and
+runs: an inline Dockerfile `FROM ${METHODOLOGY_RUNTIME_IMAGE}` (`LAKE_METHODOLOGY_RUNTIME_IMAGE`)
+that copies the methodology's folder to `/methodology` and installs its lock file with hashes
+required. `METHODOLOGY_RUNTIME_IMAGE` is in the build-argument allow-list beside `APP_RUNTIME_IMAGE`
+([methodologies.md](methodologies.md)).
+
 `build_app` requires `LAKE_APPS_RUNTIME_IMAGE`, which the operator sets from the Lake's
 `spec.apps.runtimeImage`. Lake stores a generated Dockerfile beginning with
 `ARG APP_RUNTIME_IMAGE` and `FROM ${APP_RUNTIME_IMAGE}`, and stores the configured value in the

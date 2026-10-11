@@ -5,8 +5,9 @@ Three Design pages help you decide what to build before you build it:
 - **Design → Solutions**: Orama's catalogue of ready-made AI solutions, and the solutions you write
   yourself. Each answers one business problem end to end. Start one and it becomes an AI project in
   your workspace, with its pipeline.
-- **Design → Methodologies**: the modelling methods your workspace's engine knows, what each needs
-  and makes, and whether it runs there today. Solutions compose them.
+- **Design → Methodologies**: the modelling methods your workspace can run: Orama's, built into the
+  engine and read-only, and your own, written in Python. What each needs and makes, and whether it
+  runs there today. Solutions compose them.
 - **Design → Opportunities**: what your data could be used for. Auto-Suggest reads your datasets and
   recommends AI projects to build from the solutions catalogue.
 
@@ -20,7 +21,7 @@ to find them.
 |---|---|
 | **Solution** | An AI solution: the business problem it answers, the decision it drives, how its return is measured and the methodologies it composes. **Orama's** come from the catalogue, are read-only, and have ids like `S-1`. **Yours** are written in your workspace and can be edited. |
 | **Level** | How far a solution goes, from 1 to 4; each solution lists its own levels. |
-| **Methodology** | A modelling method the engine runs, such as churn classification, segmentation, forecasting or anomaly detection. Its id looks like `M-3`. |
+| **Methodology** | A modelling method, such as churn classification, segmentation, forecasting or anomaly detection. **Orama's** are built into the engine, are read-only and have ids like `M-3`. **Yours** are Python in a repository of your workspace, with ids like `W-0a1b2c3d`. |
 | **Foundation** | What a solution project is built on: the snapshot date, the entity, the dataset and its label and feature columns, the methodology roles, the exclusion predicates, delivery and economics. |
 | **Exclusion predicate** | A column that rules an entity out of an action, such as an open complaint. A missing one is called out and blocks Run; it is never assumed to be false. |
 | **A1 decision** | A decision that needs a person's approval before its action may go ahead. |
@@ -226,6 +227,87 @@ Each entry carries `runnable`. An engine that predates the registry answers `unk
 Lake then treats it as running only churn classification (`M-1`), and the page says *No
 Methodology Registry Yet*.
 
+## Your Own Methodologies
+
+A methodology of your own is Python in a repository of your workspace, so it is versioned and
+reviewed like any other code. It is three files:
+
+- `methodology.json` says what it needs (tabular data, text, a time series, a graph, …; a target or
+  none; required features), its **parameters** with their types and defaults, the **metrics** it
+  reports and the resources it may use;
+- `methodology.py` defines `fit(data, params)`, which returns what it learned, `predict(artifact,
+  data)`, one prediction per row, and `score(artifact, data)`, its metrics (and `explain` where it
+  can);
+- `requirements.lock` pins the packages it installs, each with its hash; an empty file means the
+  standard library only.
+
+Every run reports each metric twice: in sample, on the rows it trained on, and held out, on the
+rows it did not. Quote the held-out figure.
+
+### Create One
+
+1. On **Design → Methodologies**, press **New methodology**.
+2. Give it a **Name**, say **What it should do**, and optionally its **target** (a yes-or-no
+   outcome, one of several categories, an amount, or no target to find groups).
+3. Press **Draft a first version** to read the files Lake drafts from Orama's templates, then
+   **Create methodology**. Lake commits them to a new private repository, `methodology-<name>`, and
+   the methodology's page opens, marked **Yours**, *Not validated*.
+
+Through the API:
+
+`POST /v1/create_methodology`
+
+```json
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "Late payers", "description": "Which customers will pay their invoice late?"}
+```
+
+Send `files` (`{path, contents}`) to commit your own, or `repository_id` to use code already in a
+repository of the workspace.
+
+### Edit, Validate and Train
+
+- **Code**: the page shows its files; edit one and press **Commit**. Each commit is a new revision
+  of its repository, and a new revision must be validated again before it runs. Code pushed to the
+  repository another way is followed with `update_methodology` and `revision`.
+- **Validate** checks it first without running anything (the manifest, `fit`, `predict` and
+  `score`, the lock file) and lists what is missing. When that passes, Lake builds its image and
+  runs it on a small sample in its sandbox; the result marks it **Usable** or lists what failed.
+
+  `POST /v1/validate_methodology`
+
+  ```json
+  {"customer_id": "<customer id>", "workspace_id": "<workspace id>", "id": "W-0a1b2c3d"}
+  ```
+
+- **Train** (once usable) runs it on a dataset you choose, with its target column and parameters.
+  The model it trains appears in **Train → Models**; the run, its held-out metrics and its log are
+  on the page under **Runs**.
+
+  `POST /v1/run_methodology`
+
+  ```json
+  {"customer_id": "<customer id>", "workspace_id": "<workspace id>", "id": "W-0a1b2c3d", "dataset": "sales.payers", "target": "late"}
+  ```
+
+- **Use it in a pipeline**: once usable, it is listed under **Methodology** in Build a Pipeline,
+  and the pipeline's runs run its code. Name it among a solution's methodologies like any other.
+- **Edit** changes its name, description (written to its manifest) and whether its runs may reach
+  the internet. **Duplicate** copies it, code included, into a new repository. **Delete** removes it
+  from the workspace and stops its runs; its repository and models stay.
+
+### Orama's Stay Read-Only
+
+Orama's methodologies are marked **By Orama** and cannot be edited or deleted. Press **Duplicate to
+edit** on one to start one of your own: its description and parameters are copied, with a first
+version of the Python to change, since Orama's run natively in the engine.
+
+### Where It Runs
+
+Your code runs as untrusted code, in its own container, with its pinned packages and its resources.
+It has no network unless you allow it under **Edit**, and even then never Lake, the workspace or the
+cluster; it holds no credentials; its data is handed to it, and its result taken from it, only by
+Lake. Each run's CPU, memory and GPU time is metered on **Usage**.
+
 ## Opportunities
 
 **Design → Opportunities** keeps the recommendations Auto-Suggest makes from your data until you
@@ -278,6 +360,7 @@ earlier Opportunities stay listed. **Design → Agent Library** shows which agen
 |---|---|
 | Browse solutions, methodologies and opportunities | `read` |
 | Create, edit, duplicate or delete your own solutions, or start one as a project | `write` |
+| Create, edit, validate, train, duplicate or delete your own methodologies | `write` |
 | Start or confirm a solution, run it, change its policy, approve A1 decisions, record outcomes | `write` |
 | Scan, create project drafts, dismiss | `write` |
 
@@ -289,7 +372,10 @@ Only the person who started a solution (or the operator) can confirm its foundat
 - Delivery is a webhook, Salesforce or HubSpot; its endpoint and owner are required.
 - Only one of Orama's solutions that runs on this engine, or one in preview, can be started with
   **Start this solution**; the others are listed with where their work is tracked.
-- Orama's solutions cannot be edited or deleted; duplicate one to make it yours.
+- Orama's solutions and methodologies cannot be edited or deleted; duplicate one to make it yours.
+- A methodology of your own runs only once Validate passed for its current code. Its training data
+  is at most 1,000,000 rows and what it learns at most 24 MiB. Experiments over its parameters and
+  serving its model from Ship → Models are not available yet.
 - Your own solution starts as a project with its first pipeline, not with the governed foundation
   (policy, holdout, ROI readout) Orama's get.
 - A name is at most 200 bytes, the problem and decision 4,000 bytes each, and a solution composes at
@@ -309,6 +395,9 @@ Only the person who started a solution (or the operator) can confirm its foundat
 | `forbidden` when you edit or delete a solution | It is one of Orama's, which are read-only. Open it and press **Duplicate to edit**. |
 | `invalid_input` at `/measurement/metric`, `/problem` or `/decision` | A solution of your own needs its problem, its decision and the metric its return is measured by. |
 | `invalid_input` at `/methodologies/...` | Write methodology ids such as `M-1`, each once, with a level of 1 to 4 after a colon. |
+| `forbidden` when you edit or delete a methodology | It is one of Orama's. Press **Duplicate to edit**. |
+| `conflict`: *validate this methodology first* | Its current code has not passed Validate. Press **Validate**. |
+| Validate lists `entrypoint.score`, `packages` or `manifest.…` | The file it names is missing that part; fix it and Commit, then Validate again. |
 | `unauthorized` | You have `read` but not `write`, or you did not start this solution. |
 
 ## Related Pages

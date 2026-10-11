@@ -628,6 +628,24 @@ authorize_build_token(const Capability& entry, const nlohmann::json& input, ApiC
     return ApiResult::success(nullptr);
 }
 
+// A methodology run's credential (lake#655, docs/api/methodologies.md#runs) may call only the
+// runner's two capabilities, and only for its own run; it acts as no person, so policy is not
+// consulted. The handlers check the run's state.
+ApiResult authorize_methodology_run_token(const Capability& entry,
+                                          const nlohmann::json& input,
+                                          ApiContext& context) {
+    if (!context.authorized || context.credential_workload_id.empty() ||
+        (entry.name != "methodology_run_input" && entry.name != "methodology_run_output") ||
+        input.value("run_id", "") != context.credential_workload_id) {
+        return ApiResult::failure("unauthorized",
+                                  "a methodology run's credential reaches only its own run's "
+                                  "input and output");
+    }
+    context.audit_customer_id = context.credential_customer_id;
+    context.audit_object = "methodology_run/" + context.credential_workload_id;
+    return ApiResult::success(nullptr);
+}
+
 const nlohmann::json& agent_task_input(const Capability& capability,
                                      const nlohmann::json& input,
                                      ApiContext& context,
@@ -754,6 +772,9 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         state.proceed = state.result.ok;
     } else if (context.credential_kind.starts_with("app_")) {
         state.result = authorize_app_token(entry, input, context);
+        state.proceed = state.result.ok;
+    } else if (context.credential_kind == "methodology_run") {
+        state.result = authorize_methodology_run_token(entry, input, context);
         state.proceed = state.result.ok;
     } else if (entry.requires_auth && context.session_credential &&
                std::ranges::find(context.scopes, "*") == context.scopes.end() &&

@@ -8493,6 +8493,7 @@ struct ApiServer::Impl {
         ctx.agent_bus = options.agent_bus.get();
         ctx.apps_wildcard = options.apps_wildcard;
         ctx.apps_runtime_image = options.apps_runtime_image;
+        ctx.methodology_runtime_image = options.methodology_runtime_image;
         // Build registry targets use the in-cluster authority (LAKE_INTERNAL_URL).
         ctx.internal_url = options.internal_url;
         ctx.apps_reserved_names = options.apps_reserved_names;
@@ -10249,7 +10250,28 @@ struct ApiServer::Impl {
             }
             return {RegistryAccess::Allowed, customer->id, app->workspace_id, false};
         }
-        if (credential.username == "app") {
+        if (principal->kind == "methodology_run") {
+            // A methodology run's pods pull its built image with the run's own credential
+            // (orama-operator#291, lake#655): that one image repository, read only, while the run
+            // is live.
+            if (write || credential.username != "methodology-run") {
+                return {RegistryAccess::Denied};
+            }
+            const auto run = options.store->get_methodology_run(principal->workload_id);
+            const auto customer = options.store->get_customer(principal->workload_customer_id);
+            if (!run || !customer || run->customer_id != customer->id || run->build_id.empty()) {
+                return {RegistryAccess::Denied};
+            }
+            const auto build = options.store->get_build(run->build_id);
+            const std::string image =
+                build ? build_target_image(build->target, customer->name) : std::string();
+            if (!build || build->customer_id != customer->id || image.empty() ||
+                repository != customer->name + "/" + image) {
+                return {RegistryAccess::Denied};
+            }
+            return {RegistryAccess::Allowed, customer->id, run->workspace_id, false};
+        }
+        if (credential.username == "app" || credential.username == "methodology-run") {
             return {RegistryAccess::Denied};
         }
         if (write || principal->taap_id.empty() ||

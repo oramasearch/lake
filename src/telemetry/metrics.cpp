@@ -835,6 +835,39 @@ public:
         return call("withdraw_agent_cron_schedule",
                     [&] { return store_->withdraw_agent_cron_schedule(id); });
     }
+    control::Result<control::MethodologyRun>
+    create_methodology_run(const control::NewMethodologyRun& value) override {
+        return call("create_methodology_run",
+                    [&] { return store_->create_methodology_run(value); });
+    }
+    control::Result<control::MethodologyRun> get_methodology_run(const std::string& id) override {
+        return call("get_methodology_run", [&] { return store_->get_methodology_run(id); });
+    }
+    control::Result<std::vector<control::MethodologyRun>>
+    list_methodology_runs(const std::string& customer_id,
+                          const std::string& workspace_id,
+                          const std::string& methodology_id,
+                          int limit) override {
+        return call("list_methodology_runs", [&] {
+            return store_->list_methodology_runs(customer_id, workspace_id, methodology_id, limit);
+        });
+    }
+    control::Result<control::MethodologyRun>
+    withdraw_methodology_run(const std::string& id, const std::string& reason) override {
+        return call("withdraw_methodology_run",
+                    [&] { return store_->withdraw_methodology_run(id, reason); });
+    }
+    control::Result<std::size_t>
+    expire_unstarted_methodology_runs(std::int64_t seconds, const std::string& reason) override {
+        return call("expire_unstarted_methodology_runs",
+                    [&] { return store_->expire_unstarted_methodology_runs(seconds, reason); });
+    }
+    control::Result<void>
+    put_methodology_run_status(const std::string& id,
+                               const control::MethodologyRunStatus& status) override {
+        return call("put_methodology_run_status",
+                    [&] { return store_->put_methodology_run_status(id, status); });
+    }
     control::Result<std::vector<control::AgentLaunch>>
     list_agent_cron_runs(const std::string& customer_id, const std::string& agent_id, int limit,
                          const std::string& workspace_id = {}) override {

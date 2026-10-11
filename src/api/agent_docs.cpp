@@ -48,6 +48,21 @@ constexpr std::array group_rules{
                    n == "stop_experiment" || n == "promote_trial" ||
                    engine_capability_group(n) == "Experiments";
         }},
+    // A workspace's own methodologies from Python code (lake#655, docs/api/methodologies.md).
+    GroupRule{"Methodologies",
+              "A workspace's own methodologies, written in Python in one of its repositories, "
+              "beside Orama's (list_methodologies marks each `source` orama or workspace, and "
+              "`editable`). draft_methodology drafts the files from a description; "
+              "create_methodology commits them and registers it; update_methodology commits "
+              "changes; validate_methodology checks the manifest, fit, predict and score and the "
+              "lock file, then runs it on a sample in its sandbox; run_methodology trains it on a "
+              "dataset (no network unless granted, no Lake or Zetta credentials) and registers its "
+              "model. Orama's are read-only (`forbidden`); duplicate_methodology copies either "
+              "kind. A pipeline step that uses one runs through the same runner.",
+              [](std::string_view n) {
+                  return n.find("methodology") != std::string_view::npos &&
+                         n != "list_methodologies";
+              }},
     // The workspace engine's capabilities by name (lake#650, docs/api/engine-capabilities.md).
     GroupRule{"Projects and pipelines",
               "A workspace's AI projects and their pipelines: create and delete projects, capture "
@@ -305,7 +320,7 @@ constexpr std::array group_rules{
 };
 
 // The order groups are shown in.
-constexpr std::array<std::string_view, 27> group_order{"Workspace: Design, Train and Ship",
+constexpr std::array<std::string_view, 28> group_order{"Workspace: Design, Train and Ship",
                                                        "Projects and pipelines",
                                                        "Training and runs",
                                                        "Experiments",
@@ -315,6 +330,7 @@ constexpr std::array<std::string_view, 27> group_order{"Workspace: Design, Train
                                                        "Connections",
                                                        "Decisions",
                                                        "Solutions",
+                                                       "Methodologies",
                                                        "Agents",
                                                        "Streams",
                                                        "Drives",

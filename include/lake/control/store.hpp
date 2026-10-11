@@ -728,6 +728,70 @@ struct NewAgentLaunch {
     std::string created_by_user_id, created_by_taap_id;
     std::string workspace_id;
 };
+// One run of a workspace's own methodology (docs/api/methodologies.md#runs, lake#655, migration
+// 0078): lake writes the desired run, the Orama operator waits for its image build and runs its
+// stage, run and collect pods, and writes the status. The stage and collect pods authenticate with
+// `lmr.<run id>.<secret>`, which the operator generates; lake keeps only its SHA-256. Ids, images,
+// resources and phases only: what the run read and produced is its record in the workspace Zetta.
+struct MethodologyRun {
+    std::string id, customer_id, workspace_id, methodology_id, mode, build_id, image, runtime_image,
+        slug, desired;
+    std::int64_t cpu_millis = 0, memory_bytes = 0;
+    int gpus = 0;
+    std::string gpu_class;
+    int timeout_seconds = 0;
+    bool network = false;
+    std::int64_t generation = 1;
+    std::string stop_reason;
+    std::string created_by_user_id, created_by_taap_id, created_at, updated_at;
+    // Written by the operator; empty until it reports.
+    std::string phase, message;
+    std::optional<int> exit_code;
+    std::string credential_sha256;
+    std::int64_t observed_generation = 0;
+    std::string started_at, finished_at, status_updated_at;
+};
+struct NewMethodologyRun {
+    std::string customer_id, workspace_id, methodology_id, mode, build_id, image, runtime_image;
+    std::int64_t cpu_millis = 0, memory_bytes = 0;
+    int gpus = 0;
+    std::string gpu_class;
+    int timeout_seconds = 0;
+    bool network = false;
+    std::string created_by_user_id, created_by_taap_id;
+};
+// What the operator reports about a run (methodology_run_status). The in-memory store's tests and
+// the operator contract test write it; lake never does in production.
+struct MethodologyRunStatus {
+    std::string phase, message;
+    std::optional<int> exit_code;
+    std::string credential_sha256;
+    std::int64_t observed_generation = 0;
+    std::string started_at, finished_at;
+};
+// A methodology run's credential (`lmr.<run id>.<secret>`, lake#655) is live while the run is
+// present and not finished; it acts as no person, and may call only methodology_run_input and
+// methodology_run_output for its own run (the registry checks the run).
+inline constexpr std::string_view methodology_run_credential_prefix = "lmr.";
+inline bool methodology_run_credential_live(const MethodologyRun& run) {
+    return run.desired == "present" && !run.credential_sha256.empty() && run.phase != "Succeeded" &&
+           run.phase != "Failed" && run.phase != "Stopped";
+}
+inline Principal methodology_run_principal(const MethodologyRun& run, std::string digest) {
+    return Principal{"",
+                     "methodology_run:" + run.id,
+                     "methodology_run:" + run.id,
+                     "",
+                     "lake",
+                     "methodology_run",
+                     {"methodology_run_input", "methodology_run_output"},
+                     std::nullopt,
+                     run.id,
+                     run.customer_id,
+                     "",
+                     "",
+                     std::move(digest)};
+}
 // One cron schedule of a Python agent (docs/api/agent-launches.md): an agent may have several.
 // lake writes the desired schedule (agent_cron_schedules, migration 0031); the Orama operator makes
 // each present one a Kubernetes CronJob and writes agent_cron_schedule_status, and one
@@ -1403,6 +1467,26 @@ public:
     // creation, recording `reason` as its stop_reason (lake#442). Returns how many it withdrew.
     virtual Result<std::size_t> expire_unstarted_agent_launches(std::int64_t seconds,
                                                                 const std::string& reason) = 0;
+    // Methodology runs (lake#655). Creating or withdrawing one NOTIFYs lake_services.
+    virtual Result<MethodologyRun> create_methodology_run(const NewMethodologyRun&) = 0;
+    virtual Result<MethodologyRun> get_methodology_run(const std::string& id) = 0;
+    // Newest first; an empty methodology_id lists every methodology's runs in the workspace.
+    virtual Result<std::vector<MethodologyRun>>
+    list_methodology_runs(const std::string& customer_id,
+                          const std::string& workspace_id,
+                          const std::string& methodology_id,
+                          int limit) = 0;
+    // Marks a run absent so the operator stops and removes its pods, recording `reason` (empty:
+    // stopped by a person). Refuses one already absent.
+    virtual Result<MethodologyRun> withdraw_methodology_run(const std::string& id,
+                                                            const std::string& reason) = 0;
+    // Withdraws every present run the operator has not reported on within `seconds` of its
+    // creation, recording `reason`. Returns how many it withdrew.
+    virtual Result<std::size_t> expire_unstarted_methodology_runs(std::int64_t seconds,
+                                                                  const std::string& reason) = 0;
+    // The operator's report, for tests and the operator contract; lake never calls it otherwise.
+    virtual Result<void> put_methodology_run_status(const std::string& id,
+                                                    const MethodologyRunStatus& status) = 0;
     // Cron schedules: any number per agent. Creating or withdrawing one NOTIFYs lake_services.
     virtual Result<AgentCronSchedule> create_agent_cron_schedule(const NewAgentCronSchedule&) = 0;
     virtual Result<AgentCronSchedule> get_agent_cron_schedule(const std::string& id) = 0;

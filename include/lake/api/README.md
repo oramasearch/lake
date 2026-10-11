@@ -42,6 +42,8 @@ App name policy. The HTTP adapter copies it into `ApiContext`; `create_app` comb
 built-in platform names before any desired-state write. See
 [web-apps.md](../../../docs/api/web-apps.md).
 
+`ServerOptions::methodology_runtime_image` carries `LAKE_METHODOLOGY_RUNTIME_IMAGE` the same way
+for workspace methodologies (lake#655, [methodologies.md](../../../docs/api/methodologies.md)).
 `ServerOptions::apps_runtime_image` carries `LAKE_APPS_RUNTIME_IMAGE`. The HTTP adapter copies it
 into `ApiContext`, and `build_app` records it as the generated Dockerfile's
 `APP_RUNTIME_IMAGE` build argument. See [builds.md](../../../docs/api/builds.md).

@@ -1679,6 +1679,147 @@ Result<void> InMemoryStore::set_agent_launch_status(const std::string& id,
     return {};
 }
 
+Result<MethodologyRun> InMemoryStore::create_methodology_run(const NewMethodologyRun& in) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(customers_,
+                             [&](const Customer& value) { return value.id == in.customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + in.customer_id});
+    }
+    if ((in.mode != "validate" && in.mode != "train") || in.methodology_id.empty() ||
+        in.runtime_image.empty() || in.cpu_millis <= 0 || in.memory_bytes <= 0 || in.gpus < 0 ||
+        in.timeout_seconds <= 0) {
+        return std::unexpected(StoreError{"invalid_input", "methodology run is invalid"});
+    }
+    const auto workspace = std::ranges::find_if(workspaces_, [&](const Workspace& value) {
+        return value.id == in.workspace_id && value.customer_id == in.customer_id &&
+               value.desired != "deleted";
+    });
+    if (workspace == workspaces_.end()) {
+        return std::unexpected(
+            StoreError{"invalid_input", "workspace_id must name a workspace in this space"});
+    }
+    MethodologyRun run;
+    run.id = new_uuid_v4();
+    run.customer_id = in.customer_id;
+    run.workspace_id = in.workspace_id;
+    run.methodology_id = in.methodology_id;
+    run.mode = in.mode;
+    run.build_id = in.build_id;
+    run.image = in.image;
+    run.runtime_image = in.runtime_image;
+    run.cpu_millis = in.cpu_millis;
+    run.memory_bytes = in.memory_bytes;
+    run.gpus = in.gpus;
+    run.gpu_class = in.gpu_class;
+    run.timeout_seconds = in.timeout_seconds;
+    run.network = in.network;
+    run.slug = managed_service_slug("mr", run.id);
+    run.desired = "present";
+    run.created_by_user_id = in.created_by_user_id;
+    run.created_by_taap_id = in.created_by_taap_id;
+    run.created_at = run.updated_at = std::format(
+        "{:%FT%TZ}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
+    methodology_runs_.push_back(run);
+    return run;
+}
+
+Result<MethodologyRun> InMemoryStore::get_methodology_run(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(methodology_runs_, id, &MethodologyRun::id);
+    if (found == methodology_runs_.end()) {
+        return std::unexpected(StoreError{"not_found", "no methodology run " + id});
+    }
+    return *found;
+}
+
+Result<std::vector<MethodologyRun>>
+InMemoryStore::list_methodology_runs(const std::string& customer_id,
+                                     const std::string& workspace_id,
+                                     const std::string& methodology_id,
+                                     int limit) {
+    std::lock_guard lock(mutex_);
+    std::vector<MethodologyRun> runs;
+    for (auto it = methodology_runs_.rbegin(); it != methodology_runs_.rend(); ++it) {
+        if (limit > 0 && static_cast<int>(runs.size()) >= limit) {
+            break;
+        }
+        if (it->customer_id == customer_id && it->workspace_id == workspace_id &&
+            (methodology_id.empty() || it->methodology_id == methodology_id)) {
+            runs.push_back(*it);
+        }
+    }
+    return runs;
+}
+
+Result<MethodologyRun> InMemoryStore::withdraw_methodology_run(const std::string& id,
+                                                               const std::string& reason) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(methodology_runs_, id, &MethodologyRun::id);
+    if (found == methodology_runs_.end()) {
+        return std::unexpected(StoreError{"not_found", "no methodology run " + id});
+    }
+    if (found->desired == "absent") {
+        return std::unexpected(StoreError{"conflict", "the run is already stopped"});
+    }
+    found->desired = "absent";
+    ++found->generation;
+    found->stop_reason = reason;
+    found->updated_at = now_iso8601();
+    return *found;
+}
+
+Result<std::size_t> InMemoryStore::expire_unstarted_methodology_runs(std::int64_t seconds,
+                                                                     const std::string& reason) {
+    std::lock_guard lock(mutex_);
+    const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+    std::size_t expired = 0;
+    for (MethodologyRun& run : methodology_runs_) {
+        const auto created = utc_seconds(run.created_at);
+        if (run.desired != "present" || !run.phase.empty() || !created ||
+            now - *created < std::chrono::seconds(seconds)) {
+            continue;
+        }
+        run.desired = "absent";
+        ++run.generation;
+        run.stop_reason = reason;
+        ++expired;
+    }
+    return expired;
+}
+
+Result<void> InMemoryStore::put_methodology_run_status(const std::string& id,
+                                                       const MethodologyRunStatus& status) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(methodology_runs_, id, &MethodologyRun::id);
+    if (found == methodology_runs_.end()) {
+        return std::unexpected(StoreError{"not_found", "no methodology run " + id});
+    }
+    found->phase = status.phase;
+    found->message = status.message;
+    found->exit_code = status.exit_code;
+    found->credential_sha256 = status.credential_sha256;
+    found->observed_generation =
+        status.observed_generation ? status.observed_generation : found->generation;
+    found->started_at = status.started_at;
+    found->finished_at = status.finished_at;
+    found->status_updated_at = now_iso8601();
+    return {};
+}
+
+Result<void> InMemoryStore::age_methodology_run(const std::string& id, std::int64_t seconds) {
+    std::lock_guard lock(mutex_);
+    const auto found = std::ranges::find(methodology_runs_, id, &MethodologyRun::id);
+    if (found == methodology_runs_.end()) {
+        return std::unexpected(StoreError{"not_found", "no methodology run " + id});
+    }
+    const auto created = utc_seconds(found->created_at);
+    if (!created) {
+        return std::unexpected(StoreError{"invalid_input", "run time is unreadable"});
+    }
+    found->created_at = std::format("{:%FT%TZ}", *created - std::chrono::seconds(seconds));
+    return {};
+}
+
 Result<AgentCronSchedule>
 InMemoryStore::create_agent_cron_schedule(const NewAgentCronSchedule& in) {
     std::lock_guard lock(mutex_);
@@ -3533,6 +3674,18 @@ Result<Principal> InMemoryStore::context_for(const std::string& secret) {
                          "agent_schedule",
                          schedule->scopes,
                          std::nullopt};
+    }
+    if (secret.starts_with(methodology_run_credential_prefix)) {
+        const auto parsed = parse_agent_credential(secret, methodology_run_credential_prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        const auto run = std::ranges::find(methodology_runs_, parsed->first, &MethodologyRun::id);
+        if (run == methodology_runs_.end() || !methodology_run_credential_live(*run) ||
+            !constant_time_hex_equal(identity_crypto::sha256_hex(secret), run->credential_sha256)) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        return methodology_run_principal(*run, identity_crypto::sha256_hex(secret));
     }
     if (secret.starts_with(agent_launch_credential_prefix)) {
         const auto parsed = parse_agent_launch_credential(secret);

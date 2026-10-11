@@ -21,6 +21,7 @@
 #include "lake/control/agent_library.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/memory_store.hpp"
+#include "lake/control/methodologies.hpp"
 #include "lake/control/platform.hpp"
 #include "lake/control/postgres_store.hpp"
 #include "lake/control/zetta_workspace.hpp"
@@ -101,6 +102,8 @@ int usage() {
         "  LAKE_SERVICES_PER_CUSTOMER caps live services per customer (default 0: no limit)");
     std::println("  LAKE_APPS_WILDCARD is the required parent domain for Ship app hosts");
     std::println("  LAKE_APPS_RUNTIME_IMAGE is the base image for source-backed Ship App builds");
+    std::println("  LAKE_METHODOLOGY_RUNTIME_IMAGE is the oramasearch/methodology-runtime image "
+                 "workspace methodologies are built from and run with");
     std::println(
         "  LAKE_APPS_RESERVED_NAMES adds comma-separated names that Ship apps cannot use");
     std::println("  LAKE_APPS_PER_CUSTOMER caps live apps per space (default 0: no limit)");
@@ -202,6 +205,7 @@ int main(int argc, char** argv) {
     opts.external_origin = env_or("LAKE_EXTERNAL_ORIGIN", "");
     opts.apps_wildcard = env_or("LAKE_APPS_WILDCARD", "");
     opts.apps_runtime_image = env_or("LAKE_APPS_RUNTIME_IMAGE", "");
+    opts.methodology_runtime_image = env_or("LAKE_METHODOLOGY_RUNTIME_IMAGE", "");
     opts.apps_reserved_names = env_or("LAKE_APPS_RESERVED_NAMES", "");
     opts.apps_per_customer = env_u64("LAKE_APPS_PER_CUSTOMER");
     opts.app_replicas_per_customer = env_u64("LAKE_APP_REPLICAS_PER_CUSTOMER");
@@ -565,6 +569,20 @@ int main(int argc, char** argv) {
                              nlohmann::json{{"event", "agent_launches_expired"},
                                             {"count", *expired}}
                                  .dump());
+            }
+            // A methodology run the operator never reported on, its image build included, is
+            // withdrawn the same way (lake#655).
+            const auto expired_runs = opts.store->expire_unstarted_methodology_runs(
+                lake::control::methodology_run_start_timeout_seconds,
+                std::string(lake::control::methodology_run_start_timeout_reason));
+            if (!expired_runs) {
+                std::println(stderr, "lake: could not expire unstarted methodology runs");
+            } else if (*expired_runs > 0) {
+                std::println(
+                    stderr,
+                    "{}",
+                    nlohmann::json{{"event", "methodology_runs_expired"}, {"count", *expired_runs}}
+                        .dump());
             }
             next_app_cleanup = std::chrono::steady_clock::now() + std::chrono::seconds(60);
         }

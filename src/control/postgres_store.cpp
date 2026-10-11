@@ -4846,6 +4846,231 @@ public:
         });
     }
 
+    // Methodology runs (lake#655, migration 0078).
+    static constexpr const char* methodology_run_columns =
+        "r.id::text, r.customer_id::text, r.workspace_id::text, r.methodology_id, r.mode, "
+        "COALESCE(r.build_id::text, ''), r.image, r.runtime_image, r.slug, r.desired, "
+        "r.cpu_millis, r.memory_bytes, r.gpus, r.gpu_class, r.timeout_seconds, r.network, "
+        "r.generation, r.stop_reason, COALESCE(r.created_by_user_id::text, ''), "
+        "r.created_by_taap_id, "
+        "to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "to_char(r.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "COALESCE(rs.phase, ''), COALESCE(rs.message, ''), rs.exit_code, "
+        "COALESCE(rs.credential_sha256, ''), COALESCE(rs.observed_generation, 0), "
+        "COALESCE(to_char(rs.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "''), "
+        "COALESCE(to_char(rs.finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
+        "''), "
+        "COALESCE(to_char(rs.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), '')";
+
+    static MethodologyRun methodology_run_from(const pqxx::row& row) {
+        MethodologyRun run;
+        run.id = row[0].as<std::string>();
+        run.customer_id = row[1].as<std::string>();
+        run.workspace_id = row[2].as<std::string>();
+        run.methodology_id = row[3].as<std::string>();
+        run.mode = row[4].as<std::string>();
+        run.build_id = row[5].as<std::string>();
+        run.image = row[6].as<std::string>();
+        run.runtime_image = row[7].as<std::string>();
+        run.slug = row[8].as<std::string>();
+        run.desired = row[9].as<std::string>();
+        run.cpu_millis = row[10].as<std::int64_t>();
+        run.memory_bytes = row[11].as<std::int64_t>();
+        run.gpus = row[12].as<int>();
+        run.gpu_class = row[13].as<std::string>();
+        run.timeout_seconds = row[14].as<int>();
+        run.network = row[15].as<bool>();
+        run.generation = row[16].as<std::int64_t>();
+        run.stop_reason = row[17].as<std::string>();
+        run.created_by_user_id = row[18].as<std::string>();
+        run.created_by_taap_id = row[19].as<std::string>();
+        run.created_at = row[20].as<std::string>();
+        run.updated_at = row[21].as<std::string>();
+        run.phase = row[22].as<std::string>();
+        run.message = row[23].as<std::string>();
+        if (!row[24].is_null()) {
+            run.exit_code = row[24].as<int>();
+        }
+        run.credential_sha256 = row[25].as<std::string>();
+        run.observed_generation = row[26].as<std::int64_t>();
+        run.started_at = row[27].as<std::string>();
+        run.finished_at = row[28].as<std::string>();
+        run.status_updated_at = row[29].as<std::string>();
+        return run;
+    }
+
+    static Result<MethodologyRun> one_methodology_run(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            std::string("SELECT ") + methodology_run_columns +
+                " FROM methodology_runs r LEFT JOIN methodology_run_status rs ON rs.run_id = r.id "
+                "WHERE r.id = $1::uuid",
+            id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no methodology run " + id});
+        }
+        return methodology_run_from(rows[0]);
+    }
+
+    // A methodology run's credential (lake#655): live while the run is present and unfinished,
+    // with the digest the operator wrote. It acts as no person.
+    Result<Principal> methodology_run_credential(const std::string& secret) {
+        const auto parsed = parse_agent_credential(secret, methodology_run_credential_prefix);
+        if (!parsed) {
+            return std::unexpected(StoreError{"not_found", "session is not active"});
+        }
+        return with_tx<Principal>([&](pqxx::work& tx) -> Result<Principal> {
+            auto run = one_methodology_run(tx, parsed->first);
+            const std::string digest = identity_crypto::sha256_hex(secret);
+            if (!run || !methodology_run_credential_live(*run) ||
+                !constant_time_hex_equal(digest, run->credential_sha256)) {
+                return std::unexpected(StoreError{"not_found", "session is not active"});
+            }
+            return methodology_run_principal(*run, digest);
+        });
+    }
+
+    Result<MethodologyRun> create_methodology_run(const NewMethodologyRun& in) override {
+        if ((in.mode != "validate" && in.mode != "train") || in.methodology_id.empty() ||
+            in.runtime_image.empty() || in.cpu_millis <= 0 || in.memory_bytes <= 0 || in.gpus < 0 ||
+            in.timeout_seconds <= 0) {
+            return std::unexpected(StoreError{"invalid_input", "methodology run is invalid"});
+        }
+        return with_tx<MethodologyRun>([&](pqxx::work& tx) -> Result<MethodologyRun> {
+            const std::string id = new_uuid_v4();
+            try {
+                tx.exec_params(
+                    "INSERT INTO methodology_runs (id, customer_id, workspace_id, methodology_id, "
+                    "mode, build_id, image, runtime_image, cpu_millis, memory_bytes, gpus, "
+                    "gpu_class, timeout_seconds, network, slug, created_by_user_id, "
+                    "created_by_taap_id) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, "
+                    "NULLIF($6, '')::uuid, $7, $8, $9, $10, $11, $12, $13, $14, $15, "
+                    "NULLIF($16, '')::uuid, $17)",
+                    id,
+                    in.customer_id,
+                    in.workspace_id,
+                    in.methodology_id,
+                    in.mode,
+                    in.build_id,
+                    in.image,
+                    in.runtime_image,
+                    in.cpu_millis,
+                    in.memory_bytes,
+                    in.gpus,
+                    in.gpu_class,
+                    in.timeout_seconds,
+                    in.network,
+                    managed_service_slug("mr", id),
+                    in.created_by_user_id,
+                    in.created_by_taap_id);
+            } catch (const pqxx::check_violation&) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "workspace_id must name a workspace in this space"});
+            } catch (const pqxx::foreign_key_violation&) {
+                return std::unexpected(StoreError{"not_found", "no such customer or build"});
+            }
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            return one_methodology_run(tx, id);
+        });
+    }
+
+    Result<MethodologyRun> get_methodology_run(const std::string& id) override {
+        return with_tx<MethodologyRun>(
+            [&](pqxx::work& tx) -> Result<MethodologyRun> { return one_methodology_run(tx, id); });
+    }
+
+    Result<std::vector<MethodologyRun>> list_methodology_runs(const std::string& customer_id,
+                                                              const std::string& workspace_id,
+                                                              const std::string& methodology_id,
+                                                              int limit) override {
+        return with_tx<std::vector<MethodologyRun>>(
+            [&](pqxx::work& tx) -> Result<std::vector<MethodologyRun>> {
+                const pqxx::result rows = tx.exec_params(
+                    std::string("SELECT ") + methodology_run_columns +
+                        " FROM methodology_runs r LEFT JOIN methodology_run_status rs ON "
+                        "rs.run_id = r.id WHERE r.customer_id = $1::uuid AND r.workspace_id = "
+                        "$2::uuid AND ($3 = '' OR r.methodology_id = $3) ORDER BY r.created_at "
+                        "DESC, r.id DESC LIMIT $4",
+                    customer_id,
+                    workspace_id,
+                    methodology_id,
+                    limit > 0 ? limit : 100);
+                std::vector<MethodologyRun> runs;
+                for (const pqxx::row& row : rows) {
+                    runs.push_back(methodology_run_from(row));
+                }
+                return runs;
+            });
+    }
+
+    Result<MethodologyRun> withdraw_methodology_run(const std::string& id,
+                                                    const std::string& reason) override {
+        return with_tx<MethodologyRun>([&](pqxx::work& tx) -> Result<MethodologyRun> {
+            const pqxx::result changed = tx.exec_params(
+                "UPDATE methodology_runs SET desired = 'absent', generation = generation + 1, "
+                "stop_reason = $2, updated_at = now() WHERE id = $1::uuid AND desired = "
+                "'present' RETURNING id",
+                id,
+                reason);
+            if (changed.empty()) {
+                auto existing = one_methodology_run(tx, id);
+                if (!existing) {
+                    return existing;
+                }
+                return std::unexpected(StoreError{"conflict", "the run is already stopped"});
+            }
+            tx.exec_params("SELECT pg_notify('lake_services', $1)", id);
+            return one_methodology_run(tx, id);
+        });
+    }
+
+    Result<std::size_t> expire_unstarted_methodology_runs(std::int64_t seconds,
+                                                          const std::string& reason) override {
+        return with_tx<std::size_t>([&](pqxx::work& tx) -> Result<std::size_t> {
+            const pqxx::result rows = tx.exec_params(
+                "UPDATE methodology_runs r SET desired = 'absent', generation = generation + 1, "
+                "stop_reason = $2, updated_at = now() WHERE r.desired = 'present' AND "
+                "r.created_at < now() - make_interval(secs => $1::double precision) AND NOT "
+                "EXISTS (SELECT 1 FROM methodology_run_status rs WHERE rs.run_id = r.id AND "
+                "rs.phase <> '') RETURNING r.id::text",
+                seconds,
+                reason);
+            for (const pqxx::row& row : rows) {
+                tx.exec_params("SELECT pg_notify('lake_services', $1)", row[0].as<std::string>());
+            }
+            return rows.size();
+        });
+    }
+
+    Result<void> put_methodology_run_status(const std::string& id,
+                                            const MethodologyRunStatus& status) override {
+        return with_tx<void>([&](pqxx::work& tx) -> Result<void> {
+            const pqxx::result rows = tx.exec_params(
+                "INSERT INTO methodology_run_status (run_id, phase, message, exit_code, "
+                "credential_sha256, observed_generation, started_at, finished_at, updated_at) "
+                "SELECT r.id, $2, $3, $4, $5, CASE WHEN $6 = 0 THEN r.generation ELSE $6 END, "
+                "NULLIF($7, '')::timestamptz, NULLIF($8, '')::timestamptz, now() FROM "
+                "methodology_runs r WHERE r.id = $1::uuid ON CONFLICT (run_id) DO UPDATE SET "
+                "phase = EXCLUDED.phase, message = EXCLUDED.message, exit_code = "
+                "EXCLUDED.exit_code, credential_sha256 = EXCLUDED.credential_sha256, "
+                "observed_generation = EXCLUDED.observed_generation, started_at = "
+                "EXCLUDED.started_at, finished_at = EXCLUDED.finished_at, updated_at = now() "
+                "RETURNING run_id",
+                id,
+                status.phase,
+                status.message,
+                status.exit_code,
+                status.credential_sha256,
+                status.observed_generation,
+                status.started_at,
+                status.finished_at);
+            if (rows.empty()) {
+                return std::unexpected(StoreError{"not_found", "no methodology run " + id});
+            }
+            return {};
+        });
+    }
+
     static constexpr const char* cron_schedule_columns =
         "s.id::text, s.customer_id::text, s.agent_id, s.agent_name, s.cron, s.time_zone, "
         "s.description, s.slug, s.desired, s.input::text, array_to_json(s.scopes)::text, "
@@ -6740,6 +6965,9 @@ public:
         }
         if (auto principal = app_principal(secret)) {
             return principal;
+        }
+        if (secret.starts_with(methodology_run_credential_prefix)) {
+            return methodology_run_credential(secret);
         }
         if (secret.starts_with(agent_launch_credential_prefix)) {
             return launch_principal(secret);

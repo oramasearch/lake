@@ -38,6 +38,11 @@ object in the workspace Zetta's `lake_files` bucket ([drives.md](../api/drives.m
 A workspace's own AI solutions (lake#597) follow too: `lake_solutions`, found by the space, edited and
 deleted at the revision read; Orama's catalogue solutions stay the engine's and are never copied
 ([solutions.md](../api/solutions.md#where-they-live)).
+A workspace methodology's runs (lake#655) follow: `lake_methodology_runs`, one record per run found by
+the space and methodology, holding what it read (dataset, target, features, parameters) and what it
+produced (result, metrics, log, model id), written `if_absent` when it is queued and changed once,
+at the revision read, when its result comes back. The dispatch row `methodology_runs` stays in
+PostgreSQL with ids, images, resources and phases only ([methodologies.md](../api/methodologies.md#where-a-run-lives)).
 
 The rule it implements is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in
 a workspace Zetta, including credentials, secrets and metrics. Lake's PostgreSQL and the lake Zetta

@@ -234,6 +234,8 @@ add_library(lake-core STATIC
   src/control/ask_messages.cpp
   src/control/opportunities.cpp
   src/control/solutions.cpp
+  src/control/methodologies.cpp
+  src/control/methodology_templates.cpp
   src/control/transcripts.cpp
   src/control/project_decisions.cpp
   src/control/drives.cpp
@@ -263,6 +265,7 @@ add_library(lake-core STATIC
   src/api/workspace_deletion.cpp
   src/api/workspace_record_capabilities.cpp
   src/api/solution_capabilities.cpp
+  src/api/methodology_capabilities.cpp
   src/api/transcript_capabilities.cpp
   src/api/drives_capabilities.cpp
   src/api/transcription.cpp

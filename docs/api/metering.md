@@ -224,6 +224,7 @@ the operator is the one place that knows them.
 | `app` | the app | its replicas |
 | `build` | the build | the image build's pod |
 | `agent_launch` | the launch | agent-runtime's Job (`job`) or Deployment (`service`) |
+| `methodology_run` | the run | a workspace methodology's sandbox pod, the code itself (lake#655, migration `0078`); counted once after it finishes, for `started_at` to `finished_at` of that pod, as kind `methodology` ([methodologies.md](methodologies.md#metering)) |
 
 **What the sampler records** (`sample_usage`, every fifteen minutes, by the store root's owner):
 

@@ -169,6 +169,15 @@ solutions are sealed `lake_solutions` records in the workspace Zetta, listed and
 catalogue, which it reads through the workspace's engine (`list_solutions`, `get_solution`);
 `update_solution` and `delete_solution` answer `forbidden` for Orama's. See `docs/api/solutions.md`.
 
+`methodology_capabilities.cpp` registers a workspace's own methodologies (lake#655): the code is
+committed to a workspace repository through the repository store, registered by the engine
+(`register_methodology`, `update_methodology`, `delete_methodology`), built by `build_image` and run
+as `methodology_runs` rows the Orama operator runs; each run's record is sealed
+`lake_methodology_runs` in the workspace Zetta. `methodology_run_input` and `methodology_run_output`
+answer only a run's `lmr.` credential, which `Registry::call` checks
+(`authorize_methodology_run_token`) in place of policy. `workspace_capabilities.cpp` dispatches an
+engine `run` that answers `runner_required` to `run_methodology`. See `docs/api/methodologies.md`.
+
 Repository terminal instructions receive a validated explicit `ServerOptions::external_origin` or
 the HTTPS fallback derived from trusted `public_host`. Request and proxy headers cannot select
 their URL; the web app shows the commands. Existing registry sync operations implement clone and

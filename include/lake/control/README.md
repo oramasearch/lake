@@ -221,3 +221,9 @@ operator reports a workload is scheduled with; `Store::workload_resources` lists
 `InvoiceLine::class_name` carry a GPU class rate and the class a line bills; `AgentLaunch::status_updated_at`
 is when the operator last wrote a launch's status (a finished job's end). See
 [metering](../../../docs/api/metering.md#resources).
+
+`methodologies.hpp` (lake#655) is a workspace methodology's manifest, the findings Validate answers
+without running anything, drafts and copies of Orama's, the image's Dockerfile and the validation
+sample. `store.hpp`'s `MethodologyRun`, `NewMethodologyRun` and `MethodologyRunStatus` are the
+dispatch rows of its runs (migration `0078_methodology_runs`), and `methodology_run_principal` the
+principal a run's `lmr.` credential resolves to: no person, only the runner's two capabilities.

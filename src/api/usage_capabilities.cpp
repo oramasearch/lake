@@ -1612,6 +1612,31 @@ liquid::runtime::task<UsageSampleReport> sample_usage(ApiContext& context,
                 report.unmeasured.push_back("Agent launches of " + customer.id + ": " +
                                             launches.error().message);
             }
+            // A methodology run (lake#655) counts once, for its sandbox pod's time (started to
+            // finished, as the operator reports them) at the resources it ran with.
+            for (const std::string& workspace_id : live_ids) {
+                const auto runs =
+                    context.store->list_methodology_runs(customer.id, workspace_id, "", 200);
+                if (!runs) {
+                    report.unmeasured.push_back("Methodology runs of " + workspace_id + ": " +
+                                                runs.error().message);
+                    continue;
+                }
+                for (const control::MethodologyRun& run : *runs) {
+                    if (run.started_at.empty() || run.finished_at.empty() ||
+                        !ended_now(run.finished_at)) {
+                        continue;
+                    }
+                    const auto* row = resources_of(*resources, "methodology_run", run.id);
+                    const auto ran = elapsed_seconds(run.started_at, run.finished_at);
+                    if (row != nullptr && ran) {
+                        charge(run.workspace_id,
+                               *row,
+                               *ran,
+                               {{"kind", "methodology"}, {"object_id", run.id}});
+                    }
+                }
+            }
         }
 
         // Repository build results finished since a little before the last sample, for their

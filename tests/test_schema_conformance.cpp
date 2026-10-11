@@ -401,6 +401,9 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
          .workspaces = experiments.service,
          // Workspace files (drives) in the workspace Zetta's object routes, faked.
          .object_transport = objects,
+         // Workspace methodologies build their image by the build path (lake#655).
+         .methodology_runtime_image = "registry.test/oramasearch/methodology-runtime:1",
+         .internal_url = "http://lake.schema.test",
          .admin_token = "schema-test",
          .instance_kek = kek,
          // A fake: tests never call OpenAI (docs/api/transcripts.md).
@@ -482,6 +485,67 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     auto copy_id = transcript_scope;
     copy_id["id"] = copy.at("solution").at("id");
     http.call("delete_solution", copy_id);
+    // A workspace's own methodologies (docs/api/methodologies.md, lake#655): the engine's
+    // registry is canned; the code is committed to a real repository of the workspace.
+    json own_methodology{{"id", "W-0000000a"},
+                         {"name", "Schema payers"},
+                         {"source", "workspace"},
+                         {"editable", true},
+                         {"code", {{"repository_id", ""}, {"revision", "main"}, {"path", ""}}},
+                         {"validation", {{"status", "not_validated"}}},
+                         {"network", false}};
+    experiments.caller->answers["register_methodology"] = {{"methodology", own_methodology}};
+    auto methodology_draft = transcript_scope;
+    methodology_draft["description"] = "Which customers will pay late?";
+    http.call("draft_methodology", methodology_draft);
+    auto methodology_input = methodology_draft;
+    methodology_input["name"] = "Schema payers";
+    http.call("create_methodology", methodology_input);
+    for (const auto& repository : http.call("list_repositories", {{"customer_id", customer.id}})
+                                      .value("items", json::array())) {
+        if (repository.value("name", std::string()).starts_with("methodology-schema-payers")) {
+            own_methodology["code"]["repository_id"] = repository.at("id");
+        }
+    }
+    ASSERT_FALSE(own_methodology["code"]["repository_id"].get<std::string>().empty());
+    experiments.caller->answers["get_methodology"] = {{"methodology", own_methodology}};
+    experiments.caller->answers["update_methodology"] = {{"methodology", own_methodology}};
+    experiments.caller->answers["delete_methodology"] = {{"removed", true}, {"id", "W-0000000a"}};
+    auto methodology_id = transcript_scope;
+    methodology_id["id"] = "W-0000000a";
+    auto with_source = methodology_id;
+    with_source["include_source"] = true;
+    http.call("get_methodology", with_source);
+    auto methodology_network = methodology_id;
+    methodology_network["network"] = true;
+    http.call("update_methodology", methodology_network);
+    http.call("duplicate_methodology", methodology_id);
+    const auto validating = http.call("validate_methodology", methodology_id);
+    const std::string validate_run = validating.at("run").at("id");
+    own_methodology["validation"] = {{"status", "passed"}, {"revision", "main"}};
+    experiments.caller->answers["get_methodology"] = {{"methodology", own_methodology}};
+    auto methodology_train = methodology_id;
+    methodology_train.update({{"dataset", "datasets.schema_payers"}, {"target", "late"}});
+    const auto training = http.call("run_methodology", methodology_train);
+    http.call("list_methodology_runs", transcript_scope);
+    auto methodology_run = transcript_scope;
+    methodology_run["run_id"] = training.at("run").at("id");
+    http.call("get_methodology_run", methodology_run);
+    // The runner's side, with the run's own credential (the operator writes its digest).
+    const std::string run_secret = "lmr." + validate_run + "." + std::string(48, 'f');
+    lake::control::MethodologyRunStatus staging;
+    staging.phase = "Staging";
+    staging.credential_sha256 = lake::control::identity_crypto::sha256_hex(run_secret);
+    ASSERT_TRUE(store->put_methodology_run_status(validate_run, staging));
+    const std::string methodology_operator = http.bearer;
+    http.bearer = run_secret;
+    http.call("methodology_run_input", {{"run_id", validate_run}});
+    http.call(
+        "methodology_run_output",
+        {{"run_id", validate_run}, {"result", {{"status", "ok"}, {"findings", json::array()}}}});
+    http.bearer = methodology_operator;
+    http.call("stop_methodology_run", methodology_run);
+    http.call("delete_methodology", methodology_id);
     // Drives (docs/api/drives.md): a workspace-files drive in the workspace Zetta's fake object
     // store, and a virtual one.
     auto drive_input = transcript_scope;
