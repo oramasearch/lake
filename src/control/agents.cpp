@@ -187,11 +187,11 @@ Result<liquid::actor> session_actor(std::span<const std::byte> public_key,
 Result<liquid::actor> lake_actor(const audit::Identity& identity) {
     constexpr std::string_view prefix = "taap:1:ed25519:";
     if (!identity.taap_id.starts_with(prefix)) {
-        return std::unexpected(Error{"crypto_error", "lake identity is not an Ed25519 identity"});
+        return std::unexpected(Error{"crypto_error", "Lake identity is not an Ed25519 identity"});
     }
     auto public_key = decode_base64(identity.public_key, false);
     if (!public_key || public_key->size() != 32) {
-        return std::unexpected(public_key ? Error{"crypto_error", "lake public key is invalid"}
+        return std::unexpected(public_key ? Error{"crypto_error", "Lake public key is invalid"}
                                           : public_key.error());
     }
     const std::string fingerprint = identity.taap_id.substr(prefix.size());

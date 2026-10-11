@@ -811,13 +811,13 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         } else if (!workspace || (!context.path_workspace_id.empty() &&
                            context.workspace_id != context.path_workspace_id)) {
             state.result = ApiResult::failure("invalid_input",
-                "workspace_id must name a workspace Zetta in this space", "/workspace_id");
+                "workspace_id must name a workspace Zetta in this account", "/workspace_id");
             state.proceed = false;
         } else if (input.contains("customer_id") &&
                    input.at("customer_id") != workspace->customer_id) {
             // The workspace exists, so the space named beside it is the one at fault (lake#450).
             state.result = ApiResult::failure("invalid_input",
-                                              "customer_id is not the space that owns workspace " +
+                                              "customer_id is not the account that owns workspace " +
                                                   context.workspace_id,
                                               "/customer_id");
             state.proceed = false;
