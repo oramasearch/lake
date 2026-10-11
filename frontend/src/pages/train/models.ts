@@ -187,7 +187,11 @@ export function compareVersions(from: Row, to: Row): Change[] {
 export function featuresOf(model: Row | null | undefined): string[] {
   const schema = (model?.feature_schema ?? {}) as Row;
   const features = Array.isArray(schema.features) ? schema.features : [];
-  return features.map((feature: unknown) => (typeof feature === "string" ? feature : feature && typeof feature === "object" ? text(feature as Row, "name") || JSON.stringify(feature) : String(feature))).filter(Boolean);
+  // A feature is a name, or an object naming it under one of the keys the engine's trainers use
+  // (a segmentation model writes `encoded_name` and `column`); one with no name is left out, never
+  // shown as JSON.
+  const named = (feature: Row) => ["name", "column", "encoded_name", "source", "feature"].map((key) => text(feature, key)).find(Boolean) ?? "";
+  return features.map((feature: unknown) => (typeof feature === "string" ? feature : feature && typeof feature === "object" ? named(feature as Row) : typeof feature === "number" ? String(feature) : "")).filter(Boolean);
 }
 
 /** What it learned from, when the model says: its feature schema's dataset. The run report says
