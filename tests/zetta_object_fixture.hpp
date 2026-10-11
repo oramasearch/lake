@@ -326,6 +326,22 @@ public:
         std::lock_guard lock(mutex_);
         hangs_[endpoint] = {delay, std::move(fragment)};
     }
+    // Every request to `endpoint` whose URL contains `fragment` (empty: every one) waits until
+    // `let_go`, as one stuck in the network would; `held` counts those waiting. Unlike `hang`, the
+    // test decides when they go on, so "while this request is stuck" needs no timing guess.
+    void hold(const std::string& endpoint, std::string fragment = {}) {
+        std::lock_guard lock(mutex_);
+        holds_[endpoint] = std::move(fragment);
+    }
+    void let_go() {
+        std::lock_guard lock(mutex_);
+        holds_.clear();
+        held_changed_.notify_all();
+    }
+    int held() {
+        std::lock_guard lock(mutex_);
+        return held_;
+    }
     // The bucket is gone (a recreated workspace Zetta): every request to it answers 404.
     void drop_bucket(const std::string& endpoint, const std::string& bucket = "lake_store") {
         std::lock_guard lock(mutex_);
@@ -360,6 +376,21 @@ public:
                     (hung.second.empty() || request.url.find(hung.second) != std::string::npos)) {
                     delay = hung.first;
                 }
+            }
+        }
+        {
+            std::unique_lock lock(mutex_);
+            const auto holding = [&] {
+                return std::ranges::any_of(holds_, [&](const auto& item) {
+                    return request.url.starts_with(item.first) &&
+                           (item.second.empty() ||
+                            request.url.find(item.second) != std::string::npos);
+                });
+            };
+            if (holding()) {
+                ++held_;
+                held_changed_.wait(lock, [&] { return !holding(); });
+                --held_;
             }
         }
         const bool write = request.method == "PUT" || request.method == "PATCH" ||
@@ -793,6 +824,9 @@ private:
     }
 
     std::mutex mutex_;
+    std::condition_variable held_changed_;
+    std::map<std::string, std::string> holds_;
+    int held_ = 0;
     std::condition_variable changed_;
     std::map<std::string, Node> nodes_;
     std::uint64_t requests_ = 0;

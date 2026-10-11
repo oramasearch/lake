@@ -634,7 +634,9 @@ show the order and concurrency of what was applied. `requests_seen` lists every 
 (method and path), and `store_requests_to` counts them without the owner loop's `:usage` reads,
 which run at start and every ten seconds whoever is calling: a test that a caller never reaches a
 workspace counts only those (lake#607, `WorkspaceStoreSearch.ASearchNeverOpensAWorkspaceItsCallerCannotRead`
-once counted a quota read that landed in its window under load). Set `LAKE_TEST_ZETTA_BINARY` to a `zetta` built from Zetta dev
+once counted a quota read that landed in its window under load). `hold(endpoint, fragment)` keeps every
+matching request waiting until `let_go`, and `held` counts those waiting, so a test can say "while
+this request is in flight" without a sleep (lake#603, lake#606). Set `LAKE_TEST_ZETTA_BINARY` to a `zetta` built from Zetta dev
 to run `WorkspaceStoreZetta.*` against it; `latency_proxy.hpp` (`LatencyProxy`) puts a loopback
 round trip in front of it, `LAKE_TEST_ZETTA_RTT_MS` (default 10) for
 `WorkspaceStoreZetta.AOneFileCommitsRequestsAreCountedAndTimed`, and holds each request that asks

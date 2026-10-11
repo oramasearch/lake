@@ -4493,18 +4493,32 @@ TEST(WorkspaceStoreHandoff, IndexWorkTheDrainDropsIsRebuiltByTheSuccessor) {
     }
     ASSERT_NO_FATAL_FAILURE(rig.restart());
     rig.tree(repositories.front());
-    rig.zetta->hang(endpoint_a, 150ms, "/lake_store/");
-    const auto requests = rig.zetta->requests_to(endpoint_a);
+    // The rebuild's index writes are held in the network, so it is still building when the drain
+    // begins, however fast it read the repositories (lake#606: a 150 ms delay on every store
+    // request once stood for "still rebuilding", and under load the commit below waited for the
+    // lane behind the rebuild's reads, so the rebuild finished first and the drain had no index
+    // work to drop). Its writes take no lane, so the commit and the drain's release are not held
+    // up.
+    rig.zetta->hold(endpoint_a, "/lake_store/search/segments/");
     ASSERT_EQ(rig.call("GET", "/v1/search?query=" + std::string(alpha_term) + "&workspace_id=" + rig.alpha).first, 200U);
-    ASSERT_TRUE(eventually([&] { return rig.zetta->requests_to(endpoint_a) > requests + 3; }));
+    if (!eventually([&] { return rig.zetta->held() > 0; }, 30s)) {
+        rig.zetta->let_go();
+        FAIL() << "the rebuild never reached its index writes";
+    }
     // A commit while the index is being rebuilt is pending until the rebuild is done.
     ASSERT_EQ(rig.commit(repositories.back(), "later.txt", "second laterterm").first, 200U);
+    const auto unsettled = rig.options.search->unsettled_workspaces();
+    EXPECT_NE(std::ranges::find(unsettled, rig.alpha), unsettled.end())
+        << "the rebuild is still under way";
 
     auto successor = start_successor(rig);
+    const std::uint64_t fence = rig.zetta->lease(endpoint_a).fence;
     rig.server->begin_drain();
     EXPECT_TRUE(eventually([&] { return !search_objects(*rig.zetta, endpoint_a).contains("search/manifest.json"); }))
         << "the index left behind is removed for the successor to rebuild";
-    rig.zetta->hang(endpoint_a, 0ms);
+    // The held writes go on once the successor holds the lease, and are refused as fenced.
+    EXPECT_TRUE(eventually([&] { return rig.zetta->lease(endpoint_a).fence > fence; }, 30s));
+    rig.zetta->let_go();
     rig.server->stop();
     rig.server = std::move(successor);
     ASSERT_TRUE(eventually([&] { return rig.server->store_root_open(); }));
@@ -4514,6 +4528,76 @@ TEST(WorkspaceStoreHandoff, IndexWorkTheDrainDropsIsRebuiltByTheSuccessor) {
                    repositories.size();
     })) << "the successor's index holds every commit";
     EXPECT_TRUE(search_objects(*rig.zetta, endpoint_a).contains("search/manifest.json"));
+}
+
+// lake#606: a rebuild whose index writes are still in flight when lake drains never puts the
+// manifest back after the drain removed it. Without a successor no newer fence refuses them, so
+// before the fix the rebuild's manifest landed after the drain, and the next process loaded an
+// index without the commit made during the rebuild (it never found "laterterm").
+TEST(WorkspaceStoreHandoff, AnIndexWriteInFlightAtTheDrainNeverPutsTheManifestBack) {
+    MoveRig rig;
+    ASSERT_NO_FATAL_FAILURE(rig.SetUp());
+    const std::string endpoint_a = "http://" + rig.alpha + ".test";
+    ASSERT_EQ(rig.move(rig.alpha, "switch").first, 200U);
+    std::vector<lake::control::Repository> repositories;
+    for (int index = 0; index < 6; ++index) {
+        const auto created = rig.create(rig.alpha, "indexed-" + std::to_string(index));
+        ASSERT_TRUE(created);
+        ASSERT_EQ(rig.commit(*created, "README.md", "first " + std::string(alpha_term)).first,
+                  200U);
+        repositories.push_back(*created);
+    }
+    // The index is damaged; a new process rebuilds it slowly on the next search.
+    for (const auto& [key, bytes] : search_objects(*rig.zetta, endpoint_a)) {
+        if (key.starts_with("search/runs/")) {
+            auto damaged = bytes;
+            damaged[damaged.size() - 5] = static_cast<char>(damaged[damaged.size() - 5] ^ 0x01);
+            rig.zetta->set_object(endpoint_a, key, damaged);
+        }
+    }
+    ASSERT_NO_FATAL_FAILURE(rig.restart());
+    rig.tree(repositories.front());
+    // The rebuild's index writes are held in the network, so it is still building when the drain
+    // begins, however fast it read the repositories (lake#606: a 150 ms delay on every store
+    // request once stood for "still rebuilding", and under load the commit below waited for the
+    // lane behind the rebuild's reads, so the rebuild finished first and the drain had no index
+    // work to drop). Its writes take no lane, so the commit and the drain's release are not held
+    // up.
+    rig.zetta->hold(endpoint_a, "/lake_store/search/segments/");
+    ASSERT_EQ(rig.call("GET",
+                       "/v1/search?query=" + std::string(alpha_term) + "&workspace_id=" + rig.alpha)
+                  .first,
+              200U);
+    if (!eventually([&] { return rig.zetta->held() > 0; }, 30s)) {
+        rig.zetta->let_go();
+        FAIL() << "the rebuild never reached its index writes";
+    }
+    // A commit while the index is being rebuilt is pending until the rebuild is done.
+    ASSERT_EQ(rig.commit(repositories.back(), "later.txt", "second laterterm").first, 200U);
+    const auto unsettled = rig.options.search->unsettled_workspaces();
+    EXPECT_NE(std::ranges::find(unsettled, rig.alpha), unsettled.end())
+        << "the rebuild is still under way";
+
+    rig.server->begin_drain();
+    EXPECT_TRUE(eventually([&] {
+        return !search_objects(*rig.zetta, endpoint_a).contains("search/manifest.json");
+    })) << "the index left behind is removed for the next owner to rebuild";
+    // Nobody takes the lease; the held writes go on and the rebuild finishes what it can.
+    rig.zetta->let_go();
+    rig.server->stop();
+    EXPECT_FALSE(search_objects(*rig.zetta, endpoint_a).contains("search/manifest.json"))
+        << "a write in flight at the drain put the manifest back";
+
+    // The next process rebuilds the index with every commit.
+    rig.options.search = std::make_shared<lake::search::Service>(rig.root);
+    ASSERT_NO_FATAL_FAILURE(rig.start());
+    EXPECT_TRUE(eventually([&] {
+        return searched(rig, "laterterm&workspace_id=" + rig.alpha)["value"]["items"].size() ==
+                   1U &&
+               searched(rig,
+                        std::string(alpha_term) + "&workspace_id=" + rig.alpha)["value"]["items"]
+                       .size() == repositories.size();
+    })) << "the next process's index holds every commit";
 }
 
 // lake#535: liquid's one-file commits on the workspace store ask Zetta for one fsync each, lake's
