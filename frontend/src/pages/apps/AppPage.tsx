@@ -14,6 +14,7 @@ import { entityCrumb, useTrail } from "@/lib/trail";
 import { Button, Card, type Column, DataTable, Empty, ErrorBlock, KeyValue, Page, Skeleton, Split, Status } from "@/lib/ui";
 import { AppPhase, AppUrl, decimal, formValues } from "./AppsPage";
 import { PageError, pause, qs, QueryTabs, storedNumber, storeNumber, streamHref, Terminal, useQueryTab, useRunner, useWorkspaceLink } from "./shared";
+import { stopsPolling } from "@/lib/errors";
 
 type AppEvent = Row & { sequence?: number; type?: string; message?: string; status?: Row };
 
@@ -55,8 +56,10 @@ function useAppEvents(customerId: string, workspaceId: string | null, appId: str
           }
           next = Math.max(next, Number(value.next_sequence) || next);
           storeNumber(key, next);
-        } catch {
-          if (signal.aborted) break;
+        } catch (error) {
+          // An answer asking again cannot change (not set up, unavailable, refused) ends the
+          // follow; anything else is retried after a pause (lib/errors.ts, lake#575).
+          if (signal.aborted || stopsPolling(error)) break;
           await pause(2000, signal);
         }
       }
@@ -699,8 +702,10 @@ function BuildRow({
           if (lines.length) setLive((current) => [...current, ...lines]);
           next = Number(value.next_sequence) || next;
           storeNumber(key, next);
-        } catch {
-          if (signal.aborted) break;
+        } catch (error) {
+          // An answer asking again cannot change (not set up, unavailable, refused) ends the
+          // follow; anything else is retried after a pause (lib/errors.ts, lake#575).
+          if (signal.aborted || stopsPolling(error)) break;
           await pause(2000, signal);
         }
       }

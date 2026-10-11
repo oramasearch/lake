@@ -16,6 +16,7 @@ import { Link, NavLink } from "react-router-dom";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { Check, Copy, Inbox, Loader2 } from "lucide-react";
 import { ApiError, isSignedIn } from "./api";
+import { isNotSetUp } from "./errors";
 
 export function cx(...parts: unknown[]): string {
   return parts.filter(Boolean).join(" ");
@@ -499,11 +500,15 @@ export function Skeleton({ lines = 3 }: { lines?: number }) {
   );
 }
 
-/** A failed read, in words, with Retry. A failed read never looks like an empty list. */
+/** A failed read, in words, with Retry. A failed read never looks like an empty list. A
+ * `not_supported` answer says the feature is not set up on this lake, with lake's words on what
+ * turns it on, and offers no Retry (lake#575). */
 export function ErrorBlock({ error, retry, what }: { error: unknown; retry?: () => void; what?: string }) {
   const e = error instanceof ApiError ? error : null;
-  const title =
-    e?.status === 403
+  const notSetUp = isNotSetUp(e);
+  const title = notSetUp
+    ? "Not set up on this lake"
+    : e?.status === 403
       ? "You don't have access to this"
       : e?.status === 404
         ? "Not found"
@@ -517,7 +522,7 @@ export function ErrorBlock({ error, retry, what }: { error: unknown; retry?: () 
     <div className="error" role="alert">
       <strong className="block">{title}</strong>
       <span>{message}</span>
-      {retry && e?.status !== 403 && e?.status !== 404 && (
+      {retry && !notSetUp && e?.status !== 403 && e?.status !== 404 && (
         <div className="mt-2">
           <Button onClick={retry}>Retry</Button>
         </div>

@@ -8,6 +8,7 @@
 import { type ReactNode, useState } from "react";
 import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
 import { act, useRead, type Row } from "@/lib/api";
+import { pollUnlessFailed } from "@/lib/errors";
 import { WorkspaceGate, useWorkspaceStatus, type WorkspaceState } from "@/components/WorkspaceGate";
 import { postRead as libPostRead } from "@/lib/api";
 import { useSession } from "@/lib/session";
@@ -45,6 +46,7 @@ export function useWq<T = Row>(capability: string | null, input: Row = {}, optio
     queryKey: ["workspace_query", scope.customerId, scope.workspaceId, capability, input],
     queryFn: ({ signal }) => wq<T>(scope, capability!, input, signal),
     ...options,
+    refetchInterval: pollUnlessFailed(options?.refetchInterval),
     enabled: !!capability && !!scope.customerId && !!scope.workspaceId && (options?.enabled ?? true),
   });
 }

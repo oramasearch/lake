@@ -7,6 +7,7 @@
  * secret, and the cookie is resolved by the same `context_for` as a bearer, so the app can do
  * nothing the API cannot. */
 import { QueryClient, useMutation, useQuery, type UseQueryOptions } from "@tanstack/react-query";
+import { pollUnlessFailed, shouldRetry } from "./errors";
 
 export class ApiError extends Error {
   constructor(
@@ -190,9 +191,9 @@ export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 15_000,
-      // A 4xx is the answer (not found, not allowed, a bad id): show it at once. Only a network
-      // failure or a 5xx is worth retrying.
-      retry: (count, error) => !(error instanceof ApiError && error.status >= 400 && error.status < 500) && count < 2,
+      // A 4xx, `not_supported` and `store_unavailable` are shown at once; only another network
+      // or server failure is asked again (lib/errors.ts, lake#575).
+      retry: shouldRetry,
       refetchOnWindowFocus: false,
     },
   },
@@ -206,6 +207,7 @@ export function useRead<T = Row>(name: string | null, input?: Params, options?: 
     queryKey: [name, scope, input ?? {}],
     queryFn: ({ signal }) => read<T>(name!, input, { workspace, signal }),
     ...queryOptions,
+    refetchInterval: pollUnlessFailed(queryOptions.refetchInterval),
     // After the caller's options: a null name never reads, whatever `enabled` says.
     enabled: !!name && (queryOptions.enabled ?? true),
   });
@@ -235,6 +237,7 @@ export function useList<T = Row>(
     queryKey: [name, scope, input ?? {}, pick ?? ""],
     queryFn: async ({ signal }) => listOf<T>(await read<unknown>(name!, input, { workspace, signal }), pick),
     ...queryOptions,
+    refetchInterval: pollUnlessFailed(queryOptions.refetchInterval),
     enabled: !!name && (queryOptions.enabled ?? true),
   });
 }
@@ -258,6 +261,7 @@ export function usePostRead<T = Row>(name: string | null, input: Row = {}, optio
     queryKey: [name, scope, "post", input],
     queryFn: ({ signal }) => postRead<T>(name!, input, { workspace, signal }),
     ...queryOptions,
+    refetchInterval: pollUnlessFailed(queryOptions.refetchInterval),
     enabled: !!name && (queryOptions.enabled ?? true),
   });
 }

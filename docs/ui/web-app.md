@@ -117,12 +117,26 @@ the page is sent `Cache-Control: private, no-store`. Three more things keep late
   so a page's code loads the first time it is opened. A tab opened before a deploy asks for chunk
   names the new build no longer has; the first failed import reloads the page once, and a second
   within a minute shows the error instead of looping.
-- **Reads are cached for 15 seconds** and are not refetched on window focus. A `4xx` is shown at
-  once; only a network failure or a `5xx` is retried, twice (`queryClient` in `src/lib/api.ts`).
+- **Reads are cached for 15 seconds** and are not refetched on window focus. A `4xx`,
+  `not_supported` (501) and `store_unavailable` (503) are shown at once and never asked again on
+  their own; only another network or server failure is retried, twice (`shouldRetry` in
+  `src/lib/errors.ts`, handed to `queryClient` in `src/lib/api.ts`; lake#575). Asking again
+  changes nothing until an operator configures a feature, and a store that is not reachable
+  answers at once, so retrying only made a page wait (Deployments asked six times and never said
+  it was not set up).
+- **`not_supported` reads as "Not set up on this lake".** `ErrorBlock` titles it so, shows lake's
+  message (what turns the feature on) and offers no Retry. Ship → Deployments shows one plain
+  state instead: "Deployments Are Not Set Up on This Lake" and what an operator connects
+  ([platform](../api/platform.md#a-lake-without-the-platform-mirror)).
 - **Every successful write refreshes every read on screen.** Reads that must be sent as `POST`
   (`workspace_query`, the `delete_workspace` dry run) go through `postRead`/`usePostRead`, which
   refresh nothing; calling them through `act` would refetch themselves forever.
-- **Live views** poll or long-poll their capability and stop when the page closes:
+- **Live views** poll or long-poll their capability and stop when the page closes. Each also
+  stops on an answer polling cannot change (a `4xx`, `not_supported`, `store_unavailable`;
+  `stopsPolling`/`pollUnlessFailed` in `src/lib/errors.ts`): every read hook (`useRead`, `useList`,
+  `usePostRead`, both `useWq`) wraps its `refetchInterval` with `pollUnlessFailed`, and the
+  long-poll loops (app events, build logs, environment logs, experiments) end there and show the
+  error. A Retry that succeeds starts the polling again.
 
 | What | How |
 |---|---|

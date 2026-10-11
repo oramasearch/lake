@@ -8,6 +8,7 @@ import { read, type Row } from "@/lib/api";
 import { Button, ErrorBlock, Page, Skeleton } from "@/lib/ui";
 import { usePlatformRepository } from "./EnvironmentsPage";
 import { pause, RepositoryTabs, StaleBanner, Terminal } from "./shared";
+import { stopsPolling } from "@/lib/errors";
 
 type LogPage = { items?: Row[]; next_since?: string; stale_since?: string | null };
 
@@ -52,8 +53,13 @@ export default function LogsPage() {
           setError(null);
         } catch (e) {
           if (signal.aborted) break;
-          // The first read's failure is the page's; a later one keeps the lines and retries.
-          if (first) setError(e);
+          // The first read's failure is the page's; a later one keeps the lines and retries. An
+          // answer asking again cannot change (logs not set up, refused) ends the follow.
+          if (first || stopsPolling(e)) setError(e);
+          if (stopsPolling(e)) {
+            setLoaded(true);
+            break;
+          }
         }
         if (first) {
           first = false;

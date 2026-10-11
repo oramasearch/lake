@@ -10,6 +10,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQueries } from "@tanstack/react-query";
 import { FileCode2, FolderKanban, Plus, Sparkles, Trash2, Workflow } from "lucide-react";
 import { act } from "@/lib/api";
+import { pollUnlessFailed } from "@/lib/errors";
 import { Drawer, Modal } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
 import { Banner, Button, Chip, DataTable, Empty, ErrorBlock, Field, Form, KeyValue, Page, Skeleton, Split, StateTabs, Status } from "@/lib/ui";
@@ -88,7 +89,7 @@ function ProjectBody({ name, building, onBuilding }: { name: string; building: b
     queries: graphs.map((graph) => ({
       queryKey: ["workspace_query", scope.customerId, scope.workspaceId, "get_graph", { project: name, graph: text(graph, "name") }],
       queryFn: ({ signal }: { signal: AbortSignal }) => wq<J>(scope, "get_graph", { project: name, graph: text(graph, "name") }, signal),
-      refetchInterval: interval,
+      refetchInterval: pollUnlessFailed(interval),
     })),
   });
 

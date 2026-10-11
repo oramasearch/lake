@@ -26,6 +26,7 @@ import {
   Server,
 } from "lucide-react";
 import { postRead, read, type Row } from "@/lib/api";
+import { pollUnlessFailed } from "@/lib/errors";
 import { useSession, type WorkspaceChoice } from "@/lib/session";
 import { useTrail } from "@/lib/trail";
 import { Button, Card, Empty, Page, Skeleton, Status, cx } from "@/lib/ui";
@@ -142,7 +143,7 @@ export default function CommandCenter() {
       queryKey: ["home-figures", w.id],
       queryFn: ({ signal }: { signal: AbortSignal }) => figuresOf(w, signal),
       staleTime: 30_000,
-      refetchInterval: 60_000,
+      refetchInterval: pollUnlessFailed(60_000),
     })),
   });
   const repositories = useQuery({
