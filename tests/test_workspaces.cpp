@@ -2010,6 +2010,26 @@ TEST(AgentRuns, CronExpressionsAreCheckedAsACronJobWouldTakeThem) {
     EXPECT_FALSE(normalize_cron("0 9 * * 1; rm"));
 }
 
+// zetta#1238: a compiled pipeline is named from the intent, and lake passes on the template its
+// steps started from; an engine that names none leaves `template` out.
+TEST(AgentRuns, ABuiltPipelineSaysWhichTemplateItStartedFrom) {
+    AgentRuns r;
+    r.w.caller->answers["capture_intent"] = {{"input_id", "in-1"}};
+    r.w.caller->answers["compile_intent"] = {{"name", "Predict which customers will cancel"},
+                                             {"template", "the M-1 churn template"}};
+    const auto built = r.call(
+        "compile_pipeline",
+        {{"project", "retention"}, {"intent", "Predict which customers will cancel next month"}});
+    ASSERT_TRUE(built.ok) << built.error.message;
+    EXPECT_EQ(built.value["graph"], "Predict which customers will cancel");
+    EXPECT_EQ(built.value["template"], "the M-1 churn template");
+
+    r.w.caller->answers["compile_intent"] = {{"name", "churn skeleton"}};
+    const auto older = r.call("compile_pipeline", {{"project", "retention"}, {"intent", "Churn"}});
+    ASSERT_TRUE(older.ok) << older.error.message;
+    EXPECT_FALSE(older.value.contains("template"));
+}
+
 TEST(AgentRuns, ScheduleTimeZonesAreIanaNames) {
     using lake::control::checked_time_zone;
     EXPECT_EQ(checked_time_zone("Etc/UTC"), "Etc/UTC");

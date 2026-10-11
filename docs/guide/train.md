@@ -43,7 +43,8 @@ pretending to train.
 - REST: `POST /v1/compile_pipeline` with
   `{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "intent": "Predict the churned column of accounts", "dataset": "datasets.accounts"}`.
   `dataset` is `<database>.<table>`; `methodology` (for example `M-3`) is optional. The answer's
-  `graph` is the new pipeline's id.
+  `graph` is the new pipeline's name, taken from your description's first words; `template` says
+  which template its steps started from.
 - MCP: the `compile_pipeline` tool, with the same input.
 
 You can also start a pipeline empty, from an n8n export or from Python:

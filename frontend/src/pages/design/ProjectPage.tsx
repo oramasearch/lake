@@ -209,7 +209,7 @@ function ProjectBody({ name, building, onBuilding }: { name: string; building: b
                   {graphs.length === 0
                     ? designing
                       ? "Designing…"
-                      : "No pipelines yet. Describe what the project should predict or answer, and Zetta builds one."
+                      : "No pipelines yet. Describe what the project should predict or answer, and lake builds one."
                     : summary.approved === 0
                       ? "Zetta verifies and runs only an approved pipeline: approve one on the Pipelines tab."
                       : `${summary.approved} of ${summary.pipelines} pipelines approved.`}
@@ -257,7 +257,7 @@ function Pipelines({ project, graphs, designing, onBuild }: { project: string; g
         rowKey={(graph) => text(graph, "id") || text(graph, "name")}
         empty={
           <Empty compact icon={Workflow} title={designing ? "Designing…" : "No Pipelines Yet"}>
-            {designing ? "The Project Agent is designing this project's pipeline." : "Describe what the project should predict or answer, and Zetta builds one."}
+            {designing ? "The Project Agent is designing this project's pipeline." : "Describe what the project should predict or answer, and lake builds one."}
           </Empty>
         }
         columns={[
@@ -351,19 +351,23 @@ function BuildPipeline({ project, datasets, methodologies, onClose }: { project:
         ...(methodology ? { methodology } : {}),
       });
       const graph = text(answer, "graph");
+      // zetta#1238: the steps' names are the template's until edited; say which one.
+      const template = text(answer, "template");
+      const from = template ? ` from ${template}; rename its steps to fit your data` : "";
       setIntent("");
       if (dataset && graph) {
         // Pointed at a dataset: open the pipeline at its Run form, the dataset chosen.
+        if (from) toast(`Built${from}.`);
         navigate(ws(`/design/pipeline?${qs({ project, graph, dataset })}#run`));
         return;
       }
-      toast(graph ? `Pipeline ${graph} built` : "Pipeline built");
+      toast(graph ? `Pipeline ${graph} built${from}` : "Pipeline built");
       onClose();
     });
   return (
     <Drawer
       title="Build a Pipeline"
-      subtitle="Describe what it should predict or answer; Zetta builds the steps."
+      subtitle="Describe what it should predict or answer; lake builds the steps from a template you can edit."
       onClose={onClose}
       footer={
         <>

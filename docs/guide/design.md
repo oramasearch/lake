@@ -69,8 +69,9 @@ again every 3 seconds.
 {"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "intent": "Predict the churned column of accounts", "dataset": "datasets.accounts"}
 ```
 
-Add `"methodology": "M-3"` to choose one. The answer names the new pipeline as `graph`. The MCP tool
-is `compile_pipeline`.
+Add `"methodology": "M-3"` to choose one. The answer names the new pipeline as `graph`, named from
+your description's first words, and `template`, the template its steps started from: rename the
+steps to fit your data. The MCP tool is `compile_pipeline`.
 
 A pipeline whose methodology does not train yet says *This Pipeline Trains Nothing Yet* instead of
 pretending to train. A methodology the engine cannot run is refused with `not_supported`, naming

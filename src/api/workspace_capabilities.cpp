@@ -2807,10 +2807,20 @@ liquid::runtime::task<ApiResult> compile_pipeline(ApiContext& context,
         co_return result;
     }
     const std::string graph = result.value.value("name", result.value.value("graph", std::string()));
+    // The template its steps started from (zetta#1238), said so a person knows the step names
+    // are the template's until they edit them. An older engine names none.
+    const std::string template_name = result.value.value("template", std::string());
+    const auto with_template = [&](ApiResult answer) {
+        if (answer.ok && !template_name.empty()) {
+            answer.value["template"] = template_name;
+        }
+        return answer;
+    };
     if (graph.empty() || (dataset.empty() && !model.is_object())) {
-        co_return ApiResult::success({{"graph", graph}});
+        co_return with_template(ApiResult::success({{"graph", graph}}));
     }
-    co_return called(co_await point_pipeline(context, customer_id, project, graph, dataset, model));
+    co_return with_template(
+        called(co_await point_pipeline(context, customer_id, project, graph, dataset, model)));
 }
 
 liquid::runtime::task<ApiResult> settle_build(ApiContext& context, control::AgentTask task) {
@@ -4265,14 +4275,16 @@ void register_conversation_capabilities(Registry& registry) {
             "The project page's Build a Pipeline: capture `intent` as the project's intent, "
             "compile it (with `methodology`, that methodology's own pipeline), and, with "
             "`dataset` (\"<database>.<table>\"), point the new pipeline's first connect step at "
-            "it. Answers the new pipeline's name as `graph`.",
+            "it. Answers the new pipeline's name as `graph` (from the intent's words) and, from "
+            "an engine that says so, the `template` its steps started from.",
         .input_schema = customer_input_schema({{"project", {{"type", "string"}, {"minLength", 1}}},
                                                {"intent", {{"type", "string"}, {"minLength", 1}}},
                                                {"dataset", {{"type", "string"}}},
                                                {"methodology", {{"type", "string"}}}},
                                               json::array({"project", "intent"})),
         .output_schema = {{"type", "object"},
-                          {"properties", {{"graph", {{"type", "string"}}}}},
+                          {"properties",
+                           {{"graph", {{"type", "string"}}}, {"template", {{"type", "string"}}}}},
                           {"required", json::array({"graph"})},
                           {"additionalProperties", false}},
         .kind = CapabilityKind::Action,

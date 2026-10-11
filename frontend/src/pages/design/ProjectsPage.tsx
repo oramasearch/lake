@@ -196,7 +196,7 @@ function NewProject({ onClose }: { onClose: () => void }) {
   return (
     <Drawer
       title="New Project"
-      subtitle="Start from the decision it should improve; Zetta builds its pipelines from that."
+      subtitle="Start from the decision it should improve; lake builds its pipelines from that."
       onClose={onClose}
       footer={
         <>
