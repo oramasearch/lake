@@ -724,11 +724,14 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
         context.workspace_id = input.at("workspace_id").is_string()
             ? input.at("workspace_id").get<std::string>() : std::string();
     }
-    // A bearer key lake rejected is refused on every call, including those that need none
-    // (`viewer`, the Docs): a script with a mistyped key learns so at once instead of reading
-    // `signed_in: false` (lake#594). A browser's stale session cookie is still a visitor.
+    // A bearer key lake rejected is refused on lake's own public reads too (`viewer`,
+    // `server_info`, the Docs, the capabilities whose object is the server): a script with a
+    // mistyped key learns so at once instead of reading `signed_in: false` (lake#594). A
+    // browser's stale session cookie is still a visitor, and the capabilities that verify their
+    // own bearer (the agent bus, SCIM providers) are left to do so.
     const bool rejected_bearer = !context.authorized && !context.credential_rejection.empty() &&
-                                 context.authentication_method == "bearer";
+                                 context.authentication_method == "bearer" &&
+                                 entry.object == "server";
     if ((entry.requires_auth && !context.authorized && !entry.allows_anonymous_public_read) ||
         rejected_bearer) {
         state.result = unauthenticated(context);
