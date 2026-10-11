@@ -2,8 +2,8 @@
 
 **Status: implemented (lake#564), not deployed.** Organization → Usage (`/usage`) is a dashboard of
 what the chosen workspaces store and use over time, read from each workspace's own usage
-([../api/metering.md](../api/metering.md#usage-over-time)). It shows no price: billing is not
-designed, and nothing on these pages decides it.
+([../api/metering.md](../api/metering.md#usage-over-time)). It shows no price: prices and
+invoices are Organization → Billing's, only where the lake bills ([billing.md](billing.md)).
 
 ## Pages
 

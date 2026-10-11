@@ -1,6 +1,6 @@
 /** "Usage This Month" on an agent, app, service or model page (lake#564): what that one thing used
  * in its workspace since the first of the month, from `usage_over_time`, and a link to the Usage
- * dashboard for the workspace. A figure, not a price: billing is not designed. */
+ * dashboard for the workspace. A figure, not a price: prices are Billing's (pages/billing, lake#564). */
 import { Gauge } from "lucide-react";
 import { useRead } from "@/lib/api";
 import { Button, Card, KeyValue, Skeleton } from "@/lib/ui";

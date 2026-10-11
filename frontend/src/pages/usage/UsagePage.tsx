@@ -3,7 +3,7 @@
  * meters and a CSV export. The workspace multi-select is Home's (`?ws=`); `?range=` picks the period
  * and `?dimension=` the chart. Each account's workspaces are read with `usage_over_time` and its
  * limits with `usage_limits`; several accounts' readings are added up here. The operator opens one
- * account with `?customer_id=`. There is no price here: billing is not designed. */
+ * account with `?customer_id=`. There is no price here; Billing (pages/billing) prices usage where the lake bills. */
 import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
