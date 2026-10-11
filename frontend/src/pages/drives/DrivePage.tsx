@@ -1,7 +1,9 @@
 /** One drive (`/w/<id>/drives/drive?id=<drive>&folder=<key>[&focus=<item>]`, lake#561,
  * docs/ui/drives.md): a file manager over the drive's `DriveStorage`, whatever keeps its files.
- * The folder's path, a toolbar (filter, sort), the folder's items with their actions, and:
+ * The folder's path, a toolbar (search, sort), the folder's items with their actions, and:
  *
+ * - Search: what is typed filters this folder's items at once, then `search_drives` finds the
+ *   matching names everywhere else in the drive, listed under the folder with their paths.
  * - Upload files or a whole folder (chosen, or dropped with its subfolders) into the folder, with
  *   progress; a large workspace file goes in chunks.
  * - Select items (shift-click selects a range) and move or delete them together; drag items onto
@@ -53,6 +55,9 @@ import { datasetFormat, datasetName, rangeSelect, sortEntries, validName, type D
 import { storageFor, type Drive, type DriveStorage, type Item, type Listing, type Progress, type Upload } from "./storage";
 import { STORAGE, storageLabel, targetHref, targetLabel } from "./targets";
 import { ShortcutDialog } from "./ShortcutDialog";
+import { matchLink, matchWhere, parentKey, folderKey, type DriveMatch, type SearchDrivesResult } from "./search";
+import { MatchAnchor, matchIcon } from "./MatchLink";
+import { Highlight } from "@/components/Highlight";
 import { FolderPicker } from "./FolderPicker";
 
 /** The type an internal drag carries, so a drop of files from the desktop is never a move. */
@@ -314,7 +319,7 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
         </Banner>
       )}
       <Toolbar>
-        <SearchInput value={filter} onChange={setFilter} placeholder="Filter by name…" label="Filter by name" />
+        <SearchInput value={filter} onChange={setFilter} placeholder="Search this drive…" label="Search this drive" />
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <label className="flex items-center gap-1.5 text-[12.5px] text-ink-2">
             <span className="label m-0">Sort</span>
@@ -381,8 +386,8 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
             {storage.can.upload ? "Drop files or folders here, or upload them." : "Add folders and shortcuts to what this workspace already has."}
           </Empty>
         ) : shown.length === 0 ? (
-          <Empty compact title="Nothing matches">
-            No item here is named like “{filter}”.
+          <Empty compact title="Nothing in This Folder Matches">
+            No item here is named like “{filter}”. Matches elsewhere in the drive are listed below.
           </Empty>
         ) : (
           <div className="table-wrap" role="region" aria-label="Folder contents" tabIndex={0}>
@@ -452,6 +457,7 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
           </div>
         )}
       </div>
+      {needle && <DriveMatches drive={drive} folder={folder} q={filter.trim()} scope={{ customerId, workspaceId }} open={open} wsPath={wsPath} />}
       {dialog?.kind === "folder" && <NewFolder storage={storage} folder={folder} onClose={() => setDialog(null)} />}
       {dialog?.kind === "shortcut" && <ShortcutDialog storage={storage} folder={folder} onClose={() => setDialog(null)} />}
       {dialog?.kind === "rename" && <Rename storage={storage} item={dialog.item} onClose={() => setDialog(null)} />}
@@ -484,6 +490,96 @@ function DriveBrowser({ drive, customerId, workspaceId }: { drive: Drive; custom
         />
       )}
     </Page>
+  );
+}
+
+/** The value, once it has stopped changing for `ms`. */
+function useSettled<T>(value: T, ms: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), ms);
+    return () => clearTimeout(timer);
+  }, [value, ms]);
+  return settled;
+}
+
+/** The whole drive searched by name (`search_drives {drive_id}`), once typing settles: every match
+ * outside the folder shown, which the filter above already covers, with its path. */
+function DriveMatches({
+  drive,
+  folder,
+  q,
+  scope,
+  open,
+  wsPath,
+}: {
+  drive: Drive;
+  folder: string;
+  q: string;
+  scope: { customerId: string; workspaceId: string };
+  open: (key: string) => void;
+  wsPath: (path: string) => string;
+}) {
+  const settled = useSettled(q, 250);
+  const search = useQuery<SearchDrivesResult>({
+    queryKey: ["drive-search", drive.id, scope.workspaceId, settled],
+    queryFn: ({ signal }) => read<SearchDrivesResult>("search_drives", { customer_id: scope.customerId, workspace_id: scope.workspaceId, drive_id: drive.id, q: settled, limit: 100 }, { signal }),
+    enabled: !!settled,
+    staleTime: 15_000,
+  });
+  const elsewhere = (search.data?.items ?? []).filter((m: DriveMatch) => m.kind !== "drive" && parentKey(m) !== folder);
+  const skipped = search.data?.skipped ?? [];
+  return (
+    <section className="mt-4 overflow-hidden rounded-[6px] border border-hairline bg-surface" aria-label="Matches in this drive">
+      <header className="flex items-center gap-2 border-b border-hairline bg-raised px-4 py-2">
+        <h2 className="!m-0 !text-[10.5px] after:!hidden">Elsewhere in This Drive</h2>
+        <span className="ml-auto font-mono text-[11px] text-ink-3">{search.isLoading || settled !== q ? "…" : elsewhere.length}</span>
+      </header>
+      {search.isLoading || (settled !== q && !search.data) ? (
+        <div className="px-4">
+          <Skeleton lines={2} />
+        </div>
+      ) : search.isError ? (
+        <div className="p-3">
+          <ErrorBlock error={search.error} retry={() => void search.refetch()} what="the drive's search" />
+        </div>
+      ) : skipped.length ? (
+        <p className="muted m-0 px-4 py-3 text-[13px]">This drive could not be searched: {skipped[0].reason}.</p>
+      ) : !elsewhere.length ? (
+        <p className="muted m-0 px-4 py-3 text-[13px]">No other folder of this drive holds a match.</p>
+      ) : (
+        <ul className="m-0 list-none p-0">
+          {elsewhere.map((m) => {
+            const { icon: Icon, className } = matchIcon(m);
+            const name = <Highlight text={m.name} q={settled} />;
+            return (
+              <li key={`${m.kind}:${m.id ?? m.path}`} className="border-b border-hairline px-4 py-2 last:border-b-0 hover:bg-raised/60">
+                <div className="flex min-w-0 items-center gap-2 text-[13.5px] font-medium">
+                  <Icon size={14} aria-hidden className={cx("shrink-0", className)} />
+                  {m.kind === "folder" ? (
+                    <button type="button" className={LINK} onClick={() => open(folderKey(m))}>
+                      {name}
+                    </button>
+                  ) : (
+                    <MatchAnchor link={matchLink(m, scope)} wsPath={wsPath}>
+                      {name}
+                    </MatchAnchor>
+                  )}
+                </div>
+                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[12.5px] text-ink-3">
+                  <button type="button" className="cursor-pointer border-0 bg-transparent p-0 text-left text-ink-3 hover:underline" onClick={() => open(parentKey(m))}>
+                    {matchWhere(m)}
+                  </button>
+                  {m.kind === "file" && m.size !== undefined && <span className="font-mono text-[11.5px]">{displaySize(m.size)}</span>}
+                  {m.kind === "file" && m.modified_at && <span className="font-mono text-[11.5px]">{relative(m.modified_at)}</span>}
+                </div>
+              </li>
+            );
+          })}
+          {search.data?.truncated && <li className="px-4 py-2 text-[12.5px] text-ink-3">More match; type more of the name to narrow the search.</li>}
+        </ul>
+      )}
+    </section>
   );
 }
 

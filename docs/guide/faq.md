@@ -198,7 +198,7 @@ lake runs only the exact proposal you reviewed:
 - Ask Orama confirms only a proposal it stored in your own conversation; anything else answers
   *That proposal is not in this conversation.*
 - ApplicationAgent and ExperimentsAgent read the task again on **Confirm**: if the proposal changed,
-  is no longer a finished proposal, or (for a study) the edited JSON does not parse, nothing starts.
+  is no longer a finished proposal, or (for an experiment) the edited JSON does not parse, nothing starts.
   A public app also needs its own *I understand this app will be public* box ticked.
 
 Ask again for a fresh proposal. Details: [Ask Orama](/docs/ask-orama), [Apps](/docs/apps),

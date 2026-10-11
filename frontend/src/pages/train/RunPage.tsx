@@ -8,7 +8,7 @@ import type { Row } from "@/lib/api";
 import { entityCrumb, useTrail } from "@/lib/trail";
 import { Banner, Button, Card, Chip, ErrorBlock, KeyValue, Mono, Query, Split, Stat, Status } from "@/lib/ui";
 import { WorkspaceFrame, cellText, qs, text, timeAgo, useWorkspace, useWorkspaceState, useWq, useWsPath } from "./workspace";
-import { ObjectTable, RunSubject, TrialSubject, UNFINISHED, runStatusTone, useStudies, when } from "./RunsPage";
+import { ObjectTable, RunSubject, TrialSubject, UNFINISHED, runStatusTone, useExperimentRefs, when } from "./RunsPage";
 
 export default function RunPage() {
   const [params] = useSearchParams();
@@ -66,12 +66,12 @@ export default function RunPage() {
 }
 
 function RunBody({ run, id }: { run: Row; id: string }) {
-  const studies = useStudies();
+  const experiments = useExperimentRefs();
   const status = text(run, "status");
   const finished = !UNFINISHED.has(status);
   const report = useWq<Row>("get_run_report", { run_id: id }, { enabled: finished });
   const traces = useWq<Row>("list_traces", { limit: 500 });
-  const trial = studies.byRun.get(text(run, "id"));
+  const trial = experiments.byRun.get(text(run, "id"));
   const created = text(run, "created");
 
   const said: string[] = [];

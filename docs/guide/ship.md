@@ -15,7 +15,7 @@ address `/w/<workspace id>/…`. [Getting Started](/docs) says where to find bot
 |---|---|
 | **Model** | A learned function that makes a prediction. **Ship → Models** lists the models your workspace trained: each one's name, the project, pipeline and run it came from, its score on held-out rows, the features it reads and when it was trained. A pipeline can train several models. A model uploaded on its own lives as a model repository, with no pipeline ([Repositories](/docs/repositories)). |
 | **Published** | A model or index that answers calls from outside lake. Anything not published can still be used inside lake, but `predict` and `search_index` refuse it. |
-| **Promoted** | The model a study chose as its best trial ([Experiments](/docs/experiments)). It is marked **promoted** on Ship → Models. |
+| **Promoted** | The model an experiment chose as its best trial ([Experiments](/docs/experiments)). It is marked **promoted** on Ship → Models. |
 | **Search index** | A full-text (BM25F) index over one dataset's columns. |
 | **Search key** | A lake API token whose only scope is `search_index`: it can search published indexes and do nothing else. |
 | **Lake key** | Any lake API token, made on Developer → API or Developer → MCP ([Tokens and Keys](/docs/tokens)). |
@@ -23,10 +23,10 @@ address `/w/<workspace id>/…`. [Getting Started](/docs) says where to find bot
 ## Ship → Models
 
 **Ship → Models** lists every model in the workspace. The figures on top count the models (and how
-many have weights), the published ones, the ones with a held-out score and the ones a study
+many have weights), the published ones, the ones with a held-out score and the ones an experiment
 promoted. The table shows each model's name, its project and pipeline, when it was trained, its
-score and whether it is published. A model trained by a study names its study and trial, and the
-model a study promoted carries a **promoted** chip.
+score and whether it is published. A model trained by an experiment names its experiment and trial,
+and the model an experiment promoted carries a **promoted** chip.
 
 - **Search models…** filters by name.
 - **Published** and **Not published** filter by state; when the workspace has several kinds of
@@ -234,7 +234,7 @@ published, runs the search in your workspace and records the query.
 ## Related Pages
 
 - [Train a Model](/docs/train): where models come from, and the held-out score.
-- [Experiments](/docs/experiments): studies, trials and promotion.
+- [Experiments](/docs/experiments): experiments, trials and promotion.
 - [Datasets and Loading Data](/docs/load-data): the datasets an index covers.
 - [Apps](/docs/apps): ship a whole data app instead of an endpoint.
 - [Tokens and Keys](/docs/tokens): make and revoke keys.

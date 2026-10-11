@@ -22,8 +22,10 @@ snapshot and update the page.
 Train → Experiments is implemented in the source tree with eleven registered REST/MCP operations,
 live charts, confirmed promotion, and ExperimentsAgent's editable proposal and confirmed start,
 against workspace Zetta `dev-a1d74b21`. The build's authorized bridge transport source is
-unchanged. Deletion has no engine contract; deployed study/training acceptance is not claimed.
-See `docs/api/experiments.md` and `docs/ui/experiments.md`.
+unchanged. Deletion has no engine contract; deployed experiment/training acceptance is not claimed.
+Lake says experiment (`get_experiment`, `start_experiment`, `stop_experiment`, `experiment_id`) where
+the engine says study, translating at its boundary (lake#561, not deployed); the guides and pages
+never say study. See `docs/api/experiments.md` and `docs/ui/experiments.md`.
 
 The console is the web app in `frontend/` (lake#561), embedded in the binary and answered for every
 browser page request; it calls only `/v1`. The server-rendered console pages, their deferred panels

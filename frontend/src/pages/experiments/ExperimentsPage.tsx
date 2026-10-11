@@ -1,7 +1,8 @@
-/** Train → Experiments (web_ui_experiments.cpp list mode; serve_experiments_agent_form; the
- * start-study and compare scripts): the figures, ExperimentsAgent's turn (asked from a drawer) with
- * its editable proposal and confirmed start, the filter, Start a Study in a drawer, the studies as
- * rich rows with Stop, and the tracked runs to compare. */
+/** Train → Experiments (formerly web_ui_experiments.cpp list mode, serve_experiments_agent_form and
+ * the start and compare scripts): the figures, ExperimentsAgent's turn (asked from a drawer) with
+ * its editable proposal and confirmed start, the filter, Start an Experiment in a drawer, the
+ * experiments as rich rows with Stop, and the tracked runs to compare. An experiment is the
+ * engine's study; lake's capabilities say experiment (lake#561). */
 import { type FormEvent, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Bot, FlaskConical, GitCompare, Loader2, Play } from "lucide-react";
@@ -30,15 +31,15 @@ import { cell, METRIC_NAMES, metricLabel } from "./transforms";
 
 const STATES = ["", "pending", "running", "succeeded", "failed", "stopped", "complete"];
 
-type Study = { id: string; spec: Row; status: string; trials: Row[]; spent_cost?: unknown };
+type Experiment = { id: string; spec: Row; status: string; trials: Row[]; spent_cost?: unknown };
 
-/** A study's figures: trials by state, and the best completed objective in its direction. */
-function studyFigures(study: Study) {
-  const spec = study.spec ?? {};
+/** An experiment's figures: trials by state, and the best completed objective in its direction. */
+function experimentFigures(experiment: Experiment) {
+  const spec = experiment.spec ?? {};
   const objective = (spec.objective ?? {}) as Row;
   const counts: Record<string, number> = {};
   let best: number | null = null;
-  for (const trial of study.trials ?? []) {
+  for (const trial of experiment.trials ?? []) {
     counts[trial.state] = (counts[trial.state] ?? 0) + 1;
     if (trial.state === "complete" && typeof trial.objective === "number") {
       if (best === null || (objective.direction === "maximize" ? trial.objective > best : trial.objective < best)) best = trial.objective;
@@ -61,12 +62,12 @@ export default function ExperimentsPage() {
   const [notice, setNotice] = useState(params.get("error") ?? "");
   const [busy, setBusy] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [open, setOpen] = useState<"agent" | "study" | null>(null);
+  const [open, setOpen] = useState<"agent" | "experiment" | null>(null);
   const [search, setSearch] = useState("");
   const [confirmDialog, confirm] = useConfirm();
   const listing = useQuery({
     queryKey: ["list_experiments", client.workspaceId, project, state],
-    queryFn: () => client.read<{ studies?: Study[]; runs?: Row[] }>("list_experiments", { project, state }),
+    queryFn: () => client.read<{ experiments?: Experiment[]; runs?: Row[] }>("list_experiments", { project, state }),
     enabled: !!client.customerId,
   });
   const actions = useExperimentActions(() => listing.refetch(), setNotice);
@@ -95,11 +96,11 @@ export default function ExperimentsPage() {
     navigate(url("/train/experiments", { project: String(form.get("project") ?? ""), state }));
   };
 
-  const startStudy = (event: FormEvent<HTMLFormElement>) => {
+  const startExperiment = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
     void run("start", async () => {
-      // The start-study script: dotted names nest, numbers are numbers, empty values are left out.
+      // As the old start script did: dotted names nest, numbers are numbers, empty values are left out.
       const input: Row = {};
       for (const element of Array.from(form.elements) as HTMLInputElement[]) {
         if (!element.name || element.name === "search_space" || element.name === "released_metrics") continue;
@@ -128,18 +129,18 @@ export default function ExperimentsPage() {
         .map((value) => value.trim())
         .filter(Boolean);
       if (!(await confirm("Start training with these parameters and budgets?", "Confirm", JSON.stringify(input, null, 2)))) return;
-      const study = await client.act<Row>("start_study", { ...input, confirm: true });
-      navigate(url("/train/experiment", { study: String(study.id ?? "") }));
+      const experiment = await client.act<Row>("start_experiment", { ...input, confirm: true });
+      navigate(url("/train/experiment", { experiment: String(experiment.id ?? "") }));
     });
   };
 
-  const studies = listing.data?.studies ?? [];
+  const experiments = listing.data?.experiments ?? [];
   const runs = listing.data?.runs ?? [];
   const needle = search.trim().toLowerCase();
-  const shownStudies = studies.filter((study) => !needle || `${cell(study.spec?.name)} ${cell(study.spec?.project)}`.toLowerCase().includes(needle));
+  const shownExperiments = experiments.filter((experiment) => !needle || `${cell(experiment.spec?.name)} ${cell(experiment.spec?.project)}`.toLowerCase().includes(needle));
   const shownRuns = runs.filter((item) => !needle || `${cell(item.id)} ${cell(item.project)}`.toLowerCase().includes(needle));
-  const trialCount = studies.reduce((sum, study) => sum + (study.trials ?? []).length, 0);
-  const running = studies.filter((study) => study.status === "running").length;
+  const trialCount = experiments.reduce((sum, experiment) => sum + (experiment.trials ?? []).length, 0);
+  const running = experiments.filter((experiment) => experiment.status === "running").length;
 
   const compare = () => {
     const chosen = [...selected];
@@ -150,33 +151,33 @@ export default function ExperimentsPage() {
     navigate(url("/train/experiments/compare", { runs: chosen.join(",") }));
   };
 
-  const studyColumns: Column<Study>[] = [
+  const experimentColumns: Column<Experiment>[] = [
     {
       key: "name",
-      label: "Study",
-      sort: (study) => cell(study.spec?.name),
-      render: (study) => {
-        const { objective } = studyFigures(study);
+      label: "Experiment",
+      sort: (experiment) => cell(experiment.spec?.name),
+      render: (experiment) => {
+        const { objective } = experimentFigures(experiment);
         return (
           <div className="min-w-0">
-            <Link to={url("/train/experiment", { study: study.id })} className="font-semibold">
-              {cell(study.spec?.name)}
+            <Link to={url("/train/experiment", { experiment: experiment.id })} className="font-semibold">
+              {cell(experiment.spec?.name)}
             </Link>
             <div className="truncate text-[12px] text-ink-3">
-              {cell(study.spec?.project)} · {metricLabel(objective.metric)}
+              {cell(experiment.spec?.project)} · {metricLabel(objective.metric)}
             </div>
           </div>
         );
       },
     },
-    { key: "state", label: "State", sort: (study) => study.status, render: (study) => <Status value={study.status} /> },
+    { key: "state", label: "State", sort: (experiment) => experiment.status, render: (experiment) => <Status value={experiment.status} /> },
     {
       key: "best",
       label: "Best",
       numeric: true,
-      sort: (study) => studyFigures(study).best,
-      render: (study) => {
-        const { best, objective } = studyFigures(study);
+      sort: (experiment) => experimentFigures(experiment).best,
+      render: (experiment) => {
+        const { best, objective } = experimentFigures(experiment);
         return (
           <div>
             <div className="font-mono font-semibold text-ink">{best === null ? "—" : cell(best)}</div>
@@ -189,13 +190,13 @@ export default function ExperimentsPage() {
       key: "trials",
       label: "Trials / Budget",
       numeric: true,
-      sort: (study) => (study.trials ?? []).length,
-      render: (study) => {
-        const { counts, budgets } = studyFigures(study);
+      sort: (experiment) => (experiment.trials ?? []).length,
+      render: (experiment) => {
+        const { counts, budgets } = experimentFigures(experiment);
         return (
           <div>
             <div className="font-mono">
-              {(study.trials ?? []).length} / {cell(budgets.max_trials)}
+              {(experiment.trials ?? []).length} / {cell(budgets.max_trials)}
             </div>
             <div className="text-[11px] text-ink-3" title="Complete / Pruned / Failed">
               {counts.complete ?? 0} complete · {counts.pruned ?? 0} pruned · {counts.failed ?? 0} failed
@@ -208,18 +209,18 @@ export default function ExperimentsPage() {
       key: "cost",
       label: "Cost / Cap",
       numeric: true,
-      render: (study) => (
+      render: (experiment) => (
         <span className="font-mono">
-          {cell(study.spent_cost)} / {cell(studyFigures(study).budgets.cost_cap)}
+          {cell(experiment.spent_cost)} / {cell(experimentFigures(experiment).budgets.cost_cap)}
         </span>
       ),
     },
     {
       key: "actions",
       label: "",
-      render: (study) =>
-        canWrite && study.status === "running" ? (
-          <Button variant="danger" disabled={actions.busy !== null} onClick={() => void actions.perform("stop_study", study.id)}>
+      render: (experiment) =>
+        canWrite && experiment.status === "running" ? (
+          <Button variant="danger" disabled={actions.busy !== null} onClick={() => void actions.perform("stop_experiment", experiment.id)}>
             Stop
           </Button>
         ) : null,
@@ -286,8 +287,8 @@ export default function ExperimentsPage() {
             <Bot size={14} aria-hidden /> Ask ExperimentsAgent
           </Button>
           {canWrite && (
-            <Button variant="primary" onClick={() => setOpen("study")}>
-              <Play size={14} aria-hidden /> Start a study
+            <Button variant="primary" onClick={() => setOpen("experiment")}>
+              <Play size={14} aria-hidden /> Start experiment
             </Button>
           )}
         </>
@@ -304,13 +305,13 @@ export default function ExperimentsPage() {
       ) : (
         <>
           <StatRow>
-            <Stat label="Studies" value={studies.length} icon={FlaskConical} />
+            <Stat label="Experiments" value={experiments.length} icon={FlaskConical} />
             <Stat label="Running" value={running} tone={running ? "ok" : undefined} />
-            <Stat label="Trials" value={trialCount} sub="across these studies" />
-            <Stat label="Tracked runs" value={runs.length} sub="outside studies" />
+            <Stat label="Trials" value={trialCount} sub="across these experiments" />
+            <Stat label="Tracked runs" value={runs.length} sub="outside experiments" />
           </StatRow>
           <Toolbar>
-            <SearchInput value={search} onChange={setSearch} placeholder="Search studies and runs…" label="Search studies and runs" />
+            <SearchInput value={search} onChange={setSearch} placeholder="Search experiments and runs…" label="Search experiments and runs" />
             <FilterChips
               options={STATES.filter(Boolean).map((value) => ({ id: value, label: value }))}
               value={state || null}
@@ -324,43 +325,43 @@ export default function ExperimentsPage() {
           </Toolbar>
 
           <div className="space-y-4">
-            <Card title="Studies" padded={false}>
+            <Card title="Experiments" padded={false}>
               <DataTable
-                rows={shownStudies}
+                rows={shownExperiments}
                 q={listing}
-                what="studies"
-                columns={studyColumns}
-                rowKey={(study) => study.id}
-                caption="Studies"
+                what="experiments"
+                columns={experimentColumns}
+                rowKey={(experiment) => experiment.id}
+                caption="Experiments"
                 empty={
                   <div className="p-4">
                     <Empty
                       compact
                       icon={FlaskConical}
-                      title="No Studies"
+                      title="No Experiments"
                       action={
                         canWrite ? (
-                          <Button variant="primary" onClick={() => setOpen("study")}>
-                            Start a study
+                          <Button variant="primary" onClick={() => setOpen("experiment")}>
+                            Start experiment
                           </Button>
                         ) : undefined
                       }
                     >
-                      {studies.length ? "Clear the search to see more." : "Start a study, or ask ExperimentsAgent to propose one."}
+                      {experiments.length ? "Clear the search to see more." : "Start an experiment, or ask ExperimentsAgent to propose one."}
                     </Empty>
                   </div>
                 }
               />
             </Card>
             <Card
-              title="Tracked Runs Outside Studies"
+              title="Tracked Runs Outside Experiments"
               padded={false}
               actions={
                 <Button onClick={compare} disabled={selected.size === 0}>
                   <GitCompare size={14} aria-hidden /> Compare selected runs{selected.size ? ` (${selected.size})` : ""}
                 </Button>
               }
-              footer="Select two to eight runs. Trial runs can also be compared from their study."
+              footer="Select two to eight runs. Trial runs can also be compared from their experiment."
             >
               <DataTable
                 rows={shownRuns}
@@ -369,7 +370,7 @@ export default function ExperimentsPage() {
                 columns={runColumns}
                 rowKey={(item) => String(item.id ?? "")}
                 caption="Tracked runs"
-                empty={<p className="muted m-0 px-4 py-3 text-[13px]">No tracked runs outside studies.</p>}
+                empty={<p className="muted m-0 px-4 py-3 text-[13px]">No tracked runs outside experiments.</p>}
               />
             </Card>
           </div>
@@ -379,7 +380,7 @@ export default function ExperimentsPage() {
       {open === "agent" && (
         <Drawer
           title="Run an Experiment"
-          subtitle="Describe the training or tuning goal. ExperimentsAgent proposes a complete study for you to edit and confirm before it starts."
+          subtitle="Describe the training or tuning goal. ExperimentsAgent proposes a complete experiment for you to edit and confirm before it starts."
           onClose={() => setOpen(null)}
           footer={
             <>
@@ -412,17 +413,17 @@ export default function ExperimentsPage() {
         </Drawer>
       )}
 
-      {open === "study" && canWrite && (
+      {open === "experiment" && canWrite && (
         <Drawer
-          title="Start a Study"
+          title="Start an Experiment"
           subtitle="Choose the pipeline, data, objective and budgets. You confirm the parameters before training starts."
           width={640}
           onClose={() => setOpen(null)}
           footer={
             <>
               <Button onClick={() => setOpen(null)}>Cancel</Button>
-              <Button variant="primary" type="submit" form="start-study" loading={busy === "start"}>
-                Review and start study
+              <Button variant="primary" type="submit" form="start-experiment" loading={busy === "start"}>
+                Review and start experiment
               </Button>
             </>
           }
@@ -432,10 +433,10 @@ export default function ExperimentsPage() {
             Selection uses the validation split. The final test split is never used for tuning. Metrics are named as the run report names them: held_out_auc, held_out_log_loss,
             held_out_accuracy, held_out_rmse, held_out_mae.
           </Banner>
-          <form id="start-study" className="experiments" onSubmit={startStudy}>
+          <form id="start-experiment" className="experiments" onSubmit={startExperiment}>
             <div className="experiment-fields">
               <label>
-                Study name
+                Experiment name
                 <input name="name" required />
               </label>
               <label>
@@ -519,7 +520,7 @@ export default function ExperimentsPage() {
               <input type="checkbox" name="differential_privacy" /> Differential privacy
             </label>
             <label>
-              Released metrics for private studies (comma separated)
+              Released metrics for private experiments (comma separated)
               <input name="released_metrics" />
             </label>
           </form>
@@ -574,47 +575,48 @@ function TaskPanels({
       </div>
     );
   }
-  const studyObject = result.study && typeof result.study === "object" && !Array.isArray(result.study);
-  if (result.kind === "proposal" && result.confirm === true && studyObject) {
+  // ExperimentsAgent's answer carries the experiment it proposes as the engine's `study`.
+  const proposed = result.study && typeof result.study === "object" && !Array.isArray(result.study);
+  if (result.kind === "proposal" && result.confirm === true && proposed) {
     const shown = result;
-    const confirmStudy = (event: FormEvent<HTMLFormElement>) => {
+    const confirmExperiment = (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
-      const edited = String(new FormData(event.currentTarget).get("study") ?? "");
+      const edited = String(new FormData(event.currentTarget).get("experiment") ?? "");
       void run("confirm", async () => {
         // The confirm form's checks, against a fresh read of the task.
         const fresh = await fetchAgentTask(taskId, client.customerId, client.workspaceId);
         const proposal = taskResult(fresh);
-        const freshStudy = proposal.study && typeof proposal.study === "object" && !Array.isArray(proposal.study);
-        if (fresh.agent !== "agent-experiments" || fresh.kind !== "experiment" || fresh.status !== "succeeded" || proposal.kind !== "proposal" || proposal.confirm !== true || !freshStudy) {
+        const freshProposed = proposal.study && typeof proposal.study === "object" && !Array.isArray(proposal.study);
+        if (fresh.agent !== "agent-experiments" || fresh.kind !== "experiment" || fresh.status !== "succeeded" || proposal.kind !== "proposal" || proposal.confirm !== true || !freshProposed) {
           throw new ApiError(400, "invalid_input", "That task has no ExperimentsAgent proposal to confirm.");
         }
         if (canonicalJson(proposal) !== canonicalJson(shown)) throw new ApiError(409, "conflict", "The ExperimentsAgent proposal changed before confirmation.");
-        let study: unknown;
+        let experiment: unknown;
         try {
-          study = JSON.parse(edited);
+          experiment = JSON.parse(edited);
         } catch {
-          study = null;
+          experiment = null;
         }
-        if (!study || typeof study !== "object" || Array.isArray(study)) throw new ApiError(400, "invalid_input", "The edited study proposal must be a JSON object.");
-        // lake checks the task and digest against the stored proposal before the study can start.
-        await turn("Confirm and start the reviewed study proposal.", {
+        if (!experiment || typeof experiment !== "object" || Array.isArray(experiment)) throw new ApiError(400, "invalid_input", "The edited experiment proposal must be a JSON object.");
+        // lake checks the task and digest against the stored proposal before the experiment can start.
+        await turn("Confirm and start the reviewed experiment proposal.", {
           proposal_task_id: taskId,
           proposal_sha256: task.proposal_sha256 ?? "",
-          context: { confirmed_proposal: { ...proposal, study } },
+          context: { confirmed_proposal: { ...proposal, study: experiment } },
         });
       });
     };
     return (
       <div className="mb-5" id="experiment-proposal">
-        <Card tone="active" label="ExperimentsAgent proposal" title="Proposed Study" footer={link}>
+        <Card tone="active" label="ExperimentsAgent proposal" title="Proposed Experiment" footer={link}>
           <div className="ask-reply">
             <Markdown>{reply}</Markdown>
           </div>
-          <p className="muted text-[13px]">Edit the study JSON if needed. The reviewed object is validated again before the agent can start it.</p>
-          <form className="stack" onSubmit={confirmStudy}>
+          <p className="muted text-[13px]">Edit the experiment JSON if needed. The reviewed object is validated again before the agent can start it.</p>
+          <form className="stack" onSubmit={confirmExperiment}>
             <label>
-              Study proposal (JSON)
-              <textarea name="study" rows={18} required defaultValue={JSON.stringify(result.study, null, 2)} className="font-mono" />
+              Experiment proposal (JSON)
+              <textarea name="experiment" rows={18} required defaultValue={JSON.stringify(result.study, null, 2)} className="font-mono" />
             </label>
             <details>
               <summary className="cursor-pointer text-[13px] text-ink-2">Why these choices</summary>
@@ -622,7 +624,7 @@ function TaskPanels({
             </details>
             <div>
               <Button variant="primary" type="submit" loading={busy === "confirm"}>
-                <Play size={14} aria-hidden /> Confirm and start study
+                <Play size={14} aria-hidden /> Confirm and start experiment
               </Button>
             </div>
           </form>
@@ -630,15 +632,15 @@ function TaskPanels({
       </div>
     );
   }
-  const study = (studyObject ? result.study : {}) as Row;
+  const experiment = (proposed ? result.study : {}) as Row;
   return (
     <div className="mb-5">
       <Card
         label="ExperimentsAgent"
         title="ExperimentsAgent Result"
         actions={
-          result.kind === "running" && study.id ? (
-            <Button to={url("/train/experiment", { study: String(study.id) })}>Open the running study</Button>
+          result.kind === "running" && experiment.id ? (
+            <Button to={url("/train/experiment", { experiment: String(experiment.id) })}>Open the running experiment</Button>
           ) : undefined
         }
         footer={link}

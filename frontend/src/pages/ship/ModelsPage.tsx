@@ -10,7 +10,7 @@ import { Drawer, ConfirmButton } from "@/lib/overlay";
 import { useTrail } from "@/lib/trail";
 import { Button, Chip, CopyBlock, DataTable, Empty, ErrorBlock, FilterChips, Query, SearchInput, Stat, StatRow, Status, Toolbar } from "@/lib/ui";
 import { WorkspaceFrame, qs, text, useWorkspace, useWq, useWsPath, wa } from "../train/workspace";
-import { TrialSubject, useStudies, when, type StudyRef } from "../train/RunsPage";
+import { TrialSubject, useExperimentRefs, when, type ExperimentRef } from "../train/RunsPage";
 import { CopyMono } from "./parts";
 
 export default function ModelsPage() {
@@ -70,7 +70,7 @@ function Models() {
   const path = useWsPath();
   const scope = useWorkspace();
   const q = useWq<Row>("list_models");
-  const studies = useStudies();
+  const experiments = useExperimentRefs();
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [needle, setNeedle] = useState("");
@@ -91,7 +91,7 @@ function Models() {
     }
   };
 
-  const studyOf = (model: Row): StudyRef | undefined => studies.byModel.get(text(model, "id")) ?? studies.byRun.get(text(model, "run"));
+  const experimentOf = (model: Row): ExperimentRef | undefined => experiments.byModel.get(text(model, "id")) ?? experiments.byRun.get(text(model, "run"));
   const models = useMemo(() => ((q.data?.models ?? []) as Row[]), [q.data]);
   const kinds = useMemo(() => {
     const counts = new Map<string, number>();
@@ -120,7 +120,7 @@ function Models() {
           const all = (value.models ?? []) as Row[];
           const published = all.filter((model) => model.exposed === true);
           const scored = all.filter((model) => heldOut((model.metrics ?? {}) as Row) !== null).length;
-          const promoted = all.filter((model) => studies.promoted.has(text(model, "id"))).length;
+          const promoted = all.filter((model) => experiments.promoted.has(text(model, "id"))).length;
           const lower = needle.trim().toLowerCase();
           const rows = all.filter(
             (model) =>
@@ -134,7 +134,7 @@ function Models() {
                 <Stat label="Models" value={all.length} icon={Brain} sub={`${all.filter((m) => m.has_weights === true).length} with weights`} />
                 <Stat label="Published" value={published.length} icon={Globe} tone={published.length ? "ok" : undefined} sub="answering outside calls" />
                 <Stat label="Held-out score" value={scored} sub="measured on held-out rows" />
-                <Stat label="Promoted" value={promoted} icon={Trophy} sub="by a study" />
+                <Stat label="Promoted" value={promoted} icon={Trophy} sub="by an experiment" />
               </StatRow>
               <Toolbar>
                 <SearchInput value={needle} onChange={setNeedle} placeholder="Search models…" label="Search models" />
@@ -170,7 +170,7 @@ function Models() {
                         <div className="flex flex-wrap items-center gap-1.5">
                           <strong className="text-ink">{text(model, "name")}</strong>
                           {text(model, "kind") && <Chip>{text(model, "kind").replace(/[_-]+/g, " ")}</Chip>}
-                          {studies.promoted.has(text(model, "id")) && <Chip tone="ok">promoted</Chip>}
+                          {experiments.promoted.has(text(model, "id")) && <Chip tone="ok">promoted</Chip>}
                         </div>
                         <small className="muted">
                           <code>{text(model, "id").slice(0, 8)}</code>
@@ -184,20 +184,20 @@ function Models() {
                     label: "Project",
                     sort: (model) => text(model, "project_name").toLowerCase(),
                     render: (model) => {
-                      // A study's model names its study (lake#449); a dataset-level study has no project.
+                      // An experiment's model names its experiment (lake#449); a dataset-level experiment has no project.
                       const project = text(model, "project_name");
-                      const study = studyOf(model);
+                      const experiment = experimentOf(model);
                       const link = project ? <Link to={path(`/design/project?${qs({ customer_id: scope.customerId, name: project })}`)}>{project}</Link> : null;
-                      if (!link && !study) return <span className="muted">{text(model, "project") ? "a deleted project" : "no project"}</span>;
-                      if (!link) return <TrialSubject refOf={study!} />;
+                      if (!link && !experiment) return <span className="muted">{text(model, "project") ? "a deleted project" : "no project"}</span>;
+                      if (!link) return <TrialSubject refOf={experiment!} />;
                       return (
                         <>
                           {link}
-                          {study && (
+                          {experiment && (
                             <>
                               <br />
                               <small className="muted">
-                                <TrialSubject refOf={study} />
+                                <TrialSubject refOf={experiment} />
                               </small>
                             </>
                           )}

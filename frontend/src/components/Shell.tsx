@@ -132,6 +132,10 @@ export function Shell({ children }: { children: ReactNode }) {
   const [ask, setAsk] = useState(false);
   // Ask Orama widened over the page by its expand button; closing it returns it to the side.
   const [askExpanded, setAskExpanded] = useState(false);
+  // However the panel closes (its X, the top bar's button, a phone navigation), it reopens at the side.
+  useEffect(() => {
+    if (!ask) setAskExpanded(false);
+  }, [ask]);
   const [askRequest, setAskRequest] = useState<AskRequest | null>(null);
   const askToggledAt = useRef(Number.NEGATIVE_INFINITY);
   const pendingG = useRef(0);

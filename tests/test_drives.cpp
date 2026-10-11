@@ -766,6 +766,98 @@ TEST(Drives, AVirtualDriveHoldsShortcutsThatSayWhenTheyBreak) {
     EXPECT_EQ(deleted.value["entries_removed"], 6U);
 }
 
+TEST(Drives, SearchFindsDrivesFoldersFilesAndShortcutsByName) {
+    Spaces s;
+    const auto& first = s.spaces[0];
+    const auto& second = s.spaces[1];
+    const ApiResult team = s.in(first, "create_drive", {{"name", "Team"}, {"storage", "files"}});
+    const ApiResult links =
+        s.in(first, "create_drive", {{"name", "Report Links"}, {"storage", "virtual"}});
+    ASSERT_TRUE(team.ok && links.ok);
+    const std::string team_id = team.value["id"];
+    const std::string links_id = links.value["id"];
+    const ApiResult uploaded =
+        s.in(first,
+             "upload_drive_entries",
+             {{"drive_id", team_id},
+              {"files",
+               json::array({{{"path", "Trip/Day 1/Q3 REPORT.pdf"}, {"content", base64("pdf")}},
+                            {{"path", "Trip/notes.txt"}, {"content", base64("n")}}})}});
+    ASSERT_TRUE(uploaded.ok) << uploaded.error.message;
+    // An unfinished upload is never found.
+    ASSERT_TRUE(s.in(first,
+                     "begin_drive_upload",
+                     {{"drive_id", team_id}, {"path", "report-draft.txt"}, {"size", 9}})
+                    .ok);
+    const ApiResult folder = s.in(
+        first, "create_drive_folder_entry", {{"drive_id", links_id}, {"path", "Reports/2026"}});
+    ASSERT_TRUE(folder.ok) << folder.error.message;
+    ASSERT_TRUE(s.in(first,
+                     "create_drive_shortcut",
+                     {{"drive_id", links_id},
+                      {"parent_id", folder.value["id"]},
+                      {"name", "Board report"},
+                      {"target", {{"kind", "url"}, {"url", "https://orama.test/report"}}}})
+                    .ok);
+
+    const ApiResult found = s.in(first, "search_drives", {{"q", "rEpOrT"}});
+    ASSERT_TRUE(found.ok) << found.error.message;
+    EXPECT_EQ(found.value["truncated"], false);
+    EXPECT_TRUE(found.value["skipped"].empty());
+    std::vector<std::string> names;
+    for (const json& item : found.value["items"]) {
+        names.push_back(item["kind"].get<std::string>() + " " +
+                        item["drive"]["name"].get<std::string>() + ":" +
+                        item["path"].get<std::string>());
+    }
+    EXPECT_EQ(names,
+              (std::vector<std::string>{"drive Report Links:",
+                                        "folder Report Links:Reports",
+                                        "shortcut Report Links:Reports/2026/Board report",
+                                        "file Team:Trip/Day 1/Q3 REPORT.pdf"}))
+        << found.value.dump();
+    const json& file = found.value["items"][3];
+    EXPECT_EQ(file["drive"]["storage"], "files");
+    EXPECT_EQ(file["folder"], "Trip/Day 1");
+    EXPECT_EQ(file["size"], 3);
+    EXPECT_EQ(file["content_type"], "application/pdf");
+    EXPECT_TRUE(file["modified_at"].is_string());
+    EXPECT_TRUE(file["parent_id"].is_string());
+    const json& shortcut = found.value["items"][2];
+    EXPECT_EQ(shortcut["status"], "unknown");
+    EXPECT_EQ(shortcut["target"]["url"], "https://orama.test/report");
+    EXPECT_EQ(shortcut["folder"], "Reports/2026");
+    EXPECT_EQ(shortcut["parent_id"], folder.value["id"]);
+
+    // A limit keeps the first matches and says more were found; a drive narrows to its own items.
+    const ApiResult two = s.in(first, "search_drives", {{"q", "report"}, {"limit", 2}});
+    ASSERT_TRUE(two.ok) << two.error.message;
+    EXPECT_EQ(two.value["items"].size(), 2U);
+    EXPECT_EQ(two.value["truncated"], true);
+    const ApiResult one = s.in(first, "search_drives", {{"q", "day"}, {"drive_id", team_id}});
+    ASSERT_TRUE(one.ok) << one.error.message;
+    ASSERT_EQ(one.value["items"].size(), 1U);
+    EXPECT_EQ(one.value["items"][0]["path"], "Trip/Day 1");
+    EXPECT_TRUE(s.in(first, "search_drives", {{"q", "report"}, {"drive_id", links_id}})
+                    .value["items"]
+                    .size() == 3U);
+    EXPECT_EQ(s.in(first, "search_drives", {{"q", "report"}}, 1).value["items"].size(), 0U)
+        << "another workspace of the space has its own drives";
+    EXPECT_EQ(s.in(first, "search_drives", {{"q", "report"}, {"drive_id", team_id}}, 1).error.code,
+              "not_found");
+
+    // Outside the workspace's space nothing is answered.
+    EXPECT_EQ(s.call(second,
+                     "search_drives",
+                     {{"customer_id", first.customer_id},
+                      {"workspace_id", first.workspaces[0]},
+                      {"q", "report"}})
+                  .error.code,
+              "unauthorized");
+    EXPECT_EQ(s.in(second, "search_drives", {{"q", "report"}, {"drive_id", team_id}}).error.code,
+              "not_found");
+}
+
 TEST(Drives, EveryDriveCapabilityIsAuditedInItsWorkspace) {
     for (const char* name : {"create_drive",
                              "list_drives",
@@ -785,7 +877,8 @@ TEST(Drives, EveryDriveCapabilityIsAuditedInItsWorkspace) {
                              "read_drive_file",
                              "recent_drive_entries",
                              "load_drive_dataset",
-                             "drive_share_people"}) {
+                             "drive_share_people",
+                             "search_drives"}) {
         EXPECT_EQ(lake::api::audit_log_of(name), lake::api::AuditLog::Workspace) << name;
     }
 }
@@ -1118,4 +1211,48 @@ TEST(DrivesHttp, ARepositoryDriveWriteIsSearchedDownloadedAndLoaded) {
                   false);
     ASSERT_TRUE(deleted.value("ok", false)) << deleted.dump();
     EXPECT_TRUE(lake.found("zorblaxquux").empty());
+}
+
+TEST(DrivesHttp, SearchFindsTheNamesOfARepositoryDrivesPaths) {
+    Lake lake;
+    const json drive = lake.call(
+        "create_drive",
+        {{"name", "Archive"}, {"storage", "repository"}, {"repository_name", "archive-drive"}});
+    ASSERT_TRUE(drive.value("ok", false)) << drive.dump();
+    const std::string repository_id = drive["value"]["repository_id"];
+    const json folder = lake.call(
+        "create_drive_folder",
+        {{"repository_id", repository_id}, {"ref", "main"}, {"path", ""}, {"name", "Reports"}},
+        false);
+    ASSERT_TRUE(folder.value("ok", false)) << folder.dump();
+    const json uploaded = lake.call(
+        "upload_drive_files",
+        {{"repository_id", repository_id},
+         {"ref", "main"},
+         {"path", "Reports"},
+         {"files", json::array({{{"name", "q3-report.csv"}, {"content", base64("a,b\n")}}})}},
+        false);
+    ASSERT_TRUE(uploaded.value("ok", false)) << uploaded.dump();
+    const auto& space = lake.spaces.spaces[0];
+    const json found = lake.read("search_drives",
+                                 {{"customer_id", space.customer_id},
+                                  {"workspace_id", space.workspaces[0]},
+                                  {"q", "REPORT"}});
+    ASSERT_TRUE(found.value("ok", false)) << found.dump();
+    const json& items = found["value"]["items"];
+    ASSERT_EQ(items.size(), 2U) << found.dump();
+    EXPECT_EQ(items[0]["kind"], "folder");
+    EXPECT_EQ(items[0]["path"], "Reports");
+    EXPECT_EQ(items[0]["drive"]["storage"], "repository");
+    EXPECT_TRUE(items[0]["id"].is_null()) << "a repository item is addressed by its path";
+    EXPECT_EQ(items[1]["kind"], "file");
+    EXPECT_EQ(items[1]["path"], "Reports/q3-report.csv");
+    EXPECT_EQ(items[1]["folder"], "Reports");
+    EXPECT_EQ(items[1]["size"], 4);
+    EXPECT_FALSE(items[1].contains("modified_at")) << "the tree carries no time";
+    const json marker = lake.read("search_drives",
+                                  {{"customer_id", space.customer_id},
+                                   {"workspace_id", space.workspaces[0]},
+                                   {"q", "lake-folder"}});
+    EXPECT_TRUE(marker["value"]["items"].empty()) << "the empty-folder marker is never found";
 }

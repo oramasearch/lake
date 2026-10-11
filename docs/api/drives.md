@@ -41,6 +41,8 @@ audited in the workspace's own log ([audit.md](audit.md#which-log)).
 | `recent_drive_entries` | read | `limit?` (1 to 100, default 20) | `{items: [{drive: {id, name}, entry}]}` |
 | `load_drive_dataset` | action | `drive_id`, `id`, `table_name`, `format?`, `if_exists?` | `upload_dataset`'s answer, with `source: {drive_id, id, name}` |
 
+| `search_drives` | read | `q` (1 to 255 bytes), `drive_id?`, `limit?` (1 to 200, default 50) | `{items: [match], truncated, skipped: [{drive, reason}]}` ([Search](#search)) |
+
 A drive is `{id, name, storage, repository_id, created_by, created_at}`; `repository_id` is `null`
 except for a repository drive. An entry is `{id, drive_id, parent_id, kind, name, path, created_by,
 created_at, modified_by, modified_at}`, `parent_id` `null` at the drive's top, plus for a file
@@ -198,6 +200,43 @@ its errors come back at this call's fields (`/table_name`, and `/id` for the con
 MiB (`size_invalid` at `/id`), as `upload_dataset` takes. Nothing is stored anywhere but the
 dataset. The Drives page offers it as **Load as dataset** on a CSV or JSONL file.
 
+## Search
+
+`search_drives` finds the drives, folders, files and shortcuts of the workspace whose **name**
+contains `q`, ignoring the case of A to Z (other characters compare exactly; a substring is
+enough). With `drive_id` it searches that drive only (`not_found` at `/drive_id` for a drive this
+workspace does not hold). It never looks inside a file's bytes.
+
+| Drive | What is searched | Read |
+|---|---|---|
+| any | the drive's own name | `list_drives`, once |
+| `files`, `virtual` | every ready folder, file and shortcut name (an unfinished upload is never found) | each drive's `lake_drive_entries`, once, as `list_drive_entries` reads them |
+| `repository` | the name of every folder and file path in the repository's tree at `main` (the `.lake-folder` marker never) | the tree, once per drive, off the server thread, when the caller may read the repository |
+
+A match is `{drive: {id, name, storage, repository_id}, kind, id, parent_id, name, path, folder}`:
+`kind` is `drive`, `folder`, `file` or `shortcut`; `path` is the item's path from the drive's top
+(empty for a drive) and `folder` the path of the folder holding it; `id` and `parent_id` are entry
+ids in a workspace-files or virtual drive and `null` otherwise (a repository item is addressed by
+its path). A file adds `size` and, outside repository drives, `content_type` and `modified_at`; a
+shortcut adds `target` and its checked `status` (and `reason`), as `list_drive_entries` answers
+them. Drives come first, then matches by drive name and path; the first `limit` are answered and
+`truncated` says whether more matched. Only the shortcuts answered are checked.
+
+**Repository drives, and why paths only.** A repository drive's files are a liquid repository, so
+the honest bounded search is its tree at `main`: one read per drive, the same tree `drive_browse`
+lists, giving each path's name and size. A file's modified time is not in the tree (`drive_browse`
+computes it by walking the history), so a repository match has none. Searching the *contents* of a
+repository drive's files is lake's code search (`search` with `repository`,
+[search.md](search.md)), which the Search page offers as its Code place. A repository drive whose
+tree cannot be read (no repository store, the repository deleted, the caller not allowed to read
+it, a read failure) is listed in `skipped` with the reason and never fails the call. Read access is
+the repository's own: a person who sees a repository folder only through a shared link finds
+nothing of it here.
+
+Like `list_drive_entries`, the read authorizes `read` on the space before it reads, and its audit
+event (in the workspace's log) records the `drive_id` searched and the number of matches, never the
+query.
+
 ## How File Bytes Are Kept
 
 Each file's bytes are one object in the workspace Zetta's `lake_files` bucket (created on first
@@ -255,6 +294,11 @@ storage quota yet. The workspace Zetta's own volume is the bound.
   another space refused; a virtual drive's shortcuts going broken; the audit routing; and over
   HTTP, a repository drive's `main` from creation (a bare repository's `drive_browse` is
   `not_found`) and a streamed download of a 3 MiB file.
+- `Drives.SearchFindsDrivesFoldersFilesAndShortcutsByName`: matches across a workspace-files and a
+  virtual drive in either case, with their paths, sizes and shortcut status; an unfinished upload
+  never found; a limit with `truncated`; one drive; another workspace; another space refused.
+  `DrivesHttp.SearchFindsTheNamesOfARepositoryDrivesPaths`: a repository drive's folder and file
+  paths, without the folder marker.
 - `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls every capability above and
   validates its answer against its output schema.
 - `Drives.AResentChunkAnswersTheUploadAndAbandonedUploadsExpire` (lake#588): a resent chunk's
