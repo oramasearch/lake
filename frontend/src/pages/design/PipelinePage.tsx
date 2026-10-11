@@ -7,7 +7,7 @@ import { type MouseEvent, type ReactNode, useEffect, useRef, useState } from "re
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { act, type Row } from "@/lib/api";
 import { useToast } from "@/lib/toast";
-import { MousePointerClick } from "lucide-react";
+import { Check, MousePointerClick } from "lucide-react";
 import { Banner, Button, Chip, DataTable, Empty, ErrorBlock, Field, Form, KeyValue, Page, Skeleton, Split, Status } from "@/lib/ui";
 import { WorkspaceGate, useWorkspaceStatus } from "@/components/WorkspaceGate";
 import { qs, useScope, useScopedRead, useWq, useWsPath, wa } from "./api";
@@ -769,18 +769,31 @@ function Govern({
   return (
     <Panel id="run" title="Approve, Check, Run and Deploy" tone={approved ? "default" : "active"}>
       <div className="pipeline-edit">
-        {!approved && (
-          <Form
-            onSubmit={() =>
-              approve.run(async () => {
-                await wa(scope, "approve_plan", target);
-                toast("Pipeline approved");
-              })
-            }
-          >
-            <FormError error={approve.error} />
-            <p className="m-0 text-[12.5px] text-ink-2">Zetta verifies and runs only an approved pipeline.</p>
-            <div>
+        {/* Approved, the cell stays where it was with the same footprint: removing it reflowed the
+            grid and shortened the page under a reader at its foot, which moved the whole layout
+            (lake#578). */}
+        <Form
+          onSubmit={() =>
+            approved
+              ? undefined
+              : approve.run(async () => {
+                  await wa(scope, "approve_plan", target);
+                  toast("Pipeline approved");
+                })
+          }
+        >
+          <FormError error={approve.error} />
+          <p className="m-0 text-[12.5px] text-ink-2">
+            {approved
+              ? `Approved${graph.approved_at ? ` ${whenUtc(graph.approved_at)}` : ""}. lake verifies and runs only an approved pipeline.`
+              : "lake verifies and runs only an approved pipeline."}
+          </p>
+          <div>
+            {approved ? (
+              <Button disabled>
+                <Check size={14} aria-hidden /> Approved
+              </Button>
+            ) : (
               <Button type="submit" variant="primary" loading={approve.busy}>
                 Approve
               </Button>
