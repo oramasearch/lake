@@ -1054,6 +1054,19 @@ TEST(RegistryStore, ARecordNamingAMissingOrWrongObjectIsAnErrorUntilARePushRepai
 
 namespace {
 
+// Whether `condition` holds within `limit`, checked every 10 ms.
+template <typename Condition>
+bool eventually(Condition condition, std::chrono::milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (!condition()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    return true;
+}
+
 // A pull that reads its status line and headers, then stops reading until it is closed.
 struct PausedPull {
     int socket = -1;
@@ -1132,11 +1145,18 @@ TEST(RegistryStore, PullsCountAgainstTheLaneForTheirWholeStreamAndOtherWorkspace
     pulls.clear(); // the clients go away; their streams end and give their admissions back
 
     // A long put holds alpha's lane while forty pulls arrive: they are refused or wait their
-    // turn, and beta answers meanwhile.
-    rig.zetta->hang(RegistryRig::endpoint(rig.alpha), 100ms);
+    // turn, and beta answers meanwhile. The put's store write is held in the network until the
+    // pulls have been answered, so the put holds the lane for as long as they arrive (lake#603:
+    // a sleep of 300 ms once stood for "the put holds the lane by now", and under load the put's
+    // upload or the forty connections took longer, so pulls ran before or after the put).
+    rig.zetta->hold(RegistryRig::endpoint(rig.alpha), "/lake_store/");
     Reply put;
     std::thread putter([&] { put = rig.push_blob("tenant-one/busy", layer_bytes(2 * 1024 * 1024, 93)); });
-    std::this_thread::sleep_for(300ms);
+    if (!eventually([&] { return rig.zetta->held() > 0; }, 30s)) {
+        rig.zetta->let_go();
+        putter.join();
+        FAIL() << "the put never reached the store: " << put.status << " " << put.body;
+    }
     std::vector<std::thread> pullers;
     std::atomic<int> unavailable{0};
     for (int index = 0; index < 40; ++index) {
@@ -1149,11 +1169,13 @@ TEST(RegistryStore, PullsCountAgainstTheLaneForTheirWholeStreamAndOtherWorkspace
     const auto beta_started = std::chrono::steady_clock::now();
     EXPECT_TRUE(rig.get_blob("tenant-one/calm", sha256(calm)).body == calm);
     EXPECT_LT(std::chrono::steady_clock::now() - beta_started, 3s) << "another workspace still answers";
+    // At most a lane's admissions wait behind the put; every other pull is refused at once.
+    EXPECT_TRUE(eventually([&] { return unavailable.load() >= 32; }, 30s)) << unavailable.load();
+    rig.zetta->let_go();
     for (std::thread& puller : pullers) {
         puller.join();
     }
     putter.join();
-    rig.zetta->hang(RegistryRig::endpoint(rig.alpha), 0ms);
     EXPECT_EQ(put.status, 201U) << put.body;
     EXPECT_GE(unavailable.load(), 32);
     // Afterwards the lane admits pulls again.

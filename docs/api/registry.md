@@ -122,6 +122,11 @@ as a named exception: one instance-wide namespace with public reads.
   names is `500` to GET and HEAD, never answered from the instance registry; a push of the blob
   repairs it. A record without `object` (pushed before phase B, or before its workspace was
   switched) is streamed from `blobs/`, also in windows, until the copy below names its object.
+  `RegistryStore.PullsCountAgainstTheLaneForTheirWholeStreamAndOtherWorkspacesAnswer` covers the
+  slots and a long put holding the lane while forty HEAD pulls arrive: at most the lane's
+  admissions wait and at least 32 are refused, while another workspace answers. The put's store
+  write is held in the fake Zetta until the pulls are answered (lake#603); a 300 ms sleep used to
+  stand for "the put holds the lane", and under load the pulls could arrive before or after it.
 - **Workload credentials stay in their workspace.** A build pushes and reads only repositories
   routed to its own workspace, so a build cannot pull a base or cache image of another workspace
   of its space; an app pull token reads only its app's repository, only when the route names the
