@@ -8,8 +8,8 @@ serves. Methods:
 | `initialize` | `{protocolVersion, capabilities: {tools: {listChanged: true}}, serverInfo: {name: "lake", version}}`, with an `Mcp-Session-Id` response header |
 | `notifications/initialized` | accepted, `202`, no body |
 | `ping` | `{}` |
-| `tools/list` | every JSON registry entry as a tool: `name`, `title`, `description`, `inputSchema`, `outputSchema` (`lake::api::mcp_tools`) |
-| `tools/call` | `params: {name, arguments}` → `Registry::call` with the request's bearer; result `{content: [{type: text, text}], structuredContent: <envelope>, isError}` |
+| `tools/list` | every JSON registry entry as a tool: `name`, `title`, `description`, `inputSchema`, `outputSchema` (`lake::api::mcp_tools`); at `POST /w/<workspace_id>/mcp`, also the allowed tools of the workspace's MCP connections a person chose to expose, as `<prefix>__<tool>` ([MCP connections](mcp-connections.md#lakes-mcp-re-exports-a-connection-opt-in)) |
+| `tools/call` | `params: {name, arguments}` → `Registry::call` with the request's bearer; result `{content: [{type: text, text}], structuredContent: <envelope>, isError}`. A re-exported `<prefix>__<tool>` runs through `read_mcp_tool` or `call_mcp_tool` as the caller and answers the connected server's own result |
 
 The [shared envelope decision](README.md) defines both transports: `outputSchema` describes the
 complete successful `structuredContent`, including `ok`, `value`, and `duration_ms`. Capability

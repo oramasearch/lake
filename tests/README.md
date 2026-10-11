@@ -417,6 +417,10 @@ public addresses and tool bounds, then the client over the server's own transpor
 `mcp_test_server.hpp`, a local MCP server (Streamable HTTP and HTTP+SSE, an OAuth authorization
 server, and hostile modes: slow, huge, garbage, another id first, a sampling request, endless
 events, an unknown version).
+`test_workspace_records.cpp`'s `McpConnections*` cases run the MCP connection capabilities against
+that server with both stores: the sealed record and its secret, the read-or-change rule for people,
+Ask Orama and a user-built agent, auto-approve, the audit, the usage series, re-export through the
+workspace's MCP endpoint, and OAuth sign-in with registration, PKCE and refresh rotation.
 
 `test_workspace_records.cpp` covers workspace records (lake#370,
 [workspace-records.md](../docs/architecture/workspace-records.md)): sealed records and blind

@@ -19,6 +19,9 @@ injected dependency on `ApiContext` and `ServerOptions` (lake#561, `docs/api/tra
 `make_mcp_http`, or a test's), with `McpLimits` bounding every exchange; `SseParser`,
 `parse_mcp_url`, `resolve_mcp_url` and `mcp_public_address` are the pure parts. `ApiContext` and
 `ServerOptions` carry the transport (`mcp_http`) and `mcp_allow_private_addresses`.
+`mcp_connections.hpp` registers a workspace's MCP connection capabilities and answers what Lake's
+own MCP endpoint re-exports (`exported_mcp_tools`, `call_exported_mcp_tool`). `registry.hpp`'s
+`acting_agent` names the agent whose credential made a call.
 
 `ServerOptions::external_origin` is trusted instance configuration for repository terminal
 instructions (`repository_external_origin`). It takes precedence over `https://` plus the trusted

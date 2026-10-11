@@ -38,6 +38,10 @@ object in the workspace Zetta's `lake_files` bucket ([drives.md](../api/drives.m
 A workspace's own AI solutions (lake#597) follow too: `lake_solutions`, found by the space, edited and
 deleted at the revision read; Orama's catalogue solutions stay the engine's and are never copied
 ([solutions.md](../api/solutions.md#where-they-live)).
+A workspace's MCP connections (decision 60, lake#652) follow too: `lake_mcp_connections`, found by
+the space, edited and deleted at the revision read, with each connection's credential a workspace
+secret it only names; an OAuth sign-in in progress is a `lake_mcp_oauth_states` record kept ten
+minutes and deleted when it is taken ([mcp-connections.md](../api/mcp-connections.md#where-things-live)).
 
 The rule it implements is in [workspace-data-plane.md](workspace-data-plane.md): everything goes in
 a workspace Zetta, including credentials, secrets and metrics. Lake's PostgreSQL and the lake Zetta

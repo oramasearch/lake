@@ -161,6 +161,12 @@ calls, notifications, the event-stream reader and every bound on a hostile serve
 reading once the answer is in, a byte limit, a deadline on resolution, connection, handshake and
 exchange, and no address that is not public unless `LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1`. See
 `docs/api/mcp-connections.md#the-client`.
+`mcp_connection_capabilities.cpp` registers the MCP connection capabilities (lake#652): records
+through `control::mcp_connections`, the credential read from the workspace's secret store as Lake
+(`as_lake`, never answered), discovery merged into the person's tool decisions, who may call a
+change (a person, or an agent with a person's per-tool grant and its `mcp:<prefix>` skill),
+metering through the `UsageRecorder` (`calls`, `transfer`), the audit read back for a connection's
+calls, and the re-export `mcp.cpp` calls for `/w/<workspace>/mcp`.
 
 `solution_capabilities.cpp` registers the six solution capabilities (lake#597): a workspace's own
 solutions are sealed `lake_solutions` records in the workspace Zetta, listed and read beside Orama's

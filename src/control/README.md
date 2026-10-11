@@ -109,6 +109,10 @@ space, edited and deleted at the revision read, with the paging and excerpt help
 `solutions.cpp` is a workspace's own AI solutions (lake#597): one record per solution in
 `lake_solutions`, found by the space, edited and deleted at the revision read, with the rules a
 solution keeps and the copy of one of Orama's catalogue entries; it was never a PostgreSQL table.
+`mcp_connections.cpp` is a workspace's MCP connections (decision 60, lake#652): one record per
+connection in `lake_mcp_connections`, found by the space, unique by name and prefix, changed and
+deleted at the revision read (`change_mcp_connection` rereads on a conflict), with the prefix rule
+and the OAuth sign-in states in `lake_mcp_oauth_states`, taken once by a delete at the revision read.
 `stream_owners.cpp` is the second
 (lake#379): one `if_absent` record per topic, keyed by the topic's blind index; the stores hold no
 topic creator (the retired table is dropped by `0070`). `drive_share_links.cpp` is the drive share

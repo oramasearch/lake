@@ -15,6 +15,14 @@ rates mid-month is billed, and when to revisit it.
 lake#561: [drives.md](drives.md) documents drives (repository, workspace files, virtual) and workspace files in the workspace Zetta. [transcripts.md](transcripts.md) documents speech-to-text (`transcribe`) and the
 workspace transcripts kept in the workspace Zetta (`create_transcript`, `list_transcripts`,
 `get_transcript`, `update_transcript`, `delete_transcript`), the audio never kept.
+lake#652 (decision 60): [mcp-connections.md](mcp-connections.md) documents a workspace as the client
+of remote MCP servers: Lake's own client and its bounds, the connection record and its secret, the
+fifteen capabilities (`create_mcp_connection`, `list_mcp_connections`, `get_mcp_connection`,
+`update_mcp_connection`, `delete_mcp_connection`, `refresh_mcp_connection`, `test_mcp_connection`,
+`list_mcp_connection_tools`, `read_mcp_tool`, `call_mcp_tool`, `set_mcp_tool_auto_approve`,
+`list_mcp_connection_calls`, `begin_mcp_connection_sign_in`, `complete_mcp_connection_sign_in`,
+`create_mcp_connection_agent`), the read-or-change rule, who may call what, OAuth sign-in, the
+opt-in re-export through `/w/<workspace>/mcp`, and a connection's agent and streams.
 lake#597: [solutions.md](solutions.md) documents a workspace's own AI solutions, kept in the workspace
 Zetta beside Orama's read-only catalogue (`list_solutions`, `get_solution`, `create_solution`,
 `update_solution`, `delete_solution`, `duplicate_solution`; `forbidden` for Orama's).

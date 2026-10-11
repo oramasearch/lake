@@ -27,10 +27,13 @@
 #include "lake/api/audit_routing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/forge.hpp"
+#include "lake/api/mcp.hpp"
+#include "lake/api/mcp_client.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
 #include "lake/api/transcription.hpp"
+#include "lake/api/usage_recorder.hpp"
 #include "lake/audit/audit.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/agent_task_records.hpp"
@@ -44,6 +47,7 @@
 #include "lake/control/drive_share_links.hpp"
 #include "lake/control/forge_records.hpp"
 #include "lake/control/identity_crypto.hpp"
+#include "lake/control/mcp_connections.hpp"
 #include "lake/control/memory_store.hpp"
 #include "lake/control/metering.hpp"
 #include "lake/control/oci_records.hpp"
@@ -61,6 +65,7 @@
 #include "lake/control/zetta_control.hpp"
 #include "lake/control/zetta_workspace.hpp"
 #include "lake/transparency/log.hpp"
+#include "mcp_test_server.hpp"
 #include "postgres_fixture.hpp"
 #include "record_fixture.hpp"
 #include "repository_test_support.hpp"
@@ -318,6 +323,10 @@ struct TwoSpaces {
     std::string database_uri; // empty: the in-memory store
     // Speech-to-text for transcribe and audio transcripts; empty: not configured.
     lake::api::Transcriber transcriber;
+    // MCP connections' transport (lake#652); null: none. Tests reach a local test server.
+    std::shared_ptr<lake::api::McpHttp> mcp_http;
+    lake::api::UsageRecorder* usage_recorder = nullptr;
+    lake::api::AuditRecorder* audit_recorder = nullptr;
 
     // What the operator reports for a service.
     void status(const std::string& service_id, const std::string& phase,
@@ -381,6 +390,11 @@ struct TwoSpaces {
         context.scopes = space.principal.scopes;
         context.request_id = lake::control::new_uuid_v4();
         context.transcriber = transcriber;
+        context.mcp_http = mcp_http;
+        context.mcp_allow_private_addresses = true;
+        context.external_origin = "https://lake.test";
+        context.usage_recorder = usage_recorder;
+        context.audit_recorder = audit_recorder;
         return context;
     }
 
@@ -3445,6 +3459,375 @@ TEST_P(WorkspaceRecordStores, DynamicSecretsInAWorkspaceKeepTheirInstanceLogLeaf
     for (const std::string& secret : {username, password, role, mount_name}) {
         EXPECT_EQ(leaves.find(secret), std::string::npos) << secret;
     }
+}
+
+// MCP connections (decision 60, lake#652, docs/api/mcp-connections.md): a connection is a sealed
+// record in its workspace; its token is a workspace secret Lake reads server-side and never
+// answers; a tool runs only once a person allowed it; a change is a person's or an auto-approved
+// agent's; every call is audited in the workspace and metered.
+TEST_P(WorkspaceRecordStores, McpConnectionsLiveInTheirWorkspaceAndKeepTheirTokenSecret) {
+    auto store = make_store();
+    if (!store) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not configured";
+    }
+    TwoSpaces t(store, database_uri_);
+    lake::test::McpTestServer server;
+    server.required_bearer = "the-plaintext-bearer-token";
+    t.mcp_http = lake::api::make_mcp_http(true);
+    lake::api::UsageRecorder usage(t.store.get(), t.service.get());
+    lake::api::AuditRecorder audit(t.store.get(), t.service.get(), std::string(kek), "");
+    t.usage_recorder = &usage;
+    t.audit_recorder = &audit;
+    const auto& first = t.spaces[0];
+    const auto& second = t.spaces[1];
+    const std::string home = first.workspaces[0];
+    const auto in = [&](std::size_t workspace, json input) {
+        input["customer_id"] = first.customer_id;
+        input["workspace_id"] = first.workspaces[workspace];
+        return input;
+    };
+
+    // The token, in a secret of the workspace.
+    const auto mount = t.call(first, "create_secret_mount", in(0, {{"name", "mcp-tokens"}}));
+    ASSERT_TRUE(mount.ok) << mount.error.message;
+    const std::string mount_id = mount.value["id"];
+    ASSERT_TRUE(t.call(first,
+                       "put_secret",
+                       {{"mount_id", mount_id},
+                        {"name", "ticket-desk"},
+                        {"value", {{"token", "the-plaintext-bearer-token"}}}})
+                    .ok);
+    const json secret{{"mount_id", mount_id}, {"name", "ticket-desk"}, {"field", "token"}};
+
+    // Refusals before anything is kept.
+    EXPECT_EQ(t.call(first,
+                     "create_mcp_connection",
+                     in(0, {{"name", "x"}, {"url", "http://mcp.example.com/mcp"}}))
+                  .error.path,
+              "/url");
+    EXPECT_EQ(
+        t.call(first,
+               "create_mcp_connection",
+               in(0,
+                  {{"name", "x"},
+                   {"url", server.url()},
+                   {"auth",
+                    {{"kind", "bearer"},
+                     {"secret",
+                      {{"mount_id", mount_id}, {"name", "ticket-desk"}, {"field", "nope"}}}}}}))
+            .error.path,
+        "/auth/secret/field");
+    EXPECT_EQ(t.call(first,
+                     "create_mcp_connection",
+                     in(1,
+                        {{"name", "x"},
+                         {"url", server.url()},
+                         {"auth", {{"kind", "bearer"}, {"secret", secret}}}}))
+                  .error.path,
+              "/auth/secret/mount_id")
+        << "a secret of another workspace";
+
+    // Created, and discovered at once; nothing allowed yet.
+    const auto created = t.call(first,
+                                "create_mcp_connection",
+                                in(0,
+                                   {{"name", "Ticket Desk"},
+                                    {"url", server.url()},
+                                    {"auth", {{"kind", "bearer"}, {"secret", secret}}}}));
+    ASSERT_TRUE(created.ok) << created.error.message;
+    const std::string id = created.value["id"];
+    EXPECT_EQ(created.value["prefix"], "ticket_desk");
+    EXPECT_EQ(created.value["status"], "connected") << created.value.dump();
+    EXPECT_EQ(created.value["tool_count"], 4);
+    EXPECT_EQ(created.value["allowed_count"], 0);
+    EXPECT_EQ(created.value["auth"]["secret"], secret) << "the reference, never the value";
+    EXPECT_EQ(created.value.dump().find("the-plaintext-bearer-token"), std::string::npos);
+    for (const json& tool : created.value["tools"]) {
+        EXPECT_FALSE(tool["allowed"].get<bool>());
+        EXPECT_EQ(tool["change"], tool["name"] != "echo" && tool["name"] != "fail") << tool["name"];
+    }
+    EXPECT_EQ(t.call(first,
+                     "create_mcp_connection",
+                     in(0, {{"name", "ticket desk"}, {"url", server.url()}}))
+                  .error.code,
+              "conflict");
+
+    // Sealed at rest, and the token is nowhere in the workspace's records.
+    for (const auto& [key, row] :
+         t.zetta->records["http://" + home + ".test"].rows("mcp_connections")) {
+        EXPECT_EQ(row.dump().find("Ticket Desk"), std::string::npos);
+        EXPECT_EQ(row.dump().find("the-plaintext-bearer-token"), std::string::npos);
+    }
+    EXPECT_TRUE(t.zetta->records["http://" + first.workspaces[1] + ".test"]
+                    .rows("mcp_connections")
+                    .empty());
+
+    // Listed in its workspace only; another space is refused.
+    auto listed = t.call(first, "list_mcp_connections", in(0, json::object()));
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value["connections"].size(), 1U);
+    EXPECT_TRUE(
+        t.call(first, "list_mcp_connections", in(1, json::object())).value["connections"].empty());
+    EXPECT_EQ(t.call(second, "get_mcp_connection", in(0, {{"id", id}})).error.code, "unauthorized");
+
+    // Not allowed: refused before the server hears of it.
+    const std::size_t heard = server.calls("tools/call").size();
+    EXPECT_EQ(
+        t.call(first,
+               "read_mcp_tool",
+               in(0, {{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "x"}}}}))
+            .error.path,
+        "/tool");
+    EXPECT_EQ(server.calls("tools/call").size(), heard);
+
+    // A person allows two tools; echo reads, create_ticket changes.
+    const auto decided = t.call(first,
+                                "update_mcp_connection",
+                                in(0,
+                                   {{"id", id},
+                                    {"tools",
+                                     {{"echo", {{"allowed", true}}},
+                                      {"create_ticket", {{"allowed", true}}},
+                                      {"inject", {{"allowed", true}, {"change", false}}}}}}));
+    ASSERT_TRUE(decided.ok) << decided.error.message;
+    EXPECT_EQ(decided.value["allowed_count"], 3);
+    EXPECT_EQ(t.call(first,
+                     "update_mcp_connection",
+                     in(0, {{"id", id}, {"tools", {{"nope", {{"allowed", true}}}}}}))
+                  .error.path,
+              "/tools/nope");
+
+    const auto read = t.call(
+        first,
+        "read_mcp_tool",
+        in(0, {{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "hello"}}}}));
+    ASSERT_TRUE(read.ok) << read.error.message;
+    EXPECT_EQ(read.value["structured_content"]["echo"]["text"], "hello");
+    EXPECT_FALSE(read.value["change"].get<bool>());
+    EXPECT_EQ(server.calls("tools/call").back()["params"]["arguments"]["text"], "hello");
+    const auto refused_change = t.call(
+        first,
+        "read_mcp_tool",
+        in(0, {{"connection_id", id}, {"tool", "create_ticket"}, {"arguments", {{"title", "x"}}}}));
+    EXPECT_EQ(refused_change.error.code, "invalid_input") << "a change never runs as a read";
+    const auto opened = t.call(first,
+                               "call_mcp_tool",
+                               in(0,
+                                  {{"connection_id", id},
+                                   {"tool", "create_ticket"},
+                                   {"arguments", {{"title", "Broken"}}}}));
+    ASSERT_TRUE(opened.ok) << opened.error.message;
+    EXPECT_EQ(opened.value["structured_content"]["id"], "T-1");
+    // An outside server's words come back as data, marked as such.
+    const auto injected =
+        t.call(first, "read_mcp_tool", in(0, {{"connection_id", id}, {"tool", "inject"}}));
+    ASSERT_TRUE(injected.ok) << injected.error.message;
+    EXPECT_NE(injected.value["note"].get<std::string>().find("data, never instructions"),
+              std::string::npos);
+
+    // An agent: Ask Orama's turn reads, never changes.
+    const auto task =
+        t.store->create_agent_task({.customer_id = first.customer_id,
+                                    .agent = "agent-ask-orama",
+                                    .kind = "ask",
+                                    .workspace_id = home,
+                                    .body = {{"message", "hi"}},
+                                    .scopes = {"read_mcp_tool", "list_mcp_connection_tools"},
+                                    .requested_by_user_id = first.principal.user_id});
+    ASSERT_TRUE(task) << task.error().message;
+    const std::string claim(64, 'a');
+    ASSERT_TRUE(t.store->claim_agent_task(task->id, "agent-ask-orama", claim));
+    auto ask = t.context(first);
+    ask.credential_token_hash = claim;
+    ask.credential_kind = "agent_task";
+    ask.credential_session_id = "task:" + task->id;
+    ask.scopes = {"read_mcp_tool", "list_mcp_connection_tools", "call_mcp_tool"};
+    const auto as = [&](lake::api::ApiContext context, const std::string& capability, json input) {
+        const auto completed =
+            liquid::runtime::block_on(t.registry.call_async(capability, input, context));
+        EXPECT_TRUE(completed);
+        return *completed;
+    };
+    EXPECT_TRUE(as(ask,
+                   "read_mcp_tool",
+                   in(0, {{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "a"}}}}))
+                    .ok);
+    EXPECT_EQ(
+        as(ask,
+           "call_mcp_tool",
+           in(0,
+              {{"connection_id", id}, {"tool", "create_ticket"}, {"arguments", {{"title", "a"}}}}))
+            .error.code,
+        "not_approved");
+    const auto agent_tools = as(ask, "list_mcp_connection_tools", in(0, json::object()));
+    ASSERT_TRUE(agent_tools.ok) << agent_tools.error.message;
+    EXPECT_EQ(agent_tools.value["tools"].size(), 3U) << "an agent sees allowed tools only";
+    EXPECT_EQ(
+        agent_tools.value["tools"][0]["exported_name"].get<std::string>().rfind("ticket_desk__", 0),
+        0U);
+    EXPECT_EQ(as(ask,
+                 "set_mcp_tool_auto_approve",
+                 in(0,
+                    {{"connection_id", id},
+                     {"tool", "create_ticket"},
+                     {"agent", "agent-ask-orama"},
+                     {"auto_approve", true}}))
+                  .error.code,
+              "unauthorized")
+        << "an agent never grants itself";
+
+    // A user-built agent: a change runs only with the person's grant, and only with its skill.
+    const auto launch = t.store->create_agent_launch({.customer_id = first.customer_id,
+                                                      .agent_id = "agent-7",
+                                                      .agent_name = "Triage",
+                                                      .mode = "job",
+                                                      .trigger = "manual",
+                                                      .scopes = lake::control::agent_launch_scopes,
+                                                      .created_by_user_id = first.principal.user_id,
+                                                      .created_by_taap_id = first.principal.taap_id,
+                                                      .workspace_id = home});
+    ASSERT_TRUE(launch) << launch.error().message;
+    auto agent = t.context(first);
+    agent.session_credential = false;
+    agent.credential_kind = "agent_launch";
+    agent.credential_session_id = "launch:" + launch->id;
+    agent.scopes = lake::control::agent_launch_scopes;
+    t.zetta->answers["get_agent"] = {
+        {"id", "agent-7"}, {"name", "Triage"}, {"skills", json::array({"search"})}};
+    EXPECT_EQ(as(agent,
+                 "read_mcp_tool",
+                 in(0, {{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "a"}}}}))
+                  .error.code,
+              "unauthorized")
+        << "no mcp:ticket_desk skill";
+    t.zetta->answers["get_agent"] = {
+        {"id", "agent-7"}, {"name", "Triage"}, {"skills", json::array({"mcp:ticket_desk"})}};
+    EXPECT_TRUE(as(agent,
+                   "read_mcp_tool",
+                   in(0, {{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "a"}}}}))
+                    .ok);
+    const json change_input = in(
+        0, {{"connection_id", id}, {"tool", "create_ticket"}, {"arguments", {{"title", "auto"}}}});
+    EXPECT_EQ(as(agent, "call_mcp_tool", change_input).error.code, "not_approved");
+    EXPECT_EQ(t.call(first,
+                     "set_mcp_tool_auto_approve",
+                     in(0,
+                        {{"connection_id", id},
+                         {"tool", "echo"},
+                         {"agent", "agent-7"},
+                         {"auto_approve", true}}))
+                  .error.path,
+              "/tool")
+        << "a read needs no approval";
+    const auto granted = t.call(first,
+                                "set_mcp_tool_auto_approve",
+                                in(0,
+                                   {{"connection_id", id},
+                                    {"tool", "create_ticket"},
+                                    {"agent", "agent-7"},
+                                    {"auto_approve", true}}));
+    ASSERT_TRUE(granted.ok) << granted.error.message;
+    const auto automatic = as(agent, "call_mcp_tool", change_input);
+    ASSERT_TRUE(automatic.ok) << automatic.error.message;
+    ASSERT_TRUE(t.call(first,
+                       "set_mcp_tool_auto_approve",
+                       in(0,
+                          {{"connection_id", id},
+                           {"tool", "create_ticket"},
+                           {"agent", "agent-7"},
+                           {"auto_approve", false}}))
+                    .ok);
+    EXPECT_EQ(as(agent, "call_mcp_tool", change_input).error.code, "not_approved") << "taken back";
+
+    // Every call is in the workspace's audit, with who, which tool and how; never the arguments.
+    const auto calls = t.call(first, "list_mcp_connection_calls", in(0, {{"id", id}}));
+    ASSERT_TRUE(calls.ok) << calls.error.message;
+    bool saw_auto = false;
+    for (const json& row : calls.value["calls"]) {
+        EXPECT_EQ(row.dump().find("Broken"), std::string::npos) << "no arguments in the audit";
+        if (row["action"] == "call_mcp_tool" && row["auto_approved"] == true) {
+            saw_auto = true;
+            EXPECT_EQ(row["agent"], "Triage");
+            EXPECT_EQ(row["via"], "agent");
+        }
+    }
+    EXPECT_TRUE(saw_auto) << calls.value.dump();
+
+    // Metered in the workspace: calls and bytes each way.
+    liquid::runtime::block_on(usage.flush());
+    auto& tables = t.zetta->records["http://" + home + ".test"];
+    EXPECT_GE(
+        tables.metric_total(
+            "lake_usage", {{"dimension", "calls"}, {"kind", "mcp_connection"}, {"object_id", id}}),
+        6.0);
+    EXPECT_GT(tables.metric_total("lake_usage", {{"dimension", "transfer"}, {"kind", "mcp_in"}}),
+              0.0);
+    EXPECT_GT(tables.metric_total("lake_usage", {{"dimension", "transfer"}, {"kind", "mcp_out"}}),
+              0.0);
+
+    // Re-export: only once a person turns it on, under the prefix, through the workspace's MCP.
+    const auto list_tools = [&](lake::api::ApiContext context) {
+        context.path_workspace_id = home;
+        context.registry = &t.registry;
+        const auto answered = liquid::runtime::block_on(
+            lake::api::mcp_dispatch_async(t.registry,
+                                          {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "tools/list"}},
+                                          context,
+                                          "test"));
+        EXPECT_TRUE(answered && *answered);
+        std::set<std::string> names;
+        for (const json& tool : json::parse(**answered)["result"]["tools"]) {
+            names.insert(tool["name"].get<std::string>());
+        }
+        return names;
+    };
+    EXPECT_FALSE(list_tools(t.context(first)).contains("ticket_desk__echo"));
+    ASSERT_TRUE(t.call(first, "update_mcp_connection", in(0, {{"id", id}, {"exported", true}})).ok);
+    auto names = list_tools(t.context(first));
+    EXPECT_TRUE(names.contains("ticket_desk__echo"));
+    EXPECT_TRUE(names.contains("ticket_desk__create_ticket"));
+    EXPECT_FALSE(names.contains("ticket_desk__fail")) << "not allowed, not exported";
+    EXPECT_TRUE(names.contains("list_mcp_connections")) << "Lake's own tools stay";
+    EXPECT_FALSE(list_tools(t.context(second)).contains("ticket_desk__echo")) << "another space";
+    auto mcp_context = t.context(first);
+    mcp_context.path_workspace_id = home;
+    const auto echoed = liquid::runtime::block_on(lake::api::mcp_dispatch_async(
+        t.registry,
+        {{"jsonrpc", "2.0"},
+         {"id", 2},
+         {"method", "tools/call"},
+         {"params", {{"name", "ticket_desk__echo"}, {"arguments", {{"text", "through lake"}}}}}},
+        mcp_context,
+        "test"));
+    ASSERT_TRUE(echoed && *echoed);
+    const json echo = json::parse(**echoed)["result"];
+    EXPECT_FALSE(echo["isError"].get<bool>()) << echo.dump();
+    EXPECT_EQ(echo["structuredContent"]["echo"]["text"], "through lake")
+        << "the server's own answer";
+    const auto missing = liquid::runtime::block_on(
+        lake::api::mcp_dispatch_async(t.registry,
+                                      {{"jsonrpc", "2.0"},
+                                       {"id", 3},
+                                       {"method", "tools/call"},
+                                       {"params", {{"name", "ticket_desk__fail"}}}},
+                                      mcp_context,
+                                      "test"));
+    EXPECT_TRUE(json::parse(**missing)["result"]["isError"].get<bool>());
+
+    // A refused token marks the connection as needing sign-in.
+    server.required_bearer = "rotated-elsewhere";
+    const auto expired =
+        t.call(first,
+               "read_mcp_tool",
+               in(0, {{"connection_id", id}, {"tool", "echo"}, {"arguments", {{"text", "a"}}}}));
+    EXPECT_EQ(expired.error.code, "sign_in_required");
+    EXPECT_EQ(t.call(first, "get_mcp_connection", in(0, {{"id", id}})).value["status"],
+              "needs_sign_in");
+
+    // Deleted, with its secret left in its mount.
+    ASSERT_TRUE(t.call(first, "delete_mcp_connection", in(0, {{"id", id}})).ok);
+    EXPECT_EQ(t.call(first, "get_mcp_connection", in(0, {{"id", id}})).error.code, "not_found");
+    EXPECT_TRUE(t.call(first, "read_secret", {{"mount_id", mount_id}, {"name", "ticket-desk"}}).ok);
 }
 
 INSTANTIATE_TEST_SUITE_P(Stores, WorkspaceRecordStores, testing::Values(false, true),

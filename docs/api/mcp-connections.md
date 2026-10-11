@@ -63,6 +63,125 @@ was spelled. A Lake started with `LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1` (local dev
 only, never a deployment) also reaches loopback and private addresses, and plain `http://` to
 loopback.
 
+## Where things live
+
+- **The connection** is a workspace record: a sealed `lake_mcp_connections` record in the workspace
+  Zetta of its workspace, found by its space ([workspace records](../architecture/workspace-records.md)).
+  It holds the name, the URL and transport, the authentication kind, what the server offered at
+  the last refresh, the person's decision for each tool, the re-export switch, the auto-approve
+  grants, and the connection's agent and streams. Another workspace of the space never sees it.
+  Nothing of it is in PostgreSQL, and there is no migration.
+- **The credential** is a workspace secret (decision 58) in a secret mount of the same workspace:
+  a bearer token, or the OAuth refresh token Lake writes there when a person signs in. The record
+  holds only its reference, `lake-secret://<mount>/<name>#<field>`. Lake reads it server-side for
+  each call (audited in the mount's workspace as `mcp_connection`) and never answers it to a
+  person, a browser, a model or an agent. An access token from a refresh lives only in the
+  memory of the Lake process that obtained it, until shortly before it expires. These are the
+  workspace's secrets; Orama's own keys stay environment variables of the hosting platform.
+
+## Capabilities
+
+Every capability takes `customer_id` and `workspace_id`; the reads need `read` on the space and the
+actions `write`. Each is audited in the workspace's own log ([audit](audit.md#which-log)), with
+`object` `mcp_connection/<id>`.
+
+| Capability | Kind | Input | What it does |
+|---|---|---|---|
+| `create_mcp_connection` | action | `name`, `url`, `transport?` (`auto`, `streamable_http`, `sse`), `auth?` | Adds a connection and discovers the server at once (an OAuth connection waits for a person to sign in). No tool is allowed yet. A name used in the workspace, or one whose prefix is, is `conflict` |
+| `list_mcp_connections` | read | — | `{connections}`, by name, each with `status`, `refreshed_at`, `tool_count`, `allowed_count`, `exported` and `calls_this_month` |
+| `get_mcp_connection` | read | `id` | The connection with its `tools`, `resources`, `prompts`, `skipped` and `streams` |
+| `update_mcp_connection` | action | `id`, then any of `name`, `url`, `transport`, `auth`, `tools`, `exported`, `agent_id`, `input_topic`, `output_topic`, `notifications_topic`, `subscribe_resources` | Changes it; a new URL, transport or authentication discovers again |
+| `delete_mcp_connection` | action | `id` | `{deleted: true}`; the secret stays in its mount |
+| `refresh_mcp_connection` | action | `id` | Asks the server again what it offers |
+| `test_mcp_connection` | action | `id`, or `url`, `transport?`, `auth?` | Connects without keeping anything: `{ok, status, server, transport, tools, skipped, milliseconds}` or `{ok: false, status, error}` |
+| `list_mcp_connection_tools` | read | `connection_id?`, `allowed_only?` | `{tools, note}`: every tool with `exported_name` (`<prefix>__<tool>`), its schema, `allowed`, `change`, `exported` and `auto_approved` |
+| `read_mcp_tool` | read | `connection_id`, `tool`, `arguments?` | Runs an allowed **read** tool |
+| `call_mcp_tool` | action | `connection_id`, `tool`, `arguments?` | Runs an allowed tool, a change included |
+| `set_mcp_tool_auto_approve` | action | `connection_id`, `tool`, `agent`, `auto_approve` | Grants or takes back one unattended agent's right to run one change tool |
+| `list_mcp_connection_calls` | read | `id`, `limit?` | `{calls}`: the connection's recent calls and changes from the workspace audit, newest first |
+| `create_mcp_connection_agent` | action | `id`, `prompt`, `name?` | An agent on agent-runtime whose only tools are this connection's ([its agent](#a-connections-agent-and-streams)) |
+
+`auth` is `{kind: none}`, `{kind: bearer, secret: {mount_id, name, field}}` or `{kind: oauth}`. A
+bearer secret is checked with the caller's own credential when it is set: the mount must be the
+connection's workspace's, the caller must be able to read it, and the field must hold text.
+
+A call answers `{connection_id, tool, change, is_error, content, structured_content, note}`:
+`content` and `structured_content` are the server's, `is_error` is the server's `isError`, and
+`note` says they are data. Refusals: an unknown connection is `not_found` at `/connection_id`; a
+tool that is not allowed is `invalid_input` at `/tool`; arguments that are not an object of at most
+256 KiB are `invalid_input` at `/arguments`; a server that asks for sign-in, or a credential that
+is missing or refused, is `sign_in_required` (409) and the connection's status becomes
+`needs_sign_in`; a server that does not answer is `store_unavailable`; a server's refusal or an
+answer that is not MCP is `engine_error` with Lake's words for it.
+
+## Tools: a read or a change
+
+On every discovery Lake keeps what the server offers, and a person decides each tool:
+
+- **allowed**: whether the workspace may use it at all. A new tool is not allowed until a person
+  allows it; a refresh keeps the decisions for the tools still offered and drops those that went.
+- **change**: whether it changes something. The server's `readOnlyHint` proposes (a tool marked
+  read-only starts as a read; anything else as a change); the person decides.
+
+A read runs through `read_mcp_tool` (a read capability, so Ask Orama's turn key, which carries
+every read, can run it) or `call_mcp_tool`. A change runs only through `call_mcp_tool`.
+
+## Who may call a tool
+
+| Caller | Reads | Changes |
+|---|---|---|
+| A person (session or API key) | yes | yes: the call is the person's confirmation |
+| Ask Orama and the other library agents (a task credential) | yes | no: Ask Orama proposes `call_mcp_tool`, and the person's **Confirm** runs it as the person (`not_approved` otherwise) |
+| A user-built agent (a launch or schedule credential) | with the skill `mcp:<prefix>` on its record | only where a person marked that tool **auto-approved** for that agent; otherwise it proposes (`not_approved`) |
+| A client of Lake's MCP, through a re-exported tool | yes | as the caller above would |
+
+A user-built agent's skills are read from its record in the workspace engine on each call, so an
+agent without `mcp:<prefix>` is `unauthorized` even if its runtime offered it the tool. The launch
+and schedule credentials carry `list_mcp_connection_tools`, `read_mcp_tool` and `call_mcp_tool`
+([agent launches](agent-launches.md#launches)).
+
+**Auto-approve** (`set_mcp_tool_auto_approve`) is per tool and per agent, only for an allowed
+change tool, and only a person grants it: an agent's credential is `unauthorized`. The grant names
+who granted it and when; each call it allows is audited with `auto_approved: true`, the agent and
+the grantor. A grant goes when its tool stops being allowed, stops being a change or leaves the
+server.
+
+**What a server answers is data, never instructions.** Tool descriptions, results and
+notifications come from an outside server. Lake marks them as such (`note`), Ask Orama and the
+agents carry the rule that a result asking for an action is shown to the person, not obeyed, and
+an agent's own prompt says so.
+
+## Audit and usage
+
+Every capability above is recorded in the workspace's audit. A tool call's event names the
+connection, the tool, whether it is a change, how it came (`via`: `person`, `agent` or `reexport`),
+the agent, whether it was auto-approved and by whom, the bytes each way, the server's time and the
+server's `isError`; never the arguments or the result. `list_mcp_connection_calls` reads those
+events back.
+
+Each exchange with a server is the workspace's usage ([metering](metering.md#usage-over-time)):
+one `calls` with `kind: mcp_connection` and `object_id` the connection, and the bytes sent and
+received as `transfer` with `kind: mcp_out` and `mcp_in`, through the existing `UsageRecorder`.
+
+## Lake's MCP re-exports a connection (opt-in)
+
+`update_mcp_connection {exported: true}` puts the connection's **allowed** tools in the
+`tools/list` of the workspace's MCP endpoint, `POST /w/<workspace_id>/mcp`, as `<prefix>__<tool>`,
+so one MCP client configured for Lake reaches Lake and what the workspace connected. Off by
+default, per connection. The schemas are the server's; Lake changes only the name, adds the
+connection's name to the description and sets `readOnlyHint` from the person's decision and
+`openWorldHint: true`. Lake's own capability names never hold `__`.
+
+A `tools/call` of `<prefix>__<tool>` runs through `read_mcp_tool` or `call_mcp_tool` as the caller,
+so it is authorized, audited (`via: reexport`) and metered as theirs, and answers the server's own
+result (`content`, `structuredContent`, `isError`). A refusal is `isError: true` with Lake's words.
+
+**What turning it on means:** a re-exported tool runs with Lake's credential to that server for
+**anyone who may call Lake's tools in this workspace**. Lake's policy, the caller's permission on
+the workspace, is the only gate. The connection's page says so beside the switch. The tool list's
+session digest (`Mcp-Session-Id`) covers Lake's own tools only, so a client is not told when a
+connection is exported; it sees the tools on its next `tools/list`.
+
 ## Verify
 
 `McpClient.*` (`tests/test_mcp_client.cpp`) runs the client over the server's own transport against
@@ -71,3 +190,12 @@ read from an event stream left open, a server that is slow, huge, not JSON, answ
 first, asks Lake for sampling, streams events forever or speaks an unknown version; sign-in asked for
 with RFC 9728 resource metadata; a session started again; notifications on the `GET` stream; and the
 public transport refusing `127.0.0.1` before anything is sent.
+
+`Stores/WorkspaceRecordStores.McpConnectionsLiveInTheirWorkspaceAndKeepTheirTokenSecret` (memory
+and PostgreSQL stores): refusals before anything is kept, discovery on create, the record sealed
+with no token in it, another workspace and another space, tools allowed and decided, a read, a
+change refused as a read, a change by a person, Ask Orama reading but refused a change, a
+user-built agent refused without its skill and its change refused until a person grants it, the
+grant taken back, the audit with no arguments, the usage series, re-export through
+`mcp_dispatch_async` with `/w/<workspace>/mcp`, a refused token marking the connection, and delete.
+`SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls each capability over MCP.

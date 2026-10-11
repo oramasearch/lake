@@ -1,5 +1,7 @@
 #include "lake/api/mcp.hpp"
 
+#include "lake/api/mcp_connections.hpp"
+
 #include <array>
 #include <stdexcept>
 
@@ -145,8 +147,24 @@ liquid::runtime::task<std::optional<std::string>> mcp_dispatch_async(const Regis
                                                                      const nlohmann::json& request,
                                                                      ApiContext& context,
                                                                      std::string_view version) {
-    if (!request.is_object() || request.value("jsonrpc", "") != "2.0" ||
-        request.value("method", "") != "tools/call") {
+    const std::string method = request.is_object() && request.value("jsonrpc", "") == "2.0"
+                                   ? request.value("method", "")
+                                   : "";
+    // A workspace's MCP endpoint (/w/<workspace>/mcp) also lists the allowed tools of the
+    // connections its people chose to expose, as `<prefix>__<tool>` (decision 60, lake#652).
+    const std::string& workspace = context.path_workspace_id;
+    if (method == "tools/list" && !workspace.empty() && context.authorized) {
+        nlohmann::json tools = mcp_tools(registry, schema_audience(context));
+        auto exported = co_await exported_mcp_tools(registry, context, workspace);
+        if (exported) {
+            for (nlohmann::json& tool : *exported) {
+                tools.push_back(std::move(tool));
+            }
+        }
+        co_return jsonrpc_result(request.value("id", nlohmann::json()),
+                                 {{"tools", std::move(tools)}});
+    }
+    if (method != "tools/call") {
         co_return mcp_dispatch(registry, request, context, version);
     }
     const nlohmann::json id = request.value("id", nlohmann::json());
@@ -155,6 +173,13 @@ liquid::runtime::task<std::optional<std::string>> mcp_dispatch_async(const Regis
     const nlohmann::json arguments = params.value("arguments", nlohmann::json::object());
     if (tool_name.empty()) {
         co_return jsonrpc_error(id, -32602, "params.name is required");
+    }
+    if (is_mcp_exported_tool_name(tool_name)) {
+        // A connected tool answers as its server does, through read_mcp_tool or call_mcp_tool.
+        auto answered =
+            co_await call_exported_mcp_tool(registry, context, workspace, tool_name, arguments);
+        co_return answered ? jsonrpc_result(id, std::move(*answered))
+                           : jsonrpc_error(id, -32603, answered.error().message);
     }
     auto completed = co_await registry.call_async(tool_name, arguments, context);
     const ApiResult call_result =

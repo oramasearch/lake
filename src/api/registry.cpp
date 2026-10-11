@@ -120,7 +120,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 31> documented_error_codes{{
+constexpr std::array<ErrorCode, 32> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -160,6 +160,10 @@ constexpr std::array<ErrorCode, 31> documented_error_codes{{
      "The workspace action needs an approval it does not have yet: approve the plan or the "
      "decision first."},
     {"gate_blocked", 409, "A pipeline gate refused the run; the message names the failing check."},
+    {"sign_in_required",
+     409,
+     "An MCP connection's server needs a person to sign in again, or its credential is missing or "
+     "refused."},
     {"invalid_chain",
      409,
      "The audit log's hash chain is broken: an event is missing or was changed."},
