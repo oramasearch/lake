@@ -8,6 +8,7 @@
 #include "forge_records_api.hpp"
 #include "http_connections.hpp"
 #include "lake/api/audit_recorder.hpp"
+#include "lake/api/billing.hpp"
 #include "lake/api/metering_recorder.hpp"
 #include "lake/api/request_recorder.hpp"
 #include "lake/api/server.hpp"
@@ -7910,6 +7911,13 @@ struct ApiServer::Impl {
                 });
         }
         register_core_capabilities(registry, version_string());
+        // Billing only where it is on (LAKE_BILLING, lake#564): off, its capabilities are absent.
+        if (options.billing) {
+            register_billing_capabilities(
+                registry,
+                options.payment_provider ? options.payment_provider
+                                         : manual_payment_provider(options.billing_instructions));
+        }
         openapi_body = openapi_document(registry, version_string()).dump();
         agent_openapi_body =
             openapi_document(registry, version_string(), SchemaAudience::AgentTask).dump();

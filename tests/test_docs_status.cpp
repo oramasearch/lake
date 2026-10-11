@@ -13,6 +13,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "lake/api/billing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/api/rest.hpp"
@@ -68,6 +69,8 @@ std::string status_page(std::string_view deployed, std::string_view capabilities
 TEST(DocsStatus, MatchesTheObservedOpenApi) {
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "0.0.1");
+    // Billing's capabilities exist where it is on (lake#564); the status page names them.
+    lake::api::register_billing_capabilities(registry);
     const fs::path tree = lake::test::fixture_path("status-registry-openapi.json");
     std::ofstream(tree) << lake::api::openapi_document(registry, "0.0.1").dump();
 

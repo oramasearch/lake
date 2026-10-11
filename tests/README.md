@@ -471,6 +471,12 @@ together dropped together, readings keeping their latest, deleted and refusing w
 the owner loop's `sample_usage` and the speech-to-text seconds and tokens of a transcript.
 `record_fixture.hpp`'s time series now answers a gauge's `last` reading per step.
 
+Billing (lake#564): `test_billing.cpp` covers prices and bill lines, choosing a plan now or next
+month, a month's bill from two workspaces' usage, invoices frozen, voided, reissued and paid, an
+unread workspace holding an invoice back, a fake `PaymentProvider`, and the `LAKE_BILLING` switch
+leaving every billing capability, `viewer.billing` and the Billing guide absent;
+`PostgresBilling.*` in `test_postgres.cpp` covers the store on PostgreSQL.
+
 The audit split by subject (decision 52, lake#317): `test_workspace_records.cpp`'s
 `AuditEventsAboutAWorkspaceLiveInItsOwnChain` covers the `AuditRecorder` and the readers across two
 spaces with two workspaces each (a call writes nothing until the flush, control-plane calls,

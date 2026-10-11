@@ -122,6 +122,11 @@ metering store methods: the retired tables and their legacy reads are gone (migr
 `store.hpp`'s `UsageLimit`, `usage_limits` and `set_usage_limit` are an account's per-dimension
 usage limits (migration `0072_usage_limits`, lake#564): content-free configuration; the usage stays
 in workspace Zettas.
+`store.hpp`'s `BillingPlan`, `BillingPrice`, `BillingSubscription`, `Invoice` and `InvoiceLine`, with
+`billing_plans`, `put_billing_plan`, `billing_subscriptions`, `set_billing_subscription`,
+`create_invoice`, `list_invoices`, `get_invoice` and `set_invoice_state`, are billing records
+(migration `0073_billing`, lake#564, decision 56): control-plane multitenancy; usage stays in
+workspace Zettas and an invoice line keeps only the quantity billed.
 `application_credential_records.hpp` holds the application's credentials in its workspace (lake#352,
 lake#355): the key ring codec (one record per application, every key in version order, one
 current; `rotate_application_signing_keys` writes it with `if_revision` and rereads on a conflict)

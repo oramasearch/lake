@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "lake/api/agent_docs.hpp"
+#include "lake/api/billing.hpp"
 #include "lake/api/clerk.hpp"
 #include "lake/api/markdown.hpp"
 #include "lake/api/web_ui.hpp"
@@ -129,6 +130,7 @@ json viewer_schema() {
          {"public_host", string_schema()},
          {"config",
           object_schema({{"frontier_model", string_schema()}}, json::array({"frontier_model"}))},
+         {"billing", {{"type", "boolean"}}},
          {"version", string_schema()},
          {"revision", string_schema()}},
         json::array({"signed_in",
@@ -140,6 +142,7 @@ json viewer_schema() {
                      "external_origin",
                      "public_host",
                      "config",
+                     "billing",
                      "version",
                      "revision"}));
 }
@@ -165,21 +168,24 @@ json live_workspaces(control::Store& store, const std::string& customer_id) {
 
 ApiResult viewer(const json& input, ApiContext& context, const std::string& version) {
     const auto clerk = clerk_config(context.clerk_publishable_key);
-    json out{{"signed_in", context.authorized},
-             {"administrator", context.authorized && context.operator_credential},
-             {"mfa_enrolled", false},
-             {"spaces", json::array()},
-             {"clerk",
-              {{"enabled", clerk.has_value()},
-               {"publishable_key", clerk ? clerk->publishable_key : std::string()},
-               {"frontend_api", clerk ? clerk->frontend_api : std::string()}}},
-             // Under Clerk, sign-up is Clerk's and restricted to invitations (docs/api/clerk.md).
-             {"password_sign_up", !clerk.has_value()},
-             {"external_origin", public_origin(context)},
-             {"public_host", context.public_host},
-             {"config", {{"frontier_model", ""}}},
-             {"version", version},
-             {"revision", std::string(build_revision_string())}};
+    json out{
+        {"signed_in", context.authorized},
+        {"administrator", context.authorized && context.operator_credential},
+        {"mfa_enrolled", false},
+        {"spaces", json::array()},
+        {"clerk",
+         {{"enabled", clerk.has_value()},
+          {"publishable_key", clerk ? clerk->publishable_key : std::string()},
+          {"frontend_api", clerk ? clerk->frontend_api : std::string()}}},
+        // Under Clerk, sign-up is Clerk's and restricted to invitations (docs/api/clerk.md).
+        {"password_sign_up", !clerk.has_value()},
+        {"external_origin", public_origin(context)},
+        {"public_host", context.public_host},
+        {"config", {{"frontier_model", ""}}},
+        // Whether this lake bills (LAKE_BILLING, lake#564): the web app shows Billing only then.
+        {"billing", billing_registered(context.registry)},
+        {"version", version},
+        {"revision", std::string(build_revision_string())}};
     if (!context.authorized || context.store == nullptr) {
         return ApiResult::success(std::move(out));
     }
@@ -545,7 +551,12 @@ json doc_link(const WebUiGuidePage& page) {
 // The guides in reading order with their sections and headings; with `q`, only the guides whose
 // title, headings or text contain it (ASCII case ignored), best match first: a title match, then a
 // heading match (its anchor), then the text (the heading above the first match, and an excerpt).
-ApiResult list_docs(const json& input) {
+// A guide this lake does not show: Billing where billing is off (an enterprise install, lake#564).
+bool hidden_guide(const WebUiGuidePage& page, const ApiContext& context) {
+    return page.slug == "billing" && !billing_registered(context.registry);
+}
+
+ApiResult list_docs(const json& input, const ApiContext& context) {
     const std::string q = ascii_lower(input.value("q", std::string()));
     if (q.size() > 200) {
         return ApiResult::failure("invalid_input", "q is at most 200 characters", "/q");
@@ -561,6 +572,9 @@ ApiResult list_docs(const json& input) {
     json sections = json::array();
     std::vector<std::pair<int, json>> pages;
     for (const WebUiGuidePage& page : web_ui_guide()) {
+        if (hidden_guide(page, context)) {
+            continue;
+        }
         if (sections.empty() || sections.back() != page.section) {
             sections.push_back(page.section);
         }
@@ -624,8 +638,13 @@ ApiResult list_docs(const json& input) {
     return ApiResult::success({{"pages", std::move(out)}, {"sections", std::move(sections)}});
 }
 
-ApiResult get_doc(const json& input) {
-    const std::vector<WebUiGuidePage>& pages = web_ui_guide();
+ApiResult get_doc(const json& input, const ApiContext& context) {
+    std::vector<WebUiGuidePage> pages;
+    for (const WebUiGuidePage& page : web_ui_guide()) {
+        if (!hidden_guide(page, context)) {
+            pages.push_back(page);
+        }
+    }
     const std::string slug = input.value("slug", std::string());
     const auto found =
         slug.empty() ? pages.begin() : std::ranges::find(pages, slug, &WebUiGuidePage::slug);
@@ -833,7 +852,9 @@ void register_console_capabilities(Registry& registry, std::string_view version)
         .resolve_object = no_object,
         // Every guide is public.
         .authorizes_candidates = true,
-        .handler = [](const json& input, ApiContext&) { return list_docs(input); }});
+        .handler = [](const json& input, ApiContext& context) {
+            return list_docs(input, context);
+        }});
     registry.add(Capability{
         .name = "get_doc",
         .title = "Read a Docs page",
@@ -853,7 +874,7 @@ void register_console_capabilities(Registry& registry, std::string_view version)
         .object = "server",
         .action = "read",
         .resolve_object = no_object,
-        .handler = [](const json& input, ApiContext&) { return get_doc(input); },
+        .handler = [](const json& input, ApiContext& context) { return get_doc(input, context); },
         // list_docs answers `slug`, so get_doc takes it (lake#591).
         .input_aliases = {{"page", "slug"}}});
     registry.add(Capability{

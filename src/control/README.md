@@ -154,6 +154,9 @@ Repository usage lives in workspace Zettas (lake#348, lake#349, `metering.cpp`).
 writes or reads metering rows any more; `0070` drops the retired tables. Both stores keep an
 account's usage limits (`customer_usage_limits`, migration `0072`, lake#564); a limit of 0 deletes
 the row.
+Both stores keep billing records (migration `0073_billing`, lake#564): plans with their prices,
+each account's plan by month, and invoices with their lines; one invoice an account and month
+that is not void, and only a due invoice becomes paid or void.
 `application_credential_records.cpp` keeps an application's signing keys and webhooks in its
 workspace (lake#352, lake#355). The stores no longer write or read `auth_app_signing_keys` or
 `auth_app_webhooks`: they envelope and open the credentials with the keystore

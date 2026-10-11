@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include "lake/api/billing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/markdown.hpp"
 #include "lake/api/registry.hpp"
@@ -37,6 +38,8 @@ const lake::api::Registry& registry() {
     static const lake::api::Registry* built = [] {
         auto* registry = new lake::api::Registry();
         lake::api::register_core_capabilities(*registry, "0.0.1");
+        // The billing guide's examples (lake#564) run against billing's schemas too.
+        lake::api::register_billing_capabilities(*registry);
         return registry;
     }();
     return *built;

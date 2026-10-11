@@ -47,6 +47,7 @@ may wrap across source lines.
 | | `secrets` | Secrets and Encryption Keys |
 | | `activity` | Activity and Audit |
 | | `usage` | Usage and Metering |
+| | `billing` | Billing and Invoices (only where the lake bills; `list_docs` and `get_doc` leave it out where billing is off) |
 | Developer | `developer` | REST API and OpenAPI |
 | | `mcp` | MCP Setup |
 | | `cli` | The liquid CLI |

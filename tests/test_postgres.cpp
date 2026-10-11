@@ -1085,6 +1085,134 @@ TEST(PostgresUsageLimits, OneLimitPerDimensionAndZeroRemovesIt) {
     EXPECT_EQ(store->usage_limits(lake::control::new_uuid_v4()).error().code, "not_found");
 }
 
+// Billing records (migration 0073, lake#564, decision 56): the price list, each account's plan over
+// time, and invoices with frozen lines and payment state, in the control plane.
+TEST(PostgresBilling, PlansSubscriptionsAndInvoicesFollowTheContract) {
+    const char* uri = lake::test::postgres_uri();
+    if (uri == nullptr || std::string(uri).empty()) {
+        GTEST_SKIP() << "LAKE_TEST_DB_URI is not set";
+    }
+    auto store = lake::control::make_postgres_store(
+        uri, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+    ASSERT_TRUE(store->ping()) << store->ping().error().message;
+    {
+        pqxx::connection connection(uri);
+        pqxx::work tx(connection);
+        for (const char* table : {"billing_plans",
+                                  "billing_plan_prices",
+                                  "billing_subscriptions",
+                                  "billing_invoices",
+                                  "billing_invoice_lines",
+                                  "billing_guard"}) {
+            EXPECT_FALSE(
+                tx.exec_params("SELECT to_regclass($1)", std::string(table))[0][0].is_null())
+                << table;
+        }
+        EXPECT_FALSE(
+            tx.exec("SELECT 1 FROM schema_migrations WHERE version = '0073_billing'").empty());
+    }
+    const std::string suffix = lake::control::new_uuid_v4().substr(0, 8);
+    const auto user = store->create_user(
+        {"taap:1:ed25519:bill-" + suffix, "bill-" + suffix + "@example.com", "Billing"});
+    ASSERT_TRUE(user) << user.error().message;
+    const auto customer = store->create_customer({"individual", user->id, "", "bill-" + suffix});
+    ASSERT_TRUE(customer) << customer.error().message;
+
+    // A plan with two prices, replaced in place.
+    const std::string plan_id = "team-" + suffix;
+    lake::control::BillingPlan plan;
+    plan.id = plan_id;
+    plan.name = "Team";
+    plan.currency = "USD";
+    plan.base_micros = 20'000'000;
+    plan.prices = {{"storage", 100'000, 1073741824ULL, 1073741824ULL},
+                   {"calls", 1'000'000, 1000, 0}};
+    const auto stored = store->put_billing_plan(plan);
+    ASSERT_TRUE(stored) << stored.error().message;
+    ASSERT_EQ(stored->prices.size(), 2U);
+    EXPECT_EQ(stored->prices[0].dimension, "calls") << "prices by dimension";
+    EXPECT_EQ(stored->prices[1].per, 1073741824ULL);
+    plan.prices = {{"calls", 2'000'000, 1000, 500}};
+    plan.active = false;
+    const auto replaced = store->put_billing_plan(plan);
+    ASSERT_TRUE(replaced) << replaced.error().message;
+    EXPECT_EQ(replaced->prices.size(), 1U);
+    EXPECT_EQ(replaced->prices[0].included, 500U);
+    EXPECT_FALSE(replaced->active);
+    plan.id = "Bad Id";
+    EXPECT_EQ(store->put_billing_plan(plan).error().code, "invalid_input");
+    plan.id = plan_id;
+    plan.prices = {{"calls", 1, 1, 0}, {"calls", 2, 1, 0}};
+    EXPECT_EQ(store->put_billing_plan(plan).error().code, "invalid_input");
+
+    // Subscriptions: a row from a month on replaces later ones; an empty plan only removes.
+    EXPECT_TRUE(store->billing_subscriptions(customer->id)->empty());
+    ASSERT_TRUE(store->set_billing_subscription(customer->id, "2026-09-01", plan_id));
+    ASSERT_TRUE(store->set_billing_subscription(customer->id, "2026-11-01", plan_id));
+    const auto rows = store->set_billing_subscription(customer->id, "2026-10-01", plan_id);
+    ASSERT_TRUE(rows) << rows.error().message;
+    ASSERT_EQ(rows->size(), 2U);
+    EXPECT_EQ((*rows)[0].effective_from, "2026-09-01");
+    EXPECT_EQ((*rows)[1].effective_from, "2026-10-01");
+    EXPECT_EQ(store->set_billing_subscription(customer->id, "2026-10-01", "")->size(), 1U);
+    EXPECT_EQ(store->set_billing_subscription(customer->id, "2026-10-15", plan_id).error().code,
+              "invalid_input");
+    EXPECT_EQ(
+        store->set_billing_subscription(customer->id, "2026-12-01", "no-such-plan").error().code,
+        "not_found");
+    EXPECT_EQ(store->billing_subscriptions(lake::control::new_uuid_v4()).error().code, "not_found");
+
+    // An invoice and its lines; one a month unless void.
+    lake::control::Invoice invoice;
+    invoice.customer_id = customer->id;
+    invoice.period = "2026-09";
+    invoice.plan_id = plan_id;
+    invoice.plan_name = "Team";
+    invoice.currency = "USD";
+    invoice.total_micros = 22'500'000;
+    invoice.provider = "manual";
+    invoice.instructions = "Pay by transfer.";
+    invoice.lines = {
+        {"plan", "", "Team plan, 2026-09", "month", 1, 0, 1, 20'000'000, 1, 20'000'000},
+        {"usage",
+         "calls",
+         "API and MCP Calls",
+         "calls",
+         3500,
+         1000,
+         2500,
+         1'000'000,
+         1000,
+         2'500'000}};
+    const auto issued = store->create_invoice(invoice);
+    ASSERT_TRUE(issued) << issued.error().message;
+    EXPECT_EQ(issued->state, "due");
+    EXPECT_GT(issued->number, 0U);
+    EXPECT_FALSE(issued->issued_at.empty());
+    ASSERT_EQ(issued->lines.size(), 2U);
+    EXPECT_EQ(issued->lines[1].billable, 2500U);
+    EXPECT_EQ(store->create_invoice(invoice).error().code, "conflict");
+    const auto listed = store->list_invoices(customer->id);
+    ASSERT_TRUE(listed);
+    ASSERT_EQ(listed->size(), 1U);
+    EXPECT_EQ((*listed)[0].lines.size(), 2U);
+    EXPECT_EQ(store->get_invoice(lake::control::new_uuid_v4()).error().code, "not_found");
+
+    const auto voided = store->set_invoice_state(issued->id, "void", "", "wrong");
+    ASSERT_TRUE(voided) << voided.error().message;
+    EXPECT_EQ(voided->state, "void");
+    EXPECT_FALSE(voided->voided_at.empty());
+    EXPECT_EQ(store->set_invoice_state(issued->id, "paid", "WIRE", "").error().code, "conflict");
+    const auto again = store->create_invoice(invoice);
+    ASSERT_TRUE(again) << again.error().message;
+    const auto paid = store->set_invoice_state(again->id, "paid", "WIRE-1", "");
+    ASSERT_TRUE(paid) << paid.error().message;
+    EXPECT_EQ(paid->provider_reference, "WIRE-1");
+    EXPECT_FALSE(paid->paid_at.empty());
+    EXPECT_EQ(store->set_invoice_state(again->id, "due", "", "").error().code, "invalid_input");
+    EXPECT_EQ(store->list_invoices(customer->id)->size(), 2U);
+}
+
 TEST(PostgresServices, CreateListAndWithdrawFollowTheContract) {
     const char* uri = lake::test::postgres_uri();
     if (uri == nullptr || std::string(uri).empty()) {

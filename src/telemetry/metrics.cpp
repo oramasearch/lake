@@ -634,6 +634,43 @@ public:
     set_usage_limit(const control::UsageLimit& limit) override {
         return call("set_usage_limit", [&] { return store_->set_usage_limit(limit); });
     }
+    control::Result<std::vector<control::BillingPlan>> billing_plans() override {
+        return call("billing_plans", [&] { return store_->billing_plans(); });
+    }
+    control::Result<control::BillingPlan>
+    put_billing_plan(const control::BillingPlan& plan) override {
+        return call("put_billing_plan", [&] { return store_->put_billing_plan(plan); });
+    }
+    control::Result<std::vector<control::BillingSubscription>>
+    billing_subscriptions(const std::string& customer_id) override {
+        return call("billing_subscriptions",
+                    [&] { return store_->billing_subscriptions(customer_id); });
+    }
+    control::Result<std::vector<control::BillingSubscription>>
+    set_billing_subscription(const std::string& customer_id,
+                             const std::string& effective_from,
+                             const std::string& plan_id) override {
+        return call("set_billing_subscription", [&] {
+            return store_->set_billing_subscription(customer_id, effective_from, plan_id);
+        });
+    }
+    control::Result<control::Invoice> create_invoice(const control::Invoice& invoice) override {
+        return call("create_invoice", [&] { return store_->create_invoice(invoice); });
+    }
+    control::Result<std::vector<control::Invoice>>
+    list_invoices(const std::string& customer_id) override {
+        return call("list_invoices", [&] { return store_->list_invoices(customer_id); });
+    }
+    control::Result<control::Invoice> get_invoice(const std::string& id) override {
+        return call("get_invoice", [&] { return store_->get_invoice(id); });
+    }
+    control::Result<control::Invoice> set_invoice_state(const std::string& id,
+                                                        const std::string& state,
+                                                        const std::string& provider_reference,
+                                                        const std::string& note) override {
+        return call("set_invoice_state",
+                    [&] { return store_->set_invoice_state(id, state, provider_reference, note); });
+    }
     control::Result<std::uint64_t> set_storage_quota(const std::string& customer_id,
                                                      std::uint64_t quota_bytes) override {
         return call("set_storage_quota",

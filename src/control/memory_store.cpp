@@ -2134,6 +2134,182 @@ Result<UsageLimit> InMemoryStore::set_usage_limit(const UsageLimit& limit) {
     return stored;
 }
 
+namespace {
+
+bool valid_plan_id(const std::string& id) {
+    if (id.empty() || id.size() > 63 || id[0] < 'a' || id[0] > 'z') {
+        return false;
+    }
+    return std::ranges::all_of(
+        id, [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; });
+}
+
+bool valid_currency(const std::string& currency) {
+    return currency.size() == 3 &&
+           std::ranges::all_of(currency, [](char c) { return c >= 'A' && c <= 'Z'; });
+}
+
+bool valid_month_start(const std::string& date) {
+    return date.size() == 10 && date[4] == '-' && date[7] == '-' && date.substr(8) == "01";
+}
+
+} // namespace
+
+Result<std::vector<BillingPlan>> InMemoryStore::billing_plans() {
+    std::lock_guard lock(mutex_);
+    std::vector<BillingPlan> plans;
+    for (const auto& [id, plan] : billing_plans_) {
+        plans.push_back(plan);
+    }
+    std::ranges::stable_sort(plans, [](const BillingPlan& left, const BillingPlan& right) {
+        return std::tie(left.position, left.id) < std::tie(right.position, right.id);
+    });
+    return plans;
+}
+
+Result<BillingPlan> InMemoryStore::put_billing_plan(const BillingPlan& plan) {
+    if (!valid_plan_id(plan.id) || plan.name.empty() || !valid_currency(plan.currency)) {
+        return std::unexpected(StoreError{"invalid_input",
+                                          "a plan needs an id of lower-case letters, digits and "
+                                          "hyphens, a name and a three-letter currency"});
+    }
+    std::set<std::string> seen;
+    for (const BillingPrice& price : plan.prices) {
+        if (price.dimension.empty() || price.per == 0 || !seen.insert(price.dimension).second) {
+            return std::unexpected(StoreError{
+                "invalid_input", "each price needs its own dimension and a `per` above 0"});
+        }
+    }
+    std::lock_guard lock(mutex_);
+    BillingPlan stored = plan;
+    const auto found = billing_plans_.find(plan.id);
+    stored.created_at = found == billing_plans_.end() ? now_iso8601() : found->second.created_at;
+    stored.updated_at = now_iso8601();
+    std::ranges::sort(stored.prices, {}, &BillingPrice::dimension);
+    billing_plans_[plan.id] = stored;
+    return stored;
+}
+
+Result<std::vector<BillingSubscription>>
+InMemoryStore::billing_subscriptions(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    if (std::ranges::none_of(
+            customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+        return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+    }
+    std::vector<BillingSubscription> rows;
+    for (const BillingSubscription& row : billing_subscriptions_) {
+        if (row.customer_id == customer_id) {
+            rows.push_back(row);
+        }
+    }
+    std::ranges::sort(rows, {}, &BillingSubscription::effective_from);
+    return rows;
+}
+
+Result<std::vector<BillingSubscription>> InMemoryStore::set_billing_subscription(
+    const std::string& customer_id, const std::string& effective_from, const std::string& plan_id) {
+    if (!valid_month_start(effective_from)) {
+        return std::unexpected(
+            StoreError{"invalid_input", "a plan takes effect on the first day of a month"});
+    }
+    {
+        std::lock_guard lock(mutex_);
+        if (std::ranges::none_of(
+                customers_, [&](const Customer& customer) { return customer.id == customer_id; })) {
+            return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+        }
+        if (!plan_id.empty() && !billing_plans_.contains(plan_id)) {
+            return std::unexpected(StoreError{"not_found", "no plan " + plan_id});
+        }
+        std::erase_if(billing_subscriptions_, [&](const BillingSubscription& row) {
+            return row.customer_id == customer_id && row.effective_from >= effective_from;
+        });
+        if (!plan_id.empty()) {
+            billing_subscriptions_.push_back({customer_id, effective_from, plan_id, now_iso8601()});
+        }
+    }
+    return billing_subscriptions(customer_id);
+}
+
+Result<Invoice> InMemoryStore::create_invoice(const Invoice& invoice) {
+    if (invoice.customer_id.empty() || invoice.period.size() != 7 || invoice.plan_id.empty() ||
+        !valid_currency(invoice.currency) || invoice.provider.empty()) {
+        return std::unexpected(StoreError{
+            "invalid_input", "an invoice needs an account, a month, a plan and a currency"});
+    }
+    std::lock_guard lock(mutex_);
+    for (const Invoice& existing : invoices_) {
+        if (existing.customer_id == invoice.customer_id && existing.period == invoice.period &&
+            existing.state != "void") {
+            return std::unexpected(StoreError{"conflict",
+                                              "invoice " + std::to_string(existing.number) +
+                                                  " already bills " + invoice.period});
+        }
+    }
+    Invoice stored = invoice;
+    stored.id = new_uuid_v4();
+    stored.number = invoices_.size() + 1;
+    stored.state = "due";
+    stored.issued_at = now_iso8601();
+    stored.paid_at.clear();
+    stored.voided_at.clear();
+    invoices_.push_back(stored);
+    return stored;
+}
+
+Result<std::vector<Invoice>> InMemoryStore::list_invoices(const std::string& customer_id) {
+    std::lock_guard lock(mutex_);
+    std::vector<Invoice> rows;
+    for (const Invoice& invoice : invoices_) {
+        if (invoice.customer_id == customer_id) {
+            rows.push_back(invoice);
+        }
+    }
+    std::ranges::sort(rows, [](const Invoice& left, const Invoice& right) {
+        return std::tie(right.period, right.number) < std::tie(left.period, left.number);
+    });
+    return rows;
+}
+
+Result<Invoice> InMemoryStore::get_invoice(const std::string& id) {
+    std::lock_guard lock(mutex_);
+    for (const Invoice& invoice : invoices_) {
+        if (invoice.id == id) {
+            return invoice;
+        }
+    }
+    return std::unexpected(StoreError{"not_found", "no invoice " + id});
+}
+
+Result<Invoice> InMemoryStore::set_invoice_state(const std::string& id,
+                                                 const std::string& state,
+                                                 const std::string& provider_reference,
+                                                 const std::string& note) {
+    if (state != "paid" && state != "void") {
+        return std::unexpected(StoreError{"invalid_input", "an invoice becomes paid or void"});
+    }
+    std::lock_guard lock(mutex_);
+    for (Invoice& invoice : invoices_) {
+        if (invoice.id != id) {
+            continue;
+        }
+        if (invoice.state != "due") {
+            return std::unexpected(StoreError{"conflict",
+                                              "invoice " + std::to_string(invoice.number) + " is " +
+                                                  invoice.state + ", not due"});
+        }
+        invoice.state = state;
+        if (!provider_reference.empty()) {
+            invoice.provider_reference = provider_reference;
+        }
+        invoice.note = note;
+        (state == "paid" ? invoice.paid_at : invoice.voided_at) = now_iso8601();
+        return invoice;
+    }
+    return std::unexpected(StoreError{"not_found", "no invoice " + id});
+}
+
 Result<User> InMemoryStore::get_user(const std::string& id) {
     std::lock_guard lock(mutex_);
     for (const auto& u : users_)

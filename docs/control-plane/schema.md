@@ -813,10 +813,36 @@ account's limit on one dimension of usage, in that dimension's unit
 ([`../api/metering.md`](../api/metering.md#limits)). A counted dimension's limit is per UTC calendar
 month; storage's row only carries its warning percentage, since its limit is the enforced
 `customer_storage_quotas` quota. It is content-free account configuration beside that quota: the
-usage it is compared with stays in each workspace Zetta (`lake_usage`, `lake_storage`), and no
-price, plan or bill is kept here, because where billing data lives is not decided. Nothing is
+usage it is compared with stays in each workspace Zetta (`lake_usage`, `lake_storage`). Prices,
+plans and bills are billing's own tables ([billing migration](#billing-migration)). Nothing is
 dropped; idempotent; guard `usage_limits_guard`. The operator vendors the schema and selects that
 guard in its own pull request before a lake with this change is rolled.
+
+## Billing migration
+
+`0073_billing` (lake#564, decision 56) adds billing records, in the control plane as multitenancy
+([`../api/billing.md`](../api/billing.md)):
+
+- `billing_plans` (`id` text slug, `name`, `description`, three-letter `currency`, `base_micros`
+  monthly fee, `active`, `position`, timestamps) and `billing_plan_prices` (plan, `dimension`,
+  `unit_micros` for every `per` units beyond `included` units a month; primary key plan and
+  dimension, cascading with the plan);
+- `billing_subscriptions` (customer, `effective_from` on the first of a month, enforced by a check,
+  `plan_id`; primary key customer and `effective_from`; cascading with the customer);
+- `billing_invoices` (uuid `id`, `number` from a sequence, customer, `period` `YYYY-MM`, plan id and
+  name, currency, `total_micros`, `state` `due`/`paid`/`void`, `provider`, `provider_reference`,
+  `instructions`, `note`, issued, paid and voided times) with a partial unique index allowing one
+  invoice a customer and month that is not void. `customer_id` is not a foreign key: an invoice is
+  a financial record and outlives its account;
+- `billing_invoice_lines` (invoice, `position`, `kind` `plan`/`usage`, `dimension`, `description`,
+  `unit`, `quantity`, `included`, `billable`, `unit_micros`, `per`, `amount_micros`), cascading with
+  the invoice.
+
+The quantities are the only usage that reaches PostgreSQL: one number per dimension per invoiced
+month, frozen when the invoice is issued. The usage itself stays in each workspace Zetta. Lake
+writes these tables only where `LAKE_BILLING` is on; elsewhere they stay empty. Nothing is dropped;
+idempotent; guard `billing_guard`. The operator vendors the schema and selects that guard in its own
+pull request before a lake with this change is rolled.
 
 ## Repository workspaces migration
 

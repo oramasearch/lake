@@ -409,6 +409,8 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
              -> std::expected<lake::api::Transcription, lake::api::ApiError> {
              return lake::api::Transcription{"schema words", 1.5, "gpt-4o-transcribe"};
          },
+         // Billing on (lake#564), so its capabilities are in the contract too.
+         .billing = true,
          .store_root = root.string()});
     ASSERT_TRUE(server.start()) << server.reason();
     HttpEvidence http(server.port());
@@ -555,6 +557,40 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.read("usage_over_time",
               "?customer_id=" + customer.id +
                   "&from=2026-10-01T00:00:00Z&to=2026-10-02T00:00:00Z&granularity=hour");
+    // Billing (lake#564): the price list, a plan, a preview, and a month invoiced and paid.
+    http.call("set_billing_plan",
+              {{"id", "schema-team"},
+               {"name", "Team"},
+               {"base_micros", 1000000},
+               {"prices", json::array({{{"dimension", "calls"}, {"unit_micros", 1000}}})}});
+    http.call("billing_plans");
+    http.read("billing_plans", "");
+    http.call("choose_billing_plan", {{"customer_id", customer.id}, {"plan_id", "schema-team"}});
+    http.call("billing_account", {{"customer_id", customer.id}});
+    http.read("billing_account", "?customer_id=" + customer.id);
+    http.call("bill_preview", {{"customer_id", customer.id}});
+    // January on a plan with only a fee, so its invoice reads no workspace's usage.
+    http.call("set_billing_plan",
+              {{"id", "schema-flat"}, {"name", "Flat"}, {"base_micros", 5000000}});
+    checked(store->set_billing_subscription(customer.id, "2026-01-01", "schema-flat"));
+    http.call("issue_invoice", {{"customer_id", customer.id}, {"period", "2026-01"}});
+    lake::control::Invoice month;
+    month.customer_id = customer.id;
+    month.plan_id = "schema-team";
+    month.plan_name = "Team";
+    month.currency = "USD";
+    month.provider = "manual";
+    month.lines = {{"plan", "", "Team plan", "month", 1, 0, 1, 1000000, 1, 1000000}};
+    month.period = "2026-02";
+    const auto due = checked(store->create_invoice(month));
+    http.call("list_invoices", {{"customer_id", customer.id}});
+    http.read("list_invoices", "?customer_id=" + customer.id);
+    const auto invoices = checked(store->list_invoices(customer.id));
+    const std::string january = invoices.back().id;
+    http.call("get_invoice", {{"customer_id", customer.id}, {"invoice_id", january}});
+    http.read("get_invoice", "?customer_id=" + customer.id + "&invoice_id=" + january);
+    http.call("record_invoice_payment", {{"invoice_id", january}, {"reference", "W1"}});
+    http.call("void_invoice", {{"invoice_id", due.id}, {"note", "issued twice"}});
     http.call("list_conflicts", {{"id", repository.id}});
     http.read("list_conflicts", "?id=" + repository.id);
     http.call("resolve_conflict",

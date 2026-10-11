@@ -7675,7 +7675,13 @@ TEST(WebApp, PermissionsDocsMcpAndPackagesAreCapabilities) {
     s.ctx.acting_identity.clear();
     const ApiResult pages = s.call("list_docs");
     ASSERT_TRUE(pages.ok) << pages.error.message;
-    const auto& guide = web_ui_guide();
+    // The Billing guide is absent where billing is off, as in this registry (lake#564).
+    std::vector<WebUiGuidePage> guide;
+    for (const WebUiGuidePage& page : web_ui_guide()) {
+        if (page.slug != "billing") {
+            guide.push_back(page);
+        }
+    }
     ASSERT_EQ(pages.value["pages"].size(), guide.size());
     ASSERT_GE(guide.size(), 2U);
     EXPECT_EQ(pages.value["pages"][0]["slug"], guide.front().slug);

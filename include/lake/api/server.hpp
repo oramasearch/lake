@@ -43,6 +43,8 @@ class FederationIssuerPolicy;
 // closes the stores and releases the owner lock. docs/deployment/store-volume.md has the contract.
 namespace lake::api {
 
+class PaymentProvider; // lake/api/billing.hpp
+
 struct ServerOptions {
     std::string listen_address = "127.0.0.1";
     unsigned short port = 4900; // 0 = pick an ephemeral port
@@ -156,6 +158,14 @@ struct ServerOptions {
     control::callers::JwtVerifier* jwt_verifier = nullptr;
     control::callers::CloudIdentityVerifier* cloud_identity_verifier = nullptr;
     control::callers::FederationIssuerPolicy* federation_issuer_policy = nullptr;
+    // Billing (lake#564, decision 56, docs/api/billing.md): on only where LAKE_BILLING=on (Orama
+    // Cloud). Off, as on an enterprise install, the billing capabilities are not registered, so
+    // REST, OpenAPI, MCP, the web app's billing pages and the billing Docs guide are absent; usage
+    // tracking is unaffected. `payment_provider` collects invoices; null is the manual provider
+    // with `billing_instructions` (LAKE_BILLING_INSTRUCTIONS).
+    bool billing = false;
+    std::shared_ptr<PaymentProvider> payment_provider;
+    std::string billing_instructions;
     // The operator-provided PersistentVolume mount. Customer stores live at
     // <root>/<customer id>/store and instance log objects at
     // <root>/<node name>/log. Empty disables data-plane storage.

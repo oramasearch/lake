@@ -5506,6 +5506,326 @@ public:
         });
     }
 
+    // ---- billing (migration 0073, lake#564, docs/api/billing.md) ----
+
+    static constexpr const char* utc_text_sql = "'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'";
+
+    static std::string utc_column(const std::string& column) {
+        return "COALESCE(to_char(" + column + " AT TIME ZONE 'UTC', " + utc_text_sql + "), '')";
+    }
+
+    Result<std::vector<BillingPlan>> billing_plans() override {
+        return with_tx<std::vector<BillingPlan>>(
+            [&](pqxx::work& tx) -> Result<std::vector<BillingPlan>> {
+                const pqxx::result rows =
+                    tx.exec("SELECT id, name, description, currency, base_micros, active, "
+                            "position, " +
+                            utc_column("created_at") + ", " + utc_column("updated_at") +
+                            " FROM billing_plans ORDER BY position, id");
+                std::vector<BillingPlan> plans;
+                for (const auto& row : rows) {
+                    BillingPlan plan;
+                    plan.id = row[0].as<std::string>();
+                    plan.name = row[1].as<std::string>();
+                    plan.description = row[2].as<std::string>();
+                    plan.currency = row[3].as<std::string>();
+                    plan.base_micros = row[4].as<std::uint64_t>();
+                    plan.active = row[5].as<bool>();
+                    plan.position = row[6].as<int>();
+                    plan.created_at = row[7].as<std::string>();
+                    plan.updated_at = row[8].as<std::string>();
+                    plans.push_back(std::move(plan));
+                }
+                const pqxx::result prices =
+                    tx.exec("SELECT plan_id, dimension, unit_micros, per, included "
+                            "FROM billing_plan_prices ORDER BY plan_id, dimension");
+                for (const auto& row : prices) {
+                    const std::string plan_id = row[0].as<std::string>();
+                    for (BillingPlan& plan : plans) {
+                        if (plan.id == plan_id) {
+                            plan.prices.push_back({row[1].as<std::string>(),
+                                                   row[2].as<std::uint64_t>(),
+                                                   row[3].as<std::uint64_t>(),
+                                                   row[4].as<std::uint64_t>()});
+                        }
+                    }
+                }
+                return plans;
+            });
+    }
+
+    Result<BillingPlan> put_billing_plan(const BillingPlan& plan) override {
+        std::set<std::string> seen;
+        for (const BillingPrice& price : plan.prices) {
+            if (price.dimension.empty() || price.per == 0 || !seen.insert(price.dimension).second) {
+                return std::unexpected(StoreError{
+                    "invalid_input", "each price needs its own dimension and a `per` above 0"});
+            }
+        }
+        auto written = with_tx<bool>([&](pqxx::work& tx) -> Result<bool> {
+            tx.exec_params(
+                "INSERT INTO billing_plans (id, name, description, currency, base_micros, active, "
+                "position) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO UPDATE SET "
+                "name = EXCLUDED.name, description = EXCLUDED.description, currency = "
+                "EXCLUDED.currency, base_micros = EXCLUDED.base_micros, active = EXCLUDED.active, "
+                "position = EXCLUDED.position, updated_at = now()",
+                plan.id,
+                plan.name,
+                plan.description,
+                plan.currency,
+                plan.base_micros,
+                plan.active,
+                plan.position);
+            tx.exec_params("DELETE FROM billing_plan_prices WHERE plan_id = $1", plan.id);
+            for (const BillingPrice& price : plan.prices) {
+                tx.exec_params("INSERT INTO billing_plan_prices (plan_id, dimension, unit_micros, "
+                               "per, included) VALUES ($1, $2, $3, $4, $5)",
+                               plan.id,
+                               price.dimension,
+                               price.unit_micros,
+                               price.per,
+                               price.included);
+            }
+            return true;
+        });
+        if (!written) {
+            return std::unexpected(written.error());
+        }
+        auto plans = billing_plans();
+        if (!plans) {
+            return std::unexpected(plans.error());
+        }
+        for (BillingPlan& stored : *plans) {
+            if (stored.id == plan.id) {
+                return std::move(stored);
+            }
+        }
+        return std::unexpected(StoreError{"store_error", "plan " + plan.id + " was not kept"});
+    }
+
+    static Result<std::vector<BillingSubscription>>
+    subscriptions_in(pqxx::work& tx, const std::string& customer_id) {
+        const pqxx::result customers =
+            tx.exec_params("SELECT 1 FROM customers WHERE id = $1::uuid", customer_id);
+        if (customers.empty()) {
+            return std::unexpected(StoreError{"not_found", "no customer " + customer_id});
+        }
+        const pqxx::result rows = tx.exec_params(
+            "SELECT to_char(effective_from, 'YYYY-MM-DD'), plan_id, " + utc_column("created_at") +
+                " FROM billing_subscriptions WHERE customer_id = $1::uuid ORDER BY effective_from",
+            customer_id);
+        std::vector<BillingSubscription> out;
+        for (const auto& row : rows) {
+            out.push_back({customer_id,
+                           row[0].as<std::string>(),
+                           row[1].as<std::string>(),
+                           row[2].as<std::string>()});
+        }
+        return out;
+    }
+
+    Result<std::vector<BillingSubscription>>
+    billing_subscriptions(const std::string& customer_id) override {
+        return with_tx<std::vector<BillingSubscription>>(
+            [&](pqxx::work& tx) { return subscriptions_in(tx, customer_id); });
+    }
+
+    Result<std::vector<BillingSubscription>>
+    set_billing_subscription(const std::string& customer_id,
+                             const std::string& effective_from,
+                             const std::string& plan_id) override {
+        if (effective_from.size() != 10 || effective_from.substr(8) != "01") {
+            return std::unexpected(
+                StoreError{"invalid_input", "a plan takes effect on the first day of a month"});
+        }
+        return with_tx<std::vector<BillingSubscription>>(
+            [&](pqxx::work& tx) -> Result<std::vector<BillingSubscription>> {
+                auto before = subscriptions_in(tx, customer_id);
+                if (!before) {
+                    return before;
+                }
+                if (!plan_id.empty() &&
+                    tx.exec_params("SELECT 1 FROM billing_plans WHERE id = $1", plan_id).empty()) {
+                    return std::unexpected(StoreError{"not_found", "no plan " + plan_id});
+                }
+                tx.exec_params("DELETE FROM billing_subscriptions WHERE customer_id = $1::uuid "
+                               "AND effective_from >= $2::date",
+                               customer_id,
+                               effective_from);
+                if (!plan_id.empty()) {
+                    tx.exec_params("INSERT INTO billing_subscriptions (customer_id, "
+                                   "effective_from, plan_id) VALUES ($1::uuid, $2::date, $3)",
+                                   customer_id,
+                                   effective_from,
+                                   plan_id);
+                }
+                return subscriptions_in(tx, customer_id);
+            });
+    }
+
+    static std::string invoice_columns() {
+        return "id::text, number, customer_id::text, period, plan_id, plan_name, currency, "
+               "total_micros, state, provider, provider_reference, instructions, note, " +
+               utc_column("issued_at") + ", " + utc_column("paid_at") + ", " +
+               utc_column("voided_at");
+    }
+
+    static Invoice invoice_of(const pqxx::row& row) {
+        Invoice invoice;
+        invoice.id = row[0].as<std::string>();
+        invoice.number = row[1].as<std::uint64_t>();
+        invoice.customer_id = row[2].as<std::string>();
+        invoice.period = row[3].as<std::string>();
+        invoice.plan_id = row[4].as<std::string>();
+        invoice.plan_name = row[5].as<std::string>();
+        invoice.currency = row[6].as<std::string>();
+        invoice.total_micros = row[7].as<std::uint64_t>();
+        invoice.state = row[8].as<std::string>();
+        invoice.provider = row[9].as<std::string>();
+        invoice.provider_reference = row[10].as<std::string>();
+        invoice.instructions = row[11].as<std::string>();
+        invoice.note = row[12].as<std::string>();
+        invoice.issued_at = row[13].as<std::string>();
+        invoice.paid_at = row[14].as<std::string>();
+        invoice.voided_at = row[15].as<std::string>();
+        return invoice;
+    }
+
+    static void read_lines(pqxx::work& tx, Invoice& invoice) {
+        const pqxx::result rows = tx.exec_params(
+            "SELECT kind, dimension, description, unit, quantity, included, billable, "
+            "unit_micros, per, amount_micros FROM billing_invoice_lines WHERE invoice_id = "
+            "$1::uuid ORDER BY position",
+            invoice.id);
+        invoice.lines.clear();
+        for (const auto& row : rows) {
+            invoice.lines.push_back({row[0].as<std::string>(),
+                                     row[1].as<std::string>(),
+                                     row[2].as<std::string>(),
+                                     row[3].as<std::string>(),
+                                     row[4].as<std::uint64_t>(),
+                                     row[5].as<std::uint64_t>(),
+                                     row[6].as<std::uint64_t>(),
+                                     row[7].as<std::uint64_t>(),
+                                     row[8].as<std::uint64_t>(),
+                                     row[9].as<std::uint64_t>()});
+        }
+    }
+
+    static Result<Invoice> invoice_in(pqxx::work& tx, const std::string& id) {
+        const pqxx::result rows = tx.exec_params(
+            "SELECT " + invoice_columns() + " FROM billing_invoices WHERE id = $1::uuid", id);
+        if (rows.empty()) {
+            return std::unexpected(StoreError{"not_found", "no invoice " + id});
+        }
+        Invoice invoice = invoice_of(rows[0]);
+        read_lines(tx, invoice);
+        return invoice;
+    }
+
+    Result<Invoice> create_invoice(const Invoice& invoice) override {
+        const std::string id = new_uuid_v4();
+        return with_tx<Invoice>([&](pqxx::work& tx) -> Result<Invoice> {
+            const pqxx::result existing = tx.exec_params(
+                "SELECT number FROM billing_invoices WHERE customer_id = $1::uuid AND period = $2 "
+                "AND state <> 'void'",
+                invoice.customer_id,
+                invoice.period);
+            if (!existing.empty()) {
+                return std::unexpected(StoreError{"conflict",
+                                                  "invoice " + existing[0][0].as<std::string>() +
+                                                      " already bills " + invoice.period});
+            }
+            tx.exec_params("INSERT INTO billing_invoices (id, customer_id, period, plan_id, "
+                           "plan_name, currency, total_micros, provider, provider_reference, "
+                           "instructions, note) VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, "
+                           "$8, $9, $10, $11)",
+                           id,
+                           invoice.customer_id,
+                           invoice.period,
+                           invoice.plan_id,
+                           invoice.plan_name,
+                           invoice.currency,
+                           invoice.total_micros,
+                           invoice.provider,
+                           invoice.provider_reference,
+                           invoice.instructions,
+                           invoice.note);
+            int position = 0;
+            for (const InvoiceLine& line : invoice.lines) {
+                tx.exec_params(
+                    "INSERT INTO billing_invoice_lines (invoice_id, position, kind, dimension, "
+                    "description, unit, quantity, included, billable, unit_micros, per, "
+                    "amount_micros) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, "
+                    "$12)",
+                    id,
+                    position++,
+                    line.kind,
+                    line.dimension,
+                    line.description,
+                    line.unit,
+                    line.quantity,
+                    line.included,
+                    line.billable,
+                    line.unit_micros,
+                    line.per,
+                    line.amount_micros);
+            }
+            return invoice_in(tx, id);
+        });
+    }
+
+    Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) override {
+        return with_tx<std::vector<Invoice>>([&](pqxx::work& tx) -> Result<std::vector<Invoice>> {
+            const pqxx::result rows =
+                tx.exec_params("SELECT " + invoice_columns() +
+                                   " FROM billing_invoices WHERE customer_id = $1::uuid "
+                                   "ORDER BY period DESC, number DESC",
+                               customer_id);
+            std::vector<Invoice> out;
+            for (const auto& row : rows) {
+                Invoice invoice = invoice_of(row);
+                read_lines(tx, invoice);
+                out.push_back(std::move(invoice));
+            }
+            return out;
+        });
+    }
+
+    Result<Invoice> get_invoice(const std::string& id) override {
+        return with_tx<Invoice>([&](pqxx::work& tx) { return invoice_in(tx, id); });
+    }
+
+    Result<Invoice> set_invoice_state(const std::string& id,
+                                      const std::string& state,
+                                      const std::string& provider_reference,
+                                      const std::string& note) override {
+        if (state != "paid" && state != "void") {
+            return std::unexpected(StoreError{"invalid_input", "an invoice becomes paid or void"});
+        }
+        return with_tx<Invoice>([&](pqxx::work& tx) -> Result<Invoice> {
+            auto before = invoice_in(tx, id);
+            if (!before) {
+                return before;
+            }
+            if (before->state != "due") {
+                return std::unexpected(StoreError{"conflict",
+                                                  "invoice " + std::to_string(before->number) +
+                                                      " is " + before->state + ", not due"});
+            }
+            tx.exec_params(
+                "UPDATE billing_invoices SET state = $2, provider_reference = CASE WHEN $3 = '' "
+                "THEN provider_reference ELSE $3 END, note = $4, paid_at = CASE WHEN $2 = 'paid' "
+                "THEN now() ELSE paid_at END, voided_at = CASE WHEN $2 = 'void' THEN now() ELSE "
+                "voided_at END WHERE id = $1::uuid AND state = 'due'",
+                id,
+                state,
+                provider_reference,
+                note);
+            return invoice_in(tx, id);
+        });
+    }
+
     Result<IssuedSession> sign_up_password(const NewPasswordUser& in) override {
         if (in.pool_id.empty() || in.email.empty() || in.password.size() < 12) {
             return std::unexpected(StoreError{

@@ -68,7 +68,11 @@ per-workspace `lake_usage` counter and `lake_storage` readings (lake#564, `ApiCo
 `usage_dimensions()`, each dimension's unit; `capabilities.hpp` declares `sample_usage` and
 `queue_repository_builds`, and `images.hpp`'s `ImageBytes` splits image bytes by workspace.
 `registry.hpp`'s `Transcription` carries the tokens a speech-to-text model reports. See
-[metering](../../../docs/api/metering.md#usage-over-time). `request_recorder.hpp` declares `RequestRecorder`, the
+[metering](../../../docs/api/metering.md#usage-over-time). `billing.hpp` declares billing (lake#564,
+decision 56): the `PaymentProvider` interface and its manual implementation, `billing_enabled`
+(`LAKE_BILLING`), `register_billing_capabilities` (called by `ApiServer` only where
+`ServerOptions::billing` is on), `billing_registered`, and the pure `price_of` and `bill_lines`. See
+[billing](../../../docs/api/billing.md). `request_recorder.hpp` declares `RequestRecorder`, the
 bounded per-workspace `lake_requests` counts on their way to each workspace Zetta's time series
 (decision 54 S9, lake#384); `registry.hpp`'s `RequestAttribution` (`ApiContext::request_attribution`)
 is what one HTTP request's capability calls resolved: its outermost capability, its workspace and

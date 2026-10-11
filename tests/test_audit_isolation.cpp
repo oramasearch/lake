@@ -1,5 +1,6 @@
 #include "audit_test_support.hpp"
 #include "lake/api/audit_routing.hpp"
+#include "lake/api/billing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/registry.hpp"
 #include "lake/control/memory_store.hpp"
@@ -234,6 +235,8 @@ INSTANTIATE_TEST_SUITE_P(Stores,
 TEST(AuditRouting, EveryRegisteredCapabilityIsClassified) {
     lake::api::Registry registry;
     lake::api::register_core_capabilities(registry, "test");
+    // Billing is registered only where it is on (lake#564), and classified like the rest.
+    lake::api::register_billing_capabilities(registry);
     std::set<std::string> registered;
     for (const auto& capability : registry.list()) {
         registered.insert(capability->name);

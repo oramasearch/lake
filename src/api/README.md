@@ -100,6 +100,13 @@ every `usage_sample_interval`. `usage_capabilities.cpp` registers `usage_over_ti
 is the build-record queueing the sample shares with `metering_usage`. See
 [metering](../../docs/api/metering.md#usage-over-time).
 
+Billing (lake#564, decision 56): `billing_capabilities.cpp` registers the ten billing capabilities and
+the manual `PaymentProvider`; `ApiServer` calls `register_billing_capabilities` only where
+`ServerOptions::billing` is on (`LAKE_BILLING`). A bill reads usage by calling `usage_over_time`
+through the registry as the same caller. `console_capabilities.cpp`'s `viewer` answers `billing`,
+and `list_docs`/`get_doc` leave out the Billing guide where billing is off. See
+[billing](../../docs/api/billing.md).
+
 `datasets.cpp` holds the workspace dataset rules lake applies on top of Zetta (lake#447): engine
 result databases, SQL-queryable names, CSV row checks with line numbers, and the one
 `<database>/<name>` id. `workspace_query`/`workspace_act` apply them to `list_datasets`,

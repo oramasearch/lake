@@ -119,10 +119,10 @@ not decide it.
 
 **Status: implemented (lake#564), not deployed.** Every dimension of a workspace's usage is kept
 over time in that workspace's own Zetta, and `usage_over_time` adds it up across the workspaces a
-person chooses, by hour, day or month. This is usage tracking and its visualization only: lake keeps
-no price, plan, invoice or ledger for it. Billing is not designed yet (the umbrella rule leaves
-billing data without a home until Steve decides, and decision 55 left whether billing reads
-workspace records or keeps its own store open), so nothing here decides it.
+person chooses, by hour, day or month. This is usage tracking and its visualization, on every
+installation. Billing (Orama Cloud only, off on enterprise installs) reads it through
+`usage_over_time` and keeps its own records in PostgreSQL (decision 56,
+[billing.md](billing.md)); the usage itself stays here, in each workspace Zetta.
 
 ### Where it lives
 
@@ -148,9 +148,8 @@ the lake Zetta. Telemetry: [`../serving/telemetry.md`](../serving/telemetry.md#t
 
 ### Dimensions
 
-Each dimension has one unit. When billing is designed, a price is set per dimension `name` and
-multiplies its `unit`; that mapping is the extension point and does not exist yet
-(`usage_dimensions()`, `src/api/usage_recorder.cpp`).
+Each dimension has one unit. Billing's prices are set per dimension `name` and count its `unit`
+(`usage_dimensions()`, `src/api/usage_recorder.cpp`; [billing.md](billing.md#prices-and-bills)).
 
 | Dimension | Unit | Kinds | Where it comes from |
 |---|---|---|---|

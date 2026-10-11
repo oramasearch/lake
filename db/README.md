@@ -308,5 +308,14 @@ Migration `0072_usage_limits` (lake#564) adds `customer_usage_limits`: an accoun
 dimension of usage (customer, dimension, limit in the dimension's unit, warning percentage), the
 content-free configuration `usage_limits` reads and `set_usage_limit` writes. The usage it is
 compared with stays in each workspace Zetta; no price, plan or bill is stored. Nothing is dropped;
-idempotent. The latest guard is `usage_limits_guard`; the operator must vendor this schema and select
-that guard before rollout. See [schema.md](../docs/control-plane/schema.md#usage-limits-migration).
+idempotent. Its guard is `usage_limits_guard`. See
+[schema.md](../docs/control-plane/schema.md#usage-limits-migration).
+
+Migration `0073_billing` (lake#564, decision 56) adds billing records as multitenancy:
+`billing_plans` and `billing_plan_prices` (the price list, a price per usage dimension),
+`billing_subscriptions` (an account's plan from the first of a month), `billing_invoices` (one
+account and month, a total and its payment state; at most one that is not void) and
+`billing_invoice_lines` (the quantity billed per dimension, frozen). Usage stays in each workspace
+Zetta; no workspace content is kept. Nothing is dropped; idempotent. The latest guard is
+`billing_guard`; the operator must vendor this schema and select that guard before rollout. See
+[schema.md](../docs/control-plane/schema.md#billing-migration).

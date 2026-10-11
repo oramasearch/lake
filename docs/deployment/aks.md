@@ -91,6 +91,22 @@ The Deployment rolls. To check it, `transcribe` a short clip; the answer names i
 Removing the entry turns speech-to-text off again. An image built before lake#561 ignores the
 variable.
 
+## Billing switch
+
+Billing (lake#564, [`../api/billing.md`](../api/billing.md)) is on only where `LAKE_BILLING=on`.
+Orama's own lake (lake.live, and `Lake/prod` on dev when billing is being exercised) sets it in
+`spec.env`; an enterprise install leaves it unset, and lake then has no billing capability, page or
+guide. `LAKE_BILLING_INSTRUCTIONS` (optional) is the payment text each invoice of the manual
+provider shows. The schema must first carry `0073_billing` (guard `billing_guard`). Append with a
+JSON patch, as for the speech-to-text key:
+
+```sh
+kubectl --context orama-production-cluster-01 patch lake prod --type json -p '[
+  {"op": "add", "path": "/spec/env/-", "value": {"name": "LAKE_BILLING", "value": "on"}}]'
+```
+
+Removing the entry turns billing off at the next roll; the billing rows stay in PostgreSQL.
+
 ## Runbook
 
 **Roll a new lake image.** Release an immutable CI-built image (see

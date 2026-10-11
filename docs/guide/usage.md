@@ -8,7 +8,8 @@ warn as you near them, and export it as CSV. **Repository Usage by Hour** keeps 
 repository transfer and build time, the repository storage limit and, when the lake has prices set,
 an estimated charge.
 
-Usage is a measurement, not a bill: lake shows no prices on the dashboard and keeps no invoices.
+Usage is a measurement, not a bill: the dashboard shows no prices. On Orama Cloud, **Organization →
+Billing** turns it into a monthly bill on your plan; an enterprise install has no billing.
 
 ## Concepts
 

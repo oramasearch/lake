@@ -152,8 +152,18 @@ minutes by the store root's owner. `usage_over_time` adds the chosen workspaces 
 month with breakdowns by workspace and kind; `usage_limits` and `set_usage_limit` keep content-free
 per-dimension limits in `customer_usage_limits` (storage's stays the enforced quota; the others
 warn); `record_model_usage` takes an agent's own credential. Usage is a dashboard in the web app. No
-billing: no price, plan, invoice or ledger. Not deployed; the operator must vendor the schema and
-select `usage_limits_guard`. See `docs/api/metering.md#usage-over-time`.
+billing here. See `docs/api/metering.md#usage-over-time`.
+Billing follows, for Orama Cloud only (lake#564, decision 56, migration `0073_billing`): billing
+records live in PostgreSQL as multitenancy (`billing_plans`, `billing_plan_prices`,
+`billing_subscriptions`, `billing_invoices`, `billing_invoice_lines`) and usage stays in each
+workspace Zetta, read through `usage_over_time`; an invoice freezes only the quantity billed per
+dimension. Ten capabilities (`billing_plans`, `set_billing_plan`, `billing_account`,
+`choose_billing_plan`, `bill_preview`, `issue_invoice`, `list_invoices`, `get_invoice`,
+`record_invoice_payment`, `void_invoice`), audited centrally, are registered only where
+`LAKE_BILLING=on`; off (an enterprise install), they, the Billing pages, `viewer.billing` and the
+Billing guide are absent. Payment goes through the `PaymentProvider` interface; only the manual
+(invoice only) provider exists, and no provider is chosen (lake#620). Not deployed; the operator
+must vendor the schema and select `billing_guard`. See `docs/api/billing.md`.
 Dynamic-secret leases follow (lake#362, migration `0058`): each lease is a sealed record in its
 mount's workspace, and PostgreSQL keeps only `secret_lease_routes` (lease → mount, workspace, and
 `due_at`), the content-free route and due index. Renew, revoke and the owner loop's expiry pass
@@ -609,7 +619,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `usage_limits_guard` in the source tree, versioned by content hash).
+  `billing_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

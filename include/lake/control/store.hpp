@@ -305,6 +305,44 @@ struct UsageLimit {
     int warn_percent = 80;
     std::string updated_at;
 };
+// Billing records (migration 0073, lake#564, decision 56, docs/api/billing.md): the price list,
+// each account's plan over time, and the invoices lake issues. Control-plane multitenancy; usage
+// stays in each workspace Zetta and only the quantity billed per dimension is frozen on a line.
+// Amounts are integer millionths of the currency's unit.
+struct BillingPrice {
+    std::string dimension; // a usage_dimensions() name
+    std::uint64_t unit_micros = 0;
+    std::uint64_t per = 1;      // units of the dimension's unit `unit_micros` buys
+    std::uint64_t included = 0; // units a month the plan includes
+};
+struct BillingPlan {
+    std::string id, name, description, currency = "USD";
+    std::uint64_t base_micros = 0; // the fee for one month
+    bool active = true;
+    int position = 0;
+    std::vector<BillingPrice> prices;
+    std::string created_at, updated_at;
+};
+// An account's plan from `effective_from` ("YYYY-MM-01").
+struct BillingSubscription {
+    std::string customer_id, effective_from, plan_id, created_at;
+};
+struct InvoiceLine {
+    std::string kind; // plan or usage
+    std::string dimension, description, unit;
+    std::uint64_t quantity = 0, included = 0, billable = 0, unit_micros = 0, per = 1,
+                  amount_micros = 0;
+};
+struct Invoice {
+    std::string id;
+    std::uint64_t number = 0;
+    std::string customer_id, period, plan_id, plan_name, currency;
+    std::uint64_t total_micros = 0;
+    std::string state = "due"; // due, paid or void
+    std::string provider, provider_reference, instructions, note;
+    std::string issued_at, paid_at, voided_at;
+    std::vector<InvoiceLine> lines;
+};
 struct ManagedService {
     std::string id, customer_id, kind, name, slug;
     bool is_default = false;
@@ -1396,6 +1434,29 @@ public:
     // unknown customer. set_usage_limit replaces one; a `limit` of 0 removes it.
     virtual Result<std::vector<UsageLimit>> usage_limits(const std::string& customer_id) = 0;
     virtual Result<UsageLimit> set_usage_limit(const UsageLimit& limit) = 0;
+    // Billing records (migration 0073, lake#564, docs/api/billing.md). billing_plans lists every
+    // plan, active or not, by position then id; put_billing_plan creates or replaces one with its
+    // prices. billing_subscriptions lists an account's plans by effective_from (not_found for an
+    // unknown customer); set_billing_subscription removes the account's rows from
+    // `effective_from` on and, unless `plan_id` is empty, adds one there (not_found for an unknown
+    // plan). create_invoice stores an invoice and its lines, numbering it (conflict when the
+    // account already has an invoice for the period that is not void); set_invoice_state moves a
+    // due invoice to paid or void (conflict from any other state).
+    virtual Result<std::vector<BillingPlan>> billing_plans() = 0;
+    virtual Result<BillingPlan> put_billing_plan(const BillingPlan& plan) = 0;
+    virtual Result<std::vector<BillingSubscription>>
+    billing_subscriptions(const std::string& customer_id) = 0;
+    virtual Result<std::vector<BillingSubscription>>
+    set_billing_subscription(const std::string& customer_id,
+                             const std::string& effective_from,
+                             const std::string& plan_id) = 0;
+    virtual Result<Invoice> create_invoice(const Invoice& invoice) = 0;
+    virtual Result<std::vector<Invoice>> list_invoices(const std::string& customer_id) = 0;
+    virtual Result<Invoice> get_invoice(const std::string& id) = 0;
+    virtual Result<Invoice> set_invoice_state(const std::string& id,
+                                              const std::string& state,
+                                              const std::string& provider_reference,
+                                              const std::string& note) = 0;
 
     virtual Result<PkiAuthorityRecord> create_pki_authority(const NewPkiAuthorityRecord& value,
                                                             const std::string& instance_kek) = 0;
