@@ -2216,7 +2216,8 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestAndMcpUseTheSameConfirmedTurn)
     EXPECT_EQ(mcp_task->body["prior_turn"]["task_id"], rest_task->id);
 
     // The Experiments page's turns: a goal, a reply in the same conversation, and the confirmation
-    // of the reviewed study, which lake checks against the stored proposal (lake#561).
+    // of the reviewed experiment (the agent's `study`), which lake checks against the stored
+    // proposal (lake#561).
     const auto experiment_turn = [&](nlohmann::json input) {
         input["customer_id"] = customer_id;
         input["workspace_id"] = connection->workspace_id;
@@ -2279,7 +2280,7 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestAndMcpUseTheSameConfirmedTurn)
     nlohmann::json reviewed = proposal;
     reviewed["study"] = study;
     const auto confirm = [&](const std::string& sha, const nlohmann::json& confirmed) {
-        return experiment_turn({{"message", "Confirm and start the reviewed study proposal."},
+        return experiment_turn({{"message", "Confirm and start the reviewed experiment proposal."},
                                 {"proposal_task_id", proposal_task_id},
                                 {"proposal_sha256", sha},
                                 {"context", {{"confirmed_proposal", confirmed}}}});
@@ -2295,7 +2296,10 @@ TEST_P(HttpResponseIsolation, ExperimentsAgentRestAndMcpUseTheSameConfirmedTurn)
     }
     nlohmann::json unedited = reviewed;
     unedited["study"] = "not an object";
-    EXPECT_TRUE(confirm(proposal_sha, unedited).first.starts_with("HTTP/1.1 400"));
+    const auto [not_object_response, not_object] = confirm(proposal_sha, unedited);
+    EXPECT_TRUE(not_object_response.starts_with("HTTP/1.1 400"));
+    EXPECT_EQ(not_object["error"]["message"],
+              "The edited experiment proposal must be a JSON object.");
     const auto [confirmed_response, confirmed] = confirm(proposal_sha, reviewed);
     ASSERT_TRUE(confirmed.value("ok", false)) << confirmed_response.substr(0, 300);
     const auto confirmed_task = assembled_task(confirmed["value"]["task_id"]);

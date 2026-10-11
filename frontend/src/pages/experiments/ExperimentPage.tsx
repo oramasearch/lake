@@ -1,7 +1,7 @@
-/** Train → Experiments → one study (web_ui_experiments.cpp study mode; experiments.js drawStudy,
- * drawLeaderboard and refresh), as a Split: optimization history, parallel coordinates, parameter
+/** Train → Experiments → one experiment (the engine's study; formerly web_ui_experiments.cpp and
+ * experiments.js drawing it, its leaderboard and refresh), as a Split: optimization history, parallel coordinates, parameter
  * importance and the sortable trial leaderboard with Promote and Stop trial on the left; the
- * study's status, budgets and Stop on the right; then the latest eight trials' curves, all
+ * experiment's status, budgets and Stop on the right; then the latest eight trials' curves, all
  * refreshed live. */
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
@@ -14,12 +14,13 @@ import { describe, ExperimentsShell, MetricsView, Table, useCoalesced, useExperi
 import { cell, metricLabel, type RunDetail } from "./transforms";
 
 type Trial = { number: number; run: string; state: string; params: Record<string, unknown>; objective?: number; cost?: number; model?: string } & Row;
-type Study = { id: string; spec: Row; status: string; trials: Trial[]; spent_cost?: number; stop_reason?: string; promoted_model?: string } & Row;
+type Experiment = { id: string; spec: Row; status: string; trials: Trial[]; spent_cost?: number; stop_reason?: string; promoted_model?: string } & Row;
 type Analysis = { optimization_history?: Row[]; parameter_importances?: Row[]; parallel_coordinates?: Row[]; leaderboard?: Row[] };
 
-export default function StudyPage() {
+export default function ExperimentPage() {
   const [params] = useSearchParams();
-  const studyId = params.get("study") ?? "";
+  // An address from before lake#561 named the experiment `study`.
+  const experimentId = params.get("experiment") ?? params.get("study") ?? "";
   const client = useExperimentClient();
   const url = useExperimentUrl();
   const navigate = useNavigate();
@@ -27,7 +28,7 @@ export default function StudyPage() {
   const [notice, setNotice] = useState(params.get("error") ?? "");
   const [live, setLive] = useState(true);
   const [filter, setFilter] = useState("");
-  const [study, setStudy] = useState<Study | null>(null);
+  const [experiment, setExperiment] = useState<Experiment | null>(null);
   const [analysis, setAnalysis] = useState<Analysis>({});
   const [trials, setTrials] = useState<Trial[]>([]);
   const [trialMetrics, setTrialMetrics] = useState<RunDetail[]>([]);
@@ -38,15 +39,15 @@ export default function StudyPage() {
 
   const refresh = useCoalesced(
     async () => {
-      // The study is required; an analysis or trial listing that cannot be read keeps the last one,
-      // so one failed read never leaves the page without its charts (lake#449).
+      // The experiment is required; an analysis or trial listing that cannot be read keeps the last
+      // one, so one failed read never leaves the page without its charts (lake#449).
       const [data, nextAnalysis, listed] = await Promise.all([
-        client.read<Study>("get_experiment_study", { study: studyId }),
-        client.read<Analysis>("get_experiment_analysis", { study: studyId }).catch((error) => {
+        client.read<Experiment>("get_experiment", { experiment_id: experimentId }),
+        client.read<Analysis>("get_experiment_analysis", { experiment_id: experimentId }).catch((error) => {
           setNotice(describe(error));
           return cache.current.analysis;
         }),
-        client.read<{ trials?: Trial[] }>("list_experiment_trials", { study: studyId, ...(filterRef.current ? { state: filterRef.current } : {}) }).catch((error) => {
+        client.read<{ trials?: Trial[] }>("list_experiment_trials", { experiment_id: experimentId, ...(filterRef.current ? { state: filterRef.current } : {}) }).catch((error) => {
           setNotice(describe(error));
           return { trials: cache.current.trials };
         }),
@@ -71,7 +72,7 @@ export default function StudyPage() {
       );
       const metrics = (data.trials ?? []).map((trial) => refreshed.get(trial.run)).filter((run): run is RunDetail => !!run);
       cache.current = { ...cache.current, analysis: nextAnalysis ?? {}, trials: listed.trials ?? [], metrics };
-      setStudy(data);
+      setExperiment(data);
       setAnalysis(nextAnalysis ?? {});
       setTrials(listed.trials ?? []);
       setTrialMetrics(metrics);
@@ -84,28 +85,28 @@ export default function StudyPage() {
   );
   useEffect(() => {
     void refresh();
-  }, [refresh, studyId, filter]);
+  }, [refresh, experimentId, filter]);
   const details = useMemo(() => trialMetrics.slice(-8), [trialMetrics]);
   const status = useFollow(
     live,
-    () => [{ kind: "study" as const, id: studyId }, ...details.filter((run) => !run.metrics_suppressed).map((run) => ({ kind: "run" as const, id: run.run }))],
+    () => [{ kind: "experiment" as const, id: experimentId }, ...details.filter((run) => !run.metrics_suppressed).map((run) => ({ kind: "run" as const, id: run.run }))],
     refresh,
   );
   const actions = useExperimentActions(refresh, setNotice);
 
-  if (!study) {
+  if (!experiment) {
     return (
-      <ExperimentsShell mode="study" notice={notice} live={live} onLive={setLive} status={status}>
-        {loaded ? <Empty title="Study Not Loaded">The study could not be read. The notice above says why.</Empty> : <Skeleton />}
+      <ExperimentsShell mode="experiment" notice={notice} live={live} onLive={setLive} status={status}>
+        {loaded ? <Empty title="Experiment Not Loaded">The experiment could not be read. The notice above says why.</Empty> : <Skeleton />}
       </ExperimentsShell>
     );
   }
-  const spec = study.spec ?? {};
+  const spec = experiment.spec ?? {};
   const objective = (spec.objective ?? {}) as Row;
   const budgets = (spec.budgets ?? {}) as Row;
   const counts: Record<string, number> = {};
   let best: number | null = null;
-  for (const trial of study.trials) {
+  for (const trial of experiment.trials) {
     counts[trial.state] = (counts[trial.state] ?? 0) + 1;
     if (trial.state === "complete" && typeof trial.objective === "number") {
       if (best === null || (objective.direction === "maximize" ? trial.objective > best : trial.objective < best)) best = trial.objective;
@@ -114,65 +115,65 @@ export default function StudyPage() {
   const maxTrials = typeof budgets.max_trials === "number" ? budgets.max_trials : Number(budgets.max_trials) || 0;
   const costCap = typeof budgets.cost_cap === "number" ? budgets.cost_cap : Number(budgets.cost_cap) || 0;
   const stop =
-    canWrite && study.status === "running" ? (
-      <Button variant="danger" disabled={actions.busy !== null} onClick={() => void actions.perform("stop_study", studyId)}>
-        <Square size={14} aria-hidden /> Stop study
+    canWrite && experiment.status === "running" ? (
+      <Button variant="danger" disabled={actions.busy !== null} onClick={() => void actions.perform("stop_experiment", experimentId)}>
+        <Square size={14} aria-hidden /> Stop experiment
       </Button>
     ) : null;
 
   return (
     <ExperimentsShell
-      mode="study"
+      mode="experiment"
       notice={notice}
       live={live}
       onLive={setLive}
       status={status}
       title={
         <span className="inline-flex flex-wrap items-center gap-2.5">
-          {cell(spec.name)} <Status value={study.status} />
+          {cell(spec.name)} <Status value={experiment.status} />
         </span>
       }
       sub={`${cell(spec.project)} · ${metricLabel(objective.metric)} (${cell(objective.direction)})`}
       actions={stop}
     >
       {actions.dialog}
-      {study.promoted_model && (
+      {experiment.promoted_model && (
         <Banner tone="ok" title="Promoted">
-          Model <code>{study.promoted_model}</code> is this study's promoted model.
+          Model <code>{experiment.promoted_model}</code> is this experiment's promoted model.
         </Banner>
       )}
       <StatRow>
         <Stat label="Best objective" value={best === null ? "—" : cell(best)} sub={metricLabel(objective.metric)} tone={best === null ? undefined : "ok"} icon={Award} />
-        <Stat label="Trials" value={`${study.trials.length} / ${cell(budgets.max_trials)}`} sub={`${counts.complete ?? 0} complete · ${counts.pruned ?? 0} pruned · ${counts.failed ?? 0} failed`} />
+        <Stat label="Trials" value={`${experiment.trials.length} / ${cell(budgets.max_trials)}`} sub={`${counts.complete ?? 0} complete · ${counts.pruned ?? 0} pruned · ${counts.failed ?? 0} failed`} />
         <Stat label="Running" value={counts.running ?? 0} />
-        <Stat label="Cost" value={cell(study.spent_cost)} sub={`cap ${cell(budgets.cost_cap)}`} />
+        <Stat label="Cost" value={cell(experiment.spent_cost)} sub={`cap ${cell(budgets.cost_cap)}`} />
       </StatRow>
       <Split
         side={
           <>
-            <Card label="Study" title="Status and Budgets">
+            <Card label="Experiment" title="Status and Budgets">
               <KeyValue
                 rows={[
-                  ["State", <Status key="s" value={study.status} />],
+                  ["State", <Status key="s" value={experiment.status} />],
                   ["Objective", `${metricLabel(objective.metric)} (${cell(objective.direction)})`],
-                  ["Trials", <span key="t" className="font-mono">{`${study.trials.length} / ${cell(budgets.max_trials)}`}</span>],
-                  ["Cost", <span key="c" className="font-mono">{`${cell(study.spent_cost)} / ${cell(budgets.cost_cap)}`}</span>],
+                  ["Trials", <span key="t" className="font-mono">{`${experiment.trials.length} / ${cell(budgets.max_trials)}`}</span>],
+                  ["Cost", <span key="c" className="font-mono">{`${cell(experiment.spent_cost)} / ${cell(budgets.cost_cap)}`}</span>],
                   ["Sampler", cell(spec.sampler)],
                   ["Pruner", cell(spec.pruner)],
-                  ["Stop reason", study.stop_reason ?? ""],
-                  ["Promoted model", study.promoted_model ? <code key="m">{study.promoted_model}</code> : ""],
+                  ["Stop reason", experiment.stop_reason ?? ""],
+                  ["Promoted model", experiment.promoted_model ? <code key="m">{experiment.promoted_model}</code> : ""],
                 ]}
               />
               {maxTrials > 0 && (
                 <div className="mt-3">
                   <div className="label">Trial budget</div>
-                  <Meter value={study.trials.length} max={maxTrials} label={`${study.trials.length}/${maxTrials}`} />
+                  <Meter value={experiment.trials.length} max={maxTrials} label={`${experiment.trials.length}/${maxTrials}`} />
                 </div>
               )}
-              {costCap > 0 && typeof study.spent_cost === "number" && (
+              {costCap > 0 && typeof experiment.spent_cost === "number" && (
                 <div className="mt-3">
                   <div className="label">Cost cap</div>
-                  <Meter value={study.spent_cost} max={costCap} label={`${cell(study.spent_cost)}/${cell(costCap)}`} tone={study.spent_cost >= costCap ? "bad" : undefined} />
+                  <Meter value={experiment.spent_cost} max={costCap} label={`${cell(experiment.spent_cost)}/${cell(costCap)}`} tone={experiment.spent_cost >= costCap ? "bad" : undefined} />
                 </div>
               )}
             </Card>
@@ -192,10 +193,10 @@ export default function StudyPage() {
           </>
         }
       >
-        <StudyCharts analysis={analysis} />
+        <ExperimentCharts analysis={analysis} />
         <Card title="Trial Leaderboard" label="Trials">
           <Leaderboard
-            study={study}
+            experiment={experiment}
             trials={trials}
             analysis={analysis}
             trialMetrics={trialMetrics}
@@ -204,7 +205,7 @@ export default function StudyPage() {
             busy={actions.busy}
             filter={filter}
             onFilter={setFilter}
-            perform={(capability, run) => void actions.perform(capability, studyId, run)}
+            perform={(capability, run) => void actions.perform(capability, experimentId, run)}
             onCompare={(runs) => {
               if (runs.length < 2 || runs.length > 8) {
                 setNotice("Select two to eight runs to compare.");
@@ -225,7 +226,7 @@ export default function StudyPage() {
   );
 }
 
-function StudyCharts({ analysis }: { analysis: Analysis }) {
+function ExperimentCharts({ analysis }: { analysis: Analysis }) {
   const registry = useMemo(newRegistry, []);
   const history = analysis.optimization_history ?? [];
   const historyData = useMemo(() => [history.map((row) => row.number), history.map((row) => row.value), history.map((row) => row.best)], [history]);
@@ -292,7 +293,7 @@ const HISTORY_LABELS = ["Objective", "Best so far"];
 const IMPORTANCE_LABELS = ["Importance"];
 
 function Leaderboard({
-  study,
+  experiment,
   trials,
   analysis,
   trialMetrics,
@@ -305,7 +306,7 @@ function Leaderboard({
   onCompare,
   runHref,
 }: {
-  study: Study;
+  experiment: Experiment;
   trials: Trial[];
   analysis: Analysis;
   trialMetrics: RunDetail[];
@@ -329,10 +330,10 @@ function Leaderboard({
       "objective",
       "cost",
       "confidence",
-      ...new Set(study.trials.flatMap((trial) => Object.keys(trial.params ?? {}).map((key) => `param:${key}`))),
+      ...new Set(experiment.trials.flatMap((trial) => Object.keys(trial.params ?? {}).map((key) => `param:${key}`))),
       ...new Set(trialMetrics.flatMap((run) => Object.keys(run.summary ?? {}).map((key) => `metric:${key}`))),
     ],
-    [study.trials, trialMetrics],
+    [experiment.trials, trialMetrics],
   );
   const visible = available.filter((key) => !hidden.has(key));
   const value = (trial: Trial, key: string): unknown => {
@@ -434,7 +435,7 @@ function Leaderboard({
                       <Link to={runHref(trial.run)} className="whitespace-nowrap font-mono">
                         {trial.run}
                       </Link>
-                      {study.promoted_model && trial.model === study.promoted_model ? (
+                      {experiment.promoted_model && trial.model === experiment.promoted_model ? (
                         <>
                           {" "}
                           <Status value="promoted" tone="success" />

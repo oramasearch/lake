@@ -67,10 +67,14 @@ string with the registry's `validate_input`. A missing `workspace_id` therefore 
 tests rather than a first paste. The Docs show `<workspace id>`.
 
 `test_experiments.cpp` covers all eleven training operations, space permissions, confirmation,
-workspace alias checks, audit, REST/MCP parity and actual calls, `start_study` with
-`from_defaults` and Zetta's error `path`, and the agents' guide naming the live read and the
-confirmation (`Experiments.AgentDocsNameTheLiveReadAndTheConfirmation`; lake#449, lake#463).
-`test_workspaces.cpp` covers trial runs and study models named by their study, the promoted marker,
+workspace alias checks, audit, REST/MCP parity and actual calls, `start_experiment` with
+`from_defaults` and Zetta's error `path`, the agents' guide naming the live read and the
+confirmation (`Experiments.AgentDocsNameTheLiveReadAndTheConfirmation`; lake#449, lake#463), and
+lake's experiment names translated to and from the engine's study names
+(`Experiments.LakeSaysExperimentAndTheEngineKeepsItsStudyNames`, lake#561).
+`Docs.GuidesSpeakOfExperiments` and `frontend/tests/wording.test.ts` keep "study" out of the guides
+and the pages. `test_workspaces.cpp` covers trial runs and experiment models named by their
+experiment, the promoted marker,
 the run report's held-out score lead, and `ZettaWorkspaceCaller` keeping `error.path` behind a fake
 Zetta HTTP transport. `experiment_fixture.hpp` supplies a stateful fake caller against the
 authorized engine contract and an opt-in browser fixture. `frontend/tests/experiments.test.ts` tests
@@ -285,9 +289,9 @@ fake operator Ready status.
 `HttpServer/HttpResponseIsolation.ExperimentsAgentRestAndMcpUseTheSameConfirmedTurn/*` compares
 the `agent_turn` OpenAPI/MCP schemas, continues one conversation across those transports, then
 replies to a question, edits and confirms the proposal, and refuses a stale digest or a proposal
-changed beyond its study.
-`AgentRuns.ExperimentsAgentGrantsEachTurnOnlyItsStudyOperations` verifies the
-three kinds, independent topic/credential, workspace URL and confirmation-limited study actions.
+changed beyond its experiment.
+`AgentRuns.ExperimentsAgentGrantsEachTurnOnlyItsExperimentOperations` verifies the
+three kinds, independent topic/credential, workspace URL and confirmation-limited experiment actions.
 `AgentRuns.AProjectAgentProposalIsCheckedThenAppliedApprovedAndRun` covers lake#438: a pipeline
 change turn's credential runs `compile_intent` confined to lake's check graph on its own project
 (and reads it back on a repeat), is refused every other workspace action, and the person then

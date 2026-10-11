@@ -13,9 +13,9 @@ import "@/styles/experiments.css";
 import { Chart, ChartContext, newRegistry, viewAction } from "./Chart";
 import { cell, ema, metricData, nextCursor, parameterDiff, type RunDetail } from "./transforms";
 
-export type Mode = "list" | "study" | "run" | "compare";
+export type Mode = "list" | "experiment" | "run" | "compare";
 
-const TITLES: Record<Mode, string> = { list: "Experiments", study: "Study", run: "Run Charts", compare: "Compare Runs" };
+const TITLES: Record<Mode, string> = { list: "Experiments", experiment: "Experiment", run: "Run Charts", compare: "Compare Runs" };
 
 /** An error as the page's notice reads it: the field Zetta names, then its message (zetta#1217). */
 export function describe(error: unknown): string {
@@ -138,21 +138,21 @@ export function Table({ headers, rows, caption }: { headers: ReactNode[]; rows: 
   );
 }
 
-/** Stop a study, stop a trial or promote a trial, each confirmed in words with its input shown. */
+/** Stop an experiment, stop a trial or promote a trial, each confirmed in words with its input shown. */
 export function useExperimentActions(onDone: () => Promise<unknown> | void, setNotice: (text: string) => void) {
   const client = useExperimentClient();
   const [dialog, confirm] = useConfirm();
   const [busy, setBusy] = useState<string | null>(null);
   const perform = useCallback(
-    async (capability: "stop_study" | "stop_experiment_trial" | "promote_trial", study: string, run?: string) => {
-      const input: Row = { study };
+    async (capability: "stop_experiment" | "stop_experiment_trial" | "promote_trial", experimentId: string, run?: string) => {
+      const input: Row = { experiment_id: experimentId };
       if (run) input.run_id = run;
       const message =
         capability === "promote_trial"
-          ? "Promote this completed trial’s registered model as the study’s project model version?"
+          ? "Promote this completed trial’s registered model as the experiment’s project model version?"
           : "Stop this training work? Active trials will be ended cooperatively.";
       if (!(await confirm(message, "Confirm", JSON.stringify(input, null, 2)))) return;
-      const key = `${capability}:${study}:${run ?? ""}`;
+      const key = `${capability}:${experimentId}:${run ?? ""}`;
       setBusy(key);
       try {
         const result = await client.act<Row>(capability, { ...input, confirm: true });
@@ -169,7 +169,7 @@ export function useExperimentActions(onDone: () => Promise<unknown> | void, setN
   return { dialog, confirm, perform, busy };
 }
 
-export type Target = { kind: "study" | "run"; id: string };
+export type Target = { kind: "experiment" | "run"; id: string };
 
 /** Live updates (experiments.js follow): while Live is on and the tab is visible, long-poll
  * `tail_experiment_events` for each target, refresh on any event and once more per cycle, at most

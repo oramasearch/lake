@@ -10,7 +10,7 @@ key it holds, and never waits inside a request: every turn is followed with rece
 <token-file> holds a lake API key with every tool (Developer → MCP). The token is never printed. The
 workspace needs the UX-review datasets (datasets.ux_review_churn and churn_results.at_risk_*).
 Scenarios that only propose change nothing. T11 confirms its exact ApplicationAgent proposal,
-deploys that App, and requests its URL. T12 confirms an ExperimentsAgent study, observes its
+deploys that App, and requests its URL. T12 confirms an ExperimentsAgent experiment, observes its
 trials, and asks for the explanation. Prints one line per scenario and exits 1 when any failed.
 docs/api/agent-bus.md describes the bus.
 """
@@ -279,54 +279,55 @@ def t12_experiments_agent():
         problems.append(f"the goal did not produce a confirmable proposal: {proposal}")
         return problems, seconds
     if not isinstance(proposal.get("study"), dict):
-        problems.append("the proposal has no editable study object")
+        problems.append("the proposal has no editable experiment (the agent's study object)")
         return problems, seconds
 
     confirmed, confirm_seconds, confirm_request, _ = turn(
         "agent-experiments",
-        "Confirm and start the reviewed study proposal.",
+        "Confirm and start the reviewed experiment proposal.",
         "experiment",
         {"confirmed_proposal": proposal},
         420)
     seconds += confirm_seconds
     running = (confirmed.get("answer") or {}).get("result") or {}
     problems += base_checks(confirmed, confirm_request, 420)
-    study = running.get("study") or {}
-    study_id = study.get("id")
-    if running.get("kind") != "running" or not study_id:
-        problems.append(f"the confirmed proposal did not start a study: {running}")
+    # ExperimentsAgent answers with the engine's word for the experiment, `study`.
+    experiment = running.get("study") or {}
+    experiment_id = experiment.get("id")
+    if running.get("kind") != "running" or not experiment_id:
+        problems.append(f"the confirmed proposal did not start an experiment: {running}")
         return problems, seconds
 
-    trials = study.get("trials") or []
+    trials = experiment.get("trials") or []
     status_result = {}
     for _ in range(5):
         if trials:
             break
         status, status_seconds, status_request, _ = turn(
             "agent-experiments",
-            f"Report the current trials for study {study_id}.",
+            f"Report the current trials for experiment {experiment_id}.",
             "experiment_status",
-            {"study": study_id},
+            {"experiment_id": experiment_id},
             180)
         seconds += status_seconds
         problems += base_checks(status, status_request, 180)
         status_result = (status.get("answer") or {}).get("result") or {}
         trials = status_result.get("trials") or (status_result.get("study") or {}).get("trials") or []
     if not trials:
-        problems.append(f"no trials arrived for study {study_id}: {status_result}")
+        problems.append(f"no trials arrived for experiment {experiment_id}: {status_result}")
         return problems, seconds
 
     explained, explain_seconds, explain_request, _ = turn(
         "agent-experiments",
-        f"Explain the result of study {study_id}, including the best trial and what to do next.",
+        f"Explain the result of experiment {experiment_id}, including the best trial and what to do next.",
         "experiment_explain",
-        {"study": study_id},
+        {"experiment_id": experiment_id},
         180)
     seconds += explain_seconds
     explanation = (explained.get("answer") or {}).get("result") or {}
     problems += base_checks(explained, explain_request, 180)
     if explanation.get("kind") != "explanation":
-        problems.append(f"the final turn did not explain the study: {explanation}")
+        problems.append(f"the final turn did not explain the experiment: {explanation}")
     if not ((explained.get("answer") or {}).get("reply") or "").strip():
         problems.append("the explanation has no readable reply")
     return problems, seconds

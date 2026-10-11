@@ -83,7 +83,7 @@ const ALIASES: Record<string, string> = Object.fromEntries(
   METRIC_NAMES.flatMap(([canonical, spellings]) => [[metricKey(canonical), canonical], ...spellings.map((spelling) => [metricKey(spelling), canonical])]),
 );
 
-/** A metric's canonical name, for a study recorded under an older spelling. */
+/** A metric's canonical name, for an experiment recorded under an older spelling. */
 export function metricLabel(name: unknown): string {
   if (typeof name !== "string") return JSON.stringify(name);
   return ALIASES[metricKey(name)] ?? name;

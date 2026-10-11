@@ -412,7 +412,9 @@ button:disabled:hover {
    resize handle does not animate (data-resizing on <html>, lib/askWidth.ts). */
 .ask-panel {
   position: fixed;
-  z-index: calc(var(--lake-z-sticky) + 1);
+  /* Above the shell bar (z-30), so lying over the page it keeps its own head; below the brand strip
+     (z-40) and the phone navigation drawer (z-50). */
+  z-index: 35;
   top: 2px;
   transition: width 200ms var(--lake-motion-ease, ease);
   right: 0;
@@ -470,4 +472,9 @@ html[data-resizing-ask] .ask-panel {
   .ask-panel {
     transition: none;
   }
+}
+/* Expanded over the page, the conversation and its message box share one centred, readable column. */
+.ask-panel[data-expanded] :is(.ask-scroll, .ask-foot) > * {
+  max-width: 880px;
+  margin-inline: auto;
 }

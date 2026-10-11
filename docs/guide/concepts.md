@@ -17,7 +17,7 @@ and measures it, Ship puts it in front of the people and systems that use it.
 | **4. Ship** | Publish the model or search index, and put it in an app or behind an API, for people and systems to use. | **Ship** |
 
 Agents help at every step: Ask Orama answers and hands work on; the Project Agent designs and
-changes pipelines; ExperimentsAgent and ApplicationAgent propose studies and apps. Nothing they
+changes pipelines; ExperimentsAgent and ApplicationAgent propose experiments and apps. Nothing they
 propose changes anything until you confirm it.
 
 ## Glossary
@@ -75,7 +75,7 @@ MCP tools take.
 | **Opportunity** | An AI project worth building that Auto-Suggest found by scanning your workspace's data. It is kept until you create a project from it or dismiss it. |
 | **Model** | A learned function that turns inputs into a prediction, a score or a ranking. A model can be one step inside a pipeline, and one pipeline can hold several models (a segmentation feeding a churn classifier, for example). A model also stands on its own: you can upload one as a model repository (weights, card and history) without any pipeline. Models a workspace trains are listed on **Ship → Models**; a **published** model can be called from outside lake with `predict`. See [Models and Search Indexes](/docs/ship). |
 | **Search index** | A full-text index over a dataset's text columns. A published index answers outside searches with `search_index`. See [Models and Search Indexes](/docs/ship). |
-| **Study and trial** | An experiment: a study tries many settings for one objective; each attempt is a trial with its own run and curves. See [Experiments](/docs/experiments). |
+| **Experiment and trial** | An AI model training experiment, as an experiment tracker records it: one experiment tries many settings for one objective, within budgets, and keeps the best model; each attempt is a trial with its own run and curves, ranked and compared live. See [Experiments](/docs/experiments). |
 | **Stream and topic** | A topic is a named sequence of messages in a workspace Zetta (agent events, app events, build logs, your own). Streams browses and publishes to them. See [Streams](/docs/streams). |
 | **Agent** | An AI helper that works for you. It reads what it is allowed to read and proposes changes for you to confirm. See [Agents](/docs/agents). |
 | **Agent Library** | The agents Orama provides: Ask Orama, the Project Agent, ApplicationAgent, ExperimentsAgent, Auto-Suggest and AgentCreator. **Design → Agent Library** lists them and whether each runs on your lake. |

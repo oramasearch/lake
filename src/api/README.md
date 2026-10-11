@@ -108,13 +108,14 @@ latest actions, while the bounded decision rows supply pending A1 approval contr
 operating-state reads remain concurrent. See
 [`workspaces.md`](../../docs/api/workspaces.md).
 
-`experiment_capabilities.cpp` registers eleven space-scoped study/run operations using the
-closed contracts in `experiment_schemas.hpp`; the web app's Experiments pages call only them. The
+`experiment_capabilities.cpp` registers eleven space-scoped experiment/run operations using the
+closed contracts in `experiment_schemas.hpp`, and translates lake's experiment names to the engine's
+study names and back (lake#561); the web app's Experiments pages call only them. The
 ExperimentsAgent box uses `agent_turn`; a confirmed turn names the proposing task and the stored
-proposal's digest, which `agent_turn` checks, and only the study may be edited. Questions and absent proposals get a reply form that reuses the task conversation;
+proposal's digest, which `agent_turn` checks, and only the experiment may be edited. Questions and absent proposals get a reply form that reuses the task conversation;
 Apps and Design pipeline questions use the same follow-up contract. Workspace action aliases retain
 the same confirmation, scope and promotion checks. Their failures keep Zetta's `error.path`;
-`start_study` requires `objective` and `budgets` only without `from_defaults` (lake#463).
+`start_experiment` requires `objective` and `budgets` only without `from_defaults` (lake#463).
 See [API](../../docs/api/experiments.md) and [UI](../../docs/ui/experiments.md) contracts.
 
 `stream_capabilities.cpp` registers the nine Streams REST/MCP operations, enforces space and
@@ -137,8 +138,9 @@ their URL; the web app shows the commands. Existing registry sync operations imp
 push. See [forge.md](../../docs/ui/forge.md) and the native
 [private-install proof](../../docs/deployment/private-install.md).
 
-Train → Runs, a run page and Ship → Models also read `list_studies` (lake#449): a trial run is
-*Trial N of study <name>*, a study's model names its study, and a promoted model is marked. A run
+Train → Runs, a run page and Ship → Models also read the engine's `list_studies` (lake#449): a
+trial run is *Trial N of experiment <name>*, an experiment's model names its experiment, and a
+promoted model is marked. A run
 report leads with its held-out score and row count from `get_run_report.model`, with Zetta's
 caveat on that figure beside it.
 
@@ -227,7 +229,7 @@ workspace lookup and uses the store's single-query app authorization path. See
 ApplicationAgent app turns are assembled in `workspace_capabilities.cpp`: read tools on the first
 turn, repository/App writes only when the confirmed turn names the proposing task and the stored
 proposal's digest and carries that exact proposal (`verified_confirmed_proposal`).
-ExperimentsAgent turns use the workspace adapter and grant raw study operations by turn kind;
+ExperimentsAgent turns use the workspace adapter and grant the engine's raw study operations by turn kind;
 `create_study` and `promote_trial` appear only with their reviewed confirmation. The adapter sends
 those actions through the canonical experiment capabilities.
 Project Agent pipeline change and build turns also carry `workspace_act` and `compile_intent`;
