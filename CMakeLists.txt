@@ -227,6 +227,7 @@ add_library(lake-core STATIC
   src/control/agent_bus.cpp
   src/control/agent_runs.cpp
   src/control/time_zones.cpp
+  src/control/agent_skills.cpp
   src/control/web_apps.cpp
   src/control/zetta_workspace.cpp
   src/control/workspace_records.cpp
@@ -237,6 +238,8 @@ add_library(lake-core STATIC
   src/control/methodologies.cpp
   src/control/methodology_templates.cpp
   src/control/transcripts.cpp
+  src/control/mcp_connections.cpp
+  src/control/agent_revisions.cpp
   src/control/project_decisions.cpp
   src/control/drives.cpp
   src/control/drive_files.cpp
@@ -272,6 +275,10 @@ add_library(lake-core STATIC
   src/api/drives_capabilities.cpp
   src/api/model_gateway.cpp
   src/api/transcription.cpp
+  src/api/mcp_client.cpp
+  src/api/mcp_connection_capabilities.cpp
+  src/api/mcp_connection_streams.cpp
+  src/api/audio_duration.cpp
   src/api/workspace_store_capabilities.cpp
   src/api/datasets.cpp
   src/api/stream_capabilities.cpp

@@ -651,14 +651,30 @@
           },
           "skills": {
             "items": {
-              "enum": [
-                "search",
-                "generate-data",
-                "train",
-                "summarize",
-                "call-api"
-              ],
-              "type": "string"
+              "anyOf": [
+                {
+                  "enum": [
+                    "search",
+                    "generate-data",
+                    "train",
+                    "summarize",
+                    "call-api",
+                    "drives",
+                    "transcripts",
+                    "repositories",
+                    "datasets",
+                    "streams",
+                    "pipelines",
+                    "usage"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "description": "the allowed tools of the workspace's MCP connection with this prefix in Lake",
+                  "pattern": "^mcp:[a-z][a-z0-9_]{0,23}$",
+                  "type": "string"
+                }
+              ]
             },
             "type": "array"
           },
@@ -2640,6 +2656,34 @@
       "method": "get",
       "summary": "Model health"
     },
+    "move_model_to_project": {
+      "description": "Turn a standalone model into a project people see, with its pipeline and every version, so a pipeline can grow around it. Replicates. Requires orchestration:move_model_to_project.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "intent": {
+            "description": "reserved: say what you are trying to do; recorded on the call's trace, stripped before schema validation",
+            "type": "string"
+          },
+          "model_id": {
+            "description": "any version of the standalone model, or its name",
+            "minLength": 1,
+            "type": "string"
+          },
+          "project_name": {
+            "description": "the project's name (default: the model's name)",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_id"
+        ],
+        "type": "object"
+      },
+      "method": "post",
+      "summary": "Move a standalone model into a project"
+    },
     "plan_features": {
       "description": "Read a methodology-specific feature and exclusion plan from dataset analysis, or an explicit transform_required proposal. No side effects and no transform is applied. Requires api:query.",
       "input_schema": {
@@ -2854,6 +2898,100 @@
       },
       "method": "post",
       "summary": "Record an action outcome"
+    },
+    "register_model": {
+      "description": "Keep a model trained elsewhere, from its file, as a standalone model that score, explain, expose_model and predict use like a trained one; or, with version_of, as a new version of one. Refuses a format the engine cannot read. Requires orchestration:register_model.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "intent": {
+            "description": "reserved: say what you are trying to do; recorded on the call's trace, stripped before schema validation",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`classifier` or `regressor` (default: from the file's objective)",
+            "minLength": 1,
+            "type": "string"
+          },
+          "metrics": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "description": "figures measured where it was trained, by name (held_out_auc, held_out_rmse, …), so it compares with trained models. Kept as given",
+            "type": "object"
+          },
+          "name": {
+            "description": "the model's name (required unless `version_of` is given)",
+            "minLength": 1,
+            "type": "string"
+          },
+          "source": {
+            "description": "where the file came from (a drive path, a model repository and revision); kept with the model",
+            "maxLength": 2048,
+            "type": "string"
+          },
+          "version_of": {
+            "description": "a brought standalone model's id: add this file as its new version",
+            "minLength": 1,
+            "type": "string"
+          },
+          "weights": {
+            "description": "the model file's contents: a gradient-boosted tree model in the engine's own JSON weights format (objective, base_score, feature_names, trees), the format every model trained here is kept in. The engine scores, serves and explains only what it can read; any other format is refused",
+            "minLength": 2,
+            "type": "string"
+          }
+        },
+        "required": [
+          "weights"
+        ],
+        "type": "object"
+      },
+      "method": "post",
+      "summary": "Register a brought model"
+    },
+    "retrain_model": {
+      "description": "Train a new version of a model the engine trained, on what it trained on before or on a new dataset, target or held-out share (kept for the next retrain of a standalone model). Starts a run and answers its run_id. Requires orchestration:retrain_model. Long-running: returns the engine's durable handle immediately; poll progress through the read surface.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "dataset_path": {
+            "description": "the dataset to learn from, as `database.table` (list_datasets). Given, it replaces what the model trained on and the model keeps it for its next retrain",
+            "minLength": 1,
+            "type": "string"
+          },
+          "entity_column": {
+            "description": "the column that identifies a row (default: the dataset's own). Given, it replaces what the model trained on and the model keeps it for its next retrain",
+            "minLength": 1,
+            "type": "string"
+          },
+          "holdout_fraction": {
+            "description": "hold this fraction of rows out of training and score the model on them (e.g. 0.2). Without it the only figures are in-sample, and they flatter. Given, it replaces what the model trained on and the model keeps it for its next retrain",
+            "exclusiveMaximum": 1,
+            "exclusiveMinimum": 0,
+            "type": "number"
+          },
+          "intent": {
+            "description": "reserved: say what you are trying to do; recorded on the call's trace, stripped before schema validation",
+            "type": "string"
+          },
+          "model_id": {
+            "description": "any version of the model (its uuid), or its name when one model has it",
+            "minLength": 1,
+            "type": "string"
+          },
+          "target": {
+            "description": "the column to predict. Omit it for a methodology that learns without one (segmentation, anomaly detection); a methodology whose `label` input is required refuses without it. Given, it replaces what the model trained on and the model keeps it for its next retrain",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_id"
+        ],
+        "type": "object"
+      },
+      "method": "post",
+      "summary": "Retrain a model"
     },
     "run": {
       "description": "Execute a stored, gate-passing project graph through its registered methodology runner. Unknown and unavailable model kinds are refused; a graph with no model step may run structurally. Requires orchestration:run. Long-running: returns the engine's durable handle immediately; poll progress through the read surface.",
@@ -3705,6 +3843,57 @@
       "method": "post",
       "summary": "Stop trial"
     },
+    "train_model": {
+      "description": "Train a model on its own from a dataset, a target column (none for a methodology that learns without one) and a methodology, with an optional held-out share. Starts a run and answers its run_id; the model appears in list_models, standalone, when it finishes. No project is shown for it. Requires orchestration:train_model. Long-running: returns the engine's durable handle immediately; poll progress through the read surface.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "dataset_path": {
+            "description": "the dataset to learn from, as `database.table` (list_datasets)",
+            "minLength": 1,
+            "type": "string"
+          },
+          "entity_column": {
+            "description": "the column that identifies a row (default: the dataset's own)",
+            "minLength": 1,
+            "type": "string"
+          },
+          "holdout_fraction": {
+            "description": "hold this fraction of rows out of training and score the model on them (e.g. 0.2). Without it the only figures are in-sample, and they flatter",
+            "exclusiveMaximum": 1,
+            "exclusiveMinimum": 0,
+            "type": "number"
+          },
+          "intent": {
+            "description": "reserved: say what you are trying to do; recorded on the call's trace, stripped before schema validation",
+            "type": "string"
+          },
+          "methodology": {
+            "description": "how it learns: a methodology id from list_methodologies (e.g. `M-1`), or one of its model kinds",
+            "minLength": 1,
+            "type": "string"
+          },
+          "name": {
+            "description": "the model's name; its versions keep it",
+            "minLength": 1,
+            "type": "string"
+          },
+          "target": {
+            "description": "the column to predict. Omit it for a methodology that learns without one (segmentation, anomaly detection); a methodology whose `label` input is required refuses without it",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "methodology",
+          "dataset_path"
+        ],
+        "type": "object"
+      },
+      "method": "post",
+      "summary": "Train a standalone model"
+    },
     "unexpose_index": {
       "description": "Withdraw an index's HTTP search endpoint everywhere in one action — the replicated exposure flag flips and every node refuses the route. Idempotent. Requires orchestration:unexpose_index.",
       "input_schema": {
@@ -3886,14 +4075,30 @@
           },
           "skills": {
             "items": {
-              "enum": [
-                "search",
-                "generate-data",
-                "train",
-                "summarize",
-                "call-api"
-              ],
-              "type": "string"
+              "anyOf": [
+                {
+                  "enum": [
+                    "search",
+                    "generate-data",
+                    "train",
+                    "summarize",
+                    "call-api",
+                    "drives",
+                    "transcripts",
+                    "repositories",
+                    "datasets",
+                    "streams",
+                    "pipelines",
+                    "usage"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "description": "the allowed tools of the workspace's MCP connection with this prefix in Lake",
+                  "pattern": "^mcp:[a-z][a-z0-9_]{0,23}$",
+                  "type": "string"
+                }
+              ]
             },
             "type": "array"
           },
@@ -4359,5 +4564,5 @@
     }
   },
   "engine_version": "0.1.1",
-  "zetta_revision": "bca9f382"
+  "zetta_revision": "386c3884"
 }

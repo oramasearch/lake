@@ -1,11 +1,15 @@
 /** Train → Model (`/train/model?id=`, lake#599): training one model. Its versions (one per run or
  * trial) with their held-out scores over time, two versions compared, what the chosen version
  * learned from, the pipeline step or steps it belongs to, retraining (its pipeline run again) and
- * promoting a version to Ship. Serving it is Ship → Model, linked from the header. */
+ * promoting a version to Ship. Serving it is Ship → Model, linked from the header.
+ *
+ * A standalone model (lake#654) shows what it trains on instead of a pipeline, and has Retrain and
+ * New version (`retrain_model`, or a new file for a brought one), Move into a project
+ * (`move_model_to_project`) and Delete (`delete_model` for each version). */
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowUpRight, GitCompare, RefreshCw, Rocket } from "lucide-react";
-import { act, type Row } from "@/lib/api";
+import { ArrowUpRight, FolderInput, GitCompare, Plus, RefreshCw, Rocket, Trash2 } from "lucide-react";
+import { act, ApiError, type Row } from "@/lib/api";
 import { relative } from "@/lib/format";
 import { ConfirmButton } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
@@ -14,8 +18,9 @@ import { Banner, Button, Card, Chip, DataTable, Empty, ErrorBlock, FormError, Ke
 import { Chart } from "../experiments/Chart";
 import { WorkspaceFrame, cellText, qs, text, useWorkspace, useWq, useWsPath, wa } from "./workspace";
 import { when } from "./RunsPage";
-import { compareVersions, featuresOf, groupOf, measuredFigures, modelSteps, scoreSeries, versionNumber, type ModelGroup } from "./models";
+import { broughtFrom, compareVersions, featuresOf, groupOf, measuredFigures, modelSteps, scoreSeries, trainingOf, versionNumber, type ModelGroup } from "./models";
 import { ScoreText, SourceText, VersionScore, useModelGroups, useModelLinks } from "./modelParts";
+import { BringDialog, RetrainDialog } from "./NewModel";
 
 export default function TrainModelPage() {
   const [params] = useSearchParams();
@@ -64,13 +69,13 @@ export default function TrainModelPage() {
             </Empty>
           );
         const experiment = group.versions.map((v) => experiments.byModel.get(text(v, "id")) ?? experiments.byRun.get(text(v, "run"))).find(Boolean);
-        return <ModelBody key={id} group={group} id={id} experiment={experiment} promoted={experiments.promoted} />;
+        return <ModelBody key={id} group={group} groups={groups} id={id} experiment={experiment} promoted={experiments.promoted} />;
       }}
     </WorkspaceFrame>
   );
 }
 
-function ModelBody({ group, id, experiment, promoted }: { group: ModelGroup; id: string; experiment?: { id: string; name: string }; promoted: Set<string> }) {
+function ModelBody({ group, groups, id, experiment, promoted }: { group: ModelGroup; groups: ModelGroup[]; id: string; experiment?: { id: string; name: string }; promoted: Set<string> }) {
   const path = useWsPath();
   const scope = useWorkspace();
   const links = useModelLinks();
@@ -98,7 +103,7 @@ function ModelBody({ group, id, experiment, promoted }: { group: ModelGroup; id:
                 ["Source", <SourceText key="s" group={group} experiment={experiment} />],
                 [
                   "Project",
-                  group.projectName ? (
+                  group.projectName && !group.standalone ? (
                     <Link key="p" to={path(`/design/project?${qs({ customer_id: scope.customerId, name: group.projectName })}`)}>
                       {group.projectName}
                     </Link>
@@ -111,8 +116,8 @@ function ModelBody({ group, id, experiment, promoted }: { group: ModelGroup; id:
               ]}
             />
           </Card>
-          <PipelineSteps group={group} experiment={experiment} />
-          <Train group={group} selected={selected} n={n(selected)} />
+          {group.standalone ? <Standalone group={group} /> : <PipelineSteps group={group} experiment={experiment} />}
+          <Train group={group} groups={groups} selected={selected} n={n(selected)} />
         </>
       }
     >
@@ -335,7 +340,7 @@ function PipelineSteps({ group, experiment }: { group: ModelGroup; experiment?: 
 
 /** Retrain (run the pipeline again under the model's name) and promote the chosen version to Ship
  * (publish it, and unpublish the other versions so predict answers with this one). */
-function Train({ group, selected, n }: { group: ModelGroup; selected: Row; n: number }) {
+function Train({ group, groups, selected, n }: { group: ModelGroup; groups: ModelGroup[]; selected: Row; n: number }) {
   const scope = useWorkspace();
   const path = useWsPath();
   const links = useModelLinks();
@@ -343,13 +348,22 @@ function Train({ group, selected, n }: { group: ModelGroup; selected: Row; n: nu
   const toast = useToast();
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
+  const [versioning, setVersioning] = useState(false);
   const project = group.projectName || group.project;
   const id = text(selected, "id");
   const others = group.published.filter((v) => v !== selected);
+  const graph = useWq<Row>(group.standalone && !group.brought && group.pipeline ? "get_graph" : null, { project: group.project, graph: group.pipeline }, { retry: false });
   const retrain = async () => {
     setBusy(true);
     setError(null);
     try {
+      if (group.standalone) {
+        // A standalone model's pipeline is the engine's: retrain_model runs it on what it trained on.
+        const answer = await act<Row>("retrain_model", { customer_id: scope.customerId, workspace_id: scope.workspaceId, model_id: text(group.latest, "id") });
+        toast("Retraining started");
+        navigate(path(`/train/run?${qs({ customer_id: scope.customerId, id: text(answer, "run_id") })}`));
+        return;
+      }
       const answer = await act<Row>("run_pipeline", { customer_id: scope.customerId, workspace_id: scope.workspaceId, project, graph: group.pipeline, model_name: group.name });
       const run = answer.run && typeof answer.run === "object" ? text(answer.run as Row, "run_id") : "";
       if (!answer.run) throw new Error(`The pipeline did not pass its checks: ${text((answer.gate ?? {}) as Row, "verdict") || "see the pipeline"}`);
@@ -371,14 +385,31 @@ function Train({ group, selected, n }: { group: ModelGroup; selected: Row; n: nu
     <Card label="Train and promote">
       <div className="space-y-3">
         <div>
-          {group.pipeline ? (
-            <Button loading={busy} onClick={() => void retrain()}>
-              <RefreshCw size={14} aria-hidden /> Retrain
+          {group.brought ? (
+            <Button onClick={() => setVersioning(true)}>
+              <Plus size={14} aria-hidden /> New version
             </Button>
+          ) : group.pipeline ? (
+            <div className="flex flex-wrap gap-2">
+              <Button loading={busy} onClick={() => void retrain()}>
+                <RefreshCw size={14} aria-hidden /> Retrain
+              </Button>
+              {group.standalone && (
+                <Button onClick={() => setVersioning(true)}>
+                  <Plus size={14} aria-hidden /> New version
+                </Button>
+              )}
+            </div>
           ) : (
             <p className="muted m-0 text-[12.5px]">Retraining runs a pipeline again; this model has none.</p>
           )}
-          {group.pipeline && <p className="muted mt-1 mb-0 text-[12.5px]">Runs {group.pipeline} again after its checks, as a new version of this model.</p>}
+          {group.brought ? (
+            <p className="muted mt-1 mb-0 text-[12.5px]">Brought from a file: a new file is its next version.</p>
+          ) : group.standalone ? (
+            <p className="muted mt-1 mb-0 text-[12.5px]">Retrain trains it again on what it learned from; New version on new data, another column or another held-out share.</p>
+          ) : (
+            group.pipeline && <p className="muted mt-1 mb-0 text-[12.5px]">Runs {group.pipeline} again after its checks, as a new version of this model.</p>
+          )}
           <FormError error={error} />
         </div>
         <div>
@@ -401,7 +432,118 @@ function Train({ group, selected, n }: { group: ModelGroup; selected: Row; n: nu
             </ConfirmButton>
           )}
         </div>
+        {group.standalone && <StandaloneActions group={group} />}
       </div>
+      {versioning && group.brought && <BringDialog groups={groups} versionOf={group} onClose={() => setVersioning(false)} />}
+      {versioning && !group.brought && <RetrainDialog group={group} training={trainingOf(graph.data)} onClose={() => setVersioning(false)} />}
     </Card>
+  );
+}
+
+/** What a standalone model trains on (its pipeline's model step keeps it), or where a brought one
+ * came from. Its project is the engine's and is never shown. */
+function Standalone({ group }: { group: ModelGroup }) {
+  const path = useWsPath();
+  const { customerId } = useWorkspace();
+  const graph = useWq<Row>(!group.brought && group.pipeline ? "get_graph" : null, { project: group.project, graph: group.pipeline }, { retry: false });
+  const training = trainingOf(graph.data);
+  if (group.brought) {
+    const source = broughtFrom(group.latest);
+    return (
+      <Card label="Standalone model">
+        <p className="m-0 text-[13px]">Brought from a file{source ? <>: {source}</> : null}. It has no pipeline; each file brought is a version.</p>
+      </Card>
+    );
+  }
+  return (
+    <Card label="Standalone model">
+      {graph.isLoading ? (
+        <Skeleton lines={2} />
+      ) : training ? (
+        <KeyValue
+          rows={[
+            [
+              "Dataset",
+              training.dataset ? (
+                <Link key="d" to={path(`/train/dataset?${qs({ customer_id: customerId, database: training.dataset.split(".")[0], name: training.dataset.split(".").slice(1).join(".") })}`)}>
+                  {training.dataset}
+                </Link>
+              ) : null,
+            ],
+            ["Predicts", training.target || <span key="t" className="muted">no target: it learns without one</span>],
+            ["Methodology", training.methodology],
+            ["Held out", training.holdout !== null ? `${Math.round(training.holdout * 100)}% of rows` : <span key="h" className="muted">none: in-sample figures only</span>],
+          ]}
+        />
+      ) : (
+        <p className="muted m-0 text-[13px]">Trained on its own. {graph.isError ? "What it trains on could not be read." : "Its training settings are not recorded."}</p>
+      )}
+      <p className="muted mb-0 mt-2 text-[12.5px]">No project or pipeline to look after. Move it into a project to build a pipeline around it.</p>
+    </Card>
+  );
+}
+
+/** Move into a project, and Delete: every version, and with the last the model itself. */
+function StandaloneActions({ group }: { group: ModelGroup }) {
+  const scope = useWorkspace();
+  const path = useWsPath();
+  const links = useModelLinks();
+  const navigate = useNavigate();
+  const toast = useToast();
+  const [projectName, setProjectName] = useState(group.name);
+  const input = { customer_id: scope.customerId, workspace_id: scope.workspaceId };
+  const move = async () => {
+    const answer = await act<Row>("move_model_to_project", { ...input, model_id: text(group.latest, "id"), project_name: projectName.trim() || group.name });
+    toast(`${group.name} is in the project ${text(answer, "project_name")}`);
+    navigate(path(`/design/project?${qs({ customer_id: scope.customerId, name: text(answer, "project_name") })}`));
+  };
+  const remove = async () => {
+    // Oldest last: the engine removes the model's own project with its last version.
+    for (const version of group.versions) {
+      try {
+        await act<Row>("delete_model", { ...input, id: text(version, "id") });
+      } catch (e) {
+        if (!(e instanceof ApiError && e.code === "not_found")) throw e;
+      }
+    }
+    toast(`Deleted ${group.name}`);
+    navigate(links.trainList);
+  };
+  const live = group.published.length > 0;
+  return (
+    <div className="flex flex-wrap gap-2 border-t border-hairline pt-3">
+      <ConfirmButton
+        title={`Move ${group.name} into a project?`}
+        confirmLabel="Move into project"
+        confirm={
+          <div className="grid gap-2">
+            <p className="m-0">It becomes a project in Design → Projects, with its pipeline and all {group.versions.length} {group.versions.length === 1 ? "version" : "versions"}, so you can build a pipeline around it. It is no longer standalone.</p>
+            <div className="field m-0">
+              <label htmlFor="move-project-name">Project name</label>
+              <input id="move-project-name" value={projectName} onChange={(e) => setProjectName(e.target.value)} />
+            </div>
+          </div>
+        }
+        onConfirm={move}
+      >
+        <FolderInput size={14} aria-hidden /> Move into a project
+      </ConfirmButton>
+      <ConfirmButton
+        variant="ghost"
+        danger
+        title={`Delete ${group.name}?`}
+        confirmLabel="Delete model"
+        typed={group.name}
+        confirm={
+          <>
+            Deletes all {group.versions.length} {group.versions.length === 1 ? "version" : "versions"} of {group.name}. It cannot be undone.
+            {live && <> A published version stops answering <code>predict</code>.</>} The runs that trained it are kept.
+          </>
+        }
+        onConfirm={remove}
+      >
+        <Trash2 size={14} aria-hidden /> Delete
+      </ConfirmButton>
+    </div>
   );
 }

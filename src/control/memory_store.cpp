@@ -1925,6 +1925,21 @@ Result<void> InMemoryStore::set_agent_cron_schedule_status(const std::string& id
     return {};
 }
 
+Result<void> InMemoryStore::age_agent_cron_run(const std::string& run_id, std::int64_t seconds) {
+    std::lock_guard lock(mutex_);
+    auto run = std::ranges::find_if(agent_cron_runs_,
+                                    [&](const auto& entry) { return entry.second.id == run_id; });
+    if (run == agent_cron_runs_.end()) {
+        return std::unexpected(StoreError{"not_found", "no agent cron run " + run_id});
+    }
+    const auto created = launch_created_at(run->second.created_at);
+    if (!created) {
+        return std::unexpected(StoreError{"invalid_input", "run time is unreadable"});
+    }
+    run->second.created_at = std::format("{:%FT%TZ}", *created - std::chrono::seconds(seconds));
+    return {};
+}
+
 Result<void> InMemoryStore::put_agent_cron_run(const std::string& schedule_id,
                                                const std::string& run_id,
                                                const std::string& job_name,
@@ -1960,6 +1975,10 @@ Result<void> InMemoryStore::put_agent_cron_run(const std::string& schedule_id,
                         std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
         agent_cron_runs_.emplace_back(schedule_id, std::move(launch));
         run = std::prev(agent_cron_runs_.end());
+    }
+    // A finished run's end, as agent_cron_runs.finished_at (lake#658: its duration is charged).
+    if ((phase == "Succeeded" || phase == "Failed") && run->second.status_updated_at.empty()) {
+        run->second.status_updated_at = now_iso8601();
     }
     run->second.phase = std::move(phase);
     run->second.message = std::move(message);
@@ -2358,7 +2377,8 @@ Result<std::vector<WorkloadResources>> InMemoryStore::workload_resources() {
 
 Result<void> InMemoryStore::put_workload_resources(const WorkloadResources& row) {
     static const std::set<std::string> kinds{
-        "workspace", "service", "store", "app", "build", "agent_launch"};
+        "workspace", "service", "store", "app", "build", "agent_launch", "agent_cron_run",
+        "methodology_run"};
     if (!kinds.contains(row.object_kind) || row.object_id.empty() || row.pods < 0 || row.gpus < 0) {
         return std::unexpected(StoreError{"invalid_input", "not a workload resources row"});
     }

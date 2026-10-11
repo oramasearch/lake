@@ -66,15 +66,17 @@ capability and checks its completed status and stage.
 string with the registry's `validate_input`. A missing `workspace_id` therefore fails the build's
 tests rather than a first paste. The Docs show `<workspace id>`.
 
-`test_experiments.cpp` covers all eleven training operations, space permissions, confirmation,
+`test_experiments.cpp` covers all eleven training operations, account permissions, confirmation,
 workspace alias checks, audit, REST/MCP parity and actual calls, `start_experiment` with
 `from_defaults` and Zetta's error `path`, the agents' guide naming the live read and the
 confirmation (`Experiments.AgentDocsNameTheLiveReadAndTheConfirmation`; lake#449, lake#463), and
 lake's experiment names translated to and from the engine's study names
 (`Experiments.LakeSaysExperimentAndTheEngineKeepsItsStudyNames`, lake#561).
 `Docs.AgentDocsSayLakeAndNeverSpace` (`test_markdown.cpp`, lake#647) renders llms.txt,
-llms-full.txt, the skill and every description in OpenAPI and `tools/list` and fails on "space" or
-a lowercase "lake" in their prose.
+llms-full.txt, the skill and every description in OpenAPI and `tools/list` and fails on `space` or
+a lowercase "lake" in their prose. `Docs.DeveloperDocsNeverSaySpace` (lake#669) reads every
+`docs/api/*.md` and `docs/guide/*.md` file, READMEs included, and fails on `space` or `spaces` as a
+word in their prose; code spans and blocks, workspace, namespace and whitespace are allowed.
 `Docs.GuidesSpeakOfExperiments` and `frontend/tests/wording.test.ts` keep "study" out of the guides
 and the pages. `test_workspaces.cpp` covers trial runs and experiment models named by their
 experiment, the promoted marker,
@@ -89,14 +91,14 @@ Independent response validation also uses these fixtures. See
 `my_audit` ordering, principal names (an acting agent included), a workspace call's inner
 capability and the hidden successful reads (lake#445).
 
-`test_streams.cpp` covers Streams space/system/creator permissions, non-consuming browse,
+`test_streams.cpp` covers Streams account/system/creator permissions, non-consuming browse,
 retention, revisions, and REST/MCP parity with one call per operation
 (`Streams.RestAndMcpOperateEveryStreamCapabilityAlike`). Its 1,000-topic case checks the 50-row
 default page, cursor and prefix filtering, sub-500 ms response, one list call per Zetta and no
 per-topic detail calls. `stream_fixture.hpp` is a stateful fake workspace caller using the exact
 Zetta CRUD wire shape; bus tests use `MemoryAgentBus`.
 `Streams.CreatorOwnershipLivesInTheTopicsWorkspaceZetta` keeps each topic's creator at its own
-workspace endpoint across two spaces and two workspaces, and covers missing and unknown workspace
+workspace endpoint across two accounts and two workspaces, and covers missing and unknown workspace
 ids, a workspace that is not ready, workspace deletion and the immutable `if_absent` claim
 (lake#379). The schema conformance fixture exercises all nine successful outputs. See
 `docs/api/streams.md` and `docs/ui/streams.md`.
@@ -126,7 +128,7 @@ untouched. Each test receives a random `LAKE_INSTANCE_KEK`. See
 `audit_test_support.hpp` exhausts append-order pages; use exact request filters for specific calls.
 `drive_history_support.hpp` is the Drive overwrite exercise of lake#123 (upload twice, history,
 comparison, restore and deletion, through the HTTP API) over any running Lake; the Postgres
-scenario and `WorkspaceStoreDrive.*` (space store and switched workspace store) both run it.
+scenario and `WorkspaceStoreDrive.*` (account store and switched workspace store) both run it.
 
 The `scenarios/` cases combine those production Postgres stores with an in-process Lake, public
 HTTP routes, and public client libraries. The drive scenario signs users up, synchronizes and
@@ -166,7 +168,7 @@ Request telemetry (decision 54 S9, lake#384, [`../docs/serving/telemetry.md`](..
 `HttpServer.RequestLogsNameRoutesAndEachWorkspaceGetsItsOwnRequestSeries` captures stdout while it
 makes repository, capability, registry (`/:package`, OCI manifest), drive and sync requests,
 checks every line names the route and request id and carries no raw path and no repository,
-package, image or file name, then reads the `lake_requests` series of two workspaces of one space
+package, image or file name, then reads the `lake_requests` series of two workspaces of one account
 and one of another after the flush at `stop()` (a request with no workspace counted nowhere). A
 handler sends its response before it logs and counts the request, so the test stops the server,
 which waits for every request, before it reads the log or the series (lake#547).
@@ -251,7 +253,7 @@ tombstones, mutation rows, secret detection, role checks, stale reads, degraded 
 cursors, OpenAPI, and MCP discovery (`PlatformFixture.DiscoveryExposesPlatformSurface`). A Beast2
 Loki double verifies the real coroutine HTTP client, selector request, secret bearer, line
 conversion, and cursor. `test_workspace_records.cpp`'s
-`PlatformEnvironmentsLiveInTheirRepositorysWorkspace` covers two spaces with two workspaces each,
+`PlatformEnvironmentsLiveInTheirRepositorysWorkspace` covers two accounts with two workspaces each,
 sealed records only at the repository's workspace endpoint, a quiet sync writing nothing, an older
 row never replacing a newer one, a stale revision, one environment created once by two writers,
 least privilege without a workspace call, missing, malformed and unknown ids, a workspace that is
@@ -354,7 +356,7 @@ signed-in person, a workspace they cannot see, and operator credentials. The bro
 `.PersonalSpaceBecomesAnOrganization` call the organization capabilities as two signed-up people
 against both stores (the type-the-handle confirmation is the web app's); `Organizations.*` and
 `PostgresCapabilities.OrganizationSpaceMembershipsCarryTheirGrantToTheSpace` cover the capabilities
-and the organization-space grants ([organizations.md](../docs/api/organizations.md)).
+and the organization-account grants ([organizations.md](../docs/api/organizations.md)).
 `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls `create_organization_space`
 and `convert_personal_space` with a signed-up person's session, since they refuse the operator.
 `PostgresCapabilities.OrganizationAndPolicyRoundTrip`
@@ -396,17 +398,17 @@ holds the bold quotes in `docs/ui/front-door.md` to `frontend/src/pages/home/Hom
 lacks (lake#442, lake#465) fails here. `PostgresStores.MigrationAssignsTheSoleWorkspaceAndRecordsTheRest`
 covers `0044_store_workspaces`. See [storage.md](../docs/control-plane/storage.md).
 
-Repository workspaces (lake#315): `Repositories.BelongToOneWorkspaceOfTheirSpace` covers two spaces
+Repository workspaces (lake#315): `Repositories.BelongToOneWorkspaceOfTheirSpace` covers two accounts
 and two workspaces in one, missing, empty, malformed, unknown, deleted and foreign `workspace_id`,
 reads and the workspace filter, the refused transfer, both imports, and workspace deletion.
 `PostgresRepositories.MigrationAssignsTheSoleWorkspaceAndRoutingStaysFixed` covers
 `0051_repository_workspaces` (sole, several, none, a tombstoned repository, a rerun) and the
 trigger's refusals. `PostgresRepositories.MigrationAssignsUnroutedRepositoriesTheirSoleWorkspace`
-covers `0066_assign_unrouted_repositories` (lake#513): a repository without a workspace in a space
+covers `0066_assign_unrouted_repositories` (lake#513): a repository without a workspace in an account
 that later gets exactly one is assigned, with its routing and description owners recorded; one in a
-space with two is left alone and reported once; a rerun changes nothing; and every other change of
+account with two is left alone and reported once; a rerun changes nothing; and every other change of
 `workspace_id` is refused in the migration's transaction, afterwards, and with the setting alone. `repository_test_support.hpp` (`repository_workspace`) gives other tests the
-space's first live workspace for the repositories they create.
+account's first live workspace for the repositories they create.
 
 `test_deletions.cpp` covers deleting and revoking (lake#645, `Stores/Deletions.*` over the memory
 and PostgreSQL stores): an organization refused while it owns a workspace and then gone from every
@@ -421,10 +423,21 @@ classification. `test_workspace_records.cpp`'s `TranscriptsLiveInTheirWorkspaceA
 runs the six capabilities with a fake `Transcriber` over the memory and PostgreSQL stores; no test
 calls OpenAI.
 
+`test_mcp_client.cpp` covers Lake's MCP client (lake#652): the event-stream parser, server URLs,
+public addresses and tool bounds, then the client over the server's own transport against
+`mcp_test_server.hpp`, a local MCP server (Streamable HTTP and HTTP+SSE, an OAuth authorization
+server, and hostile modes: slow, huge, garbage, another id first, a sampling request, endless
+events, an unknown version).
+`test_workspace_records.cpp`'s `McpConnections*` cases run the MCP connection capabilities against
+that server with both stores: the sealed record and its secret, the read-or-change rule for people,
+Ask Orama and a user-built agent, auto-approve, the audit, the usage series, re-export through the
+workspace's MCP endpoint, OAuth sign-in with registration, PKCE and refresh rotation, and the
+stream worker's mirrored notifications, agent jobs and published results.
+
 `test_workspace_records.cpp` covers workspace records (lake#370,
 [workspace-records.md](../docs/architecture/workspace-records.md)): sealed records and blind
 indexes, paged listing, records that open only in their own workspace and lookup, conditional
-writes with conflict retries and `busy` retries, two spaces with two workspaces each over the
+writes with conflict retries and `busy` retries, two accounts with two workspaces each over the
 memory and PostgreSQL stores, workspace deletion, the allow-list keeping the record store away from
 `workspace_query`/`workspace_act`, and the operator's one-shot copy. `record_fixture.hpp`
 (`RecordTables`) is the keyed record store (zetta#1231) as records use it; the test workspace
@@ -446,20 +459,20 @@ schema leave them dropped, and routing rows, routes, `audit_events`, `keystore` 
 dropped went with their tables; the tests that checked a retired table held nothing now check that
 it does not exist.
 Design → Opportunities (lake#376): `Stores/WorkspaceRecordStores.OpportunitiesStayInTheWorkspaceTheirScanRanIn`
-(two spaces with two workspaces each, the scan's workspace only, a second settle writing nothing,
+(two accounts with two workspaces each, the scan's workspace only, a second settle writing nothing,
 foreign and missing/malformed/unknown ids, a workspace that is not ready, workspace deletion),
 `WorkspaceRecords.AnOpportunityStatusChangeRereadsAfterAConcurrentWrite` (derived keys and a raced
 conditional write). `Drive.ShareLinksLiveOnlyInTheWorkspaceThatHoldsThem` covers
-two spaces with two workspaces each, missing/unknown/foreign `workspace_id`, least-privilege
+two accounts with two workspaces each, missing/unknown/foreign `workspace_id`, least-privilege
 callers, forged and moved tokens, a workspace that is not ready, revocation and workspace deletion.
 `workspace_fixture.hpp` (`RecordWorkspaces`) gives a test store Ready workspaces whose records live
 in `RecordTables`, over the memory or PostgreSQL store.
-Application events and delivery attempts (lake#356, lake#357): `test_apps.cpp` covers two spaces,
+Application events and delivery attempts (lake#356, lake#357): `test_apps.cpp` covers two accounts,
 two workspaces in one, missing, malformed, unknown and foreign `workspace_id`, least privilege, a
 workspace that is not ready, deletion, and an attempt claimed by another caller not being sent. `stream_fixture.hpp`'s `ready_workspace` makes a Ready
 workspace over either store for tests that sign into an application pool.
 Application users and organizations (lake#353, lake#354):
-`ApplicationAuth.UsersAndOrganizationsLiveInTheApplicationsWorkspace` covers two spaces, two
+`ApplicationAuth.UsersAndOrganizationsLiveInTheApplicationsWorkspace` covers two accounts, two
 workspaces in one, sealed records and claims at the application's endpoint only, duplicate emails,
 TAAP identities and names, fresh and abandoned claims, a sign-up completed at the next sign-in, an
 account that is not a user, suspension, deletion, renames, missing, malformed, unknown and foreign
@@ -467,7 +480,7 @@ account that is not a user, suspension, deletion, renames, missing, malformed, u
 through `call_async`.
 
 Repository usage in workspace Zettas (lake#348, lake#349): `test_workspace_records.cpp`'s
-`RepositoryUsageStaysInEachRepositorysWorkspace` covers `MeteringRecorder` across two spaces with
+`RepositoryUsageStaysInEachRepositorysWorkspace` covers `MeteringRecorder` across two accounts with
 two workspaces each (nothing written on the request path, merged counters, a second replica's
 conditional increment, not-ready, deleted and unknown workspaces, a repository without a workspace, the
 bound, build records once), and `PostgresSync.PushAndPullUsePostgresControlPlane` a real push and
@@ -499,7 +512,7 @@ from a secret mount with rotation and the manual fallback, and the route only wh
 
 The audit split by subject (decision 52, lake#317): `test_workspace_records.cpp`'s
 `AuditEventsAboutAWorkspaceLiveInItsOwnChain` covers the `AuditRecorder` and the readers across two
-spaces with two workspaces each (a call writes nothing until the flush, control-plane calls,
+accounts with two workspaces each (a call writes nothing until the flush, control-plane calls,
 refusals and missing, malformed and unknown `workspace_id` central, sealed records at the
 workspace's endpoint only, a second replica's appends never forking the chain, verify, export,
 `audit` and `my_audit`, a workspace that is not ready, workspace deletion, the bound, tampering,
@@ -511,7 +524,7 @@ protection decisions and deployment phases from the repository's workspace audit
 and `TokenAttenuation` finds an application's events there through `audit`.
 
 Forge records in workspace Zettas (lake#341): `test_workspace_records.cpp`'s
-`ForgeRecordsLiveInTheirRepositorysWorkspace` covers two spaces with two workspaces each, records
+`ForgeRecordsLiveInTheirRepositorysWorkspace` covers two accounts with two workspaces each, records
 only at their own endpoint, other repositories' and workspaces' ids, a record copied elsewhere,
 conditional updates, least privilege, missing and unknown `repository_id`, a repository without a
 workspace, a workspace that is not ready and workspace deletion, for the capabilities and for
@@ -521,7 +534,7 @@ scenario servers a `RecordWorkspaces`; `RecordWorkspaces::forge` writes a forge 
 does. `Surface`'s KEK is hexadecimal, as `LAKE_INSTANCE_KEK` is.
 Application signing keys and webhooks (lake#352, lake#355): `test_apps.cpp`
 (`KeysAndWebhooksLiveInTheApplicationsWorkspace`, `AConcurrentRotationIsRereadNotLost`) covers two
-spaces with two workspaces each, the anonymous JWKS, missing, malformed, unknown and foreign
+accounts with two workspaces each, the anonymous JWKS, missing, malformed, unknown and foreign
 `workspace_id`, least privilege, rotation and a raced rotation, not ready and deletion.
 `stream_fixture.hpp`'s `seed_application_signing_key`
 writes the first key ring of an application a test creates directly in a store.
@@ -529,9 +542,9 @@ writes the first key ring of an application a test creates directly in a store.
 Secrets in workspace Zettas (lake#328-#332): `test_secrets.cpp` runs the capability contract on a
 `RecordWorkspaces` (history, number reuse, a stopped put completed by the next, transit, a KEK
 rotation finished after a workspace was not ready, leases, denial). `test_workspace_records.cpp`'s
-`SecretsLiveInTheirMountsWorkspace` covers two spaces with two workspaces each, sealed records only
+`SecretsLiveInTheirMountsWorkspace` covers two accounts with two workspaces each, sealed records only
 at their own endpoint and none in PostgreSQL, missing, malformed, unknown and foreign ids, another
-space's person, a record copied elsewhere, a workspace not ready, KEK rotation across workspaces and
+account's person, a record copied elsewhere, a workspace not ready, KEK rotation across workspaces and
 workspace deletion, and no retired secrets table in PostgreSQL; it looks for its plaintext by a
 long marker, since sealed base64url bytes can spell a short one (lake#547). The identity exit scenario and the Postgres secrets round trip give their mount a Ready workspace.
 `SecretMountsBelongToAnAccountOrAnOrganization` (lake#561) has a person with only an individual
@@ -543,31 +556,31 @@ route, renewal and revocation, a renewal racing a revocation or an expiry (the r
 `before_put` lands the other writer's change between the read and the conditional write), the
 expiry pass reading only the workspaces of due leases, holds, not-ready and deleted workspaces, and
 the server tick. `test_workspace_records.cpp`'s `DynamicLeasesLiveInTheirMountsWorkspace` covers
-two spaces with two workspaces each; `PostgresSecrets.LeaseRoutesAreAContentFreeDueIndex` migration
+two accounts with two workspaces each; `PostgresSecrets.LeaseRoutesAreAContentFreeDueIndex` migration
 `0058_secret_lease_workspaces` rerun and the due index.
 Repository descriptions and refs (lake#315 part 2, lake#319): `test_workspace_records.cpp`
-(`RepositoryDescriptionsLiveInTheirWorkspace`) covers two spaces with two workspaces each, sealed
+(`RepositoryDescriptionsLiveInTheirWorkspace`) covers two accounts with two workspaces each, sealed
 records and routing rows without a description column, reads and one `list_records` per workspace,
 missing, malformed, unknown and foreign `workspace_id`, a refused create leaving nothing, least
 privilege, a raced change, a moved record, not ready and deletion;
 `PostgresRepositories.MigrationDropsRefsAndTheRowIsRoutingOnly` migration `0064_repository_records`.
 The sync tests in `test_api.cpp` and the forge scenario read refs through the `refs` capability
 (`served_refs`, `ref_head`), since lake keeps no copy. Application settings (lake#351):
-`test_apps.cpp` (`SettingsLiveInTheApplicationsWorkspace`) covers two spaces with two workspaces
+`test_apps.cpp` (`SettingsLiveInTheApplicationsWorkspace`) covers two accounts with two workspaces
 each, sealed records and empty routing rows, reads and listings from the workspace, the theme with
 missing, malformed, unknown and foreign `workspace_id` and a raced change, origins checked from the
 record, least privilege, a moved record not opening, not ready and deletion. `stream_fixture.hpp`'s
 `seed_application_settings` writes the settings of an application a test creates directly in a
 store, and `test_webauthn.cpp` calls the passkey ceremonies asynchronously.
 Application authorization codes (lake#363): `test_apps.cpp`
-(`AuthorizationCodesLiveInTheApplicationsWorkspace`) covers two spaces with two workspaces each,
+(`AuthorizationCodesLiveInTheApplicationsWorkspace`) covers two accounts with two workspaces each,
 sealed records under blind keys, retention, one redemption, racing exchanges (through
 `record_fixture.hpp`'s `before_delete`, a delete landing between a read and a conditional delete),
 expiry, missing, malformed and unknown `application_id`, least privilege, not ready and deletion.
 Agent tasks (lake#374, lake#375): `test_workspace_records.cpp`'s
 `AnAgentTaskKeepsItsFirstAnswerAndRereadsARacedEvent` covers the record (sealed, written once, a raced
-write reread, the first answer kept, another key or space not opening, a task without a record
-answered), and `AgentTasksKeepWhatWasWrittenInTheirOwnWorkspace` covers two spaces with two
+write reread, the first answer kept, another key or account not opening, a task without a record
+answered), and `AgentTasksKeepWhatWasWrittenInTheirOwnWorkspace` covers two accounts with two
 workspaces each and dispatch rows without content columns. `stream_fixture.hpp`'s `seed_agent_task_request`,
 `seed_agent_task_answer` and `agent_task_content` write and read a task's record for tests that
 create or finish tasks directly in a store; `AgentRuns::task` and `HttpResponseIsolation`'s
@@ -582,22 +595,22 @@ environment against the mount's workspace, the secret and its field.
 
 Workspace deletion (lake#514, decision 54 S12): `test_workspace_deletion.cpp` runs on the memory
 store and, with `LAKE_TEST_DB_URI`, on PostgreSQL. `CascadesToEverythingTheWorkspaceHoldsAndNothingElse`
-builds two spaces with two workspaces each, a workspace with a live, a retained and an expired
+builds two accounts with two workspaces each, a workspace with a live, a retained and an expired
 tombstoned repository, an app, two builds and tagged images (one name shared with the other
 workspace), checks the dry run's counts, then that the deletion tombstones both repositories with
 their retention ended and frees the name, deletes the app, cancels the builds, untags only the
-workspace's images, leaves the other workspace and space alone, and records one central event per
+workspace's images, leaves the other workspace and account alone, and records one central event per
 object plus the cascade, once. `AnInterruptedCascadeResumes` fails the registry after the
 transaction and checks the pending deletion, a failing owner-loop pass, and the pass that completes
 it without repeating an event. `OnlyAnAdministratorOfTheSpaceDeletes` refuses a writer, a stranger
-and another space's administrator, dry run included. `RegistryProtocols.DeletingAWorkspaceMakesItsImagesUnpullable`
+and another account's administrator, dry run included. `RegistryProtocols.DeletingAWorkspaceMakesItsImagesUnpullable`
 (`test_api.cpp`) pulls through a running lake before and after, and
 `Search.DroppingARepositoryRemovesItsSegmentsAndUnsharedBlobs` covers the index.
 
 Tenant images (lake#383 phase A): `test_api.cpp`
 (`Stores/TenantImages.LiveInTheirRoutedWorkspaceAndKeepTheirAddresses`,
 `Stores/TenantImages.TheOneShotCopyRoutesAndMovesLegacyTags`, on the memory store and PostgreSQL)
-covers two spaces with two workspaces each, explicit routing with missing, malformed, unknown,
+covers two accounts with two workspaces each, explicit routing with missing, malformed, unknown,
 foreign and deleted `workspace_id`, immutable routes, a build claiming only its own target, an app
 moved between workspaces and unrouted by the operator, foreign layers refused, unreadable routes as
 503 (`RoutesAreClaimedOnlyByTheirOwnerAndUnroutedOnlyByTheOperator`), a move with the cache name
@@ -614,7 +627,7 @@ pull of a multi-layer image through a routed, switched workspace (GET and HEAD, 
 nothing in the instance registry, a repeated layer stored once, usage counted once), blob requests and
 the copy refused during a drain with the lease never taken again (lake#536), a chunked
 upload and a wrong digest, a 304 MiB layer streamed with the pull's resident growth bounded, a
-blob of another workspace or space refused, the `oci_blobs` copy (plan, copy, rerun, verify with
+blob of another workspace or account refused, the `oci_blobs` copy (plan, copy, rerun, verify with
 SHA-256, missing, corrupt and unswitched blobs unresolved, pulls after the registry files are
 removed), instance packages unaffected, workspace deletion, and `move_workspace_store` `provision`
 (an empty, storeless switched workspace provisioned, then a repository created and committed; a
@@ -643,14 +656,14 @@ trigger, the policy checks and the backfill; `OperatorContract.*` the operator's
 snapshot statements.
 `test_workspace_store.cpp` covers lake#380 (the table is in
 `docs/architecture/workspace-store.md#tests`): the encrypted backend, its refusal of a rewrite, tampering, the owner's hand-off and lost lease, the rollout hand-off between two lake servers (`WorkspaceStoreHandoff.*`, lake#536; a workspace stopped or deleted while the pre-open waits in Zetta's acquire has the lease released at once, lake#541), and, through a running lake, the
-move with an interrupted copy, the switch, two workspaces of one space and the lost lease's `503`;
-`WorkspaceStoreRemoval.*` the removal of a space's old store (refusals, a linked space or store
+move with an interrupted copy, the switch, two workspaces of one account and the lost lease's `503`;
+`WorkspaceStoreRemoval.*` the removal of an account's old store (refusals, a linked account or store
 directory refused, dry run, exactly two directories removed, the instance's directory untouched, switched workspaces still answering, a later
-unswitched workspace given a new space store).
-move with an interrupted copy, the switch, two workspaces of one space and the lost lease's `503`.
+unswitched workspace given a new account store).
+move with an interrupted copy, the switch, two workspaces of one account and the lost lease's `503`.
 Its `WorkspaceStoreSearch.*` cover lake#381 through a running lake: sealed per-workspace search
-indexes beside each store, the switch's drop from the space index, reload after a restart, a
-non-operator caller who never makes search open another space's workspace, rebuild of a wiped,
+indexes beside each store, the switch's drop from the account index, reload after a restart, a
+non-operator caller who never makes search open another account's workspace, rebuild of a wiped,
 partial or tampered index with and without a restart, a failed index write that leaves the store
 alone, a dropped index write retried by search's worker with the workspace reported partly stale
 until then (lake#540), a first push that does not wait for the rebuild, pushes beside searches, and deletion;
@@ -658,7 +671,7 @@ until then (lake#540), a first push that does not wait for the rebuild, pushes b
 background rebuild queue, backoff, release snapshots, write-once runs and eviction.
 `zetta_object_fixture.hpp` is `FakeZettaObjects`, Zetta's object routes in memory. Set
 `LAKE_TEST_ZETTA_BINARY` to a `zetta` built from Zetta dev to run `WorkspaceStoreZetta.*` against it.
-move with an interrupted copy, the switch, two workspaces of one space and the lost lease's `503`.
+move with an interrupted copy, the switch, two workspaces of one account and the lost lease's `503`.
 `zetta_object_fixture.hpp` is `FakeZettaObjects`, Zetta's object routes in memory. It models
 durability (lake#527): the bucket's log is one sequence of applied writes, a barrier or a
 `durable=true` write makes it durable up to there, and `crash` keeps a prefix of the rest (the

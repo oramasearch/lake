@@ -4,7 +4,9 @@
  * `useRecorder` records with MediaRecorder (iOS Safari MP4, Chrome and Firefox WebM/Opus). For
  * dictation (`onText`) it sends the recording to lake's `transcribe` as base64 JSON and hands back
  * the text to edit; for a transcript (`onAudio`) it hands back the recording itself. Cancelling
- * discards the recording without sending it. When lake answers `not_supported` (no speech-to-text
+ * discards the recording without sending it. A dictation names the workspace the person works in,
+ * whose speech-to-text usage it is (lake#613); without one there is no dictation. When lake answers
+ * `not_supported` (no speech-to-text
  * key), every dictation microphone hides for the rest of the session and the person is told why
  * once. The phone keyboard's own dictation needs none of this: it types into the field. */
 import { useEffect, useRef, useState } from "react";
@@ -12,7 +14,8 @@ import { Loader2, Mic, Square, X } from "lucide-react";
 import { act, ApiError } from "@/lib/api";
 import { cx } from "@/lib/ui";
 import { MAX_DICTATION_SECONDS, clock, extensionFor, pickRecordingFormat, recordingFull, type AudioFormat } from "@/lib/phone";
-import { MICROPHONE_GONE, isNotSupported, onSpeechToTextChange, speechToTextOff, turnSpeechToTextOff } from "@/lib/dictation";
+import { MICROPHONE_GONE, dictationInput, isNotSupported, onSpeechToTextChange, speechToTextOff, turnSpeechToTextOff } from "@/lib/dictation";
+import { useSession } from "@/lib/session";
 
 type RecState = "idle" | "recording" | "transcribing";
 
@@ -41,8 +44,11 @@ export type Recording = { blob: Blob; name: string; seconds: number };
 export function useRecorder({ onText, onAudio, maxSeconds = MAX_DICTATION_SECONDS }: { onText?: (text: string) => void; onAudio?: (recording: Recording) => void; maxSeconds?: number }) {
   const canRecord = typeof window !== "undefined" && !!navigator.mediaDevices?.getUserMedia && typeof window.MediaRecorder !== "undefined";
   const speech = useSpeechToText();
-  // Dictation needs speech-to-text; recording a transcript's audio needs only the microphone.
-  const supported = canRecord && (!!onAudio || speech);
+  const { space, workspaceId, viewer } = useSession();
+  const scope = { customerId: space?.id ?? viewer.customer_id ?? "", workspaceId: workspaceId ?? "" };
+  // Dictation needs speech-to-text and a workspace to bill it to; recording a transcript's audio
+  // needs only the microphone.
+  const supported = canRecord && (!!onAudio || (speech && !!dictationInput(scope, "", "")));
   const [state, setState] = useState<RecState>("idle");
   const [seconds, setSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -76,7 +82,12 @@ export function useRecorder({ onText, onAudio, maxSeconds = MAX_DICTATION_SECOND
     setState("transcribing");
     try {
       const audio = await blobToDataUrl(blob);
-      const r = await act<{ text?: string }>("transcribe", { name: `dictation.${extensionFor(blob.type, format)}`, audio_base64: audio });
+      const input = dictationInput(scope, `dictation.${extensionFor(blob.type, format)}`, audio);
+      if (!input) {
+        setError("Choose a workspace first: dictation counts as its speech-to-text usage.");
+        return;
+      }
+      const r = await act<{ text?: string }>("transcribe", input);
       const text = String(r.text ?? "").trim();
       if (text) handlers.current.onText?.(text);
       else setError("Nothing was heard. Try again, closer to the microphone.");

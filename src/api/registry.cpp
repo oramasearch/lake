@@ -120,7 +120,7 @@ void log_database_diagnostic(std::string_view code, std::string_view message) {
     std::println(stderr, "{}", entry.dump());
 }
 
-constexpr std::array<ErrorCode, 32> documented_error_codes{{
+constexpr std::array<ErrorCode, 33> documented_error_codes{{
     {"invalid_input", 400, "The input is at fault; `path` points at the field."},
     {"secret_required",
      400,
@@ -160,6 +160,10 @@ constexpr std::array<ErrorCode, 32> documented_error_codes{{
      "The workspace action needs an approval it does not have yet: approve the plan or the "
      "decision first."},
     {"gate_blocked", 409, "A pipeline gate refused the run; the message names the failing check."},
+    {"sign_in_required",
+     409,
+     "An MCP connection's server needs a person to sign in again, or its credential is missing or "
+     "refused."},
     {"invalid_chain",
      409,
      "The audit log's hash chain is broken: an event is missing or was changed."},
@@ -654,10 +658,15 @@ const nlohmann::json& agent_task_input(const Capability& capability,
                                      const nlohmann::json& input,
                                      ApiContext& context,
                                      nlohmann::json& resolved) {
-    constexpr std::string_view prefix = "task:";
-    if (context.credential_kind != "agent_task" || !input.is_object() ||
-        input.contains("workspace_id") || context.store == nullptr ||
-        !context.credential_session_id.starts_with(prefix)) {
+    // A task, launch or schedule credential names its workspace (lake#652 adds the launch and
+    // the schedule, whose agents call the MCP connection capabilities without workspace_id).
+    const std::string& session = context.credential_session_id;
+    const bool task = context.credential_kind == "agent_task" && session.starts_with("task:");
+    const bool launch = context.credential_kind == "agent_launch" && session.starts_with("launch:");
+    const bool schedule =
+        context.credential_kind == "agent_schedule" && session.starts_with("schedule:");
+    if ((!task && !launch && !schedule) || !input.is_object() || input.contains("workspace_id") ||
+        context.store == nullptr) {
         return input;
     }
     const auto properties = capability.input_schema.find("properties");
@@ -665,13 +674,24 @@ const nlohmann::json& agent_task_input(const Capability& capability,
         !properties->contains("workspace_id")) {
         return input;
     }
-    const auto task =
-        context.store->get_agent_task(context.credential_session_id.substr(prefix.size()));
-    if (!task) {
+    const std::string id = session.substr(session.find(':') + 1);
+    std::string workspace_id;
+    if (task) {
+        if (const auto found = context.store->get_agent_task(id)) {
+            workspace_id = found->workspace_id;
+        }
+    } else if (launch) {
+        if (const auto found = context.store->get_agent_launch(id)) {
+            workspace_id = found->workspace_id;
+        }
+    } else if (const auto found = context.store->get_agent_cron_schedule(id)) {
+        workspace_id = found->workspace_id;
+    }
+    if (workspace_id.empty()) {
         return input;
     }
     resolved = input;
-    resolved["workspace_id"] = task->workspace_id;
+    resolved["workspace_id"] = workspace_id;
     return resolved;
 }
 
@@ -878,7 +898,7 @@ CallState prepare_call(std::shared_ptr<const Capability> capability,
 
 // The agent a task, launch or schedule credential belongs to. Those credentials act as the person
 // who started the agent, so the audit principal names the person; this names the agent (lake#445).
-std::string acting_agent(const ApiContext& context) {
+std::string acting_agent_of(const ApiContext& context) {
     const auto id_after = [&](std::string_view prefix) -> std::string {
         return context.credential_session_id.starts_with(prefix)
                    ? context.credential_session_id.substr(prefix.size())
@@ -971,7 +991,7 @@ ApiResult finish_call(const Capability* capability,
                                  : (name == "set_audit_retention" ? "retention" : "capability");
     nlohmann::json details = context.audit_details;
     details["error_code"] = result.ok ? "" : result.error.code;
-    if (const std::string agent = acting_agent(context); !agent.empty()) {
+    if (const std::string agent = acting_agent_of(context); !agent.empty()) {
         details["acting_agent"] = agent;
     }
     const audit::EventDraft event{
@@ -1020,6 +1040,10 @@ ApiResult finish_call(const Capability* capability,
 }
 
 } // namespace
+
+std::string acting_agent(const ApiContext& context) {
+    return context.store == nullptr ? std::string() : acting_agent_of(context);
+}
 
 SchemaAudience schema_audience(const ApiContext& context) {
     return context.credential_kind == "agent_task" ? SchemaAudience::AgentTask

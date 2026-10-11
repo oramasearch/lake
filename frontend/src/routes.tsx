@@ -14,6 +14,7 @@ import { screens as developer } from "@/pages/developer/routes";
 import { screens as drives } from "@/pages/drives/routes";
 import { screens as experiments } from "@/pages/experiments/routes";
 import { screens as home } from "@/pages/home/routes";
+import { screens as mcp } from "@/pages/mcp/routes";
 import { screens as organizations } from "@/pages/organizations/routes";
 import { screens as repositories } from "@/pages/repositories/routes";
 import { screens as search } from "@/pages/search/routes";
@@ -39,6 +40,7 @@ export const SCREENS: Screen[] = [
   ...train,
   ...connections,
   ...transcripts,
+  ...mcp,
   ...experiments,
   ...streams,
   ...ship,
@@ -82,7 +84,8 @@ export const NAV: NavItem[] = [
   { section: "design", path: "/design/opportunities", label: "Opportunities", icon: "search", audience: AO },
   { section: "design", path: "/design/solutions", label: "Solutions", icon: "audit", audience: AO },
   { section: "design", path: "/design/methodologies", label: "Methodologies", icon: "metering", audience: AO },
-  { section: "design", path: "/design/agent-library", label: "Agent Library", icon: "agent", audience: AO },
+  // Designing agents (lake#653); Train → Agents trains the ones that learn.
+  { section: "design", path: "/design/agents", label: "Agents", icon: "agent", audience: AO },
   { section: "train", path: "/train/agents", label: "Agents", icon: "agent", audience: AO },
   { section: "train", path: "/train/runs", label: "Runs", icon: "metering", audience: AO },
   { section: "train", path: "/train/experiments", label: "Experiments", icon: "metering", audience: AO },
@@ -187,6 +190,6 @@ export function navigableScreens(session: Pick<Session, "viewer">): Screen[] {
 /** A link to a capability-free route that is not part of the app (downloads, the OpenAPI document,
  * protocol routes). The router must never handle these. */
 export function isServerRoute(path: string): boolean {
-  return /^\/(v1|mcp|fonts|ui|assets|scim|acme|v2|buildid|_lake|legacy|simple|packages|api|healthz|readyz|metrics|llms|skills|style)/.test(path) ||
+  return /^\/(v1|mcp(?![-\w])|fonts|ui|assets|scim|acme|v2|buildid|_lake|legacy|simple|packages|api|healthz|readyz|metrics|llms|skills|style)/.test(path) ||
     /^\/(file\/(raw|download)|drive\/download|exports\/download|share\/[^/]+\/download|developer\/mcp\/skill|apps\/)/.test(path);
 }

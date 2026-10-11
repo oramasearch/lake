@@ -10,10 +10,10 @@ shows it and keeps it honest.
 - **Ask Orama** in the top bar of every signed-in page. It opens `/ask?from=<the page>`, so the
   conversation knows where it started.
 - `/ask`: the conversation, a **Talk to** selector (Ask Orama first, then the library's other running
-  chat agents a person uses, then the space's own chat-capable agents), and a message box. The
+  chat agents a person uses, then the account's own chat-capable agents), and a message box. The
   library's internal tooling (Eval Generator and the two corpus generators, `internal: true` in
   `list_agent_library`) is never offered, even where it runs (lake#451); `control::talk_to_agents`
-  builds the list. The space's own agents come from Zetta's `list_agents`, which took 380–690 ms on
+  builds the list. The account's own agents come from Zetta's `list_agents`, which took 380–690 ms on
   the dev site, so the web app adds them to the selector once that read answers, and the agent a
   conversation talks to stays selected meanwhile (lake#446).
   *Start a new
@@ -79,7 +79,7 @@ conversation) and is audited in that workspace's log.
 
 - **`send_ask_message`** stores the person's message first; a message the workspace did not store
   is an error and nothing is asked. It then calls `agent_turn`. A library agent answers in the
-  background: the value carries `task_id`. An agent of the space answers at once: its reply is
+  background: the value carries `task_id`. An agent of the account answers at once: its reply is
   stored and `reply_id` names it.
 - **`settle_ask_turn`** reads the turn as `get_agent_task` does (`task` is that value). While the
   turn is `pending` or `running`, `settled` is false and nothing is written. Once it finished, the
@@ -92,7 +92,7 @@ conversation) and is audited in that workspace's log.
   the status is final, then rereads the conversation with `get_ask_conversation`.
 - **`confirm_ask_proposal`** takes `payload.proposals[index]` of that stored message (anything else
   is `not_found` *That proposal is not in this conversation.*), calls its capability with its input
-  as the person, and stores *Done: {capability}.* or *That did not work: {error}* with
+  as the person (in the conversation's workspace when the input names none, lake#652), and stores *Done: {capability}.* or *That did not work: {error}* with
   `{agent: "agent-ask-orama", confirmed: {message_id, index}, ok}`. The value's `message_id` is
   that outcome message. A capability that refuses is still a successful confirm with `ok: false`.
   The call's own audit event carries `{ask_confirm: true, conversation_id, capability, ok}`; the
@@ -123,7 +123,7 @@ The event goes to the workspace's audit chain. Lake Console offers it beside New
 
 ## Verify
 
-`Stores/WorkspaceRecordStores.*` (lake#370): two spaces with two workspaces each keep one
+`Stores/WorkspaceRecordStores.*` (lake#370): two accounts with two workspaces each keep one
 conversation id apart per workspace; foreign, missing, malformed and unknown workspace ids are
 refused; a deleted workspace's conversations go with it; the operator copy moves and verifies
 earlier rows.

@@ -56,7 +56,7 @@ writes the allow-listed operations to `src/api/engine_openapi.json`, which the b
 - takes the engine's description, without its issue references and permission notes, with the
   names Lake gives renamed capabilities, and adds what Lake does beside it.
 
-The tool also applies Lake's wording rules (lake#647: never "space", values such as `lake` and
+The tool also applies Lake's wording rules (lake#647: never `space`, values such as `lake` and
 `zetta` in code spans) to the engine's text, as a fixed list of exact rewrites (`WORDING` in the
 tool), so the same engine document always gives the same snapshot and `--check` compares after
 them. Each rewrite matches a change made in Zetta's own descriptions; once the Zetta source
@@ -72,7 +72,7 @@ tools/api/vendor-engine-openapi.py --zetta-source "$LAKE_ZETTA_SOURCE_DIR" --che
 ```
 
 Reads are `GET` with the input in the query string and also take a JSON body on `POST`
-(`post_alias`), since some take nested input (`validate_experiment`'s search space).
+(`post_alias`), since some take nested input (`validate_experiment`'s parameter ranges).
 
 ## Names
 
@@ -93,6 +93,10 @@ pipeline where it says graph or plan.
 | `approve_plan` | `approve_pipeline` | approves a proposed pipeline |
 | `save_graph` | `save_pipeline` | saves a whole pipeline; `edit_pipeline` applies edits |
 | `chat` | `chat_with_agent` | `chat` alone does not say with what |
+
+An engine older than an allow-listed capability (one that answers `unknown_capability`) is answered
+`not_supported` by name, "this workspace's engine does not have <name> yet; it needs a newer
+Zetta", and nothing is changed (lake#654).
 
 `workspace_query` and `workspace_act` stay for compatibility and still take the engine's names.
 Their `capability` field carries an `enum` of the names each allows, so OpenAPI and MCP list them.
@@ -146,6 +150,10 @@ The groups are the ones `llms.txt` and `llms-full.txt` list them under.
 | `model_health` | same | read |
 | `expose_model` | same | write |
 | `unexpose_model` | same | write |
+| `train_model` | same | write |
+| `retrain_model` | same | write |
+| `register_model` | same | write |
+| `move_model_to_project` | same | write |
 
 ### Search indexes
 

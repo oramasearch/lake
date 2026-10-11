@@ -25,6 +25,7 @@
 #include "lake/api/workspace_deletion.hpp"
 #include "lake/control/agent_bus.hpp"
 #include "lake/control/agent_library.hpp"
+#include "lake/control/agent_revisions.hpp"
 #include "lake/control/agent_runs.hpp"
 #include "lake/control/ask_messages.hpp"
 #include "lake/control/identity_crypto.hpp"
@@ -156,6 +157,42 @@ project_decision_step(ApiContext& context,
     co_return std::nullopt;
 }
 
+// Keeps the definition an agent now has as one revision in its workspace (lake#653,
+// docs/api/train-agents.md#definition-revisions), after the engine accepted a create_agent or an
+// update_agent. The engine keeps only the latest definition, so this is the agent's history. The
+// change has happened whether or not this write succeeds, so a failure is reported beside the
+// agent (`definition_revision.recorded: false`), never as the call's failure.
+liquid::runtime::task<nlohmann::json> agent_revision_step(ApiContext& context,
+                                                          const nlohmann::json& input,
+                                                          const std::string& capability,
+                                                          const nlohmann::json& agent) {
+    const std::string customer_id = input.at("customer_id");
+    const std::string workspace_id = input.value("workspace_id", context.workspace_id);
+    const std::string agent_id = agent.value("id", std::string());
+    if (agent_id.empty()) {
+        co_return nlohmann::json{{"recorded", false},
+                                 {"message", "the workspace did not name the agent's id"}};
+    }
+    auto records = workspace_records(context, customer_id, workspace_id);
+    if (!records) {
+        co_return nlohmann::json{{"recorded", false}, {"message", records.error().message}};
+    }
+    control::AgentRevision revision{
+        .customer_id = customer_id,
+        .agent_id = agent_id,
+        .change = capability == "create_agent" ? "create" : "update",
+        .definition = control::agent_definition_of(agent),
+        .created_by =
+            context.acting_user_id.empty() ? context.acting_identity : context.acting_user_id};
+    auto written =
+        control::settled(co_await control::record_agent_revision(*records, std::move(revision)));
+    if (!written) {
+        co_return nlohmann::json{{"recorded", false}, {"message", written.error().message}};
+    }
+    co_return nlohmann::json{
+        {"recorded", true}, {"id", written->id}, {"created_at", written->created_at}};
+}
+
 } // namespace
 
 nlohmann::json agent_creator_answer(const nlohmann::json& turn) {
@@ -239,7 +276,7 @@ constexpr std::array<std::string_view, 47> workspace_reads = {"server_info",
                                                               "list_ledger",
                                                               "get_monitor",
                                                               "get_roi_readout"};
-constexpr std::array<std::string_view, 41> workspace_actions = {"create_project",
+constexpr std::array<std::string_view, 45> workspace_actions = {"create_project",
                                                                 "create_study",
                                                                 "stop_study",
                                                                 "stop_trial",
@@ -279,6 +316,13 @@ constexpr std::array<std::string_view, 41> workspace_actions = {"create_project"
                                                                 "delete_agent",
                                                                 "set_training_schedule",
                                                                 "agent_run",
+                                                                // A model made on its own, not as
+                                                                // a project pipeline's step
+                                                                // (lake#654).
+                                                                "train_model",
+                                                                "retrain_model",
+                                                                "register_model",
+                                                                "move_model_to_project",
                                                                 // A read in Zetta, called with GET,
                                                                 // but it loads a model and spends
                                                                 // compute: `write` in lake.
@@ -780,10 +824,13 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
         json arguments = input.value("input", json::object());
         const json sent = arguments;
         // A native agent runs lake's base model, which only lake knows (viewer no longer
-        // answers its path, lake#594): an agent created without one gets it here.
-        if (!read && capability == "create_agent" && context.workspaces != nullptr &&
+        // answers its path, lake#594): an agent created without one gets it here, and so does
+        // one updated to native with an empty model (Design → Agents' Orama base model, lake#653).
+        if (!read && context.workspaces != nullptr &&
             arguments.value("runtime", std::string()) == "native" &&
-            arguments.value("model", std::string()).empty()) {
+            ((capability == "create_agent" && arguments.value("model", std::string()).empty()) ||
+             (capability == "update_agent" && arguments.contains("model") &&
+              arguments["model"].is_string() && arguments["model"].get<std::string>().empty()))) {
             arguments["model"] = context.workspaces->config().base_agent_model;
         }
         // The engine refuses an empty name and a name in use with one message that names
@@ -877,6 +924,15 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
                         "' already exists in this workspace; choose another name",
                     "/input/name");
             }
+            // An engine older than the capability (allow-listed here, unknown there) says so in
+            // words a person can act on, not as a missing route (lake#654).
+            if (called->error().code == "unknown_capability") {
+                co_return ApiResult::failure(
+                    "not_supported",
+                    "this workspace's engine does not have " +
+                        std::string(engine_capability_name(capability)) +
+                        " yet; it needs a newer Zetta. Nothing was changed.");
+            }
             // Point at the field the workspace names (lake#256, lake#450), in lake's codes.
             ApiResult failed = workspace_failure(called->error(), sent, "/input", renamed);
             // An engine enum refusal lists the values, as lake's own do (lake#591).
@@ -910,6 +966,13 @@ liquid::runtime::task<ApiResult> workspace_call(bool read, json input, ApiContex
             if (*step) {
                 co_return std::move(**step);
             }
+        }
+        if (!read && value.is_object() &&
+            (capability == "create_agent" || capability == "update_agent")) {
+            auto kept = co_await agent_revision_step(context, input, capability, value);
+            value["definition_revision"] =
+                kept ? std::move(*kept)
+                     : json{{"recorded", false}, {"message", kept.error().message}};
         }
         if (value.is_object() &&
             (capability == "expose_model" || capability == "unexpose_model" ||
@@ -1767,6 +1830,14 @@ void register_search_capabilities(Registry& registry) {
             }
             if (!*found) {
                 co_return workspace_failure(found->error(), input);
+            }
+            // The index's answered searches over time, for what serving it costs (lake#658),
+            // added off the request path like predict's predictions.
+            if (context.usage_recorder != nullptr) {
+                context.usage_recorder->add(input.value("workspace_id", context.workspace_id),
+                                            "searches",
+                                            1,
+                                            {{"object_id", index}});
             }
             co_return ApiResult::success(**found);
         },
@@ -4564,8 +4635,17 @@ liquid::runtime::task<ApiResult> confirm_ask_proposal(const json& input, ApiCont
     const std::string capability = proposal.value("capability", std::string());
     context.audit_details = {
         {"ask_confirm", true}, {"conversation_id", conversation_id}, {"capability", capability}};
-    const ApiResult done = called(
-        co_await call_capability(context, capability, proposal.value("input", json::object())));
+    // A proposal runs in the conversation's workspace when its input names none (an MCP
+    // connection's call_mcp_tool from Ask Orama, lake#652).
+    json proposed = proposal.value("input", json::object());
+    if (proposed.is_object() && !proposed.contains("workspace_id") && context.registry != nullptr) {
+        if (const auto target = context.registry->find(capability);
+            target && target->input_schema.contains("properties") &&
+            target->input_schema.at("properties").contains("workspace_id")) {
+            proposed["workspace_id"] = workspace_id;
+        }
+    }
+    const ApiResult done = called(co_await call_capability(context, capability, proposed));
     context.audit_details["ok"] = done.ok;
     auto outcome = control::settled(co_await append_message(
         context,
@@ -5019,7 +5099,7 @@ void register_agent_run_capabilities(Registry& registry) {
                                         .mode = mode,
                                         .trigger = "manual",
                                         .input = input.value("input", json(nullptr)),
-                                        .scopes = control::agent_launch_scopes,
+                                        .scopes = control::agent_launch_scopes_for(*agent),
                                         .created_by_user_id = context.acting_user_id,
                                         .created_by_taap_id = context.acting_identity,
                                         .workspace_id = input.at("workspace_id")});
@@ -5191,7 +5271,7 @@ void register_agent_run_capabilities(Registry& registry) {
                                               .time_zone = time_zone,
                                               .description = trigger,
                                               .input = std::move(run_input),
-                                              .scopes = control::agent_launch_scopes,
+                                              .scopes = control::agent_launch_scopes_for(*agent),
                                               .created_by_user_id = context.acting_user_id,
                                               .created_by_taap_id = context.acting_identity,
                                               .workspace_id = input.at("workspace_id")});
@@ -5766,7 +5846,7 @@ void register_agent_run_capabilities(Registry& registry) {
                                             .agent_name = record->value("name", std::string()),
                                             .mode = "service",
                                             .trigger = "conversation",
-                                            .scopes = control::agent_launch_scopes,
+                                            .scopes = control::agent_launch_scopes_for(*record),
                                             .created_by_user_id = context.acting_user_id,
                                             .created_by_taap_id = context.acting_identity,
                                             .workspace_id = input.at("workspace_id")});
@@ -6799,6 +6879,99 @@ void register_workspace_capabilities(Registry& registry) {
                 }
                 return ApiResult::success(std::move(library));
             }});
+    registry.add(Capability{
+        .name = "list_agent_revisions",
+        .title = "List an agent's revisions",
+        .description =
+            "The history of an agent's definition (its purpose, prompt, skills, model, pipelines, "
+            "work area and trigger): one revision for each create_agent and update_agent Lake "
+            "made, newest first, each with its number, who made it, when, and the definition "
+            "it set. Restore one by calling update_agent with its `definition`, which writes a "
+            "new revision. These are not the agent's trained versions, which "
+            "agent_training_status lists.",
+        .input_schema = customer_input_schema(
+            {{"agent_id", {{"type", "string"}, {"minLength", 1}, {"description", "the agent's id"}}},
+             {"limit",
+              {{"type", "integer"},
+               {"minimum", 1},
+               {"maximum", 200},
+               {"description", "the newest this many (default 50)"}}}},
+            json::array({"agent_id"})),
+        .output_schema =
+            {{"type", "object"},
+             {"properties",
+              {{"revisions",
+                {{"type", "array"},
+                 {"items",
+                  {{"type", "object"},
+                   {"properties",
+                    {{"id", {{"type", "string"}}},
+                     {"revision", {{"type", "integer"}}},
+                     {"change", {{"type", "string"}, {"enum", {"create", "update"}}}},
+                     {"created_at", {{"type", "string"}}},
+                     {"created_by", {{"type", "string"}}},
+                     {"created_by_name", {{"type", json::array({"string", "null"})}}},
+                     {"definition", {{"type", "object"}}}}}}}}},
+               {"total", {{"type", "integer"}}}}},
+             {"required", json::array({"revisions", "total"})}},
+        .kind = CapabilityKind::Read,
+        .object = "customer",
+        .action = "read",
+        .resolve_object = customer_object,
+        // A list authorizes itself, as every list_ read does.
+        .authorizes_candidates = true,
+        .async_handler = [](const json& input,
+                            ApiContext& context) -> liquid::runtime::task<ApiResult> {
+            if (!context.workspaces) {
+                co_return unavailable();
+            }
+            const std::string customer_id = input.at("customer_id");
+            const std::string workspace_id = input.at("workspace_id");
+            if (auto refused = authorize_customer_read(input, context)) {
+                co_return *refused;
+            }
+            const std::string agent_id = input.at("agent_id");
+            auto records = workspace_records(context, customer_id, workspace_id);
+            if (!records) {
+                co_return ApiResult::failure(records.error().code, records.error().message);
+            }
+            auto listed = control::settled(
+                co_await control::list_agent_revisions(*records, customer_id, agent_id));
+            if (!listed) {
+                co_return ApiResult::failure(
+                    listed.error().code, listed.error().message, listed.error().path);
+            }
+            const std::size_t total = listed->size();
+            const std::size_t limit = input.value("limit", std::size_t{50});
+            std::map<std::string, json> names;
+            json revisions = json::array();
+            for (std::size_t index = total; index > 0 && revisions.size() < limit; --index) {
+                const control::AgentRevision& revision = (*listed)[index - 1];
+                auto known = names.find(revision.created_by);
+                if (known == names.end()) {
+                    json name = nullptr;
+                    if (context.store && !revision.created_by.empty()) {
+                        if (const auto user = context.store->get_user(revision.created_by); user) {
+                            if (!user->display_name.empty()) {
+                                name = user->display_name;
+                            } else if (!user->email.empty()) {
+                                name = user->email;
+                            }
+                        }
+                    }
+                    known = names.emplace(revision.created_by, std::move(name)).first;
+                }
+                revisions.push_back({{"id", revision.id},
+                                     {"revision", index},
+                                     {"change", revision.change},
+                                     {"created_at", revision.created_at},
+                                     {"created_by", revision.created_by},
+                                     {"created_by_name", known->second},
+                                     {"definition", revision.definition}});
+            }
+            co_return ApiResult::success(
+                {{"revisions", std::move(revisions)}, {"total", total}});
+        }});
     register_workspace_call(registry, true);
     register_workspace_call(registry, false);
     register_engine_capabilities(registry);

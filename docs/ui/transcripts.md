@@ -57,8 +57,10 @@ offered, and every dictation microphone hides. The person is told once, where it
 
 The microphone (`components/dictation/Dictate.tsx`, rev-os's `useRecorder`, `DictateButton` and
 `RecordingBar`) records with MediaRecorder (iOS MP4, others WebM) and sends the recording to
-`transcribe` `{name, audio_base64}` through `act`; the answer's `text` is added to the box, after
-what is typed, to edit or send. It is in:
+`transcribe` `{customer_id, workspace_id, name, audio_base64}` (`dictationInput`, `lib/dictation.ts`)
+through `act`, in the session's workspace, whose speech-to-text usage it is (lake#613); without a
+workspace the microphone offers no dictation. The answer's `text` is added to the box, after what is
+typed, to edit or send. It is in:
 
 - Ask Orama's message box (the panel and the full page), with **From your phone** beside it;
 - Paste a Transcript and Edit Transcript, where it adds to the text.
@@ -88,7 +90,7 @@ A dictation stops itself after 10 minutes. The phone keyboard's own dictation ne
 | `create_transcript` | action | `customer_id`, `workspace_id`, `title`, `source`, and `text` or `audio_base64` + `audio_name` (+ `recorded_at`) |
 | `update_transcript` | action | `customer_id`, `workspace_id`, `id`, `title?`, `text?` |
 | `delete_transcript` | action | `customer_id`, `workspace_id`, `id` |
-| `transcribe` | action | `name`, `audio_base64` |
+| `transcribe` | action | `customer_id`, `workspace_id`, `name`, `audio_base64` |
 
 The server side (lake#561) owns the records in the workspace Zetta, the transcription, the 25 MB
 limit and the caption cleaning; this page documents only what the app sends and shows. `language`

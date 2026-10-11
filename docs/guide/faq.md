@@ -186,7 +186,7 @@ yet says *Trains nothing yet*. Details: [Train a Model](/docs/train).
 
 ### Why is an agent unavailable?
 
-The Agent Library (**Design → Agent Library**) says, for each agent Orama provides, whether it is
+The Agent Library (**Design → Agents**, *By Orama*) says, for each agent Orama provides, whether it is
 **Available** here. An agent that is not deployed on your Lake is shown as such, and the pages that
 use it (for example **Run an Experiment** on Train → Experiments) explain that it is unavailable and
 disable sending. Details: [Agents](/docs/agents).

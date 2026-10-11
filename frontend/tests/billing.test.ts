@@ -86,10 +86,10 @@ test("an invoice's state is a chip, and what is owed adds up the due ones by cur
 });
 
 test("the price list editor starts from the published list, or the list rates, one row a dimension and GPU class", () => {
-  assert.equal(DIMENSIONS.length, 11);
+  assert.equal(DIMENSIONS.length, 12);
   const fresh = rateRows(null);
-  // Eleven dimensions, plus four GPU classes each for GPU and GPU memory.
-  assert.equal(fresh.length, 11 + 2 * GPU_CLASSES.length);
+  // Twelve dimensions, plus four GPU classes each for GPU and GPU memory.
+  assert.equal(fresh.length, 12 + 2 * GPU_CLASSES.length);
   assert.deepEqual(fresh[0], { dimension: "cpu", class: "", rate: "0.0015", per: "60000" });
   assert.deepEqual(fresh.find((r) => r.dimension === "gpu" && r.class === "h100"), { dimension: "gpu", class: "h100", rate: "0.07875", per: "60" });
   assert.deepEqual(fresh.find((r) => r.dimension === "vram" && r.class === "l4"), { dimension: "vram", class: "l4", rate: "", per: "1" }, "GPU memory has one rate for every class");

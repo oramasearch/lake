@@ -1,4 +1,5 @@
 #include "lake/api/capabilities.hpp"
+#include "lake/api/mcp_connections.hpp"
 
 #include "audit_logs.hpp"
 #include "lake/api/audit_routing.hpp"
@@ -4160,6 +4161,8 @@ void register_repository_capabilities(Registry& registry) {
             if (!file) {
                 return from_sync_store_error(file.error());
             }
+            // The file's bytes leave its repository's workspace (lake#658).
+            record_workspace_transfer(ctx, repository->workspace_id, 0, file->size);
             json out = repository_file_json(*file);
             if (in.value("units", false)) {
                 if (auto units = web_ui_source_units(file->path, file->contents)) {
@@ -6138,6 +6141,7 @@ void register_core_capabilities(Registry& registry, std::string_view version) {
     register_workspace_record_capabilities(registry);
     register_workspace_store_capabilities(registry);
     register_transcript_capabilities(registry);
+    register_mcp_connection_capabilities(registry);
     register_solution_capabilities(registry);
     register_methodology_capabilities(registry);
     register_drives_capabilities(registry);

@@ -26,7 +26,8 @@ A model has two pages (lake#599). **Train → Models** is about training it: its
 held-out scores over time, comparing versions, what it learned from, its pipeline steps, retraining
 and promoting a version. **Ship → Models** is about serving it: calling it, who may, where its
 answers go and how it is doing. Each page links to the other for the same version, and Search
-opens a model's training page.
+opens a model's training page. A standalone model (lake#654, [train.md](train.md#a-standalone-model))
+is served exactly as a project's: its source reads "trained on its own" or "brought from a file".
 
 ## Deleting a Model Version or a Search Index (lake#645)
 

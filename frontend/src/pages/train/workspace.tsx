@@ -91,7 +91,7 @@ export function useWorkspaceReady(): boolean {
 
 /** A Design, Train or Ship page (web_ui_workspace): eyebrow, heading, sub, then the shared
  * workspace gate (components/WorkspaceGate.tsx) around the content. `always` is shown ready or not
- * (the Data page's Storage, the Agents page's Agent Library). */
+ * (the Data page's Storage). */
 export function WorkspaceFrame({
   eyebrow,
   title,

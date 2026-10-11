@@ -56,8 +56,8 @@ selects the Postgres store. `server_info` reports which one as `store` (`memory`
 | `LAKE_METHODOLOGY_RUNTIME_IMAGE` | the `oramasearch/methodology-runtime` image a workspace methodology's image is built `FROM` (build argument `METHODOLOGY_RUNTIME_IMAGE`) and its stage and collect pods run; supplied by the operator from `spec.methodologies.runtimeImage`; without it Validate and runs answer `store_unavailable` | [`../api/methodologies.md`](../api/methodologies.md) |
 | `LAKE_APPS_RUNTIME_IMAGE` | required base image for `build_app`; supplied by the operator from `spec.apps.runtimeImage` and recorded as `APP_RUNTIME_IMAGE` | [`../api/builds.md`](../api/builds.md) |
 | `LAKE_APPS_RESERVED_NAMES` | comma-separated additional Ship app names to refuse; surrounding whitespace is ignored | [`../api/web-apps.md`](../api/web-apps.md) |
-| `LAKE_APPS_PER_CUSTOMER` | maximum live Ship apps per space; zero means no configured limit | [`../api/web-apps.md`](../api/web-apps.md) |
-| `LAKE_APP_REPLICAS_PER_CUSTOMER` | maximum aggregate desired Ship app replicas per space; zero means no configured limit | [`../api/web-apps.md`](../api/web-apps.md) |
+| `LAKE_APPS_PER_CUSTOMER` | maximum live Ship apps per account; zero means no configured limit | [`../api/web-apps.md`](../api/web-apps.md) |
+| `LAKE_APP_REPLICAS_PER_CUSTOMER` | maximum aggregate desired Ship app replicas per account; zero means no configured limit | [`../api/web-apps.md`](../api/web-apps.md) |
 | `LAKE_PLATFORM_SYNC_SECONDS` | platform poll interval, default 15, must be greater than zero | [`../api/platform.md`](../api/platform.md) |
 | `LAKE_LOG_MODE` | `air-gapped`, `witnessed` (default) or `anchored`; read only when a store root is set | [`../control-plane/log.md`](../control-plane/log.md) |
 | `LAKE_LOG_WITNESSES`, `LAKE_LOG_WITNESS_THRESHOLD`, `LAKE_LOG_AGGREGATOR` | JSON witness endpoint/public-key records, their quorum, and the aggregation endpoint anchored mode requires | [`../control-plane/log.md`](../control-plane/log.md), [`../api/transparency.md`](../api/transparency.md) |

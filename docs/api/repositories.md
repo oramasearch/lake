@@ -8,9 +8,9 @@ A repository is owned by a customer (the tenant) and named within it: the addres
 `0064_repository_records`, which moves its description into that workspace and drops
 `repository_refs`).
 
-Every repository belongs to one workspace of its space (lake#315, part 1: routing). The
+Every repository belongs to one workspace of its account (lake#315, part 1: routing). The
 workspace is named on create and never changes; there is no default workspace. The repository row
-in lake's PostgreSQL is the routing row (decision 54, S10): id, space, workspace, name, visibility
+in lake's PostgreSQL is the routing row (decision 54, S10): id, account, workspace, name, visibility
 and tombstone, which lake needs to find a repository by name, serve an anonymous read of a public
 one and collect expired tombstones before it reads any workspace. Its description is a record in
 that workspace's Zetta ([below](#where-the-description-lives-lake315-part-2)); forge records moved
@@ -32,7 +32,7 @@ with lake#341, and its content moves with lake#380.
 |---|---|---|---|
 | `list_repositories` | read | `customer_id?` (narrows to one tenant), `workspace_id?` (narrows to one workspace), `limit?` | — (a workspace that cannot be read marks its rows `description_unavailable`) |
 | `get_repository` | read | `id` | `404 not_found` |
-| `create_repository` | action | `customer_id`, `workspace_id`, `name`, `description?`, `visibility?` | `400 invalid_input` at `/workspace_id` (missing, unknown or deleted workspace), at `/customer_id` (another space's workspace, or an unknown customer), bad name, bad visibility; `409 conflict` (name taken within the customer); with a description, `workspace_not_ready` while the workspace cannot be written, and nothing is created |
+| `create_repository` | action | `customer_id`, `workspace_id`, `name`, `description?`, `visibility?` | `400 invalid_input` at `/workspace_id` (missing, unknown or deleted workspace), at `/customer_id` (another account's workspace, or an unknown customer), bad name, bad visibility; `409 conflict` (name taken within the customer); with a description, `workspace_not_ready` while the workspace cannot be written, and nothing is created |
 | `rename_repository` | action | `id`, `name` | `404 not_found`, `409 conflict` (tombstoned or name taken) |
 | `transfer_repository` | action | `id`, `customer_id` | always `409 conflict` at `/customer_id`: a repository stays in its account and workspace; export it and import it into the other account's workspace. `404 not_found` |
 | `set_repository_visibility` | action | `id`, `visibility` | `400 invalid_input`, `404 not_found`, `409 conflict` (tombstoned) |
@@ -120,8 +120,8 @@ into a sign-in redirect. A signed-in caller continues through the repository pol
 ## Lifecycle
 
 Rename changes only the repository slug. Transfer is refused since migration `0051`: the
-routing trigger keeps a repository's space and workspace fixed, so moving one to another space is an
-export and an import into a workspace of that space. liquid #160 and #165 publish the sync client,
+routing trigger keeps a repository's account and workspace fixed, so moving one to another account is an
+export and an import into a workspace of that account. liquid #160 and #165 publish the sync client,
 server, and wire contract. Lake exposes that contract at
 `/v1/repositories/<repository-id>/sync/*`; [`sync.md`](sync.md) records the routes, binary bodies,
 authorization, and atomic-rejection guarantees.
@@ -169,12 +169,12 @@ repository's metadata, forge records and content when they move.
 
 - **Create.** `create_repository`, `import_repository` and `import_github_repository` require it.
   A missing, malformed, unknown or deleted workspace is `invalid_input` at `/workspace_id`; a
-  workspace of another space is `invalid_input` at `/customer_id`, as for every workspace-scoped
+  workspace of another account is `invalid_input` at `/customer_id`, as for every workspace-scoped
   capability. An agent task's credential supplies its task's workspace, and a call under
   `/w/<workspace id>/` (REST or MCP) supplies the path's. An import never reuses the archive's own
   `workspace_id`: the caller names where the copy goes.
 - **Immutable.** The `repository_workspace_routing` trigger (`enforce_workspace_routing`) refuses a
-  new repository without a live workspace of its own space, and any later change of
+  new repository without a live workspace of its own account, and any later change of
   `workspace_id` or `customer_id`, including assigning one to a repository that has none. That is
   why `transfer_repository` is refused. The one exception is migration `0066`'s own block (below).
 - **Resolvable from the repository.** `get_repository`, `list_repositories`, the export archive and
@@ -184,7 +184,7 @@ repository's metadata, forge records and content when they move.
 - **Workspace deletion.** Deleting a workspace deletes its repositories (lake#514, decision 54
   S12): in the deletion's transaction every repository of the workspace that is live or still
   inside its retention is tombstoned with its retention ended (`retention_until` now, an earlier
-  `deleted_at` kept), which frees its name in the space at once. Each gets a central audit event
+  `deleted_at` kept), which frees its name in the account at once. Each gets a central audit event
   (object `repository/<id>`, request id `workspace-deletion:<workspace_id>`), and its search
   segments are dropped. Their description records (`lake_repositories`) and forge records live in
   the workspace Zetta and go with it. The confirmation lists them first
@@ -193,8 +193,8 @@ repository's metadata, forge records and content when they move.
   `huggingface_hub`'s `create_repo` cannot add body fields, the `X-Lake-Workspace-Id` header
   (`HfApi(headers={"X-Lake-Workspace-Id": ...})`).
 
-Migration `0051` assigns each earlier repository, tombstoned ones included, to its space's only live
-workspace (`sole_workspace`). A repository of a space with several live workspaces, or none, is
+Migration `0051` assigns each earlier repository, tombstoned ones included, to its account's only live
+workspace (`sole_workspace`). A repository of an account with several live workspaces, or none, is
 recorded as `needs_selection` in `workspace_assignments` and reported with a `RAISE WARNING`; it
 keeps working, with `workspace_id: null`, until an explicitly reviewed migration assigns it. List
 them with `SELECT * FROM workspace_assignments WHERE object_table = 'repositories' AND
@@ -202,20 +202,20 @@ outcome = 'needs_selection'`.
 
 Migration `0066_assign_unrouted_repositories` is that reviewed migration (decision 54 S14,
 lake#513). It runs once and is generic rather than naming an id: each repository that still has no
-workspace, tombstoned ones included, is assigned its space's only live workspace when the space now
+workspace, tombstoned ones included, is assigned its account's only live workspace when the account now
 has exactly one; any other (several live workspaces, or none) is left alone and reported with a
-`RAISE WARNING` naming the repository, the space and the count. Each assignment is recorded in
+`RAISE WARNING` naming the repository, the account and the count. Each assignment is recorded in
 `workspace_assignments`: the `repositories` row changes from `needs_selection` to `sole_workspace`,
 and the `repository_descriptions` row, if `0064` recorded one, to `repository_workspace` (the outcome
 `copy_workspace_records` gives a resolved description), with the workspace. The trigger is not
 dropped: `enforce_workspace_routing` lets an update change `workspace_id` only on `repositories`,
-only from NULL to a live workspace of the same space, and only while the transaction-local setting
+only from NULL to a live workspace of the same account, and only while the transaction-local setting
 `lake.repository_assignment` is `0066_assign_unrouted_repositories`. The block sets it before its
 updates and clears it after, so every other change is refused, in the migration's own transaction
 and afterwards. Guard `assign_unrouted_repositories_guard`.
 
 On dev this assigns the `liquid` repository (`f4d3d9bf-84fc-4c0c-a39c-952f46cfee04`) to the first
-workspace of its space, `d2a67e5d-cf36-4cd6-83a1-2e77625284dd`. Steps, for the coordinator:
+workspace of its account, `d2a67e5d-cf36-4cd6-83a1-2e77625284dd`. Steps, for the coordinator:
 
 1. Have the operator vendor `db/schema.sql` through `0066_assign_unrouted_repositories` and select
    `assign_unrouted_repositories_guard`, then apply it (the workspace may still be Pending). The
@@ -234,9 +234,9 @@ Decision 54 (S10) keeps the repository row central as routing and moves only wha
 about the repository. A repository's description, and any later setting (default branch, topics),
 is one sealed record of the `lake_repositories` collection in its workspace's Zetta
 ([workspace records](../architecture/workspace-records.md)), keyed by the repository id and found by
-its space (`customer:<id>`): a workspace belongs to one space, so one `list_records` reads every
-repository record that workspace holds. The body names the repository and its space; a record
-under another key, in another workspace or of another space does not open.
+its account (`customer:<id>`): a workspace belongs to one account, so one `list_records` reads every
+repository record that workspace holds. The body names the repository and its account; a record
+under another key, in another workspace or of another account does not open.
 
 - **Create.** `create_repository`, `import_repository` and `import_github_repository` with a
   description write the record `if_absent` under a new id first, then the routing row under that

@@ -9,9 +9,9 @@ The operator contract is [workspaces](../control-plane/workspaces.md), and the c
 [workspace data-plane design](../architecture/workspace-data-plane.md).
 
 Page paths below have the canonical prefix `/w/<workspace_id>`. The global top-bar selector
-lists the space's workspaces, including a sole preselected workspace, and offers New workspace.
+lists the account's workspaces, including a sole preselected workspace, and offers New workspace.
 Switching preserves the page and filters. Old GET URLs redirect using the validated remembered
-workspace cookie or the space's only workspace; otherwise they show a selection page. Forms
+workspace cookie or the account's only workspace; otherwise they show a selection page. Forms
 carry the ID explicitly and reject a mismatch with the URL. Person-scoped REST and MCP schemas
 require it too. A library agent's task credential is the exception: Lake derives the workspace
 from the immutable task row when the client omits it and rejects a supplied mismatch.
@@ -23,8 +23,9 @@ from the immutable task row when the client omits it and rejects a supplied mism
 | Design | `/design/projects`, `/design/project?name=` | `list_projects`, `get_project`, `create_project`, `delete_project` (typed confirmation; the project's runs and models stay listed), `capture_intent` then `compile_intent` (build a pipeline from what the project should predict), `approve_plan` (approve a proposed pipeline), `gate` then `run` (check and run an approved pipeline) |
 | Design | `/design/solutions`, `/design/solution?id=`, `/design/project?name=` | Orama's solution catalogue beside the workspace's own solutions ([solutions](solutions.md), lake#597), and a solution project. **Start this solution** collects a project name, capability level, dataset, delivery destination and owner, and the customer's value per outcome, investment and currency. A `solution:<project>` Project Agent turn proposes the snapshot, dataset and methodology roles, and policy predicate evidence. The editable proposal is shown before `confirm_solution` calls `create_solution`. The project then shows solution stages and a bounded Runs table with status, stage, error and full-run links. Active runs refresh the page every three seconds. Policy, experiment, monitor and ROI have readable summaries with JSON disclosures; the correctness certificate leads with its verdict, groups applicable checks and places other checks under **Show all**. `run_solution`, `update_policy`, `approve_decision` and `record_outcome` are all workspace actions through lake's authorization and audit path |
 | Design | `/design/pipeline?project=&graph=&step=` | **The pipeline page** (docs/design/zetta-parity.md): `get_graph` drawn as SVG in stage lanes with each step coloured by the latest run; a step inspector; every edit through `edit_pipeline`; **Ask the Project Agent** (a change request answered with a proposal: the edits in words, the graph after, run settings, and *Apply* as one `edit_pipeline` save, or *Discard*; a question or absent proposal instead gets a **Reply** box that continues the same Project Agent conversation; lake#249. While the turn works the page reloads itself every three seconds with a script, because a declarative refresh to its own `#proposal` URL is only a fragment jump (the ExperimentsAgent's working panel, reviewed at `#experiment-proposal`, does the same every two seconds); a proposal that cannot be applied lists each reason as one plain sentence, never a status code or JSON body, followed by the next step; lake#438); `approve_plan`; *Check* (`gate`, every check with its reason); *Check and run* (`gate` then `run` with a chosen dataset, a hold-out of 0.2 by default and a model name defaulting to `<project>_<pipeline>`); *Deploy* (`deploy`, with its gate); the pipeline's runs. The project page adds an empty pipeline (`save_graph`), *Import from n8n* (`import_n8n` → `compile_n8n`) and *Build from Python* (`compile_python`) |
-| Train | `/train/agents`, `/train/agent?id=` | **Agents** ([`train-agents.md`](train-agents.md)): `list_agents`, `get_agent`, `agent_training_status`, `create_agent` (Studio's boxes), `delete_agent` (typed confirmation), `update_agent`, `set_training_schedule`, `agent_run`, `chat` (a `write` in lake, `GET` to Zetta); plus lake's own Agent Library (`list_agent_library`) |
-| Data | `/connections` | Data → Connections (lake#651, [../ui/connections.md](../ui/connections.md)): `list_connections`, **Add connection** (`create_connection`, Postgres or Snowflake), **Delete** with the typed name (`delete_connection`), **Connect one of your services** (`connect_service`: the space's own Ready Postgres services in one click, no password typed or shown; other kinds say *not supported yet*), each connection's kind, host, service, status (from its `credential`) and created date, and *Tables reachable* (`list_source_tables` per connection) |
+| Design | `/design/agents`, `/design/agent?id=` or `?key=`, `/design/agents/new` | **Agents**, where agents are designed ([`train-agents.md`](train-agents.md), lake#653): Orama's (`list_agent_library`, read-only, Duplicate to edit) beside the workspace's own (`list_agents`, `get_agent`), New agent and Edit (`create_agent`, `update_agent`, each kept as a revision, `list_agent_revisions`), Restore, Duplicate, `delete_agent` (typed confirmation), and the Agent Factory |
+| Train | `/train/agents`, `/train/agent?id=` | **Agents**, training the agents that learn ([`train-agents.md`](train-agents.md)): `list_agents` filtered to the trainable, `agent_training_status`, `set_training_schedule`, promote and roll back (`update_agent`), Launch experiment (`agent_turn` to ExperimentsAgent), and the agent's runs and schedules; `agent_run`, `chat_with_agent` (a `write` in lake, `GET` to Zetta) |
+| Data | `/connections` | Data → Connections (lake#651, [../ui/connections.md](../ui/connections.md)): `list_connections`, **Add connection** (`create_connection`, Postgres or Snowflake), **Delete** with the typed name (`delete_connection`), **Connect one of your services** (`connect_service`: the account's own Ready Postgres services in one click, no password typed or shown; other kinds say *not supported yet*), each connection's kind, host, service, status (from its `credential`) and created date, and *Tables reachable* (`list_source_tables` per connection) |
 | Data | `/connections/connection?name=` | One connection: `list_source_tables` with columns, without pulling anything, and **Load into a dataset** (`create_dataset_from_query`, one read-only `SELECT`). `/train/data?browse=<connection>` redirects here |
 | Train | `/train/data` | A projected `workspace_sql` dataset list (`SELECT database, dataset FROM system.datasets`, annotated with `name`, `id` and `kind`; engine results grouped under *Results*, lake#447); **Pull a dataset** (`create_dataset_from_query` from one of the saved connections with one read-only `SELECT`), **Upload a file** (`upload_dataset`: one CSV or JSONL file of at most 16 MiB) |
 | Train | `/train/dataset?database=&name=` | `get_dataset` (id, partitions, copies, health, the loaded format (`format`, lake#594) labelled *Stored as*), its first 20 rows (`workspace_sql`), column types (`analyze_dataset` over 256 sampled rows, plus the value type in the first rows), *Keep durable* (`promote_dataset`, offered only when a partition has one copy), *Query it* |
@@ -40,8 +41,8 @@ from the immutable task row when the client omits it and rejects a supplied mism
 | Ship | `/ship/packages` | lake's own registries, not the workspace (`docs/api/registry.md`) |
 | Ship | `/deployments` | lake's own platform deployments (`docs/api/platform.md`) |
 
-Every page takes `customer_id` and defaults to the viewer's personal space; a selector lists the
-customers the viewer may act for, with their own marked *your personal space*. Until the
+Every page takes `customer_id` and defaults to the viewer's personal account; a selector lists the
+customers the viewer may act for, with their own labelled *Your workspaces*. Until the
 customer's workspace is ready, the page offers **Start your workspace** instead, then shows it being
 prepared and refreshes every 15 seconds.
 
@@ -64,7 +65,7 @@ customer's policy object and is authorized by lake before anything reaches Zetta
 | `create_workspace` | action | `write` | Requires `customer_id`, `name`, `environment`; atomically creates workspace and primary service desired state. `environment` is a lowercase DNS label of up to 47 characters, usually `dev`, `staging` or `prod` (the schema's `examples`); the operator uses it only as the namespace prefix and the `orama.cloud/environment` label, so it is not an enum (lake#594) |
 | `update_workspace` | action | `write` | Requires `customer_id`, `workspace_id`; optional name, environment, desired (`running` or `stopped`); changes increment generation, status fields are refused |
 | `delete_workspace` | action | `admin` | Requires `customer_id`, `workspace_id`, `confirm` equal to the workspace name; deletes the workspace and everything it holds ([Deletion](#deletion)). `dry_run: true` deletes nothing and answers what would be destroyed, with counts (`confirm` optional, checked when given) |
-| `start_workspace` | action | `write` | Idempotent creation of the space's first workspace, named after the account's handle (lake#638; one created earlier as `workspace` keeps that name and is found again), in `prod`; answers its state with its `workspace_id`. It uses the same contract table and never routes data implicitly: later calls name a workspace, and `create_workspace` adds more |
+| `start_workspace` | action | `write` | Idempotent creation of the account's first workspace, named after the account's handle (lake#638; one created earlier as `workspace` keeps that name and is found again), in `prod`; answers its state with its `workspace_id`. It uses the same contract table and never routes data implicitly: later calls name a workspace, and `create_workspace` adds more |
 | `predict` | action (POST, changes nothing) | `read` | Score rows through one **published** model from outside lake (lake#250): `{customer_id, workspace_id, model_id, rows, entity_column?, top_k?}` (`model` is the deprecated name of `model_id`); checks the model is published (`get_model`), then Zetta's `score`. Each `ranked` entry is `{entity, row, risk}`: `row` is the record's position in `rows`, and `entity` the value of its `entity_column` field (default `entity`), omitted when the record has none (lake#450). The engine numbers the rows itself; lake maps each number back. "row 2 has no 'tenure'" is answered `invalid_input` at `/rows/2/tenure`. Ship → Models shows each published model's `curl`. Every answer about a model the workspace has, a refusal included, is counted in the workspace's per-model series with its status class and duration (lake#599, [../serving/telemetry.md](../serving/telemetry.md#the-per-model-prediction-series)); a model id the workspace does not know is never counted |
 | `model_traffic` | read | `read` | A workspace's `predict` traffic (lake#599): `{customer_id, workspace_id, model_id?, from_ms?, to_ms?, step_ms?}`, by default the last 24 hours in about 48 steps (`step_ms` a whole number of minutes, at most 31 days and 10,000 steps). Answers `{from_ms, to_ms, step_ms, models: [{model_id, calls, errors, client_errors, server_errors, mean_ms?, steps: [{at_ms, calls, errors, mean_ms?}]}], requests: {total, by_status_class}, drift: {measured: false, why}}` from the workspace Zetta's `lake_model_calls` and `lake_model_call_ms` series and its `lake_requests` series (`capability` `predict`) through `query_metric`; a series never written reads as no traffic. Drift is not measured: the workspace keeps no reference distribution of a model's training data. Ship → Models and a model's Monitoring view read it |
 | `edit_pipeline` | action | `write` | One validated pipeline edit (`op`: add_step, rename_step, kind_step, remove_step, add_edge, remove_edge, set_attribute (step, name, value; null clears), rename), or `edits`: a list applied in order as one save, all or nothing (how a Project Agent proposal is applied). Every step keeps its `attributes` (source, table, target, algo) through every edit. It reads the graph, applies the edit with `lake::api::pipeline`, refuses one that leaves duplicate ids, unknown kinds, dangling edges or a cycle, and saves the whole graph with `save_graph` by its id. The page's forms, REST and MCP all edit through it |
@@ -98,7 +99,7 @@ project page showed the description in its place. Lake keeps the decision itself
   other type is `invalid_input` at `/input/decision`), sends the engine everything else, reads the
   new project's id back with one `get_project`, and writes the decision once (`if_absent`) as a
   sealed record of `lake_project_decisions` in the workspace Zetta, keyed by that id and found by
-  the space (`include/lake/control/project_decisions.hpp`). The answer carries `decision`. If the
+  the account (`include/lake/control/project_decisions.hpp`). The answer carries `decision`. If the
   decision cannot be written the call answers that error, saying the project was created but its
   decision was not kept.
 - `workspace_query get_project` adds `decision` beside `description` when the project has one. A
@@ -211,7 +212,7 @@ list it, with `counts` (`repositories`, `live_repositories`, `tombstoned_reposit
   the workspace's own audit chain. The operator deletes them from the workspace's desired state;
 - its repositories: live ones, and tombstoned ones still inside their 30-day retention. Each is
   tombstoned with its retention ended (`retention_until` now, `deleted_at` kept where it was set),
-  which frees its name in the space. A tombstone whose retention has already ended is gone
+  which frees its name in the account. A tombstone whose retention has already ended is gone
   already and is not listed. Each repository's description record (`lake_repositories` in the
   workspace Zetta, lake#315 part 2) goes with the Zetta, like its forge records, so the cascade
   takes no step of its own for it;
@@ -220,7 +221,7 @@ list it, with `counts` (`repositories`, `live_repositories`, `tombstoned_reposit
   ([lake#383](https://github.com/oramasearch/lake/issues/383), state `routed`), whose manifests and
   tags go with its Zetta; and what the instance registry still holds from before that split,
   `<space>/<name>` and `<space>/cache/<name>` for each of its apps and each image its builds target
-  (state `tagged`), unless an app or build of another live workspace of the space uses the name.
+  (state `tagged`), unless an app or build of another live workspace of the account uses the name.
 
 **One PostgreSQL transaction** tombstones the repositories, deletes the apps, cancels the builds,
 deletes the workspace's image routes, sets the workspace's desired state to `deleted` with its
@@ -230,7 +231,7 @@ deletion with everything it destroyed in `workspace_deletions` (migration
 
 **After the commit**, lake removes what lives outside PostgreSQL and records the central audit:
 
-1. drops each destroyed repository from its space's search index on lake's volume, and the indexed
+1. drops each destroyed repository from its account's search index on lake's volume, and the indexed
    blobs nothing else uses; for a switched workspace, forgets its search index and removes its
    `search/` objects from the workspace Zetta while lake has the workspace's store open (lake#381;
    otherwise they go with the workspace Zetta), before the store is closed;
@@ -249,7 +250,7 @@ stays pending: `delete_workspace` answers `deletion.completed: false` with the r
 that owns the store root). Repeating `delete_workspace` for the deleted workspace resumes it too,
 and answers the recorded deletion; the dry run of a deleted workspace answers the same record.
 
-The repositories' content stays in the space's liquid store until the collector reclaims it, as
+The repositories' content stays in the account's liquid store until the collector reclaims it, as
 for any tombstone whose retention has ended. A workspace whose repositories moved into its own store
 ([lake#380](https://github.com/oramasearch/lake/issues/380), [workspace-store.md](workspace-store.md))
 has that store closed and its bucket lease released before lake reports the deletion complete
@@ -361,10 +362,10 @@ and the capabilities answer `store_unavailable`. `LAKE_DATA_PLANE_*`, `LAKE_WORK
 ctest --test-dir build -R 'Workspaces|WebUi'
 ```
 
-`WorkspaceDeletion.*` (memory and PostgreSQL) covers the cascade: two spaces with two workspaces
+`WorkspaceDeletion.*` (memory and PostgreSQL) covers the cascade: two accounts with two workspaces
 each, a workspace with live and tombstoned repositories, an app, builds and images, the dry run's
-counts, names freed, the other workspace and space untouched, an interrupted cascade resumed by
-the owner loop without repeating an audit event, and that only an administrator of the space
+counts, names freed, the other workspace and account untouched, an interrupted cascade resumed by
+the owner loop without repeating an audit event, and that only an administrator of the account
 deletes. `RegistryProtocols.DeletingAWorkspaceMakesItsImagesUnpullable` checks pulls against a
 running lake, and `Search.DroppingARepositoryRemovesItsSegmentsAndUnsharedBlobs` the index.
 `Workspaces.*` covers the slug, the workspace as the default service created once, withdrawal and

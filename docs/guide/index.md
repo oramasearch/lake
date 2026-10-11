@@ -28,7 +28,7 @@ The rail on the left groups Lake's pages:
 |---|---|---|
 | **Home** | Ask Orama, Dashboard | Ask about anything in your Lake; the whole platform at a glance |
 | **Data** | Repositories, Shared with Me, Search, Datasets, Transcripts | Where your data lives and is found |
-| **Design** | Projects, Opportunities, Solutions, Methodologies, Agent Library | Deciding what AI to build, and designing its workflow |
+| **Design** | Projects, Opportunities, Solutions, Methodologies, Agents | Deciding what AI to build, designing its workflow and the agents that do it |
 | **Train** | Agents, Runs, Experiments, Models, Streams | Training models and agents, and watching them work |
 | **Ship** | Models, Search Indexes, Packages, Apps, Deployments, Services, Workspaces | Putting what you built to work |
 | **Organization** | Organizations, Secrets, Usage, Activity | People, credentials, usage and history |
@@ -160,6 +160,7 @@ From an AI agent it is the MCP tool `predict`. **Unpublish** stops every outside
 | Keep code and files in Lake | [Repositories](/docs/repositories), [Sharing and Shared with Me](/docs/sharing) |
 | Find anything | [Search](/docs/search) |
 | Turn recordings into searchable text | [Transcripts and Speech-to-Text](/docs/transcripts) |
+| Use another MCP server's tools from Lake | [MCP Connections](/docs/mcp-connections) |
 | Start from a ready-made business solution | [AI Solutions, Methodologies and Opportunities](/docs/solutions) |
 | Build agents and tune models | [Agents](/docs/agents), [Experiments](/docs/experiments), [Streams](/docs/streams) |
 | Ship apps, images and databases | [Apps](/docs/apps), [Packages, Builds and the Registry](/docs/registry), [Deployments and Environments](/docs/deployments), [Services and Storage](/docs/services) |

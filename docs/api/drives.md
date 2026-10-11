@@ -10,7 +10,7 @@ drives are the places it keeps files. Each drive keeps its files one of four way
 | `virtual` | folders and shortcuts only | none | the entry capabilities below, without uploads |
 | `store` | one of the workspace's bucket or filesystem stores, in place (lake#656) | the provider's | the entry capabilities below, an item's `id` being its path ([Store drives](#store-drives)) |
 
-A drive is one sealed record in `lake_drives` of its workspace Zetta, found by its space; its
+A drive is one sealed record in `lake_drives` of its workspace Zetta, found by its account; its
 folders, files and shortcuts (a `files` or `virtual` drive's) are sealed records in
 `lake_drive_entries`, found by drive ([workspace-records.md](../architecture/workspace-records.md)).
 Nothing about a drive is in PostgreSQL. Deleting the workspace deletes them with its Zetta.
@@ -18,7 +18,7 @@ Nothing about a drive is in PostgreSQL. Deleting the workspace deletes them with
 ## Capabilities
 
 Every capability takes `customer_id` and `workspace_id` (`Registry::call` checks the workspace is
-the space's) and authorizes on the space: reads need `read`, actions `write`. Every call is
+the account's) and authorizes on the account: reads need `read`, actions `write`. Every call is
 audited in the workspace's own log ([audit.md](audit.md#which-log)).
 
 | Capability | Kind | Input (besides `customer_id`, `workspace_id`) | Output |
@@ -41,6 +41,7 @@ audited in the workspace's own log ([audit.md](audit.md#which-log)).
 | `read_drive_file` | read | `drive_id`, `id`, `offset?`, `length?` | `{id, name, size, content_type, sha256, offset, content_base64}` |
 | `recent_drive_entries` | read | `limit?` (1 to 100, default 20) | `{items: [{drive: {id, name}, entry}]}` |
 | `load_drive_dataset` | action | `drive_id`, `id`, `table_name`, `format?`, `if_exists?` | `upload_dataset`'s answer, with `source: {drive_id, id, name}` |
+| `load_drive_model` | action | `drive_id`, `id`, `name` or `version_of`, `kind?`, `metrics?` | `register_model`'s answer (`model_id`, …), with `source: {drive_id, id, name}` ([models.md](models.md#a-standalone-model-lake654)) |
 
 | `search_drives` | read | `q` (1 to 255 bytes), `drive_id?`, `limit?` (1 to 200, default 50) | `{items: [match], truncated, skipped: [{drive, reason}]}` ([Search](#search)) |
 
@@ -101,7 +102,7 @@ drive refuses uploads.
 | `transcript` | `id` | the transcript exists in this workspace |
 | `dataset`, `agent`, `model` | `id` | not checked |
 | `project` | `name` | not checked |
-| `url` | `url` (`http://` or `https://`, no space, `"`, `<` or `>`) | not checked |
+| `url` | `url` (`http://` or `https://`, no whitespace, `"`, `<` or `>`) | not checked |
 
 `create_drive_shortcut` refuses a checked target that is not there (`not_found` at `/target`).
 Every listing and `get_drive_entry` checks again and answers `status`: `ok`, `broken` (with
@@ -241,6 +242,16 @@ its errors come back at this call's fields (`/table_name`, and `/id` for the con
 MiB (`size_invalid` at `/id`), as `upload_dataset` takes. Nothing is stored anywhere but the
 dataset. The Drives page offers it as **Load as dataset** on a CSV or JSONL file.
 
+## A Drive File as a Model (lake#654)
+
+`load_drive_model` brings a model file of a drive into the workspace as a standalone model, the same
+way: `id` is the file, a virtual drive is refused at `/drive_id`, the bytes are read as the caller,
+and the text goes to the workspace engine's `register_model` through `workspace_act` with `name`
+(or `version_of`), `kind?`, `metrics?` and `source` (`drive <drive name>: <file name>`). A new model
+needs `name` (`invalid_input` at `/name` before a byte is read). The engine's refusal of the file
+(`not_supported` for a format it cannot read) comes back at `/id`. At most 16 MiB. Train → Models'
+**New model**, Bring one, A drive offers it ([models.md](models.md#a-standalone-model-lake654)).
+
 ## Search
 
 `search_drives` finds the drives, folders, files and shortcuts of the workspace whose **name**
@@ -274,7 +285,7 @@ it, a read failure) is listed in `skipped` with the reason and never fails the c
 the repository's own: a person who sees a repository folder only through a shared link finds
 nothing of it here.
 
-Like `list_drive_entries`, the read authorizes `read` on the space before it reads, and its audit
+Like `list_drive_entries`, the read authorizes `read` on the account before it reads, and its audit
 event (in the workspace's log) records the `drive_id` searched and the number of matches, never the
 query.
 
@@ -310,7 +321,7 @@ holds the key; a move or rename never touches the object.
   into its folder.
 
 **Known gap:** `lake_files` is created without a quota, and lake's storage quota and usage
-figures read the `lake_store` bucket, so workspace files are not counted against the space's
+figures read the `lake_store` bucket, so workspace files are not counted against the account's
 storage quota yet. The workspace Zetta's own volume is the bound.
 
 ## Errors
@@ -333,12 +344,12 @@ storage quota yet. The workspace Zetta's own volume is the bound.
   and workspace); chunked writes, retries, a lost answer, out-of-order and short objects, any-range
   reads; a workspace-files drive end to end (folders from an upload path, chunked upload, finish,
   moves without copying, rename/replace/refuse, recursive delete, recent files, drive delete);
-  another space refused; a virtual drive's shortcuts going broken; the audit routing; and over
+  another account refused; a virtual drive's shortcuts going broken; the audit routing; and over
   HTTP, a repository drive's `main` from creation (a bare repository's `drive_browse` is
   `not_found`) and a streamed download of a 3 MiB file.
 - `Drives.SearchFindsDrivesFoldersFilesAndShortcutsByName`: matches across a workspace-files and a
   virtual drive in either case, with their paths, sizes and shortcut status; an unfinished upload
-  never found; a limit with `truncated`; one drive; another workspace; another space refused.
+  never found; a limit with `truncated`; one drive; another workspace; another account refused.
   `DrivesHttp.SearchFindsTheNamesOfARepositoryDrivesPaths`: a repository drive's folder and file
   paths, without the folder marker.
 - `SchemaConformance.EveryToolAndRequiredOutputUsesHttpContract` calls every capability above and
@@ -356,7 +367,9 @@ storage quota yet. The workspace Zetta's own volume is the bound.
 - `DrivesHttp.ARepositoryDriveWriteIsSearchedDownloadedAndLoaded` (lake#584, lake#587, lake#593):
   a drive write found by hot search, then moved and deleted; `download_drive_file`'s bytes, media
   type and `download_url`, whose route serves `text/csv` with the file's name; both download routes
-  in OpenAPI; and `load_drive_dataset` sending the CSV to `upload_dataset`.
+  in OpenAPI; and `load_drive_dataset` sending the CSV to `upload_dataset`; `load_drive_model`
+  sending a model file's text, its name, metrics and source to `register_model`, refusing a new
+  model with no name at `/name`, and the engine's refusal of the file at `/id` (lake#654).
   `DrivesHttp.AWorkspaceFileDownloadStreamsItsBytes` checks `Content-Disposition` and loads a JSONL
   workspace file.
 

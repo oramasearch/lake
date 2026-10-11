@@ -81,6 +81,8 @@ int usage() {
                  "(default gpt-4o-transcribe)");
     std::println("  LAKE_MODEL_PROVIDER_URL the model gateway's OpenAI-compatible provider "
                  "(default https://api.openai.com/v1)");
+    std::println("  LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1 lets MCP connections reach loopback and "
+                 "private addresses (local development only)");
     std::println(
         "  LAKE_BILLING=on turns billing on (Orama Cloud); unset or off, as on an enterprise "
         "install, billing is absent. LAKE_BILLING_INSTRUCTIONS tells accounts how to pay");
@@ -164,6 +166,9 @@ int main(int argc, char** argv) {
     opts.openai_api_key = env_or("LAKE_OPENAI_API_KEY", "");
     opts.model_provider_url = env_or("LAKE_MODEL_PROVIDER_URL", "");
     opts.transcribe_model = env_or("LAKE_TRANSCRIBE_MODEL", "");
+    // MCP connections reach only public addresses unless this is set, for local development
+    // against an MCP server on the same machine (docs/api/mcp-connections.md#the-client).
+    opts.mcp_allow_private_addresses = env_or("LAKE_MCP_ALLOW_PRIVATE_ADDRESSES", "") == "1";
     // Billing (docs/api/billing.md): on only where LAKE_BILLING=on, as on Orama Cloud; an
     // enterprise install leaves it unset and has no billing capability or page.
     opts.billing = lake::api::billing_enabled(env_or("LAKE_BILLING", ""));

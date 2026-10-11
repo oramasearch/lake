@@ -74,7 +74,10 @@ workspace uses; `ask_messages.hpp` is the reference codec. `Store` has no reads 
 first mutable collection (Design → Opportunities, lake#376): derived keys, conditional status
 writes; the retired `opportunities` table is dropped by migration `0070` with its legacy reads.
 `transcripts.hpp` (lake#561) is the transcripts codec: one record per transcript in its
-workspace, found by the space, never in PostgreSQL (`docs/api/transcripts.md`). See
+workspace, found by the space, never in PostgreSQL (`docs/api/transcripts.md`).
+`mcp_connections.hpp` (lake#652) is the MCP connection codec: the connection, the person's decision
+for each tool, the auto-approve grants and the streams, with its credential only named
+(`lake-secret://`), and the OAuth state codec (`docs/api/mcp-connections.md`). See
 `docs/architecture/workspace-records.md`. `drive_share_links.hpp` is the drive share link codec
 (lake#350): a mutable record per link keyed by its id and found by repository and folder, and the
 bearer token format `<workspace id>.<link id>.<secret>` that routes a recipient to the workspace.
@@ -122,7 +125,9 @@ workspace, and `transfer_repository` is no longer part of `Store`.
 
 `metering.hpp` holds repository usage in workspace Zettas (lake#348, lake#349): the
 `lake_metering_usage` hourly transfer counters, added to with a conditional write, and the
-`lake_metering_build_records` per-result records, written `if_absent`. `store.hpp` has no
+`lake_metering_build_records` per-result records, written `if_absent`, and (lake#658) the
+`lake_metering_job_records` that a finished build, agent job or cron run was charged, written
+`if_absent` before its resources are added to the usage series. `store.hpp` has no
 metering store methods: the retired tables and their legacy reads are gone (migration `0070`).
 `store.hpp`'s `UsageLimit`, `usage_limits` and `set_usage_limit` are an account's per-dimension
 usage limits (migration `0072_usage_limits`, lake#564): content-free configuration; the usage stays

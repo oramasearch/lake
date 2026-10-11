@@ -11,8 +11,9 @@ gives the document title, `lake — <title>`, unless the page names its own.
 | `/design/project?name=retention-review` | Design › Projects › **retention-review** |
 | `/design/pipeline?project=retention-review&graph=churn` | Design › Projects › retention-review › **churn** |
 | `/design/opportunities`, `/design/discover` | Design › **Opportunities** |
-| `/train/agents`, `/train/agent?id=…` | Train › **Agents**; Train › Agents › **the abbreviated agent id** |
-| `/train/agents/new` | Train › Agents › **Agent Factory** |
+| `/design/agents`, `/design/agent?id=…` or `?key=…` | Design › **Agents**; Design › Agents › **the agent's name** (lake#653) |
+| `/design/agents/new` | Design › Agents › **Agent Factory** (`/train/agents/new` redirects here) |
+| `/train/agents`, `/train/agent?id=…` | Train › **Agents**; Train › Agents › **the agent's name** |
 | `/ask` | **Ask Orama** |
 | `/train/data`, `/train/query` | Train › **Data**; Train › Data › **Query** |
 | `/train/dataset?name=accounts` | Train › Data › **accounts** |

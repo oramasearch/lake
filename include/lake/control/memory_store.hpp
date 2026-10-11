@@ -250,6 +250,8 @@ public:
                                                 std::string phase,
                                                 std::string message,
                                                 std::string credential_sha256);
+    // Moves a cron run's start `seconds` earlier, so a test can give it a duration (lake#658).
+    Result<void> age_agent_cron_run(const std::string& run_id, std::int64_t seconds);
     Result<void> put_agent_cron_run(const std::string& schedule_id,
                                     const std::string& run_id,
                                     const std::string& job_name,

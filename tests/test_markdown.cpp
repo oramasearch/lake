@@ -2,6 +2,8 @@
 #include <array>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <regex>
 #include <set>
@@ -388,9 +390,8 @@ namespace {
 // Where a text a person reads says "space" or names the product "lake" in prose: one line each, with
 // what is around it. Code spans and blocks are left out (`customer_id`, `remove_space_store`,
 // `claude mcp add lake`), and so are workspace, namespace and whitespace, which are other words.
-std::vector<std::string> wording_faults(std::string_view text) {
+std::vector<std::string> space_faults(const std::string& prose) {
     static const std::regex space(R"re(\bspaces?\b)re", std::regex::icase);
-    const std::string prose = prose_of(text);
     std::vector<std::string> faults;
     for (auto it = std::sregex_iterator(prose.begin(), prose.end(), space);
          it != std::sregex_iterator();
@@ -399,6 +400,12 @@ std::vector<std::string> wording_faults(std::string_view text) {
         faults.push_back("says \"" + it->str() + "\": " +
                          prose.substr(at < 60 ? 0 : at - 60, 120));
     }
+    return faults;
+}
+
+std::vector<std::string> wording_faults(std::string_view text) {
+    const std::string prose = prose_of(text);
+    std::vector<std::string> faults = space_faults(prose);
     for (const std::string& near : lowercase_product_names(prose)) {
         faults.push_back("names the product \"lake\": " + near);
     }
@@ -480,6 +487,34 @@ TEST(Docs, AgentDocsSayLakeAndNeverSpace) {
             }
         }
     }
+}
+
+// The developer docs and the guide's own files never say "space" either (lake#669): every
+// docs/api/*.md and docs/guide/*.md file, README.md included, with the same allowances as above
+// (code spans and blocks, so `customer_id`, `remove_space_store` and the `spaces` field may be
+// named; workspace, namespace and whitespace are other words). Their prose may name the binary
+// lowercase, so only "space" is checked here.
+TEST(Docs, DeveloperDocsNeverSaySpace) {
+    std::size_t files = 0;
+    for (const char* folder : {"api", "guide"}) {
+        const std::filesystem::path root =
+            std::filesystem::path(LAKE_TEST_SOURCE_DIR) / "docs" / folder;
+        for (const auto& entry : std::filesystem::directory_iterator(root)) {
+            if (entry.path().extension() != ".md") {
+                continue;
+            }
+            std::ifstream in(entry.path(), std::ios::binary);
+            ASSERT_TRUE(in) << entry.path();
+            const std::string text{std::istreambuf_iterator<char>(in),
+                                   std::istreambuf_iterator<char>()};
+            ++files;
+            for (const std::string& fault : space_faults(prose_of(text))) {
+                ADD_FAILURE() << "docs/" << folder << "/" << entry.path().filename().string()
+                              << " " << fault;
+            }
+        }
+    }
+    EXPECT_GT(files, 60U);
 }
 
 // llms.txt, llms-full.txt and the skill keep their own sections: what Lake does, the flows, every

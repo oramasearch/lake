@@ -21,6 +21,7 @@
 #include "lake/api/server.hpp"
 #include "lake/control/identity_crypto.hpp"
 #include "lake/control/memory_store.hpp"
+#include "mcp_test_server.hpp"
 #include "objects/records.hpp"
 #include "one_thread_io.hpp"
 #include "repository_test_support.hpp"
@@ -415,6 +416,8 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
              -> std::expected<lake::api::Transcription, lake::api::ApiError> {
              return lake::api::Transcription{"schema words", 1.5, "gpt-4o-transcribe"};
          },
+         // MCP connections reach the local test server (docs/api/mcp-connections.md).
+         .mcp_allow_private_addresses = true,
          // A fake model provider: the model gateway never calls OpenAI in tests (lake#248).
          .model_provider =
              [](const lake::api::ModelProviderRequest&) {
@@ -460,7 +463,6 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     http.call("delete_stream_messages", stream_delete);
     stream["confirm_name"] = "schema-orders";
     http.call("delete_stream", stream);
-    http.call("transcribe", {{"name", "memo.webm"}, {"audio_base64", "c3BlZWNo"}});
     {
         // The model gateway answers only an agent run's own credential (docs/api/model-gateway.md).
         lake::control::AgentTask task;
@@ -485,6 +487,9 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
         http.bearer = operator_bearer;
     }
     const json transcript_scope{{"customer_id", customer.id}, {"workspace_id", experiments.id}};
+    auto dictation = transcript_scope;
+    dictation.update({{"name", "memo.webm"}, {"audio_base64", "c3BlZWNo"}});
+    http.call("transcribe", dictation);
     auto transcript_input = transcript_scope;
     transcript_input.update({{"title", "Schema call"}, {"source", "text"}, {"text", "words"}});
     const auto transcript = http.call("create_transcript", transcript_input);
@@ -502,6 +507,36 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
     transcript_edit["title"] = "Schema call, edited";
     http.call("update_transcript", transcript_edit);
     http.call("delete_transcript", transcript_id);
+    // MCP connections against a local test MCP server (docs/api/mcp-connections.md, lake#652).
+    lake::test::McpTestServer mcp_server;
+    auto mcp_input = transcript_scope;
+    mcp_input.update({{"name", "Schema MCP"}, {"url", mcp_server.url()}});
+    const auto mcp = http.call("create_mcp_connection", mcp_input);
+    http.call("list_mcp_connections", transcript_scope);
+    auto mcp_id = transcript_scope;
+    mcp_id["id"] = mcp.at("id");
+    http.call("get_mcp_connection", mcp_id);
+    auto mcp_tools = mcp_id;
+    mcp_tools["tools"] = {{"echo", {{"allowed", true}}}, {"create_ticket", {{"allowed", true}}}};
+    http.call("update_mcp_connection", mcp_tools);
+    http.call("refresh_mcp_connection", mcp_id);
+    http.call("test_mcp_connection", mcp_id);
+    http.call("list_mcp_connection_tools", transcript_scope);
+    auto mcp_call = transcript_scope;
+    mcp_call.update(
+        {{"connection_id", mcp.at("id")}, {"tool", "echo"}, {"arguments", {{"text", "hi"}}}});
+    http.call("read_mcp_tool", mcp_call);
+    mcp_call["tool"] = "create_ticket";
+    mcp_call["arguments"] = {{"title", "Schema ticket"}};
+    http.call("call_mcp_tool", mcp_call);
+    auto mcp_grant = transcript_scope;
+    mcp_grant.update({{"connection_id", mcp.at("id")},
+                      {"tool", "create_ticket"},
+                      {"agent", "agent-1"},
+                      {"auto_approve", true}});
+    http.call("set_mcp_tool_auto_approve", mcp_grant);
+    http.call("list_mcp_connection_calls", mcp_id);
+    http.call("delete_mcp_connection", mcp_id);
     // A workspace's own solutions (docs/api/solutions.md, lake#597).
     auto solution_input = transcript_scope;
     solution_input.update({{"name", "Schema solution"},
@@ -511,6 +546,10 @@ TEST(SchemaConformance, EveryToolAndRequiredOutputUsesHttpContract) {
                            {"methodologies", json::array({"M-1"})}});
     const auto solution = http.call("create_solution", solution_input);
     http.call("list_solutions", transcript_scope);
+    // An agent's definition revisions (docs/api/train-agents.md, lake#653): none for an unknown agent.
+    auto revisions = transcript_scope;
+    revisions["agent_id"] = "schema-agent";
+    http.call("list_agent_revisions", revisions);
     auto solution_id = transcript_scope;
     solution_id["id"] = solution.at("solution").at("id");
     http.call("get_solution", solution_id);

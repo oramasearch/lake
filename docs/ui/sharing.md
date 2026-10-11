@@ -43,14 +43,14 @@ cannot enforce.
 
 ## Which workspace holds the links
 
-A folder's links live in one workspace of the repository's space (lake#350). The sharing pages
+A folder's links live in one workspace of the repository's account (lake#350). The sharing pages
 carry it as `workspace_id` in every URL and call. `/drive/share` without one first asks
 `my_permissions` whether the person may share the folder (`object_type: "drive folder"`) and shows
 the refusal if not. Then it opens the same page with the current workspace when it is one of the
-space's, else the space's only workspace, written into the URL. When the space has several and
-none is current, the page asks which one. The workspace choices are the space's
-`list_workspaces` when the person may read it, else their own view of the space from `viewer`.
-The management table names the workspace whose links it lists and links to the space's other
+account's, else the account's only workspace, written into the URL. When the account has several and
+none is current, the page asks which one. The workspace choices are the account's
+`list_workspaces` when the person may read it, else their own view of the account from `viewer`.
+The management table names the workspace whose links it lists and links to the account's other
 workspaces. `my_permissions` only decides what the page shows; `drive_effective_access` and the
 share capabilities check again.
 
@@ -91,7 +91,7 @@ bytes are revocable.
 
 ## Verification
 
-As a folder owner, open `/drive/share` on a space with two workspaces (the page asks) and with one
+As a folder owner, open `/drive/share` on an account with two workspaces (the page asks) and with one
 (it opens it); share with a person, create a link, open its detail page and revoke it. As a person
 who cannot share, open `/drive/share` and see the refusal. As the recipient, open
 `/shared-with-me`. Signed out, open a link, enter a child folder, preview a file, download it and

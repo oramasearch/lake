@@ -88,6 +88,28 @@ Orama's answers the new `forbidden` (403). Lake's `create_solution` is not the e
 the project and its first pipeline from the composed methodology, since the engine composes the
 governed foundation only for catalogue ids. Not deployed. See `docs/api/solutions.md`.
 
+A workspace is the client of remote MCP servers (decision 60, lake#652, no migration): Lake's own
+client (`McpClient`, Streamable HTTP and HTTP+SSE, every exchange bounded) over the server's
+transport, which reaches public addresses only (`LAKE_MCP_ALLOW_PRIVATE_ADDRESSES=1` for local
+development); each connection a sealed `lake_mcp_connections` record in the workspace Zetta, its
+bearer token or OAuth refresh token a workspace secret Lake reads server-side and never answers;
+fifteen capabilities (`create_mcp_connection` … `create_mcp_connection_agent`), a tool allowed by a
+person and either a read or a change, a change a person's or an auto-approved agent's (per tool and
+agent, audited), calls audited in the workspace and metered (`calls`, `transfer`); OAuth 2.1 sign-in
+(RFC 9728/8414 discovery, RFC 7591 registration, PKCE S256, refresh rotation); opt-in re-export
+through `/w/<workspace>/mcp` as `<prefix>__<tool>`; a connection's agent (skill `mcp:<prefix>`,
+needing the zetta change) with input and output streams and mirrored notifications, run by the store
+root's owner (`McpStreamWorker`); Data → MCP Connections in the web app. Not deployed. See
+`docs/api/mcp-connections.md` and `docs/ui/mcp-connections.md`.
+A standalone model follows (lake#654, no migration): Train → Models' New model trains one from a
+dataset, a target and a methodology (`train_model`) or brings a model file from this computer, a
+drive (`load_drive_model`) or a model repository (`register_model`); a standalone model has Retrain,
+New version (`retrain_model`), Move into a project (`move_model_to_project`) and Delete (each
+version's `delete_model`), and Ship serves it as any model. The engine keeps an internal project for
+it that it never lists. An engine that lacks an allow-listed capability is answered `not_supported`.
+Needs the zetta standalone-models change in the workspace image. Not deployed. See
+`docs/api/models.md#a-standalone-model-lake654` and `docs/ui/train.md#a-standalone-model`.
+
 The workspace engine's capabilities are named capabilities (lake#650, no migration): every name in
 `workspace_reads` and `workspace_actions` is served by `/v1/<name>`, its own OpenAPI operation and
 its own MCP tool, either one registered from the engine's input schema (`src/api/engine_openapi.json`,
@@ -97,6 +119,14 @@ capability that already covered it. Each runs the `workspace_query`/`workspace_a
 where the engine's name collides or says too little (`gate` is `check_pipeline`, `run` is
 `start_run`, `search` is `search_workspace_index`). Those two stay, with an `enum` on `capability`.
 Not deployed. See `docs/api/engine-capabilities.md`.
+Agents are designed in Design → Agents and trained in Train → Agents (lake#653, no migration):
+Design → Agents (was Agent Library; `/design/agent-library` and `/train/agents/new` redirect) lists
+Orama's agents read-only beside the workspace's own, with New agent, Duplicate, Edit and the Agent
+Factory; every `create_agent` and `update_agent` the engine accepts is kept as a sealed, append-only
+`lake_agent_revisions` record in the workspace Zetta (`list_agent_revisions`); Train → Agents lists
+only agents with something to train, with performance, versions, promote and roll back, the
+training schedule and Launch experiment. The pages call the named engine capabilities. Not
+deployed. See `docs/api/train-agents.md`.
 
 A workspace's own methodologies from Python code follow (lake#655, migration `0078_methodology_runs`):
 the code is a manifest, an entrypoint with fit, predict and score, and a hashed lock file in a
@@ -224,6 +254,17 @@ GPU-minute, with a GPU rate per class (`billing_plan_prices.class`). `instances`
 the operator must vendor the schema, select `workload_resources_guard` and report the resources
 (orama-operator#288).
 See `docs/api/metering.md#resources` and `docs/api/billing.md#price-list`.
+Every kind of usage is metered and billed (lake#658, migration `0077_metered_jobs`): a finished
+build, job launch or agent cron run (new `workload_resources` kind `agent_cron_run`) is charged once
+whenever lake first finds its resources reported, in the hour it ended, recorded `if_absent` in its
+workspace (`lake_metering_job_records`); `transcribe` names its workspace (lake#613); Zetta's
+`storage_usage` adds `storage` kinds `models`, `indexes`, `runs`, `streams`, `files`, `buckets`;
+`search_index` counts the priced `searches`; drive, image, file and Hub bytes count as `transfer`;
+`instances`, `build_compute`, `run_compute` are unbilled detail (`billed: false`).
+`tests/test_usage_contract.cpp` fails on an unmetered capability, workload kind or store type, or a
+billed dimension without a list rate. Not deployed; the operator must vendor the schema, select
+`metered_jobs_guard` and report cron runs and job templates. See
+`docs/api/metering.md#what-is-metered-where`.
 Deleting and revoking follow (lake#645, migration `0076_organization_deletion`): `delete_organization`
 (an owner; refused while its account has workspaces, which it names; the organization and its account
 are marked `deleted_at`, never erased, because the central audit chain names the account),
@@ -697,7 +738,7 @@ one adapter TU) and the pure renderers in `include/zetta/api/web_ui.hpp`.
 - **Schema.** `db/schema.sql` is the source of truth; the operator carries a byte-identical
   vendored copy at `internal/controller/assets/lake-schema.sql` and applies it per Lake as an
   owned `PostgresSchema` (one transaction, guarded on the table the **newest** migration creates,
-  `organization_deletion_guard` in the source tree, versioned by content hash).
+  `metered_jobs_guard` in the source tree, versioned by content hash).
   Change the schema HERE, then copy it into the operator in the same change; the operator's test
   checks the copy carries the source-of-truth header. Migrations are single-shot today
   (incremental migrations are the PostgresSchema follow-up), so until then a schema change means

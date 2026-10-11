@@ -31,7 +31,7 @@ The page is described in [../ui/drives.md](../ui/drives.md#storage).
   ([drives.md](drives.md#store-drives)), browsed in place. A volume reads *Shown, not browsed*:
   its contents belong to the service that mounts it. No bucket or filesystem provider is offered
   or browsable yet ([lake#664](https://github.com/oramasearch/lake/issues/664)). Which services and
-  apps mount a store, and its used space, are not recorded yet
+  apps mount a store, and how much of it is used, are not recorded yet
   ([lake#666](https://github.com/oramasearch/lake/issues/666)).
 - **Show connection** (once Ready): answers with the Data page itself, showing every field the
   operator delivered (for a volume: `claim`, `namespace`, `size_gi`, `storage_class`) once. It is
@@ -58,7 +58,7 @@ server form routes were retired in lake#561.
 All are in lake's registry (REST, OpenAPI, MCP; the *Storage* group in `llms.txt`, the skill and the
 MCP page) and authorized on the customer's policy object. Every capability except
 `list_store_providers` also requires `workspace_id`, supplied by the `/w/<id>/` URL or an agent
-task's workspace when the input leaves it out, and must name a live workspace of the space. A store
+task's workspace when the input leaves it out, and must name a live workspace of the account. A store
 of another workspace is `not_found`.
 
 | Capability | Kind | Action on the customer | What it does |
@@ -102,7 +102,7 @@ ctest --test-dir build -R 'Stor'
   `{size_gi, region, public}`, conflict, withdrawal, a `LISTEN lake_services` connection receiving
   each id, and `store_status` joined in with `Deleted` history hidden.
 - `PostgresStores.MigrationAssignsTheSoleWorkspaceAndRecordsTheRest`: migration 0044 run twice over
-  stores without a workspace — the sole workspace assigned, a two-workspace space recorded as
+  stores without a workspace — the sole workspace assigned, a two-workspace account recorded as
   `needs_selection`, and the workspace immutable afterwards.
 - `OperatorContract.*`: the operator's own SQL against lake's schema (see
   [`../control-plane/storage.md`](../control-plane/storage.md#verify)).

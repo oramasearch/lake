@@ -127,7 +127,7 @@ durable identity.
 - **Tokens that never expire** (lake#234). `create_token` with `never_expires: true` from a
   signed-in person issues a **standing** token: static, no expiry, and **no parent**, so signing out
   or the browser session expiring does not end it. It needs a non-empty `reason` and named scopes
-  (never `*`) within the issuer's scopes, the person's personal space must have
+  (never `*`) within the issuer's scopes, the person's personal account must have
   `allow_non_expiring_credentials` on (`set_customer_credential_policy`), and the instance must not
   set `LAKE_ALLOW_NON_EXPIRING_CREDENTIALS=false`. Its authority is still the person's live grants on
   every request; revoking it, `revoke_user_sessions`, or removing the person stops it. The tokens

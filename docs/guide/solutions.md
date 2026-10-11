@@ -362,7 +362,7 @@ Then list, create and dismiss:
 ```
 
 When Auto-Suggest is not running on this Lake, the page says *a new scan is not available*;
-earlier Opportunities stay listed. **Design → Agent Library** shows which agents run
+earlier Opportunities stay listed. **Design → Agents** shows which of Orama's agents run
 ([Agents](/docs/agents)).
 
 ## Permissions

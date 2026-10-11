@@ -69,7 +69,7 @@ operator credential has no account pages: they show *This page belongs to an acc
 ## Application identity
 
 An operator registers identity applications at `/applications` (`pages/admin/ApplicationsPage.tsx`),
-choosing the workspace of a space that will hold the application's records (it never changes). The
+choosing the workspace of an account that will hold the application's records (it never changes). The
 application page (`/application?id=`) links its users (`/application/users`), organizations
 (`/application/organizations`), lifecycle events and webhook registration
 (`/application/events`). Its settings, users, organizations, events with their delivery attempts,

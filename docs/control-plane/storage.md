@@ -15,7 +15,7 @@ valid pairs and which are available on this lake.
 | Type | What a client gets | Providers (✅ phase 1) |
 |---|---|---|
 | `object` (a bucket) | S3-compatible or native object API | `r2` Cloudflare R2, `s3` AWS S3, `b2` Backblaze B2, `azure` Azure Blob, `gcs` Google Cloud Storage, `lake` a liquid repository, `zetta` Zetta large objects |
-| `filesystem` | a POSIX tree in the customer's space | `lake` (Drive), `zetta` |
+| `filesystem` | a POSIX tree in the customer's account | `lake` (Drive), `zetta` |
 | `network_filesystem` | a shared mount several services attach read-write | `nfs` (in-cluster, run by the operator), `azure` Azure Files, `s3` EFS, `gcs` Filestore |
 | `volume` | a block volume one service mounts | ✅ `cluster` (the cluster's StorageClass) |
 
@@ -33,15 +33,15 @@ the customer chose otherwise — **private by default**), `desired` (`present` |
 `generation` (bumped on every desired change), `created_by_taap_id`, `created_at`, `updated_at`,
 and `workspace_id` (migration `0044_store_workspaces`, lake#465): the workspace the store belongs
 to. The `enforce_workspace_routing` trigger refuses a new store whose workspace is not a live
-workspace of its space, and refuses any later change of `workspace_id` or `customer_id`. Names stay
-unique per space, as for services and apps.
+workspace of its account, and refuses any later change of `workspace_id` or `customer_id`. Names stay
+unique per account, as for services and apps.
 
 **Before 0044 the column did not exist.** Since orama-operator ef005a4 (2026-09-29) the operator's
 `listStoresSQL` joins `stores s JOIN workspaces w ON w.id = s.workspace_id`, so every poll failed
 with `column s.workspace_id does not exist` and logged `stores deferred: cannot read stores`; no
-store was created or deleted. 0044 assigns each earlier store to its space's only live workspace
+store was created or deleted. 0044 assigns each earlier store to its account's only live workspace
 and records the outcome in `workspace_assignments` (`sole_workspace`), as 0043 did for agent
-launches. A space with several live workspaces, or none, is recorded as `needs_selection` with a
+launches. An account with several live workspaces, or none, is recorded as `needs_selection` with a
 warning; the operator's join leaves such a store out until someone sets its workspace. The guard is
 `store_workspaces_guard`.
 

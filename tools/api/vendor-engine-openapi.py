@@ -53,6 +53,7 @@ WORDING = [
     ("source lake: ", 'with `source: "lake"`: '),
     ("source zetta: ", 'with `source: "zetta"`: '),
     ("the methodology's default search space", "the methodology's default parameter ranges"),
+    ("MCP connection with this prefix in lake", "MCP connection with this prefix in Lake"),
 ]
 
 

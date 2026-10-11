@@ -20,9 +20,12 @@
 // each schedule as a CronJob), and the injected caller that sends a turn to an agent's service.
 namespace lake::control {
 
-// The lake capabilities a launched agent's credential may call: its workspace through the agent
-// path (lake#235), the repository reads a definition stored in lake needs, and the workspace's
-// transcripts (lake#561). Its skills narrow further inside agent-runtime.
+// The lake capabilities every launched agent's credential may call: its workspace through the
+// agent path (lake#235), the repository reads a definition stored in lake needs, the workspace's
+// transcripts (lake#561), the App and build reads agent-runtime gives every agent, and the
+// tools of its MCP connections (lake#652; lake checks the agent's `mcp:<prefix>` skill on every call). Its skills
+// add their own reads (agent_launch_scopes_for) and narrow the workspace further inside
+// agent-runtime.
 inline const std::vector<std::string> agent_launch_scopes{"workspace_query",
                                                           "workspace_act",
                                                           "workspace_openapi",
@@ -30,7 +33,37 @@ inline const std::vector<std::string> agent_launch_scopes{"workspace_query",
                                                           "repository_tree",
                                                           "repository_file",
                                                           "list_transcripts",
-                                                          "get_transcript"};
+                                                          "get_transcript",
+                                                          "list_apps",
+                                                          "get_app",
+                                                          "app_logs",
+                                                          "receive_app_events",
+                                                          "list_builds",
+                                                          "get_build",
+                                                          "build_logs",
+                                                          "receive_build_events",
+                                                          "list_mcp_connection_tools",
+                                                          "read_mcp_tool",
+                                                          "call_mcp_tool"};
+
+// A skill a person may grant an agent (agent-runtime#7), vendored from agent-runtime's skills.json
+// by tools/agents/vendor-agent-skills.py into src/control/agent_skills.cpp: its name, the label
+// the Agent Factory and the agent pages show, and the Lake reads it grants. A skill's changes are
+// never in a key: agent-runtime only proposes them, for a person to confirm.
+struct AgentSkill {
+    std::string_view name;
+    std::string_view label;
+    std::vector<std::string_view> reads;
+};
+const std::vector<AgentSkill>& agent_skills();
+
+// The scopes of a launch of an agent with these skills: agent_launch_scopes and the reads of each
+// skill it has, once each. A skill lake does not know grants nothing.
+std::vector<std::string> agent_launch_scopes_for(const std::vector<std::string>& skills);
+
+// The same, from an agent record's `skills` (anything that is not an array of strings grants
+// nothing beyond agent_launch_scopes).
+std::vector<std::string> agent_launch_scopes_for(const nlohmann::json& agent);
 
 // A schedule's cron expression (docs/api/agent-launches.md): the five fields a Kubernetes CronJob
 // takes (minute, hour, day of month, month, day of week), or one of @hourly, @daily, @weekly,
