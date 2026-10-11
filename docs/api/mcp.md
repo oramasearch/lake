@@ -110,8 +110,11 @@ curl -H "Authorization: Bearer <token>" -H 'content-type: application/json' \
   or **Never** (a standing key with a reason and named tools, where the space allows it, lake#234,
   lake#259).
 - **Worked Flows**: load a dataset (`upload_dataset` through `workspace_act`), train a model and call
-  it (`capture_intent` → `compile_intent` → `approve_plan` → `run_pipeline` → `get_run_report` →
-  `expose_model` → `predict`), build and run a pipeline (`create_pipeline` → `edit_pipeline` →
+  it (`create_project` → `compile_pipeline` → `approve_plan` → `run_pipeline` → `get_run_report` →
+  `expose_model` → `predict`, the Train Docs' recipe, lake#591), keep files in a drive
+  (`create_drive` → `upload_drive_entries` → `list_drive_entries` → `read_drive_file`), keep a secret
+  (`create_secret_mount` → `put_secret` → `list_secrets` → `read_secret`), keep a transcript
+  (`create_transcript` → `list_transcripts` → `get_transcript`) (the last three lake#594), build and run a pipeline (`create_pipeline` → `edit_pipeline` →
   `get_pipeline` → `workspace_act` `approve_plan` → `run_pipeline`), stand up and connect a
   Postgres service (`list_service_kinds` → `create_service` → `list_services` →
   `service_connection` → `connect_service`), search a published index (`workspace_query`

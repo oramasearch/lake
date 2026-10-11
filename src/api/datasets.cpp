@@ -179,6 +179,37 @@ std::optional<DatasetRef> parse_id(std::string_view id) {
     return ref;
 }
 
+bool sql_name(std::string_view name) {
+    if (name.empty() || std::isdigit(static_cast<unsigned char>(name.front())) != 0) {
+        return false;
+    }
+    return std::ranges::all_of(name,
+                               [](unsigned char c) { return std::isalnum(c) != 0 || c == '_'; });
+}
+
+void annotate_one(nlohmann::json& dataset) {
+    if (!dataset.is_object()) {
+        return;
+    }
+    if (const auto source = dataset.find("source_format");
+        source != dataset.end() && source->is_string() && !source->get<std::string>().empty()) {
+        if (const auto stored = dataset.find("format"); stored != dataset.end()) {
+            dataset["storage_format"] = *stored;
+        }
+        dataset["format"] = *source;
+    }
+    const auto name = dataset.find("name");
+    if (name != dataset.end() && name->is_string()) {
+        const bool queryable = sql_name(name->get<std::string>());
+        dataset["sql_queryable"] = queryable;
+        if (!queryable) {
+            dataset["sql_note"] =
+                "SQL cannot name this table (it was loaded before names were limited to letters, "
+                "digits and underscores); load it again under such a name to query it";
+        }
+    }
+}
+
 void annotate_list(nlohmann::json& listed) {
     if (!listed.is_object() || !listed.contains("datasets") || !listed["datasets"].is_array()) {
         return;
@@ -202,6 +233,7 @@ void annotate_list(nlohmann::json& listed) {
             dataset["id"] = id_of(database, name);
         }
         dataset["kind"] = kind_of(database);
+        annotate_one(dataset);
     }
 }
 

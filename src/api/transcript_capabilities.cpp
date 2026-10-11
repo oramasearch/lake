@@ -222,10 +222,16 @@ liquid::runtime::task<Heard> transcribe_audio(ApiContext& context,
                                               std::string audio_base64,
                                               std::string name,
                                               std::string language,
-                                              std::string path) {
+                                              std::string path,
+                                              std::string name_path) {
     if (!context.transcriber) {
         co_return refused_audio(
             ApiResult::failure("not_supported", "Speech-to-text is not configured on this lake."));
+    }
+    // A text file is refused here, not sent to be called corrupt (lake#594).
+    if (std::string reason = not_audio_reason(name); !reason.empty()) {
+        co_return refused_audio(
+            ApiResult::failure("invalid_input", std::move(reason), std::move(name_path)));
     }
     auto audio = decode_audio(audio_base64, path);
     if (!audio) {
@@ -272,7 +278,7 @@ liquid::runtime::task<ApiResult> transcribe(const json& input, ApiContext& conte
         co_return *refused;
     }
     auto done = heard(co_await transcribe_audio(
-        context, input.at("audio_base64"), input.at("name"), language, "/audio_base64"));
+        context, input.at("audio_base64"), input.at("name"), language, "/audio_base64", "/name"));
     if (!done) {
         co_return done.error();
     }
@@ -324,7 +330,8 @@ liquid::runtime::task<ApiResult> create_transcript(const json& input, ApiContext
                                                     audio,
                                                     input.value("audio_name", std::string()),
                                                     transcript.language,
-                                                    "/audio_base64"));
+                                                    "/audio_base64",
+                                                    "/audio_name"));
         if (!done) {
             co_return done.error();
         }

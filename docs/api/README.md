@@ -42,8 +42,14 @@ and every experiment error keeps Zetta's `path`.
 
 [streams.md](streams.md) documents all nine topic/message operations on both REST POST and MCP,
 with closed input/output schemas, space permissions, system-topic refusal and bounded live reads.
-Read tools advertise `readOnlyHint`; writes conservatively advertise `destructiveHint`. Streams reads
-retain GET and add POST without changing their read classification.
+Every MCP tool carries all three annotations from one rule in `src/api/registry.cpp` (lake#594):
+`readOnlyHint` for a read or a call authorized as one (`predict`), the same rule `mcp_setup` uses
+for `writes`; `destructiveHint` only on a write that deletes, destroys, removes, revokes or drops
+(`delete_*`, `destroy_*`, `remove_*`, `revoke_*`, `drop_*`, `purge_*`, …), so a client warns before
+those alone; and `idempotentHint` on reads and on writes a second identical call leaves as they
+were (`set_*`, `update_*`, the deletes, `settle_ask_turn`, …). Every operation has a human title,
+OpenAPI's `summary` and the tool's `title` (`Mcp.EveryToolHasAHumanTitleAndOnlyDeletesAreDestructive`).
+Streams reads retain GET and add POST without changing their read classification.
 
 The [sync protocol](sync.md) also backs the repository page's configured-origin clone/push
 instructions. The [private-instance proof](../deployment/private-install.md) executes those
@@ -234,7 +240,7 @@ credentials.
 | `transparency_proof_bundle` | public read | leaf index | identity, trust configuration, current checkpoint, all committed tiles, and one inclusion proof for offline verification | [transparency.md](transparency.md) |
 | `transparency_consistency_proof` | public read | old and new checkpoint tree sizes | compact append-only audit path bound to the complete new checkpoint record | [transparency.md](transparency.md) |
 | `transparency_identity_scan` | public read | TAAP identity | checkpoint-verified matching attestations and scan measurements | [transparency.md](transparency.md) |
-| `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships, whether this lake runs it, and `internal` for Orama's own tooling (never offered in Ask Orama) | [train-agents.md](train-agents.md) |
+| `list_agent_library` | read | none | the Agent Library: every specialized agent Orama ships, whether this lake runs it, and, only with `include_internal: true`, Orama's own tooling marked `internal` (never offered in Ask Orama) | [train-agents.md](train-agents.md) |
 | `list_datasets` | read | customer | The workspace dataset catalogue with stable `<database>/<name>` ids (the form `get_dataset` takes) and `kind` (`data` or engine `result`) | [workspaces.md](workspaces.md) |
 | `list_runs` | read | customer, optional project/solution and limit | newest matching runs with status, reached stage and final error line | [workspaces.md](workspaces.md) |
 | `launch_agent`, `list_agent_launches`, `stop_agent_launch`, `schedule_agent`, `list_agent_schedules`, `unschedule_agent` | action / read | customer, agent, mode, input, cron or trigger | run, follow and stop Python agents on agent-runtime, and give them cron schedules (each a CronJob) | [agent-launches.md](agent-launches.md) |

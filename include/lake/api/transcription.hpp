@@ -44,6 +44,10 @@ std::expected<DecodedAudio, ApiError> decode_audio(std::string_view audio_base64
 std::string audio_file_name(std::string_view name, std::string_view mime);
 // The media type of a file name's extension, application/octet-stream when unknown.
 std::string audio_mime(std::string_view file_name);
+// Why a file named `name` is not sent to speech-to-text (lake#594): it has an extension that is
+// not audio or video (`memo.txt`), which the provider would refuse as corrupt. Empty when the
+// name is fine, including a name with no extension (its media type decides).
+std::string not_audio_reason(std::string_view name);
 
 // Whether `text` is WebVTT or SubRip captions rather than plain text: a WEBVTT header, or a cue
 // timing line (`00:00:01,000 --> 00:00:04,000`).

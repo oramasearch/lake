@@ -10,12 +10,12 @@ a result that the capability would reject.
 | Input | Meaning |
 |---|---|
 | `query` | Required. Plain text is ranked BM25F; quoted text is an exact substring; `/expression/` is an ECMAScript regex. |
-| `customer` | Optional space id. Searches the space's index on lake's volume and, when the caller may read the space, the index of each of its switched workspaces. Empty: every space for the operator, and for anyone else every space the caller may read. |
+| `customer_id` | Optional space id (`customer` is its deprecated name, lake#591). Searches the space's index on lake's volume and, when the caller may read the space, the index of each of its switched workspaces. Empty: every space for the operator, and for anyone else every space the caller may read. |
 | `workspace_id` | Optional. Searches only that switched workspace's index (lake#381). A workspace that does not exist, is not switched, is deleted or is in a space the caller cannot read answers the same `invalid_input` (`workspace_id must name a workspace Zetta in this space`). |
 | `repository` | Optional repository id. |
 | `ref` | Optional branch or tag name. An immutable tag snapshot takes precedence over a branch with the same name. |
-| `change` | Optional exact change digest. Requires `customer` and `repository`, cannot be combined with `ref` or `history`, and uses scan mode. |
-| `history` | Optional boolean. Walk every change in one `customer` and `repository`; cannot be combined with `ref` or `change`. |
+| `change` | Optional exact change digest. Requires `customer_id` and `repository`, cannot be combined with `ref` or `history`, and uses scan mode. |
+| `history` | Optional boolean. Walk every change in one `customer_id` and `repository`; cannot be combined with `ref` or `change`. |
 | `limit` | Optional result count, default 20 and maximum 1000. |
 | artifact scope | Append `in:artifact:<name>[@<version>]` to `query`. The name is a build output path and the version is its immutable result digest. This scope cannot be combined with `ref`, `change`, or `history`. |
 
@@ -107,7 +107,7 @@ which a push or commit records in its audit details and never fails on.
 
 **Who can make search open a workspace.** The `search` capability decides the scope before search
 lends, opens or rebuilds anything (`search_scope`). The operator reads every space. Anyone else
-names a `customer`, a `workspace_id` or a `repository`, or is limited to the spaces they may read:
+names a `customer_id`, a `workspace_id` or a `repository`, or is limited to the spaces they may read:
 every space filtered by `read` through the policy engine, as the dashboard lists "my spaces", so
 ownership, membership, grants and organization roles count, for a person, an agent or a service
 token alike. A space's switched workspaces are opened only when the caller may read the space
@@ -354,7 +354,7 @@ build/tests/lake-tests --gtest_also_run_disabled_tests \
 
 ## Not yet
 
-- `customer` stays an input; the decided API (a required `workspace_id`, `/w/<id>/search`) is a
+- `customer_id` (formerly `customer`) stays an input; the decided API (a required `workspace_id`, `/w/<id>/search`) is a
   later change. `rebuild_search_index` as its own capability is not built; `reindex_artifacts` of
   each repository, or a wiped index, rebuilds.
 - Rollback of a workspace's index objects by the workspace Zetta is not detected, as for the store

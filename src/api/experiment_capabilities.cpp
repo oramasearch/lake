@@ -401,6 +401,25 @@ std::string experiment_description(const std::string& name) {
     return found == descriptions.end() ? std::string() : found->second;
 }
 
+// A human title for each operation (lake#594): OpenAPI's summary and the MCP tool's title.
+std::string experiment_title(std::string_view name) {
+    static const std::map<std::string_view, std::string_view> titles = {
+        {"list_experiments", "List experiments"},
+        {"get_experiment", "Get an experiment"},
+        {"list_experiment_trials", "List an experiment's trials"},
+        {"get_experiment_analysis", "Analyze an experiment"},
+        {"get_run_metrics", "Get a run's metrics"},
+        {"compare_runs", "Compare runs"},
+        {"start_experiment", "Start an experiment"},
+        {"stop_experiment", "Stop an experiment"},
+        {"stop_experiment_trial", "Stop a trial"},
+        {"promote_trial", "Promote a trial"},
+        {"tail_experiment_events", "Follow an experiment's events"},
+    };
+    const auto found = titles.find(name);
+    return found == titles.end() ? std::string(name) : std::string(found->second);
+}
+
 void add(Registry& registry, std::string name, std::string upstream, json properties,
          json required, json output, std::string permission = "read") {
     properties["customer_id"] = identifier();
@@ -416,7 +435,7 @@ void add(Registry& registry, std::string name, std::string upstream, json proper
     const auto schema = object(std::move(properties), std::move(required));
     registry.add(Capability{
         .name = name,
-        .title = name,
+        .title = experiment_title(name),
         .description = experiment_description(name),
         .input_schema = schema,
         .output_schema = std::move(output),

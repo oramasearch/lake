@@ -154,8 +154,8 @@ which is not built.
 | Code | When |
 |---|---|
 | `not_supported` (501) | No speech-to-text on this lake: "Speech-to-text is not configured on this lake." |
-| `engine_error` (502) | OpenAI refused or failed. The message is plain: "OpenAI could not transcribe the audio: <OpenAI's message>", "OpenAI is busy or over its quota; try again shortly (HTTP 429)", or "could not reach OpenAI for speech-to-text: …". A refused key (401/403) says so and never echoes OpenAI's message, which can quote part of the key. |
-| `invalid_input` (400) | Not base64, an empty audio, a missing or long title, neither text nor audio (`/text`), no speech heard in the audio, an unknown `source`, a bad `language`, `recorded_at` or `cursor`. |
+| `engine_error` (422) | OpenAI refused or failed. The message is plain: "OpenAI could not transcribe the audio: <OpenAI's message>", "OpenAI is busy or over its quota; try again shortly (HTTP 429)", or "could not reach OpenAI for speech-to-text: …". A refused key (401/403) says so and never echoes OpenAI's message, which can quote part of the key. |
+| `invalid_input` (400) | A file name whose extension is not audio or video (`memo.txt is not audio or video: send .webm, .mp4, …`, at `/name` or `/audio_name`; lake#594), not sent to OpenAI. Not base64, an empty audio, a missing or long title, neither text nor audio (`/text`), no speech heard in the audio, an unknown `source`, a bad `language`, `recorded_at` or `cursor`. |
 | `size_invalid` (413) | Audio over 25 MiB, or text over 400,000 bytes. |
 | `not_found` (404) | No such transcript in this workspace (`/id`). |
 | `unauthorized` (403) | No `read`/`write` on the space, or a scoped key without the capability. |

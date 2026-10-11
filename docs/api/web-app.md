@@ -11,10 +11,10 @@ calls the capability or the shared function, so the two cannot disagree.
 | Capability | Kind | Who | Input | Value |
 |---|---|---|---|---|
 | `viewer` | read | **anyone** | `workspace_id?`, `customer_id?` | who is calling and how this lake signs people in (below) |
-| `my_permissions` | read (also `POST`) | signed in | `object_type`, `object_id`, `actions`, `ref?`, `path?` | `{allowed: {<action>: bool}}` |
+| `my_permissions` | read (also `POST`) | signed in | `object_type` (a policy object type, `workspace` for its space's permissions, or `drive folder`; another type is refused listing them, lake#594), `object_id`, `actions`, `ref?`, `path?` | `{allowed: {<action>: bool}}` |
 | `list_packages` | read | signed in | `customer_id?` | `{available, origin, npm, python, oci}` |
-| `list_docs` | read | **anyone** | `q?` | `{pages: [{slug, title, section, headings, match?, anchor?, excerpt?}], sections}` |
-| `get_doc` | read | **anyone** | `page?` | `{slug, title, section, markdown, previous?, next?}` (each `{slug, title, section}`) |
+| `list_docs` | read | **anyone** | `q?` (every word, in any order, lake#594) | `{pages: [{slug, title, section, headings, match?, anchor?, excerpt?}], sections}` |
+| `get_doc` | read | **anyone** | `slug?` (`page` is its deprecated name, lake#591) | `{slug, title, section, markdown, previous?, next?}` (each `{slug, title, section}`) |
 | `mcp_setup` | read | signed in | — | `{origin, mcp_url, tool_groups, flows, scopes}` |
 | `resolve_model` | read | anyone, for a public model | `namespace?`, `name` | `{repository_id, revision}` |
 | `latest_agent_task` | read | read on the space | `customer_id`, `workspace_id`, `subject` | `{task: <get_agent_task value> \| null}` |
@@ -44,7 +44,7 @@ answers `401`: a visitor, or a browser holding a dead cookie, gets `signed_in: f
 | `clerk` | yes | `{enabled, publishable_key, frontend_api}` from `LAKE_CLERK_PUBLISHABLE_KEY` ([clerk.md](clerk.md)) |
 | `password_sign_up` | yes | lake's own sign-up is open: false under Clerk, where accounts are added by invitation |
 | `external_origin`, `public_host` | yes | lake's browser origin (`LAKE_EXTERNAL_ORIGIN`, else `https://<LAKE_PUBLIC_HOST>`, else the origin of the request) and `LAKE_PUBLIC_HOST`; clone and push URLs use the origin |
-| `config` | yes | `{base_agent_model, frontier_model}` for Create an Agent (`LAKE_BASE_AGENT_MODEL`, `LAKE_AGENT_MODEL`); empty for a visitor |
+| `config` | yes | `{frontier_model}` for Create an Agent (`LAKE_AGENT_MODEL`); empty for a visitor. The base model's path (`LAKE_BASE_AGENT_MODEL`) is no longer answered (lake#594): `workspace_act create_agent` fills it in for a `native` agent sent without `model` |
 | `version`, `revision` | yes | as `server_info` reports them |
 
 An operator credential has `administrator: true` and no user fields. A `workspace_id` that names no

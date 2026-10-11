@@ -755,6 +755,23 @@ std::string stream_description(const std::string& name) {
     return found == descriptions.end() ? std::string() : found->second;
 }
 
+// A human title for each operation (lake#594): OpenAPI's summary and the MCP tool's title.
+std::string stream_title(std::string_view name) {
+    static const std::map<std::string_view, std::string_view> titles = {
+        {"list_streams", "List streams"},
+        {"get_stream", "Get a stream"},
+        {"browse_stream", "Browse a stream's messages"},
+        {"create_stream", "Create a stream"},
+        {"update_stream", "Update a stream"},
+        {"delete_stream", "Delete a stream"},
+        {"publish_stream_message", "Publish a message"},
+        {"update_stream_message", "Update a message"},
+        {"delete_stream_messages", "Delete messages"},
+    };
+    const auto found = titles.find(name);
+    return found == titles.end() ? std::string(name) : std::string(found->second);
+}
+
 void add(Registry& registry, std::string name, json properties, json required, json output,
          std::string permission) {
     properties["customer_id"] = text();
@@ -774,7 +791,7 @@ void add(Registry& registry, std::string name, json properties, json required, j
     const bool read = permission == "read";
     registry.add(Capability{
         .name = name,
-        .title = name,
+        .title = stream_title(name),
         .description = stream_description(name),
         .input_schema = schema,
         .output_schema = std::move(output),
