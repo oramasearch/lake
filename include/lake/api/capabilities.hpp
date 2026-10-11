@@ -9,6 +9,7 @@
 #include <expected>
 #include <map>
 #include <string>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -182,6 +183,29 @@ bool workspace_action_allowed(std::string_view capability);
 // Whether Zetta takes the capability with GET: every read, and `chat`, which lake authorizes as
 // an action because it loads a model.
 bool workspace_uses_get(std::string_view capability);
+// The allow-lists themselves, in the order the source lists them (a name may be in both).
+std::span<const std::string_view> workspace_read_names();
+std::span<const std::string_view> workspace_action_names();
+// One allow-listed engine call as workspace_query (`read`) or workspace_act runs it: `input` is
+// {customer_id, workspace_id, capability, input}, the policy, agent scopes and audit are the same,
+// and a refusal's path points below `/input`. The named engine capabilities call this.
+liquid::runtime::task<ApiResult>
+call_workspace_capability(bool read, nlohmann::json input, ApiContext& context);
+
+// Every allow-listed engine capability as a named capability of Lake's own (lake#650,
+// docs/api/engine-capabilities.md): `/v1/<name>`, its OpenAPI operation with the engine's input
+// schema and an MCP tool. Registered by register_workspace_capabilities.
+void register_engine_capabilities(Registry& registry);
+// The Lake capability that serves an engine capability: its own name, a clearer one where the
+// engine's would collide or mislead (`gate` is check_pipeline), or the Lake capability that
+// already covers it (`get_study` is get_experiment).
+std::string_view engine_capability_name(std::string_view engine);
+// The engine capability a Lake capability registered by register_engine_capabilities calls, or
+// empty for any other name.
+std::string_view engine_capability_of(std::string_view name);
+// The group llms.txt lists a capability registered by register_engine_capabilities under
+// (Projects, Training, Models, ...), or empty.
+std::string_view engine_capability_group(std::string_view name);
 // The graphs a Project Agent compile check stores on a project are named with this prefix
 // (lake#438). They are lake's, not the person's: every list of a project's pipelines and the pick
 // after a build skip them through these two functions.

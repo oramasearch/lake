@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -6,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -17,6 +19,7 @@
 
 #include "experiment_fixture.hpp"
 #include "lake/api/agent_docs.hpp"
+#include "lake/api/audit_routing.hpp"
 #include "lake/api/capabilities.hpp"
 #include "lake/api/datasets.hpp"
 #include "lake/api/mcp.hpp"
@@ -2299,6 +2302,68 @@ TEST(AgentRuns, ALaunchCredentialActsAsTheLauncherWithTheLaunchScopes) {
     EXPECT_FALSE(store.context_for(credential)) << "a stopped launch's credential stops too";
 }
 
+TEST(AgentRuns, ARunsKeyCarriesTheReadsOfItsAgentsSkillsAndNoChange) {
+    AgentRuns r;
+    const auto has = [](const std::vector<std::string>& scopes, std::string_view name) {
+        return std::ranges::find(scopes, name) != scopes.end();
+    };
+    // An agent with no skill: the scopes every run has, and nothing a skill adds.
+    r.w.caller->answers["get_agent"] = {{"id", "a-1"}, {"name", "Plain"}, {"runtime", "python"}};
+    const auto plain = r.call("launch_agent", {{"agent_id", "a-1"}});
+    ASSERT_TRUE(plain.ok) << plain.error.message;
+    EXPECT_EQ(r.store.get_agent_launch(plain.value["id"])->scopes,
+              lake::control::agent_launch_scopes);
+
+    // drives and usage (agent-runtime#7): their reads, never their changes, never another
+    // skill's reads.
+    r.w.caller->answers["get_agent"] = {{"id", "a-2"},
+                                        {"name", "Drive reader"},
+                                        {"runtime", "python"},
+                                        {"skills", {"drives", "usage", "not-a-skill"}}};
+    const auto launched = r.call("launch_agent", {{"agent_id", "a-2"}});
+    ASSERT_TRUE(launched.ok) << launched.error.message;
+    const auto scopes = r.store.get_agent_launch(launched.value["id"])->scopes;
+    for (const std::string& base : lake::control::agent_launch_scopes) {
+        EXPECT_TRUE(has(scopes, base)) << base;
+    }
+    EXPECT_TRUE(has(scopes, "drive_browse"));
+    EXPECT_TRUE(has(scopes, "read_drive_file"));
+    EXPECT_TRUE(has(scopes, "metering_usage"));
+    EXPECT_FALSE(has(scopes, "upload_drive_files")) << "a change is a proposal, never a scope";
+    EXPECT_FALSE(has(scopes, "delete_drive")) << "a change is a proposal, never a scope";
+    EXPECT_FALSE(has(scopes, "list_issues")) << "repositories is not granted";
+    EXPECT_FALSE(has(scopes, "read_secret"));
+
+    // A schedule's runs carry the same scopes as a launch of the same agent.
+    const auto scheduled =
+        r.call("schedule_agent", {{"agent_id", "a-2"}, {"trigger", "every Monday at 09:00"}});
+    ASSERT_TRUE(scheduled.ok) << scheduled.error.message;
+    EXPECT_EQ(r.store.get_agent_cron_schedule(scheduled.value["id"])->scopes, scopes);
+}
+
+TEST(AgentRuns, EverySkillLakeOffersIsOneAgentRuntimeDefines) {
+    // src/control/agent_skills.cpp is vendored from agent-runtime's skills.json; the original five
+    // come first, in Studio's order.
+    std::vector<std::string_view> names;
+    for (const auto& skill : lake::control::agent_skills()) {
+        names.push_back(skill.name);
+        EXPECT_FALSE(skill.label.empty()) << skill.name;
+    }
+    const std::vector<std::string_view> expected{"search",
+                                                 "generate-data",
+                                                 "train",
+                                                 "summarize",
+                                                 "call-api",
+                                                 "drives",
+                                                 "transcripts",
+                                                 "repositories",
+                                                 "datasets",
+                                                 "streams",
+                                                 "pipelines",
+                                                 "usage"};
+    EXPECT_EQ(names, expected);
+}
+
 TEST(AgentRuns, LaunchStopAndScheduleAPythonAgentButNeverANativeOne) {
     AgentRuns r;
     r.w.caller->answers["get_agent"] = {{"id", "a-1"}, {"name", "Watcher"}, {"runtime", "python"}};
@@ -2523,7 +2588,10 @@ TEST(AgentRuns, CreateAgentRefusesDefinitionFieldsZettaWouldDrop) {
         {{"capability", "create_agent"},
          {"input", python(json::array({{{"path", "main.py"}, {"contents", "print(1)"}}}))}});
     ASSERT_TRUE(made.ok) << made.error.message;
-    EXPECT_EQ(r.w.caller->calls.back().second["definition"]["files"][0]["contents"], "print(1)");
+    const auto sent = std::ranges::find_if(r.w.caller->calls | std::views::reverse,
+                                           [](const auto& call) { return call.first == "create_agent"; });
+    ASSERT_NE(sent, (r.w.caller->calls | std::views::reverse).end());
+    EXPECT_EQ(sent->second["definition"]["files"][0]["contents"], "print(1)");
 
     // Zetta's own refusal code is reported as lake's documented invalid_input.
     r.w.caller->failure = lake::control::ZettaControlError{"invalid_argument", "agent.name"};
@@ -3985,6 +4053,93 @@ TEST(Workspaces, CreateProjectSaysWhetherTheNameIsMissingOrTaken) {
     EXPECT_NE(other.error.code, "conflict") << "only the engine's name refusal is a clash";
 }
 
+// An agent's definition is versioned (lake#653): the engine keeps one record per agent and
+// overwrites it, so every create_agent and update_agent Lake makes, through workspace_act or the
+// named capability, keeps the definition it set as a sealed revision in the agent's workspace, and
+// list_agent_revisions answers them newest first; restoring one is update_agent with its definition.
+TEST(Workspaces, EveryAgentDefinitionIsKeptAsARevision) {
+    ReadyWorkspace r;
+    r.instance_kek = lake::test::test_instance_kek();
+    const json first{{"id", "a-1"},
+                     {"name", "Renewal watcher"},
+                     {"kind", "custom"},
+                     {"runtime", "native"},
+                     {"model", "/m/base"},
+                     {"purpose", "Flag renewals at risk"},
+                     {"manifesto", "Answer from company data only."},
+                     {"skills", json::array({"search"})},
+                     {"status", "idle"},
+                     {"versions", json::array()},
+                     {"created_at", "2026-10-01T00:00:00Z"},
+                     {"updated_at", "2026-10-01T00:00:00Z"}};
+    r.w.caller->answers["create_agent"] = first;
+    const auto created = r.call("create_agent",
+                                {{"name", "Renewal watcher"},
+                                 {"runtime", "native"},
+                                 {"purpose", "Flag renewals at risk"},
+                                 {"manifesto", "Answer from company data only."},
+                                 {"skills", json::array({"search"})}});
+    ASSERT_TRUE(created.ok) << created.error.message;
+    EXPECT_EQ(created.value["definition_revision"]["recorded"], true)
+        << created.value["definition_revision"].dump();
+    EXPECT_FALSE(r.sent("create_agent").value("model", std::string()).empty())
+        << "a native agent without a model gets the base model";
+
+    json second = first;
+    second["manifesto"] = "Be brief.";
+    second["skills"] = json::array({"search", "summarize"});
+    second["status"] = "running";
+    r.w.caller->answers["update_agent"] = second;
+    const auto updated = r.call(
+        "workspace_act",
+        {{"capability", "update_agent"},
+         {"input", {{"id", "a-1"}, {"manifesto", "Be brief."}, {"skills", json::array({"search", "summarize"})}}}});
+    ASSERT_TRUE(updated.ok) << updated.error.message;
+    EXPECT_EQ(updated.value["definition_revision"]["recorded"], true);
+
+    // Updated to native with an empty model (Design's "Orama base model"): Lake fills it in.
+    ASSERT_TRUE(r.call("update_agent", {{"id", "a-1"}, {"runtime", "native"}, {"model", ""}}).ok);
+    EXPECT_FALSE(r.sent("update_agent").value("model", std::string()).empty());
+
+    const auto listed = r.call("list_agent_revisions", {{"agent_id", "a-1"}});
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    EXPECT_EQ(listed.value["total"], 3);
+    const json& revisions = listed.value["revisions"];
+    ASSERT_EQ(revisions.size(), 3U);
+    EXPECT_EQ(revisions[0]["revision"], 3) << "newest first";
+    EXPECT_EQ(revisions[1]["revision"], 2);
+    EXPECT_EQ(revisions[1]["change"], "update");
+    EXPECT_EQ(revisions[1]["definition"]["manifesto"], "Be brief.");
+    EXPECT_EQ(revisions[2]["change"], "create");
+    EXPECT_EQ(revisions[2]["definition"]["manifesto"], "Answer from company data only.");
+    for (const char* field : {"id", "status", "versions", "created_at", "updated_at"}) {
+        EXPECT_FALSE(revisions[2]["definition"].contains(field)) << field << " is not designed";
+    }
+    EXPECT_EQ(r.call("list_agent_revisions", {{"agent_id", "a-1"}, {"limit", 1}})
+                  .value["revisions"]
+                  .size(),
+              1U);
+    EXPECT_EQ(r.call("list_agent_revisions", {{"agent_id", "a-2"}}).value["total"], 0)
+        << "another agent's revisions are its own";
+
+    // Sealed in the workspace's records, not in PostgreSQL.
+    bool sealed = false;
+    for (auto& [url, tables] : r.w.caller->topics.records) {
+        for (const auto& [key, row] : tables.rows("agent_revisions")) {
+            sealed = true;
+            EXPECT_EQ(row.dump().find("company data"), std::string::npos) << "sealed at rest";
+        }
+    }
+    EXPECT_TRUE(sealed);
+
+    // A revision that cannot be kept never fails the change, which has happened: it says so.
+    r.w.caller->answers["update_agent"] = {{"name", "Renewal watcher"}};
+    const auto unkept = r.call("update_agent", {{"id", "a-1"}, {"goal", "x"}});
+    ASSERT_TRUE(unkept.ok) << unkept.error.message;
+    EXPECT_EQ(unkept.value["definition_revision"]["recorded"], false);
+    EXPECT_EQ(r.call("list_agent_revisions", {{"agent_id", "a-1"}}).value["total"], 3);
+}
+
 // The decision a project should improve is lake's to keep (lake#577): the engine's project has no
 // field for it (its `intent` is a trace note it strips), so create_project keeps `decision` in the
 // workspace's records under the new project's id, get_project answers it beside the description,
@@ -4227,4 +4382,245 @@ TEST(Workspaces, SqlDescriptionSaysWhatTheWorkspaceSqlNowAnswers) {
     EXPECT_NE(description.find("text included"), std::string::npos);
     EXPECT_NE(description.find("A column no row carries is an error"), std::string::npos);
     EXPECT_NE(description.find("position"), std::string::npos);
+}
+
+// Every capability of the workspace engine Lake allows is a named capability (lake#650): its
+// own REST route, OpenAPI operation and MCP tool, with the engine's input schema.
+TEST(EngineCapabilities, EveryAllowListedNameHasANamedCapability) {
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    std::vector<std::string> reads, actions;
+    for (const std::string_view name : lake::api::workspace_read_names()) {
+        reads.emplace_back(name);
+    }
+    for (const std::string_view name : lake::api::workspace_action_names()) {
+        actions.emplace_back(name);
+    }
+    for (const auto& names : {reads, actions}) {
+        for (const std::string& engine : names) {
+            const std::string_view lake_name = lake::api::engine_capability_name(engine);
+            ASSERT_FALSE(lake_name.empty())
+                << engine << " is allow-listed but has no named capability "
+                             "(src/api/engine_capabilities.cpp)";
+            const auto capability = registry.find(std::string(lake_name));
+            ASSERT_TRUE(capability) << engine << " is served by " << lake_name
+                                    << ", which is not registered";
+            if (lake::api::engine_capability_of(lake_name) != engine) {
+                continue; // a Lake capability that already covers it
+            }
+            // score and explain are in both lists and change nothing: reads. chat loads a model.
+            const bool lake_read = lake::api::workspace_read_allowed(engine) && engine != "chat";
+            EXPECT_EQ(capability->action, lake_read ? "read" : "write") << lake_name;
+            EXPECT_EQ(capability->kind == lake::api::CapabilityKind::Read, lake_read) << lake_name;
+            const json required = capability->input_schema["required"];
+            EXPECT_EQ(required[0], "customer_id") << lake_name;
+            EXPECT_EQ(required[1], "workspace_id") << lake_name;
+            EXPECT_EQ(capability->object, "customer") << lake_name;
+            EXPECT_FALSE(capability->description.empty()) << lake_name;
+            EXPECT_EQ(capability->description.find("Requires "), std::string::npos) << lake_name;
+            EXPECT_EQ(capability->granted_by_scope,
+                      capability->action == "read" ? "workspace_query" : "workspace_act");
+            EXPECT_EQ(lake::api::audit_log_of(capability->name), lake::api::AuditLog::Workspace);
+        }
+    }
+    // The engine's input schema, never a guess: the entity is named as Lake names it, and the
+    // engine's own fields are there.
+    const auto score = registry.find("score");
+    ASSERT_TRUE(score);
+    EXPECT_TRUE(score->input_schema["properties"].contains("model_id"));
+    EXPECT_TRUE(score->input_schema["properties"].contains("dataset_path"));
+    EXPECT_EQ(score->kind, lake::api::CapabilityKind::Read);
+    const auto tables = registry.find("list_source_tables");
+    ASSERT_TRUE(tables);
+    EXPECT_TRUE(tables->input_schema["properties"].contains("connection"));
+    EXPECT_EQ(tables->input_schema["additionalProperties"], false);
+    const auto check = registry.find("check_pipeline");
+    ASSERT_TRUE(check);
+    EXPECT_NE(check->description.find("The engine calls it gate"), std::string::npos);
+    EXPECT_EQ(lake::api::engine_capability_name("get_study"), "get_experiment");
+    EXPECT_EQ(lake::api::engine_capability_name("get_experiment"), "get_holdout_experiment");
+    EXPECT_EQ(lake::api::engine_capability_name("search"), "search_workspace_index");
+    EXPECT_EQ(lake::api::engine_capability_name("chat"), "chat_with_agent");
+    EXPECT_EQ(registry.find("chat_with_agent")->action, "write");
+
+    // workspace_query and workspace_act stay, and say which names `capability` takes.
+    std::ranges::sort(reads);
+    std::ranges::sort(actions);
+    reads.erase(std::ranges::unique(reads).begin(), reads.end());
+    actions.erase(std::ranges::unique(actions).begin(), actions.end());
+    EXPECT_EQ(registry.find("workspace_query")->input_schema["properties"]["capability"]["enum"],
+              json(reads));
+    EXPECT_EQ(registry.find("workspace_act")->input_schema["properties"]["capability"]["enum"],
+              json(actions));
+
+    // llms.txt lists them in their groups.
+    EXPECT_EQ(lake::api::agent_docs::group_of("list_projects"), "Projects and pipelines");
+    EXPECT_EQ(lake::api::agent_docs::group_of("start_run"), "Training and runs");
+    EXPECT_EQ(lake::api::agent_docs::group_of("model_health"), "Models");
+    EXPECT_EQ(lake::api::agent_docs::group_of("create_agent"), "Agents");
+    EXPECT_EQ(lake::api::agent_docs::group_of("validate_experiment"), "Experiments");
+    EXPECT_EQ(lake::api::agent_docs::group_of("compose_solution"), "Solutions");
+    const std::string llms = lake::api::agent_docs::llms_full_txt(registry, "https://lake.test");
+    for (const char* name : {"list_projects", "check_pipeline", "get_run_report", "list_models",
+                             "create_index", "analyze_dataset", "create_connection", "decide",
+                             "workspace_engine_info"}) {
+        EXPECT_NE(llms.find(name), std::string::npos) << name << " is not in llms-full.txt";
+    }
+}
+
+// REST, OpenAPI and MCP are one registry: every tool is an OpenAPI operation with the same input
+// schema, and every operation a tool (lake#650).
+TEST(EngineCapabilities, McpAndOpenApiDescribeTheSameCapabilities) {
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    const json openapi = lake::api::openapi_document(registry, "test");
+    const json tools = lake::api::mcp_tools(registry, lake::api::SchemaAudience::Caller);
+    std::set<std::string> tool_names;
+    for (const json& tool : tools) {
+        const std::string name = tool["name"];
+        tool_names.insert(name);
+        const auto path = openapi["paths"].find("/v1/" + name);
+        ASSERT_NE(path, openapi["paths"].end()) << name << " is an MCP tool but not in OpenAPI";
+        if (path->contains("post")) {
+            EXPECT_EQ((*path)["post"]["requestBody"]["content"]["application/json"]["schema"],
+                      tool["inputSchema"])
+                << name << ": MCP and OpenAPI differ";
+            continue;
+        }
+        json properties = json::object();
+        json required = json::array();
+        for (const json& parameter : (*path)["get"]["parameters"]) {
+            properties[parameter["name"].get<std::string>()] = parameter["schema"];
+            if (parameter["required"] == true) {
+                required.push_back(parameter["name"]);
+            }
+        }
+        EXPECT_EQ(properties, tool["inputSchema"].value("properties", json::object()))
+            << name << ": MCP and OpenAPI differ";
+        auto expected =
+            tool["inputSchema"].value("required", json::array()).get<std::vector<std::string>>();
+        auto listed = required.get<std::vector<std::string>>();
+        std::ranges::sort(expected);
+        std::ranges::sort(listed);
+        EXPECT_EQ(listed, expected) << name << ": MCP and OpenAPI require different fields";
+    }
+    for (const auto& capability : registry.list()) {
+        if (capability->transport == lake::api::CapabilityTransport::Json) {
+            EXPECT_TRUE(tool_names.contains(capability->name))
+                << capability->name << " is registered but not an MCP tool";
+        }
+    }
+    for (const std::string_view engine : lake::api::workspace_read_names()) {
+        EXPECT_TRUE(tool_names.contains(std::string(lake::api::engine_capability_name(engine))))
+            << engine;
+    }
+    for (const std::string_view engine : lake::api::workspace_action_names()) {
+        EXPECT_TRUE(tool_names.contains(std::string(lake::api::engine_capability_name(engine))))
+            << engine;
+    }
+}
+
+// A named engine capability is workspace_query or workspace_act by another name: the same
+// workspace, policy and scopes, the engine's names on the wire, and refusals at the caller's
+// fields (lake#650).
+TEST(EngineCapabilities, ANamedCallReachesTheWorkspaceEngineAsWorkspaceActDoes) {
+    Workspaces w;
+    lake::control::InMemoryStore& store = *w.store;
+    const auto principal = store.context_for(w.secret);
+    auto requested = w.run(w.service->request(w.customer_id));
+    const auto workspace = store.get_service(requested->service_id);
+    ASSERT_TRUE(store.set_service_status(workspace->id, "Ready", "", "http://ws:4800"));
+    w.deliver(*workspace, {{"kind", "zetta"}, {"token", "t"}});
+    lake::api::Registry registry;
+    lake::api::register_core_capabilities(registry, "test");
+    std::vector<std::string> scopes;
+    bool session = false;
+    std::string audit_kind;
+    const auto call = [&](const std::string& name, json input) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.authorized = true;
+        context.acting_user_id = principal->user_id;
+        context.acting_identity = principal->taap_id;
+        context.request_id = lake::control::new_uuid_v4();
+        context.session_credential = session;
+        context.scopes = scopes;
+        input["customer_id"] = w.customer_id;
+        input["workspace_id"] = w.workspace_id();
+        auto completed = liquid::runtime::block_on(registry.call_async(name, input, context));
+        EXPECT_TRUE(completed);
+        audit_kind = context.audit_kind;
+        return std::move(*completed);
+    };
+
+    w.caller->answers["list_projects"] = {{"projects", json::array({"retention"})}};
+    const auto projects = call("list_projects", json::object());
+    ASSERT_TRUE(projects.ok) << projects.error.message;
+    EXPECT_EQ(projects.value["projects"][0], "retention");
+    EXPECT_EQ(w.caller->capability, "list_projects");
+    EXPECT_TRUE(w.caller->read);
+    EXPECT_EQ(audit_kind, "workspace.query");
+
+    // Lake's name for the entity, the engine's on the wire.
+    const auto scored = call("score", {{"model_id", "m-1"}, {"dataset_path", "datasets/churn"}});
+    ASSERT_TRUE(scored.ok) << scored.error.message;
+    EXPECT_EQ(w.caller->capability, "score");
+    EXPECT_EQ(w.caller->input["model"], "m-1");
+    EXPECT_EQ(w.caller->input["dataset_path"], "datasets.churn");
+    EXPECT_FALSE(w.caller->input.contains("customer_id"));
+    const auto aliased = call("expose_model", {{"model", "m-2"}});
+    ASSERT_TRUE(aliased.ok) << aliased.error.message;
+    EXPECT_EQ(w.caller->input["model"], "m-2") << "the engine's spelling is still taken";
+
+    // A renamed capability calls the engine's.
+    const auto checked = call("check_pipeline", {{"project", "retention"}, {"graph", "churn"}});
+    ASSERT_TRUE(checked.ok) << checked.error.message;
+    EXPECT_EQ(w.caller->capability, "gate");
+    EXPECT_FALSE(w.caller->read);
+    EXPECT_EQ(audit_kind, "workspace.act");
+
+    // Lake's own rules apply, and a refusal points at the caller's field.
+    const auto unnamed = call("create_project", {{"name", " "}});
+    ASSERT_FALSE(unnamed.ok);
+    EXPECT_EQ(unnamed.error.path, "/name");
+    const auto unknown = call("list_projects", {{"colour", "blue"}});
+    ASSERT_FALSE(unknown.ok);
+    EXPECT_EQ(unknown.error.path, "/colour") << "the engine's schema is enforced";
+
+    // Another account's person reads none of it, lists included (they authorize their own
+    // candidates) and actions alike.
+    const auto stranger = store.sign_in_clerk(minted("stranger"));
+    ASSERT_TRUE(stranger);
+    const auto stranger_principal = store.context_for(stranger->secret);
+    for (const std::string name : {"list_projects", "get_project", "create_project", "list_datasets"}) {
+        lake::api::ApiContext context;
+        context.store = &store;
+        context.workspaces = w.service.get();
+        context.authorized = true;
+        context.acting_user_id = stranger_principal->user_id;
+        context.acting_identity = stranger_principal->taap_id;
+        context.request_id = lake::control::new_uuid_v4();
+        const json input{{"customer_id", w.customer_id},
+                         {"workspace_id", w.workspace_id()},
+                         {"name", "retention"}};
+        auto completed = liquid::runtime::block_on(registry.call_async(
+            name, name.starts_with("list_") ? json{{"customer_id", w.customer_id},
+                                                 {"workspace_id", w.workspace_id()}}
+                                          : input,
+            context));
+        ASSERT_TRUE(completed);
+        EXPECT_FALSE(completed->ok) << name << " answered another account's person";
+        EXPECT_EQ(completed->error.code, "unauthorized") << name;
+    }
+
+    // A credential that may call workspace_query may call the named reads, not the actions.
+    session = true;
+    scopes = {"workspace_query"};
+    EXPECT_TRUE(call("list_projects", json::object()).ok);
+    const auto refused = call("create_project", {{"name", "churn"}});
+    ASSERT_FALSE(refused.ok);
+    EXPECT_EQ(refused.error.code, "unauthorized");
+    scopes = {"workspace_act"};
+    EXPECT_TRUE(call("delete_connection", {{"name", "warehouse"}}).ok);
 }

@@ -209,10 +209,10 @@ These are workspace actions inside `workspace_act`: `run_solution`, `update_poli
 `list_ledger`, `get_monitor` and `get_roi_readout` inside `workspace_query`. For example, approving
 one A1 decision:
 
-`POST /v1/workspace_act`
+`POST /v1/approve_decision`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "approve_decision", "input": {"decision_id": "<decision id>"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "decision_id": "<decision id>"}
 ```
 
 ## Methodologies
@@ -227,10 +227,10 @@ choose the methodology under Build a Pipeline ([AI Projects and Pipelines](/docs
 
 Through the API it is `list_methodologies` inside `workspace_query`:
 
-`POST /v1/workspace_query`
+`POST /v1/list_methodologies`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "list_methodologies", "input": {}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>"}
 ```
 
 Each entry carries `runnable`. An engine that predates the registry answers `unknown_capability`;
@@ -280,7 +280,7 @@ Then list, create and dismiss:
 ```
 
 When Auto-Suggest is not running on this Lake, the page says *a new scan is not available*;
-earlier Opportunities stay listed. **Design → Agent Library** shows which agents run
+earlier Opportunities stay listed. **Design → Agents** shows which of Orama's agents run
 ([Agents](/docs/agents)).
 
 ## Permissions

@@ -495,6 +495,10 @@ struct Capability {
     // registry moves an alias onto its canonical field before validation, refuses the two when
     // they disagree, and Registry::add lists each alias in the input schema as deprecated.
     std::vector<std::pair<std::string, std::string>> input_aliases;
+    // A scope that grants this capability too: a session or app credential that may call
+    // workspace_query may call each named engine read, and one that may call workspace_act each
+    // named engine action (lake#650). The handler still applies an agent turn's own scopes.
+    std::string granted_by_scope;
 };
 
 // The input with every deprecated alias moved onto its canonical field, or invalid_input when a

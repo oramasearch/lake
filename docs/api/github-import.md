@@ -12,7 +12,7 @@ than implying lossless conversion.
 
 The action accepts destination `customer_id`, `workspace_id` and `name`, a local
 `git_directory`, and a `recording` object. The new repository belongs to `workspace_id`, a live
-workspace of the customer's space (lake#315); a missing or unknown one is `invalid_input` at
+workspace of the customer's account (lake#315); a missing or unknown one is `invalid_input` at
 `/workspace_id`. The recording has `repository`, `issues`, `issue_comments`, `pulls`,
 `review_comments`, and `workflows` arrays copied from GitHub API responses. Tests use the
 checked-in `tests/fixtures/github-import-recording.json` response bundle and no network connection.

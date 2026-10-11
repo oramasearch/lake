@@ -38,10 +38,10 @@ the dataset was saved under the next free name.
 
 The same upload through the API is `upload_dataset` inside `workspace_act`:
 
-`POST /v1/workspace_act`
+`POST /v1/upload_dataset`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "upload_dataset", "input": {"table_name": "accounts", "format": "csv", "content": "account_id,plan,churned\n1,pro,false\n2,free,true\n"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "table_name": "accounts", "format": "csv", "content": "account_id,plan,churned\n1,pro,false\n2,free,true\n"}
 ```
 
 - Put the file's text in `content`, and `"csv"` or `"jsonl"` in `format`.
@@ -107,10 +107,10 @@ Through the API it is `generate_dataset` inside `workspace_act`, with the genera
 optional `variants_per_subject`. `list_dataset_generators` inside `workspace_query` lists the
 generators.
 
-`POST /v1/workspace_act`
+`POST /v1/generate_dataset`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "generate_dataset", "input": {"kind": "<generator kind>"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "kind": "<generator kind>"}
 ```
 
 Generated data is for demos and tests: it is synthetic, not drawn from your records.
@@ -129,10 +129,10 @@ load one into a dataset from the table's row. Datasets offers the same pull:
 5. Optionally limit **At most this many rows** (a whole number).
 6. Press **Pull dataset**.
 
-`POST /v1/workspace_act`
+`POST /v1/create_dataset_from_query`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_dataset_from_query", "input": {"connection": "warehouse", "query": "SELECT account_id, plan, seats FROM accounts", "table_name": "accounts"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "connection": "warehouse", "query": "SELECT account_id, plan, seats FROM accounts", "table_name": "accounts"}
 ```
 
 The credential stays with the workspace: the pull names the saved connection, so the password does

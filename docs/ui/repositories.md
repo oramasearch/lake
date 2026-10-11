@@ -77,18 +77,18 @@ attestation data is an explicit empty state.
 
 ## First repository
 
-A signed-in viewer with a space gets **Create a Repository** on `/repositories`. It asks for the
+A signed-in viewer with an account gets **Create a Repository** on `/repositories`. It asks for the
 workspace, the repository name and an optional description; new repositories are private. The
-workspace choice lists each live workspace of the viewer's spaces, grouped by space, with the
-current workspace preselected; the workspace names its space, so the call sends `workspace_id`
-(and its `customer_id`). A space without a workspace is told to create one on Workspaces first: a
+workspace choice lists each live workspace of the viewer's accounts, grouped by account, with the
+current workspace preselected; the workspace names its account, so the call sends `workspace_id`
+(and its `customer_id`). An account without a workspace is told to create one on Workspaces first: a
 repository belongs to one workspace and there is no default (lake#315). `create_repository` then
 opens the repository home. The description is written to the chosen workspace's Zetta (lake#315
 part 2), so the create waits for that workspace and is refused while it is not ready. The list and
 the home page read descriptions there; a workspace that cannot be read shows *Unavailable* in the
 list and *Description unavailable: …* on the home page instead of failing the page. Authorization
-checks the space even when a call bypasses the page, and a `customer_id` that is not the
-workspace's space is refused. Password sign-up supplies the personal space and its ownership before
+checks the account even when a call bypasses the page, and a `customer_id` that is not the
+workspace's account is refused. Password sign-up supplies the personal account and its ownership before
 this page; see [sign-up-walkthrough.md](sign-up-walkthrough.md).
 
 ## The owning workspace
@@ -97,11 +97,11 @@ Every repository belongs to one workspace (lake#315, [repositories.md](../api/re
 The repository pages show it; they do not move under `/w/<workspace id>/`.
 
 - The repository list has a **Workspace** column linking to `/w/<id>/design/projects` for a
-  workspace of the viewer's spaces, and "Needs a workspace" for a repository migration `0051` could
+  workspace of the viewer's accounts, and "Needs a workspace" for a repository migration `0051` could
   not assign.
 - The repository home names its workspace beside the heading, with the same link, for a signed-in
-  viewer who may read the space (`get_workspace`); an anonymous or outside reader of a public
-  repository is not told the space's workspace names. **Build image** sends the repository's
+  viewer who may read the account (`get_workspace`); an anonymous or outside reader of a public
+  repository is not told the account's workspace names. **Build image** sends the repository's
   `workspace_id`, which `build_image` requires, and opens that workspace's Packages page, where
   the build shows.
 

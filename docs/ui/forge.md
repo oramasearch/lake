@@ -22,7 +22,7 @@ failure is the page's error.
 **Markdown** (README, issues, releases, change messages) is rendered in the browser by
 `src/lib/markdown.tsx` with `react-markdown` and `remark-gfm`. Raw HTML in the source stays text,
 never markup; unsafe link schemes are dropped; every heading gets a stable lowercase anchor
-(letters and digits, a run of spaces or hyphens as one dash), and a repeated heading is numbered
+(letters and digits, a run of whitespace or hyphens as one dash), and a repeated heading is numbered
 `-2`, `-3`. Links to app pages stay in the app; other links are ordinary links.
 
 **Identifiers.** Long repository, change and reference identities use one compact form (`Identifier`

@@ -104,8 +104,8 @@ Every Design, Train and Ship page waits for its workspace:
 | **Not Available on This Lake** | This Lake has no workspace control plane, so Design, Train and Ship are not available on it. |
 | **No Workspace Yet** | You have no account to hold workspaces yet. |
 
-The **Agent Library** opens whether the workspace is ready or not, because it is Lake's, not the
-workspace's.
+**Design → Agents** lists Orama's agents whether the workspace is ready or not, because they are
+Lake's, not the workspace's.
 
 ## Rename, Stop and Start a Workspace
 

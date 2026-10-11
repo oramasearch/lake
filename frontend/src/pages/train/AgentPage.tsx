@@ -1,34 +1,51 @@
-/** Train → Agent (web_ui.cpp agent_content): one agent, with Overview (what it is for and its
- * pipelines as tools), its unattended runs, its schedules and its training as tabs, and its facts
- * and actions beside them. Each control calls the capability its form handler called
- * (http_server.cpp agent_grant … agent_delete). */
+/** Train → Agent (lake#653): one agent's training page, and where it runs. A trainable agent (its
+ * behaviour comes from a model, a pipeline or a training schedule) opens on Training: its
+ * performance over time (held-out scores, task success rate, latency, cost), its trained
+ * versions and the data each learned from, its training schedule, Launch experiment through
+ * ExperimentsAgent, and promote and roll back. Every agent has its unattended runs (Run now) and,
+ * for a frontier-model agent, its schedules. Designing it is Design → Agent, linked from here. */
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { Bot, CalendarClock, MessageSquare, Play, Plus, Trash2, Workflow } from "lucide-react";
-import { ApiError, act, read, type Row } from "@/lib/api";
-import { Modal } from "@/lib/overlay";
+import { Bot, CalendarClock, FlaskConical, GraduationCap, MessageSquare, PenLine, Play, Plus, Workflow } from "lucide-react";
+import { ApiError, act, type Row } from "@/lib/api";
+import { ConfirmButton, Drawer, Modal } from "@/lib/overlay";
 import { useToast } from "@/lib/toast";
 import { entityCrumb, useTrail } from "@/lib/trail";
-import { Banner, Button, Card, Chip, DataTable, Empty, ErrorBlock, Field, KeyValue, Mono, Skeleton, Split, StateTabs, Status } from "@/lib/ui";
-import { AGENT_SKILLS, engagement, modelLabel, runsWhere } from "./agents";
-import { WorkspaceFrame, qs, text, timeAgo, useAsync, useSpaceRead, useWorkspace, useWq, useWsPath, wa, wq } from "./workspace";
+import { Banner, Button, Card, Chip, DataTable, Empty, ErrorBlock, Field, Form, FormError, KeyValue, Mono, Skeleton, Split, Stat, StatRow, StateTabs, Status } from "@/lib/ui";
+import {
+  CADENCES,
+  bestVersion,
+  currentVersion,
+  experimentAsk,
+  isNative,
+  modelLabel,
+  pipelinesOf,
+  runFigures,
+  runsWhere,
+  scoreSeries,
+  switchInput,
+  switchKind,
+  trainable,
+  trainedVersions,
+  trainingInput,
+  type ExperimentAxis,
+  type TrainedVersion,
+} from "@/lib/agents";
+import { Chart } from "@/pages/experiments/Chart";
+import { engagement, useEngineRead } from "./agents";
+import { WorkspaceFrame, qs, text, timeAgo, useAsync, useSpaceRead, useWorkspace, useWsPath } from "./workspace";
 import { UsageThisMonth } from "../usage/UsageThisMonth";
 
 export default function AgentPage() {
   const [params] = useSearchParams();
   const id = params.get("id") ?? "";
   const ws = useWsPath();
-  const { customerId } = useWorkspace();
-  const query = qs({ customer_id: customerId });
-  const agent = useWq<Row>(id ? "get_agent" : null, { id });
+  const agent = useEngineRead<Row>(id ? "get_agent" : null, { id }, { retry: false });
   const name = agent.data ? text(agent.data, "name") : "";
-  const found = !!agent.data && Object.keys(agent.data).length > 0;
-  useTrail(
-    [{ label: "Train", to: ws(`/train/agents?${query}`) }, { label: "Agents", to: ws(`/train/agents?${query}`) }, entityCrumb(id || "Agent")],
-    `Agent: ${name || id}`,
-  );
+  const found = !!agent.data && !!text(agent.data, "id");
+  useTrail([{ label: "Train", to: ws("/train/agents") }, { label: "Agents", to: ws("/train/agents") }, entityCrumb(name || id || "Agent")], `Agent: ${name || id}`);
   const missing = (
-    <Empty icon={Bot} title="No such agent in this workspace" action={<Button to={ws(`/train/agents?${query}`)}>All agents</Button>}>
+    <Empty icon={Bot} title="No such agent in this workspace" action={<Button to={ws("/train/agents")}>All agents</Button>}>
       It may have been deleted, or the link names another workspace.
     </Empty>
   );
@@ -48,9 +65,14 @@ export default function AgentPage() {
       sub={found ? text(agent.data, "purpose") || undefined : undefined}
       actions={
         found ? (
-          <Button variant="primary" to={`/?${qs({ agent: id })}`}>
-            <MessageSquare size={14} aria-hidden /> Talk to this agent in Ask Orama
-          </Button>
+          <>
+            <Button to={ws(`/design/agent?${qs({ id })}`)}>
+              <PenLine size={14} aria-hidden /> Edit its design
+            </Button>
+            <Button variant="primary" to={`/?${qs({ agent: id })}`}>
+              <MessageSquare size={14} aria-hidden /> Talk in Ask Orama
+            </Button>
+          </>
         ) : null
       }
     >
@@ -58,7 +80,7 @@ export default function AgentPage() {
         if (!id) return missing;
         if (agent.isLoading) return <Skeleton />;
         if (agent.isError) {
-          if (agent.error instanceof ApiError && agent.error.status === 404) return missing;
+          if (agent.error instanceof ApiError && (agent.error.status === 404 || agent.error.code === "not_found")) return missing;
           return <ErrorBlock error={agent.error} retry={() => void agent.refetch()} what="the agent" />;
         }
         if (!found) return missing;
@@ -68,189 +90,372 @@ export default function AgentPage() {
   );
 }
 
-type Tab = "overview" | "runs" | "schedules" | "training";
+type Tab = "training" | "runs" | "schedules";
 
 function AgentContent({ agent }: { agent: Row }) {
   const scope = useWorkspace();
+  const ws = useWsPath();
+  const [params, setParams] = useSearchParams();
   const id = text(agent, "id");
-  const runtime = text(agent, "runtime");
-  const native = !runtime || runtime === "native";
-  const [tab, setTab] = useState<Tab>("overview");
-  const [deleting, setDeleting] = useState(false);
-  // The page showed Training only when the read answered.
-  const training = useWq<Row>(native ? "agent_training_status" : null, { id });
-  const trained = !!training.data && Object.keys(training.data).length > 0;
+  const python = text(agent, "runtime") === "python";
+  const canTrain = trainable(agent);
+  const tabs: { value: Tab; label: string }[] = [
+    ...(canTrain ? [{ value: "training" as const, label: "Training" }] : []),
+    { value: "runs", label: "Unattended Runs" },
+    ...(python ? [{ value: "schedules" as const, label: "Schedules" }] : []),
+  ];
+  const asked = params.get("tab") as Tab | null;
+  const tab: Tab = asked && tabs.some((t) => t.value === asked) ? asked : tabs[0].value;
+  const setTab = (next: Tab) => {
+    const copy = new URLSearchParams(params);
+    copy.set("tab", next);
+    setParams(copy, { replace: true });
+  };
   const area = (agent.work_area && typeof agent.work_area === "object" ? agent.work_area : {}) as Row;
   let areaText = text(area, "kind") === "project" ? "A single project" : text(area, "kind") === "dataset" ? "Specific data" : "This workspace";
   if (text(area, "detail")) areaText += `: ${text(area, "detail")}`;
-  const skills = (Array.isArray(agent.skills) ? agent.skills : []).filter((s): s is string => typeof s === "string");
-  const tabs: { value: Tab; label: string }[] = [
-    { value: "overview", label: "Overview" },
-    { value: "runs", label: "Unattended Runs" },
-    ...(runtime === "python" ? [{ value: "schedules" as const, label: "Schedules" }] : []),
-    ...(trained ? [{ value: "training" as const, label: "Training" }] : []),
-  ];
+  return (
+    <Split
+      side={
+        <>
+          <Card label="Facts">
+            <KeyValue
+              rows={[
+                ["Engagement", engagement(agent)],
+                ["Model", modelLabel(agent) ? <Mono key="m">{modelLabel(agent)}</Mono> : null],
+                ["Runs", runsWhere(agent)],
+                ["Work area", areaText],
+                ["Runs on its own", text(agent, "trigger")],
+                ["Id", <Mono key="id" short={12}>{id}</Mono>],
+              ]}
+            />
+          </Card>
+          <Card label="Design">
+            <p className="muted mt-0 text-[12.5px]">Its purpose, prompt, skills, model and pipelines are designed in Design → Agents, where every revision is kept.</p>
+            <Button to={ws(`/design/agent?${qs({ id })}`)}>
+              <PenLine size={14} aria-hidden /> Edit its design
+            </Button>
+          </Card>
+          <UsageThisMonth
+            customerId={scope.customerId}
+            workspaceId={scope.workspaceId}
+            match={[{ dimension: "model_tokens", breakdown: "by_agent", keys: [text(agent, "name"), id], label: "Model tokens" }]}
+            note="Its cost: counted when the agent reports the tokens it spends."
+          />
+        </>
+      }
+    >
+      <StateTabs label="Agent" value={tab} onChange={setTab} tabs={tabs} />
+      {!canTrain && (
+        <Banner tone="quiet" title="Nothing to Train">
+          This agent runs on a frontier model and calls no pipeline, so Lake has nothing to train. Give it the Orama base model or a pipeline in its design to train it here.
+        </Banner>
+      )}
+      {tab === "training" && canTrain && <Training agent={agent} />}
+      {tab === "runs" && <Runs agent={agent} />}
+      {tab === "schedules" && python && <Schedules agentId={id} />}
+    </Split>
+  );
+}
+
+/* ------------------------------------------------------------------ training */
+
+function Training({ agent }: { agent: Row }) {
+  const ws = useWsPath();
+  const id = text(agent, "id");
+  const native = isNative(agent);
+  const status = useEngineRead<Row>(native ? "agent_training_status" : null, { id }, { retry: false });
+  const launches = useSpaceRead<{ launches?: Row[] }>("list_agent_launches", { agent_id: id, limit: 50 });
+  const versions = trainedVersions(status.data);
+  const current = currentVersion(agent, versions);
+  const best = bestVersion(versions);
+  const runs = runFigures(launches.data?.launches ?? []);
+  const [xs, ys] = scoreSeries(versions);
+  const pipelines = pipelinesOf(agent);
   return (
     <>
-      <Split
-        side={
-          <>
-            <Card label="Facts">
-              <KeyValue
-                rows={[
-                  ["Engagement", engagement(agent)],
-                  ["Work area", areaText],
-                  [
-                    "What it may do",
-                    skills.length ? (
-                      <span className="flex flex-wrap gap-1">
-                        {skills.map((s) => (
-                          <Chip key={s}>{AGENT_SKILLS.find(([key]) => key === s)?.[1] ?? s}</Chip>
-                        ))}
-                      </span>
-                    ) : null,
-                  ],
-                  ["Model", modelLabel(agent) ? <Mono>{modelLabel(agent)}</Mono> : null],
-                  ["Runs", runsWhere(agent)],
-                  ["Runs on its own", text(agent, "trigger")],
-                  ["Status", <Status key="status" value={text(agent, "status") || "idle"} />],
-                  ["Id", <Mono key="id" short={12}>{id}</Mono>],
-                ]}
-              />
-            </Card>
-            <Card label="Actions">
-              <div className="flex flex-col gap-2">
-                <AskButton id={id} />
-                <Button variant="danger" onClick={() => setDeleting(true)}>
-                  <Trash2 size={14} aria-hidden /> Delete agent
-                </Button>
-                <p className="muted m-0 text-[12px]">Deleting the agent also removes its schedules.</p>
-              </div>
-            </Card>
-            <UsageThisMonth
-              customerId={scope.customerId}
-              workspaceId={scope.workspaceId}
-              match={[{ dimension: "model_tokens", breakdown: "by_agent", keys: [text(agent, "name"), id], label: "Model tokens" }]}
-              note="Counted when the agent reports the tokens it spends."
-            />
-          </>
-        }
-      >
-        <StateTabs label="Agent" value={tab} onChange={setTab} tabs={tabs} />
-        {tab === "overview" && (
-          <>
-            <Card label="About">
-              <KeyValue
-                rows={[
-                  ["Instructions", text(agent, "manifesto") ? <span className="whitespace-pre-wrap">{text(agent, "manifesto")}</span> : null],
-                  ["What success looks like", text(agent, "goal")],
-                ]}
-              />
-            </Card>
-            <Pipelines agent={agent} />
-          </>
-        )}
-        {tab === "runs" && <Runs agent={agent} />}
-        {tab === "schedules" && runtime === "python" && <Schedules agentId={id} />}
-        {tab === "training" && trained && (
-          <Card label="Training">
-            <p className="m-0">{text(training.data, "reason")}</p>
-          </Card>
-        )}
-      </Split>
-      {deleting && <DeleteAgent agent={agent} onClose={() => setDeleting(false)} />}
+      <StatRow>
+        <Stat label="Held-out score" icon={GraduationCap} value={current?.eval_score ?? best?.eval_score ?? "—"} sub={current ? "of the version it runs" : best ? "best version" : "not evaluated yet"} />
+        <Stat label="Versions" value={versions.length} sub={status.data?.stale ? "stale: retrain it" : status.data?.due ? "a retrain is due" : "trained"} tone={status.data?.stale ? "bad" : undefined} />
+        <Stat label="Task success" value={runs.successRate === null ? "—" : `${Math.round(runs.successRate * 100)}%`} sub={runs.finished ? `${runs.succeeded} of ${runs.finished} recent runs` : "no finished runs yet"} />
+        <Stat label="Latency" value={runs.medianSeconds === null ? "—" : `${Math.round(runs.medianSeconds)} s`} sub="median run, start to finish" />
+      </StatRow>
+      {status.isError ? <ErrorBlock error={status.error} retry={() => void status.refetch()} what="its training" /> : null}
+      {status.data?.reason ? (
+        <Banner tone={status.data.stale ? "warn" : "quiet"} title={status.data.stale ? "Stale" : status.data.due ? "Retrain Due" : "Training"}>
+          {text(status.data, "reason")}
+        </Banner>
+      ) : null}
+      {Array.isArray(status.data?.unverifiable_goals) && status.data!.unverifiable_goals.length > 0 && (
+        <Banner tone="warn" title="Goals No Check Can Verify">
+          Training drops these goals, since nothing can score them: {(status.data!.unverifiable_goals as unknown[]).map((g) => (typeof g === "string" ? g : text(g as Row, "statement"))).join("; ")}
+        </Banner>
+      )}
+      {native && (
+        <Card label="Performance" title="Held-Out Score Over Time">
+          {xs.length >= 1 ? (
+            <Chart chartKey={`agent-${id}-score`} data={[xs, ys]} labels={["held-out score"]} settings={{ time: true, metric: true }} />
+          ) : (
+            <Empty compact icon={GraduationCap} title="No Evaluated Version Yet">
+              Each trained version's held-out score is plotted here once it is evaluated.
+            </Empty>
+          )}
+        </Card>
+      )}
+      {native && <Versions agent={agent} versions={versions} current={current} best={best} loading={status.isLoading} />}
+      {pipelines.length > 0 && (
+        <Card label="Pipelines" title="The Pipelines It Calls">
+          <p className="muted mt-0 text-[12.5px]">Its answers come from these approved pipelines. Train and compare their runs to improve it.</p>
+          <ul className="m-0 list-none divide-y divide-hairline p-0">
+            {pipelines.map((p) => (
+              <li key={`${p.project}/${p.graph}`} className="flex flex-wrap items-center gap-2 py-2">
+                <Workflow size={14} className="text-ink-3" aria-hidden />
+                <Link to={ws(`/design/pipeline?${qs({ project: p.project, graph: p.graph })}`)} className="font-semibold">
+                  {p.graph}
+                </Link>
+                <span className="muted">in {p.project}</span>
+                <Link to={ws(`/train/runs?${qs({ project: p.project })}`)} className="ml-auto text-[12.5px]">
+                  Its runs
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+      <Experiments agent={agent} versions={versions} />
+      {native && <TrainingSchedule agent={agent} />}
     </>
   );
 }
 
-function AskButton({ id }: { id: string }) {
-  return (
-    <Button to={`/?${qs({ agent: id })}`}>
-      <MessageSquare size={14} aria-hidden /> Talk in Ask Orama
-    </Button>
-  );
-}
-
-/** Pipelines as tools (lake#238): the whole list is written back, so Zetta checks every grant is
- * still approved and pins each to its approval. */
-function Pipelines({ agent }: { agent: Row }) {
-  const ws = useWsPath();
-  const scope = useWorkspace();
+/** Every version training produced, with the data it learned from, its score, and Promote or
+ * Roll back (the agent's model becomes that version's checkpoint, through update_agent). */
+function Versions({ agent, versions, current, best, loading }: { agent: Row; versions: TrainedVersion[]; current: TrainedVersion | null; best: TrainedVersion | null; loading: boolean }) {
   const toast = useToast();
+  const scope = useWorkspace();
   const id = text(agent, "id");
-  const projects = useWq<{ projects?: Row[] }>("list_projects");
-  const change = useAsync();
-  const granted: Row[] = Array.isArray(agent.pipelines) ? agent.pipelines : [];
-  const grantedKeys = new Set(granted.map((g) => `${text(g, "project")}/${text(g, "graph")}`));
-  // Approved Pipelines, without the Project Agent's check graphs; a failed read offers none.
-  const offers: { project: string; graph: string }[] = [];
-  for (const project of projects.data?.projects ?? []) {
-    if (!project || typeof project !== "object") continue;
-    for (const graph of Array.isArray(project.graphs) ? (project.graphs as Row[]) : []) {
-      const graphName = text(graph, "name");
-      if (graphName.startsWith("Project Agent check") || text(graph, "approval") !== "approved") continue;
-      if (!grantedKeys.has(`${text(project, "name")}/${graphName}`)) offers.push({ project: text(project, "name"), graph: graphName });
-    }
-  }
-  const write = (project: string, graph: string, grant: boolean) =>
-    change.run(async () => {
-      const current = await wq<Row>(scope, "get_agent", { id });
-      const grants = (Array.isArray(current.pipelines) ? (current.pipelines as Row[]) : [])
-        .filter((g) => !(text(g, "project") === project && text(g, "graph") === graph))
-        .map((g) => ({ project: text(g, "project"), graph: text(g, "graph") }));
-      if (grant) grants.push({ project, graph });
-      await wa(scope, "update_agent", { id, pipelines: grants });
-      toast(grant ? `Granted ${graph}` : `Revoked ${graph}`);
-    });
+  const rows = [...versions].reverse();
   return (
-    <Card label="Pipelines" title="Tools This Agent May Use" className="scroll-mt-4">
-      <p className="muted mt-0 text-[12.5px]">
-        An approved Pipeline granted here becomes one of this agent's tools: it checks the correctness gate, runs it and reads the report. The grant keeps the
-        approved version.
-      </p>
-      {change.error ? <ErrorBlock error={change.error} /> : null}
-      {granted.length === 0 ? (
-        <Empty compact icon={Workflow} title="No Pipelines granted">
-          {offers.length ? "Grant an approved Pipeline below." : "Approve a Pipeline in a project to grant it here."}
-        </Empty>
-      ) : (
-        <ul className="m-0 list-none divide-y divide-hairline p-0">
-          {granted.map((grant) => (
-            <li key={`${text(grant, "project")}/${text(grant, "graph")}`} className="flex flex-wrap items-center gap-2 py-2">
-              <span className="min-w-0 flex-1">
-                <Link to={ws(`/design/pipeline?${qs({ customer_id: scope.customerId, project: text(grant, "project"), graph: text(grant, "graph") })}`)} className="font-semibold">
-                  {text(grant, "graph")}
-                </Link>{" "}
-                <span className="muted">in {text(grant, "project")}</span>
+    <Card label="Training Runs" title="Versions and the Data They Learned From">
+      {loading ? <Skeleton /> : <DataTable
+        what="the versions"
+        rows={rows}
+        empty={
+          <Empty compact icon={GraduationCap} title="Not Trained Yet">
+            Set a training schedule below, or run an experiment, and each version it trains is listed here.
+          </Empty>
+        }
+        rowKey={(v) => v.checkpoint || v.created_at}
+        columns={[
+          { key: "when", label: "Trained", render: (v) => <span title={v.created_at}>{timeAgo(v.created_at)}</span> },
+          {
+            key: "version",
+            label: "Version",
+            render: (v) => (
+              <span className="inline-flex flex-wrap items-center gap-1">
+                <Mono short={24}>{v.checkpoint}</Mono>
+                {current?.checkpoint === v.checkpoint && <Chip tone="ok">running</Chip>}
+                {best?.checkpoint === v.checkpoint && <Chip tone="action">best</Chip>}
               </span>
-              <Chip tone="ok">approved {text(grant, "version")}</Chip>
-              <Button variant="ghost" disabled={change.busy} onClick={() => void write(text(grant, "project"), text(grant, "graph"), false)}>
-                Revoke
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
-      {offers.length > 0 && (
-        <div className="mt-4 border-t border-hairline pt-3">
-          <div className="label m-0">Approved Pipelines You Can Grant</div>
-          <ul className="m-0 list-none divide-y divide-hairline p-0">
-            {offers.map((offer) => (
-              <li key={`${offer.project}/${offer.graph}`} className="flex flex-wrap items-center gap-2 py-2">
-                <span className="min-w-0 flex-1">
-                  <span className="font-semibold text-ink">{offer.graph}</span> <span className="muted">in {offer.project}</span>
-                </span>
-                <Button disabled={change.busy} onClick={() => void write(offer.project, offer.graph, true)}>
-                  <Plus size={14} aria-hidden /> Grant
-                </Button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+            ),
+          },
+          { key: "data", label: "Data", render: (v) => v.corpus || <span className="muted">built-in corpus</span> },
+          { key: "score", label: "Held-out", numeric: true, render: (v) => (v.eval_score === null ? <span className="muted">—</span> : <span className="font-mono">{v.eval_score.toFixed(3)}</span>) },
+          { key: "job", label: "Job", render: (v) => (v.job ? <Mono short={10}>{v.job}</Mono> : <span className="muted">—</span>) },
+          {
+            key: "switch",
+            label: "",
+            className: "text-right",
+            render: (v) => {
+              const kind = switchKind(v, current);
+              if (!kind) return null;
+              return (
+                <ConfirmButton
+                  variant={kind === "promote" ? "secondary" : "ghost"}
+                  title={kind === "promote" ? "Promote This Version?" : "Roll Back to This Version?"}
+                  confirmLabel={kind === "promote" ? "Promote" : "Roll back"}
+                  confirm={
+                    <>
+                      {text(agent, "name")} will run on <code>{v.checkpoint}</code>
+                      {v.eval_score !== null ? ` (held-out ${v.eval_score.toFixed(3)})` : ""}. Its design keeps a revision of the change.
+                    </>
+                  }
+                  onConfirm={async () => {
+                    await act("update_agent", { customer_id: scope.customerId, workspace_id: scope.workspaceId, ...switchInput(id, v) });
+                    toast(kind === "promote" ? "Version promoted" : "Rolled back");
+                  }}
+                >
+                  {kind === "promote" ? "Promote" : "Roll back"}
+                </ConfirmButton>
+              );
+            },
+          },
+        ]}
+      />}
     </Card>
   );
 }
+
+/** The training spec (set_training_schedule): what it learns from, what it starts from, how many
+ * steps, and when it retrains on its own. Manual never retrains behind your back. */
+function TrainingSchedule({ agent }: { agent: Row }) {
+  const scope = useWorkspace();
+  const toast = useToast();
+  const spec = agent.training && typeof agent.training === "object" ? (agent.training as Row) : {};
+  const [form, setForm] = useState(() => ({
+    cadence: text(spec, "cadence") || "manual",
+    corpus: text(spec, "corpus"),
+    base_checkpoint: text(spec, "base_checkpoint"),
+    steps: spec.steps === undefined || spec.steps === null ? "" : String(spec.steps),
+  }));
+  const save = useAsync();
+  return (
+    <Card label="Training Schedule" title="When and What It Retrains On">
+      <Form
+        onSubmit={() =>
+          save.run(async () => {
+            await act("set_training_schedule", { customer_id: scope.customerId, workspace_id: scope.workspaceId, id: text(agent, "id"), training: trainingInput(form) });
+            toast("Training schedule saved");
+          })
+        }
+      >
+        <FormError error={save.error} />
+        <div className="grid grid-cols-1 gap-x-3 sm:grid-cols-2">
+          <Field label="Retrains">
+            <select name="cadence" value={form.cadence} onChange={(e) => setForm({ ...form, cadence: e.target.value })}>
+              {CADENCES.map((c) => (
+                <option key={c.value} value={c.value}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Steps" help="0 or empty: one epoch.">
+            <input name="steps" type="number" min={0} value={form.steps} onChange={(e) => setForm({ ...form, steps: e.target.value })} />
+          </Field>
+        </div>
+        <Field label="Training data" help="A corpus id or path; empty uses the built-in corpus.">
+          <input name="corpus" value={form.corpus} onChange={(e) => setForm({ ...form, corpus: e.target.value })} />
+        </Field>
+        <Field label="Start from" help="A checkpoint; empty starts from the model it runs now.">
+          <input name="base_checkpoint" value={form.base_checkpoint} onChange={(e) => setForm({ ...form, base_checkpoint: e.target.value })} />
+        </Field>
+        <div>
+          <Button variant="primary" type="submit" loading={save.busy}>
+            Save schedule
+          </Button>
+        </div>
+      </Form>
+    </Card>
+  );
+}
+
+/** The experiments run for this agent, and Launch experiment: ExperimentsAgent turns what to
+ * compare (versions, prompts or models) into an editable proposal on Train → Experiments, and
+ * nothing starts until it is confirmed there. */
+function Experiments({ agent, versions }: { agent: Row; versions: TrainedVersion[] }) {
+  const ws = useWsPath();
+  const id = text(agent, "id");
+  const [launching, setLaunching] = useState(false);
+  const listed = useSpaceRead<{ experiments?: Row[] }>("list_experiments", {});
+  const mine = (listed.data?.experiments ?? []).filter((e) => {
+    const spec = (e.spec && typeof e.spec === "object" ? e.spec : {}) as Row;
+    return text(spec, "agent_id") === id || text(spec, "agent") === id || (!!text(agent, "name") && text(spec, "name").includes(text(agent, "name")));
+  });
+  return (
+    <Card
+      label="Experiments"
+      title="Improve It"
+      actions={
+        <Button variant="primary" onClick={() => setLaunching(true)}>
+          <FlaskConical size={14} aria-hidden /> Launch experiment
+        </Button>
+      }
+    >
+      <p className="muted mt-0 text-[12.5px]">An experiment compares its versions, prompts or models on held-out data and proposes which to promote. ExperimentsAgent designs it; you confirm it before it starts.</p>
+      {listed.isError ? (
+        <ErrorBlock error={listed.error} retry={() => void listed.refetch()} what="the experiments" />
+      ) : mine.length ? (
+        <ul className="m-0 list-none divide-y divide-hairline p-0">
+          {mine.map((e) => (
+            <li key={text(e, "id")} className="flex flex-wrap items-center gap-2 py-2">
+              <Link to={ws(`/train/experiment?${qs({ experiment: text(e, "id") })}`)} className="font-semibold">
+                {text(e.spec, "name") || text(e, "id")}
+              </Link>
+              <Status value={text(e, "status")} />
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <Empty compact icon={FlaskConical} title="No Experiment for This Agent Yet">
+          Launch one to compare what it could run on.
+        </Empty>
+      )}
+      {launching && <LaunchExperiment agent={agent} versions={versions} onClose={() => setLaunching(false)} />}
+    </Card>
+  );
+}
+
+function LaunchExperiment({ agent, versions, onClose }: { agent: Row; versions: TrainedVersion[]; onClose: () => void }) {
+  const scope = useWorkspace();
+  const ws = useWsPath();
+  const navigate = useNavigate();
+  const [axis, setAxis] = useState<ExperimentAxis>(versions.length > 1 ? "versions" : "prompts");
+  const [goal, setGoal] = useState("");
+  const send = useAsync();
+  const message = experimentAsk(agent, axis, goal, versions);
+  return (
+    <Drawer
+      title="Launch an Experiment"
+      subtitle={text(agent, "name")}
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" type="submit" form="launch-experiment" loading={send.busy}>
+            Ask ExperimentsAgent
+          </Button>
+        </>
+      }
+    >
+      <Form
+        id="launch-experiment"
+        onSubmit={() =>
+          send.run(async () => {
+            const turn = await act<Row>("agent_turn", {
+              customer_id: scope.customerId,
+              workspace_id: scope.workspaceId,
+              agent: "agent-experiments",
+              kind: "experiment",
+              message,
+              context: { agent_id: text(agent, "id"), agent_name: text(agent, "name"), compare: axis },
+            });
+            onClose();
+            navigate(ws(`/train/experiments?${qs({ task: text(turn, "task_id") })}`));
+          })
+        }
+      >
+        <FormError error={send.error} />
+        <Field label="Compare">
+          <select name="axis" value={axis} onChange={(e) => setAxis(e.target.value as ExperimentAxis)}>
+            <option value="versions">Its trained versions</option>
+            <option value="prompts">Variations of its instructions</option>
+            <option value="models">The models it could run on</option>
+          </select>
+        </Field>
+        <Field label="What it should improve" help="Optional. Its goal is used when this is empty.">
+          <textarea name="goal" rows={2} value={goal} onChange={(e) => setGoal(e.target.value)} />
+        </Field>
+        <Field label="ExperimentsAgent is asked">
+          <p className="m-0 rounded-[6px] border border-hairline bg-raised/40 p-2 text-[12.5px] text-ink-2">{message}</p>
+        </Field>
+        <p className="muted m-0 text-[12.5px]">It answers with an editable proposal on Train → Experiments. Nothing starts until you confirm it there.</p>
+      </Form>
+    </Drawer>
+  );
+}
+
+/* ------------------------------------------------------------------ runs and schedules */
 
 /** "every monday at 09:00" is a trigger in plain words; five fields or an @macro is cron. */
 export function isCron(when: string): boolean {
@@ -509,65 +714,5 @@ function Runs({ agent }: { agent: Row }) {
         ]}
       />
     </Card>
-  );
-}
-
-function DeleteAgent({ agent, onClose }: { agent: Row; onClose: () => void }) {
-  const scope = useWorkspace();
-  const ws = useWsPath();
-  const navigate = useNavigate();
-  const toast = useToast();
-  const name = text(agent, "name");
-  const id = text(agent, "id");
-  const [confirm, setConfirm] = useState("");
-  const remove = useAsync();
-  return (
-    <Modal
-      title={`Delete ${name}?`}
-      onClose={onClose}
-      width={460}
-      footer={
-        <>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button variant="danger" type="submit" form="delete-agent" loading={remove.busy} disabled={confirm !== name}>
-            Delete agent
-          </Button>
-        </>
-      }
-    >
-      <Banner tone="warn">The agent is deleted, and its schedules with it.</Banner>
-      <form
-        id="delete-agent"
-        className="stack"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void remove.run(async () => {
-            if (confirm !== name) throw new Error("Type the agent's name to delete it.");
-            await wa(scope, "delete_agent", { id });
-            // No CronJob outlives its agent.
-            try {
-              const listed = await read<{ schedules?: Row[] }>("list_agent_schedules", { customer_id: scope.customerId, workspace_id: scope.workspaceId, agent_id: id }).catch(() => ({ schedules: [] as Row[] }));
-              for (const schedule of listed.schedules ?? []) {
-                await act("unschedule_agent", { customer_id: scope.customerId, workspace_id: scope.workspaceId, schedule_id: text(schedule, "id") }).catch(() => undefined);
-              }
-            } finally {
-              toast(`Deleted ${name}`);
-              navigate(ws(`/train/agents?${qs({ customer_id: scope.customerId })}`));
-            }
-          });
-        }}
-      >
-        {remove.error ? <ErrorBlock error={remove.error} /> : null}
-        <Field
-          label={
-            <>
-              Type <strong>{name}</strong> to delete this agent
-            </>
-          }
-        >
-          <input name="confirm" required autoComplete="off" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
-        </Field>
-      </form>
-    </Modal>
   );
 }

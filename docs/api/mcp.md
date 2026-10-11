@@ -141,12 +141,12 @@ what Lake is and what it does today (Data, Design, Train, Ship, Ask Orama, organ
 access, secrets, usage and billing), how to connect, every tool by group (llms-full adds each tool's description and input
 schema), the flows and the rules an agent must keep (an edited pipeline is proposed again, a gate
 failure runs nothing, search needs a published index, deleting destroys data). Every word in them
-says **Lake** and never "space" (the account, the workspace or the organization instead, whichever
+says **Lake** and never `space` (the account, the workspace or the organization instead, whichever
 is true), and so does every capability's title and description and every input and output field's
 description, which the registry renders into OpenAPI and `tools/list` (lake#647). The parameter
 names stay as they are (`customer_id`, `remove_space_store`). `Docs.AgentDocsSayLakeAndNeverSpace`
 renders all of llms.txt, llms-full.txt and the skill, and every description, summary and title in
-OpenAPI and in `tools/list` for both audiences, and fails on "space" or "spaces" as a word or a
+OpenAPI and in `tools/list` for both audiences, and fails on `space` or `spaces` as a word or a
 lowercase "lake" naming the product in prose; code spans and blocks, URLs, `LAKE_*` variables,
 identifiers and issue references are left alone, and so are workspace, namespace and whitespace.
 `Docs.AgentDocsKeepTheirSections` checks that llms-full.txt carries every tool with its input
@@ -175,7 +175,7 @@ its own (`frontend/src/pages/developer/`). Before, the rail's **API** item opene
   - **Keys**: the key form, the new key once, and the viewer's keys (below).
   - **Quick start**: copy-ready `curl` and `fetch` against `viewer.external_origin` (else the page's
     origin) for `GET /v1/viewer`, a list read (`list_repositories`), an action
-    (`create_repository`, with the viewer's space and workspace filled in) and a workspace-scoped
+    (`create_repository`, with the viewer's account and workspace filled in) and a workspace-scoped
     call under `/w/<workspace id>/v1`, with the envelope and the error codes explained.
   - **Operations**: every operation of `/v1/openapi.json` as the browser's session receives it,
     grouped by the product group `mcp_setup` gives its tool (liquid sync and the operations that
@@ -207,7 +207,7 @@ its own (`frontend/src/pages/developer/`). Before, the rail's **API** item opene
      - *Claude Desktop*: `claude_desktop_config.json` (macOS `~/Library/Application
        Support/Claude/`, Windows `%APPDATA%\Claude\`) running `npx -y mcp-remote <origin>/mcp
        --header Authorization:${LAKE_AUTH_HEADER}` with `env.LAKE_AUTH_HEADER = "Bearer <key>"`, the
-       form mcp-remote documents so the space survives on Windows.
+       form mcp-remote documents so the blank after `Bearer` survives on Windows.
      - *Cursor*: `~/.cursor/mcp.json` `mcpServers.lake` with `url` and `headers` (`${env:LAKE_KEY}`
        without a key).
      - *VS Code* (Copilot agent mode): `.vscode/mcp.json` `servers.lake` `type: "http"`, the header

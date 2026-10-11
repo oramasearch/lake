@@ -21,7 +21,7 @@ with a consuming receive. Both routes mark Streams current in the rail (`owns: [
 10-second waits, new messages on top, at most 200 kept on the page. Unchecking Live aborts the
 poll; checking it resumes. Refresh shows later edits to older messages. The browser never contacts
 Zetta or holds its service token. On the workspace's `agent-events` topic, **Turn** and **Agent**
-filters (`task=`, `agent=`) are kept across jump, older/newest and Live reads. Other spaces'
+filters (`task=`, `agent=`) are kept across jump, older/newest and Live reads. Other accounts'
 payloads and shared subscription identities do not reach the page.
 
 ## Layout (lake#561)
@@ -52,10 +52,10 @@ The topic page is a message browser in a Split:
 | Publish (JSON) | `publish_stream_message` |
 | Edit a payload at its displayed revision | `update_stream_message` |
 | Delete a message, Purge before a sequence, with the count first | `delete_stream_messages` (a dry run first) |
-| Which controls show | `my_permissions` on the space (`write`, `admin`) and the topic's `can_manage` |
+| Which controls show | `my_permissions` on the account (`write`, `admin`) and the topic's `can_manage` |
 
 New Topic accepts retention, limits and delivery defaults as validated settings JSON; new topics
-live on the space's workspace Zetta. Edit Settings has only the mutable fields and asks for
+live on the account's workspace Zetta. Edit Settings has only the mutable fields and asks for
 confirmation with the count a retention shrink would trim. Changing a payload sends its revision;
 a stale edit shows the server's refusal. The re-delivery checkbox starts unchecked and explains
 that enabling it queues the replacement for subscribers which already received it. Deleting
@@ -63,7 +63,7 @@ messages shows the count and that pending subscribers will skip them, and sends 
 `confirm_count`. Deleting a topic requires typing its name.
 
 System topics are marked *system · browse-only* and have no write controls; lake refuses the same
-writes to REST and MCP. Space readers see reads; writers see publish, edit and New Topic; admins
+writes to REST and MCP. Account readers see reads; writers see publish, edit and New Topic; admins
 also see message deletion and purge. Only the topic's recorded creator (`can_manage`) sees
 settings and Delete Topic, and the capability also requires admin to drop. `my_permissions` only
 decides which controls show; every capability checks again. Ask Orama and ApplicationAgent may

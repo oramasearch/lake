@@ -29,10 +29,10 @@ organization's) and `workspace_id`; [Getting Started](/docs) says where to find 
    each week*.
 3. Press **Create project**.
 
-`POST /v1/workspace_act`
+`POST /v1/create_project`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "create_project", "input": {"name": "retention", "description": "Keep paying accounts", "decision": "Which accounts customer success calls first each week"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "retention", "description": "Keep paying accounts", "decision": "Which accounts customer success calls first each week"}
 ```
 
 From an AI agent the MCP tool is `workspace_act` with the same JSON. Lake keeps `decision` in the
@@ -182,12 +182,12 @@ A changed pipeline needs **Approve** again before it runs.
 4. **Deploy**: places the approved pipeline in the workspace behind its checks. The page then says
    *Deployed*.
 
-Approve is `approve_plan` inside `workspace_act`:
+Approve is `approve_pipeline` (the engine's `approve_plan`):
 
-`POST /v1/workspace_act`
+`POST /v1/approve_pipeline`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "approve_plan", "input": {"project": "retention", "graph": "<pipeline name>"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "project": "retention", "graph": "<pipeline name>"}
 ```
 
 Check is `gate` and Deploy is `deploy`, with the same `input`. The gate answers `applied` and
@@ -209,10 +209,10 @@ It answers the gate, and the run when the gate passed. What a run reports is in
 **Delete project** on the project removes the project, its intent and its pipelines; its runs and
 models stay listed. Type the project's name to confirm, then press **Delete project**.
 
-`POST /v1/workspace_act`
+`POST /v1/delete_project`
 
 ```json
-{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "capability": "delete_project", "input": {"name": "retention"}}
+{"customer_id": "<customer id>", "workspace_id": "<workspace id>", "name": "retention"}
 ```
 
 ## Permissions

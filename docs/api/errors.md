@@ -122,8 +122,8 @@ lacks a scope or a grant is still 403 `unauthorized`.
   "row 2 has no 'tenure'" at `/rows/2/tenure`.
 - **A message that leads with an input field's name** (`confirm must be the service name`): the
   registry points `path` at that field when the handler gave none.
-- **A space that does not own the workspace** is refused at `/customer_id` (`customer_id is not the
-  space that owns workspace …`); an unknown workspace at `/workspace_id`.
+- **An account that does not own the workspace** is refused at `/customer_id` (`customer_id is not the
+  account that owns workspace …`); an unknown workspace at `/workspace_id`.
 - **A database constraint the input broke** (lake#592). PostgreSQL's diagnostic never reaches a
   caller (it is logged as `api_store_error`); `constraint_rules` in `src/api/registry.cpp` turns
   the constraints an input can break into the rule, at the field. The field is the caller's `path`

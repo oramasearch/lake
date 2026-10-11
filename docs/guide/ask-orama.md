@@ -159,7 +159,7 @@ starts. Only you can delete your conversations. The agent tasks it started stay 
 | You see | What to do |
 |---|---|
 | *Ask Orama works in a workspace, and you have none selected* | Choose a workspace in the top bar, or start one on **Ship → Workspaces**. |
-| An agent is not offered in **Talk to** | It is not deployed on your Lake, is internal tooling, or does not chat. **Design → Agent Library** says which agents run. |
+| An agent is not offered in **Talk to** | It is not deployed on your Lake, is internal tooling, or does not chat. **Design → Agents** says which of Orama's agents run. |
 | *That proposal is not in this conversation* (`not_found`) | Only proposals Lake stored in your conversation can be confirmed. |
 | `workspace_not_ready` | The workspace is not ready; conversations live in it. |
 | `invalid_input` at `/workspace_id` | The workspace id is unknown or not one of the account's. |
